@@ -45,6 +45,7 @@ use tokio::sync::broadcast;
 pub use agent::{Agent, AgentError, AgentReply, AgentRequest};
 pub use claude::ClaudeCode;
 pub use codex::Codex;
+pub use images::LabelImageQuery;
 
 use crate::error::{Error, Result};
 use crate::index::absolute;

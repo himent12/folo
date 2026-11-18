@@ -35,6 +35,22 @@ fn schema_leaves_unknown_out() {
     }
 }
 
+/// `Health.features` and `LabelRun.id` are additive: an older server's JSON without them parses, and a value
+/// without them leaves them out.
+#[test]
+fn health_features_and_label_run_ids_are_additive() {
+    let h: Health =
+        serde_json::from_str(r#"{"status":"ok","version":"0.1.0","api":"v1","mock":false}"#).unwrap();
+    assert!(h.features.is_empty());
+    assert!(serde_json::to_value(&h).unwrap().get("features").is_none());
+    let run = r#"{"agent":"claude","model":null,"effort":"medium","started":"2026-11-18T10:00:00Z","finished":null,
+        "total":2,"done":0,"failed":0,"outcome":null,"error":null,
+        "usage":{"calls":0,"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"cost_usd":null}}"#;
+    let r: LabelRun = serde_json::from_str(run).unwrap();
+    assert_eq!(r.id, "");
+    assert!(serde_json::to_value(&r).unwrap().get("id").is_none());
+}
+
 #[test]
 fn system_capabilities_are_additive() {
     // A server older than `capabilities` (and `features`, `data_dir`).

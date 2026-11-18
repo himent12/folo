@@ -8,10 +8,13 @@
 > Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
 
 Fastest path for an agent:
-- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 22 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 32 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
   run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
-  cloud_connections, cloud_offers, cloud_instances and cloud_terminate.
+  cloud_connections, cloud_offers, cloud_instances, cloud_terminate, and for labeling with a Claude Code or Codex
+  agent list_label_jobs, create_label_job, start_labeling, stop_labeling, label_status, list_label_images,
+  view_label_image (the image with its boxes drawn and numbered, boxes in pixels of that view),
+  set_label_boxes, review_label_images and export_label_dataset.
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented or
   not supported on this machine.
@@ -34,10 +37,10 @@ Fastest path for an agent:
 - [MCP server](docs/MCP.md): the `folo mcp` contract. Flags are `[--data-dir D] [--device auto|cpu|gpu:N] [--mock]
   [--read-only] [--confine] [--server URL]`; it speaks MCP 2026-07-28 and 2025-11-25. It documents the tools with
   their JSON Schemas, the `folo://` resources (dataset images, subscribable runs and metrics, sample grids, docs),
-  the prompts train_on_folder and diagnose_run, and the errors: `isError` results whose text is
+  the prompts train_on_folder, label_folder and diagnose_run, and the errors: `isError` results whose text is
   `{code, message, hint}`
 - [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, stop, val, predict, export, bench,
-  dataset synth|stats|check|convert, weights, cloud, mcp), its flags and its --json records, plus the error and
+  dataset synth|stats|check|convert, weights, cloud, label, mcp), its flags and its --json records, plus the error and
   exit-code conventions
 
 ## Reference
@@ -45,8 +48,9 @@ Fastest path for an agent:
   It covers datasets, models (weights download), runs (live events), predict, val, export, agent labeling
   (`/api/label`), vision benchmarks (`/api/bench`), uploads, cloud compute (`/api/cloud`), and real vs mock mode
 - [Agent labeling](docs/LABELING.md): unlabeled images to a dataset. `folo serve` drives Claude Code or Codex
-  (one model request per batch of images, no tools), a person reviews the boxes in Studio, and the result is a
-  registered YOLO dataset. It has the workflow, the HTTP calls, what a run costs in tokens and measured accuracy
+  (one model request per batch of images, no tools), a person reviews the boxes in Studio (or an agent does, with
+  the MCP label tools or `folo label`), and the result is a registered YOLO dataset. It has the workflow, the HTTP
+  calls, what a run costs in tokens and measured accuracy
 - [Vision benchmarks](docs/BENCH.md): grade any vision model on your own images. A benchmark is a frozen set of
   labeled images plus a plan of stress conditions (twelve, at severities 1 to 5); an entry is a FOLO model, a
   coding agent or externally made predictions, scored 0 to 100 on five axes (accuracy, robustness, self-labeling,

@@ -99,11 +99,12 @@ this machine lacks `device_not_found` with the devices it has in the hint, a GPU
 | `weights list` | works | Every published weights name (see [Weights](#weights)), whether it is downloaded, and its cache path. One record per name with `--json`: `{"name","release","asset","path","cached","about"}`. |
 | `weights pull NAME [--force] [--repo himent12/folo]` | works | Downloads a published weights file and its release's `SHA256SUMS` over plain HTTPS, without credentials (`https://github.com/<repo>/releases/download/<tag>/<file>`, redirects followed; `$FOLO_WEIGHTS_BASE_URL` downloads `<base>/<tag>/<file>` instead). When that is refused (`404`, as for a private repository's release, a draft or a missing release, or `401`/`403`) it falls back to the GitHub CLI (`gh release download`, which needs `gh auth login` and access to the repository). It checks the SHA-256 against `SHA256SUMS` and that the file opens as a `.folo` file, then moves it into the cache; on any failure nothing is installed. Already cached: nothing is downloaded unless `--force`. `--json`: `{"event":"done","name","path","downloaded","sha256","bytes","via"}` (`via`: `https`, `gh`, or `null` when nothing was downloaded). Unknown name: `weights_not_found` (exit 3); refused and then `gh` missing or failing: `gh_failed` (the message says both); no network, a timeout, a server error or a cut download: `download_failed` (no fallback to `gh`); bad hash: `checksum_mismatch` (exit 1). |
 | `cloud providers\|connect\|connections\|check\|disconnect\|offers\|instances\|terminate [--data-dir DIR]` | works | Cloud compute on the data dir, with or without a server running: see [Cloud](#cloud). |
+| `label agents\|jobs\|create\|add\|start\|stop\|status\|images\|view\|set\|review\|export [--data-dir DIR] [--server URL [--token SECRET]]` | works | Agent labeling (docs/LABELING.md): a job of images labeled by Claude Code or Codex, reviewed and corrected, exported as a dataset; through the data dir's `folo serve`, or in this process. See [Labeling](#labeling). |
 | `mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server URL [--token SECRET]] [--device auto] [--tensor-cores]` | works | Model Context Protocol server over stdio (MCP 2026-07-28 and 2025-11-25), see `docs/MCP.md`. stdout carries protocol messages only (also with `--json`); logs go to stderr. By default it embeds the real store on `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`): datasets, training, models, `val`, `predict` and `export` on the FOLO engine, the same data `folo serve` uses. Embedded, it owns the data dir as `folo serve` does; when a `folo serve` already owns it (FOLO Desktop's, say), it goes through that server as with `--server` (after checking that server's `/api/system` `data_dir` is this one), except with `--confine`, which then fails with `data_dir_in_use`. `--mock` serves mock data, `--server` forwards to a running `folo serve` (`http://` or `https://`; `--token`, env `FOLO_TOKEN`, is the token that server was started with), `--read-only` hides and rejects mutating tools, `--confine` only reads inside `--data-dir`, `--device` (env `FOLO_DEVICE`) is where inference and `val` run, `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`) asks for the GPU's tensor cores as `folo serve --tensor-cores` does (`train` with `"amp": true` needs them; without, it answers `not_supported` before starting anything). Published weights pulled with `folo weights pull` are models (`train { "weights": "folo-n-coco" }`). Exits 0 when the client closes stdin; the runs it started are stopped first (an active run after its current batch, keeping its last checkpoint). Recipes: `docs/AGENT_COOKBOOK.md`. |
 
 `folo describe --json` is the authoritative list of arguments and defaults. Its `mcp_tools` array lists every
 `folo mcp` tool (`name`, `description`, `mutating`, `inputSchema`, `outputSchema`) with the schemas `tools/list`
-publishes (about 43 KB of the 71 KB; `--no-mcp-tools` leaves them out, `folo describe <command>` prints one
+publishes (about 77 KB of the 156 KB; `--no-mcp-tools` leaves them out, `folo describe <command>` prints one
 command). Negative numbers are values (`--lr0 -1` reaches the range check and is `invalid_config`).
 
 ## ONNX export
@@ -318,6 +319,61 @@ RUNPOD_API_KEY=rpa_... folo cloud connect runpod --secret api_key=env:RUNPOD_API
 folo cloud connect remote --set url=https://gpu-box.example.com:7878 --secret token=- < token.txt
 folo cloud offers cc_4d2a --json
 folo cloud instances
+```
+
+## Labeling
+
+`folo label` labels a folder of images with a coding agent's model (Claude Code or Codex, docs/LABELING.md), lets
+a person or a script check and correct the boxes, and exports the result as a YOLO dataset. It is the command-line
+form of the MCP labeling tools (docs/MCP.md, *Labeling*) and runs the same code, so `--json` prints the same
+records as those tools' `structuredContent`. Every command takes `--data-dir` (as `folo serve`: `$FOLO_DATA_DIR`,
+else `$FOLO_HOME` or `~/.folo`), `--server URL` (a `folo serve`, e.g. on another machine; `--token` or
+`FOLO_TOKEN` for one started with `--token`) and `--json`.
+
+Where the jobs live: when a `folo serve` owns the data dir (FOLO Desktop starts one), the command goes through it,
+so Studio shows the job and its run at once. Otherwise the command opens the data dir's labeling jobs itself (only
+those; `export` also opens its dataset registry) and holds its lock while it runs, as `folo mcp` does. A run
+belongs to the process that started it, so `start` without a server **waits** for the run to end (Ctrl+C stops it,
+also while it starts; labeled images stay), while through a server it returns at once unless `--wait` is given.
+Paths are read in place, on the server's machine: an absolute path (of any OS, the server's may be another) is
+passed as given, a relative one is made absolute against the current folder (on Windows `\photos` is on the
+current drive).
+
+Boxes are `[class, x1, y1, x2, y2]` with the corners in **pixels of a view of the image**: the image scaled so its
+long side is 1024 (`view --size`; never upscaled), the size `view` writes and states (a 1920×1080 photo's view is
+1024×576). On the command line a box is `CLASS,X1,Y1,X2,Y2`, where `CLASS` is a class index or name. Each image's
+boxes have a revision (`view` prints it); `set` needs it (`--expect`), and `set` and `review --expect` are refused with
+`label_boxes_changed` (exit 1) when the boxes changed since, e.g. a run labeled the image again.
+
+| command | what it does |
+|---|---|
+| `label agents` | The agent CLIs (`claude`, `codex`): installed or not, version, suggested models, default model and effort, and how to install a missing one. |
+| `label jobs` | The jobs, newest first: `{"jobs":[{id, name, status, classes, counts, dataset_id}]}`. |
+| `label create NAME --classes A,B [--instructions TEXT] [--path P]...` | Makes a job and adds the images of each `--path` (folders searched recursively, or image files): `{job_id, images, added, skipped, skipped_first?}`. |
+| `label add JOB PATH...` | Adds images to a job (same record). |
+| `label start JOB --agent claude\|codex [--model M] [--effort low\|medium\|high] [--fast] [--images ID,...\|--all] [--note TEXT] [--batch N] [--parallel N] [--wait]` | Starts an agent run on the unlabeled images (pending and failed), on `--images` (e.g. again with a `--note` about what was wrong), or on `--all`; `--fast` asks for Codex's Fast tier (more of the plan's usage), only with a model that offers it; a server that does not list it for that model (one from before the Fast tier, which would ignore it) is refused before the start (`usage`). Waiting, it prints `{"event":"started","job_id","total","model"}`, a `{"event":"progress","done","failed","total"}` record when the counts change, and `{"event":"finished", ...}` with the `status` record of the run as it was seen to end (the review count and the log are read after it: each is left out when its read fails, e.g. the job was deleted, and both when the job's run is another one after those reads); a run that ends `failed` exits 1 with `label_run_failed` (the agent CLI's message and hint). The run is followed by its id (`run.id`), and the finished record and the exit code come from the same read. When the job's run is another one by then (the run ended and someone started the next), it prints `{"event":"superseded","job_id"}` and exits 0. Not waiting: `{job_id, total, model}`. |
+| `label stop JOB` | Stops the job's run: `{job_id, status}`. |
+| `label status JOB [--log 5]` | Counts (labeled, failed, reviewed), the last run with its outcome, the tokens of every run (`calls`, `input_tokens`, ...) and the last log lines. |
+| `label images JOB [--status pending\|labeling\|labeled\|failed] [--reviewed true\|false] [--boxes] [--offset 0] [--limit 50]` | A page of the images (`{items, next_offset, total}`; `next_offset` is `null` on the last page): id, file, status, box count, `source` (`agent` / `manual`), reviewed, and with `--boxes` the view `size`, the `revision` and the boxes. `--status labeled --reviewed false` is what is left to review. |
+| `label view JOB [IMAGE] [-o FILE] [--size 1024] [--from 1]` | Writes the view of the image (default: the next to review) as a JPEG with its boxes outlined and numbered and pixel ticks on the edges (default file `<job>-<image>.jpg`), and prints its size, its revision and its boxes (300 at most, from number `--from`); the record adds `path`. |
+| `label set JOB IMAGE (--box B... \| --clear \| [--relabel N=CLASS]... [--remove N]... [--add B]...) --expect REV [--size WxH]` | Changes the boxes: all of them (`--box`, repeated; `--clear` for none; a box given as `view` lists it keeps its exact pixels), or by the numbers `view` shows (untouched boxes keep their exact pixels); `--expect` is the revision `view` printed. `--size` is the view the coordinates are in, as `view` printed it, required with `--box` and `--add`. When boxes that differ look the same in the `--size` view, `--box` must list that look once for each of them or not at all; fewer is a `usage` error (which ones to keep is unknown): remove them by number (`--remove`), or give the boxes of a larger view. Saved as a hand edit and marked reviewed, like Studio's Save: the record is the image as `view` shows it, with its new `revision`. |
+| `label review JOB IMAGE... [--undo] [--expect IMAGE=REV]...` | Marks labeled images reviewed (their boxes are right), like Studio's "Looks right", each with `--expect` only if its boxes are still that revision: `{updated, failed?, failed_total?, to_review}`. When nothing was marked and something failed, it exits with the first failure's code. |
+| `label export JOB [--name N] [--val-fraction 0.2] [--seed 0]` | Writes the labeled images as a YOLO dataset under the data dir and registers it: `{dataset_id, name, path, train, val}`; `folo train --data PATH` trains on it. |
+
+Errors are the API's codes with their exit codes: `label_job_not_found` and `image_not_found` exit 3, an agent
+that is not installed `not_supported` exit 4, a run already active `label_job_active` exit 1, boxes changed since
+their revision `label_boxes_changed` exit 1, bad boxes, flags or requests `usage` exit 2 (the API's `invalid_body`
+and the tools' `invalid_arguments` are `usage` here), and `data_dir_in_use` (exit 1) when another process owns the data dir without
+serving it.
+
+```sh
+folo label create street --classes car,person,bicycle --path ~/photos/street
+folo label start lb_3f9a --agent claude --images 1,2,3,4,5      # a sample first
+folo label view lb_3f9a -o next.jpg                              # the next image to review, its revision
+folo label set lb_3f9a 4 --expect 2-1c9e04aa --size 1024x576 --relabel 2=person --add car,120,80,340,400
+folo label review lb_3f9a 1 2 3 5
+folo label start lb_3f9a --agent claude                          # the rest
+folo label export lb_3f9a --json
 ```
 
 ## Adding a command

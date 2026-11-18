@@ -26,6 +26,8 @@ use crate::errors::{Error, not_implemented};
 pub struct HttpStore {
     client: Client,
     mock: std::sync::OnceLock<bool>,
+    /// `/api/system`'s `features`, read once.
+    features: std::sync::OnceLock<Vec<String>>,
 }
 
 fn action(a: QueueAction) -> QueueRequest {
@@ -34,7 +36,7 @@ fn action(a: QueueAction) -> QueueRequest {
 
 /// A transport error as a tool error: the server's code, status and hint; a server that does not answer is `502
 /// server_unreachable`.
-fn store_error(e: folo_client::Error) -> Error {
+pub(crate) fn store_error(e: folo_client::Error) -> Error {
     match e.status {
         Some(status) => Error { status, body: e.error },
         None => Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", e.error.message)
@@ -47,12 +49,36 @@ impl HttpStore {
     /// `--token`.
     pub fn new(base: &str, token: Option<&str>) -> HttpStore {
         let client = Client::new(base).token(token.unwrap_or_default());
-        HttpStore { client, mock: std::sync::OnceLock::new() }
+        HttpStore { client, mock: std::sync::OnceLock::new(), features: std::sync::OnceLock::new() }
     }
 
     /// The server's base URL.
     pub fn base(&self) -> &str {
         self.client.base()
+    }
+
+    /// The client (the labeling tools call `/api/label` through it, `crate::label`).
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// This store, taking `features` as the server's (tests: a server of an earlier version).
+    #[cfg(test)]
+    pub(crate) fn assume_features(self, features: Vec<String>) -> HttpStore {
+        let _ = self.features.set(features);
+        self
+    }
+
+    /// Whether the server lists `feature` (asked once per session). `/api/health` answers without a hardware
+    /// probe; only a server that predates its `features` is asked `/api/system`, whose CPU sample once stalled a
+    /// labeling call for 20 s on a loaded machine.
+    pub fn has_feature(&self, feature: &str) -> Result<bool, Error> {
+        if let Some(f) = self.features.get() {
+            return Ok(f.iter().any(|f| f == feature));
+        }
+        let health: folo_api::Health = self.get("/health")?;
+        let features = if health.features.is_empty() { self.system()?.features } else { health.features };
+        Ok(self.features.get_or_init(|| features).iter().any(|f| f == feature))
     }
 
     /// `GET /api/system` of the server.

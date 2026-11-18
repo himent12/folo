@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use folo_api::{
-    LabelEvent, LabelImage, LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelSource, RemovedImage,
-    SkippedImage, UpdateLabelImage,
+    LabelEvent, LabelImage, LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelReviewFailure,
+    LabelReviewResult, LabelSource, RemovedImage, ReviewLabelImages, SkippedImage, UpdateLabelImage,
+    label_box_revision,
 };
 
 use crate::error::Result;
@@ -211,7 +212,7 @@ impl Labeler {
         Ok(LabelImagesAdded { added, skipped, job: state.job() })
     }
 
-    /// `GET /api/label/jobs/{id}/images`.
+    /// `GET /api/label/jobs/{id}/images` with only a status: [`Labeler::query`] without the other filters.
     pub fn images(
         &self,
         id: &str,
@@ -219,9 +220,19 @@ impl Labeler {
         offset: u64,
         limit: u64,
     ) -> Result<LabelImagePage> {
+        self.query(id, &LabelImageQuery { status, offset, limit, ..LabelImageQuery::default() })
+    }
+
+    /// `GET /api/label/jobs/{id}/images`: the images that pass every filter of `q`, paged.
+    pub fn query(&self, id: &str, q: &LabelImageQuery) -> Result<LabelImagePage> {
+        let (offset, limit) = (q.offset, q.limit);
         let job = self.job(id)?;
         let state = job.live()?;
-        let matching = state.file.images.iter().filter(|r| status.is_none_or(|s| s == state.status(r)));
+        let matching = state.file.images.iter().filter(|r| {
+            q.status.is_none_or(|s| s == state.status(r))
+                && q.reviewed.is_none_or(|v| v == state.reviewed(r))
+                && q.ids.as_ref().is_none_or(|ids| ids.contains(&r.id))
+        });
         let (mut total, mut images) = (0u64, Vec::new());
         for record in matching {
             if total >= offset && (images.len() as u64) < limit {
@@ -257,6 +268,9 @@ impl Labeler {
         let mut state = job.live()?;
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
+        if let Some(expect) = &req.expect {
+            check_revision(image_id, &record.boxes, expect)?;
+        }
         let boxes = match &req.boxes {
             Some(boxes) => Some(check_boxes(boxes, classes, (record.width, record.height))?),
             None if req.reviewed.is_none() => return Err(invalid("give `boxes`, `reviewed` or both")),
@@ -301,6 +315,81 @@ impl Labeler {
         Ok(image)
     }
 
+    /// `POST /api/label/jobs/{id}/review`: marks images reviewed (or not) with one save of the job. Each image is
+    /// checked as `PUT` checks it (it exists, has labels to be right, is not in an agent call, has the expected
+    /// revision); those that fail are reported and left as they were, the rest are marked.
+    pub fn review(&self, id: &str, req: &ReviewLabelImages) -> Result<LabelReviewResult> {
+        if req.image_ids.len() > MAX_REVIEW {
+            return Err(invalid(format!("review at most {MAX_REVIEW} images at a time")));
+        }
+        // A revision for an image not in the list (a typo'd id, the wrong list) would be silently ignored.
+        if let Some(stray) = req.expect.keys().find(|k| !req.image_ids.contains(k)) {
+            let stray: String = stray.chars().take(40).collect();
+            return Err(invalid(format!("expect names image '{stray}', which is not in image_ids")));
+        }
+        let job = self.job(id)?;
+        let mut state = job.live()?;
+        let total = state.file.run.as_ref().map(|r| r.total);
+        let (mut changed, mut failed, mut failed_total) = (Vec::new(), Vec::new(), 0u64);
+        let mut seen = HashSet::new();
+        for image_id in req.image_ids.iter().filter(|i| seen.insert(i.as_str())) {
+            let checked = state.record(image_id).and_then(|r| {
+                if let Some(expect) = req.expect.get(image_id) {
+                    check_revision(image_id, &r.boxes, expect)?;
+                }
+                if req.reviewed && r.status != LabelImageStatus::Labeled {
+                    return Err(invalid(format!("image '{image_id}' has no labels to mark reviewed")));
+                }
+                Ok(r.reviewed)
+            });
+            let waiting = state.active.as_ref().is_some_and(|a| a.waiting.contains(image_id.as_str()));
+            match checked.and_then(|old| state.claim(image_id).map(|()| old)) {
+                Ok(old) => {
+                    state.record_mut(image_id).expect("the record was just read").reviewed = req.reviewed;
+                    changed.push((image_id.clone(), old, waiting));
+                }
+                Err(e) => {
+                    failed_total += 1;
+                    if failed.len() < FAILED_FIRST {
+                        let message = e.body.message.chars().take(200).collect();
+                        failed.push(LabelReviewFailure { id: image_id.clone(), code: e.body.code, message });
+                    }
+                }
+            }
+        }
+        if !changed.is_empty()
+            && let Err(e) = job.save(&state)
+        {
+            for (image_id, old, waiting) in &changed {
+                state.record_mut(image_id).expect("the record was just read").reviewed = *old;
+                if let Some(active) = state.active.as_mut().filter(|_| *waiting) {
+                    active.waiting.insert(image_id.clone());
+                }
+            }
+            if let (Some(run), Some(total)) = (state.file.run.as_mut(), total) {
+                run.total = total;
+            }
+            return Err(e);
+        }
+        if changed.len() > BULK_IMAGES {
+            job.emit(LabelEvent::Reload);
+        } else {
+            for (image_id, _, _) in &changed {
+                job.emit(LabelEvent::Image(state.image(state.record(image_id)?)));
+            }
+        }
+        if !changed.is_empty() {
+            job.emit_job(&state);
+        }
+        let to_review = state
+            .file
+            .images
+            .iter()
+            .filter(|r| state.status(r) == LabelImageStatus::Labeled && !state.reviewed(r))
+            .count() as u64;
+        Ok(LabelReviewResult { updated: changed.len() as u64, failed, failed_total, to_review })
+    }
+
     /// `DELETE /api/label/jobs/{id}/images/{image_id}`: an upload's file goes too, a folder image's never.
     pub fn delete_image(&self, id: &str, image_id: &str) -> Result<()> {
         let job = self.job(id)?;
@@ -316,6 +405,38 @@ impl Labeler {
         job.emit_job(&state);
         Ok(())
     }
+}
+
+/// Most images one `POST /api/label/jobs/{id}/review` marks.
+pub const MAX_REVIEW: usize = 1000;
+/// Most failures a review names.
+const FAILED_FIRST: usize = 20;
+
+/// `409 label_boxes_changed` unless `boxes` have the revision `expect`.
+fn check_revision(image_id: &str, boxes: &[folo_api::BBox], expect: &str) -> Result<()> {
+    let now = label_box_revision(boxes);
+    if now == expect {
+        return Ok(());
+    }
+    Err(crate::error::Error::conflict(
+        "label_boxes_changed",
+        format!("image '{image_id}' has other boxes than revision {expect} (now {now})"),
+    ))
+}
+
+/// Filter and page of `GET /api/label/jobs/{id}/images` ([`Labeler::query`]).
+#[derive(Clone, Debug, Default)]
+pub struct LabelImageQuery {
+    /// Only images with this status (as shown: `labeling` while in an agent call).
+    pub status: Option<LabelImageStatus>,
+    /// Only reviewed (`true`) or not reviewed (`false`) images.
+    pub reviewed: Option<bool>,
+    /// Only these image ids (in the job's order, not this list's).
+    pub ids: Option<HashSet<String>>,
+    /// Skip this many matching images.
+    pub offset: u64,
+    /// Return at most this many.
+    pub limit: u64,
 }
 
 /// An image about to be added to a job.

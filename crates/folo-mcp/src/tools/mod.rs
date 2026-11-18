@@ -9,14 +9,17 @@
 //! - `results.rs`: size limits, summaries and pages of a result.
 //! - Handlers: `info.rs` (`folo_info`), `datasets.rs` (the dataset tools), `models.rs` (`list_models`, `val`,
 //!   `predict`, `predict_batch`, `export`), `runs.rs` (`train`, `run_status`, `list_runs`, `stop_run`,
-//!   `reorder_run`, `compare_runs`), `cloud.rs` (the `cloud_*` tools).
-//! - `tests.rs`: unit tests, including the tool count the docs state.
+//!   `reorder_run`, `compare_runs`), `cloud.rs` (the `cloud_*` tools), `label.rs` (the labeling tools, on
+//!   [`crate::label::Labels`]).
+//! - `tests.rs`: unit tests, including the tool count the docs state; `label_tests.rs`: the labeling tools in
+//!   process and through a `folo serve`, with a scripted agent.
 
 mod arguments;
 mod cloud;
 mod datasets;
 mod dispatch;
 mod info;
+mod label;
 mod models;
 mod results;
 mod runs;
@@ -32,7 +35,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
 use crate::types::*;
-use schemas::{api_output, input, output, train_input};
+use schemas::{api_output, input, output, terse_input, terse_output, train_input};
 
 pub use dispatch::Progress;
 pub(crate) use dispatch::join;
@@ -221,6 +224,80 @@ pub const TOOLS: &[ToolDef] = &[
         input: input::<InstanceIdArgs>,
         output: api_output::<CloudInstance>,
     },
+    ToolDef {
+        name: "list_label_jobs",
+        description: "Lists labeling jobs, newest first. Paged.",
+        mutating: false,
+        input: terse_input::<PageArgs>,
+        output: terse_output::<Page<LabelJobSummary>>,
+    },
+    ToolDef {
+        name: "create_label_job",
+        description: "Creates a labeling job (name, classes, instructions) from folders or image files on the \
+                      server's machine; with job_id, adds paths to that job.",
+        mutating: true,
+        input: terse_input::<CreateLabelJobArgs>,
+        output: terse_output::<LabelImagesAddedResult>,
+    },
+    ToolDef {
+        name: "start_labeling",
+        description: "Starts an agent run on the job's unlabeled images (or image_ids); returns at once, follow \
+                      it with label_status.",
+        mutating: true,
+        input: terse_input::<StartLabelingArgs>,
+        output: terse_output::<LabelRunStarted>,
+    },
+    ToolDef {
+        name: "stop_labeling",
+        description: "Stops a job's agent run; labeled images stay.",
+        mutating: true,
+        input: terse_input::<JobIdArgs>,
+        output: terse_output::<LabelJobState>,
+    },
+    ToolDef {
+        name: "label_status",
+        description: "A job's counts, run progress, tokens and last log lines.",
+        mutating: false,
+        input: terse_input::<LabelStatusArgs>,
+        output: terse_output::<LabelStatusResult>,
+    },
+    ToolDef {
+        name: "list_label_images",
+        description: "Lists a job's images, optionally by status or review state, with boxes. Paged.",
+        mutating: false,
+        input: terse_input::<ListLabelImagesArgs>,
+        output: terse_output::<Page<LabelImageSummary>>,
+    },
+    ToolDef {
+        name: "view_label_image",
+        description: "Shows an image (default: the next to review) with its boxes numbered and pixel ticks on \
+                      the edges, plus the box list [class,x1,y1,x2,y2] in pixels of the view and its revision.",
+        mutating: false,
+        input: terse_input::<ViewLabelImageArgs>,
+        output: terse_output::<LabelImageViewResult>,
+    },
+    ToolDef {
+        name: "set_label_boxes",
+        description: "Corrects an image's boxes, in pixels of the view (size: its size): all of them (boxes), or \
+                      relabel / remove / add by number. expect: the view's revision. Saved as a reviewed hand edit.",
+        mutating: true,
+        input: terse_input::<SetLabelBoxesArgs>,
+        output: terse_output::<LabelImageView>,
+    },
+    ToolDef {
+        name: "review_label_images",
+        description: "Marks labeled images whose boxes are right as reviewed (expect: id -> revision seen).",
+        mutating: true,
+        input: terse_input::<ReviewLabelImagesArgs>,
+        output: terse_output::<ReviewLabelImagesResult>,
+    },
+    ToolDef {
+        name: "export_label_dataset",
+        description: "Writes the labeled images as a YOLO dataset, registers it and returns its dataset_id.",
+        mutating: true,
+        input: terse_input::<ExportLabelDatasetArgs>,
+        output: terse_output::<LabelDatasetResult>,
+    },
 ];
 
 impl ToolDef {
@@ -265,5 +342,7 @@ pub fn describe() -> Value {
     )
 }
 
+#[cfg(test)]
+mod label_tests;
 #[cfg(test)]
 mod tests;

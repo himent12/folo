@@ -121,7 +121,7 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     // Prompts: retrieval returns messages only.
     let prompts = c.result("prompts/list", json!({}))["prompts"].as_array().unwrap().clone();
     let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["train_on_folder", "diagnose_run"]);
+    assert_eq!(names, ["train_on_folder", "label_folder", "diagnose_run"]);
     let p = c.result("prompts/get", json!({ "name": "diagnose_run", "arguments": { "run_id": "run_2b02" } }));
     let text = p["messages"][0]["content"]["text"].as_str().unwrap();
     assert!(text.contains("run_2b02") && text.contains("TrainConfig"));
@@ -131,6 +131,16 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     );
     assert!(p["messages"][0]["content"]["text"].as_str().unwrap().contains("register_dataset"));
     let bad = c.request("prompts/get", json!({ "name": "train_on_folder", "arguments": {} }));
+    assert_eq!(bad["error"]["code"], -32602);
+    let p = c.result(
+        "prompts/get",
+        json!({ "name": "label_folder", "arguments": { "folder_path": "D:/photos/street", "classes": "car, person" } }),
+    );
+    let text = p["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("create_label_job") && text.contains(r#""classes":["car","person"]"#), "{text}");
+    assert!(text.contains(r#""name":"street""#) && text.contains("view_label_image"), "{text}");
+    let bad =
+        c.request("prompts/get", json!({ "name": "label_folder", "arguments": { "folder_path": "x" } }));
     assert_eq!(bad["error"]["code"], -32602);
 
     // create_synthetic_dataset with progress → train → subscribe / run_status → predict.

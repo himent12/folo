@@ -22,6 +22,10 @@ pub struct Health {
     pub api: String,
     /// True when the server runs `--mock`.
     pub mock: bool,
+    /// The same optional features `GET /api/system` lists, without its hardware probe; empty from servers that
+    /// predate it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 fn default_api() -> String {

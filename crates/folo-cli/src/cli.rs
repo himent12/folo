@@ -1,10 +1,13 @@
 //! The clap command tree. `folo describe` serialises it, so help strings and defaults here are the documented
-//! surface: keep them accurate.
+//! surface: keep them accurate. `folo label`'s arguments are in `cli/label.rs`.
 
 use std::path::PathBuf;
 
 use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+
+mod label;
+pub use label::*;
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
 #[derive(Debug, Parser)]
@@ -52,6 +55,10 @@ pub enum Command {
     /// a server running.
     #[command(subcommand)]
     Cloud(CloudCommand),
+    /// Agent labeling (docs/LABELING.md): jobs of unlabeled images, boxes drawn by Claude Code or Codex, review,
+    /// and the dataset made from them.
+    #[command(subcommand)]
+    Label(LabelCommand),
     /// Run a Model Context Protocol server over stdio so agents can drive FOLO.
     Mcp(McpArgs),
 }

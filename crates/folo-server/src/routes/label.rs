@@ -9,8 +9,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use folo_api::{
     CreateLabelJob, ImportLabelImages, LabelAgentList, LabelDatasetRequest, LabelEvent, LabelImage,
-    LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, RunLogs, StartLabeling,
-    UpdateLabelImage, UpdateLabelJob,
+    LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, LabelReviewResult,
+    ReviewLabelImages, RunLogs, StartLabeling, UpdateLabelImage, UpdateLabelJob,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -99,6 +99,9 @@ pub(super) async fn add_label_images(
 #[derive(Deserialize)]
 pub(super) struct LabelImagesParams {
     status: Option<String>,
+    reviewed: Option<bool>,
+    /// Comma-separated image ids.
+    ids: Option<String>,
     #[serde(default)]
     offset: u64,
     limit: Option<u64>,
@@ -116,8 +119,16 @@ pub(super) async fn label_images(
                 .hint("status is one of pending, labeling, labeled, failed")
         })?),
     };
-    let limit = p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    Ok(Json(st.store.labeler()?.images(&id, status, p.offset, limit)?))
+    let ids =
+        p.ids.map(|ids| ids.split(',').map(str::trim).filter(|i| !i.is_empty()).map(String::from).collect());
+    let q = crate::label::LabelImageQuery {
+        status,
+        reviewed: p.reviewed,
+        ids,
+        offset: p.offset,
+        limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
+    };
+    Ok(Json(st.store.labeler()?.query(&id, &q)?))
 }
 
 pub(super) async fn label_image(
@@ -136,6 +147,14 @@ pub(super) async fn update_label_image(
     ApiJson(req): ApiJson<UpdateLabelImage>,
 ) -> Result<Json<LabelImage>> {
     Ok(Json(blocking(&st, move |s| s.labeler()?.update_image(&id, &image_id, req)).await?))
+}
+
+pub(super) async fn review_label_images(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<ReviewLabelImages>,
+) -> Result<Json<LabelReviewResult>> {
+    Ok(Json(blocking(&st, move |s| s.labeler()?.review(&id, &req)).await?))
 }
 
 pub(super) async fn delete_label_image(

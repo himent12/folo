@@ -34,6 +34,7 @@ impl Backend for MockBackend {
             version: "0.1.0".into(),
             api: folo_api::API_VERSION.into(),
             mock: true,
+            features: Vec::new(),
         })
     }
 

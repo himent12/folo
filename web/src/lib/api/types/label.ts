@@ -67,6 +67,8 @@ export interface LabelUsage {
 
 /** One agent run over some images of a `LabelJob`. */
 export interface LabelRun {
+  /** Unique per run; absent from older servers (`started` has one-second resolution). */
+  id?: string;
   agent: LabelAgentId;
   /** null: the CLI's default. */
   model: string | null;

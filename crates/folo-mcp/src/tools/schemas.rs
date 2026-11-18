@@ -18,6 +18,99 @@ pub(super) fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
     Arc::new(s)
 }
 
+/// [`input`] of a labeling tool, shrunk further: a `oneOf` of string constants becomes an `enum`, the `$defs`
+/// lose their descriptions (the field's own description says what the values mean), as output schemas do, empty
+/// defaults (`null`, `false`, `""`, `[]`, `{}`) and `null` in the types of optional fields go (a field that is
+/// not `required` is left out; `null` is still accepted), and `job_id` / `image_id` lose their descriptions.
+pub(super) fn terse_input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+    let mut s = (*input::<T>()).clone();
+    s.remove("description");
+    s.remove("title");
+    if let Some(Value::Object(defs)) = s.get_mut("$defs") {
+        for d in defs.values_mut().filter_map(Value::as_object_mut) {
+            d.remove("description");
+            const_enum(d);
+        }
+    }
+    if let Some(Value::Object(props)) = s.get_mut("properties") {
+        for (name, p) in props.iter_mut() {
+            let Some(p) = p.as_object_mut() else { continue };
+            // The name says it all.
+            if name == "job_id" || name == "image_id" {
+                p.remove("description");
+            }
+            // An empty default is what leaving the field out means anyway.
+            let empty = |v: &Value| match v {
+                Value::Null | Value::Bool(false) => true,
+                Value::String(s) => s.is_empty(),
+                Value::Array(a) => a.is_empty(),
+                Value::Object(o) => o.is_empty(),
+                _ => false,
+            };
+            if p.get("default").is_some_and(empty) {
+                p.remove("default");
+            }
+            // An optional field is left out, not sent as `null`: `["string", "null"]` is `"string"`, and an
+            // `anyOf` of a type and `null` that type.
+            if let Some(Value::Array(types)) = p.get("type")
+                && let [t, Value::String(null)] = &types[..]
+                && null == "null"
+            {
+                let t = t.clone();
+                p.insert("type".into(), t);
+            }
+            if let Some(Value::Array(any)) = p.get("anyOf")
+                && let [t, n] = &any[..]
+                && n == &json!({ "type": "null" })
+                && let Some(t) = t.as_object()
+            {
+                let t = t.clone();
+                p.remove("anyOf");
+                p.extend(t);
+            }
+        }
+    }
+    Arc::new(s)
+}
+
+/// [`output`] of a labeling tool, without descriptions or `required` lists: docs/MCP.md documents the fields,
+/// whose names say what they are, and a result always has them all (`null` when absent).
+pub(super) fn terse_output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+    fn strip(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                o.remove("description");
+                o.remove("title");
+                o.remove("required");
+                for (k, child) in o.iter_mut() {
+                    if !matches!(k.as_str(), "enum" | "const" | "examples") {
+                        strip(child);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut v = Value::Object((*output::<T>()).clone());
+    strip(&mut v);
+    let Value::Object(s) = v else { unreachable!("an object stays an object") };
+    Arc::new(s)
+}
+
+/// Writes a `oneOf` of string constants (a Rust enum with documented variants) as an `enum`.
+fn const_enum(o: &mut JsonObject) {
+    let consts: Option<Vec<Value>> = o
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(|b| b.get("const").filter(|c| c.is_string()).cloned()).collect());
+    if let Some(values) = consts {
+        o.remove("oneOf");
+        o.insert("type".into(), json!("string"));
+        o.insert("enum".into(), Value::Array(values));
+    }
+}
+
 /// Marks every object schema with `properties` (the root and the `$defs`) `additionalProperties: false`: tools
 /// reject arguments they do not know ([`unknown_argument`]) instead of silently ignoring a typo.
 ///
@@ -102,14 +195,7 @@ fn compact(s: &mut JsonObject, output: bool) {
                     if in_defs {
                         o.remove("description");
                     }
-                    let consts: Option<Vec<Value>> = o.get("oneOf").and_then(Value::as_array).and_then(|a| {
-                        a.iter().map(|b| b.get("const").filter(|c| c.is_string()).cloned()).collect()
-                    });
-                    if let Some(values) = consts {
-                        o.remove("oneOf");
-                        o.insert("type".into(), json!("string"));
-                        o.insert("enum".into(), Value::Array(values));
-                    }
+                    const_enum(o);
                 }
                 for (k, child) in o.iter_mut() {
                     let defs = k == "$defs" || k == "definitions";

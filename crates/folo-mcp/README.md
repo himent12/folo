@@ -1,10 +1,11 @@
 # folo-mcp
 
-`folo mcp`: a Model Context Protocol server over stdio, so agents can build datasets, train, evaluate, predict and
-export through FOLO. The protocol layer is the `rmcp` SDK; this crate adds the FOLO tools, `folo://` resources and
+`folo mcp`: a Model Context Protocol server over stdio, so agents can label images, build datasets, train,
+evaluate, predict and export through FOLO. The protocol layer is the `rmcp` SDK; this crate adds the FOLO tools, `folo://` resources and
 prompts on top of folo-server's `Store` trait. It depends on folo-api (with its `schema` feature), folo-server,
 folo-data and folo-client. folo-cli is the only crate that depends on it: `crates/folo-cli/src/mcp.rs` builds the
-server from the `folo mcp` flags, and `folo describe` includes the tool schemas. The contract is
+server from the `folo mcp` flags, `folo describe` includes the tool schemas, and `folo label`
+(`crates/folo-cli/src/label/`) runs the labeling operations of `src/label/`. The contract is
 [docs/MCP.md](../../docs/MCP.md).
 
 ## Where things are
@@ -14,10 +15,11 @@ server from the `folo mcp` flags, and `folo describe` includes the tool schemas.
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
 | `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
 | `src/tools/` | The tools; see below |
-| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type |
+| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views) |
+| `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
 | `src/resources.rs` | `folo://` URIs (`FoloUri`), the resource listing and templates, JSON snapshots |
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
-| `src/prompts.rs` | The prompts `train_on_folder` and `diagnose_run` |
+| `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |
 | `src/proxy.rs` | `HttpStore`: the `Store` of `--server`, forwarding the request / response calls to a running `folo serve` through `folo_client::Client`; `subscribe` answers `not_implemented` |
 | `src/paths.rs` | `PathPolicy`: relative input paths resolve against `--data-dir`; with `--confine`, canonical paths must stay inside it |
 | `src/confine.rs` | `--confine` for datasets: a read guard on every file the dataset reader opens, and the report before a tool reads a dataset |
@@ -39,7 +41,9 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `models.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export` |
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
+| `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |
 | `tests.rs` | Unit tests, including the tool count the docs state |
+| `label_tests.rs` | The labeling tools with a scripted agent: in process, through a loopback `folo serve` (also an older one without the image filters and revisions), revisions against a gated run, `--confine` |
 
 ### How the flags are applied
 
@@ -48,13 +52,16 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
   `https://` URL). folo-cli picks the backend, and switches an embedded server to `Proxy` when a `folo serve`
   already owns the data dir and `--confine` is off (`crates/folo-cli/src/mcp.rs`).
 - **`--read-only`.** `tools::listed` leaves the `mutating` tools out of `tools/list`, `Inner::call` refuses them
-  with the `read_only` error, and `prompts::list` leaves out `train_on_folder`.
+  with the `read_only` error, and `prompts::list` leaves out `train_on_folder` and `label_folder`.
 - **`--confine`.** `build` installs the dataset read guard (`confine::install_read_guard`) unless the backend is
-  `Proxy`, where `folo serve` reads the datasets; `PathPolicy` checks every input path.
+  `Proxy`, where `folo serve` reads the datasets; `PathPolicy` checks every input path, label paths included,
+  and the labeling tools that read a job's images check them all first (`confine_job`).
 - **Schemas.** The tool types derive `schemars::JsonSchema`: those in `src/types.rs` directly, the folo-api types
   through its `schema` feature, which this crate's `Cargo.toml` turns on. `schemas.rs` generates each schema with
   rmcp's `schema_for_input` / `schema_for_output`, removes what does not help validation and marks every object
-  `additionalProperties: false`; `train_input` makes `dataset_id` optional when `resume_run_id` is given.
+  `additionalProperties: false`; `train_input` makes `dataset_id` optional when `resume_run_id` is given, and
+  `terse_input` (the labeling tools) also writes enums as `enum` without the variants' descriptions and drops empty
+  defaults and `null` in optional types; `terse_output` drops every description and `required` list.
 
 ## Start here
 
@@ -77,7 +84,8 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 ## Tests and benchmarks
 
 ```sh
-cargo test -p folo-mcp                  # unit tests: schemas, arguments, paging, URIs, paths, an unreachable --server
+cargo test -p folo-mcp                  # unit tests: schemas, arguments, paging, URIs, paths, an unreachable --server,
+                                        # the labeling tools (scripted agent, loopback folo serve)
 cargo test -p folo-cli --test mcp       # end to end: spawns `folo mcp` and speaks raw JSON-RPC
 ```
 

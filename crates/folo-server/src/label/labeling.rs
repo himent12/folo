@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::http::StatusCode;
 use folo_api::{
@@ -10,7 +10,7 @@ use folo_api::{
 };
 
 use crate::error::{Error, Result};
-use crate::util::{rfc3339, unix_now};
+use crate::util::{mix64, rfc3339, unix_now};
 
 use super::agent::Agent;
 use super::job::Active;
@@ -79,6 +79,7 @@ impl Labeler {
             backoff: self.backoff,
         };
         let previous = state.file.run.replace(LabelRun {
+            id: run_id(),
             agent: req.agent,
             model: model.clone(),
             effort,
@@ -171,4 +172,15 @@ impl Labeler {
         }
         Ok(state.job())
     }
+}
+
+/// A new run id, unique in practice: the clock in nanoseconds, the process id and a counter, mixed. `started` has
+/// one-second resolution, so a waiter that compared it took a run started in the same second for its own.
+fn run_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let h = mix64(nanos ^ mix64(u64::from(std::process::id()) << 32 | n));
+    format!("lr_{h:016x}")
 }

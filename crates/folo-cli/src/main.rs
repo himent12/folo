@@ -14,6 +14,7 @@
 //! - `dataset`: `folo dataset check | stats | synth | convert`.
 //! - `weights`: `folo weights list | pull` and published-name resolution (folder: download).
 //! - `cloud`: `folo cloud ...` through `folo_server::cloud`.
+//! - `label`: `folo label ...`, agent labeling on folo-mcp's labeling operations (folder: print).
 //! - `engine`: opening datasets, registering the GPU backend, engine errors as CLI errors.
 //! - `output`: `--json` records, the error envelope and the exit codes.
 //! - `serve_lock`: one owner per data dir (`serve.lock`, `serve.json`).
@@ -28,6 +29,7 @@ mod doctor;
 mod draw;
 mod engine;
 mod infer;
+mod label;
 mod mcp;
 mod output;
 mod quantize;
@@ -131,6 +133,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Weights(cmd) => weights::run(cmd, out),
         Command::Cloud(cmd) => cloud::run(cmd, out),
+        Command::Label(cmd) => label::run(cmd, out),
         Command::Mcp(args) => mcp::mcp(args),
     }
 }

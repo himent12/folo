@@ -1,4 +1,4 @@
-//! Jobs: upload, label, review and make a dataset; folder images read in place.
+//! Jobs: upload, label, review and make a dataset; folder images read in place; the image filters.
 
 use std::path::Path;
 
@@ -385,4 +385,86 @@ async fn a_person_marks_images_reviewed_and_the_agent_relabeling_one_clears_it()
     idle(app, &job.id).await;
     let again = images(app, &job.id, "").await;
     assert_eq!((again.images[0].source, again.images[0].reviewed), (Some(LabelSource::Agent), false));
+}
+
+#[tokio::test]
+async fn images_filter_by_review_state_and_ids() {
+    let t = TestDir::new("label-filters");
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let system: Value = ok(app, get("/api/system")).await;
+    assert!(system["features"].as_array().unwrap().contains(&json!(FEATURE_LABEL_IMAGE_FILTERS)), "{system}");
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    idle(app, &job.id).await;
+    let all = images(app, &job.id, "").await;
+    let ids: Vec<&str> = all.images.iter().map(|i| i.id.as_str()).collect();
+    ok::<LabelImage>(app, put(&format!("{uri}/images/{}", ids[1]), json!({ "reviewed": true }))).await;
+
+    let reviewed = images(app, &job.id, "?reviewed=true").await;
+    assert_eq!((reviewed.total, reviewed.images[0].id.as_str()), (1, ids[1]));
+    let to_review = images(app, &job.id, "?status=labeled&reviewed=false&limit=1").await;
+    assert_eq!((to_review.total, to_review.images.len(), to_review.images[0].id.as_str()), (2, 1, ids[0]));
+    let picked = images(app, &job.id, &format!("?ids={},{},nope", ids[2], ids[0])).await;
+    let got: Vec<&str> = picked.images.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!((picked.total, got), (2, vec![ids[0], ids[2]]), "in the order the images were added");
+    assert_eq!(images(app, &job.id, "?ids=nope&reviewed=true").await.total, 0);
+    err(app, get(&format!("{uri}/images?reviewed=maybe")), StatusCode::BAD_REQUEST, "invalid_query").await;
+}
+
+#[tokio::test]
+async fn box_edits_and_reviews_check_the_revision() {
+    let t = TestDir::new("label-revisions");
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let system: Value = ok(app, get("/api/system")).await;
+    assert!(system["features"].as_array().unwrap().contains(&json!(FEATURE_LABEL_REVISIONS)), "{system}");
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let first: LabelJob = ok(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    idle(app, &job.id).await;
+    // Runs started within the same second still have their own ids.
+    let again = json!({ "agent": "claude", "scope": "all" });
+    let second: LabelJob = ok(app, post(&format!("{uri}/start"), again)).await;
+    idle(app, &job.id).await;
+    let (first, second) = (first.run.unwrap().id, second.run.unwrap().id);
+    assert!(first.starts_with("lr_") && second.starts_with("lr_") && first != second, "{first} {second}");
+    let all = images(app, &job.id, "").await;
+    let ids: Vec<String> = all.images.iter().map(|i| i.id.clone()).collect();
+    let rev = label_box_revision(&all.images[0].boxes);
+    assert!(rev.starts_with(&format!("{}-", all.images[0].boxes.len())), "{rev}");
+
+    // An edit on another revision changes nothing.
+    let image = format!("{uri}/images/{}", ids[0]);
+    let stale = json!({ "boxes": [], "expect": "0-00000000" });
+    err(app, put(&image, stale), StatusCode::CONFLICT, "label_boxes_changed").await;
+    assert_eq!(images(app, &job.id, "").await.images[0].boxes, all.images[0].boxes);
+    let saved: LabelImage = ok(app, put(&image, json!({ "boxes": [], "expect": rev }))).await;
+    assert!(saved.boxes.is_empty() && saved.reviewed);
+    assert_eq!(label_box_revision(&saved.boxes), "0-811c9dc5");
+
+    // Many marks in one request: the stale one and the unknown one fail, a repeated id counts once.
+    let review = format!("{uri}/review");
+    let mut body = json!({ "image_ids": [ids[1], ids[2], "nope", ids[1]] });
+    body["expect"][&ids[2]] = json!("9-0");
+    let r: LabelReviewResult = ok(app, post(&review, body)).await;
+    assert_eq!((r.updated, r.failed_total, r.to_review), (1, 2, 1));
+    let codes: Vec<(&str, &str)> = r.failed.iter().map(|f| (f.id.as_str(), f.code.as_str())).collect();
+    assert_eq!(codes, vec![(ids[2].as_str(), "label_boxes_changed"), ("nope", "image_not_found")]);
+    let r: LabelReviewResult =
+        ok(app, post(&review, json!({ "image_ids": [ids[1]], "reviewed": false }))).await;
+    assert_eq!((r.updated, r.to_review, r.failed.len()), (1, 2, 0));
+    let reviewed = images(app, &job.id, "?reviewed=true").await;
+    assert_eq!((reviewed.total, reviewed.images[0].id.as_str()), (1, ids[0].as_str()));
+    let many: Vec<String> = (0..1001).map(|i| i.to_string()).collect();
+    err(app, post(&review, json!({ "image_ids": many })), StatusCode::BAD_REQUEST, "invalid_body").await;
+    // A revision for an image not in the list is refused before anything is marked.
+    let mut stray = json!({ "image_ids": [ids[1]] });
+    stray["expect"][&ids[2]] = json!(label_box_revision(&all.images[2].boxes));
+    err(app, post(&review, stray), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert_eq!(images(app, &job.id, "?reviewed=true").await.total, 1);
+    // The cheap health check lists the same features as /api/system.
+    let health: Value = ok(app, get("/api/health")).await;
+    assert_eq!(health["features"], system["features"]);
 }

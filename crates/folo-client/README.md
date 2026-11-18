@@ -5,10 +5,10 @@ top of it. It depends only on folo-api among the workspace crates. Four crates d
 
 | crate | what it uses it for |
 |---|---|
-| folo-mcp | `folo mcp --server`: `HttpStore` (`crates/folo-mcp/src/proxy.rs`) sends every tool's store call through a `Client` |
+| folo-mcp | `folo mcp --server`: `HttpStore` (`crates/folo-mcp/src/proxy.rs`) sends every tool's store call through a `Client`, the labeling tools too (`crates/folo-mcp/src/label/`) |
 | folo-server | The cloud control plane (`crates/folo-server/src/cloud/`) talks to a worker, uploads its dataset and checkpoint and downloads the weights (`transfer`) |
 | folo-cloud | The `remote` provider asks the server for its health and system info (`crates/folo-cloud/src/remote.rs`); `Endpoint::client` builds a client of a worker |
-| folo-cli | `serve_lock::serves` asks a server at a data dir's recorded address which data dir it serves |
+| folo-cli | `serve_lock::serves` asks a server at a data dir's recorded address which data dir it serves; `folo label` goes through folo-mcp's `HttpStore` when a `folo serve` owns the data dir |
 
 `Client` knows the API's conventions and nothing about its routes (only `src/transfer.rs` names routes, the
 upload protocol's `/uploads` family): paths are relative to `/api`, bodies are
@@ -19,7 +19,7 @@ JSON, a non-2xx answer is the error envelope `{ "error": { code, message, hint }
 
 | path | what it holds |
 |---|---|
-| `src/lib.rs` | `Client` (`get`, `post`, `put`, `delete`, raw bytes, `get_range`), `Error` (`is_unreachable`, `is_transient`, `code`), the codes `UNREACHABLE` and `NOT_FOLO`, `encode` for path segments |
+| `src/lib.rs` | `Client` (`get`, `post`, `put` (bytes), `put_json`, `delete`, raw bytes, `get_range`), `Error` (`is_unreachable`, `is_transient`, `code`), the codes `UNREACHABLE` and `NOT_FOLO`, `encode` for path segments |
 | `src/transfer.rs` | `upload` (a stream a caller produces, sent in parts, resumed after a lost answer), `download` (a file fetched with `Range` requests into a temporary file, renamed into place), `remove_partial`, `Control` (progress, stop, backoff) |
 
 ## Start here
