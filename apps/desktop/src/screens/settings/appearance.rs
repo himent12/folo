@@ -236,7 +236,11 @@ impl FoloApp {
                 window,
                 cx,
                 Rc::new(move |this, i, _, cx| {
-                    if let Some(id) = ids.get(i) {
+                    // Re-picking the theme the slot shows does nothing (THEMES.md, Choosing a theme),
+                    // whichever input delivered the pick: the select itself calls back for a click on
+                    // the chosen option, as other selects need.
+                    let shown = this.themes.entry_for(&this.theme_prefs, mode).id.clone();
+                    if let Some(id) = ids.get(i).filter(|id| **id != shown) {
                         this.pick_theme(id, cx);
                     }
                 }),

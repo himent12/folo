@@ -31,6 +31,10 @@ mod render;
 mod run_charts_tests;
 #[cfg(test)]
 mod run_page_tests;
+#[cfg(test)]
+mod select_driving;
+#[cfg(test)]
+mod select_tests;
 mod sidebar;
 mod start_from;
 #[cfg(test)]
@@ -339,6 +343,9 @@ pub struct FoloApp {
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
     pub ds_class: Option<u32>,
+    /// The dataset whose page was open last: the class filter belongs to it, so opening another
+    /// dataset clears it (its class indices mean other classes there, or none).
+    pub ds_class_of: Option<String>,
     /// Show only images without labels (from the Empty images tile).
     pub ds_empty_only: bool,
     pub ds_boxes: bool,
@@ -654,6 +661,7 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
+            ds_class_of: None,
             ds_empty_only: false,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.

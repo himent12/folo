@@ -49,7 +49,11 @@ impl FoloApp {
         let teacher_select = self.select_with(
             "bench-loop-teacher",
             teacher_i.and_then(|i| teachers.get(i)).map_or_else(
-                || if teacher_gone { "Pick a teacher" } else { "No model can teach" }.into(),
+                // A teacher that appeared while the form was open (the list refreshed) is offered.
+                || {
+                    if teacher_gone || !teachers.is_empty() { "Pick a teacher" } else { "No model can teach" }
+                        .into()
+                },
                 |m| m.name.clone().into(),
             ),
             models
@@ -58,8 +62,8 @@ impl FoloApp {
                     (m.name.clone().into(), Some(format!("{} · {} px", m.arch.as_str(), m.imgsz).into()))
                 })
                 .collect(),
-            // Deleted, none of them is the choice.
-            teacher_i.unwrap_or(if teacher_gone { models.len() } else { 0 }),
+            // None set, or deleted: none of them is the choice, so the first one can be picked.
+            teacher_i.unwrap_or(models.len()),
             &off,
             window,
             cx,
@@ -123,6 +127,7 @@ impl FoloApp {
         let note = match (teacher_i.and_then(|i| teachers.get(i)), pool_images) {
             (None, _) if teacher_gone => "Its teacher was deleted. Pick another.".to_string(),
             (_, None) if choice == SourceChoice::Deleted => "Its pool was deleted. Pick another.".to_string(),
+            (None, _) if !teachers.is_empty() => "Pick a teacher: it labels the pool.".to_string(),
             (None, _) => {
                 "No model can teach yet: a teacher is trained on this benchmark's classes, in its order."
                     .to_string()

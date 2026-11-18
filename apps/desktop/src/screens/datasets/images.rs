@@ -84,7 +84,9 @@ impl FoloApp {
                 current,
                 options,
                 &classes,
-                picked.map_or(0, |c| c as usize + 1),
+                // The stored class, even past this dataset's classes: then no option is the
+                // choice, and "All classes" (shown) clears it by pointer or keys.
+                self.ds_class.map_or(0, |c| c as usize + 1),
                 window,
                 cx,
                 Rc::new(|this, i, _, cx| {
