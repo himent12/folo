@@ -23,7 +23,9 @@ pub const MAX_BOXES: usize = 1000;
 ///
 /// A box is a list, `["car", x1, y1, x2, y2]`, not an object: output tokens cost several times what input tokens
 /// do, and the list says the same in fewer of them than `{"label": "car", "box": [x1, y1, x2, y2]}`, the shape
-/// before November 2026 (which [`parse_reply`] still reads).
+/// before November 2026. [`parse_reply`] still reads that shape, and reads its coordinates as pixels too: they
+/// are what this prompt asks for whatever the shape, so a model that falls back to the old shape is taken at the
+/// prompt's word (a reply in the old shape and the old thousandths is not told apart from pixels).
 ///
 /// Coordinates are pixels of the image as sent, whose size [`user_prompt`] gives. Until November 2026 they were
 /// thousandths of the width and height; Claude Sonnet and Opus now answer in pixels whatever they are told (Sonnet
@@ -182,6 +184,7 @@ pub(crate) fn json_objects<T: serde::de::DeserializeOwned>(
 
 /// A reply box (`["car", x1, y1, x2, y2]`, or the older `{"label": "car", "box": [x1, y1, x2, y2]}`) in pixels of
 /// the image as sent, clipped to it and scaled to the original, or `None` when it is not one or fails a check.
+/// Both shapes are read as pixels: [`SYSTEM`] asks for pixels, whatever shape a model answers in.
 fn to_pixels(b: &Value, classes: &[String], size: ImageSize) -> Option<BBox> {
     let (label, coords) = match b {
         Value::Array(items) => (items.first()?, items.get(1..)?),
@@ -283,16 +286,33 @@ mod tests {
 
     #[test]
     fn list_boxes_and_object_boxes_read_alike() {
-        // The shape asked for since November 2026, and the one before it, in one reply.
+        // The shape asked for since November 2026 and the one before it, mixed in one reply and in one image, of
+        // images sent smaller (landscape, halved) and larger (portrait, 576 x 768 for a 480 x 640 file) than their
+        // files: both shapes are pixels of the image as sent.
         let text = r#"{"images":[
-            {"image":1,"boxes":[["car",100,200,500,600],["traffic light",900,0,1000,250]]},
-            {"image":2,"boxes":[{"label":"car","box":[100,200,500,600]}]}]}"#;
-        let out = parse_reply(text, &classes(), &[thousandths(2000, 1000), thousandths(2000, 1000)]).unwrap();
+            {"image":1,"boxes":[["car",100,50,300,250],{"label":"car","box":[400,100,700,500]}]},
+            {"image":2,"boxes":[{"label":"Traffic light","box":[288,384,576,768]},["car",0,0,144,192]]}]}"#;
+        let sizes = [
+            ImageSize { sent: (768, 576), file: (1536, 1152) },
+            ImageSize { sent: (576, 768), file: (480, 640) },
+        ];
+        let out = parse_reply(text, &classes(), &sizes).unwrap();
         let first = out[0].as_ref().unwrap();
         assert_eq!(first.dropped, 0);
-        assert_eq!(first.boxes[0], BBox { class: 0, x1: 200.0, y1: 200.0, x2: 1000.0, y2: 600.0 });
-        assert_eq!(first.boxes[1], BBox { class: 1, x1: 1800.0, y1: 0.0, x2: 2000.0, y2: 250.0 });
-        assert_eq!(out[1].as_ref().unwrap().boxes, first.boxes[..1]);
+        assert_eq!(
+            first.boxes,
+            [
+                BBox { class: 0, x1: 200.0, y1: 100.0, x2: 600.0, y2: 500.0 },
+                BBox { class: 0, x1: 800.0, y1: 200.0, x2: 1400.0, y2: 1000.0 }
+            ]
+        );
+        assert_eq!(
+            out[1].as_ref().unwrap().boxes,
+            [
+                BBox { class: 1, x1: 240.0, y1: 320.0, x2: 480.0, y2: 640.0 },
+                BBox { class: 0, x1: 0.0, y1: 0.0, x2: 120.0, y2: 160.0 }
+            ]
+        );
         // A list in the wrong order or of the wrong length costs only that box.
         let text = r#"{"images":[{"image":1,"boxes":[
             [100,200,500,600,"car"],["car",100,200,500],["car",100,200,500,600,7],[],["car","1","2","3","4"],

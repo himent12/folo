@@ -137,8 +137,9 @@ dataset that the store registers.
   a call costs little more than its images.
 - A run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the image)
   before storing it, and ends the run at once on a failure that another call would repeat. A provider's passing
-  fault (overloaded, a 5xx, a dropped stream: `agent::is_transient`) is asked once more after a pause
-  (`agent::label_with_retry`, which benchmark agent entries use too).
+  fault (overloaded, a 5xx, a dropped stream, a short rate limit: `label/faults.rs`) is asked once more after a
+  pause (`agent::label_with_retry`, which benchmark agent entries use too, with the same pause); `faults.rs` also
+  words a limit's hint from the CLI's message.
 - Events (`job`, `image`, `removed`, `reload`, `log`: `folo_api::LabelEvent`) fan out to SSE subscribers through a
   per-job broadcast channel, as for runs.
 - Tests script the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes,

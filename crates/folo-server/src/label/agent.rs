@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
 
+pub use super::faults::{BUSY, fault_hint, is_limit, is_transient, limit_hint, reset_time, retry_after};
 use super::tree::Tree;
 
 /// How long one agent call may take.
@@ -57,19 +58,28 @@ pub struct AgentReply {
 }
 
 /// Why a call returned nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AgentError {
     /// The CLI could not be started, or said something FOLO does not understand. Calling again will not help.
     Unavailable(String),
-    /// The CLI ran and reported an error (not signed in, an unknown model, a rate limit): its message.
-    Failed(String),
+    /// The CLI ran and reported an error (not signed in, an unknown model, a rate limit): its message, and what
+    /// the call used before it failed (Claude Code reports that; zero when the CLI does not).
+    Failed(String, LabelUsage),
     /// The provider failed the call twice on a passing fault ([`is_transient`]: overloaded, a server error, a
-    /// dropped stream): its message. Only [`label_with_retry`] returns it; the next call may well go through.
-    Transient(String),
+    /// dropped stream, a short rate limit): its message, and what both attempts used. Only [`label_with_retry`]
+    /// returns it; the next call may well go through.
+    Transient(String, LabelUsage),
     /// No answer within [`CALL_TIMEOUT`]; the process was killed.
     Timeout,
     /// The cancel switch was set; the process was killed.
     Cancelled,
+}
+
+impl AgentError {
+    /// [`AgentError::Failed`] with nothing used.
+    pub fn failed(message: impl Into<String>) -> AgentError {
+        AgentError::Failed(message.into(), LabelUsage::default())
+    }
 }
 
 /// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`];
@@ -86,6 +96,17 @@ pub trait Agent: Send + Sync + 'static {
     fn image_side(&self) -> u32 {
         super::run::AGENT_IMAGE_SIDE
     }
+    /// Whether a run may ask for the faster service tier ([`AgentRequest::fast`]) with `model` (`None`: the
+    /// agent's default): `Err` says why not.
+    fn check_fast(&self, model: Option<&str>) -> Result<(), String> {
+        let _ = model;
+        Err(format!("{} has no faster service tier", self.id().display_name()))
+    }
+    /// Something about how this agent's calls are made right now that a run's log should say once (a call that
+    /// costs more than it should, and why); `None` when there is nothing to say.
+    fn notice(&self) -> Option<String> {
+        None
+    }
     /// Labels one batch: one model request, no tools. Blocks until the reply, the deadline or `cancel`.
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError>;
     /// What to do about a failure with this `message` ([`AgentError::Failed`] / [`AgentError::Unavailable`]),
@@ -96,121 +117,43 @@ pub trait Agent: Send + Sync + 'static {
     }
 }
 
-/// Whether a CLI's failure `message` is a passing fault on the provider's side that the same call can get past a
-/// little later: the provider is overloaded (Anthropic's 529, OpenAI's "high demand"), answered with a server
-/// error (500, 502, 503, 504), or the connection or the stream broke off. Both CLIs retry such faults themselves
-/// before they give up, so one that reaches FOLO has lasted a while. A rate limit or a usage limit never is one:
-/// asking again only spends more of a limit that has run out.
-pub fn is_transient(message: &str) -> bool {
-    let m = message.to_lowercase();
-    const LIMITS: [&str; 9] = [
-        "rate limit",
-        "rate_limit",
-        "usage limit",
-        "session limit",
-        "spend",
-        "quota",
-        "credits",
-        "too many requests",
-        "hit your",
-    ];
-    const PASSING: [&str; 18] = [
-        "overloaded",
-        "high demand",
-        "high load",
-        "internal server error",
-        "bad gateway",
-        "service unavailable",
-        "gateway timeout",
-        "server_error",
-        "api_error",
-        "stream disconnected",
-        "stream error",
-        "connection error",
-        "connection reset",
-        "connection closed",
-        "econnreset",
-        "socket hang up",
-        "temporarily unavailable",
-        "request timed out",
-    ];
-    let numbers = || m.split(|c: char| !c.is_ascii_digit());
-    if LIMITS.iter().any(|w| m.contains(w)) || numbers().any(|n| n == "429") {
-        return false;
-    }
-    numbers().any(|n| matches!(n, "500" | "502" | "503" | "504" | "529"))
-        || PASSING.iter().any(|w| m.contains(w))
-}
-
-/// When a usage limit that `message` reports resets, in the CLI's own words: Claude Code's "resets 3pm
-/// (Europe/Berlin)", Codex's "try again at 3:04 PM", or the seconds since 1970 after a `|` that older Claude Code
-/// versions print (as an RFC 3339 UTC time).
-pub fn reset_time(message: &str) -> Option<String> {
-    // ASCII lowercase keeps every byte offset of `message`.
-    let lower = message.to_ascii_lowercase();
-    for marker in ["resets ", "try again at ", "try again in "] {
-        if let Some(at) = lower.find(marker) {
-            let rest = &message[at + marker.len()..];
-            // To the end of the clause: a sentence's end, a `·` or `|` separator, a line break.
-            let end = rest
-                .char_indices()
-                .find(|&(i, c)| {
-                    matches!(c, '·' | '|' | '\n')
-                        || (c == '.' && rest[i + 1..].starts_with(char::is_whitespace))
-                })
-                .map_or(rest.len(), |(i, _)| i);
-            let when = rest[..end].trim().trim_end_matches('.');
-            if !when.is_empty() {
-                return Some(when.to_string());
-            }
-        }
-    }
-    let (_, epoch) = message.rsplit_once('|')?;
-    let secs: u64 = epoch.trim().parse().ok().filter(|&s| s > 1_000_000_000)?;
-    Some(crate::util::rfc3339(secs as f64))
-}
-
-/// The hint of a run that ended on a usage or rate limit, with when it resets if the CLI said.
-pub fn limit_hint(message: &str) -> String {
-    match reset_time(message) {
-        Some(at) => format!(
-            "the account's usage limit was reached and resets {at}: start again then, or use another agent"
-        ),
-        None => {
-            "the account's usage limit was reached; start again once it resets, or use another agent".into()
-        }
-    }
-}
-
-/// The hint of a run that ended on passing faults ([`is_transient`]).
-pub const BUSY: &str = "the provider is overloaded or failing right now (each call was asked twice); start again \
-                        in a few minutes, or use another agent";
-
-/// [`Agent::label`], asked once more after `backoff` when the call failed on a passing fault ([`is_transient`]);
-/// `on_retry` is told the fault first. A second passing fault is returned as [`AgentError::Transient`], any other
-/// outcome as it is. The wait ends early, as [`AgentError::Cancelled`], when `req.cancel` is set.
+/// [`Agent::label`], asked once more when the call failed on a passing fault ([`is_transient`]), after `backoff`
+/// or the wait the message asks for if that is longer; `on_retry` is told the fault and the wait first. A second
+/// passing fault is returned as [`AgentError::Transient`], any other outcome as it is, with what the first
+/// attempt used added to it. The wait ends early, as [`AgentError::Cancelled`], when `req.cancel` is set.
 pub fn label_with_retry(
     agent: &dyn Agent,
     req: &AgentRequest<'_>,
     backoff: Duration,
-    on_retry: impl FnOnce(&str),
+    on_retry: impl FnOnce(&str, Duration),
 ) -> Result<AgentReply, AgentError> {
-    match agent.label(req) {
-        Err(AgentError::Failed(why)) if is_transient(&why) => {
-            on_retry(&why);
-            let until = Instant::now() + backoff;
-            while Instant::now() < until {
-                if req.cancel.load(Ordering::Relaxed) {
-                    return Err(AgentError::Cancelled);
-                }
-                std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
-            }
-            match agent.label(req) {
-                Err(AgentError::Failed(why)) if is_transient(&why) => Err(AgentError::Transient(why)),
-                other => other,
-            }
+    let (why, first) = match agent.label(req) {
+        Err(AgentError::Failed(why, used)) if is_transient(&why) => (why, used),
+        other => return other,
+    };
+    let wait = retry_after(&why).map_or(backoff, |asked| asked.max(backoff));
+    on_retry(&why, wait);
+    let until = Instant::now() + wait;
+    while Instant::now() < until {
+        if req.cancel.load(Ordering::Relaxed) {
+            return Err(AgentError::Cancelled);
         }
-        other => other,
+        std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
+    }
+    let with_first = |mut used: LabelUsage| {
+        used.add(&first);
+        used
+    };
+    match agent.label(req) {
+        Ok(mut reply) => {
+            reply.usage = with_first(reply.usage);
+            Ok(reply)
+        }
+        Err(AgentError::Failed(why, used)) if is_transient(&why) => {
+            Err(AgentError::Transient(why, with_first(used)))
+        }
+        Err(AgentError::Failed(why, used)) => Err(AgentError::Failed(why, with_first(used))),
+        Err(other) => Err(other),
     }
 }
 
@@ -529,63 +472,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn passing_faults_are_told_from_limits_and_other_errors() {
-        // What the CLIs print once their own retries are spent (Claude Code, then Codex).
-        for transient in [
-            r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
-            r#"API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}"#,
-            "Repeated 529 Overloaded errors",
-            "API Error: Connection error.",
-            "Opus is experiencing high load, please use /model to switch to Sonnet",
-            "exceeded retry limit, last status: 503 Service Unavailable",
-            "stream disconnected before completion: error sending request for url",
-            "We're currently experiencing high demand, which may cause temporary errors.",
-            "unexpected status 502 Bad Gateway",
-        ] {
-            assert!(is_transient(transient), "{transient}");
-        }
-        for not in [
-            "You've hit your session limit · resets 3pm (Europe/Berlin)",
-            "Claude AI usage limit reached|1763481600",
-            "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again at 3:04 PM.",
-            "exceeded retry limit, last status: 429 Too Many Requests",
-            "rate limit exceeded: 500 requests per minute",
-            "Invalid API key · Please run /login",
-            "There's an issue with the selected model (nope). It may not exist or you may not have access to it.",
-            "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
-            "the image is 15000 px wide",
-        ] {
-            assert!(!is_transient(not), "{not}");
-        }
-    }
-
-    #[test]
-    fn reset_times_are_read_in_the_clis_words() {
-        let reset = |m: &str| reset_time(m);
-        assert_eq!(
-            reset("You've hit your session limit · resets 3pm (Europe/Berlin)").as_deref(),
-            Some("3pm (Europe/Berlin)")
-        );
-        assert_eq!(
-            reset("You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again at 3:04 PM.")
-                .as_deref(),
-            Some("3:04 PM")
-        );
-        assert_eq!(
-            reset("Usage limit reached. Try again in 2 hours 5 minutes. Thanks").as_deref(),
-            Some("2 hours 5 minutes")
-        );
-        assert_eq!(
-            reset("Claude AI usage limit reached|1763481600").as_deref(),
-            Some("2025-11-18T16:00:00Z")
-        );
-        assert_eq!(reset("You've hit your usage limit. Try again later."), None);
-        assert_eq!(reset("rate limit exceeded"), None);
-        assert!(limit_hint("rate limit exceeded").contains("once it resets"));
-        assert!(limit_hint("limit · resets 5am").contains("resets 5am: start again then"));
-    }
-
     /// An agent that fails with the messages it is given, in turn, then replies.
     struct Flaky(Mutex<Vec<&'static str>>, std::sync::atomic::AtomicUsize);
 
@@ -601,9 +487,10 @@ mod tests {
         }
         fn label(&self, _: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
             self.1.fetch_add(1, Ordering::SeqCst);
+            let used = LabelUsage { calls: 1, input_tokens: 100, ..LabelUsage::default() };
             match self.0.lock().unwrap().pop() {
-                Some(why) => Err(AgentError::Failed(why.into())),
-                None => Ok(AgentReply { text: "{}".into(), usage: LabelUsage::default() }),
+                Some(why) => Err(AgentError::Failed(why.into(), used)),
+                None => Ok(AgentReply { text: "{}".into(), usage: used }),
             }
         }
     }
@@ -628,24 +515,29 @@ mod tests {
             let agent = Flaky(Mutex::new(fails), Default::default());
             let mut heard = Vec::new();
             let t0 = Instant::now();
-            let r = label_with_retry(&agent, &req, wait, |why| heard.push(why.to_string()));
+            let r = label_with_retry(&agent, &req, wait, |why, _| heard.push(why.to_string()));
             (r, agent.1.load(Ordering::SeqCst), heard, t0.elapsed())
         };
-        // Overloaded once: asked again after the wait, and the reply comes back.
+        let used = |calls: u64| LabelUsage { calls, input_tokens: 100 * calls, ..LabelUsage::default() };
+        // Overloaded once: asked again after the wait, and the reply comes back with what both attempts used.
         let (r, calls, heard, took) = ask(vec!["API Error: 529 Overloaded"]);
-        assert!(r.is_ok() && calls == 2 && heard == ["API Error: 529 Overloaded"] && took >= wait);
+        assert!(calls == 2 && heard == ["API Error: 529 Overloaded"] && took >= wait);
+        assert_eq!(r.unwrap().usage, used(2));
         // Overloaded twice: a transient failure, not a third call. (The list pops from its end.)
-        let (r, calls, _, _) = ask(vec!["503 again", "API Error: 529 Overloaded"]);
-        assert_eq!((r, calls), (Err(AgentError::Transient("503 again".into())), 2));
+        let (r, calls, _, _) = ask(vec!["status 503 again", "API Error: 529 Overloaded"]);
+        assert_eq!((r, calls), (Err(AgentError::Transient("status 503 again".into(), used(2))), 2));
         // Overloaded, then a real error: that error.
         let (r, calls, _, _) = ask(vec!["Please run /login", "API Error: 529 Overloaded"]);
-        assert_eq!((r, calls), (Err(AgentError::Failed("Please run /login".into())), 2));
+        assert_eq!((r, calls), (Err(AgentError::Failed("Please run /login".into(), used(2))), 2));
         // A limit is never asked again.
         let (r, calls, heard, _) = ask(vec!["You've hit your session limit"]);
         assert_eq!(
             (r, calls, heard.len()),
-            (Err(AgentError::Failed("You've hit your session limit".into())), 1, 0)
+            (Err(AgentError::Failed("You've hit your session limit".into(), used(1))), 1, 0)
         );
+        // A short rate limit is waited out (for as long as it asks, when that is longer than the pause).
+        let (r, calls, _, took) = ask(vec!["Rate limit reached. Please try again in 0.2s."]);
+        assert!(r.is_ok() && calls == 2 && took >= Duration::from_millis(200), "{took:?}");
         // Cancelled while it waits: no second call.
         cancel.store(true, Ordering::SeqCst);
         let (r, calls, _, took) = ask(vec!["API Error: 529 Overloaded"]);

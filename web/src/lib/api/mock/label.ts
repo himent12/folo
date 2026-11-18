@@ -82,10 +82,10 @@ export function mockAgents(codex: boolean): LabelAgent[] {
       available: codex,
       version: codex ? '0.58.0' : null,
       models: [
-        { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' },
-        { id: 'gpt-6-astra', label: 'GPT-6-Astra' },
-        { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
-        { id: 'gpt-6-luna', label: 'GPT-6-Luna' },
+        { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', fast: true },
+        { id: 'gpt-6-astra', label: 'GPT-6-Astra', fast: true },
+        { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', fast: true },
+        { id: 'gpt-6-luna', label: 'GPT-6-Luna', fast: true },
       ],
       default_model: null,
       default_effort: 'low',
@@ -596,8 +596,16 @@ export class MockLabeling {
       throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
     if (!inRange(body.batch, BATCH_MAX)) throw new ApiError(400, 'invalid_body', `batch must be in 1..=${BATCH_MAX}`);
     if (!inRange(body.parallel, PARALLEL_MAX)) throw new ApiError(400, 'invalid_body', `parallel must be in 1..=${PARALLEL_MAX}`);
-    if (body.fast && !mockAgents(true).find((a) => a.id === body.agent)?.fast)
-      throw new ApiError(400, 'invalid_body', `${AGENT_NAME[body.agent]} has no faster service tier: send "fast": false`);
+    if (body.fast) {
+      // As the server: the model named (or the default one) must offer it.
+      const offers = mockAgents(true).find((a) => a.id === body.agent);
+      const why = !offers?.fast
+        ? `${AGENT_NAME[body.agent]} has no faster service tier`
+        : model && !offers.models.find((m) => m.id === model)?.fast
+          ? `Codex's model catalog lists no faster service tier for ${model}`
+          : null;
+      if (why) throw new ApiError(400, 'invalid_body', `${why}: send "fast": false`);
+    }
     const agent = mockAgents(this.codex).find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
     if (this.#active(j)) throw new ApiError(409, 'label_job_active', `An agent is already labeling ${j.name}.`, 'Wait for the run to finish, or stop it first.');

@@ -73,8 +73,9 @@ pub struct LabelAgent {
     /// The reasoning effort a run uses when it names none: the one that labels best for its cost with this
     /// agent.
     pub default_effort: LabelEffort,
-    /// The agent offers a faster service tier that uses more of the account's usage ([`StartLabeling::fast`]):
-    /// Codex's Fast (priority processing). Claude Code offers none to FOLO's calls.
+    /// The agent's default model offers a faster service tier that uses more of the account's usage
+    /// ([`StartLabeling::fast`]): Codex's Fast (priority processing). Which other models offer it is
+    /// [`LabelModel::fast`]. Claude Code offers none to FOLO's calls.
     #[serde(default)]
     pub fast: bool,
     /// How to make the agent available (install, sign in); `null` when it is.
@@ -89,6 +90,10 @@ pub struct LabelModel {
     pub id: String,
     /// Display name.
     pub label: String,
+    /// The model offers the agent's faster service tier ([`StartLabeling::fast`]); a run that asks for it with a
+    /// model that does not is refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast: bool,
 }
 
 /// `GET /api/label/jobs`.
@@ -451,8 +456,8 @@ pub struct StartLabeling {
     /// Reasoning effort; absent or `null` uses [`LabelAgent::default_effort`].
     #[serde(default)]
     pub effort: Option<LabelEffort>,
-    /// Ask for the agent's faster service tier, which uses more of the account's usage; only for an agent whose
-    /// [`LabelAgent::fast`] is true (otherwise `400 invalid_body`).
+    /// Ask for the agent's faster service tier, which uses more of the account's usage; only with a model that
+    /// offers it ([`LabelModel::fast`]; [`LabelAgent::fast`] for the default model), otherwise `400 invalid_body`.
     #[serde(default)]
     pub fast: bool,
     /// Which images to label, unless `image_ids` names them.

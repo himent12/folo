@@ -32,8 +32,8 @@ impl Labeler {
         let job = self.job(id)?;
         let agent = self.agent(req.agent)?;
         let info = agent.info();
-        if req.fast && !info.fast {
-            return Err(invalid(format!("{} has no faster service tier: send \"fast\": false", info.name)));
+        if req.fast {
+            agent.check_fast(model).map_err(|why| invalid(format!("{why}: send \"fast\": false")))?;
         }
         let model = model.map(str::to_string).or(info.default_model);
         let effort = req.effort.unwrap_or(info.default_effort);

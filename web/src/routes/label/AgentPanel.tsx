@@ -189,7 +189,7 @@ export default function AgentPanel(props: AgentPanelProps) {
       {!running.get() ? (
         <div class="sec">
           <AgentFields agents={props.agents} agentsError={props.agentsError} retryAgents={props.retryAgents} choice={props.choice} />
-          {agent.get()?.fast ? (
+          {props.choice.fastOffered ? (
             <Switch
               label="Fast"
               hint={`${agent.get()!.name}'s faster service tier: answers sooner and uses more of the account's usage.`}

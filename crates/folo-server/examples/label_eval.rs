@@ -41,7 +41,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use folo_server::api::{BBox, LabelAgentId, LabelEffort, LabelUsage};
 use folo_server::label::agent::label_with_retry;
@@ -249,6 +249,16 @@ fn main() {
     if !info.available {
         eprintln!("{} is not available: {:?}", info.name, info.hint);
         std::process::exit(1);
+    }
+    // The server's own check, before any token is spent.
+    if args.fast
+        && let Err(why) = agent.check_fast(args.model.as_deref())
+    {
+        eprintln!("--fast: {why}");
+        std::process::exit(2);
+    }
+    if let Some(notice) = agent.notice() {
+        eprintln!("{}: {notice}", info.name);
     }
     let model = args.model.clone().or(info.default_model.clone());
     let effort = args.effort.unwrap_or(info.default_effort);
@@ -560,7 +570,10 @@ fn label(
                     };
                     let t = Instant::now();
                     for attempt in 0..2 {
-                        let retry = |why: &str| eprintln!("call {n}: {why}; asking again");
+                        let retry = |why: &str, wait: Duration| {
+                            eprintln!("call {n}: {why}; asking again in {} s", wait.as_secs());
+                        };
+                        // What a failed call used counts in the totals, as a run's usage does.
                         let reply = match label_with_retry(agent, &req, TRANSIENT_BACKOFF, retry) {
                             Ok(reply) => reply,
                             Err(AgentError::Cancelled) => break,
@@ -568,11 +581,20 @@ fn label(
                                 eprintln!("call {n}: timed out");
                                 break;
                             }
-                            Err(
-                                AgentError::Failed(why)
-                                | AgentError::Unavailable(why)
-                                | AgentError::Transient(why),
-                            ) => {
+                            Err(AgentError::Transient(why, used)) => {
+                                // Its photos go unanswered (as missed objects); the eval goes on.
+                                usage.lock().unwrap().add(&used);
+                                eprintln!("call {n}: {why}");
+                                break;
+                            }
+                            Err(AgentError::Failed(why, used)) => {
+                                usage.lock().unwrap().add(&used);
+                                eprintln!("call {n}: {why}");
+                                fatal.lock().unwrap().get_or_insert(why);
+                                cancel.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            Err(AgentError::Unavailable(why)) => {
                                 eprintln!("call {n}: {why}");
                                 fatal.lock().unwrap().get_or_insert(why);
                                 cancel.store(true, Ordering::Relaxed);

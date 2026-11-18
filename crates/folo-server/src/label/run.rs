@@ -6,9 +6,10 @@
 //! JSON asked for is retried once and no more; and a failure that another call would only repeat (the CLI
 //! missing or signed out, an unknown model, a rate limit, calls timing out in a row) ends the run at once, killing
 //! the calls in flight. A failure that is the provider's passing fault (overloaded, a server error, a dropped
-//! stream: [`super::agent::is_transient`]) is not one of those: the call is asked once more after
-//! [`TRANSIENT_BACKOFF`], and if it fails that way again its images fail and it counts towards the calls in a row
-//! that end the run.
+//! stream, a rate limit that asks for a wait of a minute at most: [`super::agent::is_transient`]) is not one of
+//! those: the call is asked once more after [`TRANSIENT_BACKOFF`] (or the wait asked for, if longer), and if it
+//! fails that way again its images fail and it counts towards the calls in a row that end the run. What a failed
+//! call used is counted in the run's usage as a reply's is.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -92,6 +93,8 @@ struct Run<'a> {
     fatal: Mutex<Option<String>>,
     /// Results are in memory that `job.json` does not have yet.
     unsaved: AtomicBool,
+    /// The agent's notices ([`Agent::notice`]) the log has, so each is logged once.
+    noticed: Mutex<Vec<String>>,
 }
 
 /// Runs `plan` on `job` to its end (the body of the run's thread). The job's `active` and `run` are set by the
@@ -112,7 +115,9 @@ pub fn run(job: &Job, plan: &Plan) {
         soft_failures: AtomicU32::new(0),
         fatal: Mutex::new(None),
         unsaved: AtomicBool::new(false),
+        noticed: Mutex::new(Vec::new()),
     };
+    run.notice();
     let workers = plan.parallel.clamp(1, plan.batches.len().max(1));
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..workers).map(|_| scope.spawn(|| run.work())).collect();
@@ -147,6 +152,20 @@ impl Run<'_> {
             let Some((n, ids)) = self.queue.lock().unwrap().pop_front() else { break };
             self.call(n, ids);
         }
+    }
+
+    /// Logs the agent's notice ([`Agent::notice`]), once per run: before the first call, and after a call (a call
+    /// can be what makes one).
+    fn notice(&self) {
+        let Some(notice) = self.plan.agent.notice() else { return };
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.contains(&notice) {
+            return;
+        }
+        noticed.push(notice.clone());
+        drop(noticed);
+        let mut state = self.job.lock();
+        self.job.log(&mut state, LogLevel::Warn, format!("{}: {notice}", self.agent_name()));
     }
 
     /// Gives up: no further calls, and the ones in flight are ended.
@@ -225,16 +244,18 @@ impl Run<'_> {
             if self.cancelled() {
                 break all(untouched, "");
             }
-            let on_retry = |why: &str| {
+            let on_retry = |why: &str, wait: Duration| {
                 let mut state = self.job.lock();
-                let wait = self.plan.backoff.as_secs();
+                let wait = wait.as_secs();
                 self.job.log(
                     &mut state,
                     LogLevel::Warn,
                     format!("call {n}: {why}; asking again in {wait} s"),
                 );
             };
-            let reply = match label_with_retry(&*self.plan.agent, &request, self.plan.backoff, on_retry) {
+            let answer = label_with_retry(&*self.plan.agent, &request, self.plan.backoff, on_retry);
+            self.notice();
+            let reply = match answer {
                 Ok(reply) => reply,
                 Err(AgentError::Cancelled) => break all(untouched, ""),
                 Err(AgentError::Timeout) => {
@@ -243,11 +264,17 @@ impl Run<'_> {
                     self.soft_failure(&why);
                     break all(Outcome::Failed, &why);
                 }
-                Err(AgentError::Transient(why)) => {
+                Err(AgentError::Transient(why, used)) => {
+                    usage.add(&used);
                     self.soft_failure(&why);
                     break all(Outcome::Failed, &why);
                 }
-                Err(AgentError::Unavailable(why) | AgentError::Failed(why)) => {
+                Err(AgentError::Failed(why, used)) => {
+                    usage.add(&used);
+                    self.fail(why);
+                    break all(untouched, "");
+                }
+                Err(AgentError::Unavailable(why)) => {
                     self.fail(why);
                     break all(untouched, "");
                 }
@@ -262,6 +289,11 @@ impl Run<'_> {
                         .zip(labels)
                         .map(|(id, labels)| {
                             let outcome = match labels {
+                                // Every box the agent gave this image was dropped: not an image with nothing
+                                // on it, so it is not marked labeled (and empty).
+                                Some(labels) if labels.boxes.is_empty() && labels.dropped > 0 => {
+                                    Outcome::Failed(all_dropped(labels.dropped))
+                                }
                                 Some(labels) => Outcome::Labeled(labels),
                                 None => Outcome::Failed("the agent's reply left this image out".into()),
                             };
@@ -423,6 +455,16 @@ impl Drop for CloseOnPanic<'_> {
         let _ = self.0.save(&state);
         self.0.emit_job(&state);
     }
+}
+
+/// Why an image whose every box the reply gave was dropped failed.
+fn all_dropped(dropped: usize) -> String {
+    let all = if dropped == 1 { "the one box".to_string() } else { format!("all {dropped} boxes") };
+    format!(
+        "{all} the agent gave this image {} dropped (a label that is not a class, or a box that is not one or lies \
+         outside the image)",
+        if dropped == 1 { "was" } else { "were" }
+    )
 }
 
 fn plural(n: u64, word: &'static str) -> String {

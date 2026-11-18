@@ -19,7 +19,7 @@ it.
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
 | `src/runs/` | The real store's training runs: `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs`, `registry.rs`, `resume.rs` |
 | `src/cloud/` | The cloud control plane (docs/CLOUD.md): `Cloud` in `mod.rs`, `connections.rs`, `ledger.rs`, `reaper.rs`, `worker.rs`, `state.rs`, `files.rs`, and `executor/` (a cloud run's thread: `launch.rs`, `sync.rs`, `train.rs`, `mirror.rs`) |
-| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `claude.rs`, `codex.rs`, `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
+| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `faults.rs` (passing faults and limits in a CLI's message), `claude.rs`, `codex.rs`, `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
 | `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs`, `source.rs`, `design.rs`, `loops.rs` |
 | `src/throughput/` | The measured throughput table and run-time estimates: `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the predictor cache of `/api/predict` |

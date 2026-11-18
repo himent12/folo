@@ -76,7 +76,9 @@ attaches the images to the prompt.
 
 Larger images cost more, up to a cap: images are scaled down before they are sent, so a 12-megapixel photo costs
 what a 1024 px one does (768 px for Codex). The prompt gives each image's size as sent, the boxes come back in
-pixels of that, and they are stored in pixels of the original file. The sizes are where labels stop improving
+pixels of that, and they are stored in pixels of the original file. (Codex passes its images on at the size FOLO
+sends them: asked for a red square's corners in images of 768 x 576 up to 2048 x 1536 pixels, portrait too,
+gpt-6.2-sol answered in exact pixels of each.) The sizes are where labels stop improving
 for their cost: Codex labels as well at 768 px as at 1024 for 40% fewer tokens, while Haiku labels worse on
 smaller images and better on larger ones (below).
 
@@ -100,22 +102,32 @@ defaults before and after):
   takes only an API key, never a subscription's sign-in.
 - Codex gets its own model catalog back with the models' tools taken off (since codex-cli 0.16x every model
   carried a code-mode tool into every request, whatever the features said), and the skills list, subagent tools
-  and `request_user_input` switched off: a call's own overhead went from about 7800 tokens to about 50.
+  and `request_user_input` switched off: a call's own overhead went from about 7800 tokens to about 50. When the
+  catalog cannot be read, your Codex `config.toml` points Codex at another catalog or server (`model_catalog_json`,
+  `profile`, `openai_base_url`, `chatgpt_base_url`), or Codex refuses the file, calls go without it at the old
+  cost, and the run's log says so once.
 - A box is a list, `["car", x1, y1, x2, y2]`, instead of `{"label": "car", "box": [x1, y1, x2, y2]}`: Codex
   writes 25% fewer output tokens for the same labels.
 - Haiku runs at low effort and Codex sends images at 768 px (the reasons are in the next section).
 
 **Fast (Codex).** Codex offers a faster service tier (what it calls Fast: priority processing, which uses more of
-the plan's usage). Studio's agent panel has a Fast switch for Codex, and the API takes `"fast": true`. On the 60
-photos it took 28 s instead of 35, with the same labels and tokens. Claude Code offers no fast mode to `claude -p`.
+the plan's usage) for the models whose catalog entry lists it, which on codex-cli 0.169.0 is every one. Studio's
+agent panel shows a Fast switch when the Codex model picked offers it (it is set for each agent, so it does not
+follow you to another), and the API takes `"fast": true` (refused, before any call, with a model that does not
+offer it). On the 60 photos it took 28 s instead of 35, with the same labels and tokens. Claude Code offers no fast
+mode to `claude -p`.
 
 A run stops spending as soon as spending is pointless. If the CLI is missing, signed out, refuses the model or
-hits a rate limit or its plan's usage limit, the run ends on that call with the CLI's own message (and, for a
-limit, when it resets), and the images it did not reach stay as they were. A passing fault of the provider (it is
-overloaded, a server error, the connection dropped) is asked once more after 15 seconds; failing that way twice,
-the call's images fail. A reply that cannot be read is asked for once more, never in a loop, and one bad box in a
-reply costs only that box. Three calls in a row that time out, return garbage or fail twice on a passing fault
-end the run.
+hits its plan's usage limit, or a rate limit that asks for a wait of more than a minute, the run ends on that call
+with the CLI's own message, and the images it did not reach stay as they were; the hint names the limit the
+message names (the account's usage limit or the provider's rate limit) and when to start again, in the CLI's
+words ("resets 3pm", "try again in 20m"). A passing fault of the provider (it is overloaded, a server error, the
+connection dropped, a rate limit that asks for a minute or less) is asked once more after 15 seconds, or after the
+wait it asks for if that is longer; failing that way twice, the call's images fail. What a failed call used still
+counts in the run's usage. A reply that cannot be read is asked for once more, never in a loop, and one bad box in
+a reply costs only that box; an image whose every box was dropped (no class of the job, or nothing left inside the
+image) fails with that reason instead of passing for an empty one. Three calls in a row that time out, return
+garbage or fail twice on a passing fault end the run.
 
 ## How good the labels are
 Measured with `crates/folo-server/examples/label_eval.rs` on 60 COCO val2017 photos with 133 objects of 10
@@ -156,7 +168,9 @@ That is where the defaults come from:
   well as at 1024 (87% against 86%) for 650 input tokens a photo instead of 1050.
 - **Pixels, not thousandths.** Until November 2026 a reply's coordinates were thousandths of the image's width and
   height. The current Sonnet and Opus answer in pixels whatever they are told: Sonnet then found 5% of the objects
-  and Opus 62%, Haiku and Codex as many as now. Asked for pixels of the image as sent, every model does well.
+  and Opus 62%, Haiku and Codex as many as now. Asked for pixels of the image as sent, every model does well. A
+  reply in the older object shape (`{"label", "box"}`) is read in pixels too: the prompt asks for pixels whatever
+  shape a model answers in.
 
 To measure your own setup, run the eval against the real CLIs (it spends about 60 images' worth of tokens a
 pass; COCO val2017 and its annotations are a free download):

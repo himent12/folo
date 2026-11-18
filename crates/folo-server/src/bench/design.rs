@@ -20,7 +20,7 @@ use folo_bench::plan::{DEFAULT_SEVERITIES, MAX_WEIGHT};
 use super::state::Slot;
 use crate::error::{Error, Result};
 use crate::label::agent::{AgentError, AgentRequest, label_with_retry};
-use crate::label::{TRANSIENT_BACKOFF, agent_jpeg, check_model, check_text};
+use crate::label::{agent_jpeg, check_model, check_text};
 use crate::store::Store;
 use serde::Deserialize;
 use serde_json::Value;
@@ -201,7 +201,8 @@ pub(super) fn design(
     static CALLS: AtomicU64 = AtomicU64::new(0);
     let note = check_text("note", &req.note, MAX_NOTE_CHARS)?;
     let model = check_model(req.model.as_deref())?;
-    let agent = store.labeler()?.agent(req.agent)?;
+    let labeler = store.labeler()?;
+    let (agent, backoff) = (labeler.agent(req.agent)?, labeler.transient_backoff());
     let info = agent.info();
     let model = model.or(info.default_model);
     let effort = req.effort.unwrap_or(info.default_effort);
@@ -261,7 +262,7 @@ pub(super) fn design(
         let mut why = String::new();
         let mut answer = None;
         for _attempt in 0..2 {
-            match label_with_retry(&*agent, &request, TRANSIENT_BACKOFF, |_| {}) {
+            match label_with_retry(&*agent, &request, backoff, |_, _| {}) {
                 Ok(reply) => {
                     usage.add(&reply.usage);
                     match parse_answer(&reply.text, designer.clone()) {
@@ -281,7 +282,8 @@ pub(super) fn design(
                     answer = Some(Err(agent_failed(message, None)));
                     break;
                 }
-                Err(AgentError::Unavailable(m) | AgentError::Failed(m) | AgentError::Transient(m)) => {
+                // A design that failed has no usage to show.
+                Err(AgentError::Unavailable(m) | AgentError::Failed(m, _) | AgentError::Transient(m, _)) => {
                     let hint = agent.hint(&m);
                     answer = Some(Err(agent_failed(m, hint)));
                     break;

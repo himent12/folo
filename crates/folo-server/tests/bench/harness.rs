@@ -11,6 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_nn::io::ModelConfig;
 use folo_server::api::*;
+use folo_server::label::agent::fault_hint;
 use folo_server::label::{Agent, AgentError, AgentReply, AgentRequest};
 use folo_server::{Options, RealStore, Server};
 use folo_vision::FoloModel;
@@ -32,6 +33,8 @@ pub(super) enum Step {
     Reply(String),
     /// The CLI reports an error.
     Fail(&'static str),
+    /// The CLI reports an error after the call reached the model: it used [`paid`].
+    FailPaid(&'static str),
     /// Works until the call is cancelled.
     Hold,
 }
@@ -69,6 +72,17 @@ fn boxes_reply(images: usize, label: &str) -> String {
     json!({ "images": entries }).to_string()
 }
 
+/// What a [`Step::FailPaid`] call used.
+pub(super) fn paid() -> LabelUsage {
+    LabelUsage {
+        calls: 1,
+        input_tokens: 300,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: Some(0.002),
+    }
+}
+
 impl Agent for Scripted {
     fn id(&self) -> LabelAgentId {
         self.id
@@ -80,7 +94,7 @@ impl Agent for Scripted {
             name: self.id.display_name().into(),
             available: self.available,
             version: self.available.then(|| "1.0.0".into()),
-            models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
+            models: vec![LabelModel { id: "small".into(), label: "Small".into(), fast: false }],
             default_model: Some("small".into()),
             default_effort: LabelEffort::Medium,
             fast: false,
@@ -100,7 +114,8 @@ impl Agent for Scripted {
         let step = self.steps.lock().unwrap().pop_front();
         let text = match step {
             Some(Step::Reply(text)) => text,
-            Some(Step::Fail(why)) => return Err(AgentError::Failed(why.into())),
+            Some(Step::Fail(why)) => return Err(AgentError::failed(why)),
+            Some(Step::FailPaid(why)) => return Err(AgentError::Failed(why.into(), paid())),
             Some(Step::Hold) => {
                 while !req.cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(5));
@@ -123,7 +138,8 @@ impl Agent for Scripted {
     }
 
     fn hint(&self, message: &str) -> Option<String> {
-        message.contains("/login").then(|| "sign in first".into())
+        // As the real agents: their own hints, then the ones every agent gives (a limit, a passing fault).
+        message.contains("/login").then(|| "sign in first".into()).or_else(|| fault_hint(message))
     }
 }
 
@@ -145,7 +161,8 @@ pub(super) fn fixture_with(home: &Path, change: impl FnOnce(RealStore) -> RealSt
         RealStore::open(home.to_path_buf())
             .recheck_every(Duration::ZERO)
             .device("cpu")
-            .label_agents(vec![agent.clone(), Scripted::new(LabelAgentId::Codex, false)]),
+            .label_agents(vec![agent.clone(), Scripted::new(LabelAgentId::Codex, false)])
+            .label_transient_backoff(Duration::from_millis(20)),
     ));
     Fixture { app: Server::new(store.clone(), Options::default()).router(), store, agent }
 }

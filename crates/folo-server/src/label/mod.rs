@@ -10,7 +10,8 @@
 //! Files: this one holds [`Labeler`]; `job` (one job: `job.json`, its state and events), `images` (adding, listing,
 //! editing and removing a job's images), `labeling` (starting and stopping a run), `run` (a run, batch by batch),
 //! [`agent`] (the [`Agent`] trait and running a CLI with a deadline), [`claude`] and [`codex`] (the two agents),
-//! `tree` (a child process with everything it starts), [`prompt`] (what an agent is asked and how its reply is read),
+//! `faults` (what a CLI's failure message says: a passing fault or a limit), `tree` (a child process with everything
+//! it starts), [`prompt`] (what an agent is asked and how its reply is read),
 //! `validate` (checks of what clients send), `export` and `dataset` (the YOLO dataset a job becomes).
 
 pub mod agent;
@@ -18,6 +19,7 @@ pub mod claude;
 pub mod codex;
 pub(crate) mod dataset;
 mod export;
+mod faults;
 mod images;
 pub(crate) mod job;
 mod labeling;
@@ -200,6 +202,12 @@ impl Labeler {
     /// Changes how long a call that failed on a passing fault waits before it is asked again (tests shorten it).
     pub fn set_transient_backoff(&mut self, backoff: Duration) {
         self.backoff = backoff;
+    }
+
+    /// How long a call that failed on a passing fault waits before it is asked again: [`TRANSIENT_BACKOFF`],
+    /// unless a test shortened it. Benchmark agent entries wait as long.
+    pub fn transient_backoff(&self) -> Duration {
+        self.backoff
     }
 
     fn job(&self, id: &str) -> Result<Arc<Job>> {

@@ -25,9 +25,9 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             available: true,
             version: Some("2.1.30".into()),
             models: vec![
-                LabelModel { id: "sonnet".into(), label: "Sonnet".into() },
-                LabelModel { id: "haiku".into(), label: "Haiku".into() },
-                LabelModel { id: "opus".into(), label: "Opus".into() },
+                LabelModel { id: "sonnet".into(), label: "Sonnet".into(), fast: false },
+                LabelModel { id: "haiku".into(), label: "Haiku".into(), fast: false },
+                LabelModel { id: "opus".into(), label: "Opus".into(), fast: false },
             ],
             default_model: Some("sonnet".into()),
             default_effort: LabelEffort::Medium,
@@ -40,8 +40,8 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             available: true,
             version: Some("0.42.0".into()),
             models: vec![
-                LabelModel { id: "o3".into(), label: "o3".into() },
-                LabelModel { id: "codex-mini".into(), label: "codex-mini".into() },
+                LabelModel { id: "o3".into(), label: "o3".into(), fast: true },
+                LabelModel { id: "codex-mini".into(), label: "codex-mini".into(), fast: true },
             ],
             default_model: Some("o3".into()),
             default_effort: LabelEffort::Medium,

@@ -8,25 +8,30 @@
 //!   subagents, `request_user_input`, the environment and permission notes);
 //! - the tools a model's own catalog entry brings: since codex-cli 0.16x every model runs in "code mode", whose
 //!   JavaScript `exec` tool (and its helpers) is in every request whatever the features say. A call hands Codex its
-//!   own catalog (`codex debug models`) back as `model_catalog_json` with those entries' tools taken off
-//!   ([`lean_catalog`]): the model, its instructions and everything else stay as Codex has them.
+//!   own catalog (`codex debug models`, read for the provider a call uses) back as `model_catalog_json` with those
+//!   entries' tools taken off ([`lean_catalog`]): the model, its instructions and everything else stay as Codex
+//!   has them. When the catalog cannot be read, the user's config points Codex at another catalog or server
+//!   ([`catalog_conflict`]), or Codex refuses the file, calls go without it, and the run's log says so once
+//!   ([`Agent::notice`]).
 //!
 //! On codex-cli 0.169.0 that takes the fixed cost of a call from about 20000 input tokens (Codex's defaults) and
 //! 7800 (the switches before November 2026) to about 50 of Codex's own; with FOLO's instructions and reply schema
-//! a call's fixed cost is about 700, so a call costs about what its images do. The images are attached with `--image`, and `--output-schema` holds the reply to FOLO's JSON shape. [`AgentRequest::fast`]
-//! asks for Codex's priority service tier (`service_tier`, what Codex calls Fast).
+//! a call's fixed cost is about 700, so a call costs about what its images do. The images are attached with
+//! `--image`, at the size FOLO sends them (Codex does not scale them down: an image's input tokens grow with its
+//! area), and `--output-schema` holds the reply to FOLO's JSON shape. [`AgentRequest::fast`] asks for Codex's
+//! priority service tier (`service_tier`, what Codex calls Fast), which the catalog says which models offer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::Value;
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, BUSY, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT,
-    is_transient, last_line, limit_hint, run,
+    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT, fault_hint,
+    last_line, limit_hint, run,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -67,41 +72,188 @@ const CONFIG: [&str; 7] = [
 /// processing: about twice the speed, more of the plan's usage).
 const FAST_TIER: &str = "priority";
 
+/// The model provider a call uses: `codex exec --ignore-user-config` does not read a provider from the user's
+/// config, so it is Codex's built-in one. `codex debug models` (which has no `--ignore-user-config`) is told the
+/// same, so the catalog it prints is the one a call's model comes from.
+const PROVIDER: &str = "model_provider='openai'";
+
+/// Top-level keys of Codex's `config.toml` that can make `codex debug models` print another catalog than the one
+/// `codex exec --ignore-user-config` uses (another catalog file, a profile, another server); see
+/// [`catalog_conflict`].
+const CATALOG_KEYS: [&str; 4] = ["model_catalog_json", "profile", "openai_base_url", "chatgpt_base_url"];
+
+/// What a call without the lean catalog costs more, in the words of a run's log.
+const COSTS_MORE: &str =
+    "calls go without FOLO's lean model catalog and cost about 7800 more input tokens each";
+
 /// Codex (`codex`, or the executable `FOLO_CODEX_BIN` names).
 pub struct Codex {
     cli: Cli,
     catalog: Memo<Catalog>,
+    /// A call failed on the lean catalog ([`with_lean_fallback`]): calls go without it until the catalog is
+    /// read again.
+    lean_refused: AtomicBool,
 }
 
 /// What Codex's model catalog (`codex debug models`) gives FOLO.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Catalog {
     /// The models that take images ([`catalog_models`]).
     models: Vec<LabelModel>,
-    /// The catalog with its models' tools taken off ([`lean_catalog`]); `None` when it could not be read.
+    /// Codex's default model: the catalog's first listed model.
+    default: Option<String>,
+    /// The models that offer the [`FAST_TIER`].
+    fast: Vec<String>,
+    /// The catalog with its models' tools taken off ([`lean_catalog`]); `None` when there is none to use.
     lean: Option<Arc<String>>,
+    /// Why there is no lean catalog, for a run's log; `None` when there is one, or Codex is not installed.
+    no_lean: Option<String>,
+}
+
+impl Catalog {
+    /// The catalog `codex debug models` printed, `conflict` being a key of the user's config that may have made
+    /// it another catalog than a call's ([`catalog_conflict`]).
+    fn read(json: &str, conflict: Option<&str>) -> Catalog {
+        let Ok(catalog) = serde_json::from_str::<Value>(json) else {
+            return Catalog::unread("`codex debug models` printed no catalog FOLO can read");
+        };
+        let entries = catalog["models"].as_array().cloned().unwrap_or_default();
+        let slug = |m: &Value| m["slug"].as_str().map(str::to_string);
+        let mut listed: Vec<&Value> = entries.iter().filter(|m| m["visibility"] == "list").collect();
+        listed.sort_by_key(|m| m["priority"].as_u64().unwrap_or(u64::MAX));
+        let fast: Vec<String> = entries
+            .iter()
+            .filter(|m| m["service_tiers"].as_array().is_some_and(|t| t.iter().any(|t| t["id"] == FAST_TIER)))
+            .filter_map(slug)
+            .collect();
+        let (lean, no_lean) = match conflict {
+            Some(key) => (
+                None,
+                Some(format!(
+                    "Codex's config.toml sets `{key}`, so the model catalog FOLO reads may not be the one its calls \
+                     use: {COSTS_MORE}"
+                )),
+            ),
+            None => match lean_catalog(json) {
+                Some(lean) => (Some(Arc::new(lean)), None),
+                None => (None, Some(format!("`codex debug models` printed no model catalog: {COSTS_MORE}"))),
+            },
+        };
+        Catalog {
+            models: catalog_models(&entries, &fast),
+            default: listed.first().and_then(|m| slug(m)),
+            fast,
+            lean,
+            no_lean,
+        }
+    }
+
+    /// No catalog, for `why`.
+    fn unread(why: &str) -> Catalog {
+        Catalog { no_lean: Some(format!("{why}: {COSTS_MORE}")), ..Catalog::default() }
+    }
+
+    /// [`Agent::check_fast`] for this catalog.
+    fn check_fast(&self, model: Option<&str>) -> Result<(), String> {
+        match model.or(self.default.as_deref()) {
+            Some(model) if self.fast.iter().any(|m| m == model) => Ok(()),
+            Some(model) => Err(format!("Codex's model catalog lists no faster service tier for {model}")),
+            None => Err(
+                "Codex's model catalog could not be read, so FOLO cannot tell whether the model offers a \
+                         faster service tier"
+                    .into(),
+            ),
+        }
+    }
 }
 
 impl Codex {
     /// The agent, looking for `codex` when it is first asked.
     pub const fn new() -> Codex {
-        Codex { cli: Cli::new("codex", "FOLO_CODEX_BIN"), catalog: Memo::new() }
+        Codex {
+            cli: Cli::new("codex", "FOLO_CODEX_BIN"),
+            catalog: Memo::new(),
+            lean_refused: AtomicBool::new(false),
+        }
     }
 
-    /// Codex's own model catalog (`codex debug models`); empty when it cannot be read.
+    /// Codex's own model catalog (`codex debug models`, for the provider a call uses); empty when Codex is not
+    /// installed, and without models when it cannot be read. Reading it again gives the lean catalog another try.
     fn catalog(&self) -> Catalog {
         self.catalog.get(|| {
             let Ok(path) = self.cli.path() else { return Catalog::default() };
+            self.lean_refused.store(false, Ordering::Relaxed);
             let mut cmd = Command::new(path);
-            cmd.args(["debug", "models"]);
+            cmd.args(["debug", "models", "-c", PROVIDER]);
             match run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)) {
-                Ok(out) if out.success => Catalog {
-                    models: catalog_models(&out.stdout),
-                    lean: lean_catalog(&out.stdout).map(Arc::new),
-                },
-                _ => Catalog::default(),
+                Ok(out) if out.success => {
+                    let config =
+                        codex_home().and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok());
+                    Catalog::read(&out.stdout, config.as_deref().and_then(catalog_conflict))
+                }
+                Ok(out) => {
+                    let why = last_line(&out.stderr).or_else(|| last_line(&out.stdout)).unwrap_or_default();
+                    Catalog::unread(&format!("`codex debug models` failed ({why})"))
+                }
+                Err(_) => Catalog::unread("`codex debug models` did not run"),
             }
         })
+    }
+
+    /// One `codex exec`, with `catalog` as its `model_catalog_json` when there is one.
+    fn call(
+        &self,
+        path: &Path,
+        req: &AgentRequest<'_>,
+        catalog: Option<&str>,
+    ) -> Result<AgentReply, AgentError> {
+        let files = Files::write(req, catalog)
+            .map_err(|e| AgentError::Unavailable(format!("preparing the call: {e}")))?;
+        let cmd = command(path, req, &files);
+        parse(&run(cmd, Some(req.prompt.as_bytes().to_vec()), CALL_TIMEOUT, req.cancel)?)
+    }
+}
+
+/// Codex's home folder: `CODEX_HOME`, else `.codex` in the user's home.
+fn codex_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    let home =
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(".codex"))
+}
+
+/// The first of [`CATALOG_KEYS`] that Codex's `config.toml` (its text) sets at the top level, before any table.
+fn catalog_conflict(config: &str) -> Option<&'static str> {
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            return None;
+        }
+        let Some((key, _)) = line.split_once('=') else { continue };
+        let key = key.trim().trim_matches('"');
+        if let Some(found) = CATALOG_KEYS.iter().find(|k| **k == key) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// A call with the lean `catalog`, made once more without it when Codex refuses the file (a `model_catalog_json`
+/// this version cannot read: it then fails before asking the model); `refused` is set so later calls go without
+/// it.
+fn with_lean_fallback(
+    catalog: Option<&str>,
+    refused: &AtomicBool,
+    mut call: impl FnMut(Option<&str>) -> Result<AgentReply, AgentError>,
+) -> Result<AgentReply, AgentError> {
+    let catalog = catalog.filter(|_| !refused.load(Ordering::Relaxed));
+    match call(catalog) {
+        Err(AgentError::Failed(why, _)) if catalog.is_some() && why.contains("model_catalog_json") => {
+            refused.store(true, Ordering::Relaxed);
+            call(None)
+        }
+        other => other,
     }
 }
 
@@ -118,19 +270,20 @@ impl Agent for Codex {
 
     fn info(&self) -> LabelAgent {
         let version = self.cli.version();
+        let catalog = if version.is_some() { self.catalog() } else { Catalog::default() };
         LabelAgent {
             id: self.id(),
             name: self.id().display_name().into(),
             available: version.is_some(),
             hint: version.is_none().then(|| self.cli.hint(INSTALL)),
-            models: if version.is_some() { self.catalog().models } else { Vec::new() },
+            fast: catalog.check_fast(None).is_ok(),
+            models: catalog.models,
             version,
             // Codex picks its own default; its config file, where a user would set one, is not loaded.
             default_model: None,
             // Measured November 2026 (gpt-6.2-sol): medium effort found 86% of the objects, as low did, with twice
             // the output tokens and twice the time.
             default_effort: LabelEffort::Low,
-            fast: true,
         }
     }
 
@@ -148,13 +301,23 @@ impl Agent for Codex {
         768
     }
 
+    fn check_fast(&self, model: Option<&str>) -> Result<(), String> {
+        self.catalog().check_fast(model)
+    }
+
+    fn notice(&self) -> Option<String> {
+        if self.lean_refused.load(Ordering::Relaxed) {
+            return Some(format!("Codex refused FOLO's lean model catalog: {COSTS_MORE}"));
+        }
+        self.catalog().no_lean
+    }
+
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
         let path = self.cli.path()?;
         let catalog = self.catalog().lean;
-        let files = Files::write(req, catalog.as_deref().map(String::as_str))
-            .map_err(|e| AgentError::Unavailable(format!("preparing the call: {e}")))?;
-        let cmd = command(&path, req, &files);
-        parse(&run(cmd, Some(req.prompt.as_bytes().to_vec()), CALL_TIMEOUT, req.cancel)?)
+        with_lean_fallback(catalog.as_deref().map(String::as_str), &self.lean_refused, |catalog| {
+            self.call(&path, req, catalog)
+        })
     }
 
     fn hint(&self, message: &str) -> Option<String> {
@@ -162,8 +325,8 @@ impl Agent for Codex {
         let signed_out = ["login", "log in", "logged in", "api key", "authenticat", "unauthorized", "401"];
         if signed_out.iter().any(|w| m.contains(w)) {
             Some("run `codex login` in a terminal on the server's machine, then start again".into())
-        } else if is_transient(message) {
-            Some(BUSY.into())
+        } else if let Some(hint) = fault_hint(message) {
+            Some(hint)
         } else if ["limit", "quota", "credits", "spend cap"].iter().any(|w| m.contains(w)) {
             Some(limit_hint(message))
         } else if m.contains("model") {
@@ -271,14 +434,14 @@ fn parse(out: &Output) -> Result<AgentReply, AgentError> {
     }
     let (Some(text), Some(usage)) = (text, usage) else {
         if let Some(failure) = failure {
-            return Err(AgentError::Failed(folo_api::codes::cap(
+            return Err(AgentError::failed(folo_api::codes::cap(
                 &failure,
                 folo_api::codes::MAX_MESSAGE_CHARS,
             )));
         }
         let why = last_line(&out.stderr).or_else(|| last_line(&out.stdout));
         return Err(match why {
-            Some(why) if !out.success => AgentError::Failed(why),
+            Some(why) if !out.success => AgentError::failed(why),
             _ => AgentError::Unavailable("`codex` printed no reply".into()),
         });
     };
@@ -318,19 +481,18 @@ fn lean_catalog(json: &str) -> Option<String> {
     serde_json::to_string(&catalog).ok()
 }
 
-/// The listed models of `codex debug models` that accept images, in the catalog's order of preference.
-fn catalog_models(json: &str) -> Vec<LabelModel> {
-    let Ok(catalog) = serde_json::from_str::<Value>(json) else { return Vec::new() };
-    let mut models: Vec<(u64, LabelModel)> = catalog["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
+/// The listed models of a catalog's `entries` that accept images, in the catalog's order of preference; those in
+/// `fast` offer the [`FAST_TIER`].
+fn catalog_models(entries: &[Value], fast: &[String]) -> Vec<LabelModel> {
+    let mut models: Vec<(u64, LabelModel)> = entries
+        .iter()
         .filter(|m| m["visibility"] == "list")
         .filter(|m| m["input_modalities"].as_array().is_some_and(|a| a.iter().any(|x| x == "image")))
         .filter_map(|m| {
             let id = m["slug"].as_str()?.to_string();
             let label = m["display_name"].as_str().unwrap_or(&id).to_string();
-            Some((m["priority"].as_u64().unwrap_or(u64::MAX), LabelModel { id, label }))
+            let fast = fast.contains(&id);
+            Some((m["priority"].as_u64().unwrap_or(u64::MAX), LabelModel { id, label, fast }))
         })
         .collect();
     models.sort_by_key(|(priority, _)| *priority);
@@ -376,10 +538,10 @@ mod tests {
 {"type":"error","message":"unexpected status 401 Unauthorized"}
 {"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: sign in again"}}"#;
         let err = parse(&output(stdout, "", false)).unwrap_err();
-        assert_eq!(err, AgentError::Failed("unexpected status 401 Unauthorized: sign in again".into()));
+        assert_eq!(err, AgentError::failed("unexpected status 401 Unauthorized: sign in again"));
         assert!(Codex::new().hint("unexpected status 401 Unauthorized").unwrap().contains("codex login"));
         let err = parse(&output("", "Error: Unknown feature flag: nope\n", false)).unwrap_err();
-        assert_eq!(err, AgentError::Failed("Error: Unknown feature flag: nope".into()));
+        assert_eq!(err, AgentError::failed("Error: Unknown feature flag: nope"));
         let err = parse(&output("", "", true)).unwrap_err();
         let AgentError::Unavailable(message) = &err else { panic!("{err:?}") };
         assert!(Codex::new().hint(message).unwrap().contains("`codex exec hi`"));
@@ -387,11 +549,15 @@ mod tests {
         let limit = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again \
                      at 3:04 PM.";
         let hint = Codex::new().hint(limit).unwrap();
-        assert!(hint.contains("resets 3:04 PM: start again then"), "{hint}");
+        assert!(hint.contains("usage limit was reached (try again at 3:04 PM): start again then"), "{hint}");
         assert_eq!(
             Codex::new().hint("exceeded retry limit, last status: 503 Service Unavailable").unwrap(),
-            BUSY
+            crate::label::agent::BUSY
         );
+        // A rate limit is the provider's, in its own words.
+        let hint =
+            Codex::new().hint("Rate limit reached for gpt-6.2-sol. Please try again in 20m0s.").unwrap();
+        assert!(hint.starts_with("the provider's rate limit was reached (try again in 20m0s)"), "{hint}");
     }
 
     #[test]
@@ -476,21 +642,96 @@ mod tests {
         assert!(parse(&output(&stdout, "", true)).is_ok());
     }
 
+    const FAST: &str = r#"[{"id":"priority","name":"Fast","description":"2x speed"}]"#;
+
+    /// A catalog as `codex debug models` prints it: `b` and `hidden` offer Fast, `text` takes no images.
+    fn catalog_json() -> String {
+        format!(
+            r#"{{"models":[
+            {{"slug":"b","display_name":"B","visibility":"list","input_modalities":["text","image"],"priority":2,"service_tiers":{FAST}}},
+            {{"slug":"hidden","display_name":"H","visibility":"hide","input_modalities":["text","image"],"priority":0,"service_tiers":{FAST}}},
+            {{"slug":"text","display_name":"T","visibility":"list","input_modalities":["text"],"priority":1,"service_tiers":[]}},
+            {{"slug":"a","visibility":"list","input_modalities":["image"],"priority":1,"tool_mode":"code_mode_only"}}]}}"#
+        )
+    }
+
     #[test]
     fn catalog_lists_visible_image_models_by_priority() {
-        let json = r#"{"models":[
-            {"slug":"b","display_name":"B","visibility":"list","input_modalities":["text","image"],"priority":2},
-            {"slug":"hidden","display_name":"H","visibility":"hide","input_modalities":["text","image"],"priority":0},
-            {"slug":"text","display_name":"T","visibility":"list","input_modalities":["text"],"priority":1},
-            {"slug":"a","visibility":"list","input_modalities":["image"],"priority":1}]}"#;
-        let models = catalog_models(json);
+        let catalog = Catalog::read(&catalog_json(), None);
         assert_eq!(
-            models,
+            catalog.models,
             [
-                LabelModel { id: "a".into(), label: "a".into() },
-                LabelModel { id: "b".into(), label: "B".into() }
+                LabelModel { id: "a".into(), label: "a".into(), fast: false },
+                LabelModel { id: "b".into(), label: "B".into(), fast: true }
             ]
         );
-        assert!(catalog_models("not json").is_empty() && catalog_models("{}").is_empty());
+        assert_eq!(catalog.default.as_deref(), Some("text"), "the first listed model, images or not");
+        assert!(catalog.lean.is_some() && catalog.no_lean.is_none());
+        let unread = Catalog::read("not json", None);
+        assert!(unread.models.is_empty() && unread.lean.is_none());
+        assert!(unread.no_lean.unwrap().contains("7800 more input tokens"));
+        assert!(Catalog::read("{}", None).models.is_empty());
+    }
+
+    #[test]
+    fn fast_is_offered_for_the_models_whose_entry_lists_the_priority_tier() {
+        let catalog = Catalog::read(&catalog_json(), None);
+        assert_eq!(catalog.check_fast(Some("b")), Ok(()));
+        assert_eq!(catalog.check_fast(Some("hidden")), Ok(()), "a model the list hides can still be named");
+        assert_eq!(
+            catalog.check_fast(Some("text")).unwrap_err(),
+            "Codex's model catalog lists no faster service tier for text"
+        );
+        assert!(catalog.check_fast(Some("not-in-the-catalog")).is_err());
+        // The default model (`text`) does not offer it, so neither does a run that names no model.
+        assert!(catalog.check_fast(None).is_err());
+        let b_first = catalog_json().replace(r#""priority":2"#, r#""priority":0"#);
+        assert_eq!(Catalog::read(&b_first, None).check_fast(None), Ok(()));
+        assert!(Catalog::default().check_fast(None).unwrap_err().contains("could not be read"));
+    }
+
+    #[test]
+    fn a_config_that_may_point_codex_elsewhere_keeps_the_lean_catalog_out() {
+        let config = "model_auto_compact_token_limit = 400000\n# profile = \"x\"\n\n[profiles.fast]\nmodel_catalog_json = \"x\"\n";
+        assert_eq!(catalog_conflict(config), None, "comments and keys in tables do not count");
+        assert_eq!(catalog_conflict("openai_base_url = \"https://proxy\"\n[x]\n"), Some("openai_base_url"));
+        assert_eq!(catalog_conflict("  profile=\"work\""), Some("profile"));
+        let catalog = Catalog::read(&catalog_json(), Some("profile"));
+        assert_eq!(catalog.lean, None);
+        assert!(catalog.no_lean.as_deref().unwrap().starts_with("Codex's config.toml sets `profile`"));
+        assert_eq!(catalog.models.len(), 2, "the models are still offered");
+    }
+
+    #[test]
+    fn a_refused_lean_catalog_is_left_out_of_that_call_and_the_next() {
+        let refused = AtomicBool::new(false);
+        let reply = || Ok(AgentReply { text: "{}".into(), usage: LabelUsage::default() });
+        let mut seen = Vec::new();
+        let r = with_lean_fallback(Some("{}"), &refused, |catalog| {
+            seen.push(catalog.is_some());
+            if catalog.is_some() {
+                Err(AgentError::failed(
+                    "Error: failed to parse model_catalog_json path `x` as JSON: missing field `slug`",
+                ))
+            } else {
+                reply()
+            }
+        });
+        assert!(r.is_ok() && seen == [true, false] && refused.load(Ordering::Relaxed));
+        // Later calls go without it at once.
+        let mut seen = Vec::new();
+        let _ = with_lean_fallback(Some("{}"), &refused, |catalog| {
+            seen.push(catalog.is_some());
+            reply()
+        });
+        assert_eq!(seen, [false]);
+        // Any other failure is the call's.
+        let refused = AtomicBool::new(false);
+        let mut calls = 0;
+        let r = with_lean_fallback(Some("{}"), &refused, |_| {
+            calls += 1;
+            Err(AgentError::failed("unexpected status 401 Unauthorized"))
+        });
+        assert!(r.is_err() && calls == 1 && !refused.load(Ordering::Relaxed));
     }
 }

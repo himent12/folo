@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use folo_api::{BenchDetection, BenchEvent, LabelEffort, LabelUsage};
 use folo_bench::score::Sample;
@@ -26,7 +26,7 @@ use super::results::{self, Pass};
 use super::state::{BenchFile, Slot};
 use crate::error::{Error, Result};
 use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT, label_with_retry};
-use crate::label::{AgentImage, MAX_SOFT_FAILURES, TRANSIENT_BACKOFF, agent_jpeg, agent_jpeg_of, prompt};
+use crate::label::{AgentImage, MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
 
 /// Agent calls in flight at once (as a labeling run's default).
 pub const PARALLEL: usize = crate::label::DEFAULT_PARALLEL as usize;
@@ -46,6 +46,9 @@ pub struct AgentJob {
     pub images: usize,
     pub conditions: bool,
     pub cancel: Arc<AtomicBool>,
+    /// The wait before a call that failed on a passing fault is asked again, as a labeling run's
+    /// ([`crate::label::Labeler::transient_backoff`]).
+    pub backoff: Duration,
 }
 
 /// One call's worth of images: of pass `pass`, the images at these positions.
@@ -197,7 +200,7 @@ impl Run<'_> {
             if self.cancelled() {
                 break None;
             }
-            let reply = match label_with_retry(&*self.job.agent, &request, TRANSIENT_BACKOFF, |_| {}) {
+            let reply = match label_with_retry(&*self.job.agent, &request, self.job.backoff, |_, _| {}) {
                 Ok(reply) => reply,
                 Err(AgentError::Cancelled) => break None,
                 Err(AgentError::Timeout) => {
@@ -209,11 +212,17 @@ impl Run<'_> {
                     self.soft_failure(&why);
                     break Some(Err(why));
                 }
-                Err(AgentError::Transient(why)) => {
+                Err(AgentError::Transient(why, used)) => {
+                    usage.add(&used);
                     self.soft_failure(&why);
                     break Some(Err(why));
                 }
-                Err(AgentError::Unavailable(why) | AgentError::Failed(why)) => {
+                Err(AgentError::Failed(why, used)) => {
+                    usage.add(&used);
+                    self.fail(why);
+                    break None;
+                }
+                Err(AgentError::Unavailable(why)) => {
                     self.fail(why);
                     break None;
                 }
