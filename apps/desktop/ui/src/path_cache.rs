@@ -9,27 +9,33 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 
-use crate::{BuiltPath, Pixels};
+use crate::{BuiltPath, Pixels, Point};
 
-/// Bytes the cache may hold (keys and triangles): a few hundred chart lines.
+/// Bytes the cache may hold (keys, triangles and its table): a few hundred chart lines.
 const BUDGET: usize = 8 << 20;
-/// A path whose key or triangles alone are bigger is never kept.
+/// What a cache over [`BUDGET`] is cut down to, the least recently used first, in one pass: the next
+/// inserts then fit without another.
+const LOW_WATER: usize = BUDGET / 4 * 3;
+/// A path whose entry alone is bigger is never kept.
 const MAX_ENTRY: usize = BUDGET / 8;
 
 struct Entry {
-    key: Vec<u32>,
+    /// The key, without spare capacity.
+    key: Box<[u32]>,
+    /// The path, its triangles without spare capacity.
     path: BuiltPath<Pixels>,
     last_used: u64,
 }
 
 impl Entry {
+    /// What this entry holds: its key's and triangles' allocations and its slot in the table (with the
+    /// table's control byte).
     fn bytes(&self) -> usize {
-        entry_bytes(&self.key, &self.path)
+        std::mem::size_of_val(&*self.key)
+            + self.path.triangles.capacity() * std::mem::size_of::<Point<Pixels>>()
+            + std::mem::size_of::<(u64, Entry)>()
+            + 1
     }
-}
-
-fn entry_bytes(key: &[u32], path: &BuiltPath<Pixels>) -> usize {
-    key.len() * 4 + std::mem::size_of_val(path.triangles.as_slice()) + std::mem::size_of::<Entry>()
 }
 
 /// Built paths by the hash of their key (a collision keeps the newer one).
@@ -39,6 +45,8 @@ pub(crate) struct PathCache {
     bytes: usize,
     clock: u64,
     hits: u64,
+    /// Times the cache went over [`BUDGET`] and was cut down.
+    evictions: u64,
 }
 
 thread_local! {
@@ -78,7 +86,7 @@ impl PathCache {
     /// The path built from `key` before, if it is still here.
     fn get(&mut self, key: &[u32]) -> Option<BuiltPath<Pixels>> {
         self.clock += 1;
-        let entry = self.entries.get_mut(&hash(key)).filter(|e| e.key == key)?;
+        let entry = self.entries.get_mut(&hash(key)).filter(|e| *e.key == *key)?;
         entry.last_used = self.clock;
         self.hits += 1;
         Some(entry.path.clone())
@@ -86,18 +94,32 @@ impl PathCache {
 
     /// Keeps `path` as what `key` builds, dropping the least recently used paths beyond the budget.
     fn insert(&mut self, key: Vec<u32>, path: &BuiltPath<Pixels>) {
-        let bytes = entry_bytes(&key, path);
+        // A clone's triangles have no spare capacity; the key is cut to its length.
+        let entry = Entry { key: key.into_boxed_slice(), path: path.clone(), last_used: self.clock + 1 };
+        let bytes = entry.bytes();
         if bytes > MAX_ENTRY {
             return;
         }
         self.clock += 1;
-        let entry = Entry { key, path: path.clone(), last_used: self.clock };
         if let Some(old) = self.entries.insert(hash(&entry.key), entry) {
             self.bytes -= old.bytes();
         }
         self.bytes += bytes;
-        while self.bytes > BUDGET {
-            let Some((&h, _)) = self.entries.iter().min_by_key(|(_, e)| e.last_used) else { break };
+        if self.bytes > BUDGET {
+            self.evict();
+        }
+    }
+
+    /// Drops the least recently used paths until the cache is down to [`LOW_WATER`]: one sort of the
+    /// entries by age, however many go.
+    fn evict(&mut self) {
+        self.evictions += 1;
+        let mut by_age: Vec<(u64, u64)> = self.entries.iter().map(|(&h, e)| (e.last_used, h)).collect();
+        by_age.sort_unstable();
+        for (_, h) in by_age {
+            if self.bytes <= LOW_WATER {
+                break;
+            }
             if let Some(old) = self.entries.remove(&h) {
                 self.bytes -= old.bytes();
             }
@@ -202,6 +224,52 @@ mod tests {
         let (_, _, hits) = stats();
         let _ = zero.build().unwrap();
         assert_eq!(stats().2, hits);
+    }
+
+    /// A path of one triangle, as the cache holds it.
+    fn tiny(i: u32) -> BuiltPath<Pixels> {
+        let p = point(px(i as f32), px(0.));
+        BuiltPath { triangles: vec![p, p, p], bounds: Default::default() }
+    }
+
+    /// What the cache charges is what it holds: a key with spare capacity (as `PathBuilder::key` may make
+    /// one) is kept and counted at its length, the triangles at their capacity.
+    #[test]
+    fn the_cache_counts_what_it_holds() {
+        let mut c = PathCache::default();
+        let mut key = Vec::with_capacity(100_000);
+        key.extend([1, 2, 3]);
+        let mut path = tiny(1);
+        path.triangles.reserve(10_000);
+        c.insert(key, &path);
+        let e = c.entries.values().next().unwrap();
+        assert_eq!(std::mem::size_of_val(&*e.key), 12, "no spare capacity is kept");
+        assert_eq!(e.path.triangles.capacity(), 3);
+        assert_eq!(c.bytes, e.bytes());
+        assert!(c.bytes < 1000, "{} bytes", c.bytes);
+    }
+
+    /// One big path into a cache full of tiny ones drops all it must in one pass (a scan of the whole
+    /// map per dropped entry made that thousands of scans in one frame), oldest first.
+    #[test]
+    fn a_big_path_into_a_full_cache_evicts_in_one_pass() {
+        let mut c = PathCache::default();
+        let mut i = 0;
+        while c.bytes + 200 < BUDGET {
+            c.insert(vec![i], &tiny(i));
+            i += 1;
+        }
+        let tiny_count = i;
+        assert_eq!(c.evictions, 0);
+        let mut big = tiny(0);
+        big.triangles = vec![point(px(1.), px(1.)); MAX_ENTRY / std::mem::size_of::<Point<Pixels>>() / 2];
+        c.insert(vec![u32::MAX], &big);
+        assert_eq!(c.evictions, 1, "one pass");
+        assert!(c.bytes <= LOW_WATER, "{} bytes", c.bytes);
+        assert_eq!(c.bytes, c.entries.values().map(Entry::bytes).sum::<usize>());
+        // The newest are kept, the oldest gone.
+        assert!(c.get(&[u32::MAX]).is_some() && c.get(&[tiny_count - 1]).is_some());
+        assert!(c.get(&[0]).is_none());
     }
 
     #[test]

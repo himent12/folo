@@ -151,6 +151,8 @@ pub struct Options {
 pub struct AppState {
     store: Arc<dyn Store>,
     probe: Arc<system::SystemProbe>,
+    /// `/api/system`'s one-time preparation (`routes::system`), shared by the requests that arrive while it runs.
+    system_ready: Arc<tokio::sync::OnceCell<()>>,
     shutdown: Arc<watch::Sender<bool>>,
     /// The served Studio includes the in-browser runtime (`/api/system`'s `web_wasm` feature).
     web_wasm: bool,
@@ -359,6 +361,7 @@ impl Server {
         let state = AppState {
             store: store.clone(),
             probe: Arc::new(system::SystemProbe::default()),
+            system_ready: Arc::default(),
             shutdown: shutdown.clone(),
             web_wasm,
         };

@@ -53,21 +53,13 @@ fn features(st: &AppState) -> Vec<String> {
 }
 
 pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
+    st.system_ready.get_or_try_init(|| prepare_system(&st)).await?;
     let probe = st.probe.clone();
     let store = st.store.clone();
+    // Quick once prepared: a CPU and memory reading and what the preparation keeps. `gpus` comes after the device
+    // (`capabilities`), which it puts first.
     let ((cpu, memory), capabilities, gpu_pool, gpus) = tokio::task::spawn_blocking(move || {
-        // The first call's three slow parts overlap: creating the GPU device (`capabilities`), enumerating the
-        // adapters, and the CPU counters the probe may still be setting up. `gpus` itself comes after the device,
-        // which it puts first.
-        std::thread::scope(|s| {
-            let adapters = s.spawn(|| store.prepare_gpus());
-            let sample = s.spawn(|| probe.sample());
-            let capabilities = store.capabilities();
-            let gpu_pool = store.gpu_pool();
-            let _ = adapters.join();
-            let sample = sample.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
-            (sample, capabilities, gpu_pool, store.gpus())
-        })
+        (probe.sample(), store.capabilities(), store.gpu_pool(), store.gpus())
     })
     .await
     .map_err(|e| Error::internal(format!("task failed: {e}")))?;
@@ -82,6 +74,19 @@ pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResp
     }))
 }
 
+/// The slow parts of the first `/api/system`, side by side, each a blocking task of its own: creating the GPU device
+/// (`capabilities`), enumerating the adapters, and the CPU counters' set-up and first interval. Run once per server
+/// ([`AppState`]'s `system_ready`); requests that arrive meanwhile wait on the same run without holding a blocking
+/// thread. A part that panicked fails this request and leaves the preparation to the next.
+async fn prepare_system(st: &AppState) -> Result<()> {
+    let (store, adapters_store, probe) = (st.store.clone(), st.store.clone(), st.probe.clone());
+    let device = tokio::task::spawn_blocking(move || drop(store.capabilities()));
+    let adapters = tokio::task::spawn_blocking(move || adapters_store.prepare_gpus());
+    let counters = tokio::task::spawn_blocking(move || probe.warm_up());
+    let (device, adapters, counters) = tokio::join!(device, adapters, counters);
+    device.and(adapters).and(counters).map_err(|e| Error::internal(format!("task failed: {e}")))
+}
+
 pub(super) async fn throughput(State(st): State<AppState>) -> Result<Json<ThroughputTable>> {
     Ok(Json(blocking(&st, |s| s.throughput()).await?))
 }
@@ -91,4 +96,52 @@ pub(super) async fn benchmark(
     ApiJson(req): ApiJson<BenchmarkRequest>,
 ) -> Result<Json<BenchmarkReport>> {
     Ok(Json(blocking(&st, move |s| s.benchmark(req)).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    /// A burst of first `/api/system` calls shares one preparation, and nothing waits on a blocking thread for
+    /// another blocking job: with a single blocking thread every call still answers. Later calls prepare nothing.
+    #[test]
+    fn first_calls_share_one_preparation_and_hold_no_blocking_thread_while_waiting() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let st = AppState {
+            store: Arc::new(crate::MockStore::new()),
+            probe: Arc::new(crate::system::SystemProbe::default()),
+            system_ready: Arc::default(),
+            shutdown: Arc::new(tokio::sync::watch::channel(false).0),
+            web_wasm: false,
+        };
+        rt.block_on(async {
+            let burst = (0..16).map(|_| tokio::spawn(system(State(st.clone()))));
+            let answers = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut answers = Vec::new();
+                for call in burst {
+                    answers.push(call.await.unwrap());
+                }
+                answers
+            })
+            .await
+            .expect("every call answers");
+            for a in answers {
+                let Json(r) = a.unwrap_or_else(|e| panic!("{e:?}"));
+                assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
+            }
+            assert_eq!(st.probe.warm_ups.load(Ordering::Relaxed), 1);
+            for _ in 0..3 {
+                assert!(system(State(st.clone())).await.is_ok());
+            }
+            assert_eq!(st.probe.warm_ups.load(Ordering::Relaxed), 1, "prepared once");
+        });
+    }
 }

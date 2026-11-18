@@ -300,8 +300,31 @@ impl PathBuilder {
     /// Every input of [`PathBuilder::build`] as words, each float by its bits: builders with equal keys
     /// build equal paths. Each part says its kind and length, so no two inputs give the same words.
     fn key(&self) -> Vec<u32> {
-        let segments: usize = self.subpaths.iter().map(|s| 5 + s.segments.len() * 7).sum();
-        let mut k = Vec::with_capacity(24 + segments);
+        // Exactly the words pushed below, so the key the cache keeps needs no shrinking.
+        let style = match self.style {
+            PathStyle::Stroke(_) => 6,
+            PathStyle::Fill(_) => 3,
+        };
+        let transform = if self.transform.is_some() { 7 } else { 1 };
+        let dashes = self.dash_array.as_ref().map_or(1, |d| 2 + d.len());
+        let subpaths: usize = self
+            .subpaths
+            .iter()
+            .map(|s| {
+                let segments: usize = s
+                    .segments
+                    .iter()
+                    .map(|seg| match seg {
+                        Segment::Line(_) => 3,
+                        Segment::Quadratic { .. } => 5,
+                        Segment::Cubic { .. } => 7,
+                    })
+                    .sum();
+                5 + segments
+            })
+            .sum();
+        let len = style + transform + dashes + subpaths;
+        let mut k = Vec::with_capacity(len);
         match self.style {
             PathStyle::Stroke(o) => k.extend([
                 0,
@@ -353,6 +376,7 @@ impl PathBuilder {
                 }
             }
         }
+        debug_assert_eq!((k.len(), k.capacity()), (len, len));
         k
     }
 

@@ -641,6 +641,47 @@ connection: close
         }
     }
 
+    /// `FOLO_SERVER` on this machine reached through a proxy (`ALL_PROXY` without a matching `NO_PROXY`):
+    /// nothing listens on that port here, but the proxy answers for it, so the probe finds the server
+    /// (the refused-at-once check would say nobody is there, and the app would start a second server).
+    #[test]
+    fn a_server_behind_a_proxy_is_found_although_its_port_is_closed_here() {
+        use std::io::{BufRead, BufReader, Write};
+        // A closed loopback port: bound for a moment and let go.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        // The proxy: takes the CONNECT to that port and answers the health check through the tunnel.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let (tx, connects) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = proxy.accept() else { return };
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            // A request's head: its first line, then the headers up to the blank line.
+            let mut head = || {
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                loop {
+                    let mut l = String::new();
+                    if reader.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                        break first;
+                    }
+                }
+            };
+            let _ = tx.send(head());
+            let _ = sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+            let _get = head();
+            let _ =
+                sock.write_all(&json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#));
+        });
+        let url = format!("http://{closed}");
+        let probe_through = super::server::probe_through;
+        assert!(probe_through(&url, Some(ureq::Proxy::new(&proxy_url).unwrap())));
+        let connect = connects.recv().unwrap();
+        assert!(connect.starts_with(&format!("CONNECT {closed} ")), "{connect}");
+        // Without the proxy the same address is closed.
+        assert!(!probe_through(&url, None));
+    }
+
     #[test]
     fn closing_asks_the_apps_server_for_its_runs_and_tells_no_answer_apart() {
         let (url, requests) = canned_server(vec![json("200 OK", r#"{ "runs": [] }"#), Vec::new()]);

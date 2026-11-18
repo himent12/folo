@@ -95,20 +95,31 @@ pub fn is_loopback(url: &str) -> bool {
 /// Whether a `folo serve` answers `GET /api/health` at `url`. On this machine the connection gets half a
 /// second: a listening port accepts at once however busy the server is, and a port nothing listens on is
 /// told first without waiting ([`super::refused`]: Windows refuses it only after its SYN retries, 2 s).
+/// Through the proxy the environment names (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, minus `NO_PROXY`),
+/// as every other call of the app goes.
 pub fn probe(url: &str) -> bool {
+    probe_through(url, ureq::Proxy::try_from_env())
+}
+
+/// [`probe`] with the HTTP client's proxy given: `None` connects directly.
+pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
     let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
     // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
     let health = super::HttpBackend::new(url).url("/health");
-    // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
-    if super::refused::refused(&health) {
-        return false;
-    }
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(connect))
         .timeout_global(Some(Duration::from_secs(10)))
+        .proxy(proxy)
         .build();
     let agent: ureq::Agent = agent.into();
+    // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
+    // Asked only when the client connects to that address itself: through a proxy, a refused direct
+    // connection says nothing about what the proxy reaches.
+    let direct = agent.config().proxy().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
+    if direct && super::refused::refused(&health) {
+        return false;
+    }
     agent
         .get(&health)
         .call()

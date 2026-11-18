@@ -1,6 +1,7 @@
 //! Host CPU and memory information (shared with `folo doctor`).
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use folo_api::{CpuInfo, MemoryInfo};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -86,49 +87,84 @@ fn cpu_name(sys: &System) -> String {
 ///
 /// Setting up the CPU usage counters takes Windows about 150 ms, which `folo serve` spent before it said it was
 /// listening (and FOLO Desktop waited on). They are set up on a thread of their own instead, started where the
-/// probe is made; the first [`SystemProbe::sample`] waits for them if they are not ready yet.
+/// probe is made. The first reading needs an interval behind it: sysinfo measures CPU use between two refreshes,
+/// and one made right after the set-up reads 100 %. So [`SystemProbe::warm_up`] (and the first
+/// [`SystemProbe::sample`], which does it) waits for the set-up and then out the rest of
+/// [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] from when it finished; `/api/system` does that beside creating the GPU
+/// device, which takes longer.
 pub struct SystemProbe {
     sys: Mutex<Probe>,
+    /// [`SystemProbe::warm_up`] calls so far (`/api/system`'s preparations).
+    #[cfg(test)]
+    pub(crate) warm_ups: std::sync::atomic::AtomicUsize,
 }
 
-/// The probe's [`System`], or the thread still setting it up.
+/// The probe's [`System`], or the thread still setting it up (which returns it with when it finished).
 enum Probe {
-    Starting(std::thread::JoinHandle<System>),
-    Ready(System),
+    Starting(std::thread::JoinHandle<(System, Instant)>),
+    /// `measured_from`: when the counters last read (set up or refreshed), the start of the next reading's interval;
+    /// `first`: no reading made yet.
+    Ready {
+        sys: System,
+        measured_from: Instant,
+        first: bool,
+    },
 }
 
-fn new_system() -> System {
-    System::new_with_specifics(
+fn new_system() -> (System, Instant) {
+    let sys = System::new_with_specifics(
         RefreshKind::nothing()
             .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
             .with_memory(MemoryRefreshKind::nothing().with_ram()),
-    )
+    );
+    (sys, Instant::now())
+}
+
+fn ready((sys, measured_from): (System, Instant)) -> Probe {
+    Probe::Ready { sys, measured_from, first: true }
 }
 
 impl Default for SystemProbe {
     fn default() -> Self {
         let probe = match std::thread::Builder::new().name("folo-system-probe".into()).spawn(new_system) {
             Ok(thread) => Probe::Starting(thread),
-            Err(_) => Probe::Ready(new_system()),
+            Err(_) => ready(new_system()),
         };
-        SystemProbe { sys: Mutex::new(probe) }
+        SystemProbe {
+            sys: Mutex::new(probe),
+            #[cfg(test)]
+            warm_ups: Default::default(),
+        }
     }
 }
 
 impl SystemProbe {
+    /// Makes the next [`SystemProbe::sample`] quick and its CPU reading real: waits for the counters' set-up and,
+    /// before the first reading, out the rest of [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] since it. Blocks.
+    pub fn warm_up(&self) {
+        #[cfg(test)]
+        self.warm_ups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut probe = self.sys.lock().unwrap_or_else(|e| e.into_inner());
+        warm_up(&mut probe);
+    }
+
     /// Current CPU and memory.
     pub fn sample(&self) -> (CpuInfo, MemoryInfo) {
+        self.sample_over().0
+    }
+
+    /// [`SystemProbe::sample`] and the interval its CPU reading was measured over.
+    fn sample_over(&self) -> ((CpuInfo, MemoryInfo), Duration) {
         let mut probe = self.sys.lock().unwrap_or_else(|e| e.into_inner());
-        if let Probe::Starting(_) = &*probe {
-            // Swapped out for a moment to take the thread by value; a set-up that panicked is done again here.
-            let Probe::Starting(thread) = std::mem::replace(&mut *probe, Probe::Ready(System::new())) else {
-                unreachable!("matched above")
-            };
-            *probe = Probe::Ready(thread.join().unwrap_or_else(|_| new_system()));
-        }
-        let Probe::Ready(sys) = &mut *probe else { unreachable!("made ready above") };
+        warm_up(&mut probe);
+        let Probe::Ready { sys, measured_from, first } = &mut *probe else {
+            unreachable!("made ready above")
+        };
+        let interval = measured_from.elapsed();
         sys.refresh_cpu_usage();
         sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        *measured_from = Instant::now();
+        *first = false;
         let util = (sys.global_cpu_usage() / 100.0).clamp(0.0, 1.0);
         let cpu = CpuInfo {
             name: cpu_name(sys),
@@ -137,7 +173,25 @@ impl SystemProbe {
         };
         let total = sys.total_memory();
         let mem = MemoryInfo { used_bytes: total.saturating_sub(sys.available_memory()), total_bytes: total };
-        (cpu, mem)
+        ((cpu, mem), interval)
+    }
+}
+
+/// [`SystemProbe::warm_up`] on the locked probe.
+fn warm_up(probe: &mut Probe) {
+    if let Probe::Starting(_) = probe {
+        // Swapped out for a moment to take the thread by value; a set-up that panicked is done again here.
+        let placeholder = Probe::Ready { sys: System::new(), measured_from: Instant::now(), first: true };
+        let Probe::Starting(thread) = std::mem::replace(probe, placeholder) else {
+            unreachable!("matched above")
+        };
+        *probe = ready(thread.join().unwrap_or_else(|_| new_system()));
+    }
+    if let Probe::Ready { measured_from, first: true, .. } = probe {
+        let left = sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.saturating_sub(measured_from.elapsed());
+        if !left.is_zero() {
+            std::thread::sleep(left);
+        }
     }
 }
 
@@ -154,5 +208,21 @@ mod tests {
             assert!((0.0..=1.0).contains(&cpu.util), "{}", cpu.util);
             assert!(mem.total_bytes > 0 && mem.used_bytes <= mem.total_bytes);
         }
+    }
+
+    /// A reading taken right after the counters were set up has no interval behind it: sysinfo reports 100 %
+    /// then (Overview's "CPU 100%" on every cold launch). The first one waits for one.
+    #[test]
+    fn the_first_reading_is_measured_over_sysinfos_minimum_interval() {
+        let probe = SystemProbe::default();
+        let (_, first) = probe.sample_over();
+        assert!(first >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL, "{first:?}");
+        // Warmed up first (as `/api/system` does beside the GPU device), the reading itself is quick.
+        let probe = SystemProbe::default();
+        probe.warm_up();
+        let t = Instant::now();
+        let (_, first) = probe.sample_over();
+        assert!(first >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL, "{first:?}");
+        assert!(t.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL, "{:?}", t.elapsed());
     }
 }
