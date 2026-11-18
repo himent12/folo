@@ -106,6 +106,14 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
     let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
     // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
     let health = super::HttpBackend::new(url).url("/health");
+    // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
+    // Asked only when the client below connects to that address itself (ureq's own test: no proxy, or one
+    // whose NO_PROXY names the host): through a proxy, a refused direct connection says nothing about what
+    // the proxy reaches. Before the client is made, which costs more than the check.
+    let direct = proxy.as_ref().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
+    if direct && super::refused::refused(&health) {
+        return false;
+    }
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(connect))
@@ -113,13 +121,6 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
         .proxy(proxy)
         .build();
     let agent: ureq::Agent = agent.into();
-    // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
-    // Asked only when the client connects to that address itself: through a proxy, a refused direct
-    // connection says nothing about what the proxy reaches.
-    let direct = agent.config().proxy().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
-    if direct && super::refused::refused(&health) {
-        return false;
-    }
     agent
         .get(&health)
         .call()
