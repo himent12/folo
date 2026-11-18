@@ -392,14 +392,12 @@ mod tests {
     fn a_call_killed_after_its_result_still_used_what_the_result_says() {
         let dir = folo_test_support::TestDir::new("label-claude-hung");
         std::fs::write(dir.path().join("out.txt"), format!("{SUCCESS}\n")).unwrap();
-        // The CLI prints its result, then hangs on its way out until the call's time is up.
-        let script =
-            if cfg!(windows) { "type out.txt & ping -n 30 127.0.0.1 > NUL" } else { "cat out.txt; sleep 30" };
-        let mut cmd = crate::label::agent::shell(script);
+        // The CLI prints its result, then hangs on its way out until the call is stopped.
+        let mut cmd = crate::label::agent::shell(crate::label::agent::PRINT_AND_HANG);
         cmd.current_dir(dir.path());
-        let err = ended(run_kept(cmd, None, std::time::Duration::from_secs(2), &AtomicBool::new(false)))
-            .unwrap_err();
-        let AgentError::Timeout(used) = err else { panic!("{err:?}") };
+        let cancel = crate::label::agent::cancel_when(dir.path().join("printed"));
+        let err = ended(run_kept(cmd, None, std::time::Duration::from_secs(90), &cancel)).unwrap_err();
+        let AgentError::Cancelled(used) = err else { panic!("{err:?}") };
         assert_eq!((used.calls, used.input_tokens, used.output_tokens), (1, 1912, 827));
         // Killed before it printed one: nothing to count.
         let err = ended(Err(Box::new((AgentError::Cancelled(LabelUsage::default()), output("", "", false)))));

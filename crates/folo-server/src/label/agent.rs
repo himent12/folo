@@ -457,6 +457,31 @@ pub(super) fn shell(script: &str) -> Command {
     cmd
 }
 
+/// A shell script that prints the file `out` (in its working folder), then creates the file `printed` and hangs
+/// (tests: a CLI that printed something and then hung).
+#[cfg(test)]
+pub(super) const PRINT_AND_HANG: &str = if cfg!(windows) {
+    "type out.txt & type nul > printed & ping -n 60 127.0.0.1 > NUL"
+} else {
+    "cat out.txt; touch printed; sleep 60"
+};
+
+/// A cancel switch set once the file `marker` exists (tests: stops a child once it has printed, however slow the
+/// machine, instead of on a deadline it may not have printed by).
+#[cfg(test)]
+pub(super) fn cancel_when(marker: PathBuf) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let set = cancel.clone();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        while !marker.exists() && t0.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        set.store(true, Ordering::Relaxed);
+    });
+    cancel
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,14 +539,13 @@ mod tests {
 
     #[test]
     fn a_killed_child_still_hands_back_what_it_printed() {
-        let script = if cfg!(windows) {
-            "echo printed & ping -n 30 127.0.0.1 > NUL"
-        } else {
-            "echo printed; sleep 30"
-        };
-        let (e, out) =
-            *run_kept(shell(script), None, Duration::from_secs(2), &AtomicBool::new(false)).unwrap_err();
-        assert_eq!(e, AgentError::Timeout(LabelUsage::default()));
+        let dir = folo_test_support::TestDir::new("label-run-kept");
+        std::fs::write(dir.path().join("out.txt"), "printed\n").unwrap();
+        let mut cmd = shell(PRINT_AND_HANG);
+        cmd.current_dir(dir.path());
+        let cancel = cancel_when(dir.path().join("printed"));
+        let (e, out) = *run_kept(cmd, None, Duration::from_secs(90), &cancel).unwrap_err();
+        assert_eq!(e, AgentError::Cancelled(LabelUsage::default()));
         assert_eq!(out.stdout.trim(), "printed");
     }
 
