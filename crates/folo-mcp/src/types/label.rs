@@ -119,6 +119,9 @@ pub struct StartLabelingArgs {
     /// Default: the agent's.
     #[serde(default)]
     pub effort: Option<LabelEffort>,
+    /// Codex's Fast tier (uses more of the plan).
+    #[serde(default)]
+    pub fast: bool,
     /// `all` also relabels labeled images.
     #[serde(default)]
     pub scope: LabelScope,

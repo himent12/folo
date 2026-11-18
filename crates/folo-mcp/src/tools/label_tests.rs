@@ -18,8 +18,8 @@ use crate::proxy::HttpStore;
 use crate::server::FoloMcp;
 use crate::{Options, errors::Error};
 
-/// An agent that labels every image with one `car` box at the same relative place (the whole image when the run's
-/// note says `wide`). With a gate, each call first waits for a message on it.
+/// An agent that labels every image with one `car` box at the same place of the 64 x 48 test images, in pixels as
+/// sent (the whole image when the run's note says `wide`). With a gate, each call first waits for a message on it.
 struct Scripted {
     calls: AtomicUsize,
     gate: Option<Mutex<mpsc::Receiver<()>>>,
@@ -36,9 +36,10 @@ impl Agent for Scripted {
             name: "Claude Code".into(),
             available: true,
             version: Some("1.0.0".into()),
-            models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
+            models: vec![LabelModel { id: "small".into(), label: "Small".into(), fast: false }],
             default_model: Some("small".into()),
             default_effort: LabelEffort::Medium,
+            fast: false,
             hint: None,
         }
     }
@@ -52,10 +53,13 @@ impl Agent for Scripted {
             let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(20));
         }
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let b = if req.prompt.contains("wide") { [0, 0, 1000, 1000] } else { [250, 100, 750, 600] };
-        let images: Vec<Value> = (1..=req.images.len())
-            .map(|i| json!({ "image": i, "boxes": [{ "label": "car", "box": b }] }))
-            .collect();
+        let b = if req.prompt.contains("wide") {
+            json!(["car", 0, 0, 64, 48])
+        } else {
+            json!(["car", 16, 4.8, 48, 28.8])
+        };
+        let images: Vec<Value> =
+            (1..=req.images.len()).map(|i| json!({ "image": i, "boxes": [b] })).collect();
         let usage = LabelUsage { calls: 1, input_tokens: 600, output_tokens: 20, ..LabelUsage::default() };
         Ok(AgentReply { text: json!({ "images": images }).to_string(), usage })
     }

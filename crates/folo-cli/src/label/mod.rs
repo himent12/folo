@@ -222,6 +222,7 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
             EffortArg::Medium => LabelEffort::Medium,
             EffortArg::High => LabelEffort::High,
         }),
+        fast: a.fast,
         scope: if a.all { LabelScope::All } else { LabelScope::Unlabeled },
         image_ids: (!a.images.is_empty()).then_some(a.images),
         note: a.note,

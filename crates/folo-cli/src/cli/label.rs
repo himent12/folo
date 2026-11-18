@@ -126,6 +126,9 @@ pub struct LabelStartArgs {
     /// Reasoning effort [default: the agent's].
     #[arg(long, value_enum)]
     pub effort: Option<EffortArg>,
+    /// Codex's Fast tier (priority processing, which uses more of the plan); only models that offer it.
+    #[arg(long)]
+    pub fast: bool,
     /// Exactly these images (comma-separated ids), e.g. to ask again with a --note.
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     pub images: Vec<String>,

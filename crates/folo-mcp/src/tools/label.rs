@@ -145,6 +145,7 @@ impl Inner {
             agent: a.agent,
             model: a.model,
             effort: a.effort,
+            fast: a.fast,
             scope: a.scope,
             image_ids: a.image_ids,
             note: a.note,

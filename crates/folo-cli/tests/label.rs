@@ -15,9 +15,9 @@ use serde_json::{Value, json};
 /// Longest a `folo label` command may take (a run of five images with the fake agent takes about a second).
 const DEADLINE: Duration = Duration::from_secs(60);
 
-/// What the fake `claude` prints for every request: one `result` event whose reply puts a car on image 1, so
-/// runs use `--batch 1`.
-const REPLY: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"{\"images\":[{\"image\":1,\"boxes\":[{\"label\":\"car\",\"box\":[250,100,750,600]}]}]}","usage":{"input_tokens":600,"output_tokens":40},"total_cost_usd":0.001}"#;
+/// What the fake `claude` prints for every request: one `result` event whose reply puts a car on image 1 (in pixels
+/// of the 64 x 48 test images), so runs use `--batch 1`.
+const REPLY: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"{\"images\":[{\"image\":1,\"boxes\":[[\"car\",16,4.8,48,28.8]]}]}","usage":{"input_tokens":600,"output_tokens":40},"total_cost_usd":0.001}"#;
 
 /// Writes the fake `claude` into `dir`: `--version` prints a version, anything else [`REPLY`].
 fn fake_claude(dir: &Path) -> PathBuf {
