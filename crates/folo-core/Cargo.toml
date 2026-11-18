@@ -34,6 +34,10 @@ name = "conv_infer"
 harness = false
 
 [[bench]]
+name = "q8_infer"
+harness = false
+
+[[bench]]
 name = "index"
 harness = false
 

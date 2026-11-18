@@ -78,6 +78,10 @@ name = "cpu_e2e"
 harness = false
 
 [[bench]]
+name = "int8_e2e"
+harness = false
+
+[[bench]]
 name = "candidates"
 harness = false
 

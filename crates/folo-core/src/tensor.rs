@@ -479,6 +479,27 @@ impl Tensor {
         f(View::of_cell(&s, &self.0.layout, self.0.storage.derived()))
     }
 
+    /// A value `make` builds from this CPU `F32` tensor's elements (row-major), kept with its storage under its
+    /// type and `key` (which must name what the value is and everything it depends on besides the elements) until
+    /// the data is next written; a storage keeps its two newest values. The value is made under the storage's
+    /// read lock and dropped when the write lock is taken, so it never outlives the data it was made from, even
+    /// during a concurrent write (a check of [`Tensor::storage_version`] cannot promise that: a write bumps the
+    /// version before it waits for the lock).
+    pub fn derived_f32<T: std::any::Any + Send + Sync>(
+        &self,
+        key: u64,
+        make: impl FnOnce(&[f32]) -> T,
+    ) -> Result<Arc<T>> {
+        use std::hash::{Hash, Hasher};
+        self.with_view(|v| {
+            let data = crate::cpu::contiguous_f32(&v, "derived_f32")?;
+            let mut h = std::hash::DefaultHasher::new();
+            ("Tensor::derived_f32", key, v.layout.offset(), v.layout.shape().dims(), v.layout.strides())
+                .hash(&mut h);
+            Ok(v.derived(h.finish(), || make(&data)))
+        })
+    }
+
     /// The elements in row-major order as host data (downloads from a device).
     pub fn to_cpu_storage(&self) -> Result<CpuStorage> {
         let b = self.backend()?;

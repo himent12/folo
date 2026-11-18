@@ -90,7 +90,9 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36.
 - The weights are transformed once per weight tensor and kept with its storage until the storage is next written
   (`View::derived`: every write lock clears it; a view whose `storage` field was pointed elsewhere neither uses nor
-  fills it).
+  fills it). `Tensor::derived_f32` offers the same store outside the backend (folo-vision's int8 plan keeps its
+  packed convs there): unlike a check of the storage version, which a write bumps before it waits for the lock, a
+  value made under the read lock never outlives the data it was made from.
 - The tiles are cut into blocks; a block transforms its input patches, runs 16 small GEMMs through the row-pointer
   micro-kernel and transforms the results into its output tiles while they are in L2. An image with too few blocks
   for the pool runs in two passes: the input transforms split by input channels, then the GEMMs and output transforms
@@ -152,6 +154,46 @@ these kernels:
 - It applies SiLU / ReLU in its own passes (forward and backward), bit for bit BatchNorm then `Tensor::silu` / `relu`
   (`cpu::silu` / `cpu::silu_backward` are the shared formulas).
 - Its per-plane loops run as AVX2 when the CPU has it (the same loops compiled under `target_feature`, bit for bit).
+
+### int8 convs
+`cpu::q8` holds the kernels of int8 inference (docs/MODEL.md §9.6 has the arithmetic; folo-vision's
+`model::quant` drives them). They work on raw buffers, not `Tensor`s:
+- **Layout.** Activations are u8 codes in C4 words, `[N][C/4][H][W]` `u32` (byte `t` of a word is channel
+  `4g + t`), each with an affine grid (`Grid { scale, zero }`). A channel slice on a multiple of 4 is a view (an
+  offset), so split and concatenation copy nothing. Buffers come from the buffer cache (`q8::alloc`, `q8::recycle`)
+  with 64 words of slack after the data.
+- **Conv.** `q8::conv` takes the input parts of a concatenation (each with its zero point, which must be the one
+  the weights were packed with), an optional residual and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four
+  to a word, the zero-point corrections, per-channel scales and biases; `C·k·k` at most `MAX_REDUCTION` = 2¹⁵ so
+  the i32 sums cannot overflow, stride at most `MAX_STRIDE` = 64, padding at most `MAX_PAD` = 4096:
+  `QConv::supports` names these limits, `q8::out_size` says whether a kernel fits an input, and `q8::conv_size`
+  also whether the input, padded copy and output each fit one allocation (`isize::MAX` bytes), on 32-bit
+  targets too) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output
+  pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
+  `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
+  the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
+  zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
+  FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
+  results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
+  (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
+  `silu8`'s `exp` polynomial, one power-of-two scale and no blend (within 2e-6 of SiLU); the AVX2 requantise packs
+  four channels' codes with saturating `packs` / `packus` and one byte shuffle into C4 words. Work is split into
+  (image, pixel block, channel block) tasks: about three per thread, none under 2²⁰ multiply-adds. An image whose
+  input fits in 384 KiB (a core's L2) is split by channel blocks first, so tasks write whole output planes; pixel
+  blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
+  are split by pixel blocks first, so each task reads its own part once.
+- **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
+  bytes; exact since the grid is monotonic), nearest 2× upsampling.
+
+Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
+with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
+outputs, two images, and offset views with a longer image stride. They also check the task plan's bounds, the
+refusals (zero points, long reductions, wrapping views, kernels larger than the input), `supports`, `out_size` and
+`conv_size`,
+VNNI against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for
+bit, the epilogue's exact ties (to even, on both paths), `quantize_weights`' known answers (ties away from zero,
+±127 at the row maximum), quantise round trips and the pools. `cargo bench -p folo-core --bench
+q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 
 ### The buffer cache
 `f32` buffers from 16 KiB are recycled through a size-keyed cache (`cpu/pool_alloc.rs`;

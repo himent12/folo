@@ -13,7 +13,7 @@ use folo_vision::val::{ValConfig, val_metrics, validate};
 use folo_vision::{FoloModel, NmsConfig, Precision, PredictConfig, Predictor};
 use serde_json::json;
 
-use crate::cli::{ExportArgs, ExportFormatArg, PredictArgs, SplitArg, ValArgs};
+use crate::cli::{ExportArgs, ExportFormatArg, PrecisionArg, PredictArgs, SplitArg, ValArgs};
 use crate::draw::annotate;
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
@@ -24,7 +24,7 @@ fn nn_error(command: &str, e: folo_nn::Error) -> CliError {
 
 /// A weights file that cannot be read: `invalid_weights` saying what the file is not, instead of a parser
 /// detail such as a header length.
-fn weights_error(command: &str, path: &Path, e: folo_nn::Error) -> CliError {
+pub(crate) fn weights_error(command: &str, path: &Path, e: folo_nn::Error) -> CliError {
     let mut err = nn_error(command, e);
     if err.code == "invalid_weights" {
         err.message = folo_api::codes::cap(
@@ -40,6 +40,7 @@ fn weights_error(command: &str, path: &Path, e: folo_nn::Error) -> CliError {
 
 /// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
 /// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
+/// `int8` runs the backbone and neck in int8 on the CPU with the file's calibration ([`open_int8`]).
 /// `tensor_cores` asks for the tensor-core f16 kernels (a note on stderr when they are unavailable or unused).
 /// The kernels an earlier `command` with this model and `shape` (the options that change them) used start compiling
 /// on every core while the weights load ([`folo_vision::precompile`]).
@@ -47,11 +48,15 @@ fn open_model(
     command: &str,
     path: &Path,
     device: &str,
-    half: bool,
+    precision: (bool, Option<PrecisionArg>),
     tensor_cores: bool,
     shape: &str,
 ) -> Result<FoloModel, CliError> {
     let path = &crate::weights::resolve(path)?;
+    let half = match precision {
+        (_, Some(PrecisionArg::Int8)) => return open_int8(command, path, device, tensor_cores),
+        (half, p) => half || p == Some(PrecisionArg::F16),
+    };
     if tensor_cores {
         folo_gpu::context::request_tensor_cores();
     }
@@ -79,9 +84,56 @@ fn open_model(
     FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(|e| nn_error(command, e))
 }
 
-/// The precision a model runs in.
-fn precision_of(model: &FoloModel) -> Precision {
-    if model.dtype() == Precision::F16.dtype() { Precision::F16 } else { Precision::F32 }
+/// [`open_model`] with `--precision int8`: on the CPU (`auto` picks it; a GPU is a usage error), in f32 with the
+/// int8 plan of the calibration `folo quantize` stored in the file.
+fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Result<FoloModel, CliError> {
+    if !matches!(device.trim().to_ascii_lowercase().as_str(), "auto" | "" | "cpu") {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--precision int8 runs on the CPU, not --device {device}"),
+        )
+        .hint("pass --device cpu (or auto)"));
+    }
+    if !folo_vision::model::quant::uses_vnni() {
+        eprintln!(
+            "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
+             (they need AVX-VNNI, which this CPU lacks, AVX-512 VNNI not being used; or FOLO_Q8_SCALAR is set)"
+        );
+    }
+    if tensor_cores {
+        eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
+    }
+    let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
+    // A missing, unreadable or mismatched calibration: the weights are fine, the int8 calibration is not.
+    let calibration_error = |why: String| {
+        CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {why}", folo_api::json::path(path)))
+            .hint("run `folo quantize --model <weights> --data <dataset>` and use the file it writes")
+    };
+    let cal = match folo_vision::model::quant::Calibration::from_metadata(file.metadata()) {
+        Ok(Some(cal)) => cal,
+        Ok(None) => return Err(calibration_error("no int8 calibration".into())),
+        Err(e) => return Err(calibration_error(format!("unreadable int8 calibration ({e})"))),
+    };
+    let mut model = FoloModel::from_file_for_inference(
+        &file,
+        resolve_device("cpu").map_err(|e| engine_error(command, e))?,
+        Precision::F32.dtype(),
+    )
+    .map_err(|e| nn_error(command, e))?;
+    model.set_int8(Some(cal)).map_err(|e| calibration_error(e.to_string()))?;
+    Ok(model)
+}
+
+/// The precision a model runs in: `f32`, `f16` or `int8`.
+fn precision_of(model: &FoloModel) -> &'static str {
+    if model.int8().is_some() {
+        "int8"
+    } else if model.dtype() == Precision::F16.dtype() {
+        Precision::F16.as_str()
+    } else {
+        Precision::F32.as_str()
+    }
 }
 
 /// `--fusion-iou` is an IoU: in `0..=1` (a NaN would put every candidate of a class in every cluster).
@@ -95,7 +147,8 @@ fn check_fusion_iou(v: f32) -> Result<(), CliError> {
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
-    let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
+    let model =
+        open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -330,7 +383,14 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
-    let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
+    let model = open_model(
+        "predict",
+        &args.model,
+        &args.device,
+        (args.half, args.precision),
+        args.tensor_cores,
+        &shape,
+    )?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
@@ -349,7 +409,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     };
     let classes = predictor.classes().to_vec();
     let device = predictor.device().to_string();
-    let precision = predictor.precision();
+    let precision = precision_of(predictor.model());
     let (mut boxes, mut failed) = (0usize, 0usize);
     // The first image's timing (it includes pipeline compilation and the first allocations) and the sum over the
     // rest: the mean leaves the first out once there are others.
@@ -512,54 +572,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
         ));
     }
-    // Like MCP `export`, never overwrite: the output is claimed with `create_new` (so concurrent exports never
-    // share a file; the export then replaces the empty claim atomically). The default name gets `-2`, `-3`, ...
-    // when taken; an existing --output is an error.
-    let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
-    let io = |p: &Path, e: std::io::Error| {
-        CliError::new(
-            ExitCode::Runtime,
-            "io_error",
-            format!("cannot create {}: {e}", folo_api::json::path(p)),
-        )
-    };
-    let output = match args.output.clone() {
-        Some(o) => {
-            let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => a == b,
-            };
-            if same(&o, &args.model) {
-                return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
-            }
-            match claim(&o) {
-                Ok(()) => o,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Err(CliError::new(
-                        ExitCode::Runtime,
-                        "output_exists",
-                        format!("{} exists; export never overwrites", folo_api::json::path(&o)),
-                    )
-                    .hint("pass another --output, or leave it out for a free name next to --model"));
-                }
-                Err(e) => return Err(io(&o, e)),
-            }
-        }
-        None => {
-            let stem =
-                args.model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
-            let mut n = 1;
-            loop {
-                let tag = if n == 1 { String::new() } else { format!("-{n}") };
-                let p = args.model.with_file_name(format!("{stem}{suffix}{tag}.{ext}"));
-                match claim(&p) {
-                    Ok(()) => break p,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                    Err(e) => return Err(io(&p, e)),
-                }
-            }
-        }
-    };
+    let output = claim_output("export", &args.model, args.output.clone(), suffix, ext)?;
     let t = Instant::now();
     let source = if file.has_ema() { "ema" } else { "model" };
     let meta = file.metadata();
@@ -665,6 +678,61 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         bytes as f64 / 1e6
     ));
     Ok(())
+}
+
+/// The output file of `command` (export, quantize), claimed with `create_new`: `output`, or a free name next to
+/// `model` (`<stem><suffix>.<ext>`, then `-2`, `-3`, ...). Never overwrites: an existing `output` is `output_exists`.
+pub(crate) fn claim_output(
+    command: &str,
+    model: &Path,
+    output: Option<PathBuf>,
+    suffix: &str,
+    ext: &str,
+) -> Result<PathBuf, CliError> {
+    // Like MCP `export`: concurrent commands never share a file; the writer then replaces the empty claim
+    // atomically.
+    let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
+    let io = |p: &Path, e: std::io::Error| {
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot create {}: {e}", folo_api::json::path(p)),
+        )
+    };
+    match output {
+        Some(o) => {
+            let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => a == b,
+            };
+            if same(&o, model) {
+                return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
+            }
+            match claim(&o) {
+                Ok(()) => Ok(o),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CliError::new(
+                    ExitCode::Runtime,
+                    "output_exists",
+                    format!("{} exists; {command} never overwrites", folo_api::json::path(&o)),
+                )
+                .hint("pass another --output, or leave it out for a free name next to --model")),
+                Err(e) => Err(io(&o, e)),
+            }
+        }
+        None => {
+            let stem = model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
+            let mut n = 1;
+            loop {
+                let tag = if n == 1 { String::new() } else { format!("-{n}") };
+                let p = model.with_file_name(format!("{stem}{suffix}{tag}.{ext}"));
+                match claim(&p) {
+                    Ok(()) => break Ok(p),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                    Err(e) => return Err(io(&p, e)),
+                }
+            }
+        }
+    }
 }
 
 /// `predict`'s line for one image: "a.jpg: 2 boxes (cat 0.91, dog 0.40) 9.2 ms", "1 box", "0 boxes" without an empty

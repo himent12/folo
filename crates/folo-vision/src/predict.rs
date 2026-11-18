@@ -288,9 +288,11 @@ impl Predictor {
         Self::with_precision(model, cfg, Precision::F16)
     }
 
-    /// [`Predictor::new`] at `precision` (see [`Predictor::new_f16`]).
+    /// [`Predictor::new`] at `precision` (see [`Predictor::new_f16`]). The whole model runs at `precision`: an
+    /// int8 plan ([`FoloModel::set_int8`]) is turned off; [`Predictor::new`] keeps it.
     pub fn with_precision(model: FoloModel, cfg: PredictConfig, precision: Precision) -> Result<Self> {
         let mut p = Self::new(model, cfg)?;
+        p.model.set_int8(None)?;
         let fallback = if precision == Precision::F16 { f16_unavailable(p.device()) } else { None };
         let dtype = if fallback.is_some() { DType::F32 } else { precision.dtype() };
         p.model.to_dtype(dtype)?;

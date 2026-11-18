@@ -14,7 +14,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs and the re-exports |
-| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU) |
+| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU), `quant/` (int8 inference: `walk.rs` the quantised graph, `calib.rs` calibration and the stored `Calibration`, `exec.rs` the int8 executor on folo-core's `cpu::q8`, `fake.rs` the fake-quant reference) |
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
@@ -61,6 +61,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §9.2 Letterbox | `src/predict.rs`; folo-data `src/letterbox.rs` |
 | §9.3 NMS, §9.4 Box fusion | `src/nms.rs`, `src/fusion.rs` |
 | §9.5 Candidate-first evaluation | `src/model/lazy.rs`, `src/model/lazy_gpu.rs` |
+| §9.6 int8 inference | `src/model/quant/`, `FoloModel::set_int8`; folo-core `src/cpu/q8/` |
 | §10 Verification plan | `tests/model.rs` (§10.1, §10.2), `tests/assign_cases.rs` and `tests/loss_cases.rs` (§10.3), `tests/train.rs` (§10.4) |
 
 ## Start here
@@ -98,6 +99,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `nms_reference.rs`, `fusion_reference.rs` | NMS against a naive reference; DFL fusion against `bench/fusion/post.py` |
 | `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs` | The evaluator against hand-computed answers and against pycocotools |
 | `lazy_head.rs` | Candidate-first prediction on the CPU, bit for bit against the dense path |
+| `int8.rs` | int8 inference: the executor against the fake-quant reference, the same bits at every thread count, the calibration's JSON, metadata and weights fingerprint |
 | `train.rs` | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, the predictor on trained weights |
 | `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
 | `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss.rs`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation (and its fused kernel against the tensor path) |
@@ -119,6 +121,7 @@ and `train_step`.
 |---|---|---|
 | `gpu` | The detector on the GPU: forward, predict and training step per scale and precision | GPU |
 | `cpu_e2e` | The CPU predictor end to end at batch 1 | |
+| `int8_e2e` | int8 against `f32` CPU prediction end to end (rows 7 and 8), in-process alternation | `FOLO_BENCH_WEIGHTS` (a `folo quantize` output), `FOLO_BENCH_IMAGES` |
 | `train_step` | One CPU training step: folo-n, 4 classes, 320 px, batch 16 (MODEL.md §10.6's configuration) | |
 | `model` | The CPU forward pass (unfused and fused), `predict_raw` and the predictor | |
 | `post` | Decode + NMS, the `o2o` top-k, batched NMS, the assigner, the evaluator | |

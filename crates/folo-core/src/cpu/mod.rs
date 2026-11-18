@@ -32,6 +32,7 @@ pub mod gemm;
 mod index;
 mod pool;
 mod pool_alloc;
+pub mod q8;
 pub(crate) mod reduce;
 #[cfg(test)]
 mod sites_tests;
@@ -131,7 +132,7 @@ fn f32s<'a>(v: &View<'a>, op: &'static str) -> Result<&'a [f32]> {
 }
 
 /// The elements of an `F32` view as a contiguous slice (borrowed when already contiguous).
-fn contiguous_f32<'a>(v: &View<'a>, op: &'static str) -> Result<Cow<'a, [f32]>> {
+pub(crate) fn contiguous_f32<'a>(v: &View<'a>, op: &'static str) -> Result<Cow<'a, [f32]>> {
     let data = f32s(v, op)?;
     Ok(match v.layout.contiguous_range() {
         Some(r) => Cow::Borrowed(&data[r]),

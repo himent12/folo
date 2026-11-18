@@ -374,6 +374,96 @@ fn train_val_predict_export_with_json() {
     assert!(!project.join("nogpu").exists());
 }
 
+/// `folo quantize`, then `val` / `predict --precision int8` with the file it writes, and the refusals.
+#[test]
+fn quantize_then_int8_val_and_predict() {
+    let tiny = tiny_run();
+    assert_eq!(tiny.train.0, 0, "{}", tiny.train.2);
+    let (data, best) = (&tiny.data, tiny.run.join("weights/best.folo"));
+    let out = tiny.root.join("tiny-int8.folo");
+    let (code, lines, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(data),
+        "--images",
+        "6",
+        "--output",
+        s(&out),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let r = &lines[0];
+    assert_eq!(
+        (r["images"].as_u64(), r["method"].as_str(), r["tail"].as_f64()),
+        (Some(6), Some("percentile"), Some(1e-4))
+    );
+    assert!(r["boundaries"].as_u64().unwrap() > 50, "{r}");
+    // An existing --output is refused before calibrating.
+    let (code, lines, _) =
+        folo(&["quantize", "--json", "--model", s(&best), "--data", s(data), "--output", s(&out)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("output_exists")));
+    // So is an --imgsz the model cannot take (and --method mse runs).
+    let (code, lines, _) =
+        folo(&["quantize", "--json", "--model", s(&best), "--data", s(data), "--imgsz", "100"]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (2, Some("usage")));
+    let mse = out.with_file_name("mse-int8.folo");
+    let (code, lines, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(data),
+        "--images",
+        "2",
+        "--method",
+        "mse",
+        "--output",
+        s(&mse),
+    ]);
+    assert_eq!(
+        (code, lines[0]["method"].as_str(), lines[0]["tail"].as_f64()),
+        (0, Some("mse"), None),
+        "{stderr}"
+    );
+
+    let (code, lines, stderr) =
+        folo(&["val", "--json", "--model", s(&out), "--data", s(data), "--precision", "int8"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["device"].as_str()), (Some("int8"), Some("cpu")));
+    let image = data.join("images/val").read_dir().unwrap().next().unwrap().unwrap().path();
+    let (code, lines, stderr) =
+        folo(&["predict", "--json", "--model", s(&out), "--precision", "int8", s(&image)]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines[0]["dtype"], "int8");
+    // The same file runs in f32 without the flag.
+    let (code, lines, stderr) =
+        folo(&["predict", "--json", "--model", s(&out), "--device", "cpu", s(&image)]);
+    assert_eq!((code, lines[0]["dtype"].as_str()), (0, Some("f32")), "{stderr}");
+
+    // Weights without a calibration, a GPU device, and --half with --precision are refused.
+    let (code, lines, _) =
+        folo(&["predict", "--json", "--model", s(&best), "--precision", "int8", s(&image)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("invalid_weights")));
+    assert!(lines[0]["error"]["hint"].as_str().unwrap().contains("folo quantize"), "{}", lines[0]);
+    let (code, lines, _) = folo(&[
+        "predict",
+        "--json",
+        "--model",
+        s(&out),
+        "--precision",
+        "int8",
+        "--device",
+        "gpu:0",
+        s(&image),
+    ]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (2, Some("usage")));
+    let (code, _, _) = folo(&["predict", "--model", s(&out), "--precision", "f16", "--half", s(&image)]);
+    assert_eq!(code, 2);
+}
+
 /// Every float that is exactly an f32 prints as the f32 does (no `0.009999999776482582`).
 fn assert_no_f32_noise(v: &Value) {
     match v {
