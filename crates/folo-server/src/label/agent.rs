@@ -172,6 +172,11 @@ impl<T: Clone> Memo<T> {
         self.get_where(|_| true, find)
     }
 
+    /// Forgets the remembered value: the next [`Memo::get`] finds it again.
+    pub fn forget(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
     /// [`Memo::get`], finding the value again also when the remembered one is not `current` (it was found for
     /// something that has changed since).
     pub fn get_where(&self, current: impl FnOnce(&T) -> bool, find: impl FnOnce() -> T) -> T {
@@ -238,6 +243,11 @@ impl Cli {
         self.found().map(|f| f.version)
     }
 
+    /// Forgets the probe: the next question about the CLI runs it again (it may have been updated in place).
+    pub fn forget(&self) {
+        self.probed.forget();
+    }
+
     /// The executable and its version, from one probe (`None`: not installed): what goes together, for what is
     /// found out from that executable.
     pub fn found_pair(&self) -> Option<(PathBuf, String)> {
@@ -251,7 +261,7 @@ impl Cli {
 }
 
 /// The version the executable at `path` says it is (`--version`), asked now: `None` when it does not answer.
-pub fn probe_version(path: &Path) -> Option<String> {
+fn probe_version(path: &Path) -> Option<String> {
     let mut cmd = Command::new(path);
     cmd.arg("--version");
     let out = run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)).ok()?;

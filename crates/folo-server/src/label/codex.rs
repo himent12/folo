@@ -32,7 +32,7 @@ use serde_json::Value;
 
 use super::agent::{
     Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Memo, Output, PROBE_TIMEOUT,
-    fault_hint, last_line, limit_hint, probe_version, run, run_kept,
+    fault_hint, last_line, limit_hint, run, run_kept,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -92,8 +92,10 @@ pub struct Codex {
     cli: Cli,
     catalog: Memo<Catalog>,
     /// The versions of Codex that refused the lean catalog ([`with_lean_fallback`]): their calls go without it.
-    /// Each refusal is its catalog snapshot's version, so a late one from a call that held an older snapshot
-    /// neither turns off nor clears a newer version's.
+    /// A refusal is recorded against the version of the catalog snapshot the call held ([`Codex::refuse`]), so a
+    /// late one from an older snapshot neither turns off nor clears a newer version's; the probe and the catalog
+    /// are then read again, so a Codex updated in place gets its own snapshot (and is tried with its own lean
+    /// catalog).
     lean_refused: Mutex<BTreeSet<String>>,
 }
 
@@ -102,6 +104,8 @@ pub struct Codex {
 struct Catalog {
     /// The version of Codex that printed it: the snapshot's generation.
     version: String,
+    /// Whether `codex debug models` printed a catalog FOLO could read.
+    read: bool,
     /// The executable that printed it, which a call with it runs (`None`: Codex is not installed).
     path: Option<PathBuf>,
     /// The models that take images ([`catalog_models`]).
@@ -159,6 +163,7 @@ impl Catalog {
         };
         Catalog {
             version: String::new(),
+            read: true,
             path: None,
             models: catalog_models(&entries, &fast),
             default: listed.first().and_then(|m| slug(m)),
@@ -230,9 +235,13 @@ impl Codex {
         self.lean_refused.lock().unwrap().contains(&catalog.version)
     }
 
-    /// Notes that `version` of Codex refused the lean catalog.
-    fn refuse(&self, version: &str) {
-        self.lean_refused.lock().unwrap().insert(version.to_string());
+    /// Notes that the version of Codex that printed `catalog` refused its lean catalog, and forgets the probe and
+    /// the catalog: the next call reads the executable and its catalog again (Codex may have been updated in
+    /// place since).
+    fn refuse(&self, catalog: &Catalog) {
+        self.lean_refused.lock().unwrap().insert(catalog.version.clone());
+        self.cli.forget();
+        self.catalog.forget();
     }
 
     /// One `codex exec`, with `catalog` as its `model_catalog_json` when there is one: what it printed.
@@ -369,13 +378,15 @@ impl Agent for Codex {
             Some(path) => path.clone(),
             None => self.cli.path()?,
         };
-        // Fast as this call's catalog offers it (the one the run was started with may be older).
-        if req.fast {
+        // Fast as this call's catalog offers it (the one the run was started with may be older): a catalog that
+        // was read and lists no fast tier for the model refuses it; one that could not be read leaves it out.
+        let fast = req.fast && catalog.read;
+        if fast {
             catalog.check_fast(req.model).map_err(AgentError::Unavailable)?;
         }
+        let req = &AgentRequest { fast, ..*req };
         let lean = catalog.lean.as_deref().map(String::as_str).filter(|_| !self.refused(&catalog));
-        // The refusal is the version that refused: Codex may have been updated in place since the catalog was read.
-        let refuse = || self.refuse(&probe_version(&path).unwrap_or_else(|| catalog.version.clone()));
+        let refuse = || self.refuse(&catalog);
         parse(&with_lean_fallback(lean, refuse, |lean| self.call(&path, req, lean))?)
     }
 
@@ -749,7 +760,8 @@ mod tests {
         assert_eq!(catalog.default.as_deref(), Some("text"), "the first listed model, images or not");
         assert!(catalog.lean.is_some() && catalog.no_lean.is_none());
         let unread = Catalog::read("not json", None);
-        assert!(unread.models.is_empty() && unread.lean.is_none());
+        assert!(unread.models.is_empty() && unread.lean.is_none() && !unread.read);
+        assert!(catalog.read);
         assert!(unread.no_lean.unwrap().contains("7800 more input tokens"));
         assert!(Catalog::read("{}", None).models.is_empty());
     }
@@ -861,13 +873,16 @@ mod tests {
         let codex = Codex::new();
         let snapshot =
             |version: &str| Catalog { version: version.into(), ..Catalog::read(&catalog_json(), None) };
-        codex.refuse("0.169.0");
+        let _ = codex.catalog.get(|| snapshot("0.169.0"));
+        codex.refuse(&snapshot("0.169.0"));
         assert!(codex.refused(&snapshot("0.169.0")));
+        // ... and the catalog is read again (with the probe): the next call may run a Codex updated in place.
+        assert_eq!(codex.catalog.get(|| snapshot("0.170.0")).version, "0.170.0");
         assert!(!codex.refused(&snapshot("0.170.0")), "a newer Codex is given the lean catalog again");
         // Refusals interleave: the newer version refuses too, then a late refusal from a call that still held
         // the older snapshot comes in. Neither clears the other.
-        codex.refuse("0.170.0");
-        codex.refuse("0.169.0");
+        codex.refuse(&snapshot("0.170.0"));
+        codex.refuse(&snapshot("0.169.0"));
         assert!(codex.refused(&snapshot("0.170.0")) && codex.refused(&snapshot("0.169.0")));
         assert!(!codex.refused(&snapshot("0.171.0")));
     }

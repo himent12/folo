@@ -4,7 +4,9 @@
 //! installed through npm), and killing the shim alone would leave that process running, and spending. On Unix
 //! the child leads a process group and the group is killed. On Windows the child is created suspended, put in a
 //! job object and only then let run, so nothing it starts can be outside the job, and the job is terminated.
-//! Both still reach the descendants after the child itself has exited.
+//! Both still reach the descendants after the child itself has exited. On Windows the job also ends its processes
+//! when its last handle closes: when the call is over, and when the server dies (killed, crashed), so no agent CLI
+//! outlives the server that started it, holding its pipes open.
 
 use std::process::{Child, Command, Stdio};
 
@@ -88,14 +90,17 @@ mod windows {
         CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
     pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
 
-    /// A Windows job object: the processes assigned to it, and every process they start, stay members.
+    /// A Windows job object: the processes assigned to it, and every process they start, stay members, and they
+    /// end when its handle closes (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
     pub struct JobObject(HANDLE);
 
     impl JobObject {
@@ -107,6 +112,19 @@ mod windows {
                 return None;
             }
             let job = JobObject(handle);
+            // SAFETY: `limits` is a plain struct of numbers, zero apart from the flag, passed with its size to the
+            // job handle just created. Should Windows refuse the limit, the job still ends its processes on
+            // `terminate`; only a server that dies leaves them.
+            unsafe {
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+            }
             // SAFETY: `job.0` is the job handle just created and `child` owns a valid process handle.
             let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
             (assigned != 0).then_some(job)
@@ -121,8 +139,8 @@ mod windows {
 
     impl Drop for JobObject {
         fn drop(&mut self) {
-            // SAFETY: `self.0` is a handle this value owns, closed exactly once. Closing the job does not end
-            // its processes: a call that finished normally leaves what it started alone.
+            // SAFETY: `self.0` is a handle this value owns, closed exactly once. Closing the job ends what is
+            // left in it (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): nothing a call started outlives the call.
             unsafe { CloseHandle(self.0) };
         }
     }
@@ -153,6 +171,33 @@ mod windows {
             }
             CloseHandle(snapshot);
             resumed
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn a_tree_whose_job_closes_ends_with_it() {
+        // What happens to a call's tree when the server dies: its job handle closes without `kill`.
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        Tree::prepare(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let tree = Tree::start(&child).unwrap();
+        assert!(tree.job.is_some());
+        drop(tree);
+        let t0 = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the tree outlived its job");
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }

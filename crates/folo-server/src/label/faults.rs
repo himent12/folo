@@ -137,8 +137,9 @@ fn statuses(lower: &str) -> Vec<u16> {
     found
 }
 
-/// The words that start a wait in numbers and units ([`retry_after`]).
-const WAIT_MARKERS: [&str; 4] = ["try again in ", "retry after ", "retry in ", "retry-after: "];
+/// The words that start a wait in numbers and units ([`retry_after`]); `retry-after:` (a header's) may have spaces
+/// after its colon or none.
+const WAIT_MARKERS: [&str; 4] = ["try again in ", "retry after ", "retry in ", "retry-after:"];
 
 /// How long a `message` says to wait before trying again ("try again in 1.5s", "retry after 20 seconds", "try
 /// again in 2 hours 5 minutes", "try again in 1m12.5s", "Retry-After: 20"), when it says so in numbers and units:
@@ -161,12 +162,13 @@ struct Wait<'m> {
 impl Wait<'_> {
     /// The clause, as a hint quotes it: "retry after 90 seconds".
     fn quoted(&self) -> String {
-        format!("{}{}", self.marker, self.words)
+        format!("{} {}", self.marker.trim_end(), self.words)
     }
 }
 
 /// The longest wait `message` asks for in numbers and units; the first of equal ones. Each wait is read from its
-/// own clause ([`clause_len`]), so nothing after it (other numbers, another wait) adds to it.
+/// own clause ([`clause_len`]), so nothing after it (other numbers, another wait) adds to it; a clause cut at a
+/// comma goes on when all that follows up to the next cut is more amounts ("1 minute, 30 seconds").
 fn longest_wait(message: &str) -> Option<Wait<'_>> {
     // ASCII lowercase keeps every byte offset of `message`.
     let lower = message.to_ascii_lowercase();
@@ -174,8 +176,17 @@ fn longest_wait(message: &str) -> Option<Wait<'_>> {
     for marker in WAIT_MARKERS {
         for (at, _) in lower.match_indices(marker) {
             let start = at + marker.len();
-            let end = start + clause_len(&lower[start..]);
-            let Some(wait) = read_wait(&lower[start..end], marker == "retry-after: ") else { continue };
+            let mut end = start + clause_len(&lower[start..], true);
+            while lower[end..].starts_with(',') {
+                let next = end + 1;
+                let next_end = next + clause_len(&lower[next..], true);
+                match read_wait(&lower[next..next_end], false) {
+                    Some((_, rest)) if rest.trim().is_empty() => end = next_end,
+                    _ => break,
+                }
+            }
+            let bare = marker == "retry-after:";
+            let Some((wait, _)) = read_wait(&lower[start..end], bare) else { continue };
             if longest.as_ref().is_none_or(|l| wait > l.wait || (wait == l.wait && at < l.at)) {
                 longest = Some(Wait { at, marker, wait, words: message[start..end].trim() });
             }
@@ -184,30 +195,46 @@ fn longest_wait(message: &str) -> Option<Wait<'_>> {
     longest
 }
 
-/// The length of the clause `rest` starts with: to a sentence's end, a `,`, `;`, `·`, `∙` or `|`, a line break.
-fn clause_len(rest: &str) -> usize {
-    rest.char_indices()
-        .find(|&(i, c)| {
-            matches!(c, ',' | ';' | '·' | '∙' | '|' | '\n')
-                || (c == '.' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))
-        })
-        .map_or(rest.len(), |(i, _)| i)
+/// The length of the clause `rest` starts with: to a `·`, `∙` or `|`, a line break, (with `commas`) a `,` or
+/// `;`, or a sentence's end. The period of an abbreviation of single letters ("p.m.") stays in the clause, which
+/// goes on unless a new sentence starts after it.
+fn clause_len(rest: &str, commas: bool) -> usize {
+    for (i, c) in rest.char_indices() {
+        match c {
+            '·' | '∙' | '|' | '\n' => return i,
+            ',' | ';' if commas => return i,
+            '.' if rest[i + 1..].chars().next().is_none_or(char::is_whitespace) => {
+                let mut before = rest[..i].chars().rev();
+                let abbreviation = before.next().is_some_and(char::is_alphabetic)
+                    && before.next().is_none_or(|c| !c.is_alphanumeric());
+                if !abbreviation {
+                    return i;
+                }
+                // After an abbreviation, a sentence's end only when a new sentence starts (or nothing follows).
+                if rest[i + 1..].trim_start().chars().next().is_none_or(char::is_uppercase) {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    rest.len()
 }
 
-/// The wait a `clause` (lowercase) starts with: a number and its unit, or several that follow each other directly
-/// ("1m30s", "2 hours 5 minutes", "2 hours and 5 minutes"). A number without a unit is seconds only when `bare`
-/// (after `Retry-After:`, a header's seconds).
-fn read_wait(clause: &str, bare: bool) -> Option<Duration> {
+/// The wait a `clause` (lowercase) starts with, and what follows it: a number and its unit, or several that follow
+/// each other directly ("1m30s", "2 hours 5 minutes", "2 hours and 5 minutes", "1 minute, 30 seconds"). A number
+/// without a unit is seconds only when `bare` (after `Retry-After:`, a header's seconds).
+fn read_wait(clause: &str, bare: bool) -> Option<(Duration, &str)> {
     let mut rest = clause;
     let (mut total, mut read) = (0.0, false);
     for _ in 0..6 {
-        rest = rest.trim_start();
-        if read && let Some(after) = rest.strip_prefix("and ") {
-            rest = after.trim_start();
+        let mut next = rest.trim_start_matches([' ', ',']);
+        if read && let Some(after) = next.strip_prefix("and ") {
+            next = after.trim_start();
         }
-        let digits = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
-        let Ok(amount) = rest[..digits].trim_end_matches('.').parse::<f64>() else { break };
-        let after = rest[digits..].trim_start();
+        let digits = next.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(next.len());
+        let Ok(amount) = next[..digits].trim_end_matches('.').parse::<f64>() else { break };
+        let after = next[digits..].trim_start();
         let letters = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
         let millis = match &after[..letters] {
             "ms" | "msec" | "millisecond" | "milliseconds" => 1.0,
@@ -217,6 +244,7 @@ fn read_wait(clause: &str, bare: bool) -> Option<Duration> {
             "" if bare && !read => {
                 total = amount * 1e3;
                 read = true;
+                rest = after;
                 break;
             }
             _ => break,
@@ -225,7 +253,7 @@ fn read_wait(clause: &str, bare: bool) -> Option<Duration> {
         read = true;
         rest = &after[letters..];
     }
-    (read && total.is_finite() && total < 1e12).then(|| Duration::from_millis(total.round() as u64))
+    (read && total.is_finite() && total < 1e12).then(|| (Duration::from_millis(total.round() as u64), rest))
 }
 
 /// When a limit that `message` reports passes, in the CLI's own words with what it says before them: Claude
@@ -235,17 +263,10 @@ fn read_wait(clause: &str, bare: bool) -> Option<Duration> {
 pub fn reset_time(message: &str) -> Option<String> {
     // ASCII lowercase keeps every byte offset of `message`.
     let lower = message.to_ascii_lowercase();
-    // The clause after the `marker` at `at`: to a sentence's end, a `·`, `∙` or `|` separator, a line break.
+    // The clause after the `marker` at `at` (to a sentence's end, a `·`, `∙` or `|` separator, a line break).
     let clause = |at: usize, marker: &str| {
         let rest = &message[at + marker.len()..];
-        let end = rest
-            .char_indices()
-            .find(|&(i, c)| {
-                matches!(c, '·' | '∙' | '|' | '\n')
-                    || (c == '.' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))
-            })
-            .map_or(rest.len(), |(i, _)| i);
-        let when = rest[..end].trim();
+        let when = rest[..clause_len(rest, false)].trim();
         (!when.is_empty()).then(|| format!("{marker}{when}"))
     };
     for marker in ["resets ", "try again at "] {
@@ -262,7 +283,8 @@ pub fn reset_time(message: &str) -> Option<String> {
 }
 
 /// The hint of a run that ended on a limit ([`is_limit`]): which limit (the account's usage only when the message
-/// says so), and when it passes if the CLI said, in its own words (for a long wait, the clause of that wait).
+/// says so), and when it passes if the CLI said, in its own words: for the account's limit when it resets, for the
+/// provider's rate limit or long wait the clause of the wait that counts.
 pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     let m = message.to_lowercase();
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
@@ -283,7 +305,7 @@ pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     };
     let fewer = if usage { "" } else { " with fewer calls in flight (`parallel`)" };
     let when = match wait {
-        Some(wait) if long => Some(wait.quoted()),
+        Some(wait) if !usage => Some(wait.quoted()),
         _ => reset_time(message),
     };
     match when {
@@ -410,6 +432,11 @@ mod tests {
         // Each wait is read from its own clause: what follows it does not add to it.
         assert_eq!(wait("Try again in 2s, 90 seconds elapsed"), Some(2000));
         assert_eq!(wait("try again in 2s; 3 attempts so far"), Some(2000));
+        // A header's colon with no space after it.
+        assert_eq!(wait("Retry-After:30"), Some(30_000));
+        // A clause cut at a comma goes on when what follows is more amounts.
+        assert_eq!(wait("Please try again in 1 minute, 30 seconds."), Some(90_000));
+        assert_eq!(wait("try again in 1 hour, 2 minutes, 3 seconds"), Some(3_723_000));
     }
 
     #[test]
@@ -442,6 +469,13 @@ mod tests {
             Some("retry after 90 seconds"),
             "the wait that counts"
         );
+        // The periods of "p.m." are the time's, not a sentence's end.
+        assert_eq!(
+            reset("You've hit your usage limit. Try again at 3:04 p.m. Thanks").as_deref(),
+            Some("try again at 3:04 p.m.")
+        );
+        assert_eq!(reset("Limit reached · resets 9 a.m. (UTC)").as_deref(), Some("resets 9 a.m. (UTC)"));
+        assert_eq!(reset("Rate limit reached. Retry-After:30").as_deref(), Some("retry-after: 30"));
         assert_eq!(reset("You've hit your usage limit. Try again later."), None);
         assert_eq!(reset("rate limit exceeded"), None);
     }
@@ -496,6 +530,16 @@ mod tests {
             fault_hint("Try again in 1s · Retry after 90 seconds", Some(429))
                 .unwrap()
                 .contains("(retry after 90 seconds)")
+        );
+        // An account's limit says when it resets, whatever wait the message also names.
+        assert_eq!(
+            hint("Weekly usage limit reached. Resets 3pm. Try again in 90 seconds."),
+            "the account's usage limit was reached (resets 3pm): start again then, or use another agent"
+        );
+        let hint = fault_hint("Rate limit reached. Please try again in 1 minute, 30 seconds.", None).unwrap();
+        assert!(
+            hint.starts_with("the provider asked for a long wait (try again in 1 minute, 30 seconds):"),
+            "{hint}"
         );
         // The hint quotes the clause of the wait that counts, and that clause alone.
         let hint = fault_hint("Retry-After: 90 · Try again in 1s", Some(429)).unwrap();
