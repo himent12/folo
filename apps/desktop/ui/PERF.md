@@ -1,6 +1,7 @@
 # folo-ui: what FOLO Desktop costs, against the GPUI app
 
-Part of folo-ui ([README.md](README.md)). A record of one measurement; `apps/desktop/tools/perf.ps1` measures a
+Part of folo-ui ([README.md](README.md)). A record of two measurements (the GPUI comparison, then the 2026-11-18
+loading and frame work at the end); `apps/desktop/tools/perf.ps1` measures a
 build again.
 
 Measured 2026-11-11 on our test machine for the pull request that replaces GPUI 0.2.2 with folo-ui. "folo-ui" is
@@ -178,6 +179,75 @@ A busy synthetic screen, release build, the machine quiet.
 Both builds were made from an empty target dir one after the other, the GPUI one from `ee846c88` (without the
 baseline's patch; its release exe is 41,679,360 bytes). The exe includes the app's own inference stack (folo-vision on wgpu) in both builds: the UI is not the only GPU
 user in the binary, only the only one at run time while no model runs.
+
+## 2026-11-18: loading and frames (pull request `desktop/perf-load`)
+
+Same machine, shared with other agents, so every comparison alternates the two builds and reports the median
+over rounds with the range. "Before" is `origin/main` at `c265b78b`; for the launch, it is that build plus the
+trace points of this pull request (`FOLO_UI_TRACE=1`: `probe-none`, `server-started`, `first-lists`, `system`,
+`images` and their `-frame` lines), which change nothing else. Release builds, warm file cache.
+
+### Launch to data on screen
+
+Off screen (`FOLO_UI_OFFSCREEN=1`), 1280 x 800, nothing on port 7878, so the app starts its own `folo serve`
+(`FOLO_BIN` set to the matching build) on a data dir with two datasets (2000 and 500 images) and one run;
+eight alternating rounds, milliseconds since the process was created.
+
+| | before | after |
+| --- | ---: | ---: |
+| first frame | 31.4 (26.2-57.7) | 31.6 (25.4-34.9) |
+| probe of port 7878 says nobody is there | 547.1 (540.2-584.3) | 41.9 (30.0-47.2) |
+| `folo serve` listening | 731.7 (704.8-1350.0) | 68.8 (63.2-86.2) |
+| runs, datasets and models on screen | 751.0 (718.4-1367.5) | 88.2 (80.0-104.7) |
+| the system card (CPU, memory, GPUs) on screen | 1212.7 (1141.2-1858.5) | 379.8 (344.4-545.3) |
+| the open dataset's thumbnails all on screen | not traced | 103.2 (96.2-121.1) |
+
+Where it went:
+
+- The probe of `127.0.0.1:7878` waited for its 0.5 s connect timeout: Windows answers a connection to a closed
+  port only after its SYN retries. A loopback address is now asked first with `SIO_TCP_INITIAL_RTO` set to no
+  retries, which reports the refusal at once (`src/api/http/refused.rs`); anything else goes to the probe as
+  before.
+- `folo serve` set up sysinfo's CPU-usage counters (about 150 ms) before listening; they are now set up on a
+  thread of their own and joined at the first `/api/system`. `/api/system` itself ran the engine's
+  capabilities (a GPU device, about 280 ms), then the adapter list (about 150 ms), then the CPU sample, one
+  after the other; they now run side by side. `folo serve` listening: about 165 ms to 16 ms (six alternating
+  rounds); the first `/api/system`: about 1420 to 820 ms (noisy).
+
+### Frames (`--bench-frames 100`, headless, scale 1.5)
+
+Five alternating rounds, microseconds, the median of each round's median; "scroll" is new (40 px wheel steps
+over the window's centre, five down then five up), so it has no "before".
+
+| screen | window | full before | full after | paint before | paint after | scroll after |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| overview | 1280x800 | 837 (831-891) | 811 (771-1008) | 233 | 207 | 2061 |
+| runs | 1280x800 | 740 (721-805) | 600 (566-654) | 281 | 161 | 586 |
+| dataset | 1280x800 | 898 (876-932) | 818 (803-831) | 225 | 202 | 1962 |
+| run-live | 1280x800 | 2218 (2085-2710) | 1809 (1742-2216) | 758 | 489 | 3596 |
+| settings | 1280x800 | 1039 (955-1097) | 851 (826-924) | 206 | 192 | 1994 |
+| overview | 2560x1440 | 1093 (1055-1302) | 1008 (950-1036) | 276 | 234 | 985 |
+| runs | 2560x1440 | 899 (860-983) | 728 (673-752) | 310 | 189 | 684 |
+| dataset | 2560x1440 | 2949 (2852-3295) | 2636 (2487-2888) | 723 | 634 | 7563 |
+| run-live | 2560x1440 | 2541 (2365-2622) | 2296 (2166-2322) | 933 | 665 | 5728 |
+| settings | 2560x1440 | 1001 (915-1049) | 918 (871-970) | 235 | 221 | 2826 |
+
+Two changes made these:
+
+- Built paths are kept by their input (`ui/src/path_cache.rs`): the charts and sparklines were tessellated
+  again every frame. Alone (five rounds): run-live full frame 2145 to 1853 us at 1280 x 800 (paint 743 to
+  489), 2306 to 2025 at 2560 x 1440, scroll 5903 to 5645. With the live pump on (the chart's data changes
+  every tick) it is a tie.
+- The segment heap (`assets/folo-desktop.manifest`): a frame makes thousands of small allocations. Alone
+  (five rounds, 1280 x 800): overview 849 to 813 us, dataset 907 to 842, run-live 2387 to 2275, settings
+  1070 to 873; at 2560 x 1440 dataset 2790 to 2480 and its scroll 7828 to 7382, run-live a tie. Working set and
+  private bytes 5 s after launch equal or slightly lower; start-up unchanged.
+
+Pixels: every scenario of `--list-scenarios` (90) rendered with `--shot` by both builds at 1280 x 800 @ 1 and
+1920 x 1200 @ 1.5: 180 of 180 identical (`tools/parity.py --tol 0`). The release exe grew by 32 KB.
+
+Tried and dropped: mimalloc (frames 15 to 23 % shorter, but private bytes 44 to 136 MB); an AVX2 build of the
+renderer (a tie); starting the server's GPU device at start-up (about 25 ms on the system card).
 
 ## Not measured
 

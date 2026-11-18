@@ -44,7 +44,7 @@ Where things live, under `src/`:
 | `lib.rs`, `prelude.rs` | the module list, and the flat re-exports of everything public; the traits app code imports with `use folo_ui::prelude::*` |
 | `geometry/`, `color.rs`, `shared_string.rs`, `input_events.rs`, `keystroke.rs` | value types, events, keystrokes |
 | `opacity.rs` | opacity groups: an opacity that changes after paint without repainting the UI |
-| `style/`, `styled/`, `layout.rs`, `path_builder.rs`, `svg.rs`, `image.rs`, `easing.rs`, `assets.rs` | `Style` and its refinement, the `Styled` methods, the mapping to taffy, paths, SVG icons, images |
+| `style/`, `styled/`, `layout.rs`, `path_builder.rs`, `path_cache.rs`, `svg.rs`, `image.rs`, `easing.rs`, `assets.rs` | `Style` and its refinement, the `Styled` methods, the mapping to taffy, paths (and the built ones kept by input), SVG icons, images |
 | `app/`, `executor.rs`, `action.rs`, `keymap/`, `view.rs` | the runtime: `Application`, `App`, entities, contexts, effects, tasks, actions and key bindings, `--shot` |
 | `window/`, `interactive/`, `element.rs`, `elements/` | the window and its frame pipeline, dispatch, focus, hit testing; the elements |
 | `text/` | `TextSystem`, the line layout cache, wrapping and truncation, painting; `dwrite/` and `portable/` backends |
@@ -166,7 +166,7 @@ window frame in the mode it shows):
 | Variable | Effect |
 | --- | --- |
 | `FOLO_UI_OFFSCREEN=1` | real-window checks on a machine someone is using. Both OS backends (Win32 and winit, on any OS): the app's windows open outside every display, are never activated and take no focus (no taskbar button on Windows), and nothing is launched that would open a window of its own: the file dialogs answer with an error (one with no active window to own it opened centred on the primary display), `open_url` and `reveal_path` do nothing but say so on stderr. That refusal is one gate both backends call (`platform/services.rs`). Win32 only: any other window of the process that shows on a display (a library's dialog) is moved off it, named on stderr. winit does not move such windows, and places its own by position only: where the window system ignores a client's position (Wayland), the compositor decides where they open |
-| `FOLO_UI_TRACE=1` | prints `first-render <ms>`, `first-present <ms>` and `first-frame <ms>` to stderr (ms since the process was created) |
+| `FOLO_UI_TRACE=1` | prints `first-render <ms>`, `first-present <ms>` and `first-frame <ms>` to stderr (ms since the process was created), and the app's own points: `trace_point(label)` prints `label <ms>` at once, `trace_at_next_frame(label)` when the next frame is presented (FOLO Desktop: `probe-found` or `probe-none`, `server-started`, `first-lists`, `system`, `images`, each also with `-frame`) |
 | `FOLO_UI_TRACE=frames` | prints one line per frame: the time of each phase (build, layout, prepaint, paint, raster, present) and the primitive and hitbox counts |
 | `FOLO_UI_PLATFORM=winit` | on Windows, with the `winit` feature, use the winit backend instead of Win32 |
 

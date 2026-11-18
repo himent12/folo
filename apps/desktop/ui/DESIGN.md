@@ -87,7 +87,7 @@ module's doc comment may name its part with an `Owner tag`):
 | `platform/windows/` | Win32 backend |
 | `platform/winit/` | winit + softbuffer backend |
 | `platform/headless/` `headless_app.rs` | the headless platform and `HeadlessApp` (below) |
-| `style/` `styled/` `layout.rs` `path_builder.rs` `assets.rs` `svg.rs` `image.rs` `easing.rs` | `Style`, `StyleRefinement`, `Styled`, `TextStyle`, taffy mapping, `PathBuilder` / `Path`, `AssetSource`, SVG to mask, `RenderImage` |
+| `style/` `styled/` `layout.rs` `path_builder.rs` `path_cache.rs` `assets.rs` `svg.rs` `image.rs` `easing.rs` | `Style`, `StyleRefinement`, `Styled`, `TextStyle`, taffy mapping, `PathBuilder` / `Path` (and the built paths kept by input), `AssetSource`, SVG to mask, `RenderImage` |
 | `executor.rs` `action.rs` `keymap/` `app/` `view.rs` | the runtime: `Application`, `App`, entities, contexts, effects, tasks, actions, key bindings, `--shot` |
 | `window/` `interactive/` `element.rs` `elements/` | the window, its frame pipeline and dispatch, the elements |
 
@@ -161,10 +161,10 @@ Masks and images are identified by a process-unique `id: u64` assigned at creati
 pixel bytes. `Scene::clear()` keeps capacity. Element opacity is applied to colours at paint time (as GPUI),
 except inside an opacity group (below), where it is applied right after paint by the same multiplications.
 
-## Frames: opacity groups and layout reuse
+## Frames: opacity groups, layout reuse and built paths
 
 A full frame is GPUI's pipeline (`window/draw.rs`): render the root view, lay it out with taffy, prepaint,
-paint into a `Scene`, then rasterize and present the damage. Two things keep it cheap without changing a pixel:
+paint into a `Scene`, then rasterize and present the damage. Three things keep it cheap without changing a pixel:
 
 - **Opacity groups** (`ui/src/opacity.rs`, `window/paint_animation.rs`, `elements/animation.rs`). An element
   whose only animated property is its opacity uses `AnimationExt::with_opacity_animation` (the app's breathing
@@ -193,6 +193,12 @@ paint into a `Scene`, then rasterize and present the damage. Two things keep it 
   forgets everything and is laid out from scratch, the requests it already answered included. Every result,
   every measure call and every final position is therefore exactly what laying out a fresh tree gives
   (GPUI's behaviour); only the cost differs. Nodes measured without a key are never reused.
+- **Built paths** (`path_cache.rs`). `PathBuilder::build` (lyon's tessellation) is a pure function of the
+  builder, so a builder equal word for word to one built recently (its contours, transform, dashes and options,
+  every float compared by its bits) gets a copy of that result instead of being tessellated again: the live run
+  page's chart lines were about a quarter of its full frame. Per thread, 8 MB of keys and triangles at most,
+  the least recently used dropped first; an error is never kept. Tests: `path_cache.rs` (a hit equals a fresh
+  build, any change in the input builds anew, the budget holds).
 
 ## Renderer contract (`raster`)
 

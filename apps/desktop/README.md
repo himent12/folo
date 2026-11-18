@@ -28,7 +28,7 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/charts/` | canvas charts: line (raw + smoothed, area, markers, hover cursor), sparkline, histogram |
 | `src/viz.rs` | images with detection boxes and label chips (the box spec of design/README.md) |
 | `src/store/` | client state: fetched values (`Load<T>`), live run data from the SSE events, the decoded-image cache, the "best model" rule |
-| `src/api/` | the `Backend` trait (`mod.rs`) and the wire types (`types.rs`, from `crates/folo-api`); `http/`, the client of `folo serve` (transport, SSE streams, images, inference, and `server.rs`, which starts a local `folo serve`); `mock/` and `mock_bench/`, the built-in demo |
+| `src/api/` | the `Backend` trait (`mod.rs`) and the wire types (`types.rs`, from `crates/folo-api`); `http/`, the client of `folo serve` (transport, SSE streams, images, inference, `server.rs`, which starts a local `folo serve`, and `refused.rs`, which tells a closed port on this machine at once); `mock/` and `mock_bench/`, the built-in demo |
 | `src/bench/` | the state and actions behind the Benchmarks screens, and the open benchmark's event stream |
 | `src/cloud.rs` | cloud compute: the state and rules Settings › Cloud, New run and a cloud run's page share |
 | `src/local.rs` | Playground's local inference: folo-vision's predictor in this process, on folo-gpu or the CPU |
@@ -38,7 +38,7 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/scenario.rs` | `--scenario` states for screenshots (`ALL` is the review set) |
 | `src/synth.rs` | procedural "shapes" scenes behind the demo's images |
 | `build.rs` | generates the token tables from `design/tokens.json` (Design tokens, below), embeds `assets/icons/*.svg`, and on MSVC links `assets/folo.ico` and `assets/folo-desktop.manifest` into the executable |
-| `assets/` | the SVG icons (`LICENSE-lucide.txt` for the Lucide ones), the app icon, the application manifest (DPI awareness, Common Controls 6) |
+| `assets/` | the SVG icons (`LICENSE-lucide.txt` for the Lucide ones), the app icon, the application manifest (DPI awareness, Common Controls 6, the segment heap) |
 | `ui/` | folo-ui, the UI framework crate ([ui/README.md](ui/README.md)) |
 | `tools/` | developer scripts (Tools, below) |
 | `notes/` | the design review record: `REVIEW_RUBRIC.md` and `HILLCLIMB.md` |
@@ -271,8 +271,8 @@ on your desktop take the request and open their window on your screen.
   every window of a process on a display, rectangles, launch with extra environment, the DIB capture).
 - `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON (`ui/PERF.md` has them for
   this build and GPUI's).
-- `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase)
-  over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts. Its default
+- `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase, for
+  full rebuilds, animation ticks and 40 px wheel scrolls over the window's centre) over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts. Its default
   executable is `$CARGO_TARGET_DIR/release/folo-desktop.exe`; pass another as the first argument.
 - `cross-check.sh` (bash, any host): type-checks and lints folo-ui for Linux and both macOS targets (CI runs it on
   Linux).
@@ -303,7 +303,8 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   cloud scenarios: `+cloud`, `cloud-…`, `run-cloud+…`); `+empty` scenarios have no connection and `+trouble` ones
   a revoked key and a termination the provider hasn't confirmed.
 
-By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`; on Windows a closed port on this
+machine is told at once, not after the probe's 0.5 s timeout); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
 bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
 window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If that local server stops answering (the
