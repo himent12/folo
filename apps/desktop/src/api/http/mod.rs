@@ -368,7 +368,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for resp in responses {
+            let mut responses = responses.into_iter();
+            let mut resp = responses.next();
+            while let Some(answer) = &resp {
                 let Ok((mut sock, _)) = listener.accept() else { return };
                 // The whole request, body included (answering before a POST's body is read would
                 // reset the connection under the client).
@@ -390,10 +392,16 @@ mod tests {
                         break;
                     }
                 }
+                // A connection closed before sending anything is no request (the probe's check that a
+                // port on this machine is not refused, `refused.rs`): it gets no answer of the list.
+                if req.is_empty() {
+                    continue;
+                }
                 let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
-                let _ = sock.write_all(&resp);
+                let _ = sock.write_all(answer);
                 let _ = sock.flush();
                 // Dropping the socket closes the connection (cutting a short body).
+                resp = responses.next();
             }
         });
         (format!("http://{addr}"), rx)
