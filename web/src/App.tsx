@@ -7,6 +7,7 @@
 // to load shows an error with Retry (ScreenError), and the screen once any later try brings it in.
 import { computed, createRoot, css, effect, getOwner, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
 import { hub } from '$lib/api/index';
+import { applyTheme } from '$lib/design/applyTheme';
 import { prefs } from '$lib/prefs';
 import { router, type Route } from '$lib/router';
 import CommandPalette from '$lib/shell/CommandPalette';
@@ -43,9 +44,9 @@ export default function App(props: AppProps) {
   const paletteOpen = signal(false);
   const shortcutsOpen = signal(false);
 
-  effect(() => {
-    document.documentElement.dataset.theme = prefs.resolvedTheme;
-  });
+  // The theme (design/THEMES.md): `data-theme` the mode, `data-theme-id` the built-in palette's block in tokens.css,
+  // and a custom theme's own colours as inline properties over it, the last theme's cleared first.
+  effect(() => applyTheme(document.documentElement, prefs.activeTheme));
 
   onMount(() => {
     void hub.connect();

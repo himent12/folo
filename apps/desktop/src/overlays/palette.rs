@@ -74,7 +74,8 @@ pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
 }
 
 impl FoloApp {
-    fn palette_items(&self) -> Vec<PaletteItem> {
+    /// Every command; `shown` is the theme on screen (its command says so).
+    fn palette_items(&self, shown: crate::theme::ThemeId) -> Vec<PaletteItem> {
         let mut items = Vec::new();
         let nav: [(&str, &'static str, Route, &'static [&'static str]); 7] = [
             ("Overview", "icons/layout-dashboard.svg", Route::Overview, &["Ctrl", "1"]),
@@ -217,17 +218,45 @@ impl FoloApp {
                 });
             }
         }
+        // One command per theme (custom ones too), as Settings' selects pick them: the theme becomes
+        // its mode's, and the mode switches to it unless it is System. Last, and for a query only
+        // (`filtered_palette`): "theme" finds them.
+        for e in self.themes.entries() {
+            let id = e.id.clone();
+            let dark = e.mode == crate::theme::Mode::Dark;
+            let mut detail = if dark { "dark theme" } else { "light theme" }.to_string();
+            if e.custom {
+                detail.insert_str(0, "custom ");
+            }
+            if shown.as_str() == e.id {
+                detail.push_str(" · current");
+            }
+            items.push(PaletteItem {
+                group: "Themes",
+                icon: if dark { "icons/moon.svg" } else { "icons/sun.svg" },
+                title: format!("Theme: {}", e.name),
+                detail,
+                keys: &[],
+                action: act(move |this, _, cx| this.pick_theme(&id, cx)),
+            });
+        }
         items
     }
 
-    fn filtered_palette(&self) -> Vec<PaletteItem> {
+    fn filtered_palette(&self, shown: crate::theme::ThemeId) -> Vec<PaletteItem> {
         let q = self.palette.as_ref().map(|p| p.query.trim().to_string()).unwrap_or_default();
-        rank(&q, self.palette_items())
+        let mut items = self.palette_items(shown);
+        // The theme commands are offered for a query only, as in Studio (design/THEMES.md): seven or
+        // more of them would crowd the empty palette.
+        if q.is_empty() {
+            items.retain(|it| it.group != "Themes");
+        }
+        rank(&q, items)
     }
 
     pub(super) fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let items = self.filtered_palette();
+        let items = self.filtered_palette(t.id);
         let n = items.len();
         let rows: Vec<(&'static str, String)> = items.iter().map(|it| (it.group, it.title.clone())).collect();
         if let Some(p) = self.palette.as_mut()
@@ -526,5 +555,58 @@ mod tests {
         let groups: Vec<&str> = ranked.iter().map(|i| i.group).collect();
         assert_eq!(&groups[..3], ["Go to", "Runs", "Runs"], "grouped, the best group first");
         assert_eq!(groups.last(), Some(&"Actions"));
+    }
+}
+
+#[cfg(test)]
+mod theme_commands {
+    use crate::app::tests::{drive, open};
+    use crate::theme::{ModePref, theme};
+
+    /// "Theme: <name>" for every theme, custom ones too, picking it as Settings does; the toggle stays.
+    #[test]
+    fn every_theme_has_a_command() {
+        let (mut app, window) = open();
+        let titles = drive(&mut app, window, |this, _, cx| {
+            let custom = crate::theme::custom::parse(
+                r#"{"folo_theme": 1, "id": "sepia-2", "name": "Sepia", "mode": "light", "base": "paper"}"#,
+            )
+            .unwrap();
+            this.themes = crate::theme::Catalog::with_custom(vec![custom]);
+            let items = super::rank("theme", this.palette_items(theme(cx).id));
+            items.into_iter().map(|i| (i.title, i.detail)).collect::<Vec<_>>()
+        });
+        let names: Vec<&str> = titles.iter().filter_map(|(t, _)| t.strip_prefix("Theme: ")).collect();
+        assert_eq!(
+            names,
+            [
+                "Dark",
+                "Midnight",
+                "Dim",
+                "High contrast dark",
+                "Light",
+                "Paper",
+                "High contrast light",
+                "Sepia"
+            ]
+        );
+        assert!(titles.iter().any(|(t, _)| t == "Switch to light theme"), "the toggle stays: {titles:?}");
+        assert!(titles.iter().any(|(t, d)| t == "Theme: Dark" && d.ends_with("· current")));
+        assert!(titles.iter().any(|(t, d)| t == "Theme: Sepia" && d == "custom light theme"));
+        // The empty palette doesn't offer them (a query does, as in Studio).
+        let unqueried = drive(&mut app, window, |this, _, cx| {
+            this.filtered_palette(theme(cx).id).iter().filter(|i| i.group == "Themes").count()
+        });
+        assert_eq!(unqueried, 0);
+        // Running one: Sepia's mode with it in the light slot.
+        drive(&mut app, window, |this, w, cx| {
+            let items = this.palette_items(theme(cx).id);
+            let sepia = items.into_iter().find(|i| i.title == "Theme: Sepia").unwrap();
+            (sepia.action)(this, w, cx);
+        });
+        let now = drive(&mut app, window, |this, _, cx| {
+            (theme(cx).id.as_str().to_string(), this.theme_prefs.mode, this.theme_prefs.light.clone())
+        });
+        assert_eq!(now, ("sepia-2".into(), ModePref::Light, "sepia-2".into()));
     }
 }

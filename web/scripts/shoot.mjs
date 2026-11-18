@@ -16,14 +16,15 @@
 // fonts loaded, animations frozen at the shot, scenes in parallel, a normalized DOM (`<shot>.dom.txt`) next to each
 // shot and `shoot.json` (shots, failures). --out <dir> writes there instead of shots/<round>; --base <url> uses a
 // running server; --prod shoots the production build (as --qa does); --jobs N states at once (--qa, --exact);
-// --only a,b takes a comma list.
+// --only a,b takes a comma list. --theme <id> shoots in that colour theme only (design/THEMES.md; a built-in id from
+// tokens.json): each scene in the theme's mode, if the scene is shot in that mode, named `<scene>--<id>--<viewport>`.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
 // (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
 // Phone states run under a coarse pointer (touch: 44 px targets, 16 px field text), where controls grow and rows that
 // fit with a mouse can collide. Each state gets its scene's setup; nothing is captured or saved.
 import { createServer, preview } from 'vite';
 import { chromium } from 'playwright-core';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, EOL } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +35,7 @@ import { buildApps } from './entries.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 /** Flags that take a value: their values are not the round's name. */
-const VALUED = ['--only', '--out', '--base', '--jobs'];
+const VALUED = ['--only', '--out', '--base', '--jobs', '--theme'];
 const opt = (/** @type {string} */ flag) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : undefined;
@@ -45,6 +46,14 @@ const onlyParts = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : 
 const picked = (/** @type {string} */ name) => !onlyParts.length || onlyParts.some((p) => name.includes(p));
 const qa = args.includes('--qa');
 const exact = args.includes('--exact');
+/** `--theme <id>`: the built-in theme to shoot in, with its mode; none shoots each scene's modes in their defaults. */
+const themeId = opt('--theme');
+const themeMode = (() => {
+  if (!themeId) return undefined;
+  const t = JSON.parse(readFileSync(resolve(root, '..', 'design', 'tokens.json'), 'utf8')).themes?.[themeId];
+  if (!t || themeId.startsWith('$')) throw new Error(`--theme ${themeId}: not a built-in theme of design/tokens.json`);
+  return /** @type {'dark' | 'light'} */ (t.mode);
+})();
 /** The app's page. */
 const ENTRY = '/';
 /**
@@ -671,7 +680,7 @@ const overflows = [];
  * @returns {Promise<boolean>} whether the page showed a phone section picker
  */
 async function shoot(scene, theme, vp, touch = false) {
-  const name = `${scene.name}--${theme}--${vp}${touch ? '+touch' : ''}`;
+  const name = `${scene.name}--${themeId ?? theme}--${vp}${touch ? '+touch' : ''}`;
   if (missing) {
     failed[name] = missing;
     return false;
@@ -692,10 +701,15 @@ async function shoot(scene, theme, vp, touch = false) {
     // moves only by the scenes' runFor, the same on every machine. --exact too: a scene's shots then match.
     await page.clock.install({ time: paused ? FIXED_NOW.getTime() - 3_600_000 : FIXED_NOW });
     if (paused) await page.clock.pauseAt(FIXED_NOW);
-    await page.addInitScript((t) => {
-      localStorage.setItem('folo.theme', t);
-      localStorage.setItem('folo.shoot', '1');
-    }, theme);
+    await page.addInitScript(
+      ([t, id]) => {
+        localStorage.setItem('folo.theme', t);
+        localStorage.setItem('folo.shoot', '1');
+        // --theme: that mode's theme (prefs.ts darkTheme / lightTheme), read by the first-paint script and the app.
+        if (id) localStorage.setItem('folo.prefs', JSON.stringify({ theme: t, [`${t}Theme`]: id }));
+      },
+      [theme, themeId ?? ''],
+    );
     // --exact: the mock's latency jitter (Math.random, src/lib/api/mock/server.ts) decides how many of the scenes'
     // 250 ms clock steps a wait takes, so the live run's progress drifts between shoots. A constant draw gives every
     // call its nominal latency, whatever order an app makes its calls in.
@@ -799,12 +813,14 @@ const qaJobs = [];
 const shotJobs = [];
 try {
   for (const scene of scenes) {
-    const themes = scene.themes ?? ['dark', 'light'];
+    const themes = (scene.themes ?? ['dark', 'light']).filter((m) => !themeMode || m === themeMode);
+    // --theme of the other mode leaves a scene made for one mode nothing to shoot (a dark-only scene under Paper).
+    if (!themes.length) continue;
     const viewports = scene.viewports ?? ['desktop', 'mobile'];
     if (!qa) {
       for (const theme of themes) {
         for (const vp of viewports) {
-          if (picked(`${scene.name}--${theme}--${vp}`)) shotJobs.push(() => shoot(scene, theme, vp).then(() => {}));
+          if (picked(`${scene.name}--${themeId ?? theme}--${vp}`)) shotJobs.push(() => shoot(scene, theme, vp).then(() => {}));
         }
       }
       continue;
@@ -812,7 +828,7 @@ try {
     // --qa: the tablet and phone sizes in dark (or the one theme a scene is made for), and light too behind a picker.
     const first = themes.includes('dark') ? 'dark' : themes[0];
     for (const vp of viewports.filter((v) => qaSizes.includes(v))) {
-      if (!picked(`${scene.name}--${first}--${vp}`)) continue;
+      if (!picked(`${scene.name}--${themeId ?? first}--${vp}`)) continue;
       // A phone is a touch screen, and touch is the stricter case, so a phone state is checked once, under a coarse
       // pointer. A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets
       // `touch: false` and keeps the mouse.

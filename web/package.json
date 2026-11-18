@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tokens": "node scripts/tokens.mjs",
-    "check": "node scripts/tokens.mjs --check && node ../design/contrast.mjs && node framework/tools/icons.mjs && tsc -p tsconfig.json && tsc -p tsconfig.node.json && node scripts/lint-spacing.mjs",
+    "check": "node scripts/tokens.mjs --check && node ../design/contrast.mjs && node --test ../design/contrast.test.mjs && node framework/tools/icons.mjs && tsc -p tsconfig.json && tsc -p tsconfig.node.json && node scripts/lint-spacing.mjs",
     "test": "vitest run",
     "shoot": "node scripts/shoot.mjs",
     "smoke": "node scripts/smoke.mjs",

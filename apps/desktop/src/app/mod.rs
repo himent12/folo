@@ -31,12 +31,18 @@ mod render;
 mod run_charts_tests;
 #[cfg(test)]
 mod run_page_tests;
+#[cfg(test)]
+mod select_driving;
+#[cfg(test)]
+mod select_tests;
 mod sidebar;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 mod text_input_tests;
+#[cfg(test)]
+mod theme_tests;
 mod titlebar;
 #[cfg(test)]
 mod unavailable_tests;
@@ -64,6 +70,7 @@ pub use forms::{
     retry_batch, synth_errors,
 };
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
+pub use preferences::{follow_system_appearance, is_dark};
 pub use sidebar::logo;
 
 actions!(
@@ -296,7 +303,18 @@ pub struct FoloApp {
     pub store: Store,
     pub route: Route,
     pub history: Vec<Route>,
+    /// The mode shown now (the theme's; with System, the OS's).
     pub mode: Mode,
+    /// The user's theme choice: the mode (Dark, Light, System) and each mode's theme.
+    pub theme_prefs: crate::theme::ThemePrefs,
+    /// The themes to pick from: built-in, then custom (`<FOLO_HOME or ~/.folo>/themes`).
+    pub themes: crate::theme::Catalog,
+    /// Whether the OS appearance is dark now (System follows it).
+    pub system_dark: bool,
+    /// The custom themes folder is being read again (Reload).
+    pub themes_loading: bool,
+    /// The mode the window's system frame was last set to.
+    frame_mode: Option<Mode>,
     pub frozen: bool,
     /// Keep every fetch pending (loading-state screenshots).
     pub hold_loading: bool,
@@ -325,6 +343,9 @@ pub struct FoloApp {
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
     pub ds_class: Option<u32>,
+    /// The dataset whose page was open last: the class filter belongs to it, so opening another
+    /// dataset clears it (its class indices mean other classes there, or none).
+    pub ds_class_of: Option<String>,
     /// Show only images without labels (from the Empty images tile).
     pub ds_empty_only: bool,
     pub ds_boxes: bool,
@@ -619,6 +640,11 @@ impl FoloApp {
             route: Route::Overview,
             history: Vec::new(),
             mode: theme(cx).mode,
+            theme_prefs: crate::theme::ThemePrefs::default(),
+            themes: crate::theme::Catalog::builtin(),
+            system_dark: preferences::is_dark(window.appearance()),
+            themes_loading: false,
+            frame_mode: None,
             frozen,
             hold_loading: false,
             state_path: None,
@@ -635,6 +661,7 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
+            ds_class_of: None,
             ds_empty_only: false,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.

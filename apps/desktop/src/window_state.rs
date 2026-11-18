@@ -1,5 +1,5 @@
 //! What the app remembers between launches: the window's size, position and maximized / full-screen
-//! state, and the theme. One small JSON file, `<FOLO_HOME or ~/.folo>/desktop.json`
+//! state, and the theme (the mode and each mode's theme). One small JSON file, `<FOLO_HOME or ~/.folo>/desktop.json`
 //! (`$FOLO_DESKTOP_STATE` names another, as `tools/window-check.ps1` does).
 //!
 //! Screenshots stay deterministic: with `--scenario`, `--width` or `--height` nothing is read or
@@ -11,13 +11,21 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::theme::{ModePref, ThemePrefs};
+
 /// The file's contents. Every field is optional, so an older or newer file still loads.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct State {
     pub window: Option<Placement>,
-    /// `"dark"` or `"light"`.
+    /// The mode: `"dark"`, `"light"` or `"system"` (design/THEMES.md; older builds wrote the first two).
     pub theme: Option<String>,
+    /// The theme Dark uses (a theme id, kept as is when no such theme is installed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark_theme: Option<String>,
+    /// The theme Light uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_theme: Option<String>,
     /// Whether connecting starts a local `folo serve` when none is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_server: Option<bool>,
@@ -122,8 +130,30 @@ fn parse(bytes: &[u8]) -> State {
     State {
         window,
         theme: field(&v, "theme"),
+        dark_theme: field(&v, "dark_theme"),
+        light_theme: field(&v, "light_theme"),
         spawn_server: field(&v, "spawn_server"),
         reduce_motion: field(&v, "reduce_motion"),
+    }
+}
+
+impl State {
+    /// The theme choice saved here: the mode (Dark when missing or unknown) and each mode's theme
+    /// (its default when missing; an id no theme has is kept, and shows the default).
+    pub fn theme_prefs(&self) -> ThemePrefs {
+        let d = ThemePrefs::default();
+        ThemePrefs {
+            mode: self.theme.as_deref().and_then(ModePref::parse).unwrap_or(d.mode),
+            dark: self.dark_theme.clone().unwrap_or(d.dark),
+            light: self.light_theme.clone().unwrap_or(d.light),
+        }
+    }
+
+    /// Keeps `prefs` in this state.
+    pub fn set_theme_prefs(&mut self, prefs: &ThemePrefs) {
+        self.theme = Some(prefs.mode.as_str().into());
+        self.dark_theme = Some(prefs.dark.clone());
+        self.light_theme = Some(prefs.light.clone());
     }
 }
 
@@ -255,15 +285,30 @@ mod tests {
                 mode: WindowMode::Maximized,
                 display: Some("display-uuid".into()),
             }),
-            theme: Some("light".into()),
+            theme: Some("system".into()),
+            dark_theme: Some("midnight".into()),
+            // A custom theme not installed now: kept.
+            light_theme: Some("gone-custom".into()),
             spawn_server: Some(false),
             reduce_motion: Some(true),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
-        // A file written before Reduce motion was kept: it follows the OS.
-        std::fs::write(&path, r#"{"theme":"dark","spawn_server":true}"#).unwrap();
+        let prefs = load(&path).theme_prefs();
+        assert_eq!(
+            (prefs.mode, prefs.dark.as_str(), prefs.light.as_str()),
+            (ModePref::System, "midnight", "gone-custom")
+        );
+        let mut again = State::default();
+        again.set_theme_prefs(&prefs);
+        assert_eq!(again.theme_prefs(), prefs);
+        // A file written before Reduce motion was kept: it follows the OS. Before themes: the mode
+        // reads the same, each mode's theme is its default.
+        std::fs::write(&path, r#"{"theme":"light","spawn_server":true}"#).unwrap();
         assert_eq!(load(&path).reduce_motion, None);
+        assert_eq!(load(&path).theme_prefs(), ThemePrefs { mode: ModePref::Light, ..ThemePrefs::default() });
+        std::fs::write(&path, r#"{"theme":"sideways","dark_theme":7}"#).unwrap();
+        assert_eq!(load(&path).theme_prefs(), ThemePrefs::default(), "unknown values read as the defaults");
         // Saving again replaces the file and leaves no temporary file behind.
         let state2 = State { theme: Some("dark".into()), ..state.clone() };
         save(&path, &state2).unwrap();

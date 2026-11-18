@@ -26,6 +26,11 @@ impl App {
         self.platform.displays()
     }
 
+    /// The system's light / dark appearance (the headless platform: dark).
+    pub fn window_appearance(&self) -> crate::WindowAppearance {
+        self.platform.window_appearance()
+    }
+
     /// The primary display.
     pub fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         self.platform.primary_display()

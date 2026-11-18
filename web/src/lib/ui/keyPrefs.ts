@@ -15,7 +15,8 @@ function load(): boolean {
 }
 
 class KeyPrefs {
-  #on = signal(typeof localStorage === 'undefined' ? true : load());
+  // load() reads inside a try: no `typeof localStorage` probe, which throws itself on an opaque origin.
+  #on = signal(load());
 
   constructor() {
     // Switched in another tab: here too (shell F2).

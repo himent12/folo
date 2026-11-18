@@ -11,7 +11,7 @@ use folo_ui::{
 use crate::app::{FoloApp, ServerMode, act};
 use crate::screens::page_header;
 use crate::store::Load;
-use crate::theme::{Mode, radius, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 
 /// The settings column's widest: wide enough not to read as a narrow form, close enough that a
@@ -33,6 +33,37 @@ const GO_TO_KEYS: [(&str, &[&str]); 9] = [
     ("Previous region", &["Shift", "F6"]),
 ];
 
+/// One Settings row (UNIFIED.md §4): the name and its one-line description on the left (they take the
+/// slack and wrap), the control on the right edge; 56 px high, more when the description wraps.
+pub(super) fn settings_row(t: &Theme, title: &str, help: AnyElement, control: AnyElement) -> folo_ui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(24.))
+        .px(px(16.))
+        // 56 px rows (DIRECTION); a row whose description wraps grows.
+        .min_h(px(56.))
+        .py(px(8.))
+        .border_b_1()
+        .border_color(t.line_subtle)
+        // Label and description take the slack (and wrap); every control ends on the same edge.
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .min_w_0()
+                .child(
+                    text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()),
+                )
+                .child(help),
+        )
+        .child(div().flex_none().flex().justify_end().child(control))
+}
+
 impl FoloApp {
     pub fn settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -48,36 +79,7 @@ impl FoloApp {
         .w_full()
         .max_w(px(COLUMN_MAX))
         .mx_auto();
-        let row = |title: &str, help: AnyElement, control: AnyElement| {
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(24.))
-                .px(px(16.))
-                // 56 px rows (DIRECTION); a row whose description wraps grows.
-                .min_h(px(56.))
-                .py(px(8.))
-                .border_b_1()
-                .border_color(t.line_subtle)
-                // Label and description take the slack (and wrap); every control ends on the same edge.
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .min_w_0()
-                        .child(
-                            text(ty::BASE, t.text_primary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(title.to_string()),
-                        )
-                        .child(help),
-                )
-                .child(div().flex_none().flex().justify_end().child(control))
-        };
+        let row = |title: &str, help: AnyElement, control: AnyElement| settings_row(&t, title, help, control);
         // Command names render as code chips, as on Overview.
         let help = |s: &str| crate::ui::rich(&t, ty::SM, t.text_tertiary, s).text_left().into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
@@ -207,47 +209,7 @@ impl FoloApp {
                 spawn.into_any_element(),
             ));
 
-        let theme_sel = if self.mode == Mode::Dark { 0 } else { 1 };
-        let theme_seg = self.segmented(
-            "set-theme",
-            &["Dark", "Light"],
-            theme_sel,
-            window,
-            cx,
-            Rc::new(|this, i, _, cx| this.set_mode(if i == 0 { Mode::Dark } else { Mode::Light }, cx)),
-        );
-        let motion = self.switch(
-            "set-motion",
-            self.reduce_motion,
-            window,
-            cx,
-            act(|this, _, cx| {
-                this.reduce_motion = !this.reduce_motion;
-                set_reduce_motion(this.reduce_motion);
-                cx.refresh_windows();
-            }),
-        );
-        let appearance = panel(&t)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(panel_header(&t, "Appearance"))
-            .child(row(
-                "Theme",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(shortcut(&t, &["Ctrl", "Shift", "L"]))
-                    .child(text(ty::SM, t.text_tertiary).child("switches anywhere"))
-                    .into_any_element(),
-                theme_seg.into_any_element(),
-            ))
-            .child(row(
-                "Reduce motion",
-                help("Turn off pulsing live indicators and transitions."),
-                motion.into_any_element(),
-            ));
+        let appearance = self.appearance_panel(window, cx);
 
         let actions: [(&str, &[&str]); 8] = [
             ("Command palette", &["Ctrl", "K"]),

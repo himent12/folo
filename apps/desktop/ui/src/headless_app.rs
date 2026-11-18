@@ -221,4 +221,11 @@ impl HeadlessApp {
     pub fn windows(&self) -> Vec<AnyWindowHandle> {
         self.app.borrow().windows()
     }
+
+    /// The system turns `appearance` (light or dark), delivered to every window through the
+    /// platform's appearance callback as a real OS change is, then `run_until_idle`.
+    pub fn set_system_appearance(&mut self, appearance: crate::WindowAppearance) {
+        self.platform.set_appearance(appearance);
+        self.run_until_idle();
+    }
 }

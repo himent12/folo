@@ -1,0 +1,17 @@
+{
+  "$comment": "Example custom theme (design/THEMES.md, Custom themes): Midnight on a darker, less blue ground, with warm primary text and the sky series (line and swatch; arrays replace whole) shifted toward cyan. Check it with `node design/contrast.mjs --theme design/themes/night-shift.json`.",
+  "folo_theme": 1,
+  "id": "night-shift",
+  "name": "Night shift",
+  "mode": "dark",
+  "base": "midnight",
+  "description": "Midnight, darker and calmer, with warm text for late sessions.",
+  "color": {
+    "bg": { "app": "#0B0D12", "panel": "#11141B" },
+    "text": { "primary": "#E6E2DA", "secondary": "#A3AAB6" },
+    "chart": {
+      "series": ["#4FD1E8", "#F2C14E", "#E879F9", "#2DD4BF", "#A78BFA", "#FB923C"],
+      "fill": ["#4FD1E8", "#F2C14E", "#E879F9", "#2DD4BF", "#A78BFA", "#FB923C"]
+    }
+  }
+}

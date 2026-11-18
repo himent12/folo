@@ -70,6 +70,8 @@ pub struct HeadlessPlatform {
     pub(crate) prompt_answer: RefCell<Option<Vec<PathBuf>>>,
     /// URLs passed to `open_url` and paths to `reveal_path`, for tests to assert on.
     pub(crate) opened: RefCell<Vec<String>>,
+    /// The system's light / dark appearance (dark until a test changes it: `set_appearance`).
+    pub(crate) appearance: Rc<Cell<WindowAppearance>>,
 }
 
 impl HeadlessPlatform {
@@ -87,7 +89,33 @@ impl HeadlessPlatform {
             quit_requested: Cell::new(false),
             prompt_answer: RefCell::new(None),
             opened: RefCell::new(Vec::new()),
+            appearance: Rc::new(Cell::new(WindowAppearance::Dark)),
         }
+    }
+
+    /// Changes the system's appearance as the OS does (Win32's `WM_SETTINGCHANGE`
+    /// "ImmersiveColorSet"): when it differs, every window runs the callback the core registered with
+    /// `on_appearance_changed`, so a test drives the same delivery a real window does. The harness's
+    /// `HeadlessApp::set_system_appearance` also runs what that schedules.
+    pub fn set_appearance(&self, appearance: WindowAppearance) {
+        if self.appearance.replace(appearance) == appearance {
+            return;
+        }
+        let windows = self.windows.borrow().clone();
+        for window in windows {
+            // Out of the cell while it runs (it may register a new one), as Win32's `with_callback`.
+            let callback = window.callbacks.borrow_mut().appearance_changed.take();
+            if let Some(mut callback) = callback {
+                callback();
+                window.callbacks.borrow_mut().appearance_changed.get_or_insert(callback);
+            }
+        }
+    }
+
+    /// Each window's frame appearance as the app last set it (`set_frame_appearance`; `None`:
+    /// following the system), in the order the windows were opened.
+    pub fn frame_appearances(&self) -> Vec<Option<WindowAppearance>> {
+        self.windows.borrow().iter().map(|w| w.frame_appearance.get()).collect()
     }
 
     /// A platform for `options`, with the text backend it names. Panics when that backend is not built
@@ -157,13 +185,15 @@ impl Platform for HeadlessPlatform {
             title: RefCell::new(String::new()),
             maximized: Cell::new(false),
             fullscreen: Cell::new(false),
+            appearance: self.appearance.clone(),
+            frame_appearance: Cell::new(None),
         });
         self.windows.borrow_mut().push(state.clone());
         Ok(Box::new(HeadlessWindow { state, display: self.display.clone() }))
     }
 
     fn window_appearance(&self) -> WindowAppearance {
-        WindowAppearance::Dark
+        self.appearance.get()
     }
 
     fn open_url(&self, url: &str) {
@@ -220,6 +250,8 @@ pub(crate) struct HeadlessCallbacks {
     pub(crate) close: Option<Box<dyn FnOnce()>>,
     /// `on_hit_test_window_control`.
     pub(crate) hit_test_window_control: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
+    /// `on_appearance_changed`.
+    pub(crate) appearance_changed: Option<Box<dyn FnMut()>>,
 }
 
 /// State shared between a `HeadlessWindow` and the harness.
@@ -248,6 +280,10 @@ pub(crate) struct HeadlessWindowState {
     pub(crate) maximized: Cell<bool>,
     /// Full screen flag.
     pub(crate) fullscreen: Cell<bool>,
+    /// The system's appearance (the platform's).
+    pub(crate) appearance: Rc<Cell<WindowAppearance>>,
+    /// What the app set with `set_frame_appearance`.
+    pub(crate) frame_appearance: Cell<Option<WindowAppearance>>,
 }
 
 /// A headless window.
@@ -284,7 +320,7 @@ impl PlatformWindow for HeadlessWindow {
     }
 
     fn appearance(&self) -> WindowAppearance {
-        WindowAppearance::Dark
+        self.state.appearance.get()
     }
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
@@ -371,7 +407,13 @@ impl PlatformWindow for HeadlessWindow {
         self.state.callbacks.borrow_mut().close = Some(callback);
     }
 
-    fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
+    fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
+        self.state.callbacks.borrow_mut().appearance_changed = Some(callback);
+    }
+
+    fn set_frame_appearance(&self, appearance: Option<WindowAppearance>) {
+        self.state.frame_appearance.set(appearance);
+    }
 
     fn present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
         // Only the damage changed since the last present (as a real backend copies it); a new size copies all.

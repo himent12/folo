@@ -49,7 +49,9 @@ folo-vision = { path = "../../crates/folo-vision" }
 ureq = { version = "3", features = ["json"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: decimal numbers round correctly, as JavaScript's do, so a custom theme's numbers (and its range
+# limit) read the same in Desktop as in Studio (design/THEMES.md, Custom themes; no new crate, only slower float parsing).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Same major as folo-ui's own `image` dependency, so RenderImage frames are the same type.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
@@ -65,7 +67,8 @@ folo-test-support = { path = "../../crates/folo-test-support" }
 folo-cloud = { path = "../../crates/folo-cloud" }
 
 [build-dependencies]
-serde_json = "1"
+# `preserve_order`: the themes are listed in tokens.json's order (no new crate: the app's serde_json has it already).
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -72,6 +72,8 @@ pub const ALL: &[&str] = &[
     "playground+canvas-focus",
     "settings",
     "settings+reference",
+    "settings+bottom",
+    "settings+bottom+light",
     "benchmarks",
     "benchmarks+light",
     "benchmarks+empty",
@@ -286,6 +288,10 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             if s.has("reference") {
                 app.tp_all = true;
                 app.tp_view = 1;
+            }
+            // The page's end: Appearance (the theme rows, custom themes), Keyboard and About.
+            if s.has("bottom") {
+                app.scroll_end_pending = 60;
             }
         }
         // Settings › Cloud's dialogs, over the section.
