@@ -414,6 +414,10 @@ async fn labeling_through_a_server() {
     let drive = json!({ "name": "x", "classes": ["car"], "paths": [r"\photos"] });
     let e = call(&s, "create_label_job", drive).await.err().unwrap();
     assert!(e.body.code == "invalid_arguments" && e.body.message.contains("drive"), "{e:?}");
+    // Fast where the server lists no Fast tier is refused before the start, not run at the standard tier.
+    let fast = json!({ "job_id": job, "agent": "claude", "scope": "all", "fast": true });
+    let e = call(&s, "start_labeling", fast).await.err().unwrap();
+    assert!(e.body.code == "invalid_arguments" && e.body.message.contains("no Fast tier"), "{e:?}");
     assert_eq!(ok(&c, "label_status", json!({ "job_id": job })).await["reviewed"], 5);
     let _ = stop.send(());
     serving.await.unwrap().unwrap();
@@ -536,11 +540,12 @@ async fn a_finished_run_is_reported_as_seen() {
     let seen = labels.job(&job).unwrap();
     let first = seen.run.clone().unwrap();
     assert!(!labels.status_of(seen.clone(), 5).log.is_empty());
-    // Another run since: its log is not the first run's.
+    // Another run since: the review count and the log read now could be the new run's, so neither is given.
     ok(&s, "start_labeling", json!({ "job_id": job, "agent": "claude", "image_ids": ["2"] })).await;
     wait_idle(&s, &job).await;
     let st = labels.status_of(seen.clone(), 5);
-    assert!(st.log.is_empty() && st.reviewed == Some(0), "{st:?}");
+    assert!(st.log.is_empty() && st.reviewed.is_none(), "{st:?}");
+    assert!(labels.status_of(seen.clone(), 0).reviewed.is_none());
     assert_eq!(st.run.unwrap().total, first.total);
     // The job is gone: the run as seen, without the details.
     labels.delete(&job).unwrap();

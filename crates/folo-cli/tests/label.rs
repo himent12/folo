@@ -289,6 +289,9 @@ fn label_through_a_folo_serve() {
     });
     let first = rx.recv_timeout(DEADLINE).expect("folo serve never said where it listens");
     let url = serde_json::from_str::<Value>(&first).unwrap()["url"].as_str().unwrap().to_string();
+    // Its first /api/system samples the hardware (9 s seen on a loaded machine): done here, outside the commands.
+    let warm = folo_client::Client::with_timeouts(&url, Duration::from_secs(5), DEADLINE);
+    warm.get::<Value>("/system").expect("folo serve answers /api/system");
 
     // The data dir's server is found through its lock; the paths are made absolute for it.
     let d = ["--data-dir", home.to_str().unwrap()];

@@ -177,7 +177,13 @@ impl Labels {
     pub fn start(&self, id: &str, req: StartLabeling) -> Result<LabelJob, Error> {
         match self.via()? {
             Via::Here(l) => l.start(id, req),
-            Via::Http(h) => h.client().post(&job_path(id, "/start"), &req).map_err(store_error),
+            Via::Http(h) => {
+                // A server from before the Fast tier ignores `fast`: the run would go at the standard tier.
+                if req.fast {
+                    fast_offered(&get::<LabelAgentList>(h, "/label/agents")?.agents, &req)?;
+                }
+                h.client().post(&job_path(id, "/start"), &req).map_err(store_error)
+            }
         }
     }
 
@@ -216,6 +222,37 @@ impl Labels {
             Via::Http(_) => Ok(None),
         }
     }
+}
+
+/// An absolute path as a server is sent it: as FOLO writes paths (`/` separators, no `\\?\` prefix) when that
+/// keeps it absolute, else as it is. A volume path (`\\?\Volume{GUID}\photos`) without its prefix is relative.
+pub fn wire_path(p: &std::path::Path) -> String {
+    let shown = folo_api::json::path(p);
+    if std::path::Path::new(&shown).is_absolute() == p.is_absolute() {
+        shown
+    } else {
+        p.to_string_lossy().into_owned()
+    }
+}
+
+/// `Ok` when a start with `fast` can have it: the server lists the Fast tier for the run's model (the one named, or
+/// the agent's default). A server that predates the tier lists it for nothing, so it is refused there too, not
+/// ignored.
+fn fast_offered(agents: &[LabelAgent], req: &StartLabeling) -> Result<(), Error> {
+    let agent = agents.iter().find(|a| a.id == req.agent);
+    let offered = agent.is_some_and(|a| match req.model.as_deref() {
+        Some(m) => a.models.iter().any(|x| x.id == m && x.fast),
+        None => a.fast,
+    });
+    if offered {
+        return Ok(());
+    }
+    let model = req.model.as_deref().map_or("its default model".to_string(), |m| format!("model {m}"));
+    Err(crate::errors::invalid_arguments(format!(
+        "this server or model has no Fast tier: the server lists none for {} with {model} (a server from before \
+         the Fast tier would run at the standard one); start without fast",
+        req.agent.display_name()
+    )))
 }
 
 /// Whether `p` is an absolute path on some machine (`/…`, `\\…`, `C:/…`, `C:\…`): a path a server takes as
@@ -295,5 +332,47 @@ mod tests {
         for p in ["photos", "./x", "C:x", r"\photos", ""] {
             assert!(!super::looks_absolute(p), "{p}");
         }
+    }
+
+    #[test]
+    fn wire_paths_stay_absolute() {
+        use std::path::Path;
+        #[cfg(windows)]
+        {
+            let volume = r"\\?\Volume{0f1e2d3c-0000-0000-0000-000000000000}\photos";
+            assert_eq!(super::wire_path(Path::new(volume)), volume);
+            assert_eq!(super::wire_path(Path::new(r"\\?\C:\photos\a")), "C:/photos/a");
+            assert_eq!(super::wire_path(Path::new(r"\\?\UNC\nas\x")), "//nas/x");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(super::wire_path(Path::new("/data/photos")), "/data/photos");
+    }
+
+    #[test]
+    fn fast_needs_a_server_that_lists_it() {
+        use folo_api::{LabelAgent, LabelAgentId, StartLabeling};
+        let start = |model: Option<&str>| StartLabeling {
+            agent: LabelAgentId::Codex,
+            model: model.map(str::to_string),
+            fast: true,
+            ..serde_json::from_value(serde_json::json!({ "agent": "codex" })).unwrap()
+        };
+        // An older server's agent: no `fast` anywhere.
+        let old: LabelAgent = serde_json::from_value(serde_json::json!({
+            "id": "codex", "name": "Codex", "available": true, "version": "1", "default_model": "m",
+            "default_effort": "medium", "models": [{ "id": "m", "label": "M" }]
+        }))
+        .unwrap();
+        let e = super::fast_offered(std::slice::from_ref(&old), &start(None)).unwrap_err();
+        assert!(e.body.code == "invalid_arguments" && e.body.message.contains("no Fast tier"), "{e:?}");
+        assert!(super::fast_offered(std::slice::from_ref(&old), &start(Some("m"))).is_err());
+        let mut new = old;
+        new.fast = true;
+        new.models[0].fast = true;
+        new.models.push(folo_api::LabelModel { id: "slow".into(), label: "Slow".into(), fast: false });
+        assert!(super::fast_offered(std::slice::from_ref(&new), &start(None)).is_ok());
+        assert!(super::fast_offered(std::slice::from_ref(&new), &start(Some("m"))).is_ok());
+        assert!(super::fast_offered(std::slice::from_ref(&new), &start(Some("slow"))).is_err());
+        assert!(super::fast_offered(&[], &start(None)).is_err());
     }
 }

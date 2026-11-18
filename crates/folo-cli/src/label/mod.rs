@@ -167,11 +167,12 @@ fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliError> {
         .iter()
         .map(|p| {
             let p = p.trim();
-            if remote && looks_absolute(p) {
+            // Absolute already (a volume path `\\?\Volume{GUID}\...` too): as given.
+            if (remote && looks_absolute(p)) || Path::new(p).is_absolute() {
                 return Ok(p.to_string());
             }
             let abs = std::path::absolute(Path::new(p)).map_err(|e| usage(format!("{p}: {e}")))?;
-            Ok(folo_api::json::path(abs))
+            Ok(folo_mcp::label::wire_path(&abs))
         })
         .collect()
 }
@@ -307,15 +308,17 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
 
 /// Whether `now` (the job's run in a later read) is still `ours`, the run this command started; `last` is the
 /// progress seen before. By id; a server that predates run ids gives only the start time to the second, so there
-/// the agent and model must match too and the progress must not go back, else it is another run. Not the size:
-/// a run's `total` drops when an image that waited for it is edited, reviewed or deleted.
+/// the agent and model must match too, the progress must not go back and the size must not grow (since the start
+/// or the last poll), else it is another run. The size may shrink: a run's `total` drops when an image that waited
+/// for it is edited, reviewed or deleted.
 fn same_run(ours: Option<&LabelRun>, now: Option<&LabelRun>, last: Option<(u64, u64, u64)>) -> bool {
     let (Some(ours), Some(now)) = (ours, now) else { return ours.is_none() && now.is_none() };
     if !ours.id.is_empty() || !now.id.is_empty() {
         return ours.id == now.id;
     }
     let went_back = last.is_some_and(|(done, failed, _)| now.done < done || now.failed < failed);
-    (&ours.started, ours.agent, &ours.model) == (&now.started, now.agent, &now.model) && !went_back
+    let grew = now.total > last.map_or(ours.total, |(_, _, total)| total);
+    (&ours.started, ours.agent, &ours.model) == (&now.started, now.agent, &now.model) && !went_back && !grew
 }
 
 fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
@@ -501,6 +504,9 @@ mod tests {
         // that goes back is another one.
         assert!(same_run(Some(&run("", 9, 0)), Some(&run("", 8, 4)), Some((3, 0, 9))));
         assert!(!same_run(Some(&run("", 9, 0)), Some(&run("", 9, 1)), Some((3, 0, 9))));
+        // A one-image run that ended before the first poll, and a two-image one started in the same second.
+        assert!(!same_run(Some(&run("", 1, 0)), Some(&run("", 2, 0)), None));
+        assert!(!same_run(Some(&run("", 9, 0)), Some(&run("", 9, 4)), Some((3, 0, 8))));
     }
 
     #[test]
@@ -514,5 +520,11 @@ mod tests {
         #[cfg(windows)]
         assert!(here.as_bytes()[1] == b':' && here.ends_with(":/photos"), "{here}");
         assert!(Path::new(&p("photos", true)).is_absolute());
+        #[cfg(windows)]
+        {
+            let volume = r"\\?\Volume{0f1e2d3c-0000-0000-0000-000000000000}\photos";
+            assert_eq!((p(volume, false), p(volume, true)), (volume.to_string(), volume.to_string()));
+            assert_eq!(p(r"D:\x", false), r"D:\x");
+        }
     }
 }

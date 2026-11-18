@@ -55,11 +55,15 @@ impl ServeLock {
     }
 }
 
+/// How long [`serves`] waits for `/api/system`. A server's first answer samples the hardware, which took 9 s on a
+/// loaded machine: with 3 s, a `folo label` right after `folo serve` started took the server for another process.
+const SERVES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Whether the `folo serve` at `url` serves `dir` (its `/api/system` `data_dir`): `serve.json` can be stale, and a
-/// new process may listen on a dead server's port.
+/// new process may listen on a dead server's port. Connecting is quick or nothing listens there.
 pub fn serves(url: &str, dir: &Path, token: Option<&str>) -> bool {
-    let t = std::time::Duration::from_secs(3);
-    let mut client = folo_client::Client::with_timeouts(url, t, t);
+    let connect = std::time::Duration::from_secs(3);
+    let mut client = folo_client::Client::with_timeouts(url, connect, SERVES_TIMEOUT);
     if let Some(token) = token {
         client = client.token(token);
     }
@@ -110,5 +114,34 @@ mod tests {
         std::fs::write(dir.path().join("serve.json"), r#"{"url":"http://127.0.0.1:1"}"#).unwrap();
         let Acquire::Held(_lock) = acquire(dir.path()).unwrap() else { panic!("free") };
         assert!(!dir.path().join("serve.json").exists());
+    }
+
+    /// A server whose first `/api/system` takes a few seconds (its hardware sample) still counts as the one that
+    /// serves the data dir.
+    #[test]
+    fn a_slow_first_answer_still_serves() {
+        use std::io::{Read, Write};
+        let dir = TestDir::new("serve-lock-slow");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body = serde_json::json!({
+            "cpu": { "name": "c", "threads": 1, "util": 0 }, "memory": { "used_bytes": 1, "total_bytes": 2 },
+            "gpus": [], "data_dir": folo_api::json::path(dir.path()),
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+        });
+        assert!(serves(&url, dir.path(), None));
+        server.join().unwrap();
     }
 }

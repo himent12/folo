@@ -50,7 +50,7 @@ impl Inner {
         }
         let mut out = Vec::with_capacity(paths.len());
         for p in paths {
-            out.push(folo_api::json::path(self.resolve(p).await?));
+            out.push(crate::label::wire_path(&self.resolve(p).await?));
         }
         Ok(out)
     }
