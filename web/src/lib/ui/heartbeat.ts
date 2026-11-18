@@ -1,17 +1,31 @@
 // The live heartbeats (base.css `live-pulse`: StatusBadge's running dot, the sidebar's and the label tiles'; LineEnds'
 // `end-beat`, a live chart line's end) move for the first third of every 2.4 s and hold still for the rest. A running
-// CSS animation costs a style recalc (and for the SVG ring a layout) every frame even while its value holds, which kept
-// a page with a training run busy at display rate while nothing on it moved: on an idle Overview, about 190 style
-// recalcs and 85 layouts a second, most of the main thread's work. This pauses each heartbeat for its still part and
-// resumes it at the phase it would have reached, so every frame shows what it showed before (a paused animation holds
-// its value and costs nothing); the CSS stays the source of what is animated and when (reduced motion, a held status:
-// `animation: none` still removes the animation, and this lets it go).
+// CSS animation costs a style recalc every frame even while its value holds, which kept a page with a training run
+// restyling at display rate while nothing on it moved. This pauses each heartbeat for most of its still part (a paused
+// animation holds its value and costs nothing) and resumes it at the phase it would have reached, its start time
+// unchanged. The CSS stays the source of what is animated and when (reduced motion, a held status: `animation: none`
+// still removes the animation, and this lets it go).
+//
+// What it guarantees: every frame shows what it showed without this, unless the timer that resumes a heartbeat runs more
+// than RESUME_EARLY (250 ms) late: the main thread busy for that long at that moment, or the browser throttling the
+// page's timers. Then the first frames of that beat show the still value (the ring transparent) until the timer runs,
+// and the beat goes on from its own phase, never shifted. Measured on the Run page of a live run, the latest such timer
+// ran 8 ms late, 57 ms with the CPU throttled 4x and 121 ms at 6x (PR #306). A hidden tab's timers are throttled to
+// once a second or a minute: nothing is paused while the page is hidden, and when it is shown again each heartbeat is
+// placed from its own clock (its start time) before anything is paused again.
+//
+// Limitation: once script has paused or played a CSS animation, the browser no longer applies `animation-play-state`
+// to it (Web Animations). No rule sets that property on a heartbeat; one that does needs a change here.
 
 /** The keyframes (by name, a component's scoped ones by suffix) whose still part is skipped. */
 const BEATS = /^(?:fw-[0-9a-z]+-)?(?:live-pulse|end-beat)$/;
-/** Paused this long after the still part starts (and resumed this long before it ends), so a late timer never pauses
- * a frame of movement, and a resumed animation has a frame or two to run before it moves again. */
-const MARGIN = 60;
+/** Paused this long after the still part starts: a pause that lands late, or a frame drawn just before it, is still. */
+const PAUSE_AFTER = 60;
+/**
+ * Resumed this long before the still part ends, so a resume timer that runs up to this late still resumes before the
+ * beat moves (header: the guarantee and what it is sized from).
+ */
+export const RESUME_EARLY = 250;
 
 /** A heartbeat's timing: its period and when in each period it holds still (ms). */
 export interface Beat {
@@ -21,15 +35,15 @@ export interface Beat {
 }
 
 /**
- * What a heartbeat should be doing at timeline time `now`: paused while inside its still part (with MARGIN on both
- * sides), running otherwise; and when that next changes.
+ * What a heartbeat should be doing at timeline time `now`: paused inside its still part (PAUSE_AFTER after it starts,
+ * RESUME_EARLY before it ends), running otherwise; and when that next changes.
  */
 export function beatAt(b: Beat, now: number): { pause: boolean; next: number } {
   const t = now - b.start;
   const k = Math.floor(t / b.period);
   const p = t - k * b.period;
-  const from = b.stillFrom + MARGIN;
-  const to = b.period - MARGIN;
+  const from = b.stillFrom + PAUSE_AFTER;
+  const to = b.period - RESUME_EARLY;
   const base = b.start + k * b.period;
   if (from >= to) return { pause: false, next: Infinity };
   if (p < from) return { pause: false, next: base + from };
@@ -68,8 +82,17 @@ export function installHeartbeat(doc: Document = document): () => void {
   const tracked = new Set<Tracked>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeline = () => (doc.timeline.currentTime as number | null) ?? 0;
+  const hidden = () => doc.visibilityState === 'hidden';
+
+  /** Running again at the phase it would have had had it never stopped. */
+  const resume = (b: Tracked) => {
+    if (b.anim.playState !== 'paused') return;
+    b.anim.play();
+    b.anim.startTime = b.start;
+  };
 
   const tick = () => {
+    clearTimeout(timer);
     timer = undefined;
     const now = timeline();
     let next = Infinity;
@@ -80,13 +103,16 @@ export function installHeartbeat(doc: Document = document): () => void {
         tracked.delete(b);
         continue;
       }
+      // Hidden: its timers may run a minute late, so nothing stays paused (and a hidden page draws no frames anyway).
+      if (hidden()) {
+        resume(b);
+        continue;
+      }
+      // Running: its own clock says where its beat is.
+      if (a.playState === 'running' && a.startTime !== null) b.start = Number(a.startTime);
       const want = beatAt(b, now);
       if (want.pause && a.playState === 'running') a.pause();
-      else if (!want.pause && a.playState === 'paused') {
-        a.play();
-        // Back at the phase it would have had had it never stopped.
-        a.startTime = b.start;
-      }
+      else if (!want.pause) resume(b);
       next = Math.min(next, want.next);
     }
     if (next < Infinity) timer = setTimeout(tick, Math.max(0, next - timeline()));
@@ -104,14 +130,16 @@ export function installHeartbeat(doc: Document = document): () => void {
     if (!(period > 0) || still >= 1) return;
     for (const b of tracked) if (b.anim === anim) return;
     tracked.add({ anim, start: Number(anim.startTime), period, stillFrom: still * period });
-    clearTimeout(timer);
     tick();
   };
 
   doc.addEventListener('animationstart', onStart, true);
+  doc.addEventListener('visibilitychange', tick);
   return () => {
     doc.removeEventListener('animationstart', onStart, true);
+    doc.removeEventListener('visibilitychange', tick);
     clearTimeout(timer);
+    for (const b of tracked) resume(b);
     tracked.clear();
   };
 }
