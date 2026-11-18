@@ -163,7 +163,8 @@ impl Catalog {
         };
         Catalog {
             version: String::new(),
-            read: true,
+            // An object without a model list is no catalog either.
+            read: catalog["models"].is_array(),
             path: None,
             models: catalog_models(&entries, &fast),
             default: listed.first().and_then(|m| slug(m)),
@@ -236,12 +237,12 @@ impl Codex {
     }
 
     /// Notes that the version of Codex that printed `catalog` refused its lean catalog, and forgets the probe and
-    /// the catalog: the next call reads the executable and its catalog again (Codex may have been updated in
-    /// place since).
+    /// the catalog while they are still that snapshot's: the next call reads the executable and its catalog again
+    /// (Codex may have been updated in place since). A late refusal does not evict a newer snapshot.
     fn refuse(&self, catalog: &Catalog) {
         self.lean_refused.lock().unwrap().insert(catalog.version.clone());
-        self.cli.forget();
-        self.catalog.forget();
+        self.cli.forget_version(&catalog.version);
+        self.catalog.forget_if(|held| held.version == catalog.version && held.path == catalog.path);
     }
 
     /// One `codex exec`, with `catalog` as its `model_catalog_json` when there is one: what it printed.
@@ -764,6 +765,8 @@ mod tests {
         assert!(catalog.read);
         assert!(unread.no_lean.unwrap().contains("7800 more input tokens"));
         assert!(Catalog::read("{}", None).models.is_empty());
+        // No model list: unread, so a Fast call goes without the tier instead of failing.
+        assert!(!Catalog::read("{}", None).read && Catalog::read(r#"{"models":[]}"#, None).read);
     }
 
     #[test]
@@ -878,6 +881,9 @@ mod tests {
         assert!(codex.refused(&snapshot("0.169.0")));
         // ... and the catalog is read again (with the probe): the next call may run a Codex updated in place.
         assert_eq!(codex.catalog.get(|| snapshot("0.170.0")).version, "0.170.0");
+        // A late refusal of the older version leaves the newer snapshot in place.
+        codex.refuse(&snapshot("0.169.0"));
+        assert_eq!(codex.catalog.get(|| snapshot("0.171.0")).version, "0.170.0");
         assert!(!codex.refused(&snapshot("0.170.0")), "a newer Codex is given the lean catalog again");
         // Refusals interleave: the newer version refuses too, then a late refusal from a call that still held
         // the older snapshot comes in. Neither clears the other.

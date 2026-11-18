@@ -176,10 +176,11 @@ fn longest_wait(message: &str) -> Option<Wait<'_>> {
     for marker in WAIT_MARKERS {
         for (at, _) in lower.match_indices(marker) {
             let start = at + marker.len();
-            let mut end = start + clause_len(&lower[start..], true);
-            while lower[end..].starts_with(',') {
+            // Clauses are cut on the message's own case (a new sentence starts with a capital letter).
+            let mut end = start + clause_len(&message[start..], true);
+            while message[end..].starts_with(',') {
                 let next = end + 1;
-                let next_end = next + clause_len(&lower[next..], true);
+                let next_end = next + clause_len(&message[next..], true);
                 match read_wait(&lower[next..next_end], false) {
                     Some((_, rest)) if rest.trim().is_empty() => end = next_end,
                     _ => break,
@@ -196,17 +197,20 @@ fn longest_wait(message: &str) -> Option<Wait<'_>> {
 }
 
 /// The length of the clause `rest` starts with: to a `·`, `∙` or `|`, a line break, (with `commas`) a `,` or
-/// `;`, or a sentence's end. The period of an abbreviation of single letters ("p.m.") stays in the clause, which
-/// goes on unless a new sentence starts after it.
+/// `;`, or a sentence's end. The period of "a.m." or "p.m." stays in the clause, which goes on unless a new
+/// sentence starts after it.
 fn clause_len(rest: &str, commas: bool) -> usize {
     for (i, c) in rest.char_indices() {
         match c {
             '·' | '∙' | '|' | '\n' => return i,
             ',' | ';' if commas => return i,
             '.' if rest[i + 1..].chars().next().is_none_or(char::is_whitespace) => {
-                let mut before = rest[..i].chars().rev();
-                let abbreviation = before.next().is_some_and(char::is_alphabetic)
-                    && before.next().is_none_or(|c| !c.is_alphanumeric());
+                let before = rest[..i].to_ascii_lowercase();
+                let abbreviation = ["a.m", "p.m"].iter().any(|time| {
+                    before
+                        .strip_suffix(time)
+                        .is_some_and(|b| b.chars().next_back().is_none_or(|c| !c.is_alphanumeric()))
+                });
                 if !abbreviation {
                     return i;
                 }
@@ -228,7 +232,7 @@ fn read_wait(clause: &str, bare: bool) -> Option<(Duration, &str)> {
     let mut rest = clause;
     let (mut total, mut read) = (0.0, false);
     for _ in 0..6 {
-        let mut next = rest.trim_start_matches([' ', ',']);
+        let mut next = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
         if read && let Some(after) = next.strip_prefix("and ") {
             next = after.trim_start();
         }
@@ -261,6 +265,12 @@ fn read_wait(clause: &str, bare: bool) -> Option<(Duration, &str)> {
 /// several waits, the one [`retry_after`] reads: the longest). Older Claude Code versions print the seconds since
 /// 1970 after a `|`: "resets at" and that time in RFC 3339 (UTC).
 pub fn reset_time(message: &str) -> Option<String> {
+    stated_reset(message, true)
+}
+
+/// [`reset_time`], with the wait a message asks for (`waits`) or only when a limit resets (an account's limit:
+/// its reset time, never a `Retry-After`).
+fn stated_reset(message: &str, waits: bool) -> Option<String> {
     // ASCII lowercase keeps every byte offset of `message`.
     let lower = message.to_ascii_lowercase();
     // The clause after the `marker` at `at` (to a sentence's end, a `·`, `∙` or `|` separator, a line break).
@@ -274,7 +284,7 @@ pub fn reset_time(message: &str) -> Option<String> {
             return Some(when);
         }
     }
-    if let Some(wait) = longest_wait(message) {
+    if waits && let Some(wait) = longest_wait(message) {
         return Some(wait.quoted());
     }
     let (_, epoch) = message.rsplit_once('|')?;
@@ -305,8 +315,9 @@ pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     };
     let fewer = if usage { "" } else { " with fewer calls in flight (`parallel`)" };
     let when = match wait {
-        Some(wait) if !usage => Some(wait.quoted()),
-        _ => reset_time(message),
+        _ if usage => stated_reset(message, false),
+        Some(wait) => Some(wait.quoted()),
+        None => reset_time(message),
     };
     match when {
         Some(when) => format!("{what} ({when}): start again then{fewer}, or use another agent"),
@@ -437,6 +448,11 @@ mod tests {
         // A clause cut at a comma goes on when what follows is more amounts.
         assert_eq!(wait("Please try again in 1 minute, 30 seconds."), Some(90_000));
         assert_eq!(wait("try again in 1 hour, 2 minutes, 3 seconds"), Some(3_723_000));
+        // "s." is no abbreviation: the amounts after the comma count.
+        assert_eq!(wait("429 Too Many Requests. Try again in 30 s, 45 s."), Some(75_000));
+        assert!(!transient("429 Too Many Requests. Try again in 30 s, 45 s."), "75 s is past the cutoff");
+        // Tabs too before an amount.
+        assert_eq!(wait("Retry-After: \t30"), Some(30_000));
     }
 
     #[test]
@@ -476,6 +492,9 @@ mod tests {
         );
         assert_eq!(reset("Limit reached · resets 9 a.m. (UTC)").as_deref(), Some("resets 9 a.m. (UTC)"));
         assert_eq!(reset("Rate limit reached. Retry-After:30").as_deref(), Some("retry-after: 30"));
+        // A new sentence ends the clause, read in the message's own case.
+        assert_eq!(reset("Try again in 30 s. Contact support").as_deref(), Some("try again in 30 s"));
+        assert_eq!(reset("Try again at 3 p.m. Contact support").as_deref(), Some("try again at 3 p.m."));
         assert_eq!(reset("You've hit your usage limit. Try again later."), None);
         assert_eq!(reset("rate limit exceeded"), None);
     }
@@ -531,7 +550,16 @@ mod tests {
                 .unwrap()
                 .contains("(retry after 90 seconds)")
         );
-        // An account's limit says when it resets, whatever wait the message also names.
+        // An account's limit says when it resets (the epoch form too), never a wait the message also names.
+        assert_eq!(
+            hint("Weekly usage limit reached. Retry-After:30 | 1763481600"),
+            "the account's usage limit was reached (resets at 2025-11-18T16:00:00Z): start again then, or use \
+             another agent"
+        );
+        assert_eq!(
+            hint("Weekly usage limit reached. Retry-After:30"),
+            "the account's usage limit was reached: start again once it resets, or use another agent"
+        );
         assert_eq!(
             hint("Weekly usage limit reached. Resets 3pm. Try again in 90 seconds."),
             "the account's usage limit was reached (resets 3pm): start again then, or use another agent"

@@ -172,9 +172,12 @@ impl<T: Clone> Memo<T> {
         self.get_where(|_| true, find)
     }
 
-    /// Forgets the remembered value: the next [`Memo::get`] finds it again.
-    pub fn forget(&self) {
-        *self.0.lock().unwrap() = None;
+    /// Forgets the remembered value when it is `stale`: the next [`Memo::get`] finds it again.
+    pub fn forget_if(&self, stale: impl FnOnce(&T) -> bool) {
+        let mut slot = self.0.lock().unwrap();
+        if slot.as_ref().is_some_and(|(_, value)| stale(value)) {
+            *slot = None;
+        }
     }
 
     /// [`Memo::get`], finding the value again also when the remembered one is not `current` (it was found for
@@ -243,9 +246,10 @@ impl Cli {
         self.found().map(|f| f.version)
     }
 
-    /// Forgets the probe: the next question about the CLI runs it again (it may have been updated in place).
-    pub fn forget(&self) {
-        self.probed.forget();
+    /// Forgets the probe when it found `version`: the next question about the CLI runs it again (it may have been
+    /// updated in place). A probe that already found another version stays.
+    pub fn forget_version(&self, version: &str) {
+        self.probed.forget_if(|found| found.as_ref().is_some_and(|f| f.version == version));
     }
 
     /// The executable and its version, from one probe (`None`: not installed): what goes together, for what is
