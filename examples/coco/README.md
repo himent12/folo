@@ -26,8 +26,9 @@ trained from scratch on COCO train2017, so no data beyond COCO train2017 is anyw
 
 **v5: AP 0.370 / AP50 0.525**, the best folo-n weights: v4 continued for 64 more epochs with the same teacher (128
 in all, 96 of them distilled), published as `folo-n-coco-v5` (release `weights-v6`): `folo weights pull
-folo-n-coco-v5` ([v5](#v5-v4-continued-for-64-epochs-with-the-folo-s-teacher)). +0.014 AP over v4; no
-teacher-free continuation was run, so that is the epochs and the teacher together. Still COCO train2017 only.
+folo-n-coco-v5` ([v5](#v5-v4-continued-for-64-epochs-with-the-folo-s-teacher)). +0.014 AP over v4 (one
+training seed; no teacher-free continuation was run, so that is the epochs and the teacher together). Still COCO
+train2017 only.
 
 **folo-s: AP 0.416 / AP50 0.580** after 56 epochs from scratch on one rented RTX PRO 4000 Blackwell (9.5 h of epochs,
 about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`): `folo weights pull folo-s-coco`. That is 0.05–0.06 AP
@@ -672,7 +673,7 @@ d0c0907d (the v4 runs reproduce [v4's own check](#publish-v4), made with 069935d
 
 The bar, set before the runs, was that v5's mean is not more than 0.010 AP below v4's on any of the three. It is
 inside the bar on all three, so v5 is the recommended start for fine-tuning. It is also a little below v4 on all
-three (by less than the seed-to-seed spread on BCCD and signature): the better COCO model is not a better fine-tuning
+three (on every set by less than the spread between v5's two seeds): the better COCO model is not a better fine-tuning
 start here, and two seeds on three small test sets can show neither a gain nor a loss of this size.
 
 ## folo-s: 56 epochs on a rented GPU

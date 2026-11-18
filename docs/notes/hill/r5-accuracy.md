@@ -199,7 +199,7 @@ detections with pycocotools, `eval/stats-long.json`, and gives the same numbers)
 
 | model | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---:|---:|---:|---:|---:|
-| **long run, epoch 64 (NOT PUBLISHED)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| **long run, epoch 64 (published as `folo-n-coco-v5`)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
 | `folo-n-coco-v4` (published), its start | 0.3559 | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
 | hill 4's control, 64 epochs from scratch without the teacher (not published) | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
 
