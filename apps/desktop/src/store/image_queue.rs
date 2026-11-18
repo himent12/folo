@@ -94,7 +94,7 @@ impl<T> LoadQueue<T> {
         self.in_flight = 0;
     }
 
-    #[cfg(test)]
+    /// Fetches on their way now.
     pub fn in_flight(&self) -> usize {
         self.in_flight
     }
