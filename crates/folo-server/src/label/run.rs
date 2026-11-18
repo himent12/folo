@@ -5,7 +5,12 @@
 //! keep a run from wasting tokens: a call is one model request with the images inline; a reply that is not the
 //! JSON asked for is retried once and no more; and a failure that another call would only repeat (the CLI
 //! missing or signed out, an unknown model, a rate limit, calls timing out in a row) ends the run at once, killing
-//! the calls in flight.
+//! the calls in flight. A failure that is the provider's passing fault (overloaded, a server error, a dropped
+//! stream, a rate limit that asks for a wait of a minute at most: [`super::agent::is_transient`]) is not one of
+//! those: the call is asked once more after [`TRANSIENT_BACKOFF`] (or the wait asked for, if longer), and if it
+//! fails that way again its images fail and it counts towards the calls in a row that end the run. A batch makes
+//! two calls at most, whatever made the first fail ([`super::agent::ask`]), and what every call used is counted in
+//! the run's usage, whatever came of it.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -15,18 +20,22 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelEffort, LabelEvent, LabelImageStatus, LabelOutcome, LabelSource, LabelUsage, LogLevel};
 
-use super::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT};
+use super::agent::{Agent, AgentRequest, BatchError, CALL_TIMEOUT, Event, ask, failure_hint};
 use super::job::Job;
-use super::prompt::{self, Labels};
+use super::prompt::{self, ImageSize, Labels};
 use crate::util::{rfc3339, unix_now};
 
-/// The longest side, in pixels, of an image as an agent sees it. Larger images are scaled down: about 1000
-/// input tokens per image, and box coordinates are relative, so nothing is lost but detail the models do not use.
+/// The longest side, in pixels, of an image as an agent sees it unless the agent says otherwise
+/// ([`Agent::image_side`]). Larger images are scaled down (the reply's pixels are scaled back up), which loses
+/// only detail the models do not use, and the provider bills an image by its size.
 pub const AGENT_IMAGE_SIDE: u32 = 1024;
 /// JPEG quality of the images sent.
 const JPEG_QUALITY: u8 = 85;
 /// Calls in a row that may time out or return garbage before the run gives up (a benchmark's agent entry too).
 pub const MAX_SOFT_FAILURES: u32 = 3;
+/// How long a call that failed on a passing fault waits before it is asked once more. The CLIs have retried such
+/// a fault themselves for a while before they report it, so this is a pause, not a first retry.
+pub const TRANSIENT_BACKOFF: Duration = Duration::from_secs(15);
 /// How often a run writes `job.json` at most. The file holds every image of the job, so a large job is not
 /// rewritten after each of its thousands of calls; what a crash can lose is the labels of the last few seconds.
 pub const SAVE_EVERY: Duration = Duration::from_secs(5);
@@ -38,6 +47,8 @@ pub struct Plan {
     pub agent: Arc<dyn Agent>,
     pub model: Option<String>,
     pub effort: LabelEffort,
+    /// Ask for the faster service tier ([`AgentRequest::fast`]).
+    pub fast: bool,
     /// The extra instruction of this run.
     pub note: String,
     /// The image ids of every call, in order.
@@ -48,6 +59,9 @@ pub struct Plan {
     pub cancel: Arc<AtomicBool>,
     /// How often the run writes `job.json` at most: [`SAVE_EVERY`] (tests shorten it).
     pub save_every: Duration,
+    /// The wait before a call that failed on a passing fault is asked again: [`TRANSIENT_BACKOFF`] (tests
+    /// shorten it).
+    pub backoff: Duration,
 }
 
 /// What a call did to one image.
@@ -62,8 +76,8 @@ enum Outcome {
 #[derive(Default)]
 struct Batch {
     ids: Vec<String>,
-    /// Width and height of each original image.
-    sizes: Vec<(u32, u32)>,
+    /// Each image's size as sent and as the file is.
+    sizes: Vec<ImageSize>,
     jpegs: Vec<Vec<u8>>,
 }
 
@@ -76,10 +90,12 @@ struct Run<'a> {
     queue: Mutex<VecDeque<(usize, Vec<String>)>>,
     /// Calls in a row that timed out or returned garbage.
     soft_failures: AtomicU32,
-    /// Why the run gave up, once it has.
-    fatal: Mutex<Option<String>>,
+    /// Why the run gave up, once it has, and what to do about it when that is known then.
+    fatal: Mutex<Option<(String, Option<String>)>>,
     /// Results are in memory that `job.json` does not have yet.
     unsaved: AtomicBool,
+    /// The agent's notices ([`Agent::notice`]) the log has, so each is logged once.
+    noticed: Mutex<Vec<String>>,
 }
 
 /// Runs `plan` on `job` to its end (the body of the run's thread). The job's `active` and `run` are set by the
@@ -100,7 +116,9 @@ pub fn run(job: &Job, plan: &Plan) {
         soft_failures: AtomicU32::new(0),
         fatal: Mutex::new(None),
         unsaved: AtomicBool::new(false),
+        noticed: Mutex::new(Vec::new()),
     };
+    run.notice();
     let workers = plan.parallel.clamp(1, plan.batches.len().max(1));
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..workers).map(|_| scope.spawn(|| run.work())).collect();
@@ -137,9 +155,25 @@ impl Run<'_> {
         }
     }
 
-    /// Gives up: no further calls, and the ones in flight are ended.
-    fn fail(&self, why: String) {
-        self.fatal.lock().unwrap().get_or_insert(why);
+    /// Logs the agent's notice ([`Agent::notice`]), once per run: before the first call, and after a call (a call
+    /// can be what makes one).
+    fn notice(&self) {
+        let Some(notice) = self.plan.agent.notice() else { return };
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.contains(&notice) {
+            return;
+        }
+        noticed.push(notice.clone());
+        drop(noticed);
+        let mut state = self.job.lock();
+        self.job.log(&mut state, LogLevel::Warn, format!("{}: {notice}", self.agent_name()));
+    }
+
+    /// Gives up: no further calls, and the ones in flight are ended. `hint` says what to do about it, as the caller
+    /// resolved it ([`failure_hint`], [`Agent::hint`]): the run ends with that one, `None` too (a failure whose own
+    /// status says it is no limit or passing fault is not given the hint its text would get).
+    fn fail(&self, why: String, hint: Option<String>) {
+        self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.plan.cancel.store(true, Ordering::Relaxed);
     }
 
@@ -165,12 +199,13 @@ impl Run<'_> {
             return;
         }
         let (mut batch, mut outcomes) = (Batch::default(), Vec::new());
+        let side = self.plan.agent.image_side();
         for (id, path, size) in taken {
-            match agent_jpeg(&path) {
-                Ok(jpeg) => {
+            match agent_jpeg(&path, side) {
+                Ok(image) => {
                     batch.ids.push(id);
-                    batch.sizes.push(size);
-                    batch.jpegs.push(jpeg);
+                    batch.sizes.push(ImageSize { sent: image.size(), file: size });
+                    batch.jpegs.push(image.jpeg);
                 }
                 Err(why) => outcomes.push((id, Outcome::Failed(why))),
             }
@@ -182,7 +217,7 @@ impl Run<'_> {
         self.settle(n, outcomes, &usage);
     }
 
-    /// One agent call for `batch` (a second one when the first reply cannot be read): what became of each image.
+    /// The agent calls for `batch` ([`ask`]: two at most, whatever made the first fail): what became of each image.
     fn ask(&self, n: usize, batch: &Batch, usage: &mut LabelUsage) -> Vec<(String, Outcome)> {
         let all = |outcome: fn(String) -> Outcome, why: &str| -> Vec<(String, Outcome)> {
             batch.ids.iter().map(|id| (id.clone(), outcome(why.to_string()))).collect()
@@ -190,10 +225,11 @@ impl Run<'_> {
         let untouched = |_| Outcome::Untouched;
         let scratch = self.job.dir.join("tmp").join(format!("call-{n}"));
         if let Err(e) = std::fs::create_dir_all(&scratch) {
-            self.fail(format!("creating {}: {e}", scratch.display()));
+            self.fail(format!("creating {}: {e}", scratch.display()), None);
             return all(untouched, "");
         }
-        let prompt = prompt::user_prompt(&self.classes, &self.instructions, &self.plan.note, batch.ids.len());
+        let sent: Vec<(u32, u32)> = batch.sizes.iter().map(|s| s.sent).collect();
+        let prompt = prompt::user_prompt(&self.classes, &self.instructions, &self.plan.note, &sent);
         let request = AgentRequest {
             system: prompt::SYSTEM,
             prompt: &prompt,
@@ -201,67 +237,78 @@ impl Run<'_> {
             schema: &self.schema,
             model: self.plan.model.as_deref(),
             effort: self.plan.effort,
+            fast: self.plan.fast,
             scratch: &scratch,
             cancel: &self.plan.cancel,
         };
-        let mut retried = false;
-        let outcomes = loop {
-            // Decoding the images took a moment, and so did a first attempt: the run may have ended meanwhile.
-            if self.cancelled() {
-                break all(untouched, "");
+        // Decoding the images took a moment: the run may have ended meanwhile.
+        if self.cancelled() {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return all(untouched, "");
+        }
+        let on = |event: Event<'_>| match event {
+            // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that only
+            // returns garbage is given up on after three calls, not three batches.
+            Event::Unreadable(why) => self.soft_failure(why, self.plan.agent.hint(why)),
+            Event::Again { why, wait } => {
+                let again = match wait {
+                    Some(wait) => format!("asking again in {} s", wait.as_secs()),
+                    None => "asking once more".into(),
+                };
+                let mut state = self.job.lock();
+                self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}; {again}"));
             }
-            let reply = match self.plan.agent.label(&request) {
-                Ok(reply) => reply,
-                Err(AgentError::Cancelled) => break all(untouched, ""),
-                Err(AgentError::Timeout) => {
-                    let why =
-                        format!("{} did not answer within {} s", self.agent_name(), CALL_TIMEOUT.as_secs());
-                    self.soft_failure(&why);
-                    break all(Outcome::Failed, &why);
-                }
-                Err(AgentError::Unavailable(why) | AgentError::Failed(why)) => {
-                    self.fail(why);
-                    break all(untouched, "");
-                }
-            };
-            usage.add(&reply.usage);
-            match prompt::parse_reply(&reply.text, &self.classes, &batch.sizes) {
-                Ok(labels) => {
-                    self.soft_failures.store(0, Ordering::Relaxed);
-                    break batch
-                        .ids
-                        .iter()
-                        .zip(labels)
-                        .map(|(id, labels)| {
-                            let outcome = match labels {
-                                Some(labels) => Outcome::Labeled(labels),
-                                None => Outcome::Failed("the agent's reply left this image out".into()),
-                            };
-                            (id.clone(), outcome)
-                        })
-                        .collect();
-                }
-                Err(why) => {
-                    // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that
-                    // only returns garbage is given up on after three calls, not three batches.
-                    self.soft_failure(&why);
-                    if retried || self.cancelled() {
-                        break all(Outcome::Failed, &why);
-                    }
-                    retried = true;
-                    let mut state = self.job.lock();
-                    self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}; asking once more"));
-                }
+        };
+        let read = |text: &str| prompt::parse_reply(text, &self.classes, &batch.sizes);
+        let answer = ask(&*self.plan.agent, &request, self.plan.backoff, usage, read, on);
+        self.notice();
+        let outcomes = match answer {
+            Ok(labels) => {
+                self.soft_failures.store(0, Ordering::Relaxed);
+                batch
+                    .ids
+                    .iter()
+                    .zip(labels)
+                    .map(|(id, labels)| {
+                        let outcome = match prompt::image_answer(labels) {
+                            Ok(labels) => Outcome::Labeled(labels),
+                            Err(why) => Outcome::Failed(why),
+                        };
+                        (id.clone(), outcome)
+                    })
+                    .collect()
+            }
+            Err(BatchError::Cancelled) => all(untouched, ""),
+            Err(BatchError::Timeout) => {
+                let why = format!("{} did not answer within {} s", self.agent_name(), CALL_TIMEOUT.as_secs());
+                self.soft_failure(&why, self.plan.agent.hint(&why));
+                all(Outcome::Failed, &why)
+            }
+            Err(BatchError::Transient(failure)) => {
+                self.soft_failure(&failure.shown(), failure_hint(&*self.plan.agent, &failure));
+                all(Outcome::Failed, &failure.shown())
+            }
+            // Counted towards the cutoff as each reply came in.
+            Err(BatchError::Unreadable(why)) => all(Outcome::Failed, &why),
+            Err(BatchError::Failed(failure)) => {
+                self.fail(failure.shown(), failure_hint(&*self.plan.agent, &failure));
+                all(untouched, "")
+            }
+            Err(BatchError::Unavailable(why)) => {
+                let hint = self.plan.agent.hint(&why);
+                self.fail(why, hint);
+                all(untouched, "")
             }
         };
         let _ = std::fs::remove_dir_all(&scratch);
         outcomes
     }
 
-    /// Counts a call that timed out or returned garbage; too many in a row end the run.
-    fn soft_failure(&self, why: &str) {
+    /// Counts a call that timed out, returned garbage or failed on passing faults; too many in a row end the run,
+    /// with the last one's `hint`.
+    fn soft_failure(&self, why: &str, hint: Option<String>) {
         if self.soft_failures.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_SOFT_FAILURES {
-            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"));
+            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"), hint);
         }
     }
 
@@ -343,7 +390,10 @@ impl Run<'_> {
         let mut state = self.job.lock();
         state.active = None;
         let name = self.agent_name();
-        let hint = fatal.as_deref().and_then(|why| self.plan.agent.hint(why));
+        let (fatal, hint) = match fatal {
+            Some((why, hint)) => (Some(why), hint),
+            None => (None, None),
+        };
         let Some(run) = state.file.run.as_mut() else { return };
         run.finished = Some(rfc3339(unix_now()));
         run.outcome = Some(match &fatal {
@@ -405,22 +455,38 @@ fn plural(n: u64, word: &'static str) -> String {
     }
 }
 
-/// The image at `path` as an agent gets it: upright, at most [`AGENT_IMAGE_SIDE`] on its long side, JPEG.
-pub fn agent_jpeg(path: &Path) -> Result<Vec<u8>, String> {
-    agent_jpeg_of(folo_data::read_image(path).map_err(|e| e.to_string())?)
+/// An image as an agent gets it: the JPEG and its size, which the prompt states and the reply's pixels are of.
+pub struct AgentImage {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
-/// A decoded image as an agent gets it ([`agent_jpeg`]): at most [`AGENT_IMAGE_SIDE`] on its long side, JPEG.
-pub fn agent_jpeg_of(image: folo_data::Image) -> Result<Vec<u8>, String> {
+impl AgentImage {
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+/// The image at `path` as an agent gets it: upright, at most `side` pixels on its long side
+/// ([`Agent::image_side`]), JPEG.
+pub fn agent_jpeg(path: &Path, side: u32) -> Result<AgentImage, String> {
+    agent_jpeg_of(folo_data::read_image(path).map_err(|e| e.to_string())?, side)
+}
+
+/// A decoded image as an agent gets it ([`agent_jpeg`]): at most `side` pixels on its long side, JPEG.
+pub fn agent_jpeg_of(image: folo_data::Image, side: u32) -> Result<AgentImage, String> {
     let long = image.width.max(image.height);
-    let image = if long > AGENT_IMAGE_SIDE {
-        let scale = f64::from(AGENT_IMAGE_SIDE) / f64::from(long);
+    let image = if long > side {
+        let scale = f64::from(side) / f64::from(long);
         let side = |v: u32| ((f64::from(v) * scale).round() as u32).max(1);
         folo_data::resize::resize(&image, side(image.width), side(image.height))
     } else {
         image
     };
-    folo_data::encode(&image, folo_data::ImageFormat::Jpeg(JPEG_QUALITY)).map_err(|e| e.to_string())
+    let jpeg =
+        folo_data::encode(&image, folo_data::ImageFormat::Jpeg(JPEG_QUALITY)).map_err(|e| e.to_string())?;
+    Ok(AgentImage { jpeg, width: image.width, height: image.height })
 }
 
 #[cfg(test)]
@@ -446,14 +512,16 @@ mod tests {
             folo_data::ImageFormat::Png,
         )
         .unwrap();
-        let size = |path: &Path| {
-            let jpeg = agent_jpeg(path).unwrap();
-            assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
-            let image = folo_data::decode(&jpeg).unwrap();
-            (image.width, image.height)
+        let size = |path: &Path, side: u32| {
+            let sent = agent_jpeg(path, side).unwrap();
+            assert_eq!(&sent.jpeg[..2], &[0xff, 0xd8]);
+            let image = folo_data::decode(&sent.jpeg).unwrap();
+            assert_eq!((image.width, image.height), sent.size());
+            sent.size()
         };
-        assert_eq!(size(&big), (1024, 512));
-        assert_eq!(size(&small), (320, 200));
-        assert!(agent_jpeg(&dir.join("missing.png")).is_err());
+        assert_eq!(size(&big, AGENT_IMAGE_SIDE), (1024, 512));
+        assert_eq!(size(&big, 768), (768, 384));
+        assert_eq!(size(&small, AGENT_IMAGE_SIDE), (320, 200));
+        assert!(agent_jpeg(&dir.join("missing.png"), AGENT_IMAGE_SIDE).is_err());
     }
 }

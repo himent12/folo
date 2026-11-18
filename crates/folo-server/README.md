@@ -19,7 +19,7 @@ it.
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
 | `src/runs/` | The real store's training runs: `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs`, `registry.rs`, `resume.rs` |
 | `src/cloud/` | The cloud control plane (docs/CLOUD.md): `Cloud` in `mod.rs`, `connections.rs`, `ledger.rs`, `reaper.rs`, `worker.rs`, `state.rs`, `files.rs`, and `executor/` (a cloud run's thread: `launch.rs`, `sync.rs`, `train.rs`, `mirror.rs`) |
-| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `claude.rs`, `codex.rs`, `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
+| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `ask.rs` (one batch's calls: two at most, usage kept whatever the outcome), `faults.rs` (passing faults and limits in a CLI's failure), `claude.rs`, `codex.rs`, `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
 | `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs`, `source.rs`, `design.rs`, `loops.rs` |
 | `src/throughput/` | The measured throughput table and run-time estimates: `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the predictor cache of `/api/predict` |
@@ -109,7 +109,8 @@ live next to the code (`src/**/tests.rs` and `mod tests` blocks). Each folder un
 
 The two tests in `label_live.rs` are `#[ignore]`d: they need the CLI installed and signed in, and they spend tokens.
 Run one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`). The crate
-has no benchmarks.
+has no benchmarks; its one example, `examples/label_eval.rs`, measures agent labeling with the real CLIs on 60 COCO
+val2017 photos (found, right, IoU, tokens, cost and time per setting: docs/LABELING.md, How good the labels are).
 
 ## Further reading
 

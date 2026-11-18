@@ -6,7 +6,8 @@
 //!
 //! **Failures.** A call that cannot be made (the CLI missing or signed out, an unknown model, a rate limit) ends
 //! the entry at once, as it ends a labeling run, and so do three calls in a row that time out or return garbage.
-//! An image whose call failed otherwise (its reply could not be read even when asked once more, or left the image
+//! A call the provider failed on a passing fault (overloaded, a server error) is asked once more after a pause,
+//! as in a labeling run, and fails its images when that fails too. An image whose call failed otherwise (its reply could not be read even when asked once more, or left the image
 //! out) has no answer. Scoring such an image as one where the agent found nothing would understate the agent, so
 //! the entry is scored only when at most [`allowed_failures`] of its images failed (2%, at least one); with more,
 //! the entry fails and says how many.
@@ -14,7 +15,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use folo_api::{BenchDetection, BenchEvent, LabelEffort, LabelUsage};
 use folo_bench::score::Sample;
@@ -24,8 +25,8 @@ use super::model::{PROGRESS_EVERY, finish_entry, passes};
 use super::results::{self, Pass};
 use super::state::{BenchFile, Slot};
 use crate::error::{Error, Result};
-use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT};
-use crate::label::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
+use crate::label::agent::{Agent, AgentRequest, BatchError, CALL_TIMEOUT, Event, ask, failure_hint};
+use crate::label::{AgentImage, MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
 
 /// Agent calls in flight at once (as a labeling run's default).
 pub const PARALLEL: usize = crate::label::DEFAULT_PARALLEL as usize;
@@ -45,6 +46,9 @@ pub struct AgentJob {
     pub images: usize,
     pub conditions: bool,
     pub cancel: Arc<AtomicBool>,
+    /// The wait before a call that failed on a passing fault is asked again, as a labeling run's
+    /// ([`crate::label::Labeler::transient_backoff`]).
+    pub backoff: Duration,
 }
 
 /// One call's worth of images: of pass `pass`, the images at these positions.
@@ -65,7 +69,8 @@ struct Run<'a> {
     /// Images whose call failed, with the first reason.
     failed: Mutex<(usize, Option<String>)>,
     soft_failures: AtomicU32,
-    fatal: Mutex<Option<String>>,
+    /// Why the entry gave up, and what to do about it when that is known then.
+    fatal: Mutex<Option<(String, Option<String>)>>,
     done: Mutex<(u64, Option<Instant>)>,
 }
 
@@ -126,28 +131,30 @@ impl Run<'_> {
         }
     }
 
-    fn fail(&self, why: String) {
-        self.fatal.lock().unwrap().get_or_insert(why);
+    /// Gives up, with `hint` as the caller resolved it ([`failure_hint`], [`Agent::hint`]); `None` stays none.
+    fn fail(&self, why: String, hint: Option<String>) {
+        self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.job.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn soft_failure(&self, why: &str) {
+    fn soft_failure(&self, why: &str, hint: Option<String>) {
         if self.soft_failures.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_SOFT_FAILURES {
-            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"));
+            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"), hint);
         }
     }
 
     /// The image at `i` as the agent gets it under the unit's pass.
-    fn jpeg(&self, pass: usize, i: usize) -> std::result::Result<Vec<u8>, String> {
+    fn jpeg(&self, pass: usize, i: usize) -> std::result::Result<AgentImage, String> {
         let im = &self.file.images[i];
         let path = self.job.slot.image_path(im);
+        let side = self.job.agent.image_side();
         match self.passes[pass] {
-            None => agent_jpeg(&path),
+            None => agent_jpeg(&path, side),
             Some((c, s)) => {
                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
                 let seed = conditions::variant_seed(self.file.seed, &im.id, c, s);
                 let r = conditions::render(&bytes, c, s, &im.boxes, seed).map_err(|e| e.to_string())?;
-                agent_jpeg_of(folo_data::decode(&r.jpeg).map_err(|e| e.to_string())?)
+                agent_jpeg_of(folo_data::decode(&r.jpeg).map_err(|e| e.to_string())?, side)
             }
         }
     }
@@ -158,23 +165,25 @@ impl Run<'_> {
         let mut sizes = Vec::with_capacity(unit.images.len());
         for &i in &unit.images {
             match self.jpeg(unit.pass, i) {
-                Ok(j) => {
-                    jpegs.push(j);
-                    sizes.push((self.file.images[i].width, self.file.images[i].height));
+                Ok(image) => {
+                    let file = (self.file.images[i].width, self.file.images[i].height);
+                    sizes.push(prompt::ImageSize { sent: image.size(), file });
+                    jpegs.push(image.jpeg);
                 }
                 Err(why) => {
                     // A benchmark's files are its own: one that cannot be read is a broken benchmark.
-                    self.fail(format!("image '{}': {why}", self.file.images[i].id));
+                    self.fail(format!("image '{}': {why}", self.file.images[i].id), None);
                     return;
                 }
             }
         }
         let scratch = self.job.slot.dir.join("tmp").join(&self.job.entry).join(format!("call-{}", unit.n));
         if let Err(e) = std::fs::create_dir_all(&scratch) {
-            self.fail(format!("creating {}: {e}", scratch.display()));
+            self.fail(format!("creating {}: {e}", scratch.display()), None);
             return;
         }
-        let text = prompt::user_prompt(&self.file.classes, &self.file.description, "", jpegs.len());
+        let sent: Vec<(u32, u32)> = sizes.iter().map(|s| s.sent).collect();
+        let text = prompt::user_prompt(&self.file.classes, &self.file.description, "", &sent);
         let request = AgentRequest {
             system: prompt::SYSTEM,
             prompt: &text,
@@ -182,46 +191,48 @@ impl Run<'_> {
             schema: &self.schema,
             model: self.job.model.as_deref(),
             effort: self.job.effort,
+            fast: false,
             scratch: &scratch,
             cancel: &self.job.cancel,
         };
         let mut usage = LabelUsage::default();
-        let mut retried = false;
         // `Some(labels per image)` on a reply that was read, `Err(why)` when the images failed, `None` untouched.
-        let result: Option<std::result::Result<Vec<Option<prompt::Labels>>, String>> = loop {
-            if self.cancelled() {
-                break None;
+        let read = |text: &str| prompt::parse_reply(text, &self.file.classes, &sizes);
+        // Every unreadable reply counts towards the cutoff, as in a labeling run.
+        let on = |event: Event<'_>| {
+            if let Event::Unreadable(why) = event {
+                self.soft_failure(why, self.job.agent.hint(why));
             }
-            let reply = match self.job.agent.label(&request) {
-                Ok(reply) => reply,
-                Err(AgentError::Cancelled) => break None,
-                Err(AgentError::Timeout) => {
-                    let why = format!(
-                        "{} did not answer within {} s",
-                        self.job.agent.id().display_name(),
-                        CALL_TIMEOUT.as_secs()
-                    );
-                    self.soft_failure(&why);
-                    break Some(Err(why));
-                }
-                Err(AgentError::Unavailable(why) | AgentError::Failed(why)) => {
-                    self.fail(why);
-                    break None;
-                }
-            };
-            usage.add(&reply.usage);
-            match prompt::parse_reply(&reply.text, &self.file.classes, &sizes) {
-                Ok(labels) => {
-                    self.soft_failures.store(0, Ordering::Relaxed);
-                    break Some(Ok(labels));
-                }
-                Err(why) => {
-                    self.soft_failure(&why);
-                    if retried || self.cancelled() {
-                        break Some(Err(why));
-                    }
-                    retried = true;
-                }
+        };
+        let agent = &*self.job.agent;
+        let result = match ask(agent, &request, self.job.backoff, &mut usage, read, on) {
+            Ok(labels) => {
+                self.soft_failures.store(0, Ordering::Relaxed);
+                Some(Ok(labels))
+            }
+            Err(BatchError::Cancelled) => None,
+            Err(BatchError::Timeout) => {
+                let why = format!(
+                    "{} did not answer within {} s",
+                    agent.id().display_name(),
+                    CALL_TIMEOUT.as_secs()
+                );
+                self.soft_failure(&why, agent.hint(&why));
+                Some(Err(why))
+            }
+            Err(BatchError::Transient(failure)) => {
+                self.soft_failure(&failure.shown(), failure_hint(agent, &failure));
+                Some(Err(failure.shown()))
+            }
+            Err(BatchError::Unreadable(why)) => Some(Err(why)),
+            Err(BatchError::Failed(failure)) => {
+                self.fail(failure.shown(), failure_hint(agent, &failure));
+                None
+            }
+            Err(BatchError::Unavailable(why)) => {
+                let hint = agent.hint(&why);
+                self.fail(why, hint);
+                None
             }
         };
         let _ = std::fs::remove_dir_all(&scratch);
@@ -248,8 +259,9 @@ impl Run<'_> {
                 let mut answers = self.answers.lock().unwrap();
                 for (&i, labels) in unit.images.iter().zip(labels) {
                     answered += 1;
-                    match labels {
-                        Some(l) => {
+                    // As a labeling run judges an image: one left out, or whose every box was dropped, failed.
+                    match prompt::image_answer(labels) {
+                        Ok(l) => {
                             answers[unit.pass][i] = Some(
                                 l.boxes
                                     .iter()
@@ -264,10 +276,10 @@ impl Run<'_> {
                                     .collect(),
                             )
                         }
-                        None => {
+                        Err(why) => {
                             let mut f = self.failed.lock().unwrap();
                             f.0 += 1;
-                            f.1.get_or_insert_with(|| "the agent's reply left an image out".into());
+                            f.1.get_or_insert(why);
                         }
                     }
                 }
@@ -293,8 +305,7 @@ impl Run<'_> {
 
     /// The entry's grade, `Ok(None)` when it was stopped, or why it failed.
     fn outcome(&self) -> Result<Option<results::Graded>> {
-        if let Some(why) = self.fatal.lock().unwrap().take() {
-            let hint = self.job.agent.hint(&why);
+        if let Some((why, hint)) = self.fatal.lock().unwrap().take() {
             let e = Error::new(axum::http::StatusCode::BAD_GATEWAY, "agent_failed", why);
             return Err(match hint {
                 Some(h) => e.hint(h),

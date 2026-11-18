@@ -19,7 +19,7 @@ use folo_bench::plan::{DEFAULT_SEVERITIES, MAX_WEIGHT};
 
 use super::state::Slot;
 use crate::error::{Error, Result};
-use crate::label::agent::{AgentError, AgentRequest};
+use crate::label::agent::{AgentRequest, BatchError, ask, failure_hint};
 use crate::label::{agent_jpeg, check_model, check_text};
 use crate::store::Store;
 use serde::Deserialize;
@@ -192,6 +192,10 @@ fn agent_failed(message: impl Into<String>, hint: Option<String>) -> Error {
 /// `POST /api/bench/benchmarks/{id}/design`: one call to the agent (asked once more when its answer cannot be
 /// read); the plan it proposes, not saved. A timer thread ends the call at [`DESIGN_TIMEOUT`], or when the server
 /// shuts down (`closing`).
+///
+/// What the calls used is reported with a plan only ([`BenchDesign::usage`]): a design that fails is a `502`
+/// with the message and hint alone, without what its calls used (labeling runs and benchmark entries count
+/// every call, whatever the outcome).
 pub(super) fn design(
     store: &dyn Store,
     slot: &Slot,
@@ -201,17 +205,21 @@ pub(super) fn design(
     static CALLS: AtomicU64 = AtomicU64::new(0);
     let note = check_text("note", &req.note, MAX_NOTE_CHARS)?;
     let model = check_model(req.model.as_deref())?;
-    let agent = store.labeler()?.agent(req.agent)?;
+    let labeler = store.labeler()?;
+    let (agent, backoff) = (labeler.agent(req.agent)?, labeler.transient_backoff());
     let info = agent.info();
     let model = model.or(info.default_model);
     let effort = req.effort.unwrap_or(info.default_effort);
     let file = slot.live()?.file.clone();
+    let side = agent.image_side();
     let jpegs = file
         .images
         .iter()
         .take(DESIGN_IMAGES)
         .map(|im| {
-            agent_jpeg(&slot.image_path(im)).map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
+            agent_jpeg(&slot.image_path(im), side)
+                .map(|image| image.jpeg)
+                .map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
         })
         .collect::<Result<Vec<_>>>()?;
     let prompt = user_prompt(&file.description, &note, &file.classes, &file.class_boxes(), jpegs.len());
@@ -250,47 +258,39 @@ pub(super) fn design(
             schema: &schema,
             model: model.as_deref(),
             effort,
+            fast: false,
             scratch: &scratch,
             cancel,
         };
         let mut usage = LabelUsage::default();
-        let mut why = String::new();
-        let mut answer = None;
-        for _attempt in 0..2 {
-            match agent.label(&request) {
-                Ok(reply) => {
-                    usage.add(&reply.usage);
-                    match parse_answer(&reply.text, designer.clone()) {
-                        Ok(plan) => {
-                            answer = Some(Ok(BenchDesign { plan, usage }));
-                            break;
-                        }
-                        Err(e) => why = e,
-                    }
-                }
-                Err(AgentError::Cancelled | AgentError::Timeout) => {
-                    let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
-                        format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
-                    } else {
-                        "the server is shutting down".to_string()
-                    };
-                    answer = Some(Err(agent_failed(message, None)));
-                    break;
-                }
-                Err(AgentError::Unavailable(m) | AgentError::Failed(m)) => {
-                    let hint = agent.hint(&m);
-                    answer = Some(Err(agent_failed(m, hint)));
-                    break;
-                }
+        // Two calls at most, whatever made the first fail (a passing fault, or an answer that is not a plan).
+        let read = |text: &str| parse_answer(text, designer.clone());
+        let answer = match ask(&*agent, &request, backoff, &mut usage, read, |_| {}) {
+            Ok(plan) => Ok(BenchDesign { plan, usage }),
+            Err(BatchError::Cancelled | BatchError::Timeout) => {
+                let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
+                    format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
+                } else {
+                    "the server is shutting down".to_string()
+                };
+                Err(agent_failed(message, None))
             }
-        }
-        drop(done);
-        answer.unwrap_or_else(|| {
-            Err(agent_failed(
+            Err(BatchError::Unreadable(why)) => Err(agent_failed(
                 format!("{name}'s answer is not a plan, also when asked once more: {why}"),
                 Some("try again, or a larger model".into()),
-            ))
-        })
+            )),
+            // A design that failed has no usage to show.
+            Err(BatchError::Failed(failure) | BatchError::Transient(failure)) => {
+                let hint = failure_hint(&*agent, &failure);
+                Err(agent_failed(failure.shown(), hint))
+            }
+            Err(BatchError::Unavailable(m)) => {
+                let hint = agent.hint(&m);
+                Err(agent_failed(m, hint))
+            }
+        };
+        drop(done);
+        answer
     });
     let _ = std::fs::remove_dir_all(&scratch);
     answer

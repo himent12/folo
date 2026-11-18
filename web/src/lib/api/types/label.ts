@@ -13,6 +13,8 @@ export type LabelAgentId = 'claude' | 'codex';
 export interface LabelModel {
   id: string;
   label: string;
+  /** It offers the agent's faster service tier (`StartLabeling.fast`); absent when it does not. */
+  fast?: boolean;
 }
 
 /** `GET /api/label/agents`: one agent CLI and whether the server found it. */
@@ -29,6 +31,11 @@ export interface LabelAgent {
   default_model: string | null;
   /** The effort a run uses when it names none: what labels best for its cost with this agent. */
   default_effort: LabelEffort;
+  /**
+   * Its default model offers a faster service tier that uses more of the account's usage (`StartLabeling.fast`):
+   * Codex's Fast. Which listed models offer it is `LabelModel.fast`. Absent from older servers.
+   */
+  fast?: boolean;
   /** How to make the agent available (install, sign in); null when it is. */
   hint: string | null;
 }
@@ -64,6 +71,8 @@ export interface LabelRun {
   /** null: the CLI's default. */
   model: string | null;
   effort: LabelEffort;
+  /** It asked for the faster service tier; absent when it did not. */
+  fast?: boolean;
   started: Time;
   /** null while the run is active. */
   finished: Time | null;
@@ -173,6 +182,11 @@ export interface StartLabeling {
   model?: string | null;
   /** Absent or null: the agent's `default_effort`. */
   effort?: LabelEffort | null;
+  /**
+   * The agent's faster service tier, using more of the account's usage; only with a model that offers it
+   * (`LabelModel.fast`, or `LabelAgent.fast` for the default model).
+   */
+  fast?: boolean;
   scope?: LabelScope;
   /** Exactly these images, whatever their status, instead of `scope`. */
   image_ids?: string[] | null;

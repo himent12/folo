@@ -1,4 +1,4 @@
-// Which agent, model and effort a labeling run asks for: picked in the job page's Agent panel and used by every run
+// Which agent, model, effort and service tier a labeling run asks for: picked in the job page's Agent panel and used by every run
 // started there (the panel's, and the editor's "Ask the agent again"). The agent is remembered per browser (prefs).
 
 import { signal } from 'fw';
@@ -11,6 +11,11 @@ export class AgentChoice {
   #model = signal('');
   /** The effort picked for each agent; one not picked is that agent's default. */
   #effort = signal<Partial<Record<LabelAgentId, LabelEffort>>>({});
+  /**
+   * The faster service tier, switched on for each agent: one switched on for one agent is not carried to another,
+   * and it counts only with a model that offers it (`fastOffered`).
+   */
+  #fast = signal<Partial<Record<LabelAgentId, boolean>>>({});
 
   constructor(readonly agents: () => readonly LabelAgent[] | undefined) {}
 
@@ -45,9 +50,30 @@ export class AgentChoice {
     if (a) this.#effort.set({ ...this.#effort.peek(), [a.id]: e });
   }
 
-  /** The request's agent part, or null when no agent is installed. */
-  request(): Pick<StartLabeling, 'agent' | 'model' | 'effort'> | null {
+  /**
+   * Whether the model shown offers the faster service tier: a listed model says so itself (`LabelModel.fast`), the
+   * agent's default model as `LabelAgent.fast` says. A model the agent does not list is not offered it.
+   */
+  get fastOffered(): boolean {
     const a = this.agent;
-    return a ? { agent: a.id, model: this.model || null, effort: this.effort } : null;
+    if (!a) return false;
+    const model = this.model;
+    return model ? !!a.models.find((m) => m.id === model)?.fast : !!a.fast;
+  }
+
+  /** The faster service tier: switched on for this agent, and offered with the model shown. */
+  get fast(): boolean {
+    const a = this.agent;
+    return !!a && this.fastOffered && !!this.#fast.get()[a.id];
+  }
+  set fast(on: boolean) {
+    const a = this.agent;
+    if (a) this.#fast.set({ ...this.#fast.peek(), [a.id]: on });
+  }
+
+  /** The request's agent part, or null when no agent is installed. */
+  request(): Pick<StartLabeling, 'agent' | 'model' | 'effort' | 'fast'> | null {
+    const a = this.agent;
+    return a ? { agent: a.id, model: this.model || null, effort: this.effort, ...(this.fast ? { fast: true } : {}) } : null;
   }
 }

@@ -137,12 +137,13 @@ async fn upload_label_review_and_make_a_dataset() {
         assert!(a.prompt.contains("For this request: Tight boxes."), "{}", a.prompt);
     }
 
-    // The labels are in pixels of each image.
+    // The labels are in pixels of each image (the reply's pixels, each image being sent as it is).
     let page = images(app, &job.id, "?status=labeled").await;
     assert_eq!((page.total, page.images.len()), (6, 6));
     assert_eq!(page.images[0].source, Some(LabelSource::Agent));
     assert_eq!(page.images[0].boxes, [BBox { class: 0, x1: 50.0, y1: 10.0, x2: 150.0, y2: 60.0 }]);
-    assert_eq!(page.images[5].boxes, [BBox { class: 0, x1: 16.0, y1: 6.4, x2: 48.0, y2: 38.4 }]);
+    // The 64 x 64 image: the box is clipped to it.
+    assert_eq!(page.images[5].boxes, [BBox { class: 0, x1: 50.0, y1: 10.0, x2: 64.0, y2: 60.0 }]);
     assert_eq!(images(app, &job.id, "?status=pending").await.total, 0);
     assert_eq!(images(app, &job.id, "?offset=4&limit=5").await.images.len(), 2);
     err(app, get(&format!("{uri}/images?status=done")), StatusCode::BAD_REQUEST, "invalid_query").await;

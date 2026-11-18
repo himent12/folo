@@ -9,7 +9,9 @@ use folo_server::{MockStore, Options, Server};
 use folo_test_support::TestDir;
 use serde_json::{Value, json};
 
-use super::harness::{Step, boxes_reply, err, fixture, get, idle, images, job_with_images, ok, post};
+use folo_server::label::agent::BUSY;
+
+use super::harness::{Step, boxes_reply, err, fixture, get, idle, images, job_with_images, ok, paid, post};
 
 #[tokio::test]
 async fn replies_that_cannot_be_read_fail_their_images_only() {
@@ -18,7 +20,7 @@ async fn replies_that_cannot_be_read_fail_their_images_only() {
     // class and one good box. Call 3 (the retry of the failed ones, later): fine.
     let partial = json!({ "images": [{ "image": 2, "boxes": [
         { "label": "truck", "box": [0, 0, 500, 500] },
-        { "label": "Person", "box": [500, 500, 1000, 1000] },
+        { "label": "Person", "box": [100, 50, 200, 100] },
     ] }] });
     let steps = vec![
         Step::Reply("I'm sorry, I can't see any images.".into()),
@@ -96,6 +98,157 @@ async fn a_cli_error_ends_the_run_before_more_calls_are_made() {
     assert_eq!(idle(app, &job.id).await.counts.labeled, 6);
 }
 
+/// What Claude Code prints when Anthropic's API stays overloaded through its own retries.
+const OVERLOADED: &str =
+    r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+
+#[tokio::test]
+async fn a_passing_fault_is_asked_again_once_and_the_run_goes_on() {
+    let t = TestDir::new("label-transient");
+    // Call 1 is overloaded, then goes through; call 2 fails twice after reaching the model, so its image fails;
+    // call 3 is fine.
+    let steps = vec![
+        Step::Fail(OVERLOADED),
+        Step::Reply(boxes_reply(1, "car")),
+        Step::FailPaid("stream disconnected before completion: error sending request"),
+        Step::FailPaid("exceeded retry limit, last status: 503 Service Unavailable"),
+    ];
+    let f = fixture(&t.join("home"), steps);
+    let app = &f.app;
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), body)).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.done, run.failed), (Some(LabelOutcome::Completed), 2, 1));
+    // Two calls for each of the first two images, one for the third. Usage counts the replies and the failed
+    // attempts that reached the model (call 2's), not the one that did not (call 1's first).
+    assert_eq!((f.agent.calls(), run.usage.calls), (5, 4));
+    assert_eq!(run.usage.input_tokens, 2 * 1000 + 2 * paid().input_tokens);
+    assert_eq!(done.usage, run.usage);
+    let page = images(app, &job.id, "").await;
+    assert_eq!(
+        page.images[1].error.as_deref(),
+        Some("exceeded retry limit, last status: 503 Service Unavailable")
+    );
+    let logs: RunLogs = ok(app, get(&format!("{uri}/logs"))).await;
+    let text: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert!(
+        text.iter().any(|m| m.starts_with("call 1: API Error: 529") && m.ends_with("asking again in 0 s")),
+        "{text:?}"
+    );
+    assert!(text.iter().any(|m| m.starts_with("call 2: stream disconnected")), "{text:?}");
+}
+
+#[tokio::test]
+async fn passing_faults_in_a_row_end_the_run_and_a_usage_limit_ends_it_at_once() {
+    let t = TestDir::new("label-transient-run");
+    let f = fixture(&t.join("home"), (0..6).map(|_| Step::Fail(OVERLOADED)).collect());
+    let app = &f.app;
+    let job = job_with_images(app, 5).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body.clone())).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    // Three calls (each asked twice) failed: the run gives up as on three timeouts.
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 6));
+    assert!(run.error.unwrap().starts_with("3 calls in a row failed; the last one: API Error: 529"));
+    assert_eq!(run.hint.as_deref(), Some(BUSY));
+    assert_eq!(done.counts, LabelCounts { images: 5, pending: 2, labeled: 0, failed: 3, boxes: 0 });
+
+    // A usage limit is not a passing fault: no second try, the run ends on it.
+    let t = TestDir::new("label-usage-limit");
+    let limit = "You've hit your session limit · resets 3pm (Europe/Berlin)";
+    let f = fixture(&t.join("home"), vec![Step::Fail(limit)]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let run = idle(app, &job.id).await.run.unwrap();
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 1));
+    assert_eq!(run.error.as_deref(), Some(limit));
+    let hint = run.hint.unwrap();
+    assert!(hint.starts_with("the account's usage limit was reached (resets 3pm (Europe/Berlin))"), "{hint}");
+
+    // A short rate limit is a passing fault: asked again, and the run goes on.
+    let t = TestDir::new("label-rate-limit");
+    let rate = "API Error: 429 Rate limit reached. Please try again in 0.05s.";
+    let f = fixture(&t.join("home"), vec![Step::Fail(rate)]);
+    let app = &f.app;
+    let job = job_with_images(app, 1).await;
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), json!({ "agent": "claude" })))
+        .await;
+    let run = idle(app, &job.id).await.run.unwrap();
+    assert_eq!((run.outcome, run.done, f.agent.calls()), (Some(LabelOutcome::Completed), 1, 2));
+}
+
+#[tokio::test]
+async fn a_status_that_is_no_fault_keeps_the_hint_its_text_would_get_out_of_the_run() {
+    // A 400 whose text names a 503: a client error (not asked again), and not "overloaded" either, also when the
+    // run ends on it.
+    let t = TestDir::new("label-status-hint");
+    let f = fixture(&t.join("home"), vec![Step::FailStatus("API Error: 503 Service Unavailable", 400)]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let run = idle(app, &job.id).await.run.unwrap();
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 1));
+    assert_eq!(
+        (run.error.as_deref(), run.hint.as_deref()),
+        (Some("API Error: 503 Service Unavailable"), None)
+    );
+}
+
+#[tokio::test]
+async fn a_batch_makes_two_calls_at_most_whatever_made_them_fail() {
+    let t = TestDir::new("label-mixed-failures");
+    // Call 1 fails on a passing fault, is asked again and replies garbage: that is its second and last call (the
+    // third step, another passing fault, is call 2's first).
+    let steps = vec![
+        Step::FailPaid("API Error: 503 Service Unavailable"),
+        Step::Reply("Sure! Here are the boxes.".into()),
+        Step::Fail("API Error: 503 Service Unavailable"),
+    ];
+    let f = fixture(&t.join("home"), steps);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.done, run.failed), (Some(LabelOutcome::Completed), 1, 1));
+    // Two calls each: four, not five.
+    assert_eq!(f.agent.calls(), 4);
+    // Every call that reported usage is counted: the paid fault, the garbage reply and call 2's reply.
+    assert_eq!((run.usage.calls, run.usage.input_tokens), (3, paid().input_tokens + 2 * 1000));
+    let page = images(app, &job.id, "").await;
+    assert_eq!(page.images[0].error.as_deref(), Some("the reply has no JSON object"));
+}
+
+#[tokio::test]
+async fn an_image_whose_every_box_was_dropped_fails_instead_of_looking_empty() {
+    let t = TestDir::new("label-all-dropped");
+    // Image 1 (200 x 100): its one box is of a class of the job but lies wholly outside it, so nothing is left
+    // of it. Image 2: nothing on it, which is an answer.
+    let reply = json!({ "images": [
+        { "image": 1, "boxes": [["car", 300, 150, 400, 200]] },
+        { "image": 2, "boxes": [] },
+    ] });
+    let f = fixture(&t.join("home"), vec![Step::Reply(reply.to_string())]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), json!({ "agent": "claude" })))
+        .await;
+    let done = idle(app, &job.id).await;
+    assert_eq!(done.counts, LabelCounts { images: 2, pending: 0, labeled: 1, failed: 1, boxes: 0 });
+    let page = images(app, &job.id, "").await;
+    let error = page.images[0].error.as_deref().unwrap();
+    assert!(error.starts_with("the one box the agent gave this image was dropped"), "{error}");
+    assert_eq!((page.images[1].status, page.images[1].error.as_deref()), (LabelImageStatus::Labeled, None));
+}
+
 #[tokio::test]
 async fn an_agent_that_only_returns_garbage_is_given_up_on_after_three_calls() {
     let t = TestDir::new("label-garbage");
@@ -158,6 +311,8 @@ async fn start_refuses_what_it_cannot_run() {
         json!({ "agent": "claude", "parallel": 9 }),
         json!({ "agent": "claude", "image_ids": ["404"] }),
         json!({ "agent": "claude", "note": "n".repeat(2001) }),
+        // This agent has no faster tier to ask for.
+        json!({ "agent": "claude", "fast": true }),
     ] {
         err(app, post(&start, bad), StatusCode::BAD_REQUEST, "invalid_body").await;
     }
@@ -179,7 +334,10 @@ async fn start_refuses_what_it_cannot_run() {
     idle(app, &job.id).await;
     // ... and without an effort the agent's default is used.
     let asked = f.agent.asked.lock().unwrap()[0].clone();
-    assert_eq!((asked.model.as_deref(), asked.effort), (Some("claude-opus-5-5[1m]"), LabelEffort::Medium));
+    assert_eq!(
+        (asked.model.as_deref(), asked.effort, asked.fast),
+        (Some("claude-opus-5-5[1m]"), LabelEffort::Medium, false)
+    );
     let empty = job_with_images(app, 0).await;
     let e = err(
         app,

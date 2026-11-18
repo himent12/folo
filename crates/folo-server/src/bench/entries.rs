@@ -229,7 +229,8 @@ impl Benches {
             }
             BenchContestantSpec::Agent { agent: agent_id, model, effort } => {
                 let model = check_model(model.as_deref())?;
-                let agent = store.labeler()?.agent(agent_id)?;
+                let labeler = store.labeler()?;
+                let (agent, backoff) = (labeler.agent(agent_id)?, labeler.transient_backoff());
                 let info = agent.info();
                 let model = model.or(info.default_model);
                 let effort = effort.unwrap_or(info.default_effort);
@@ -265,6 +266,7 @@ impl Benches {
                     images,
                     conditions,
                     cancel,
+                    backoff,
                 };
                 let engine = self.engine.clone();
                 let thread = std::thread::Builder::new()

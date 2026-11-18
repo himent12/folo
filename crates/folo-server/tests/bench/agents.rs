@@ -8,7 +8,7 @@ use folo_test_support::TestDir;
 use serde_json::json;
 
 use super::harness::{
-    Step, axis, bench, dataset, delete, ended, err, fixture, get, ok, post, put, send, small_plan,
+    Step, axis, bench, dataset, delete, ended, err, fixture, get, ok, paid, post, put, send, small_plan,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -44,7 +44,7 @@ async fn agent_entries_follow_the_labeling_policy() {
     // Asked as agent labeling asks: the classes, the description as the instructions, two images a call.
     let prompts = f.agent.prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0], ("Classes: circle, square\nInstructions: Count the shapes.\n2 images follow, in order: image 1 to image 2.".to_string(), 2));
+    assert_eq!(prompts[0], ("Classes: circle, square\nInstructions: Count the shapes.\n2 images follow, in order: image 1 (64 x 64 pixels), image 2 (64 x 64 pixels).".to_string(), 2));
     let gallery: BenchEntryImagePage = ok(app, get(&format!("{entries}/{}/images", e.id))).await;
     assert!(gallery.images.iter().all(|i| i.detections.len() == 1 && i.detections[0].score == 1.0));
 
@@ -64,6 +64,15 @@ async fn agent_entries_follow_the_labeling_policy() {
     assert_eq!(
         (failed.error.as_deref(), failed.hint.as_deref()),
         (Some("not signed in: run /login"), Some("sign in first"))
+    );
+    // A client error whose text names a server fault: the status counts, so it ends the entry without the
+    // "overloaded" hint the text alone would get.
+    f.agent.script(vec![Step::FailStatus("API Error: 503 Service Unavailable", 400)]);
+    let e: BenchEntry = ok(app, post(&entries, agent.clone())).await;
+    let failed = ended(app, &b.id, &e.id).await;
+    assert_eq!(
+        (failed.status, failed.error.as_deref(), failed.hint.as_deref()),
+        (BenchEntryStatus::Failed, Some("API Error: 503 Service Unavailable"), None)
     );
     // One image left out of a reply is within the policy (scored as nothing found)...
     f.agent.script(vec![Step::Reply(json!({ "images": [{ "image": 1, "boxes": [] }] }).to_string())]);
@@ -110,6 +119,38 @@ async fn agent_entries_follow_the_labeling_policy() {
     err(app, post(&entries, bad), StatusCode::BAD_REQUEST, "invalid_body").await;
     let zero = json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 0 });
     err(app, post(&entries, zero), StatusCode::BAD_REQUEST, "invalid_body").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passing_fault_in_an_agent_entry_is_asked_again_once() {
+    let t = TestDir::new("bench-agent-transient");
+    let f = fixture(&t.join("home"));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 20).await;
+    let b = bench(
+        app,
+        json!({ "name": "b", "description": "Count the shapes.", "source": { "kind": "dataset", "dataset_id": ds.id }, "plan": small_plan() }),
+    )
+    .await;
+    let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+    let agent = json!({ "contestant": { "kind": "agent", "agent": "claude" } });
+
+    // One call is overloaded after reaching the model, then goes through: the entry is done, and its usage has
+    // the failed attempt too.
+    f.agent.script(vec![Step::FailPaid("API Error: 529 Overloaded")]);
+    let e: BenchEntry = ok(app, post(&entries, agent.clone())).await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done, "{done:?}");
+    assert_eq!(f.agent.calls.load(Ordering::SeqCst), 3, "two batches, one of them asked twice");
+    let usage = done.usage.unwrap();
+    assert_eq!((usage.calls, usage.input_tokens), (3, 2000 + paid().input_tokens));
+
+    // Overloaded twice in a row, in every call: the images get no answer and the entry fails.
+    f.agent.script((0..4).map(|_| Step::Fail("API Error: 529 Overloaded")).collect());
+    let e: BenchEntry = ok(app, post(&entries, agent)).await;
+    let failed = ended(app, &b.id, &e.id).await;
+    assert_eq!(failed.status, BenchEntryStatus::Failed, "{failed:?}");
+    assert_eq!(f.agent.calls.load(Ordering::SeqCst), 3 + 4);
 }
 
 #[tokio::test(flavor = "multi_thread")]

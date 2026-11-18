@@ -28,6 +28,7 @@ folo-vision.workspace = true
 walkdir.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tokio-stream.workspace = true

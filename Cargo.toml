@@ -32,6 +32,8 @@ rayon = "1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde_yaml = "0.9"
+# Reading Codex's config.toml (agent labeling): the parser only.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 smallvec = { version = "1", features = ["union", "const_generics"] }
 thiserror = "2"
 walkdir = "2"

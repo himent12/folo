@@ -10,14 +10,18 @@
 //! Files: this one holds [`Labeler`]; `job` (one job: `job.json`, its state and events), `images` (adding, listing,
 //! editing and removing a job's images), `labeling` (starting and stopping a run), `run` (a run, batch by batch),
 //! [`agent`] (the [`Agent`] trait and running a CLI with a deadline), [`claude`] and [`codex`] (the two agents),
-//! `tree` (a child process with everything it starts), [`prompt`] (what an agent is asked and how its reply is read),
+//! `ask` (one batch's calls: at most two, whatever made the first fail), `faults` (what a CLI's failure says: a
+//! passing fault or a limit), `tree` (a child process with everything
+//! it starts), [`prompt`] (what an agent is asked and how its reply is read),
 //! `validate` (checks of what clients send), `export` and `dataset` (the YOLO dataset a job becomes).
 
 pub mod agent;
+mod ask;
 pub mod claude;
 pub mod codex;
 pub(crate) mod dataset;
 mod export;
+mod faults;
 mod images;
 pub(crate) mod job;
 mod labeling;
@@ -26,7 +30,8 @@ mod run;
 mod tree;
 mod validate;
 
-pub(crate) use run::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of};
+pub(crate) use run::MAX_SOFT_FAILURES;
+pub use run::{AGENT_IMAGE_SIDE, AgentImage, TRANSIENT_BACKOFF, agent_jpeg, agent_jpeg_of};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -126,6 +131,8 @@ pub struct Labeler {
     agents: Vec<Arc<dyn Agent>>,
     /// How often a run writes `job.json` at most ([`run::SAVE_EVERY`]).
     save_every: Duration,
+    /// How long a call that failed on a passing fault waits before it is asked again ([`run::TRANSIENT_BACKOFF`]).
+    backoff: Duration,
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -180,6 +187,7 @@ impl Labeler {
             jobs: RwLock::new(jobs),
             agents: vec![Arc::new(ClaudeCode::new()), Arc::new(Codex::new())],
             save_every: run::SAVE_EVERY,
+            backoff: run::TRANSIENT_BACKOFF,
         }
     }
 
@@ -191,6 +199,17 @@ impl Labeler {
     /// Changes how often a run writes `job.json` at most (tests shorten it).
     pub fn set_save_every(&mut self, every: Duration) {
         self.save_every = every;
+    }
+
+    /// Changes how long a call that failed on a passing fault waits before it is asked again (tests shorten it).
+    pub fn set_transient_backoff(&mut self, backoff: Duration) {
+        self.backoff = backoff;
+    }
+
+    /// How long a call that failed on a passing fault waits before it is asked again: [`TRANSIENT_BACKOFF`],
+    /// unless a test shortened it. Benchmark agent entries wait as long.
+    pub fn transient_backoff(&self) -> Duration {
+        self.backoff
     }
 
     fn job(&self, id: &str) -> Result<Arc<Job>> {

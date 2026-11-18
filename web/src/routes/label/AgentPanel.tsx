@@ -23,6 +23,7 @@ import Gate from '$lib/ui/Gate';
 import Meta from '$lib/ui/Meta';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
+import Switch from '$lib/ui/Switch';
 import TextArea from '$lib/ui/TextArea';
 import Callout from '../run/Callout';
 import AgentFields from './AgentFields';
@@ -117,6 +118,7 @@ export default function AgentPanel(props: AgentPanelProps) {
                 <Meta>
                   <For each={runAgent(run.get()!, props.agents)}>{(f) => <span>{f()}</span>}</For>
                   <span>{run.get()!.effort} effort</span>
+                  {run.get()!.fast ? <span>fast</span> : null}
                 </Meta>
               </p>
             </div>
@@ -165,8 +167,8 @@ export default function AgentPanel(props: AgentPanelProps) {
                   </p>
                 ) : agent.get() ? (
                   <p class="note">
-                    {agent.get()!.name} · {modelLabel(props.choice.model || null, agent.get())} · {props.choice.effort} effort. The boxes are a draft for you to
-                    review.
+                    {agent.get()!.name} · {modelLabel(props.choice.model || null, agent.get())} · {props.choice.effort} effort{props.choice.fast ? ' · fast' : ''}. The boxes are a draft
+                    for you to review.
                   </p>
                 ) : null}
               </>
@@ -187,6 +189,14 @@ export default function AgentPanel(props: AgentPanelProps) {
       {!running.get() ? (
         <div class="sec">
           <AgentFields agents={props.agents} agentsError={props.agentsError} retryAgents={props.retryAgents} choice={props.choice} />
+          {props.choice.fastOffered ? (
+            <Switch
+              label="Fast"
+              hint={`${agent.get()!.name}'s faster service tier: answers sooner and uses more of the account's usage.`}
+              checked={props.choice.fast}
+              onchange={(on) => (props.choice.fast = on)}
+            />
+          ) : null}
         </div>
       ) : null}
 

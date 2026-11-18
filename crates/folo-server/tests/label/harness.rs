@@ -10,6 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
+use folo_server::label::agent::{Failure, fault_hint};
 use folo_server::label::{Agent, AgentError, AgentReply, AgentRequest};
 use folo_server::{Options, RealStore, Server};
 use http_body_util::BodyExt;
@@ -23,6 +24,10 @@ pub(super) enum Step {
     Reply(String),
     /// The CLI reports an error.
     Fail(&'static str),
+    /// The CLI reports an error after the call reached the model: it used [`paid`].
+    FailPaid(&'static str),
+    /// The CLI reports an error with an HTTP status in a field of its own (Claude Code's `api_error_status`).
+    FailStatus(&'static str, u16),
     /// No answer in time.
     Timeout,
     /// Works until the run is cancelled.
@@ -38,6 +43,7 @@ pub(super) struct Asked {
     pub(super) images: usize,
     pub(super) model: Option<String>,
     pub(super) effort: LabelEffort,
+    pub(super) fast: bool,
 }
 
 /// An agent that follows a script, then labels every image with one box of the first class.
@@ -68,12 +74,23 @@ impl Scripted {
     }
 }
 
-/// A reply with one box of `label` per image, at the same relative place in each.
+/// A reply with one box of `label` per image, at the same pixels in each.
 pub(super) fn boxes_reply(images: usize, label: &str) -> String {
     let entries: Vec<Value> = (1..=images)
-        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [250, 100, 750, 600] }] }))
+        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [50, 10, 150, 60] }] }))
         .collect();
     json!({ "images": entries }).to_string()
+}
+
+/// What a [`Step::FailPaid`] call used.
+pub(super) fn paid() -> LabelUsage {
+    LabelUsage {
+        calls: 1,
+        input_tokens: 300,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: Some(0.002),
+    }
 }
 
 impl Agent for Scripted {
@@ -93,9 +110,10 @@ impl Agent for Scripted {
             name: self.id.display_name().into(),
             available: self.available,
             version: self.available.then(|| "1.0.0".into()),
-            models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
+            models: vec![LabelModel { id: "small".into(), label: "Small".into(), fast: false }],
             default_model: Some("small".into()),
             default_effort: LabelEffort::Medium,
+            fast: false,
             hint: (!self.available).then(|| "install it".into()),
         }
     }
@@ -113,24 +131,31 @@ impl Agent for Scripted {
             images: req.images.len(),
             model: req.model.map(str::to_string),
             effort: req.effort,
+            fast: req.fast,
         });
         let step = self.steps.lock().unwrap().pop_front();
         let text = match step {
             Some(Step::Reply(text)) => text,
-            Some(Step::Fail(why)) => return Err(AgentError::Failed(why.into())),
-            Some(Step::Timeout) => return Err(AgentError::Timeout),
+            Some(Step::Fail(why)) => return Err(AgentError::failed(why)),
+            Some(Step::FailPaid(why)) => {
+                return Err(AgentError::Failed(Failure { used: paid(), ..Failure::new(why) }));
+            }
+            Some(Step::FailStatus(why, status)) => {
+                return Err(AgentError::Failed(Failure { status: Some(status), ..Failure::new(why) }));
+            }
+            Some(Step::Timeout) => return Err(AgentError::Timeout(Default::default())),
             Some(Step::Hold) => {
                 while !req.cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                return Err(AgentError::Cancelled);
+                return Err(AgentError::Cancelled(Default::default()));
             }
             Some(Step::Until(_)) | None => {
                 if let Some(Step::Until(open)) = &step {
                     while !open.load(Ordering::SeqCst) {
                         // A test that fails before it opens the gate ends the run instead (the store's drop).
                         if req.cancel.load(Ordering::Relaxed) {
-                            return Err(AgentError::Cancelled);
+                            return Err(AgentError::Cancelled(Default::default()));
                         }
                         std::thread::sleep(Duration::from_millis(5));
                     }
@@ -150,7 +175,8 @@ impl Agent for Scripted {
     }
 
     fn hint(&self, message: &str) -> Option<String> {
-        message.contains("/login").then(|| "sign in first".into())
+        // As the real agents: their own hints, then the ones every agent gives (a limit, a passing fault).
+        message.contains("/login").then(|| "sign in first".into()).or_else(|| fault_hint(message, None))
     }
 }
 
@@ -183,6 +209,7 @@ pub(super) fn fixture_with(
     let store = Arc::new(tune(
         RealStore::open(home.to_path_buf())
             .recheck_every(Duration::ZERO)
+            .label_transient_backoff(Duration::from_millis(20))
             .label_agents(vec![agent.clone(), missing]),
     ));
     Fixture { app: Server::new(store.clone(), Options::default()).router(), store, agent }

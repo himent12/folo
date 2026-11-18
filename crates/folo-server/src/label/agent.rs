@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
 
+pub use super::ask::{BatchError, Event, MAX_CALLS, ask, failure_hint};
+pub use super::faults::{BUSY, fault_hint, is_limit, is_transient, limit_hint, reset_time, retry_after};
 use super::tree::Tree;
 
 /// How long one agent call may take.
@@ -19,10 +21,12 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a probe's result is reused.
 const PROBE_TTL: Duration = Duration::from_secs(60);
 /// How often a running child is checked for its exit, the deadline and the cancel switch.
-const POLL: Duration = Duration::from_millis(40);
+pub(super) const POLL: Duration = Duration::from_millis(40);
 /// How long a child's output pipes may stay open after it exited (a process it started still holds them) before
 /// what has been read is taken as its output.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+/// How long the output of a killed child is read on: what it printed just before the kill is still in its pipes.
+const KILL_DRAIN: Duration = Duration::from_millis(250);
 
 /// One call: a prompt and the images it is about.
 pub struct AgentRequest<'a> {
@@ -38,6 +42,9 @@ pub struct AgentRequest<'a> {
     pub model: Option<&'a str>,
     /// Reasoning effort.
     pub effort: LabelEffort,
+    /// Ask for the provider's faster service tier, which uses more of the account's usage
+    /// ([`LabelAgent::fast`]); agents without one ignore it.
+    pub fast: bool,
     /// An existing folder of this call's own, for files the CLI needs on disk; the caller removes it.
     pub scratch: &'a Path,
     /// Set to end the call early ([`AgentError::Cancelled`]).
@@ -54,16 +61,64 @@ pub struct AgentReply {
 }
 
 /// Why a call returned nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AgentError {
     /// The CLI could not be started, or said something FOLO does not understand. Calling again will not help.
     Unavailable(String),
-    /// The CLI ran and reported an error (not signed in, an unknown model, a rate limit): its message.
-    Failed(String),
-    /// No answer within [`CALL_TIMEOUT`]; the process was killed.
-    Timeout,
-    /// The cancel switch was set; the process was killed.
-    Cancelled,
+    /// The CLI ran and reported an error (not signed in, an unknown model, a limit, a passing fault).
+    Failed(Failure),
+    /// No answer within [`CALL_TIMEOUT`]; the process was killed. With what the call used, when the CLI had
+    /// printed that before it hung ([`run_kept`]).
+    Timeout(LabelUsage),
+    /// The cancel switch was set; the process was killed. With what the call used, as for a timeout.
+    Cancelled(LabelUsage),
+}
+
+impl AgentError {
+    /// [`AgentError::Failed`] with `message` alone.
+    pub fn failed(message: impl Into<String>) -> AgentError {
+        AgentError::Failed(Failure::new(message))
+    }
+
+    /// This error with `used` as what the call used, when it is a timeout or a cancel (the others say it
+    /// themselves, or used nothing).
+    pub fn with_used(self, used: LabelUsage) -> AgentError {
+        match self {
+            AgentError::Timeout(_) => AgentError::Timeout(used),
+            AgentError::Cancelled(_) => AgentError::Cancelled(used),
+            other => other,
+        }
+    }
+}
+
+/// An error a CLI reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Failure {
+    /// Its message, in full: what it is ([`is_transient`], [`is_limit`]) is read from all of it, and only what is
+    /// shown is cut short ([`Failure::shown`]).
+    pub message: String,
+    /// The HTTP status the CLI reported in a field of its own (Claude Code's `api_error_status`): it stands for
+    /// the statuses in the text, which may be any number.
+    pub status: Option<u16>,
+    /// What the call used before it failed (Claude Code reports that; zero when the CLI does not).
+    pub used: LabelUsage,
+}
+
+impl Failure {
+    /// A failure with `message` alone.
+    pub fn new(message: impl Into<String>) -> Failure {
+        Failure { message: message.into(), ..Failure::default() }
+    }
+
+    /// Whether the same call can get past it a little later ([`is_transient`]).
+    pub fn is_transient(&self) -> bool {
+        is_transient(&self.message, self.status)
+    }
+
+    /// The message as a run, an image or a log line shows it: at most [`folo_api::codes::MAX_MESSAGE_CHARS`].
+    pub fn shown(&self) -> String {
+        folo_api::codes::cap(&self.message, folo_api::codes::MAX_MESSAGE_CHARS)
+    }
 }
 
 /// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`];
@@ -75,10 +130,27 @@ pub trait Agent: Send + Sync + 'static {
     fn info(&self) -> LabelAgent;
     /// Images per call when a run names no batch size: larger for an agent with a larger fixed cost per call.
     fn default_batch(&self) -> usize;
+    /// The longest side, in pixels, of an image as this agent is sent it ([`super::agent_jpeg`]): what the
+    /// provider bills per image grows with it, so it is as small as labels its images about as well.
+    fn image_side(&self) -> u32 {
+        super::run::AGENT_IMAGE_SIDE
+    }
+    /// Whether a run may ask for the faster service tier ([`AgentRequest::fast`]) with `model` (`None`: the
+    /// agent's default): `Err` says why not.
+    fn check_fast(&self, model: Option<&str>) -> Result<(), String> {
+        let _ = model;
+        Err(format!("{} has no faster service tier", self.id().display_name()))
+    }
+    /// Something about how this agent's calls are made right now that a run's log should say once (a call that
+    /// costs more than it should, and why); `None` when there is nothing to say.
+    fn notice(&self) -> Option<String> {
+        None
+    }
     /// Labels one batch: one model request, no tools. Blocks until the reply, the deadline or `cancel`.
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError>;
     /// What to do about a failure with this `message` ([`AgentError::Failed`] / [`AgentError::Unavailable`]),
-    /// when the agent can tell (sign in, pick another model, ...).
+    /// when the agent can tell (sign in, pick another model, ...). [`failure_hint`] puts a failure's own status
+    /// first.
     fn hint(&self, message: &str) -> Option<String> {
         let _ = message;
         None
@@ -97,9 +169,23 @@ impl<T: Clone> Memo<T> {
     /// The remembered value, or `find()`'s when there is none or it is older than [`PROBE_TTL`]. Concurrent
     /// callers wait for one `find`.
     pub fn get(&self, find: impl FnOnce() -> T) -> T {
+        self.get_where(|_| true, find)
+    }
+
+    /// Forgets the remembered value when it is `stale`: the next [`Memo::get`] finds it again.
+    pub fn forget_if(&self, stale: impl FnOnce(&T) -> bool) {
+        let mut slot = self.0.lock().unwrap();
+        if slot.as_ref().is_some_and(|(_, value)| stale(value)) {
+            *slot = None;
+        }
+    }
+
+    /// [`Memo::get`], finding the value again also when the remembered one is not `current` (it was found for
+    /// something that has changed since).
+    pub fn get_where(&self, current: impl FnOnce(&T) -> bool, find: impl FnOnce() -> T) -> T {
         let mut slot = self.0.lock().unwrap();
         match &*slot {
-            Some((at, value)) if at.elapsed() < PROBE_TTL => value.clone(),
+            Some((at, value)) if at.elapsed() < PROBE_TTL && current(value) => value.clone(),
             _ => {
                 let value = find();
                 *slot = Some((Instant::now(), value.clone()));
@@ -143,11 +229,8 @@ impl Cli {
             Some(custom) => PathBuf::from(custom),
             None => which(self.name)?,
         };
-        let mut cmd = Command::new(&path);
-        cmd.arg("--version");
-        let out = run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)).ok()?;
-        let version = version_of(&out.stdout)?;
-        out.success.then_some(Found { path, version })
+        let version = probe_version(&path)?;
+        Some(Found { path, version })
     }
 
     /// The executable to start, or why there is none.
@@ -163,10 +246,38 @@ impl Cli {
         self.found().map(|f| f.version)
     }
 
+    /// Remembers `version` at `path` as the probe's finding (tests).
+    #[cfg(test)]
+    pub(crate) fn remember(&self, path: &str, version: &str) {
+        let found = || Some(Found { path: PathBuf::from(path), version: version.into() });
+        self.probed.get_where(|_| false, found);
+    }
+
+    /// Forgets the probe when it found `version`: the next question about the CLI runs it again (it may have been
+    /// updated in place). A probe that already found another version stays.
+    pub fn forget_version(&self, version: &str) {
+        self.probed.forget_if(|found| found.as_ref().is_some_and(|f| f.version == version));
+    }
+
+    /// The executable and its version, from one probe (`None`: not installed): what goes together, for what is
+    /// found out from that executable.
+    pub fn found_pair(&self) -> Option<(PathBuf, String)> {
+        self.found().map(|f| (f.path, f.version))
+    }
+
     /// How to make the CLI available: `install` (a sentence on getting it), or the override variable.
     pub fn hint(&self, install: &str) -> String {
         format!("{install}, or point {} at its executable; then reload", self.env)
     }
+}
+
+/// The version the executable at `path` says it is (`--version`), asked now: `None` when it does not answer.
+fn probe_version(path: &Path) -> Option<String> {
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    let out = run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)).ok()?;
+    let version = version_of(&out.stdout)?;
+    out.success.then_some(version)
 }
 
 /// The version number in a `--version` line: the first word that starts with a digit (`2.1.302 (Claude Code)`,
@@ -185,7 +296,11 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Why [`run_kept`]'s child was killed, and what it had printed by then.
+pub type Killed = Box<(AgentError, Output)>;
+
 /// What a finished child printed.
+#[derive(Clone, Debug, Default)]
 pub struct Output {
     /// Whether it exited with status 0.
     pub success: bool,
@@ -237,8 +352,24 @@ pub fn run(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentError> {
-    let ended = run_to_end(cmd, stdin, timeout, cancel, PIPE_GRACE)?;
-    Ok(Output { success: ended.outcome?, stdout: ended.stdout.text(), stderr: ended.stderr.text() })
+    run_kept(cmd, stdin, timeout, cancel).map_err(|killed| killed.0)
+}
+
+/// [`run`], keeping what the child printed when it was killed (a timeout, a cancel): a CLI may have reported what
+/// the call used before it hung.
+pub fn run_kept(
+    cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, Killed> {
+    let ended =
+        run_to_end(cmd, stdin, timeout, cancel, PIPE_GRACE).map_err(|e| Box::new((e, Output::default())))?;
+    let out = Output { success: false, stdout: ended.stdout.text(), stderr: ended.stderr.text() };
+    match ended.outcome {
+        Ok(success) => Ok(Output { success, ..out }),
+        Err(e) => Err(Box::new((e, out))),
+    }
 }
 
 /// A child that has ended, or was ended: whether it succeeded, and its pipes.
@@ -262,7 +393,7 @@ fn run_to_end(
         .stderr(Stdio::piped());
     Tree::prepare(&mut cmd);
     if cancel.load(Ordering::Relaxed) {
-        return Err(AgentError::Cancelled);
+        return Err(AgentError::Cancelled(LabelUsage::default()));
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
     let unavailable = |e: std::io::Error| AgentError::Unavailable(format!("starting `{program}`: {e}"));
@@ -294,14 +425,20 @@ fn run_to_end(
             Some((success, at)) if (stdout.ended() && stderr.ended()) || at.elapsed() >= grace => {
                 break Ok(success);
             }
-            _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled),
-            _ if Instant::now() >= deadline => break Err(AgentError::Timeout),
+            _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled(LabelUsage::default())),
+            _ if Instant::now() >= deadline => break Err(AgentError::Timeout(LabelUsage::default())),
             _ => std::thread::sleep(POLL),
         }
     };
     if outcome.is_err() || !(stdout.ended() && stderr.ended()) {
         // Whatever still runs (the child, or what it started and left holding a pipe) goes.
         tree.kill(&mut child);
+        // What the readers had not copied yet when the processes went (a result printed just before the kill)
+        // is still in the pipes, which end once nothing holds them: a short wait for that, no longer.
+        let drained = Instant::now() + KILL_DRAIN;
+        while !(stdout.ended() && stderr.ended()) && Instant::now() < drained {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     Ok(Ended { outcome, stdout, stderr })
 }
@@ -312,16 +449,42 @@ pub fn last_line(text: &str) -> Option<String> {
     Some(folo_api::codes::cap(line, folo_api::codes::MAX_MESSAGE_CHARS))
 }
 
+/// A command that runs `script` in the platform's shell.
+#[cfg(test)]
+pub(super) fn shell(script: &str) -> Command {
+    let mut cmd = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+    cmd.arg(if cfg!(windows) { "/C" } else { "-c" }).arg(script);
+    cmd
+}
+
+/// A shell script that prints the file `out` (in its working folder), then creates the file `printed` and hangs
+/// (tests: a CLI that printed something and then hung).
+#[cfg(test)]
+pub(super) const PRINT_AND_HANG: &str = if cfg!(windows) {
+    "type out.txt & type nul > printed & ping -n 60 127.0.0.1 > NUL"
+} else {
+    "cat out.txt; touch printed; sleep 60"
+};
+
+/// A cancel switch set once the file `marker` exists (tests: stops a child once it has printed, however slow the
+/// machine, instead of on a deadline it may not have printed by).
+#[cfg(test)]
+pub(super) fn cancel_when(marker: PathBuf) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let set = cancel.clone();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        while !marker.exists() && t0.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        set.store(true, Ordering::Relaxed);
+    });
+    cancel
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A command that runs `script` in the platform's shell.
-    fn shell(script: &str) -> Command {
-        let mut cmd = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
-        cmd.arg(if cfg!(windows) { "/C" } else { "-c" }).arg(script);
-        cmd
-    }
 
     #[test]
     fn versions_are_read_from_either_cli() {
@@ -357,7 +520,7 @@ mod tests {
         let sleep = if cfg!(windows) { "ping -n 30 127.0.0.1 > NUL" } else { "sleep 30" };
         let t0 = Instant::now();
         let r = run(shell(sleep), None, Duration::from_millis(200), &AtomicBool::new(false));
-        assert_eq!(r.err(), Some(AgentError::Timeout));
+        assert_eq!(r.err(), Some(AgentError::Timeout(LabelUsage::default())));
         assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
         // Cancelled while it runs: killed. Cancelled before it starts: never started (the program is not even
         // looked for).
@@ -368,10 +531,22 @@ mod tests {
             switch.store(true, Ordering::Relaxed);
         });
         let r = run(shell(sleep), None, PROBE_TIMEOUT, &cancel);
-        assert_eq!(r.err(), Some(AgentError::Cancelled));
+        assert_eq!(r.err(), Some(AgentError::Cancelled(LabelUsage::default())));
         let r = run(Command::new("folo-no-such-agent-cli"), None, PROBE_TIMEOUT, &cancel);
-        assert_eq!(r.err(), Some(AgentError::Cancelled));
+        assert_eq!(r.err(), Some(AgentError::Cancelled(LabelUsage::default())));
         assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
+    }
+
+    #[test]
+    fn a_killed_child_still_hands_back_what_it_printed() {
+        let dir = folo_test_support::TestDir::new("label-run-kept");
+        std::fs::write(dir.path().join("out.txt"), "printed\n").unwrap();
+        let mut cmd = shell(PRINT_AND_HANG);
+        cmd.current_dir(dir.path());
+        let cancel = cancel_when(dir.path().join("printed"));
+        let (e, out) = *run_kept(cmd, None, Duration::from_secs(90), &cancel).unwrap_err();
+        assert_eq!(e, AgentError::Cancelled(LabelUsage::default()));
+        assert_eq!(out.stdout.trim(), "printed");
     }
 
     #[test]
