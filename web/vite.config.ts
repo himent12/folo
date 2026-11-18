@@ -27,6 +27,25 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: true,
+    // Three chunks per screen, not sixty: the entry (the shell and what it imports), `shared` (every module two or
+    // more chunks use: ui parts, charts, d3, the API's types and rules) and the screen's own. Left to itself the
+    // bundler makes a chunk of every set of modules a distinct set of screens shares (115 files, many under 1 KB), and
+    // a cold Overview fetched 41 JS and 19 CSS files: over HTTP/1.1 (folo serve) a browser opens 6 connections to a
+    // host, so on a remote server those requests queued in waves of one round trip each. A first load fetches some
+    // code its screen does not use (the Overview: 15 KB more JS, brotli), and every later screen only its own chunk
+    // (README, Routing).
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            // What index.html's script imports statically stays in the entry, so the shell paints as soon as it has
+            // loaded, never waiting on `shared`.
+            { name: 'index', tags: ['$initial'], priority: 2 },
+            { name: 'shared', minShareCount: 2, priority: 1 },
+          ],
+        },
+      },
+    },
   },
   // An unhandled error (a deferred callback outliving its component) fails the run, never only a warning.
   // In CI a test gets 20 s instead of vitest's 5 s: a runner shares its machine with other jobs, and a test of
