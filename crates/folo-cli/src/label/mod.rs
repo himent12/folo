@@ -49,7 +49,7 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
         }
         LabelCommand::Create(a) => {
             let s = open(&a.conn, false)?;
-            let paths = paths(&a.paths)?;
+            let paths = paths(&a.paths, a.conn.server.is_some())?;
             let r = s
                 .labels
                 .create_job(a.name, a.classes, a.instructions, &paths)
@@ -59,7 +59,7 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
         }
         LabelCommand::Add(a) => {
             let s = open(&a.conn, false)?;
-            let paths = paths(&a.paths)?;
+            let paths = paths(&a.paths, a.conn.server.is_some())?;
             let r = s.labels.add_paths(&a.job, &paths).map_err(api_error)?;
             out.record(&r);
             print::added(&r, out);
@@ -157,15 +157,17 @@ impl Drop for Session {
     }
 }
 
-/// Input paths as the server takes them: an absolute path (of any OS: the server's may not be this one's) as
-/// given, a relative one made absolute against the current folder (a server never reads a relative path, which
-/// would mean its own working folder).
-fn paths(paths: &[String]) -> Result<Vec<String>, CliError> {
+/// Input paths as the server takes them, absolute: a relative one made absolute against the current folder (a
+/// server never reads a relative path, which would mean its own working folder). On this machine (in process, or
+/// the `folo serve` that owns the data dir) by this OS's rules, so on Windows `/photos` and `\photos` are on the
+/// current drive; for an explicit `--server`, whose OS may be another, an absolute path of any OS is passed as
+/// given.
+fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliError> {
     paths
         .iter()
         .map(|p| {
             let p = p.trim();
-            if looks_absolute(p) {
+            if remote && looks_absolute(p) {
                 return Ok(p.to_string());
             }
             let abs = std::path::absolute(Path::new(p)).map_err(|e| usage(format!("{p}: {e}")))?;
@@ -284,7 +286,7 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
     };
     // The record and the exit code both come from the snapshot that showed the run over.
     let run = job.run.clone();
-    let status = s.labels.status_of(job, 5).map_err(api_error)?;
+    let status = s.labels.status_of(job, 5);
     let mut record = folo_api::json::to_value(&status).unwrap_or_default();
     record["event"] = json!("finished");
     out.record(&record);
@@ -304,15 +306,15 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
 
 /// Whether `now` (the job's run in a later read) is still `ours`, the run this command started; `last` is the
 /// progress seen before. By id; a server that predates run ids gives only the start time to the second, so there
-/// the agent, model and size must match too and the progress must not go back, else it is another run.
+/// the agent and model must match too and the progress must not go back, else it is another run. Not the size:
+/// a run's `total` drops when an image that waited for it is edited, reviewed or deleted.
 fn same_run(ours: Option<&LabelRun>, now: Option<&LabelRun>, last: Option<(u64, u64, u64)>) -> bool {
     let (Some(ours), Some(now)) = (ours, now) else { return ours.is_none() && now.is_none() };
     if !ours.id.is_empty() || !now.id.is_empty() {
         return ours.id == now.id;
     }
     let went_back = last.is_some_and(|(done, failed, _)| now.done < done || now.failed < failed);
-    (&ours.started, ours.agent, &ours.model, ours.total) == (&now.started, now.agent, &now.model, now.total)
-        && !went_back
+    (&ours.started, ours.agent, &ours.model) == (&now.started, now.agent, &now.model) && !went_back
 }
 
 fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
@@ -474,4 +476,42 @@ fn cli_error(mut e: folo_server::error::Error) -> CliError {
 
 fn usage(message: impl Into<String>) -> CliError {
     CliError::new(ExitCode::Usage, "usage", message).hint("see `folo label --help`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(id: &str, total: u64, done: u64) -> LabelRun {
+        serde_json::from_value(json!({
+            "id": id, "agent": "claude", "model": null, "effort": "medium", "started": "2026-11-18T10:00:00Z",
+            "finished": null, "total": total, "done": done, "failed": 0, "outcome": null, "error": null,
+            "usage": { "calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "cost_usd": null }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_waiter_knows_its_own_run() {
+        // By id when the server gives one: a run started in the same second is another.
+        assert!(same_run(Some(&run("lr_1", 9, 0)), Some(&run("lr_1", 9, 3)), None));
+        assert!(!same_run(Some(&run("lr_1", 9, 0)), Some(&run("lr_2", 9, 0)), None));
+        // An older server: an image edited while it waited lowers `total`, which is still the same run; progress
+        // that goes back is another one.
+        assert!(same_run(Some(&run("", 9, 0)), Some(&run("", 8, 4)), Some((3, 0, 9))));
+        assert!(!same_run(Some(&run("", 9, 0)), Some(&run("", 9, 1)), Some((3, 0, 9))));
+    }
+
+    #[test]
+    fn paths_follow_this_os_unless_the_server_is_elsewhere() {
+        let p = |s: &str, remote: bool| paths(&[s.to_string()], remote).unwrap().remove(0);
+        assert_eq!(p("/photos", true), "/photos");
+        assert_eq!(p("C:/photos", true), "C:/photos");
+        // On this machine `/photos` is this OS's: on Windows, the current drive's.
+        let here = p("/photos", false);
+        assert_eq!(here, folo_api::json::path(std::path::absolute("/photos").unwrap()));
+        #[cfg(windows)]
+        assert!(here.as_bytes()[1] == b':' && here.ends_with(":/photos"), "{here}");
+        assert!(Path::new(&p("photos", true)).is_absolute());
+    }
 }

@@ -69,7 +69,7 @@ section, re-exported by `types.ts`) in sync. The code and docs follow these rule
 | Add a field to a request or response | The type in `src/<section>.rs` (`#[serde(default)]` for a response field); a test in `src/tests.rs` when older servers lack it; the section in `docs/API.md`; `web/src/lib/api/types/<section>.ts`; the server code that fills it (crates/folo-server) |
 | Add an enum value | The variant (and its `as_str` / `ALL` where the enum has them, as `LabelAgentId` in `src/label.rs`); `docs/API.md`; the web types; every `match` the compiler then points at, also in `apps/desktop` |
 | Add an error code | `CODES` in `src/codes.rs`; the Errors table in `docs/API.md`; `crates/folo-cli/tests/codes.rs` fails on a code the sources use that is not listed |
-| Announce an optional API feature | A `FEATURE_*` constant next to its types; the server lists it in `/api/system` (crates/folo-server/src/routes/system.rs or `Store::features`) |
+| Announce an optional API feature | A `FEATURE_*` constant next to its types; the server lists it in `/api/system` and `/api/health` (`features` in crates/folo-server/src/routes/system.rs, or `Store::features`) |
 
 ## Tests and benchmarks
 

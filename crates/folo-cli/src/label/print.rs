@@ -89,7 +89,7 @@ pub(super) fn status(r: &LabelStatusResult, out: Out) {
         status_name(r.status),
         c.images,
         c.labeled,
-        r.reviewed,
+        r.reviewed.map_or("?".to_string(), |n| n.to_string()),
         c.pending,
         c.failed,
         c.boxes

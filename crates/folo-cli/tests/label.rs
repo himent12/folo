@@ -94,7 +94,8 @@ fn run(mut cmd: Command) -> (i32, String, String) {
     (status.code().unwrap_or(-1), out, err)
 }
 
-/// Kills `child` and every process it started.
+/// Kills `child` and what is left of the processes it started (once `child` has exited, its descendants are out of
+/// reach on Windows and Unix alike).
 fn kill_tree(child: &mut ChildGuard) {
     #[cfg(windows)]
     {
@@ -318,4 +319,17 @@ fn label_through_a_folo_serve() {
     let again = [&["start", &job, "--agent", "claude", "--images", &a, "--note", "again"], &srv[..]].concat();
     let started = env.ok(&again);
     assert_eq!((s(&started["job_id"]), started["total"].as_u64()), (job.as_str(), Some(1)));
+    // The run ends before the server goes: killed while it launched the agent, it left the agent suspended,
+    // holding this test's output.
+    let status = [&["status", &job, "--log", "0"], &srv[..]].concat();
+    let start = Instant::now();
+    loop {
+        let st = env.ok(&status);
+        if s(&st["status"]) == "idle" {
+            assert_eq!(s(&st["run"]["outcome"]), "completed", "{st}");
+            break;
+        }
+        assert!(start.elapsed() < DEADLINE, "the run never ended: {st}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

@@ -8,6 +8,8 @@ export interface Health {
   /** API generation, `v1`. */
   api: string;
   mock: boolean;
+  /** The optional features `/api/system` lists, without its hardware probe; absent from older servers. */
+  features?: string[];
 }
 
 export type GpuBackend = 'vulkan' | 'dx12' | 'metal';

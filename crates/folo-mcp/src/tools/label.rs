@@ -187,7 +187,7 @@ impl Inner {
             c.labeled,
             c.images,
             c.failed,
-            r.reviewed
+            r.reviewed.unwrap_or(0)
         );
         if let Some(run) = &r.run {
             let state = match run.outcome {

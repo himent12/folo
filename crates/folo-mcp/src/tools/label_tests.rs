@@ -514,6 +514,37 @@ async fn confine_keeps_labeling_inside_the_data_dir() {
     store.shutdown();
 }
 
+/// What a waiter saw end is what it reports: the details read after are left out when they would belong to a
+/// later run, or cannot be read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_run_is_reported_as_seen() {
+    let home = TestDir::new("mcp-label-seen");
+    images(&home.join("photos"));
+    let store = store(home.path());
+    let s = FoloMcp::new(store.clone(), None, options(home.path(), false));
+    let photos = folo_api::json::path(home.join("photos"));
+    let made =
+        ok(&s, "create_label_job", json!({ "name": "x", "classes": ["car"], "paths": [photos] })).await;
+    let job = made["job_id"].as_str().unwrap().to_string();
+    ok(&s, "start_labeling", json!({ "job_id": job, "agent": "claude", "image_ids": ["1"] })).await;
+    wait_idle(&s, &job).await;
+    let labels = crate::label::Labels::Store(store.clone());
+    let seen = labels.job(&job).unwrap();
+    let first = seen.run.clone().unwrap();
+    assert!(!labels.status_of(seen.clone(), 5).log.is_empty());
+    // Another run since: its log is not the first run's.
+    ok(&s, "start_labeling", json!({ "job_id": job, "agent": "claude", "image_ids": ["2"] })).await;
+    wait_idle(&s, &job).await;
+    let st = labels.status_of(seen.clone(), 5);
+    assert!(st.log.is_empty() && st.reviewed == Some(0), "{st:?}");
+    assert_eq!(st.run.unwrap().total, first.total);
+    // The job is gone: the run as seen, without the details.
+    labels.delete(&job).unwrap();
+    let st = labels.status_of(seen, 5);
+    assert!(st.log.is_empty() && st.reviewed.is_none(), "{st:?}");
+    store.shutdown();
+}
+
 /// The `size` a view returns is taken back as is, a portrait image's included (rounding and the one-pixel side).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_views_size_is_taken_back() {

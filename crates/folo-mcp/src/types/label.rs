@@ -229,8 +229,10 @@ pub struct LabelStatusResult {
     pub classes: Vec<String>,
     /// Image counts.
     pub counts: LabelCounts,
-    /// Labeled images a person or an agent has checked.
-    pub reviewed: u64,
+    /// Labeled images a person or an agent has checked; left out only by `folo label start --wait` when the
+    /// job could not be read again after its run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<u64>,
     /// The active run, else the last one.
     pub run: Option<LabelRunSummary>,
     /// Tokens of every run of the job.

@@ -95,30 +95,48 @@ fn check_frame(f: [u32; 2], width: u32, height: u32) -> Result<(), Error> {
     Ok(())
 }
 
+/// `label_status`' result of `job`.
+fn status_result(
+    job: folo_api::LabelJob,
+    reviewed: Option<u64>,
+    log: &[folo_api::LogLine],
+) -> LabelStatusResult {
+    LabelStatusResult {
+        id: job.id,
+        name: job.name,
+        status: job.status,
+        classes: job.classes,
+        counts: job.counts,
+        reviewed,
+        run: job.run.map(Into::into),
+        usage: job.usage,
+        dataset_id: job.dataset_id,
+        log: log.iter().map(compact::log_line).collect(),
+    }
+}
+
 impl Labels {
     /// The job with its review count and its last `log_lines` log lines (`label_status`).
     pub fn status(&self, id: &str, log_lines: usize) -> Result<LabelStatusResult, Error> {
-        self.status_of(self.job(id)?, log_lines)
-    }
-
-    /// [`Self::status`] of a job already read: its run and counts are those of `job`, not of a later read (a
-    /// waiter reports the run it saw end, not the one that may have started since).
-    pub fn status_of(&self, job: folo_api::LabelJob, log_lines: usize) -> Result<LabelStatusResult, Error> {
-        let id = job.id.as_str();
+        let job = self.job(id)?;
         let reviewed = self.count(id, Some(LabelImageStatus::Labeled), Some(true))?;
         let log = if log_lines == 0 { Vec::new() } else { self.logs(id, log_lines)? };
-        Ok(LabelStatusResult {
-            id: job.id,
-            name: job.name,
-            status: job.status,
-            classes: job.classes,
-            counts: job.counts,
-            reviewed,
-            run: job.run.map(Into::into),
-            usage: job.usage,
-            dataset_id: job.dataset_id,
-            log: log.iter().map(compact::log_line).collect(),
-        })
+        Ok(status_result(job, Some(reviewed), &log))
+    }
+
+    /// [`Self::status`] of a job already read, which it always describes: its run and counts are those of `job`
+    /// (a waiter reports the run it saw end, not one started since). The review count and the log are read after,
+    /// as well as can be: left out when the reads fail (the job was deleted since), and the log also when the
+    /// job's run is another by then (its lines would be the new run's).
+    pub fn status_of(&self, job: folo_api::LabelJob, log_lines: usize) -> LabelStatusResult {
+        let id = job.id.clone();
+        let reviewed = self.count(&id, Some(LabelImageStatus::Labeled), Some(true)).ok();
+        let mut log = if log_lines == 0 { Vec::new() } else { self.logs(&id, log_lines).unwrap_or_default() };
+        let run = |j: &folo_api::LabelJob| j.run.as_ref().map(|r| (r.id.clone(), r.started.clone()));
+        if !log.is_empty() && self.job(&id).ok().is_none_or(|now| run(&now) != run(&job)) {
+            log.clear();
+        }
+        status_result(job, reviewed, &log)
     }
 
     /// Images of job `id` with this status and review mark.

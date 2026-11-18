@@ -177,7 +177,8 @@ pub fn view_text(
     let by_name = classes.iter().all(|c| c.len() <= SHORT_CLASS);
     let mut lines = String::new();
     let mut listed = 0u64;
-    if v.num_boxes == 0 {
+    // Paging past the end first: boxes cleared since paging started are no plain "No boxes."
+    if v.num_boxes == 0 && v.from <= 1 {
         lines.push_str("\nNo boxes.");
     } else if v.boxes.is_empty() {
         lines.push_str(&format!(
@@ -305,5 +306,8 @@ mod tests {
         let t = view_text("lj_1", &view(5, 9), &["car".into()], 0, 16_000);
         assert!(t.contains("No boxes from number 9: the image has 5 now (revision n-x)"), "{t}");
         assert!(t.contains("view again with from: 1.") && !t.contains("(boxes"), "{t}");
+        // All of them cleared since paging started.
+        let t = view_text("lj_1", &view(0, 301), &["car".into()], 0, 16_000);
+        assert!(t.contains("No boxes from number 301: the image has 0 now"), "{t}");
     }
 }
