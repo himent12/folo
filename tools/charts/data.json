@@ -49,7 +49,7 @@
     "coco": {
       "source": "docs/BENCHMARKS.md, Accuracy (COCO val2017 AP; the YOLO26 numbers are Ultralytics' published ones)",
       "rows": [
-        { "label": "Nano", "detail": "folo-n v4: 64 epochs, distilled", "values": [0.356, 0.409], "text": ["0.356", "0.409"], "delta": "−0.053" },
+        { "label": "Nano", "detail": "folo-n v5: 128 epochs, distilled", "values": [0.37, 0.409], "text": ["0.370", "0.409"], "delta": "−0.039" },
         { "label": "Small", "detail": "folo-s: 56 epochs from scratch", "values": [0.416, 0.48], "text": ["0.416", "0.480"], "delta": "−0.064" }
       ]
     },

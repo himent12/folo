@@ -11,7 +11,7 @@ cf65f7a5, built in a detached worktree (`D:/folo-wt/hill5-trainer-base`, binary
 full-COCO pair, but about nothing on full COCO with mosaic, which is loader-bound on this machine; and a fourth
 review round (GPT-6.2 Sol on 5e6714a5, after the three below) still found two blocking error-path bugs (see
 Design). The branch stays on origin for reference. Items 1 and 3 got no PR: `train/mosaic-window` and
-`train/amp-step-r5` (the rebase) are branches on the maintainers' machine, not pushed; the original
+`train/amp-step-r5` (the rebase) are branches on origin (5644cff3 and cf4c7f63), with no PR; the original
 `train/amp-step` (0b74e5f7) is on origin. The code, tests and docs this notebook describes exist only on those
 branches.
 
@@ -239,7 +239,7 @@ the CPU (16 workers beside other work), which the lead may want to ship separate
 
 ## Item 3: `train/amp-step` rebased (branch `train/amp-step-r5`, not shipped)
 
-`train/amp-step` (0b74e5f7, on origin) rebased on `main` cf65f7a5 as cf4c7f63 on `train/amp-step-r5` (not pushed) (conflicts in `storage.rs`, `kernels/mod.rs`, ARCHITECTURE.md; clippy clean). A/B
+`train/amp-step` (0b74e5f7, on origin) rebased on `main` cf65f7a5 as cf4c7f63 on `train/amp-step-r5` (on origin) (conflicts in `storage.rs`, `kernels/mod.rs`, ARCHITECTURE.md; clippy clean). A/B
 `amp-mini2` (mini320 at 640, `--mosaic 0 --workers 12`, new first, 130 s arms; an earlier set `amp-mini` overlapped a
 loader bench of mine and is discarded):
 

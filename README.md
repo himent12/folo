@@ -77,8 +77,8 @@ measured.
 ### Accuracy
 
 Speed only counts at comparable accuracy, and on COCO FOLO is not there yet. Trained on COCO alone from random
-weights, folo-n reaches AP 0.356 on val2017 after 64 epochs, the second half distilled from folo-s (`folo-n-coco-v4`;
-the earlier `folo-n-coco-v3` read 0.340 after 78) and folo-s 0.416 after 56; the opt-in box fusion (`--fusion dfl --iou 0.65 --max-det 1000`) adds 0.002–0.004
+weights, folo-n reaches AP 0.370 on val2017 after 128 epochs, 96 of them distilled from folo-s (`folo-n-coco-v5`:
+`folo-n-coco-v4`, 0.356 after 64, continued for 64 more with the teacher) and folo-s 0.416 after 56; the opt-in box fusion (`--fusion dfl --iou 0.65 --max-det 1000`) adds 0.002–0.004
 AP to each. Ultralytics publishes 0.409 for yolo26n and 0.480 for yolo26s, from models pretrained on Objects365 and then trained on COCO for far longer (245 epochs for
 yolo26n). That is not like for like, and a full COCO comparison at an equal budget has not been run. Two things have
 been measured at an equal budget:
@@ -92,7 +92,7 @@ been measured at an equal budget:
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/accuracy-dark.svg">
-    <img src="docs/img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.356 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 and 64 epochs (folo-n's second half distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+    <img src="docs/img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.370 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 (folo-s) and 128 epochs (folo-n, 96 of them distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
   </picture>
 </p>
 
@@ -311,6 +311,7 @@ What works today (v0.1):
   | name | model | val2017 AP / AP50 | training |
   |---|---|---|---|
   | `folo-s-coco` | folo-s | 0.416 / 0.580 | 56 epochs |
+  | `folo-n-coco-v5` | folo-n | 0.370 / 0.525 | v4 continued for 64 epochs with the `folo-s-coco` teacher, 128 in all |
   | `folo-n-coco-v4` | folo-n | 0.356 / 0.509 | 64 epochs, the second half distilled from `folo-s-coco` |
   | `folo-n-coco-v3` | folo-n | 0.340 / 0.487 | v2 annealed for 16 more epochs, 78 in all |
   | `folo-n-coco-v2` | folo-n | 0.317 / 0.458 | epoch 62 of a 300-epoch run that is paused |

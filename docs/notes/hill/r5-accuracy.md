@@ -3,7 +3,7 @@
 Lane `accuracy` of hill-climb 5 (2026-11-17). Goal: a third distillation term, **class-wise rank distillation**
 (a `distill.rank_gain` beside docs/MODEL.md §8.9's terms), gated at full COCO scale on forks of hill 4's control,
 then the round's long run (`folo-n-coco-v4` continued for 64 epochs with the teacher; "Long run" at the end:
-val2017 AP 0.3701, weights not published). **The gate killed the term**
+val2017 AP 0.3701, published as `folo-n-coco-v5`). **The gate killed the term**
 (below), so it is not in main: its code, tests and `bench/distill/rank.py` are only in the closed PR #295 (commits
 c08fbc7c, 342699d8, e85a2cbe, a8235fd7, ba874d3b). What the round kept is the fused distillation kernel (#297). The design is the Fable 5.2 counsel of this
 round (not in the repo; summarised here where it matters); hill 4's distillation is
@@ -199,7 +199,7 @@ detections with pycocotools, `eval/stats-long.json`, and gives the same numbers)
 
 | model | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---:|---:|---:|---:|---:|
-| **long run, epoch 64 (NOT PUBLISHED)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| **long run, epoch 64 (published as `folo-n-coco-v5`)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
 | `folo-n-coco-v4` (published), its start | 0.3559 | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
 | hill 4's control, 64 epochs from scratch without the teacher (not published) | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
 
@@ -219,9 +219,12 @@ The target (0.364) is met, and the gain shows in every AP column.
 - One training seed: the intervals cover the sampling of the evaluation images, not the training seed.
 - The teacher was trained on train2017, the student's training set.
 - The trainer's mAP was still rising at epoch 64; a longer continuation is not measured.
-- Not measured on these weights: the fused f16 file, the opt-in box fusion flags, int8 (`folo quantize`).
+- Not measured on these weights in this lane: the fused f16 file, the opt-in box fusion flags, int8 (`folo
+  quantize`). The first two were measured at the publication (below); int8 was not.
 - The run's cost against v4's is not measured (loaded machine, no A/B).
 
-**The weights are not published.** The file is local, `D:/folo-data/runs-hill5/accuracy/weights/n-v4-cont-kd-e64.folo`;
-whether to publish it (as `folo-n-coco-v5`) is the owner's decision. Until then the published folo-n is v4, and
-docs/BENCHMARKS.md's headline numbers stay v4's 0.356.
+**Published (2026-11-18).** The owner approved publishing: this file is `folo-n-coco-v5` (release `weights-v6`,
+byte for byte), with its fused f16 export `folo-n-coco-v5-f16`. At the publication the f32 file read the table's
+numbers again to every digit (AP 0.370076, the same 814,520 detections), the f16 file 0.370103 with `--half`, and
+the f32 file 0.3730 with the box fusion flags ([examples/coco, v5](../../../examples/coco/README.md#evaluate-v5),
+which also has the fine-tuning check against v4). docs/BENCHMARKS.md's headline folo-n numbers are now v5's 0.370.

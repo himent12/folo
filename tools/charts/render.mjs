@@ -132,7 +132,7 @@ const figures = {
           },
         ],
         footer: [
-          'COCO: FOLO trained on COCO alone from random weights, 56 and 64 epochs (folo-n: the second half distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for far longer.',
+          'COCO: FOLO trained on COCO alone from random weights, 56 epochs (folo-s) and 128 (folo-n: 96 of them distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for far longer.',
           'Fine-tuning: each from its own COCO weights, at its defaults, 100 epochs; the differences are of the unrounded means. "level": inside the spread of the seeds, or on a set both saturate (signatures). Details: docs/BENCHMARKS.md, Accuracy.',
         ],
       },

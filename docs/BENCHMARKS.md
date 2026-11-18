@@ -34,8 +34,9 @@ been measured again with that longer warm-up. The CPU rows warm up with 5 calls 
   </picture>
 </p>
 
-Accuracy is the other half. Trained on COCO alone from random weights for 56 (folo-s) and 64 epochs (folo-n,
-`folo-n-coco-v4`, AP 0.356, its second half distilled from folo-s; v3 read 0.340 after 78), FOLO's models are 0.05 to 0.07 AP behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; how much of the
+Accuracy is the other half. Trained on COCO alone from random weights for 56 (folo-s) and 128 epochs (folo-n,
+`folo-n-coco-v5`, AP 0.370: `folo-n-coco-v4`, 0.356 after 64 with its second half distilled from folo-s, continued for
+64 more with the same teacher), FOLO's models are 0.04 to 0.06 AP behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; how much of the
 gap each of those accounts for is not known. On a COCO subset at an equal budget FOLO's trainer and Ultralytics' reach
 the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n are level on three
 ([Accuracy](#accuracy)).
@@ -43,7 +44,7 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/accuracy-dark.svg">
-    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.356 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 and 64 epochs (folo-n's second half distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.370 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 (folo-s) and 128 epochs (folo-n, 96 of them distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
   </picture>
 </p>
 
@@ -53,10 +54,10 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 |---|---|
 | [Machine](#machine), [Reproduce](#reproduce), [Method](#method) | How the incumbent was measured, and what its numbers say |
 | [FOLO targets](#folo-targets) | The table of record: every headline row, folo-n and folo-s against the incumbent's best |
-| [Hill-climb 5](#hill-climb-5-2026-11-17) | The fifth round: the fused distillation kernel, opt-in int8 CPU inference, a long COCO run (val2017 AP 0.370, weights not published: the owner decides), and what tied or lost |
+| [Hill-climb 5](#hill-climb-5-2026-11-17) | The fifth round: the fused distillation kernel, opt-in int8 CPU inference, a long COCO run (val2017 AP 0.370, published as `folo-n-coco-v5`), and what tied or lost |
 | [Hill-climb 4](#hill-climb-4-2026-11-15-accuracy) | The accuracy round: distillation from folo-s, the first full COCO folo-n under today's defaults (the distilled one published as `folo-n-coco-v4`) |
 | [Hill-climb 3](#hill-climb-3-2026-11-13), [Hill-climb 2](#hill-climb-2-2026-11-12), [Hill-climb](#hill-climb-2026-11-09) | The three engine rounds: before and after, where each gain came from, what was tried and lost |
-| [Accuracy](#accuracy) | COCO (the published weights, hill-climb 4's unpublished control and hill-climb 5's unpublished long run), the equal-budget comparison, fine-tuning on small datasets |
+| [Accuracy](#accuracy) | COCO (the published weights and hill-climb 4's unpublished control), the equal-budget comparison, fine-tuning on small datasets |
 | [FOLO on the GPU](#folo-on-the-gpu), [NMS-free head](#nms-free-head-o2o), [FOLO on the CPU](#folo-on-the-cpu) | The measurement log of the work that built each path. Older numbers are kept with their dates; the current ones are in FOLO targets |
 | [Next optimisations](#next-optimisations) | What is known to be left |
 | [Results](#results) | Generated tables of every incumbent configuration |
@@ -271,8 +272,8 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 The fifth round aimed at a measured improvement of FOLO itself: accuracy, faster kernels, faster training. Four
 lanes, each on its own branches with PRs reviewed by GPT Sol and Opus 5.5 agents, each with a notebook:
 - **accuracy**, [distillation on full COCO](notes/hill/r5-accuracy.md): a class-wise rank distillation term (killed
-  at its gate, #295 closed), the fused distillation kernel (#297, merged) and the round's long COCO run (below; its
-  weights are not published).
+  at its gate, #295 closed), the fused distillation kernel (#297, merged) and the round's long COCO run (below;
+  published as `folo-n-coco-v5`).
 - **cpuq8**, [int8 inference on the CPU](notes/hill/r5-cpuq8.md): an opt-in int8 path for the backbone and neck
   (#300, merged).
 - **gputrain**, [GPU training glue, backward GEMM shapes, BatchNorm in the conv](notes/hill/r5-gputrain.md): one PR,
@@ -331,24 +332,26 @@ not met: much of its time is outside the int8 convs (the f32 stem, 3 ms of a 13.
 head, the quantise and dequantise boundaries), and its small 1×1 convs are no faster in int8 at 28 threads. The
 int8 weights files exist only in the lane's run folder (not published).
 
-### The long COCO run (weights not published)
+### The long COCO run, published as folo-n-coco-v5
 
 `folo-n-coco-v4` continued for 64 epochs on full COCO with the `folo-s-coco` teacher (the fused kernel; no rank term),
 AMP, seed 0, `auto` rule 5 (MuSGD): 64 epochs in 21,439 s (the trainer's "finished 64 epochs in 21438.9 s"; about 6 h)
-on the shared machine, ending 2026-11-18. val2017 of the EMA weights of epoch 64, read once (`folo val --coco`,
-pycocotools-exact; [notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md), Long run):
+on the shared machine, ending 2026-11-18. val2017 of the EMA weights of epoch 64, read once by the lane (`folo val
+--coco`, pycocotools-exact; [notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md), Long run), and the same to every
+digit at its publication ([examples/coco, Evaluate (v5)](../examples/coco/README.md#evaluate-v5)):
 
 | model | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---:|---:|---:|---:|---:|
-| **long run, epoch 64 (NOT PUBLISHED, pending publication: the owner decides)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| **long run, epoch 64 (published as `folo-n-coco-v5`)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
 | `folo-n-coco-v4` (published), its start | 0.3559 | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
 | hill-climb 4's control (not published) | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
 
-Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples, seed 0): long − v4 **+0.0141**
-[+0.0114, +0.0166]; long − control +0.0194 [+0.0160, +0.0223]. No teacher-free continuation was run, so the gain is
+Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples, seed 0): v5 − v4 **+0.0141**
+[+0.0114, +0.0166]; v5 − control +0.0194 [+0.0160, +0.0223]. No teacher-free continuation was run, so the gain is
 64 more epochs and the teacher together, not the teacher alone; one training seed; the trainer's own mAP50-95 was
-still rising at epoch 64 (0.3658 → 0.3664). The weights are a local file; whether they are published (as
-`folo-n-coco-v5`) is the owner's decision, and until then this page's headline folo-n numbers stay v4's 0.356.
+still rising at epoch 64 (0.3658 → 0.3664). The weights are published as `folo-n-coco-v5` and `folo-n-coco-v5-f16`
+(release `weights-v6`, 2026-11-18; the fused f16 file reads 0.370 too), and this page's headline folo-n numbers are
+now v5's 0.370.
 
 ### Tried and lost (2026-11-17)
 
@@ -367,7 +370,7 @@ still rising at epoch 64 (0.3658 → 0.3664). The weights are a local file; whet
   against 501), +5.7% in the one GPU-bound full-COCO pair, about nothing on loader-bound full COCO; its prototype
   missed its gate (4.4 ms per window against 5), and a fourth review round still found two blocking error-path bugs
   ([notes/hill/r5-trainer.md](notes/hill/r5-trainer.md)).
-- **A decode-once mosaic window** (branch `train/mosaic-window`, local, not pushed; no PR): the loader 1.56x faster
+- **A decode-once mosaic window** (branch `train/mosaic-window` on origin; no PR): the loader 1.56x faster
   over a whole COCO epoch (median of three pairs), under its 1.8x gate; its accuracy gate passed at K = 2048 (proxy
   0.1274 against 0.1255) and failed at K = 512 (0.1232).
 - **`train/amp-step` again** (cached f16 weight copies, rebased): a tie (cycle −3.5% with the load drifting; row 10,
@@ -1087,15 +1090,18 @@ mosaic off for the last 8, AMP, seed 0; 1.58 h on the RTX 4080 SUPER, hill-climb
 [notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Part 0), published as `folo-n-coco-v3` (release `weights-v4`);
 the trainer's own mAP50-95 was still rising at its last epoch (0.3355, +0.0004). v4 is a new run, not a continuation:
 64 epochs from random weights under `auto` rule 5 (MuSGD), AMP, seed 0, its epochs 33-64 distilled from the frozen
-`folo-s-coco` (hill-climb 4), published as `folo-n-coco-v4` (release `weights-v5`). folo-s was trained from scratch for
+`folo-s-coco` (hill-climb 4), published as `folo-n-coco-v4` (release `weights-v5`). v5 continues v4: 64 more epochs
+from v4's weights with the same teacher (a new learning-rate schedule, `auto` rule 5, AMP, seed 0; hill-climb 5),
+published as `folo-n-coco-v5` (release `weights-v6`). folo-s was trained from scratch for
 **56 epochs** with AMP on one rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as
 `folo-s-coco` (release `weights-v3`). Measured again on 2026-11-13 with `main`'s `folo val`
 ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Accuracy): every file published before hill-climb 4 (folo-n
 v1–v3, folo-s) reads the AP below. The hill-climb 4 rows come from its notebook
 ([notes/hill/r4-distill.md](notes/hill/r4-distill.md), Full scale); v4's two files were measured again at their
-publication on 2026-11-16 ([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4)). The hill-climb 5
-row comes from its notebook ([notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md), Long run); those weights are
-not published, and the headline folo-n numbers of this page stay v4's until they are.
+publication on 2026-11-16 ([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4)), and v5's at
+theirs on 2026-11-18 ([examples/coco, Evaluate (v5)](../examples/coco/README.md#evaluate-v5)); the lane's own read
+of the v5 file, the same to every digit, is in its notebook ([notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md),
+Long run).
 
 *Nano*
 
@@ -1108,9 +1114,10 @@ not published, and the headline folo-n numbers of this page stay v4's until they
 | folo-n v3, f32 (`folo-n-coco-v3`) | 2.6 M | v2 + 16 annealing epochs (78 in all), SGD, AMP | 0.340 | 0.487 | 0.367 | 0.163 | 0.368 | 0.494 |
 | folo-n v3, f16 (`--half`, `folo-n-coco-v3-f16`) | 2.6 M | the same weights, fused f16 file | 0.339 | 0.487 | 0.367 | 0.163 | 0.367 | 0.494 |
 | folo-n control, f32 (**NOT PUBLISHED**, hill-climb 4) | 2.6 M | 64 epochs from scratch, `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
-| **folo-n v4, f32** (`folo-n-coco-v4`, hill-climb 4) | 2.6 M | **the control's epoch 32, then epochs 33-64 with the folo-s teacher** (`--teacher`) | **0.356** | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 |
+| folo-n v4, f32 (`folo-n-coco-v4`, hill-climb 4) | 2.6 M | the control's epoch 32, then epochs 33-64 with the folo-s teacher (`--teacher`) | 0.356 | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 |
 | folo-n v4, f16 (`--half`, `folo-n-coco-v4-f16`) | 2.6 M | the same weights, fused f16 file | 0.356 | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 |
-| folo-n long run, f32 (**NOT PUBLISHED**, pending publication: the owner decides; hill-climb 5) | 2.6 M | v4 + 64 more epochs with the folo-s teacher (128 cumulative epochs; the second 64 a new run from v4's weights), `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3701 | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| **folo-n v5, f32** (`folo-n-coco-v5`, hill-climb 5) | 2.6 M | **v4 + 64 more epochs with the folo-s teacher** (128 cumulative epochs; the second 64 a new run from v4's weights), `auto` rule 5 (MuSGD), AMP, seed 0 | **0.370** | 0.525 | 0.400 | 0.179 | 0.405 | 0.540 |
+| folo-n v5, f16 (`--half`, `folo-n-coco-v5-f16`) | 2.6 M | the same weights, fused f16 file | 0.370 | 0.525 | 0.400 | 0.179 | 0.405 | 0.540 |
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
@@ -1144,8 +1151,9 @@ reads a little lower than the pycocotools-exact AP of the tables):
   29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark.
   It can be resumed from its checkpoint ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what
   the full schedule reaches is not known. v3 (2026-11-13) does not resume it: it gives v2's weights a short ending
-  (the learning rate decayed to 1%, mosaic off) and gains 0.023 AP over v2 (0.317 → 0.340). folo-n v4 (hill-climb 4,
-  below) is **0.04–0.05 AP behind the published nano models** (v3 was 0.06–0.07, v2 0.08–0.09, v1 0.08–0.10).
+  (the learning rate decayed to 1%, mosaic off) and gains 0.023 AP over v2 (0.317 → 0.340). folo-n v5 (hill-climb 5,
+  below) is **0.025–0.039 AP behind the published nano models** (v4 was 0.04–0.05, v3 0.06–0.07, v2 0.08–0.09, v1
+  0.08–0.10).
 - **folo-s.** 56 epochs (103,544 optimizer steps, 9.49 h of epochs on a 140 W card) reach **AP 0.416 / AP50 0.580**,
   **0.05–0.06 AP behind YOLO11s / YOLO26s** and above both published nano models. That is the epoch budget's floor,
   not a plateau: internal mAP50-95 rose in every one of the 56 epochs, and the last six gains (0.0007 to 0.0001)
@@ -1163,6 +1171,14 @@ distilled one: the control's epoch-32 checkpoint continued to epoch 64 with the 
 images; [Hill-climb 4](#hill-climb-4-2026-11-15-accuracy)). One training seed; no data beyond COCO train2017 in the
 student or its teacher (folo-s, trained from scratch on train2017 with FOLO's trainer).
 
+**Hill-climb 5 (2026-11-17): v5.** v4's weights continued for 64 more epochs on COCO train2017 with the same frozen
+`folo-s-coco` teacher (the fused distillation kernel of #297; `auto` rule 5, MuSGD, AMP, seed 0; a new learning-rate
+schedule from 3 warm-up epochs), published as `folo-n-coco-v5` (release `weights-v6`): +0.0141 AP [+0.0114,
++0.0166] over v4 and +0.0194 [+0.0160, +0.0223] over hill-climb 4's control (paired bootstrap;
+[Hill-climb 5](#the-long-coco-run-published-as-folo-n-coco-v5)). **No teacher-free continuation was run**, so the
+gain is the 64 more epochs and the teacher together, and how much each gives is not known. One training seed; still
+no data beyond COCO train2017 in the student or its teacher.
+
 **Box fusion, an option** (hill-climb 3, #257; docs/MODEL.md §9.4): `--fusion dfl --iou 0.65 --max-det 1000` on
 `folo val` and `folo predict` moves the four edges of each box NMS keeps to a weighted mean over the candidates of its
 class that overlap it (IoU at least `--fusion-iou`, 0.75, the kept box included), each side weighted by the member's score times the
@@ -1175,12 +1191,14 @@ above is without it. On the published weights (one deterministic run each, `main
 | `folo-n-coco` | 0.3138 / 0.4554 / 0.3392 | 0.3181 / 0.4612 / 0.3424 | +0.0043 |
 | `folo-n-coco-v2` | 0.3168 / 0.4578 / 0.3428 | 0.3202 / 0.4634 / 0.3457 | +0.0034 |
 | `folo-n-coco-v3` | 0.3396 / 0.4874 / 0.3671 | **0.3434** / 0.4922 / 0.3692 | +0.0038 |
-| `folo-n-coco-v4` | 0.3559 / 0.5087 / 0.3842 | **0.3594** / 0.5140 / 0.3864 | +0.0035 |
+| `folo-n-coco-v4` | 0.3559 / 0.5087 / 0.3842 | 0.3594 / 0.5140 / 0.3864 | +0.0035 |
+| `folo-n-coco-v5` | 0.3701 / 0.5250 / 0.4000 | **0.3730** / 0.5305 / 0.4006 | +0.0029 |
 | `folo-s-coco` | 0.4162 / 0.5798 / 0.4519 | **0.4186** / 0.5840 / 0.4537 | +0.0025 |
 
 The v1–v3 and folo-s cells match lane fusion's own ([notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Headline)
-to four digits; the v4 row was measured at its publication on 2026-11-16
-([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4)).
+to four digits; the v4 and v5 rows were measured at their publications on 2026-11-16 and 2026-11-18
+([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4),
+[Evaluate (v5)](../examples/coco/README.md#evaluate-v5)).
 From its paired bootstrap (not run again here; every interval above zero except the NMS change on folo-s): the NMS
 settings alone give +0.0000 to +0.0009, the DFL weights +0.0003 to +0.0010 over plain score-weighted voting, and
 the rest is voting. What it costs: `folo val` took 4–9 s
@@ -1853,15 +1871,15 @@ the last list):
 3. **Accuracy at full scale**: the full COCO run under `auto` rule 5 is done (folo-n 0.3507, and 0.3559 with the
    folo-s teacher over its second half, published as `folo-n-coco-v4`; [Hill-climb
    4](#hill-climb-4-2026-11-15-accuracy)), and so is v4 continued for 64 epochs with the teacher (0.3701, +0.0141
-   [+0.0114, +0.0166] over v4; not published: the owner decides; [Hill-climb
-   5](#the-long-coco-run-weights-not-published)). Open: publishing those weights as `folo-n-coco-v5` if the owner
-   agrees; a teacher-free continuation of v4 of the same length, to split that gain between the epochs and the teacher
+   [+0.0114, +0.0166] over v4, published as `folo-n-coco-v5`; [Hill-climb
+   5](#the-long-coco-run-published-as-folo-n-coco-v5)). Open: a teacher-free continuation of v4 of the same length, to split that gain between the epochs and the teacher
    (its trainer mAP was still rising at epoch 64); a whole distilled run with the teacher from epoch 1, a second seed
    per side, the teacher's training cost without other load; then `loss.cls_gain` by class count (+4.5% on the
    80-class proxy, −0.006 on BCCD), `o2o_attached_epochs` with three seeds, an EMA time constant for short fine-tunes;
    BCCD is level with yolo26n (0.625 vs 0.626), likely limited by the pretrained weights it started from (v2, COCO AP
-   0.317 vs 0.409; that benchmark's numbers stay v2's; a separate two-seed v3/v4 starting-point check is in
-   [examples/coco, Publish (v4)](../examples/coco/README.md#publish-v4))
+   0.317 vs 0.409; that benchmark's numbers stay v2's; separate two-seed starting-point checks, v3 against v4 and v4 against v5, are
+   in [examples/coco, Publish (v4)](../examples/coco/README.md#publish-v4) and
+   [Publish (v5)](../examples/coco/README.md#publish-v5))
    ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)). Post-hoc box refinement is not the way (Hill-climb 3, Tried and
    lost): the next accuracy step has to change training (distillation from folo-s, a longer schedule; v3's landing
    still gained 0.0004 in its last epoch), judged first on the top boxes' edge error by object size
@@ -1929,7 +1947,7 @@ From hill-climb 3's notebooks (not ranked against the list above):
   ([notes/hill/r3-lazy-head.md](notes/hill/r3-lazy-head.md)).
 
 From hill-climb 5's notebooks (not ranked):
-- **The decode-once mosaic window** (branch `train/mosaic-window`, local to the maintainers' machine; opt-in,
+- **The decode-once mosaic window** (branch `train/mosaic-window` on origin, 5644cff3; opt-in,
   `mosaic_window = 0` by default): 1.56x loader throughput over a whole COCO epoch on a loaded machine, more when
   other work takes the cores; the proxy passed at K = 2048. Worth shipping as an opt-in for runs where the loader
   competes for the CPU ([notes/hill/r5-trainer.md](notes/hill/r5-trainer.md)).

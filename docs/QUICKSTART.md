@@ -150,20 +150,20 @@ are re-initialised, and everything else is kept. As a check: fine-tuning the sha
 
 ### Fine-tune from pretrained weights
 
-`folo-n-coco-v4` is folo-n trained on COCO alone from random weights ([examples/coco](../examples/coco/README.md)):
-val2017 AP 0.356 after 64 epochs, the second half distilled from `folo-s-coco` (`folo-n-coco`, AP 0.314,
-`folo-n-coco-v2`, AP 0.317, and `folo-n-coco-v3`, AP 0.340, are the earlier ones). `folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
+`folo-n-coco-v5` is folo-n trained on COCO alone from random weights ([examples/coco](../examples/coco/README.md)):
+val2017 AP 0.370 after 128 epochs, 96 of them distilled from `folo-s-coco` (`folo-n-coco`, AP 0.314,
+`folo-n-coco-v2`, AP 0.317, `folo-n-coco-v3`, AP 0.340, and `folo-n-coco-v4`, AP 0.356, are the earlier ones). `folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
 it takes the weights' architecture, folo-s). `folo weights list` shows every published name. Two commands fine-tune
 one on your dataset:
 
 ```sh
-folo weights pull folo-n-coco-v4                                  # into ~/.folo/weights/, checksum verified
-folo train --data my-data --weights folo-n-coco-v4 --epochs 20    # takes the weights' architecture (folo-n)
+folo weights pull folo-n-coco-v5                                  # into ~/.folo/weights/, checksum verified
+folo train --data my-data --weights folo-n-coco-v5 --epochs 20    # takes the weights' architecture (folo-n)
 ```
 
 The weights are published GitHub releases, and `folo weights pull` downloads them over HTTPS: the `folo` binary is
 all it takes. `train` never downloads by itself: without the pull it stops with
-`weights_not_found` and the hint to run `folo weights pull folo-n-coco-v4` first.
+`weights_not_found` and the hint to run `folo weights pull folo-n-coco-v5` first.
 
 Studio and MCP list downloaded published weights as models once pulled (`folo weights pull`), or you can copy a `.folo`
 file into `<data dir>/models/` ([CLI.md, Weights](CLI.md#weights)).

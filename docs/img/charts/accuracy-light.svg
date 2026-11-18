@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 662" width="720" height="662" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title id="t">Accuracy: FOLO against YOLO26</title>
-<desc id="d">Grouped bars of AP on one scale. On COCO val2017, FOLO trained on COCO alone is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. Nano: 0.356 against 0.409. Small: 0.416 against 0.480. Blood cells (BCCD): 0.607 against 0.626. Brain tumours (MRI): 0.452 against 0.436. Signatures: 0.989 against 0.982. Medical pills: 0.804 against 0.803.</desc>
+<desc id="d">Grouped bars of AP on one scale. On COCO val2017, FOLO trained on COCO alone is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. Nano: 0.370 against 0.409. Small: 0.416 against 0.480. Blood cells (BCCD): 0.607 against 0.626. Brain tumours (MRI): 0.452 against 0.436. Signatures: 0.989 against 0.982. Medical pills: 0.804 against 0.803.</desc>
 <rect x="0.5" y="0.5" width="719" height="661" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
 <text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#0C0E12">Accuracy: FOLO against YOLO26</text>
 <text x="28" y="66" font-size="13" fill="#4F5661">AP@[.5:.95], pycocotools</text>
@@ -11,12 +11,12 @@
 <path d="M28 112.5L692 112.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
 <text x="28" y="138" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">COCO val2017</tspan><tspan font-size="12.5" fill="#646B75">   higher is better. Not like for like: see below</tspan></text>
 <text x="28" y="172" font-size="13" font-weight="500" fill="#0C0E12">Nano</text>
-<text x="28" y="189" font-size="12.5" fill="#646B75">folo-n v4: 64 epochs, distilled</text>
-<path d="M236 162h76.21a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-76.21z" fill="#0A8FD6"/>
-<text x="324.21" y="172.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">0.356</tspan></text>
+<text x="28" y="189" font-size="12.5" fill="#646B75">folo-n v5: 128 epochs, distilled</text>
+<path d="M236 162h79.36a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-79.36z" fill="#0A8FD6"/>
+<text x="327.36" y="172.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">0.370</tspan></text>
 <path d="M236 178h88.15a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-88.15z" fill="#646B75"/>
 <text x="336.15" y="188.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#4F5661">0.409</tspan></text>
-<text x="692" y="174" font-size="16" font-weight="600" text-anchor="end" fill="#0C0E12">−0.053</text>
+<text x="692" y="174" font-size="16" font-weight="600" text-anchor="end" fill="#0C0E12">−0.039</text>
 <text x="692" y="190" font-size="12.5" text-anchor="end" fill="#646B75">AP</text>
 <text x="28" y="224" font-size="13" font-weight="500" fill="#0C0E12">Small</text>
 <text x="28" y="241" font-size="12.5" fill="#646B75">folo-s: 56 epochs from scratch</text>
@@ -63,9 +63,9 @@
 <text x="692" y="500" font-size="12.5" text-anchor="end" fill="#646B75">level</text>
 <path d="M235.5 308L235.5 508" stroke="#D8D8D9" stroke-width="1" fill="none"/>
 <path d="M28 524.5L692 524.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
-<text x="28" y="548" font-size="12.5" fill="#646B75">COCO: FOLO trained on COCO alone from random weights, 56 and 64 epochs (folo-n: the second half distilled</text>
-<text x="28" y="566" font-size="12.5" fill="#646B75">from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for</text>
-<text x="28" y="584" font-size="12.5" fill="#646B75">far longer.</text>
+<text x="28" y="548" font-size="12.5" fill="#646B75">COCO: FOLO trained on COCO alone from random weights, 56 epochs (folo-s) and 128 (folo-n: 96 of them</text>
+<text x="28" y="566" font-size="12.5" fill="#646B75">distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and</text>
+<text x="28" y="584" font-size="12.5" fill="#646B75">trained for far longer.</text>
 <text x="28" y="602" font-size="12.5" fill="#646B75">Fine-tuning: each from its own COCO weights, at its defaults, 100 epochs; the differences are of the unrounded</text>
 <text x="28" y="620" font-size="12.5" fill="#646B75">means. &quot;level&quot;: inside the spread of the seeds, or on a set both saturate (signatures). Details:</text>
 <text x="28" y="638" font-size="12.5" fill="#646B75">docs/BENCHMARKS.md, Accuracy.</text>
