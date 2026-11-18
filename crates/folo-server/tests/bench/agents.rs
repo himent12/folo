@@ -65,6 +65,15 @@ async fn agent_entries_follow_the_labeling_policy() {
         (failed.error.as_deref(), failed.hint.as_deref()),
         (Some("not signed in: run /login"), Some("sign in first"))
     );
+    // A client error whose text names a server fault: the status counts, so it ends the entry without the
+    // "overloaded" hint the text alone would get.
+    f.agent.script(vec![Step::FailStatus("API Error: 503 Service Unavailable", 400)]);
+    let e: BenchEntry = ok(app, post(&entries, agent.clone())).await;
+    let failed = ended(app, &b.id, &e.id).await;
+    assert_eq!(
+        (failed.status, failed.error.as_deref(), failed.hint.as_deref()),
+        (BenchEntryStatus::Failed, Some("API Error: 503 Service Unavailable"), None)
+    );
     // One image left out of a reply is within the policy (scored as nothing found)...
     f.agent.script(vec![Step::Reply(json!({ "images": [{ "image": 1, "boxes": [] }] }).to_string())]);
     let e: BenchEntry = ok(app, post(&entries, agent.clone())).await;

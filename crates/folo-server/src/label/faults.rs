@@ -141,36 +141,67 @@ fn statuses(lower: &str) -> Vec<u16> {
 const WAIT_MARKERS: [&str; 4] = ["try again in ", "retry after ", "retry in ", "retry-after: "];
 
 /// How long a `message` says to wait before trying again ("try again in 1.5s", "retry after 20 seconds", "try
-/// again in 2 hours 5 minutes", "try again in 1m12.5s"), when it says so in numbers and units: every amount of a
-/// compound duration counts, and of several waits (Claude Code joins its error fields into one message) the
-/// longest.
+/// again in 2 hours 5 minutes", "try again in 1m12.5s", "Retry-After: 20"), when it says so in numbers and units:
+/// every amount of a compound duration counts, and of several waits (Claude Code joins its error fields into one
+/// message) the longest.
 pub fn retry_after(message: &str) -> Option<Duration> {
-    longest_wait(message).map(|(_, _, wait)| wait)
+    longest_wait(message).map(|w| w.wait)
 }
 
-/// The longest wait `message` asks for in numbers and units: where its marker starts (a byte offset of
-/// `message`), the marker and the wait. The first of equal ones.
-fn longest_wait(message: &str) -> Option<(usize, &'static str, Duration)> {
+/// A wait a message asks for ([`longest_wait`]).
+struct Wait<'m> {
+    /// Where its marker starts: a byte offset of the message.
+    at: usize,
+    marker: &'static str,
+    wait: Duration,
+    /// The rest of its clause, in the message's words.
+    words: &'m str,
+}
+
+impl Wait<'_> {
+    /// The clause, as a hint quotes it: "retry after 90 seconds".
+    fn quoted(&self) -> String {
+        format!("{}{}", self.marker, self.words)
+    }
+}
+
+/// The longest wait `message` asks for in numbers and units; the first of equal ones. Each wait is read from its
+/// own clause ([`clause_len`]), so nothing after it (other numbers, another wait) adds to it.
+fn longest_wait(message: &str) -> Option<Wait<'_>> {
     // ASCII lowercase keeps every byte offset of `message`.
     let lower = message.to_ascii_lowercase();
-    let mut longest: Option<(usize, &'static str, Duration)> = None;
+    let mut longest: Option<Wait<'_>> = None;
     for marker in WAIT_MARKERS {
         for (at, _) in lower.match_indices(marker) {
-            let Some(wait) = read_wait(&lower[at + marker.len()..]) else { continue };
-            if longest.is_none_or(|(first, _, most)| wait > most || (wait == most && at < first)) {
-                longest = Some((at, marker, wait));
+            let start = at + marker.len();
+            let end = start + clause_len(&lower[start..]);
+            let Some(wait) = read_wait(&lower[start..end], marker == "retry-after: ") else { continue };
+            if longest.as_ref().is_none_or(|l| wait > l.wait || (wait == l.wait && at < l.at)) {
+                longest = Some(Wait { at, marker, wait, words: message[start..end].trim() });
             }
         }
     }
     longest
 }
 
-/// The wait at the start of `rest` (lowercase), in numbers and units.
-fn read_wait(mut rest: &str) -> Option<Duration> {
+/// The length of the clause `rest` starts with: to a sentence's end, a `,`, `;`, `·`, `∙` or `|`, a line break.
+fn clause_len(rest: &str) -> usize {
+    rest.char_indices()
+        .find(|&(i, c)| {
+            matches!(c, ',' | ';' | '·' | '∙' | '|' | '\n')
+                || (c == '.' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))
+        })
+        .map_or(rest.len(), |(i, _)| i)
+}
+
+/// The wait a `clause` (lowercase) starts with: a number and its unit, or several that follow each other directly
+/// ("1m30s", "2 hours 5 minutes", "2 hours and 5 minutes"). A number without a unit is seconds only when `bare`
+/// (after `Retry-After:`, a header's seconds).
+fn read_wait(clause: &str, bare: bool) -> Option<Duration> {
+    let mut rest = clause;
     let (mut total, mut read) = (0.0, false);
-    // Up to six amounts, each a number and its unit, written together ("1m30s") or apart ("2 hours 5 minutes").
     for _ in 0..6 {
-        rest = rest.trim_start_matches([' ', ',']);
+        rest = rest.trim_start();
         if read && let Some(after) = rest.strip_prefix("and ") {
             rest = after.trim_start();
         }
@@ -183,8 +214,11 @@ fn read_wait(mut rest: &str) -> Option<Duration> {
             "s" | "sec" | "secs" | "second" | "seconds" => 1e3,
             "m" | "min" | "mins" | "minute" | "minutes" => 60e3,
             "h" | "hr" | "hrs" | "hour" | "hours" => 3600e3,
-            // A bare number at the end: seconds (a Retry-After header's).
-            "" if after.is_empty() => 1e3,
+            "" if bare && !read => {
+                total = amount * 1e3;
+                read = true;
+                break;
+            }
             _ => break,
         };
         total += amount * millis;
@@ -219,8 +253,8 @@ pub fn reset_time(message: &str) -> Option<String> {
             return Some(when);
         }
     }
-    if let Some(when) = longest_wait(message).and_then(|(at, marker, _)| clause(at, marker)) {
-        return Some(when);
+    if let Some(wait) = longest_wait(message) {
+        return Some(wait.quoted());
     }
     let (_, epoch) = message.rsplit_once('|')?;
     let secs: u64 = epoch.trim().parse().ok().filter(|&s| s > 1_000_000_000)?;
@@ -228,15 +262,16 @@ pub fn reset_time(message: &str) -> Option<String> {
 }
 
 /// The hint of a run that ended on a limit ([`is_limit`]): which limit (the account's usage only when the message
-/// says so), and when it passes if the CLI said, in its own words.
+/// says so), and when it passes if the CLI said, in its own words (for a long wait, the clause of that wait).
 pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     let m = message.to_lowercase();
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
     let usage = is_usage_limit(&m);
-    let wait = retry_after(message);
+    let wait = longest_wait(message);
+    let long = wait.as_ref().is_some_and(|w| w.wait > SHORT_RATE_LIMIT);
     let (what, then) = if usage {
         ("the account's usage limit was reached", "start again once it resets")
-    } else if wait.is_some_and(|w| w > SHORT_RATE_LIMIT) {
+    } else if long {
         // A rate limit too, maybe: what counts is that it is no short wait.
         ("the provider asked for a long wait", "start again later")
     } else if is_rate_limit(&m, &statuses) {
@@ -247,7 +282,11 @@ pub fn limit_hint(message: &str, status: Option<u16>) -> String {
         ("the CLI reported a limit", "start again once it has passed")
     };
     let fewer = if usage { "" } else { " with fewer calls in flight (`parallel`)" };
-    match reset_time(message) {
+    let when = match wait {
+        Some(wait) if long => Some(wait.quoted()),
+        _ => reset_time(message),
+    };
+    match when {
         Some(when) => format!("{what} ({when}): start again then{fewer}, or use another agent"),
         None => format!("{what}: {then}{fewer}, or use another agent"),
     }
@@ -365,6 +404,12 @@ mod tests {
         assert_eq!(wait("retry after 90 seconds · try again in 1s"), Some(90_000));
         assert_eq!(wait("try again in a moment · retry in 2s"), Some(2000));
         assert!(!transient("Rate limit reached. Try again in 1s · Retry after 90 seconds"));
+        // A number without a unit is seconds after `Retry-After:` only, wherever that stands.
+        assert_eq!(wait("Retry-After: 90 · Try again in 1s"), Some(90_000));
+        assert_eq!(wait("retry after 20"), None);
+        // Each wait is read from its own clause: what follows it does not add to it.
+        assert_eq!(wait("Try again in 2s, 90 seconds elapsed"), Some(2000));
+        assert_eq!(wait("try again in 2s; 3 attempts so far"), Some(2000));
     }
 
     #[test]
@@ -452,6 +497,11 @@ mod tests {
                 .unwrap()
                 .contains("(retry after 90 seconds)")
         );
+        // The hint quotes the clause of the wait that counts, and that clause alone.
+        let hint = fault_hint("Retry-After: 90 · Try again in 1s", Some(429)).unwrap();
+        assert!(hint.starts_with("the provider asked for a long wait (retry-after: 90):"), "{hint}");
+        let hint = fault_hint("Rate limit reached. Try again in 2s, 90 seconds elapsed", None).unwrap();
+        assert!(hint.starts_with("the provider's rate limit was reached (try again in 2s):"), "{hint}");
         assert_eq!(fault_hint("API Error: 529 Overloaded", None).as_deref(), Some(BUSY));
         assert!(
             fault_hint("Rate limit reached. Please try again in 1.5s.", None).unwrap().contains("rate limit")

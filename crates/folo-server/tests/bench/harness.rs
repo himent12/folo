@@ -35,6 +35,8 @@ pub(super) enum Step {
     Fail(&'static str),
     /// The CLI reports an error after the call reached the model: it used [`paid`].
     FailPaid(&'static str),
+    /// The CLI reports an error with an HTTP status in a field of its own (Claude Code's `api_error_status`).
+    FailStatus(&'static str, u16),
     /// Works until the call is cancelled.
     Hold,
 }
@@ -117,6 +119,9 @@ impl Agent for Scripted {
             Some(Step::Fail(why)) => return Err(AgentError::failed(why)),
             Some(Step::FailPaid(why)) => {
                 return Err(AgentError::Failed(Failure { used: paid(), ..Failure::new(why) }));
+            }
+            Some(Step::FailStatus(why, status)) => {
+                return Err(AgentError::Failed(Failure { status: Some(status), ..Failure::new(why) }));
             }
             Some(Step::Hold) => {
                 while !req.cancel.load(Ordering::Relaxed) {

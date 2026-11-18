@@ -131,7 +131,7 @@ impl Run<'_> {
         }
     }
 
-    /// Gives up, with `hint` (else the agent's for `why`).
+    /// Gives up, with `hint` as the caller resolved it ([`failure_hint`], [`Agent::hint`]); `None` stays none.
     fn fail(&self, why: String, hint: Option<String>) {
         self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.job.cancel.store(true, Ordering::Relaxed);
@@ -201,7 +201,7 @@ impl Run<'_> {
         // Every unreadable reply counts towards the cutoff, as in a labeling run.
         let on = |event: Event<'_>| {
             if let Event::Unreadable(why) = event {
-                self.soft_failure(why, None);
+                self.soft_failure(why, self.job.agent.hint(why));
             }
         };
         let agent = &*self.job.agent;
@@ -217,7 +217,7 @@ impl Run<'_> {
                     agent.id().display_name(),
                     CALL_TIMEOUT.as_secs()
                 );
-                self.soft_failure(&why, None);
+                self.soft_failure(&why, agent.hint(&why));
                 Some(Err(why))
             }
             Err(BatchError::Transient(failure)) => {
@@ -230,7 +230,8 @@ impl Run<'_> {
                 None
             }
             Err(BatchError::Unavailable(why)) => {
-                self.fail(why, None);
+                let hint = agent.hint(&why);
+                self.fail(why, hint);
                 None
             }
         };
@@ -305,7 +306,6 @@ impl Run<'_> {
     /// The entry's grade, `Ok(None)` when it was stopped, or why it failed.
     fn outcome(&self) -> Result<Option<results::Graded>> {
         if let Some((why, hint)) = self.fatal.lock().unwrap().take() {
-            let hint = hint.or_else(|| self.job.agent.hint(&why));
             let e = Error::new(axum::http::StatusCode::BAD_GATEWAY, "agent_failed", why);
             return Err(match hint {
                 Some(h) => e.hint(h),

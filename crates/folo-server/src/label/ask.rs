@@ -91,6 +91,8 @@ pub fn ask<T>(
                     if cancelled() {
                         return Err(BatchError::Cancelled);
                     }
+                    #[cfg(test)]
+                    IN_WAIT.with(|told| told.borrow().as_ref().map(|tx| tx.send(())));
                     std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
                 }
             }
@@ -105,6 +107,12 @@ pub fn ask<T>(
             Err(AgentError::Unavailable(why)) => return Err(BatchError::Unavailable(why)),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Told on each round of the wait before the next call (tests: a stop that comes once the wait has begun).
+    static IN_WAIT: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// What to do about `failure`: the hint its own status gives (a limit, a passing fault), else the agent's
@@ -184,11 +192,14 @@ mod tests {
         calls: usize,
         used: LabelUsage,
         events: Vec<String>,
+        /// The wait of each `Again` event.
+        waits: Vec<Option<Duration>>,
         took: Duration,
     }
 
-    /// Asks `agent`; with `stop_on_again`, the run is stopped as the first call is asked again (during its wait).
-    fn ask_with(agent: &Scripted, stop_on_again: bool) -> Asked {
+    /// Asks `agent`; with `stop_in_wait`, another thread stops the run once a wait before the next call has begun
+    /// (the wait loop tells it, [`IN_WAIT`]).
+    fn ask_with(agent: &Scripted, stop_in_wait: bool) -> Asked {
         let cancel = &AtomicBool::new(false);
         let schema = serde_json::json!({});
         let req = AgentRequest {
@@ -202,19 +213,33 @@ mod tests {
             scratch: Path::new("."),
             cancel,
         };
-        let (mut used, mut events) = (LabelUsage::default(), Vec::new());
+        let (mut used, mut events, mut waits) = (LabelUsage::default(), Vec::new(), Vec::new());
         let t0 = Instant::now();
         // A reply reads when it is "{}".
         let read =
             |text: &str| if text == "{}" { Ok(text.to_string()) } else { Err(format!("unreadable: {text}")) };
         let on = |e: Event<'_>| {
-            if stop_on_again && matches!(e, Event::Again { .. }) {
-                cancel.store(true, Ordering::SeqCst);
+            if let Event::Again { wait, .. } = e {
+                waits.push(wait);
             }
             events.push(format!("{e:?}"));
         };
-        let result = ask(agent, &req, WAIT, &mut used, read, on);
-        Asked { result, calls: agent.1.load(Ordering::SeqCst), used, events, took: t0.elapsed() }
+        let result = std::thread::scope(|scope| {
+            if stop_in_wait {
+                let (tx, rx) = std::sync::mpsc::channel();
+                IN_WAIT.with(|told| *told.borrow_mut() = Some(tx));
+                scope.spawn(move || {
+                    if rx.recv().is_ok() {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                });
+            }
+            let result = ask(agent, &req, WAIT, &mut used, read, on);
+            // Dropping the sender ends the stopper, told or not.
+            IN_WAIT.with(|told| told.borrow_mut().take());
+            result
+        });
+        Asked { result, calls: agent.1.load(Ordering::SeqCst), used, events, waits, took: t0.elapsed() }
     }
 
     fn ask_steps(steps: Vec<Step>) -> Asked {
@@ -267,12 +292,12 @@ mod tests {
         // counts too.
         let a = ask_steps(vec![Step::Fail(OVERLOADED), Step::Timeout]);
         assert_eq!((a.result, a.calls, a.used), (Err(BatchError::Timeout), 2, used(2)));
-        // Stopped during the wait before the second call (as it is announced, so before any second call).
+        // Stopped during the wait before the second call, once that wait has begun: no second call.
         let agent = scripted(vec![Step::Fail("Rate limit reached. Please try again in 30s.")]);
         let a = ask_with(&agent, true);
         assert_eq!((a.result, a.calls, a.used), (Err(BatchError::Cancelled), 1, used(1)));
-        // It waited for the 30 s the limit asked for, and ended promptly on the stop.
-        assert!(a.events[0].contains("30s"), "{:?}", a.events);
+        // The wait was the 30 s the limit asked for, and the stop ended it promptly.
+        assert_eq!(a.waits, [Some(Duration::from_secs(30))]);
         assert!(a.took < Duration::from_secs(5), "{:?}", a.took);
     }
 

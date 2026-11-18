@@ -32,7 +32,7 @@ use serde_json::Value;
 
 use super::agent::{
     Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Memo, Output, PROBE_TIMEOUT,
-    fault_hint, last_line, limit_hint, run, run_kept,
+    fault_hint, last_line, limit_hint, probe_version, run, run_kept,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -369,8 +369,13 @@ impl Agent for Codex {
             Some(path) => path.clone(),
             None => self.cli.path()?,
         };
+        // Fast as this call's catalog offers it (the one the run was started with may be older).
+        if req.fast {
+            catalog.check_fast(req.model).map_err(AgentError::Unavailable)?;
+        }
         let lean = catalog.lean.as_deref().map(String::as_str).filter(|_| !self.refused(&catalog));
-        let refuse = || self.refuse(&catalog.version);
+        // The refusal is the version that refused: Codex may have been updated in place since the catalog was read.
+        let refuse = || self.refuse(&probe_version(&path).unwrap_or_else(|| catalog.version.clone()));
         parse(&with_lean_fallback(lean, refuse, |lean| self.call(&path, req, lean))?)
     }
 

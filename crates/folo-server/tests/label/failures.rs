@@ -184,6 +184,24 @@ async fn passing_faults_in_a_row_end_the_run_and_a_usage_limit_ends_it_at_once()
 }
 
 #[tokio::test]
+async fn a_status_that_is_no_fault_keeps_the_hint_its_text_would_get_out_of_the_run() {
+    // A 400 whose text names a 503: a client error (not asked again), and not "overloaded" either, also when the
+    // run ends on it.
+    let t = TestDir::new("label-status-hint");
+    let f = fixture(&t.join("home"), vec![Step::FailStatus("API Error: 503 Service Unavailable", 400)]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let run = idle(app, &job.id).await.run.unwrap();
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 1));
+    assert_eq!(
+        (run.error.as_deref(), run.hint.as_deref()),
+        (Some("API Error: 503 Service Unavailable"), None)
+    );
+}
+
+#[tokio::test]
 async fn a_batch_makes_two_calls_at_most_whatever_made_them_fail() {
     let t = TestDir::new("label-mixed-failures");
     // Call 1 fails on a passing fault, is asked again and replies garbage: that is its second and last call (the

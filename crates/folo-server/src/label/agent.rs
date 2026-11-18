@@ -25,6 +25,8 @@ pub(super) const POLL: Duration = Duration::from_millis(40);
 /// How long a child's output pipes may stay open after it exited (a process it started still holds them) before
 /// what has been read is taken as its output.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+/// How long the output of a killed child is read on: what it printed just before the kill is still in its pipes.
+const KILL_DRAIN: Duration = Duration::from_millis(250);
 
 /// One call: a prompt and the images it is about.
 pub struct AgentRequest<'a> {
@@ -219,11 +221,8 @@ impl Cli {
             Some(custom) => PathBuf::from(custom),
             None => which(self.name)?,
         };
-        let mut cmd = Command::new(&path);
-        cmd.arg("--version");
-        let out = run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)).ok()?;
-        let version = version_of(&out.stdout)?;
-        out.success.then_some(Found { path, version })
+        let version = probe_version(&path)?;
+        Some(Found { path, version })
     }
 
     /// The executable to start, or why there is none.
@@ -249,6 +248,15 @@ impl Cli {
     pub fn hint(&self, install: &str) -> String {
         format!("{install}, or point {} at its executable; then reload", self.env)
     }
+}
+
+/// The version the executable at `path` says it is (`--version`), asked now: `None` when it does not answer.
+pub fn probe_version(path: &Path) -> Option<String> {
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    let out = run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)).ok()?;
+    let version = version_of(&out.stdout)?;
+    out.success.then_some(version)
 }
 
 /// The version number in a `--version` line: the first word that starts with a digit (`2.1.302 (Claude Code)`,
@@ -404,6 +412,12 @@ fn run_to_end(
     if outcome.is_err() || !(stdout.ended() && stderr.ended()) {
         // Whatever still runs (the child, or what it started and left holding a pipe) goes.
         tree.kill(&mut child);
+        // What the readers had not copied yet when the processes went (a result printed just before the kill)
+        // is still in the pipes, which end once nothing holds them: a short wait for that, no longer.
+        let drained = Instant::now() + KILL_DRAIN;
+        while !(stdout.ended() && stderr.ended()) && Instant::now() < drained {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     Ok(Ended { outcome, stdout, stderr })
 }

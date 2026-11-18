@@ -169,8 +169,9 @@ impl Run<'_> {
         self.job.log(&mut state, LogLevel::Warn, format!("{}: {notice}", self.agent_name()));
     }
 
-    /// Gives up: no further calls, and the ones in flight are ended. `hint` says what to do about it; without one
-    /// the agent's hint for `why` is given ([`Agent::hint`]).
+    /// Gives up: no further calls, and the ones in flight are ended. `hint` says what to do about it, as the caller
+    /// resolved it ([`failure_hint`], [`Agent::hint`]): the run ends with that one, `None` too (a failure whose own
+    /// status says it is no limit or passing fault is not given the hint its text would get).
     fn fail(&self, why: String, hint: Option<String>) {
         self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.plan.cancel.store(true, Ordering::Relaxed);
@@ -248,7 +249,7 @@ impl Run<'_> {
         let on = |event: Event<'_>| match event {
             // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that only
             // returns garbage is given up on after three calls, not three batches.
-            Event::Unreadable(why) => self.soft_failure(why, None),
+            Event::Unreadable(why) => self.soft_failure(why, self.plan.agent.hint(why)),
             Event::Again { why, wait } => {
                 let again = match wait {
                     Some(wait) => format!("asking again in {} s", wait.as_secs()),
@@ -280,7 +281,7 @@ impl Run<'_> {
             Err(BatchError::Cancelled) => all(untouched, ""),
             Err(BatchError::Timeout) => {
                 let why = format!("{} did not answer within {} s", self.agent_name(), CALL_TIMEOUT.as_secs());
-                self.soft_failure(&why, None);
+                self.soft_failure(&why, self.plan.agent.hint(&why));
                 all(Outcome::Failed, &why)
             }
             Err(BatchError::Transient(failure)) => {
@@ -294,7 +295,8 @@ impl Run<'_> {
                 all(untouched, "")
             }
             Err(BatchError::Unavailable(why)) => {
-                self.fail(why, None);
+                let hint = self.plan.agent.hint(&why);
+                self.fail(why, hint);
                 all(untouched, "")
             }
         };
@@ -389,10 +391,7 @@ impl Run<'_> {
         state.active = None;
         let name = self.agent_name();
         let (fatal, hint) = match fatal {
-            Some((why, hint)) => {
-                let hint = hint.or_else(|| self.plan.agent.hint(&why));
-                (Some(why), hint)
-            }
+            Some((why, hint)) => (Some(why), hint),
             None => (None, None),
         };
         let Some(run) = state.file.run.as_mut() else { return };
