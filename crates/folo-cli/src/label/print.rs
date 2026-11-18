@@ -123,7 +123,7 @@ pub(super) fn status(r: &LabelStatusResult, out: Out) {
     if let Some(d) = &r.dataset_id {
         out.human(format!("dataset: {d}"));
     }
-    for l in &r.log {
+    for l in r.log.iter().flatten() {
         out.human(format!("  {l}"));
     }
 }

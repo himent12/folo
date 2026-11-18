@@ -62,8 +62,13 @@ const SERVES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Whether the `folo serve` at `url` serves `dir` (its `/api/system` `data_dir`): `serve.json` can be stale, and a
 /// new process may listen on a dead server's port. Connecting is quick or nothing listens there.
 pub fn serves(url: &str, dir: &Path, token: Option<&str>) -> bool {
+    serves_within(url, dir, token, SERVES_TIMEOUT)
+}
+
+/// [`serves`] with `/api/system` given at most `timeout`.
+fn serves_within(url: &str, dir: &Path, token: Option<&str>, timeout: std::time::Duration) -> bool {
     let connect = std::time::Duration::from_secs(3);
-    let mut client = folo_client::Client::with_timeouts(url, connect, SERVES_TIMEOUT);
+    let mut client = folo_client::Client::with_timeouts(url, connect, timeout);
     if let Some(token) = token {
         client = client.token(token);
     }
@@ -116,24 +121,22 @@ mod tests {
         assert!(!dir.path().join("serve.json").exists());
     }
 
-    /// A server whose first `/api/system` takes a few seconds (its hardware sample) still counts as the one that
-    /// serves the data dir.
-    #[test]
-    fn a_slow_first_answer_still_serves() {
+    /// A server whose `/api/system` answers after `delay` (a first answer samples the hardware), on its own
+    /// thread; its URL.
+    fn slow_server(dir: &Path, delay: std::time::Duration) -> String {
         use std::io::{Read, Write};
-        let dir = TestDir::new("serve-lock-slow");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let body = serde_json::json!({
             "cpu": { "name": "c", "threads": 1, "util": 0 }, "memory": { "used_bytes": 1, "total_bytes": 2 },
-            "gpus": [], "data_dir": folo_api::json::path(dir.path()),
+            "gpus": [], "data_dir": folo_api::json::path(dir),
         })
         .to_string();
-        let server = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
-            std::thread::sleep(std::time::Duration::from_secs(4));
+            std::thread::sleep(delay);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -141,7 +144,17 @@ mod tests {
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.write_all(body.as_bytes());
         });
-        assert!(serves(&url, dir.path(), None));
-        server.join().unwrap();
+        url
+    }
+
+    /// A server whose answer takes longer than a short wait but not the wait given is still the data dir's: a
+    /// 3 s wait took a server busy with its first hardware sample (9 s) for another process.
+    #[test]
+    fn a_slow_answer_still_serves_within_the_wait() {
+        use std::time::Duration;
+        let dir = TestDir::new("serve-lock-slow");
+        let ms = Duration::from_millis;
+        assert!(!serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(50)));
+        assert!(serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(5000)));
     }
 }

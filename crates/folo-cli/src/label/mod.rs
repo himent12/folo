@@ -160,15 +160,21 @@ impl Drop for Session {
 /// Input paths as the server takes them, absolute: a relative one made absolute against the current folder (a
 /// server never reads a relative path, which would mean its own working folder). On this machine (in process, or
 /// the `folo serve` that owns the data dir) by this OS's rules, so on Windows `/photos` and `\photos` are on the
-/// current drive; for an explicit `--server`, whose OS may be another, an absolute path of any OS is passed as
-/// given.
+/// current drive; for an explicit `--server`, whose OS may be another, an absolute path of another OS is passed as
+/// given. Every path absolute here is written as FOLO writes paths ([`folo_mcp::label::wire_path`]).
 fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliError> {
     paths
         .iter()
         .map(|p| {
             let p = p.trim();
-            // Absolute already (a volume path `\\?\Volume{GUID}\...` too): as given.
-            if (remote && looks_absolute(p)) || Path::new(p).is_absolute() {
+            // Absolute here already: as FOLO writes paths, so `\\?\C:\photos` is the `C:/photos` the server may
+            // have imported before (a volume path `\\?\Volume{GUID}\...` keeps its prefix, without which it is
+            // relative).
+            if Path::new(p).is_absolute() {
+                return Ok(folo_mcp::label::wire_path(Path::new(p)));
+            }
+            // Absolute on another OS, for a server that may run it: as given.
+            if remote && looks_absolute(p) {
                 return Ok(p.to_string());
             }
             let abs = std::path::absolute(Path::new(p)).map_err(|e| usage(format!("{p}: {e}")))?;
@@ -524,7 +530,14 @@ mod tests {
         {
             let volume = r"\\?\Volume{0f1e2d3c-0000-0000-0000-000000000000}\photos";
             assert_eq!((p(volume, false), p(volume, true)), (volume.to_string(), volume.to_string()));
-            assert_eq!(p(r"D:\x", false), r"D:\x");
+            // One spelling of a drive path, whatever the prefix or separators: the server's comparison of the
+            // paths it imported sees the same folder.
+            for given in [r"D:\photos", r"\\?\D:\photos", "D:/photos"] {
+                assert_eq!(
+                    (p(given, false), p(given, true)),
+                    ("D:/photos".to_string(), "D:/photos".to_string())
+                );
+            }
         }
     }
 }

@@ -539,18 +539,23 @@ async fn a_finished_run_is_reported_as_seen() {
     let labels = crate::label::Labels::Store(store.clone());
     let seen = labels.job(&job).unwrap();
     let first = seen.run.clone().unwrap();
-    assert!(!labels.status_of(seen.clone(), 5).log.is_empty());
+    // As a record: the same run, so the review count and the log are there.
+    let record = |st: crate::types::LabelStatusResult| serde_json::to_value(st).unwrap();
+    let same = record(labels.status_of(seen.clone(), 5));
+    assert!(same["reviewed"] == 0 && !same["log"].as_array().unwrap().is_empty(), "{same}");
     // Another run since: the review count and the log read now could be the new run's, so neither is given.
     ok(&s, "start_labeling", json!({ "job_id": job, "agent": "claude", "image_ids": ["2"] })).await;
     wait_idle(&s, &job).await;
-    let st = labels.status_of(seen.clone(), 5);
-    assert!(st.log.is_empty() && st.reviewed.is_none(), "{st:?}");
-    assert!(labels.status_of(seen.clone(), 0).reviewed.is_none());
-    assert_eq!(st.run.unwrap().total, first.total);
+    for lines in [5, 0] {
+        let st = record(labels.status_of(seen.clone(), lines));
+        assert!(st.get("log").is_none() && st.get("reviewed").is_none(), "{st}");
+        assert_eq!(st["run"]["total"], first.total, "{st}");
+    }
     // The job is gone: the run as seen, without the details.
     labels.delete(&job).unwrap();
-    let st = labels.status_of(seen, 5);
-    assert!(st.log.is_empty() && st.reviewed.is_none(), "{st:?}");
+    let st = record(labels.status_of(seen, 5));
+    assert!(st.get("log").is_none() && st.get("reviewed").is_none(), "{st}");
+    assert_eq!(st["run"]["outcome"], "completed", "{st}");
     store.shutdown();
 }
 

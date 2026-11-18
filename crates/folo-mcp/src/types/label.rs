@@ -243,8 +243,10 @@ pub struct LabelStatusResult {
     pub usage: LabelUsage,
     /// The dataset last exported from the job.
     pub dataset_id: Option<String>,
-    /// The last log lines, oldest first (`warn: ` / `error: ` before those levels).
-    pub log: Vec<String>,
+    /// The last log lines, oldest first (`warn: ` / `error: ` before those levels); left out only by `folo label
+    /// start --wait`, as `reviewed` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<Vec<String>>,
 }
 
 /// `list_label_images`.
