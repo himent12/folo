@@ -192,6 +192,10 @@ fn agent_failed(message: impl Into<String>, hint: Option<String>) -> Error {
 /// `POST /api/bench/benchmarks/{id}/design`: one call to the agent (asked once more when its answer cannot be
 /// read); the plan it proposes, not saved. A timer thread ends the call at [`DESIGN_TIMEOUT`], or when the server
 /// shuts down (`closing`).
+///
+/// What the calls used is reported with a plan only ([`BenchDesign::usage`]): a design that fails is a `502`
+/// with the message and hint alone, without what its calls used (labeling runs and benchmark entries count
+/// every call, whatever the outcome).
 pub(super) fn design(
     store: &dyn Store,
     slot: &Slot,

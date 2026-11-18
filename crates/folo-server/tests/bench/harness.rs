@@ -122,7 +122,7 @@ impl Agent for Scripted {
                 while !req.cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                return Err(AgentError::Cancelled);
+                return Err(AgentError::Cancelled(Default::default()));
             }
             None => {
                 let first_class = req.prompt.lines().next().unwrap().trim_start_matches("Classes: ");

@@ -94,20 +94,30 @@ pub fn ask<T>(
                     std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
                 }
             }
-            Err(AgentError::Timeout) => return Err(BatchError::Timeout),
-            Err(AgentError::Cancelled) => return Err(BatchError::Cancelled),
+            Err(AgentError::Timeout(spent)) => {
+                used.add(&spent);
+                return Err(BatchError::Timeout);
+            }
+            Err(AgentError::Cancelled(spent)) => {
+                used.add(&spent);
+                return Err(BatchError::Cancelled);
+            }
             Err(AgentError::Unavailable(why)) => return Err(BatchError::Unavailable(why)),
         }
     }
 }
 
 /// What to do about `failure`: the hint its own status gives (a limit, a passing fault), else the agent's
-/// ([`Agent::hint`], which reads the message).
+/// ([`Agent::hint`], which reads the message). With a status of its own the failure is no limit or passing fault
+/// unless that status says so, so the agent's hint does not count when it is the one the text alone would give
+/// ([`fault_hint`]: a 400 whose text names a 503 is not "overloaded").
 pub fn failure_hint(agent: &dyn Agent, failure: &Failure) -> Option<String> {
-    failure
-        .status
-        .and_then(|status| fault_hint(&failure.message, Some(status)))
-        .or_else(|| agent.hint(&failure.message))
+    let message = &failure.message;
+    match failure.status {
+        Some(status) => fault_hint(message, Some(status))
+            .or_else(|| agent.hint(message).filter(|hint| fault_hint(message, None).as_ref() != Some(hint))),
+        None => agent.hint(message),
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +130,7 @@ mod tests {
 
     use super::*;
     use crate::label::agent::AgentReply;
+    use crate::label::faults::BUSY;
 
     /// One call of a scripted agent.
     enum Step {
@@ -153,7 +164,7 @@ mod tests {
                 Some(Step::Fail(why)) => {
                     Err(AgentError::Failed(Failure { used: usage, ..Failure::new(why) }))
                 }
-                Some(Step::Timeout) => Err(AgentError::Timeout),
+                Some(Step::Timeout) => Err(AgentError::Timeout(usage)),
                 Some(Step::Reply(text)) => Ok(AgentReply { text: text.into(), usage }),
                 None => Ok(AgentReply { text: "{}".into(), usage }),
             }
@@ -176,7 +187,9 @@ mod tests {
         took: Duration,
     }
 
-    fn ask_with(agent: &Scripted, cancel: &AtomicBool) -> Asked {
+    /// Asks `agent`; with `stop_on_again`, the run is stopped as the first call is asked again (during its wait).
+    fn ask_with(agent: &Scripted, stop_on_again: bool) -> Asked {
+        let cancel = &AtomicBool::new(false);
         let schema = serde_json::json!({});
         let req = AgentRequest {
             system: "",
@@ -194,12 +207,18 @@ mod tests {
         // A reply reads when it is "{}".
         let read =
             |text: &str| if text == "{}" { Ok(text.to_string()) } else { Err(format!("unreadable: {text}")) };
-        let result = ask(agent, &req, WAIT, &mut used, read, |e| events.push(format!("{e:?}")));
+        let on = |e: Event<'_>| {
+            if stop_on_again && matches!(e, Event::Again { .. }) {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            events.push(format!("{e:?}"));
+        };
+        let result = ask(agent, &req, WAIT, &mut used, read, on);
         Asked { result, calls: agent.1.load(Ordering::SeqCst), used, events, took: t0.elapsed() }
     }
 
     fn ask_steps(steps: Vec<Step>) -> Asked {
-        ask_with(&scripted(steps), &AtomicBool::new(false))
+        ask_with(&scripted(steps), false)
     }
 
     #[test]
@@ -244,19 +263,13 @@ mod tests {
 
     #[test]
     fn what_the_calls_used_survives_every_outcome() {
-        // The second call times out: the first one's usage stays.
+        // The second call times out: the first one's usage stays, and what the second printed before it hung
+        // counts too.
         let a = ask_steps(vec![Step::Fail(OVERLOADED), Step::Timeout]);
-        assert_eq!((a.result, a.calls, a.used), (Err(BatchError::Timeout), 2, used(1)));
-        // Stopped during the wait before the second call.
+        assert_eq!((a.result, a.calls, a.used), (Err(BatchError::Timeout), 2, used(2)));
+        // Stopped during the wait before the second call (as it is announced, so before any second call).
         let agent = scripted(vec![Step::Fail("Rate limit reached. Please try again in 30s.")]);
-        let cancel = AtomicBool::new(false);
-        let a = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(100));
-                cancel.store(true, Ordering::SeqCst);
-            });
-            ask_with(&agent, &cancel)
-        });
+        let a = ask_with(&agent, true);
         assert_eq!((a.result, a.calls, a.used), (Err(BatchError::Cancelled), 1, used(1)));
         // It waited for the 30 s the limit asked for, and ended promptly on the stop.
         assert!(a.events[0].contains("30s"), "{:?}", a.events);
@@ -286,10 +299,37 @@ mod tests {
         let failure =
             Failure { status: Some(503), ..Failure::new("upstream failed after processing 503 tokens") };
         assert!(failure.is_transient());
-        assert_eq!(failure_hint(&Status, &failure).as_deref(), Some(super::super::faults::BUSY));
+        assert_eq!(failure_hint(&Status, &failure).as_deref(), Some(BUSY));
         let failure = Failure { status: None, ..failure };
         assert!(!failure.is_transient());
         assert_eq!(failure_hint(&Status, &failure).as_deref(), Some("the agent's own"));
+        // A 400 whose text names a 503: no passing fault, so not the hint the text alone would give, whatever
+        // the agent reads into it.
+        struct ByText;
+        impl Agent for ByText {
+            fn id(&self) -> LabelAgentId {
+                LabelAgentId::Claude
+            }
+            fn info(&self) -> LabelAgent {
+                unreachable!()
+            }
+            fn default_batch(&self) -> usize {
+                1
+            }
+            fn label(&self, _: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
+                unreachable!()
+            }
+            fn hint(&self, message: &str) -> Option<String> {
+                fault_hint(message, None).or_else(|| message.contains("model").then(|| "pick another".into()))
+            }
+        }
+        let failure = Failure { status: Some(400), ..Failure::new("API Error: 503 Service Unavailable") };
+        assert!(!failure.is_transient());
+        assert_eq!(failure_hint(&ByText, &failure), None);
+        assert_eq!(failure_hint(&ByText, &Failure { status: None, ..failure }).as_deref(), Some(BUSY));
+        // A hint of the agent's own (not a fault's) stays.
+        let failure = Failure { status: Some(404), ..Failure::new("no such model") };
+        assert_eq!(failure_hint(&ByText, &failure).as_deref(), Some("pick another"));
         // What is shown is cut short; what is classified is not.
         let long = format!("{} API Error: 529 Overloaded", "x".repeat(5000));
         let failure = Failure::new(long);

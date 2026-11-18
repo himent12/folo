@@ -848,7 +848,8 @@ exported more than once.
   (`StartLabeling.fast`): Codex's Fast (priority processing, which uses more of the plan's usage); a model's own
   `fast` says whether it offers it (Codex: its catalog entry lists the `priority` tier). No Codex model offers it
   when the user's Codex `config.toml` sets `model_catalog_json`, `profile`, `openai_base_url` or
-  `chatgpt_base_url` (the catalog FOLO reads may then not be its calls'; `start` with `fast` says so). Claude Code
+  `chatgpt_base_url`, or exists but cannot be read (the catalog FOLO reads may then not be its calls'; `start`
+  with `fast` says so). Claude Code
   has none for `claude -p`.
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "/data/photos" }`
@@ -937,8 +938,8 @@ exported more than once.
   instructions, web search, the features and config keys that add tools or text switched off, Codex's own model
   catalog handed back without the models' tools (`model_catalog_json`, read with `codex debug models` for the
   built-in provider a call uses, and left out, with a warning in the run's log, when it cannot be read, the user's
-  `config.toml` sets one of the keys above, or Codex refuses it as it starts: that call, which used no tokens, is
-  made again without it, and calls go without it until another Codex version is installed), the images as
+  `config.toml` sets one of the keys above or cannot be read, or Codex refuses it as it starts: that call, which
+  used no tokens, is made again without it, and that Codex version's calls go without it), the images as
   `--image` attachments and
   the reply shape as `--output-schema` (class names limited to the job's classes), and with `fast` its
   `service_tier` set to `priority`; that takes a call's fixed cost from about 20000 tokens to about 700. Both run
@@ -964,7 +965,8 @@ exported more than once.
   text. Once a run is stopped or has failed, no further call is started and
   the ones in flight are killed. `POST …/start` again continues with what is left.
 - `usage` adds up what the CLIs report per call, a failed call's too (Claude Code reports what a call that failed
-  used), whatever became of the batch (stopped during a wait, timed out). `cost_usd` is Claude Code's own figure (list prices, also on a subscription); Codex reports none.
+  used), whatever became of the batch (stopped during a wait, timed out; a call killed after the CLI printed
+  what it used counts that, and a Codex turn that completed without a reply counts its tokens). `cost_usd` is Claude Code's own figure (list prices, also on a subscription); Codex reports none.
 
 **Making the dataset**
 - `POST /api/label/jobs/{id}/dataset` body `{ "name"?, "val_fraction"?: 0.2, "seed"?: 0 }` → `201 Dataset` with
@@ -1073,7 +1075,8 @@ most once, `severities` are 1 to 5 distinct values in `1..=5` in ascending order
 empty `conditions` runs the unchanged images only. Text is trimmed (empty becomes `null`).
 
 - `POST /api/bench/benchmarks/{id}/design` body `{ "agent": "claude" | "codex", "model"?, "effort"?, "note"?: "" }`
-  → `BenchDesign` `{ "plan": BenchPlan, "usage": LabelUsage }`. One call to the agent (as agent labeling makes
+  → `BenchDesign` `{ "plan": BenchPlan, "usage": LabelUsage }` (a design that fails is a `502 agent_failed`
+  without its usage). One call to the agent (as agent labeling makes
   them: no tools, one request; `model` and `effort` default to the agent's, `model` checked as for labeling,
   `note` at most 2000 characters) with the benchmark's description and the note, its classes with their box
   counts, the catalog and the first four of its images (scaled as labeling scales them). The answer is read as

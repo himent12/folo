@@ -20,8 +20,8 @@ use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::{Value, json};
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Output, fault_hint, last_line,
-    limit_hint, run,
+    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Killed, Output, fault_hint,
+    last_line, limit_hint, run_kept,
 };
 
 /// The model a run uses when it names none: on photos Haiku finds about as many objects as Sonnet, with fewer
@@ -99,7 +99,7 @@ impl Agent for ClaudeCode {
 
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
         let cmd = command(&self.cli.path()?, req);
-        parse(&run(cmd, Some(stdin(req)), CALL_TIMEOUT, req.cancel)?)
+        ended(run_kept(cmd, Some(stdin(req)), CALL_TIMEOUT, req.cancel))
     }
 
     fn hint(&self, message: &str) -> Option<String> {
@@ -184,6 +184,23 @@ fn parse(out: &Output) -> Result<AgentReply, AgentError> {
         return Err(AgentError::Failed(Failure { message: error_message(&result), status, used: usage }));
     }
     Ok(AgentReply { text: result["result"].as_str().unwrap_or_default().to_string(), usage })
+}
+
+/// A call that ran to its end is read ([`parse`]); one that was killed (it hung, or was stopped) still used what
+/// a result event it printed before says.
+fn ended(run: Result<Output, Killed>) -> Result<AgentReply, AgentError> {
+    match run {
+        Ok(out) => parse(&out),
+        Err(killed) => {
+            let (e, out) = *killed;
+            let result = out
+                .stdout
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|v| v["type"] == "result");
+            Err(e.with_used(result.as_ref().map(usage_of).unwrap_or_default()))
+        }
+    }
 }
 
 /// What a result event says the call used. A call that never reached the model (no tokens, no cost) is no call.
@@ -369,6 +386,24 @@ mod tests {
         let fields = r#""subtype":"error_max_turns","is_error":true"#;
         let err = parse(&output(&failed_stream("", fields), "", false)).unwrap_err();
         assert_eq!(err, AgentError::failed("Claude Code reported an error (error_max_turns)"));
+    }
+
+    #[test]
+    fn a_call_killed_after_its_result_still_used_what_the_result_says() {
+        let dir = folo_test_support::TestDir::new("label-claude-hung");
+        std::fs::write(dir.path().join("out.txt"), format!("{SUCCESS}\n")).unwrap();
+        // The CLI prints its result, then hangs on its way out until the call's time is up.
+        let script =
+            if cfg!(windows) { "type out.txt & ping -n 30 127.0.0.1 > NUL" } else { "cat out.txt; sleep 30" };
+        let mut cmd = crate::label::agent::shell(script);
+        cmd.current_dir(dir.path());
+        let err = ended(run_kept(cmd, None, std::time::Duration::from_secs(2), &AtomicBool::new(false)))
+            .unwrap_err();
+        let AgentError::Timeout(used) = err else { panic!("{err:?}") };
+        assert_eq!((used.calls, used.input_tokens, used.output_tokens), (1, 1912, 827));
+        // Killed before it printed one: nothing to count.
+        let err = ended(Err(Box::new((AgentError::Cancelled(LabelUsage::default()), output("", "", false)))));
+        assert_eq!(err.unwrap_err(), AgentError::Cancelled(LabelUsage::default()));
     }
 
     #[test]

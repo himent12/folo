@@ -11,9 +11,10 @@ use std::time::Duration;
 /// that asks for longer ends the run like a limit, with when to start again in the hint.
 pub const SHORT_RATE_LIMIT: Duration = Duration::from_secs(60);
 
-/// The hint of a run that ended on passing faults ([`is_transient`]).
-pub const BUSY: &str = "the provider is overloaded or failing right now (each call was asked twice); start again \
-                        in a few minutes, or use another agent";
+/// The hint of a run that ended on passing faults ([`is_transient`]). How often each call was asked is the run's
+/// to say (its log has every retry), so the hint does not count.
+pub const BUSY: &str =
+    "the provider is overloaded or failing right now; start again in a few minutes, or use another agent";
 
 /// Words of a limit of the account (a plan's usage, a spending cap): asking again only spends more of a limit
 /// that has run out, however soon it says to try again. Each is matched at the start of a word ([`has_word`]), so
@@ -136,15 +137,36 @@ fn statuses(lower: &str) -> Vec<u16> {
     found
 }
 
+/// The words that start a wait in numbers and units ([`retry_after`]).
+const WAIT_MARKERS: [&str; 4] = ["try again in ", "retry after ", "retry in ", "retry-after: "];
+
 /// How long a `message` says to wait before trying again ("try again in 1.5s", "retry after 20 seconds", "try
 /// again in 2 hours 5 minutes", "try again in 1m12.5s"), when it says so in numbers and units: every amount of a
-/// compound duration counts.
+/// compound duration counts, and of several waits (Claude Code joins its error fields into one message) the
+/// longest.
 pub fn retry_after(message: &str) -> Option<Duration> {
-    let lower = message.to_lowercase();
-    let at = ["try again in ", "retry after ", "retry in ", "retry-after: "]
-        .iter()
-        .find_map(|marker| lower.find(marker).map(|at| at + marker.len()))?;
-    let mut rest = &lower[at..];
+    longest_wait(message).map(|(_, _, wait)| wait)
+}
+
+/// The longest wait `message` asks for in numbers and units: where its marker starts (a byte offset of
+/// `message`), the marker and the wait. The first of equal ones.
+fn longest_wait(message: &str) -> Option<(usize, &'static str, Duration)> {
+    // ASCII lowercase keeps every byte offset of `message`.
+    let lower = message.to_ascii_lowercase();
+    let mut longest: Option<(usize, &'static str, Duration)> = None;
+    for marker in WAIT_MARKERS {
+        for (at, _) in lower.match_indices(marker) {
+            let Some(wait) = read_wait(&lower[at + marker.len()..]) else { continue };
+            if longest.is_none_or(|(first, _, most)| wait > most || (wait == most && at < first)) {
+                longest = Some((at, marker, wait));
+            }
+        }
+    }
+    longest
+}
+
+/// The wait at the start of `rest` (lowercase), in numbers and units.
+fn read_wait(mut rest: &str) -> Option<Duration> {
     let (mut total, mut read) = (0.0, false);
     // Up to six amounts, each a number and its unit, written together ("1m30s") or apart ("2 hours 5 minutes").
     for _ in 0..6 {
@@ -173,27 +195,32 @@ pub fn retry_after(message: &str) -> Option<Duration> {
 }
 
 /// When a limit that `message` reports passes, in the CLI's own words with what it says before them: Claude
-/// Code's "resets 3pm (Europe/Berlin)", Codex's "try again at 3:04 PM" or a rate limit's "try again in 1.5s". Older
-/// Claude Code versions print the seconds since 1970 after a `|`: "resets at" and that time in RFC 3339 (UTC).
+/// Code's "resets 3pm (Europe/Berlin)", Codex's "try again at 3:04 PM" or a rate limit's "try again in 1.5s" (of
+/// several waits, the one [`retry_after`] reads: the longest). Older Claude Code versions print the seconds since
+/// 1970 after a `|`: "resets at" and that time in RFC 3339 (UTC).
 pub fn reset_time(message: &str) -> Option<String> {
     // ASCII lowercase keeps every byte offset of `message`.
     let lower = message.to_ascii_lowercase();
-    for marker in ["resets ", "try again at ", "try again in ", "retry after "] {
-        if let Some(at) = lower.find(marker) {
-            let rest = &message[at + marker.len()..];
-            // To the end of the clause: a sentence's end, a `·`, `∙` or `|` separator, a line break.
-            let end = rest
-                .char_indices()
-                .find(|&(i, c)| {
-                    matches!(c, '·' | '∙' | '|' | '\n')
-                        || (c == '.' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))
-                })
-                .map_or(rest.len(), |(i, _)| i);
-            let when = rest[..end].trim();
-            if !when.is_empty() {
-                return Some(format!("{marker}{when}"));
-            }
+    // The clause after the `marker` at `at`: to a sentence's end, a `·`, `∙` or `|` separator, a line break.
+    let clause = |at: usize, marker: &str| {
+        let rest = &message[at + marker.len()..];
+        let end = rest
+            .char_indices()
+            .find(|&(i, c)| {
+                matches!(c, '·' | '∙' | '|' | '\n')
+                    || (c == '.' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))
+            })
+            .map_or(rest.len(), |(i, _)| i);
+        let when = rest[..end].trim();
+        (!when.is_empty()).then(|| format!("{marker}{when}"))
+    };
+    for marker in ["resets ", "try again at "] {
+        if let Some(when) = lower.find(marker).and_then(|at| clause(at, marker)) {
+            return Some(when);
         }
+    }
+    if let Some(when) = longest_wait(message).and_then(|(at, marker, _)| clause(at, marker)) {
+        return Some(when);
     }
     let (_, epoch) = message.rsplit_once('|')?;
     let secs: u64 = epoch.trim().parse().ok().filter(|&s| s > 1_000_000_000)?;
@@ -206,11 +233,15 @@ pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     let m = message.to_lowercase();
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
     let usage = is_usage_limit(&m);
+    let wait = retry_after(message);
     let (what, then) = if usage {
         ("the account's usage limit was reached", "start again once it resets")
+    } else if wait.is_some_and(|w| w > SHORT_RATE_LIMIT) {
+        // A rate limit too, maybe: what counts is that it is no short wait.
+        ("the provider asked for a long wait", "start again later")
     } else if is_rate_limit(&m, &statuses) {
         ("the provider's rate limit was reached", "start again in a little while")
-    } else if retry_after(message).is_some() {
+    } else if wait.is_some() {
         ("the provider asked for a long wait", "start again later")
     } else {
         ("the CLI reported a limit", "start again once it has passed")
@@ -329,6 +360,11 @@ mod tests {
         assert_eq!(wait("Try again later."), None);
         assert_eq!(wait("try again at 3:04 PM"), None);
         assert_eq!(wait("try again in a moment"), None);
+        // Several waits in one message (Claude Code joins its error fields): the longest, whichever comes first.
+        assert_eq!(wait("Try again in 1s · Retry after 90 seconds"), Some(90_000));
+        assert_eq!(wait("retry after 90 seconds · try again in 1s"), Some(90_000));
+        assert_eq!(wait("try again in a moment · retry in 2s"), Some(2000));
+        assert!(!transient("Rate limit reached. Try again in 1s · Retry after 90 seconds"));
     }
 
     #[test]
@@ -355,6 +391,11 @@ mod tests {
         assert_eq!(
             reset("Claude AI usage limit reached|1763481600").as_deref(),
             Some("resets at 2025-11-18T16:00:00Z")
+        );
+        assert_eq!(
+            reset("Rate limit reached. Try again in 1s · Retry after 90 seconds").as_deref(),
+            Some("retry after 90 seconds"),
+            "the wait that counts"
         );
         assert_eq!(reset("You've hit your usage limit. Try again later."), None);
         assert_eq!(reset("rate limit exceeded"), None);
@@ -391,6 +432,25 @@ mod tests {
                 "the provider asked for a long wait (try again in 2 hours): start again then with fewer calls in \
                  flight (`parallel`), or use another agent"
             )
+        );
+        // A rate limit that asks for a long wait is that long wait, whether its words or its status say 429.
+        for long in
+            ["429 Too Many Requests; try again in 1m30s", "Rate limit reached. Please try again in 1m30s."]
+        {
+            assert_eq!(
+                fault_hint(long, None).as_deref(),
+                Some(
+                    "the provider asked for a long wait (try again in 1m30s): start again then with fewer calls \
+                     in flight (`parallel`), or use another agent"
+                ),
+                "{long}"
+            );
+        }
+        assert!(fault_hint("slow down; try again in 1m30s", Some(429)).unwrap().contains("long wait"));
+        assert!(
+            fault_hint("Try again in 1s · Retry after 90 seconds", Some(429))
+                .unwrap()
+                .contains("(retry after 90 seconds)")
         );
         assert_eq!(fault_hint("API Error: 529 Overloaded", None).as_deref(), Some(BUSY));
         assert!(

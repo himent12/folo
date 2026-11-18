@@ -65,16 +65,27 @@ pub enum AgentError {
     Unavailable(String),
     /// The CLI ran and reported an error (not signed in, an unknown model, a limit, a passing fault).
     Failed(Failure),
-    /// No answer within [`CALL_TIMEOUT`]; the process was killed.
-    Timeout,
-    /// The cancel switch was set; the process was killed.
-    Cancelled,
+    /// No answer within [`CALL_TIMEOUT`]; the process was killed. With what the call used, when the CLI had
+    /// printed that before it hung ([`run_kept`]).
+    Timeout(LabelUsage),
+    /// The cancel switch was set; the process was killed. With what the call used, as for a timeout.
+    Cancelled(LabelUsage),
 }
 
 impl AgentError {
     /// [`AgentError::Failed`] with `message` alone.
     pub fn failed(message: impl Into<String>) -> AgentError {
         AgentError::Failed(Failure::new(message))
+    }
+
+    /// This error with `used` as what the call used, when it is a timeout or a cancel (the others say it
+    /// themselves, or used nothing).
+    pub fn with_used(self, used: LabelUsage) -> AgentError {
+        match self {
+            AgentError::Timeout(_) => AgentError::Timeout(used),
+            AgentError::Cancelled(_) => AgentError::Cancelled(used),
+            other => other,
+        }
     }
 }
 
@@ -156,9 +167,15 @@ impl<T: Clone> Memo<T> {
     /// The remembered value, or `find()`'s when there is none or it is older than [`PROBE_TTL`]. Concurrent
     /// callers wait for one `find`.
     pub fn get(&self, find: impl FnOnce() -> T) -> T {
+        self.get_where(|_| true, find)
+    }
+
+    /// [`Memo::get`], finding the value again also when the remembered one is not `current` (it was found for
+    /// something that has changed since).
+    pub fn get_where(&self, current: impl FnOnce(&T) -> bool, find: impl FnOnce() -> T) -> T {
         let mut slot = self.0.lock().unwrap();
         match &*slot {
-            Some((at, value)) if at.elapsed() < PROBE_TTL => value.clone(),
+            Some((at, value)) if at.elapsed() < PROBE_TTL && current(value) => value.clone(),
             _ => {
                 let value = find();
                 *slot = Some((Instant::now(), value.clone()));
@@ -222,6 +239,12 @@ impl Cli {
         self.found().map(|f| f.version)
     }
 
+    /// The executable and its version, from one probe (`None`: not installed): what goes together, for what is
+    /// found out from that executable.
+    pub fn found_pair(&self) -> Option<(PathBuf, String)> {
+        self.found().map(|f| (f.path, f.version))
+    }
+
     /// How to make the CLI available: `install` (a sentence on getting it), or the override variable.
     pub fn hint(&self, install: &str) -> String {
         format!("{install}, or point {} at its executable; then reload", self.env)
@@ -244,8 +267,11 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Why [`run_kept`]'s child was killed, and what it had printed by then.
+pub type Killed = Box<(AgentError, Output)>;
+
 /// What a finished child printed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Output {
     /// Whether it exited with status 0.
     pub success: bool,
@@ -297,8 +323,24 @@ pub fn run(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentError> {
-    let ended = run_to_end(cmd, stdin, timeout, cancel, PIPE_GRACE)?;
-    Ok(Output { success: ended.outcome?, stdout: ended.stdout.text(), stderr: ended.stderr.text() })
+    run_kept(cmd, stdin, timeout, cancel).map_err(|killed| killed.0)
+}
+
+/// [`run`], keeping what the child printed when it was killed (a timeout, a cancel): a CLI may have reported what
+/// the call used before it hung.
+pub fn run_kept(
+    cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, Killed> {
+    let ended =
+        run_to_end(cmd, stdin, timeout, cancel, PIPE_GRACE).map_err(|e| Box::new((e, Output::default())))?;
+    let out = Output { success: false, stdout: ended.stdout.text(), stderr: ended.stderr.text() };
+    match ended.outcome {
+        Ok(success) => Ok(Output { success, ..out }),
+        Err(e) => Err(Box::new((e, out))),
+    }
 }
 
 /// A child that has ended, or was ended: whether it succeeded, and its pipes.
@@ -322,7 +364,7 @@ fn run_to_end(
         .stderr(Stdio::piped());
     Tree::prepare(&mut cmd);
     if cancel.load(Ordering::Relaxed) {
-        return Err(AgentError::Cancelled);
+        return Err(AgentError::Cancelled(LabelUsage::default()));
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
     let unavailable = |e: std::io::Error| AgentError::Unavailable(format!("starting `{program}`: {e}"));
@@ -354,8 +396,8 @@ fn run_to_end(
             Some((success, at)) if (stdout.ended() && stderr.ended()) || at.elapsed() >= grace => {
                 break Ok(success);
             }
-            _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled),
-            _ if Instant::now() >= deadline => break Err(AgentError::Timeout),
+            _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled(LabelUsage::default())),
+            _ if Instant::now() >= deadline => break Err(AgentError::Timeout(LabelUsage::default())),
             _ => std::thread::sleep(POLL),
         }
     };
@@ -372,16 +414,17 @@ pub fn last_line(text: &str) -> Option<String> {
     Some(folo_api::codes::cap(line, folo_api::codes::MAX_MESSAGE_CHARS))
 }
 
+/// A command that runs `script` in the platform's shell.
+#[cfg(test)]
+pub(super) fn shell(script: &str) -> Command {
+    let mut cmd = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+    cmd.arg(if cfg!(windows) { "/C" } else { "-c" }).arg(script);
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A command that runs `script` in the platform's shell.
-    fn shell(script: &str) -> Command {
-        let mut cmd = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
-        cmd.arg(if cfg!(windows) { "/C" } else { "-c" }).arg(script);
-        cmd
-    }
 
     #[test]
     fn versions_are_read_from_either_cli() {
@@ -417,7 +460,7 @@ mod tests {
         let sleep = if cfg!(windows) { "ping -n 30 127.0.0.1 > NUL" } else { "sleep 30" };
         let t0 = Instant::now();
         let r = run(shell(sleep), None, Duration::from_millis(200), &AtomicBool::new(false));
-        assert_eq!(r.err(), Some(AgentError::Timeout));
+        assert_eq!(r.err(), Some(AgentError::Timeout(LabelUsage::default())));
         assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
         // Cancelled while it runs: killed. Cancelled before it starts: never started (the program is not even
         // looked for).
@@ -428,10 +471,23 @@ mod tests {
             switch.store(true, Ordering::Relaxed);
         });
         let r = run(shell(sleep), None, PROBE_TIMEOUT, &cancel);
-        assert_eq!(r.err(), Some(AgentError::Cancelled));
+        assert_eq!(r.err(), Some(AgentError::Cancelled(LabelUsage::default())));
         let r = run(Command::new("folo-no-such-agent-cli"), None, PROBE_TIMEOUT, &cancel);
-        assert_eq!(r.err(), Some(AgentError::Cancelled));
+        assert_eq!(r.err(), Some(AgentError::Cancelled(LabelUsage::default())));
         assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
+    }
+
+    #[test]
+    fn a_killed_child_still_hands_back_what_it_printed() {
+        let script = if cfg!(windows) {
+            "echo printed & ping -n 30 127.0.0.1 > NUL"
+        } else {
+            "echo printed; sleep 30"
+        };
+        let (e, out) =
+            *run_kept(shell(script), None, Duration::from_secs(2), &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e, AgentError::Timeout(LabelUsage::default()));
+        assert_eq!(out.stdout.trim(), "printed");
     }
 
     #[test]

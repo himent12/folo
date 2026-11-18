@@ -104,9 +104,9 @@ defaults before and after):
   carried a code-mode tool into every request, whatever the features said), and the skills list, subagent tools
   and `request_user_input` switched off: a call's own overhead went from about 7800 tokens to about 50. When the
   catalog cannot be read, your Codex `config.toml` sets a key that can point Codex at another catalog or server
-  (`model_catalog_json`, `profile`, `openai_base_url` or `chatgpt_base_url` at its top level), or Codex refuses
-  the file as it starts, calls go without it at the old cost, and the run's log says so once. A refusal holds
-  until another version of Codex is installed.
+  (`model_catalog_json`, `profile`, `openai_base_url` or `chatgpt_base_url` at its top level) or exists but
+  cannot be read, or Codex refuses the file as it starts, calls go without it at the old cost, and the run's log
+  says so once. A refusal holds for the version of Codex that refused, until another one is installed.
 - A box is a list, `["car", x1, y1, x2, y2]`, instead of `{"label": "car", "box": [x1, y1, x2, y2]}`: Codex
   writes 25% fewer output tokens for the same labels.
 - Haiku runs at low effort and Codex sends images at 768 px (the reasons are in the next section).
@@ -123,12 +123,14 @@ A run stops spending as soon as spending is pointless. If the CLI is missing, si
 hits its plan's usage limit, or a rate limit (or any fault) that asks for a wait of more than a minute, the run
 ends on that call with the CLI's own message, and the images it did not reach stay as they were; the hint names
 the limit the message names (the account's usage limit or the provider's rate limit) and when to start again, in
-the CLI's words ("resets 3pm", "try again in 20m"). A client error (a 4xx status other than 429) is never asked
+the CLI's words ("resets 3pm", "try again in 20m"; of several waits in one message, the longest counts). A
+client error (a 4xx status other than 429) is never asked
 again, whatever else its message says. A passing fault of the provider (it is overloaded, a server error, the
 connection dropped, a rate limit that asks for a minute or less) is asked once more after 15 seconds, or after the
 wait it asks for if that is longer, and a reply that cannot be read is asked for once more; but a batch makes two
 calls at most, whatever made the first one fail, and when the second fails too the batch's images fail. What
-every call used counts in the run's usage, whatever came of it (a stop during the wait, a timeout). One bad box
+every call used counts in the run's usage, whatever came of it (a stop during the wait, a timeout, a call that
+reported its usage and then hung). One bad box
 in a reply costs only that box; an image whose every box was dropped (no class of the job, or nothing left inside
 the image) fails with that reason instead of passing for an empty one. Three calls in a row that time out, return
 garbage or fail twice on a passing fault end the run.

@@ -21,6 +21,7 @@
 //! area), and `--output-schema` holds the reply to FOLO's JSON shape. [`AgentRequest::fast`] asks for Codex's
 //! priority service tier (`service_tier`, what Codex calls Fast), which the catalog says which models offer.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -30,8 +31,8 @@ use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::Value;
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT, fault_hint,
-    last_line, limit_hint, run,
+    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Memo, Output, PROBE_TIMEOUT,
+    fault_hint, last_line, limit_hint, run, run_kept,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -90,10 +91,10 @@ const COSTS_MORE: &str =
 pub struct Codex {
     cli: Cli,
     catalog: Memo<Catalog>,
-    /// The version of Codex that refused the lean catalog ([`with_lean_fallback`]): calls go without it until
-    /// another version is installed. Keyed by the catalog snapshot's version, so a call that holds an older
-    /// snapshot cannot turn off a newer one.
-    lean_refused: Mutex<Option<String>>,
+    /// The versions of Codex that refused the lean catalog ([`with_lean_fallback`]): their calls go without it.
+    /// Each refusal is its catalog snapshot's version, so a late one from a call that held an older snapshot
+    /// neither turns off nor clears a newer version's.
+    lean_refused: Mutex<BTreeSet<String>>,
 }
 
 /// What Codex's model catalog (`codex debug models`) gives FOLO.
@@ -101,6 +102,8 @@ pub struct Codex {
 struct Catalog {
     /// The version of Codex that printed it: the snapshot's generation.
     version: String,
+    /// The executable that printed it, which a call with it runs (`None`: Codex is not installed).
+    path: Option<PathBuf>,
     /// The models that take images ([`catalog_models`]).
     models: Vec<LabelModel>,
     /// Codex's default model: the catalog's first listed model.
@@ -156,6 +159,7 @@ impl Catalog {
         };
         Catalog {
             version: String::new(),
+            path: None,
             models: catalog_models(&entries, &fast),
             default: listed.first().and_then(|m| slug(m)),
             fast,
@@ -193,23 +197,23 @@ impl Codex {
         Codex {
             cli: Cli::new("codex", "FOLO_CODEX_BIN"),
             catalog: Memo::new(),
-            lean_refused: Mutex::new(None),
+            lean_refused: Mutex::new(BTreeSet::new()),
         }
     }
 
-    /// Codex's own model catalog (`codex debug models`, for the provider a call uses); empty when Codex is not
-    /// installed, and without models when it cannot be read.
+    /// Codex's own model catalog (`codex debug models`, for the provider a call uses), printed by the executable
+    /// and version the CLI's probe found now (read again when that changed); empty when Codex is not installed,
+    /// and without models when it cannot be read.
     fn catalog(&self) -> Catalog {
-        self.catalog.get(|| {
-            let Ok(path) = self.cli.path() else { return Catalog::default() };
-            let version = self.cli.version().unwrap_or_default();
-            let mut cmd = Command::new(path);
+        let Some((path, version)) = self.cli.found_pair() else { return Catalog::default() };
+        let current = |c: &Catalog| c.path.as_ref() == Some(&path) && c.version == version;
+        self.catalog.get_where(current, || {
+            let mut cmd = Command::new(&path);
             cmd.args(["debug", "models", "-c", PROVIDER]);
             let catalog = match run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)) {
                 Ok(out) if out.success => {
-                    let config =
-                        codex_home().and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok());
-                    Catalog::read(&out.stdout, config.as_deref().and_then(catalog_conflict).as_deref())
+                    let conflict = codex_home().and_then(|home| config_conflict(&home.join("config.toml")));
+                    Catalog::read(&out.stdout, conflict.as_deref())
                 }
                 Ok(out) => {
                     let why = last_line(&out.stderr).or_else(|| last_line(&out.stdout)).unwrap_or_default();
@@ -217,13 +221,18 @@ impl Codex {
                 }
                 Err(_) => Catalog::unread("`codex debug models` did not run"),
             };
-            Catalog { version, ..catalog }
+            Catalog { version: version.clone(), path: Some(path.clone()), ..catalog }
         })
     }
 
     /// Whether the version of Codex that printed `catalog` refused its lean catalog.
     fn refused(&self, catalog: &Catalog) -> bool {
-        self.lean_refused.lock().unwrap().as_deref() == Some(catalog.version.as_str())
+        self.lean_refused.lock().unwrap().contains(&catalog.version)
+    }
+
+    /// Notes that `version` of Codex refused the lean catalog.
+    fn refuse(&self, version: &str) {
+        self.lean_refused.lock().unwrap().insert(version.to_string());
     }
 
     /// One `codex exec`, with `catalog` as its `model_catalog_json` when there is one: what it printed.
@@ -231,7 +240,11 @@ impl Codex {
         let files = Files::write(req, catalog)
             .map_err(|e| AgentError::Unavailable(format!("preparing the call: {e}")))?;
         let cmd = command(path, req, &files);
-        run(cmd, Some(req.prompt.as_bytes().to_vec()), CALL_TIMEOUT, req.cancel)
+        // A call killed after its turn completed (it hung on its way out) still used what that event says.
+        run_kept(cmd, Some(req.prompt.as_bytes().to_vec()), CALL_TIMEOUT, req.cancel).map_err(|killed| {
+            let (e, out) = *killed;
+            e.with_used(usage_of(&out.stdout).unwrap_or_default())
+        })
     }
 }
 
@@ -243,6 +256,17 @@ fn codex_home() -> Option<PathBuf> {
     let home =
         std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).filter(|h| !h.is_empty())?;
     Some(PathBuf::from(home).join(".codex"))
+}
+
+/// How Codex's `config.toml` at `path` may point Codex at another catalog or server than a call's
+/// ([`catalog_conflict`]). Only a file that is not there is no config: one that cannot be read (no permission, an
+/// I/O error, not UTF-8) may set anything, so it counts as a conflict.
+fn config_conflict(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(config) => catalog_conflict(&config),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("cannot be read ({e})")),
+    }
 }
 
 /// How Codex's `config.toml` (its text) may point Codex at another catalog or server than a call's: "sets `key`"
@@ -339,10 +363,14 @@ impl Agent for Codex {
     }
 
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
-        let path = self.cli.path()?;
+        // The executable the catalog came from: a call and its catalog are of one version.
         let catalog = self.catalog();
+        let path = match &catalog.path {
+            Some(path) => path.clone(),
+            None => self.cli.path()?,
+        };
         let lean = catalog.lean.as_deref().map(String::as_str).filter(|_| !self.refused(&catalog));
-        let refuse = || *self.lean_refused.lock().unwrap() = Some(catalog.version.clone());
+        let refuse = || self.refuse(&catalog.version);
         parse(&with_lean_fallback(lean, refuse, |lean| self.call(&path, req, lean))?)
     }
 
@@ -445,39 +473,52 @@ fn toml_string(s: &str) -> String {
 /// Reads the events `codex exec --json` prints: the last agent message is the reply and `turn.completed` has
 /// the usage; without them, `turn.failed` / `error` say why. (An `error` before a completed turn was a retry, and
 /// `item.completed` items of type `error` are warnings, e.g. about a config key this version does not know.)
+///
+/// What a completed turn used is counted whether or not there is a reply: a failure carries it.
 fn parse(out: &Output) -> Result<AgentReply, AgentError> {
-    let (mut text, mut usage, mut failure) = (None, None, None);
+    let (mut text, mut failure) = (None, None);
     for event in out.stdout.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
             Some("item.completed") if event["item"]["type"] == "agent_message" => {
                 text = event["item"]["text"].as_str().map(str::to_string);
             }
-            Some("turn.completed") => usage = Some(event["usage"].clone()),
             Some("turn.failed") => failure = event["error"]["message"].as_str().map(str::to_string),
             Some("error") => failure = event["message"].as_str().map(str::to_string),
             _ => {}
         }
     }
+    let usage = usage_of(&out.stdout);
     let (Some(text), Some(usage)) = (text, usage) else {
-        if let Some(failure) = failure {
-            return Err(AgentError::failed(failure));
-        }
-        let why = last_line(&out.stderr).or_else(|| last_line(&out.stdout));
+        let used = usage.unwrap_or_default();
+        let why = failure
+            .or_else(|| last_line(&out.stderr).filter(|_| !out.success))
+            .or_else(|| last_line(&out.stdout).filter(|_| !out.success));
         return Err(match why {
-            Some(why) if !out.success => AgentError::failed(why),
-            _ => AgentError::Unavailable("`codex` printed no reply".into()),
+            Some(why) => AgentError::Failed(Failure { used, ..Failure::new(why) }),
+            // A turn that completed without a message still used its tokens.
+            None if usage.is_some() => {
+                AgentError::Failed(Failure { used, ..Failure::new("`codex` printed no reply") })
+            }
+            None => AgentError::Unavailable("`codex` printed no reply".into()),
         });
     };
-    let tokens = |key: &str| usage[key].as_u64().unwrap_or(0);
-    Ok(AgentReply {
-        text,
-        usage: LabelUsage {
-            calls: 1,
-            input_tokens: tokens("input_tokens"),
-            cached_input_tokens: tokens("cached_input_tokens"),
-            output_tokens: tokens("output_tokens"),
-            cost_usd: None,
-        },
+    Ok(AgentReply { text, usage })
+}
+
+/// What the `turn.completed` event among the events `stdout` has says the call used; `None` without one.
+fn usage_of(stdout: &str) -> Option<LabelUsage> {
+    let event = stdout
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|event| event["type"] == "turn.completed")?;
+    let tokens = |key: &str| event["usage"][key].as_u64().unwrap_or(0);
+    Some(LabelUsage {
+        calls: 1,
+        input_tokens: tokens("input_tokens"),
+        cached_input_tokens: tokens("cached_input_tokens"),
+        output_tokens: tokens("output_tokens"),
+        cost_usd: None,
     })
 }
 
@@ -568,6 +609,16 @@ mod tests {
         let err = parse(&output("", "", true)).unwrap_err();
         let AgentError::Unavailable(message) = &err else { panic!("{err:?}") };
         assert!(Codex::new().hint(message).unwrap().contains("`codex exec hi`"));
+        // A turn that completed without a message, on a normal exit: no reply, but its tokens were used.
+        let no_message =
+            SUCCESS.lines().filter(|l| !l.contains("agent_message")).collect::<Vec<_>>().join("\n");
+        let err = parse(&output(&no_message, "", true)).unwrap_err();
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert_eq!((failure.message.as_str(), failure.used.input_tokens), ("`codex` printed no reply", 8993));
+        assert!(Codex::new().hint(&failure.message).unwrap().contains("`codex exec hi`"));
+        // ... and a call killed after it printed that event (it hung on its way out) used them too.
+        assert_eq!(usage_of(&no_message).map(|u| u.output_tokens), Some(287));
+        assert_eq!(usage_of("{\"type\":\"turn.started\"}"), None);
         // A usage limit says when it resets; a server error that outlasted Codex's own retries is not a limit.
         let limit = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again \
                      at 3:04 PM.";
@@ -577,10 +628,12 @@ mod tests {
             Codex::new().hint("exceeded retry limit, last status: 503 Service Unavailable").unwrap(),
             crate::label::agent::BUSY
         );
-        // A rate limit is the provider's, in its own words.
+        // A rate limit is the provider's, in its own words; one that asks for a long wait is that wait.
+        let hint = Codex::new().hint("Rate limit reached for gpt-6.2-sol. Please try again in 30s.").unwrap();
+        assert!(hint.starts_with("the provider's rate limit was reached (try again in 30s)"), "{hint}");
         let hint =
             Codex::new().hint("Rate limit reached for gpt-6.2-sol. Please try again in 20m0s.").unwrap();
-        assert!(hint.starts_with("the provider's rate limit was reached (try again in 20m0s)"), "{hint}");
+        assert!(hint.starts_with("the provider asked for a long wait (try again in 20m0s)"), "{hint}");
     }
 
     #[test]
@@ -803,8 +856,34 @@ mod tests {
         let codex = Codex::new();
         let snapshot =
             |version: &str| Catalog { version: version.into(), ..Catalog::read(&catalog_json(), None) };
-        *codex.lean_refused.lock().unwrap() = Some("0.169.0".into());
+        codex.refuse("0.169.0");
         assert!(codex.refused(&snapshot("0.169.0")));
         assert!(!codex.refused(&snapshot("0.170.0")), "a newer Codex is given the lean catalog again");
+        // Refusals interleave: the newer version refuses too, then a late refusal from a call that still held
+        // the older snapshot comes in. Neither clears the other.
+        codex.refuse("0.170.0");
+        codex.refuse("0.169.0");
+        assert!(codex.refused(&snapshot("0.170.0")) && codex.refused(&snapshot("0.169.0")));
+        assert!(!codex.refused(&snapshot("0.171.0")));
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_counts_as_one_that_may_point_codex_elsewhere() {
+        let dir = TestDir::new("label-codex-config");
+        let path = dir.path().join("config.toml");
+        assert_eq!(config_conflict(&path), None, "no config at all");
+        std::fs::write(&path, "model = \"x\"\n").unwrap();
+        assert_eq!(config_conflict(&path), None);
+        std::fs::write(&path, "profile = \"work\"\n").unwrap();
+        assert_eq!(config_conflict(&path).as_deref(), Some("sets `profile`"));
+        // Not UTF-8: not read, so it may set anything.
+        std::fs::write(&path, b"profile = \"\xff\xfe\"\n").unwrap();
+        assert!(config_conflict(&path).unwrap().starts_with("cannot be read ("));
+        // A folder where the file should be: an error other than its absence.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(config_conflict(&path).unwrap().starts_with("cannot be read ("));
+        let catalog = Catalog::read(&catalog_json(), config_conflict(&path).as_deref());
+        assert!(catalog.lean.is_none() && catalog.check_fast(Some("b")).is_err());
     }
 }

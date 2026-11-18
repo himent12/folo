@@ -138,19 +138,19 @@ impl Agent for Scripted {
             Some(Step::FailPaid(why)) => {
                 return Err(AgentError::Failed(Failure { used: paid(), ..Failure::new(why) }));
             }
-            Some(Step::Timeout) => return Err(AgentError::Timeout),
+            Some(Step::Timeout) => return Err(AgentError::Timeout(Default::default())),
             Some(Step::Hold) => {
                 while !req.cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                return Err(AgentError::Cancelled);
+                return Err(AgentError::Cancelled(Default::default()));
             }
             Some(Step::Until(_)) | None => {
                 if let Some(Step::Until(open)) = &step {
                     while !open.load(Ordering::SeqCst) {
                         // A test that fails before it opens the gate ends the run instead (the store's drop).
                         if req.cancel.load(Ordering::Relaxed) {
-                            return Err(AgentError::Cancelled);
+                            return Err(AgentError::Cancelled(Default::default()));
                         }
                         std::thread::sleep(Duration::from_millis(5));
                     }
