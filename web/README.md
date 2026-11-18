@@ -21,7 +21,8 @@ npm run build     # -> dist/, served by `folo serve`; fails if a built styleshee
 npm run preview   # serves dist/ (vite preview)
 npm run tokens    # regenerates src/lib/design/tokens.css and tokens.ts from ../design/tokens.json
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome); -- --theme paper: one theme
-npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots; fails on any (CI)
+npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots, then
+                  # scripts/load-faults.mjs (a stylesheet or the mock failing once: Studio recovers); fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
 npm run live-smoke -- <out dir>                # a short training run through New run, watched (usage: its header)
 npm run label-smoke -- <out dir> --images <dir> # agent labeling end to end with a real agent CLI (spends tokens)
@@ -76,10 +77,10 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
 | `src/lib/bench/` | Vision benchmarks' rules and score functions, shared by the screens and the mock |
 | `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand: every built-in theme's palette too), `themes.ts` (custom theme files checked, themes resolved and listed), `applyTheme.ts` (a theme onto `<html>`), `base.css`, `classInk.ts` |
-| `src/lib/*.ts` | Shared rules and wording: `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
+| `src/lib/*.ts` | Shared rules and wording: `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
 | `framework/` | fw, the UI framework: [framework/README.md](framework/README.md) |
 | `public/` | Copied as is into `dist/`: `favicon.svg`, and `folo-wasm/` once `scripts/build-wasm.sh` has built it |
-| `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `parity.mjs`, `perf.mjs`, `entries.mjs`, `png.mjs`, the smoke tests |
+| `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `load-faults.mjs` (recovery from a stylesheet or the mock that failed to load), `parity.mjs`, `perf.mjs`, `entries.mjs`, `png.mjs`, the smoke tests |
 | `shots/`, `dist/` | Output of `npm run shoot` and `npm run build`; git-ignored |
 | `notes/` | The design review record: the rubric each round was scored against, and the log of the rounds |
 | `DESIGN_DIRECTION.md` | The design rules Studio's code follows |
@@ -116,7 +117,9 @@ makes each of those files a chunk. A screen's first load fetches three scripts a
 shell and what it imports), `shared` (every module two or more chunks use) and the screen's own chunk
 (`build.rolldownOptions` in `vite.config.ts`); later screens need only their own. Keep it that way: `folo serve` speaks
 HTTP/1.1, where a browser opens six connections to a server, so on a remote one every six more files cost another
-round trip. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
+round trip. A stylesheet a chunk needs that failed to load is loaded again before the next chunk (`src/lib/failedStyles.ts`:
+the bundler's preload helper never asks for a file twice), so Retry, the next screen and the demo's mock module get it;
+`scripts/load-faults.mjs` (in `npm run qa`) holds that. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
 come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
 (`src/lib/shell/crumbs.ts`).
 

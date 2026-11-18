@@ -9,6 +9,7 @@
 // is slow or not there is offline, never demo data). Screens read `hub.api` and never care which one it is.
 
 import { computed, signal } from 'fw';
+import { refetchFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
 import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
@@ -31,9 +32,20 @@ const scenario = (params.get('scenario') ?? 'normal') as Scenario;
 type MockModule = typeof import('./mock');
 let mockModule: MockModule | null = null;
 let mockLoad: Promise<MockModule> | null = null;
-/** The mock's module, loaded once (its own chunk). */
+/**
+ * The mock's module, loaded once (its own chunk); a load that failed (a dropped connection) is tried again next time,
+ * with any stylesheet that failed to load (lib/failedStyles).
+ */
 function loadMock(): Promise<MockModule> {
-  mockLoad ??= import('./mock').then((m) => (mockModule = m));
+  mockLoad ??= (async () => {
+    try {
+      await refetchFailedStyles();
+      return (mockModule = await import('./mock'));
+    } catch (e) {
+      mockLoad = null;
+      throw e;
+    }
+  })();
   return mockLoad;
 }
 // Forced: start fetching it while the rest of the app loads.
@@ -148,7 +160,7 @@ class Hub {
     this.#refused.set(null);
     this.#reach.reset(null);
     if (forcedMock) {
-      await this.#useMock('forced', attempt);
+      await new Promise<void>((settled) => void this.#useMock('forced', attempt, settled));
       return;
     }
     const http = new HttpApi(prefs.serverUrl, this.#reach);
@@ -220,15 +232,33 @@ class Hub {
     }
   }
 
-  /** Switches to the mock: at once when its module is loaded (as the Svelte hub does), else once it is. */
-  async #useMock(reason: 'forced', attempt: number) {
-    const m = mockModule ?? (await loadMock());
-    if (attempt !== this.#attempt) return;
-    if (!(unshare(this.#api.peek()) instanceof m.MockApi)) this.api = new m.MockApi(scenario);
-    this.version = '0.1.0';
-    this.reason = reason;
-    this.mode = 'mock';
-    this.epoch++;
+  /**
+   * Switches to the mock: at once when its module is loaded (as the Svelte hub does), else once it is. Its module comes
+   * from the server like any chunk: while it cannot be loaded, Studio is offline and tries again (PROBE_DELAYS).
+   */
+  async #useMock(reason: 'forced', attempt: number, settled: () => void) {
+    try {
+      let m = mockModule;
+      for (let i = 0; !m; i++) {
+        try {
+          m = await loadMock();
+        } catch {
+          if (attempt !== this.#attempt) return;
+          this.#unreachable.set(true);
+          settled();
+          await new Promise((next) => setTimeout(next, PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]));
+        }
+        if (attempt !== this.#attempt) return;
+      }
+      this.#unreachable.set(false);
+      if (!(unshare(this.#api.peek()) instanceof m.MockApi)) this.api = new m.MockApi(scenario);
+      this.version = '0.1.0';
+      this.reason = reason;
+      this.mode = 'mock';
+      this.epoch++;
+    } finally {
+      settled();
+    }
   }
 
   /**
