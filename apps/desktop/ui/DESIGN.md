@@ -196,9 +196,11 @@ paint into a `Scene`, then rasterize and present the damage. Three things keep i
 - **Built paths** (`path_cache.rs`). `PathBuilder::build` (lyon's tessellation) is a pure function of the
   builder, so a builder equal word for word to one built recently (its contours, transform, dashes and options,
   every float compared by its bits) gets a copy of that result instead of being tessellated again: the live run
-  page's chart lines were about a quarter of its full frame. Per thread, 8 MB of keys and triangles at most,
-  the least recently used dropped first; an error is never kept. Tests: `path_cache.rs` (a hit equals a fresh
-  build, any change in the input builds anew, the budget holds).
+  page's chart lines were about a quarter of its full frame. Per thread, 8 MB at most, counted as held (keys
+  without spare capacity, the triangles' allocations, the table's slots); over that, one pass drops the least
+  recently used down to 6 MB. An error is never kept. Tests: `path_cache.rs` (a hit equals a fresh build, any
+  change in the input builds anew, what is held is what is counted, one big path evicts in one pass, the budget
+  holds).
 
 ## Renderer contract (`raster`)
 

@@ -304,7 +304,7 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   a revoked key and a termination the provider hasn't confirmed.
 
 By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`; on Windows a closed port on this
-machine is told at once, not after the probe's 0.5 s timeout); if none answers it starts a
+machine is told at once, not after the probe's 0.5 s timeout, unless a proxy from the environment is used for it); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
 bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
 window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If that local server stops answering (the

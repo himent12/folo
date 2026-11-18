@@ -185,7 +185,9 @@ user in the binary, only the only one at run time while no model runs.
 Same machine, shared with other agents, so every comparison alternates the two builds and reports the median
 over rounds with the range. "Before" is `origin/main` at `c265b78b`; for the launch, it is that build plus the
 trace points of this pull request (`FOLO_UI_TRACE=1`: `probe-none`, `server-started`, `first-lists`, `system`,
-`images` and their `-frame` lines), which change nothing else. Release builds, warm file cache.
+the image queue's first drain, and the `-frame` lines of the last three), which change nothing else. Release builds,
+warm file cache. The tables below are the first measurement, of the pull request before its review fixes; the
+fixes were measured again afterwards ("After the review fixes", below), on a busier machine.
 
 ### Launch to data on screen
 
@@ -200,7 +202,7 @@ eight alternating rounds, milliseconds since the process was created.
 | `folo serve` listening | 731.7 (704.8-1350.0) | 68.8 (63.2-86.2) |
 | runs, datasets and models on screen | 751.0 (718.4-1367.5) | 88.2 (80.0-104.7) |
 | the system card (CPU, memory, GPUs) on screen | 1212.7 (1141.2-1858.5) | 379.8 (344.4-545.3) |
-| the open dataset's thumbnails all on screen | not traced | 103.2 (96.2-121.1) |
+| the image queue first drained (on this server: the thumbnails on screen) | not traced | 103.2 (96.2-121.1) |
 
 Where it went:
 
@@ -209,9 +211,10 @@ Where it went:
   retries, which reports the refusal at once (`src/api/http/refused.rs`); anything else goes to the probe as
   before.
 - `folo serve` set up sysinfo's CPU-usage counters (about 150 ms) before listening; they are now set up on a
-  thread of their own and joined at the first `/api/system`. `/api/system` itself ran the engine's
-  capabilities (a GPU device, about 280 ms), then the adapter list (about 150 ms), then the CPU sample, one
-  after the other; they now run side by side. `folo serve` listening: about 165 ms to 16 ms (six alternating
+  thread of their own, and the first `/api/system` waits for them and then out sysinfo's 200 ms minimum interval
+  since (a reading taken at once said 100 %). `/api/system` itself ran the engine's capabilities (a GPU device,
+  about 280 ms), then the adapter list (about 150 ms), then the CPU sample, one after the other; the first call
+  now runs the three side by side, once per server, and later calls only read. `folo serve` listening: about 165 ms to 16 ms (six alternating
   rounds); the first `/api/system`: about 1420 to 820 ms (noisy).
 
 ### Frames (`--bench-frames 100`, headless, scale 1.5)
@@ -248,6 +251,64 @@ Pixels: every scenario of `--list-scenarios` (90) rendered with `--shot` by both
 
 Tried and dropped: mimalloc (frames 15 to 23 % shorter, but private bytes 44 to 136 MB); an AVX2 build of the
 renderer (a tie); starting the server's GPU device at start-up (about 25 ms on the system card).
+
+### After the review fixes
+
+The review fixes: the refused-at-once check only where the HTTP client connects directly (not through a proxy),
+bounded by one 100 ms deadline and with its Winsock start-up released; the first CPU reading after its interval;
+`/api/system`'s first parts prepared once per server as blocking tasks instead of threads per request; the path
+cache counting what it holds and evicting in one pass. Measured again with three builds alternating: "before"
+is `origin/main` at `1f2084ec` plus the trace points, "PR" the pull request before the fixes, "fixed" with them.
+The machine was busier than for the tables above (other programs used about a third of the CPU), so every
+number is higher; the comparison is within this run.
+
+Launch, as above, eight rounds, ms since the process was created:
+
+| | before | PR | fixed |
+| --- | ---: | ---: | ---: |
+| first frame | 42.0 (37.3-63.1) | 42.9 (39.1-61.9) | 43.4 (40.0-68.1) |
+| probe of port 7878 says nobody is there | 565.9 (556.0-591.8) | 92.2 (54.7-225.9) | 88.5 (53.0-218.3) |
+| `folo serve` listening | 767.2 (758.5-852.2) | 127.3 (80.2-279.5) | 128.0 (81.2-247.5) |
+| runs, datasets and models on screen | 788.2 (778.5-868.7) | 147.4 (96.5-298.5) | 148.2 (98.3-270.3) |
+| the system card on screen | 1318.0 (1278.8-1383.9) | 645.9 (480.9-819.5) | 581.0 (496.8-715.1) |
+| the image queue first drained, on screen | 811.0 (797.1-889.6) | 174.9 (113.6-321.5) | 168.2 (117.3-286.9) |
+
+`folo serve` alone, six rounds: ms from spawn to listening and to the answer of a `/api/system` asked at once,
+and that answer's CPU reading (`cpu.util`) next to one asked 2 s later:
+
+| | before | PR | fixed |
+| --- | ---: | ---: | ---: |
+| listening | 231.2 (207.6-467.7) | 32.1 (21.9-136.1) | 29.4 (21.0-45.2) |
+| first `/api/system` answered | 1059.0 (775.2-2430.9) | 512.4 (404.3-887.2) | 444.2 (413.2-1321.3) |
+| its CPU reading | 0.29 0.08 0.45 0.58 0.48 0.63 | 1.00 1.00 1.00 0.65 0.92 1.00 | 0.37 0.30 0.53 0.77 0.54 0.47 |
+| the reading 2 s later | 0.38 0.38 0.54 0.60 0.65 0.36 | 0.36 0.44 0.60 0.54 0.63 0.48 | 0.33 0.37 0.54 0.39 0.53 0.75 |
+
+The probe's check itself, timed in a fresh process: 1.2 to 1.5 ms with the fixes, 1.1 ms without (three
+processes each). A second check in a process where nothing else started Winsock takes about 1.2 ms instead of
+0.05 ms, since the first one's `WSACleanup` unloads it; the app checks once per connection attempt.
+
+Frames, `--bench-frames 100`, headless, scale 1.5, five alternating rounds, us ("after" is "fixed"):
+
+| screen | window | full before | full after | paint before | paint after | scroll after |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| overview | 1280x800 | 2126 (1932-2222) | 1936 (1777-2022) | 597 | 487 | 4205 |
+| runs | 1280x800 | 1134 (1026-1306) | 855 (736-1556) | 372 | 216 | 849 |
+| dataset | 1280x800 | 1157 (1036-1635) | 1009 (910-1130) | 276 | 237 | 2322 |
+| run-live | 1280x800 | 3445 (3024-6872) | 2945 (2447-3424) | 1104 | 774 | 5475 |
+| settings | 1280x800 | 1837 (1497-1944) | 1265 (1151-1452) | 331 | 273 | 3292 |
+| overview | 2560x1440 | 1648 (1310-2214) | 1838 (1300-2189) | 423 | 431 | 1589 |
+| runs | 2560x1440 | 1537 (1240-2097) | 833 (812-2304) | 534 | 217 | 860 |
+| dataset | 2560x1440 | 4178 (3900-4336) | 3716 (3343-4254) | 1008 | 907 | 10115 |
+| run-live | 2560x1440 | 4155 (3952-4652) | 3840 (3393-4286) | 1493 | 1101 | 9390 |
+| settings | 2560x1440 | 1697 (1321-1885) | 2017 (1350-2154) | 405 | 474 | 4627 |
+
+Overview and settings at 2560 x 1440 are ties (the ranges cover each other). The run-live rows with all three
+builds (five rounds, full frame / paint): 1280 x 800 2972 / 1023 before, 2828 / 810 PR, 2490 / 685 fixed;
+2560 x 1440 3943 / 1483, 3839 / 1137, 3420 / 997. The path cache's one-pass eviction and exact accounting
+cost nothing measurable.
+
+Pixels: all 90 scenarios rendered with `--shot` by "before" and "fixed" at 1280 x 800 @ 1 and 1920 x 1200 @ 1.5:
+180 of 180 identical (`tools/parity.py --tol 0`).
 
 ## Not measured
 
