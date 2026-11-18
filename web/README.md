@@ -70,7 +70,7 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/lib/api/` | `index.ts` (`hub`: live server or mock), `client.ts` (the `Api` interface and `HttpApi`), `types.ts` + `types/` (docs/API.md's types, by resource), `resource.ts`, `sse.ts`, `live*.ts`, `reach.ts`, `handshake.ts`, `upload.ts`, `mock/` |
 | `src/lib/router.ts` | The hash router (`router`, `href`, `RouteName`) |
 | `src/lib/shell/` | App chrome: `Sidebar`, `Topbar`, `TabBar`, `CommandPalette`, `Page` (the page frame), `nav.ts`, `crumbs.ts`, `shortcuts.ts`, `RunWatch` |
-| `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`) |
+| `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`; `heartbeat.ts` pauses the live heartbeat animations while they hold still) |
 | `src/lib/charts/` | SVG/canvas charts (`LineChart`, `Sparkline`, `Histogram`, `ConfusionMatrix`, `XYChart`) and their geometry |
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
@@ -112,7 +112,11 @@ to load shows an error with Retry (`src/ScreenError.tsx`), or, when the server's
 script (Studio was updated under the open page), "Studio was updated" with Reload; a screen that throws while it is
 created shows "This page could not be shown" with Reload in its place (`ScreenCrash`), never the previous screen under
 the new URL. `src/routes.ts` maps each route name to its file in `src/routes/` (`ROUTES`), and `import.meta.glob`
-makes each of those files a chunk. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
+makes each of those files a chunk. A screen's first load fetches three scripts and their stylesheets: the entry (the
+shell and what it imports), `shared` (every module two or more chunks use) and the screen's own chunk
+(`build.rolldownOptions` in `vite.config.ts`); later screens need only their own. Keep it that way: `folo serve` speaks
+HTTP/1.1, where a browser opens six connections to a server, so on a remote one every six more files cost another
+round trip. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
 come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
 (`src/lib/shell/crumbs.ts`).
 
@@ -216,6 +220,7 @@ node scripts/parity.mjs <dirA> <dirB>         # compare two shot folders
 node scripts/perf.mjs --runs 5                # load, memory and CPU of this version
 node scripts/perf.mjs --ref origin/main       # against another git ref (its web/ built in a temporary worktree)
 node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (another version's dist/)
+node scripts/perf.mjs --folo <folo binary> --net 50,20 --only cold,warm   # served by folo serve, a remote server's network
 ```
 
 - `shoot.mjs --exact` (what parity uses) makes a shot reproducible to the pixel: the clock paused as for `--qa`,
@@ -234,5 +239,8 @@ node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (another 
   loads of the main screens (FCP, content shown, script/task/layout/style time, long tasks, heap after GC, nodes,
   listeners), hash navigation cycles (with the heap growth), 15 s live on the Run page and Overview (busy %, rAF/s),
   and the dataset grid scrolled end to end. With a baseline (`--baseline-dist`, `--ref`) both are measured,
-  alternated, and compared. `--api <url>` uses a running `folo serve --mock` instead of `?mock=1`;
-  `--only bundle,cold,nav,live,large`. Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).
+  alternated, and compared. `--api <url>` uses a running `folo serve --mock` instead of `?mock=1`; `--folo <binary>`
+  serves each build with that binary (`folo serve --mock --web-dir`, so the server's own headers and compression are in
+  the numbers; `--base-folo` serves the baseline with another one), and `--net <rtt ms>,<Mbit/s>` emulates a network
+  for the cold loads and the `warm` ones (a second load from a filled cache: requests and KB that still went out);
+  `--only bundle,cold,warm,nav,live,large` (default all but warm). Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).
