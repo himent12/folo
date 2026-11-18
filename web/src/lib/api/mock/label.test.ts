@@ -53,7 +53,7 @@ describe('MockApi agent labeling: a run', () => {
     const close = api.labelEvents('lb_7c21', { job: push('job'), image: push('image'), log: push('log') });
     const started = await api.startLabeling('lb_7c21', { agent: 'claude' });
     expect(started.status).toBe('running');
-    expect(started.run).toMatchObject({ agent: 'claude', model: 'haiku', effort: 'medium', total: 40, done: 0 });
+    expect(started.run).toMatchObject({ agent: 'claude', model: 'haiku', effort: 'low', total: 40, done: 0 });
     // Three calls of four images go out at once.
     expect((await api.labelImages('lb_7c21', { status: 'labeling' })).total).toBe(12);
 
@@ -103,7 +103,7 @@ describe('MockApi agent labeling: a run', () => {
     const j = await new MockApi('all-agents', 0).startLabeling('lb_7c21', { agent: 'codex' });
     expect(j.run).toMatchObject({ agent: 'codex', model: null, effort: 'low' });
     expect(agents.map((a) => [a.default_model, a.default_effort])).toEqual([
-      ['haiku', 'medium'],
+      ['haiku', 'low'],
       [null, 'low'],
     ]);
   });

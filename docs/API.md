@@ -843,8 +843,9 @@ exported more than once.
   signed in: a run finds that out on its first call and fails with the CLI's own message. `models` are Claude
   Code's model aliases (`haiku`, `sonnet`, `opus`), and for Codex the models of its own catalog that take images
   (`codex debug models`). `default_model` and `default_effort` are what a run uses when it names none: Claude
-  Code `haiku` at `medium`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
-  them).
+  Code `haiku` at `low`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
+  them). `fast` says the agent has a faster service tier a run can ask for (`StartLabeling.fast`): Codex's Fast
+  (priority processing, which uses more of the plan's usage); Claude Code has none for `claude -p`.
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "/data/photos" }`
   → `201 LabelJob`. `name` must not be blank (one line of at most 100 characters); `classes`: 1 to 80 distinct,
@@ -891,12 +892,14 @@ exported more than once.
 **Asking an agent**
 - `POST /api/label/jobs/{id}/start` body `StartLabeling` → `LabelJob` (`status: "running"`, with the new `run`).
   Only `agent` is required; `model` and `effort` default to the agent's `default_model` and `default_effort`.
+  `fast: true` asks for the agent's faster service tier (only an agent whose `fast` is true; the run's `fast`
+  says it did).
   The run labels the `scope` (`unlabeled`, the default: `pending` and `failed`
   images; `all`: every image, replacing existing labels, hand-drawn ones too), or exactly `image_ids`. `note` (at
   most 2000 characters) is an extra instruction for this run only: the way to tell the agent what its last
   labels got wrong. Errors: `422 invalid_body` (an unknown `agent`), `400 invalid_body` (a `model` with characters
   outside `A-Z a-z 0-9 . _ : / - [ ]` or over 100 of them, `batch` outside `1..=16`, `parallel` outside `1..=8`,
-  an unknown image id, nothing to label), `501 not_supported` (the agent's CLI is not installed; the hint says
+  `fast` for an agent without a faster tier, an unknown image id, nothing to label), `501 not_supported` (the agent's CLI is not installed; the hint says
   how to get it), `409 label_job_active` (a run is already active).
 - `POST /api/label/jobs/{id}/stop` → `LabelJob` (`stopping`, then `idle` with `run.outcome: "stopped"`). The agent
   calls in flight are killed and their images keep the state they had. `409 label_job_not_active` when no run
@@ -917,29 +920,33 @@ exported more than once.
 **How a run works** (and what it costs)
 - The run splits its images into batches (`batch` images per agent call: Claude Code 4, Codex 8 by default) and
   keeps `parallel` calls (default 3) in flight. Each call is **one model request with no tools**: the images are
-  attached to the prompt (downscaled to at most 1024 px on the long side and re-encoded as JPEG, so a call costs
-  about 1000 input tokens per image whatever the files' size), and the reply is one JSON object with a box list
-  per image. Coordinates in the reply are relative (`0..1000` of the image's width and height), so they are
-  independent of the downscaling; the server converts them to pixels of the original image.
+  attached to the prompt (downscaled to at most 1024 px on the long side for Claude Code and 768 px for Codex, and
+  re-encoded as JPEG, so an image costs about 1050 and 650 input tokens whatever the file's size), the prompt
+  gives each image's size as sent, and the reply is one JSON object with a box list per image, each box
+  `["<class>", x1, y1, x2, y2]` in pixels of the image as sent (the older `{"label", "box"}` objects are read
+  too). The server clips each box to the image and scales it to pixels of the original.
 - Claude Code is started as `claude -p` with its system prompt replaced by FOLO's labeling prompt, no tools, no
   MCP servers, no user or project settings, hooks, skills or `CLAUDE.md`, and no session file; the images go in
-  on stdin as a `stream-json` user message. The fixed cost of a call is a few hundred tokens. Codex is started
-  as `codex exec` with `--ephemeral --sandbox read-only --ignore-user-config`, FOLO's instructions as the model
-  instructions, web search and the features that add tools switched off, the images as `--image` attachments
-  and the reply shape as `--output-schema` (with `label` limited to the job's classes); that takes a call's fixed
-  cost from about 20000 tokens to about 8000, which are Codex's own and stay, so its default batch is larger.
-  Both run in an empty scratch folder and use the account the CLI is signed in with. Measured with
-  `crates/folo-server/tests/label_live.rs` (Claude Code 2.1.302, codex-cli 0.167.0), eight 320 px images: Claude
-  Code 2 calls and 3500 input tokens in all, Codex 1 call and 9200.
+  on stdin as a `stream-json` user message. Prompt caching, the session-title request and the advisor tool are
+  switched off by environment variables. The fixed cost of a call is about 900 tokens. Codex is started as `codex
+  exec` with `--ephemeral --sandbox read-only --ignore-user-config`, FOLO's instructions as the model
+  instructions, web search, the features and config keys that add tools or text switched off, Codex's own model
+  catalog handed back without the models' tools (`model_catalog_json`), the images as `--image` attachments and
+  the reply shape as `--output-schema` (class names limited to the job's classes), and with `fast` its
+  `service_tier` set to `priority`; that takes a call's fixed cost from about 20000 tokens to about 700. Both run
+  in an empty scratch folder and use the account the CLI is signed in with. The eval
+  `crates/folo-server/examples/label_eval.rs` measures both on COCO photos (docs/LABELING.md).
 - A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
   without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
   image the reply does not mention is `failed`. One bad box costs only itself, and the JSON is found with text
   around it or split into one object per image. A reply with no such JSON at all is asked for once more; then
   its images are `failed` with the reason.
 - A run never burns tokens on a broken setup: when the CLI cannot be started or exits with an error (not signed
-  in, an unknown model, a rate limit), or three calls in a row time out (5 minutes each) or return garbage
-  (every call counts, a retry too), the run ends with `outcome: "failed"`, the CLI's message in `run.error` and
-  the images it did not get to unchanged. Once a run is stopped or has failed, no further call is started and
+  in, an unknown model, a rate limit or usage limit, with when it resets in `run.hint`), or three calls in a row
+  time out (5 minutes each) or return garbage (every call counts, a retry too), the run ends with `outcome:
+  "failed"`, the CLI's message in `run.error` and the images it did not get to unchanged. A passing fault of the
+  provider (overloaded, a 5xx, a dropped stream) is not such an error: the call is made once more after 15 s, and
+  if it fails that way again its images are `failed` and the call counts towards the three in a row. Once a run is stopped or has failed, no further call is started and
   the ones in flight are killed. `POST …/start` again continues with what is left.
 - `usage` adds up what the CLIs report per call. `cost_usd` is Claude Code's own figure (list prices, also on a
   subscription); Codex reports none.
@@ -965,6 +972,7 @@ exported more than once.
   "models": [{ "id": "haiku", "label": "Haiku" }],     // suggestions; `model` takes any name the CLI accepts
   "default_model": "haiku" | null,                     // null: the CLI's own default
   "default_effort": "low|medium|high",                 // what a run without `effort` uses
+  "fast": false,                                       // it has a faster service tier (Codex)
   "hint": null | "Install Claude Code (https://claude.com/claude-code) and sign in with `claude`, or ..." }
 // LabelJob
 { "id": "lb_3f9a", "name": "street", "classes": ["car", "person"], "instructions": "Label every ...",
@@ -974,7 +982,7 @@ exported more than once.
   "usage": LabelUsage,           // every run of the job
   "dataset_id": "ds_8f2c" | null }
 // LabelRun
-{ "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "started": "...",
+{ "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "fast"?: true, "started": "...",
   "finished": "..." | null, "total": 24, "done": 16, "failed": 0,   // images of this run
   "outcome": null | "completed|stopped|failed", "error": null | "...", "hint"?: "...", "usage": LabelUsage }
 // LabelUsage
@@ -987,8 +995,8 @@ exported more than once.
   "error": null | "...",                // why the last agent call failed
   "reviewed": false }                   // a person checked its labels (labeled images only); an agent run clears it
 // StartLabeling (only agent is required; the rest shows the defaults)
-{ "agent": "claude", "model": null, "effort": null, "scope": "unlabeled", "image_ids": null, "note": "",
-  "batch": null, "parallel": null }
+{ "agent": "claude", "model": null, "effort": null, "fast": false, "scope": "unlabeled", "image_ids": null,
+  "note": "", "batch": null, "parallel": null }
 ```
 
 ## Vision benchmarks

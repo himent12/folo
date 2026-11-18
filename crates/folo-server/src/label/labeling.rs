@@ -32,6 +32,9 @@ impl Labeler {
         let job = self.job(id)?;
         let agent = self.agent(req.agent)?;
         let info = agent.info();
+        if req.fast && !info.fast {
+            return Err(invalid(format!("{} has no faster service tier: send \"fast\": false", info.name)));
+        }
         let model = model.map(str::to_string).or(info.default_model);
         let effort = req.effort.unwrap_or(info.default_effort);
 
@@ -67,16 +70,19 @@ impl Labeler {
             agent: agent.clone(),
             model: model.clone(),
             effort,
+            fast: req.fast,
             note,
             batches: ids.chunks(batch).map(<[String]>::to_vec).collect(),
             parallel: req.parallel.unwrap_or(DEFAULT_PARALLEL) as usize,
             cancel: Arc::new(AtomicBool::new(false)),
             save_every: self.save_every,
+            backoff: self.backoff,
         };
         let previous = state.file.run.replace(LabelRun {
             agent: req.agent,
             model: model.clone(),
             effort,
+            fast: req.fast,
             started: rfc3339(unix_now()),
             finished: None,
             total: ids.len() as u64,
@@ -89,10 +95,11 @@ impl Labeler {
         });
         let calls = plan.batches.len();
         let message = format!(
-            "{} ({}, {} effort) starts on {} {}: {calls} {} of up to {batch}",
+            "{} ({}, {} effort{}) starts on {} {}: {calls} {} of up to {batch}",
             req.agent.display_name(),
             model.as_deref().unwrap_or("its default model"),
             effort.as_str(),
+            if req.fast { ", fast" } else { "" },
             ids.len(),
             if ids.len() == 1 { "image" } else { "images" },
             if calls == 1 { "call" } else { "calls" },

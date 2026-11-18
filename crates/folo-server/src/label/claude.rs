@@ -4,6 +4,12 @@
 //! FOLO's instructions replace Claude Code's system prompt, there are no tools, MCP servers, skills, hooks,
 //! settings or `CLAUDE.md`, and no session is written. The images travel on stdin inside a `stream-json` user
 //! message, so the model sees them in its first (and only) request instead of reading files through a tool.
+//!
+//! Three environment variables take off what the flags leave ([`ENV`]; measured on Claude Code 2.1.326): prompt
+//! caching, which on a subscription writes the whole request (the images too) to a one-hour cache at twice the
+//! input price although nothing of it but a few hundred tokens of preamble is ever read back; the second request
+//! Claude Code makes to title the session; and a server-side advisor tool. A call's fixed cost is then about 750
+//! input tokens. `--bare` would take off more, but it reads only an API key, never a subscription's sign-in.
 
 use std::path::Path;
 use std::process::Command;
@@ -12,15 +18,28 @@ use base64::Engine;
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::{Value, json};
 
-use super::agent::{Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Output, last_line, run};
+use super::agent::{
+    Agent, AgentError, AgentReply, AgentRequest, BUSY, CALL_TIMEOUT, Cli, Output, is_transient, last_line,
+    limit_hint, run,
+};
 
-/// The model a run uses when it names none: on photos, Haiku at medium effort finds about as many objects as
-/// the larger models for a small fraction of their cost (docs/LABELING.md has the numbers).
+/// The model a run uses when it names none: on photos Haiku finds about as many objects as Sonnet, with fewer
+/// wrong boxes, for a twelfth of its cost; Opus finds more but also draws more wrong boxes, for 25 times the cost
+/// (docs/LABELING.md has the numbers).
 const DEFAULT_MODEL: &str = "haiku";
 /// Claude Code's own aliases, which always name the latest model of each tier.
 const MODELS: [(&str, &str); 3] = [("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus")];
 const INSTALL: &str = "Install Claude Code (https://claude.com/claude-code) on the server's machine and sign in by \
                        running `claude` once";
+
+/// The environment of every call (see the module docs): no prompt caching (a cache write costs more than the
+/// input it caches, and a call's images are never asked about again), no requests besides the call's own (the
+/// session title, telemetry), no advisor tool.
+const ENV: [(&str, &str); 3] = [
+    ("DISABLE_PROMPT_CACHING", "1"),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1"),
+];
 
 /// Claude Code (`claude`, or the executable `FOLO_CLAUDE_BIN` names).
 pub struct ClaudeCode {
@@ -55,14 +74,24 @@ impl Agent for ClaudeCode {
             version,
             models: MODELS.map(|(id, label)| LabelModel { id: id.into(), label: label.into() }).to_vec(),
             default_model: Some(DEFAULT_MODEL.into()),
-            // Haiku labels markedly better once it reasons a little; more than that buys little.
-            default_effort: LabelEffort::Medium,
+            // Measured November 2026 (Claude Code 2.1.326): Haiku at low effort labels as well as at medium
+            // (found 77-78% against 77%, on 60 COCO photos in two passes) for 20% less and in less time.
+            default_effort: LabelEffort::Low,
+            // Claude Code's fast mode is not offered in `-p` ("not available in the Agent SDK").
+            fast: false,
         }
     }
 
     fn default_batch(&self) -> usize {
-        // A call's fixed cost is a few hundred tokens, so small batches cost nothing extra and fail small.
+        // Eight photos a call cost 18% less input than four (a call's fixed cost is about 900 tokens), but Haiku
+        // then found 72-74% of the objects instead of 77-78% (two passes each): it labels best a few at a time.
         4
+    }
+
+    fn image_side(&self) -> u32 {
+        // Haiku labels worse on smaller images (a 640 px photo sent at 480 px: found 75% against 79%, IoU 0.80
+        // against 0.84) and better on larger ones (scaled up to 1024 px: 83%), so photos go at 1024 px.
+        super::AGENT_IMAGE_SIDE
     }
 
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
@@ -77,13 +106,12 @@ impl Agent for ClaudeCode {
             Some("run `claude` in a terminal on the server's machine and sign in, then start again".into())
         } else if m.contains("unknown option") {
             Some("update Claude Code (`claude update`): FOLO needs version 2.1 or newer".into())
+        } else if is_transient(message) {
+            Some(BUSY.into())
+        } else if m.contains("limit") {
+            Some(limit_hint(message))
         } else if m.contains("model") {
             Some("pick another model: this account may not have access to that one".into())
-        } else if m.contains("limit") {
-            Some(
-                "the account's usage limit was reached; start again once it resets, or use another agent"
-                    .into(),
-            )
         } else if m.contains("printed no result") {
             Some("run `claude -p hi` in a terminal on the server's machine to see why (a sign-in, a limit or an update it asks for)".into())
         } else {
@@ -102,7 +130,8 @@ fn command(path: &Path, req: &AgentRequest<'_>) -> Command {
         // user's or the project's customisations.
         .args(["--tools", "", "--strict-mcp-config", "--safe-mode", "--disable-slash-commands"])
         .arg("--no-session-persistence")
-        .args(["--effort", req.effort.as_str()]);
+        .args(["--effort", req.effort.as_str()])
+        .envs(ENV);
     if let Some(model) = req.model {
         cmd.args(["--model", model]);
     }
@@ -203,6 +232,14 @@ mod tests {
         assert!(ClaudeCode::new().hint(message).unwrap().contains("another model"));
         let hint = ClaudeCode::new().hint("Invalid API key · Please run /login").unwrap();
         assert!(hint.contains("sign in"), "{hint}");
+        // A limit says when it resets; an overloaded provider is not "pick another model".
+        let hint =
+            ClaudeCode::new().hint("You've hit your session limit · resets 3pm (Europe/Berlin)").unwrap();
+        assert!(hint.contains("resets 3pm (Europe/Berlin): start again then"), "{hint}");
+        let hint = ClaudeCode::new()
+            .hint("Opus is experiencing high load, please use /model to switch to Sonnet")
+            .unwrap();
+        assert_eq!(hint, BUSY);
     }
 
     #[test]
@@ -226,6 +263,7 @@ mod tests {
             schema: &schema,
             model: Some("haiku"),
             effort: LabelEffort::Medium,
+            fast: false,
             scratch: Path::new("."),
             cancel: &cancel,
         };
@@ -248,6 +286,18 @@ mod tests {
         assert_eq!((after("--input-format"), after("--output-format")), ("stream-json", "stream-json"));
         // No argument has a line break (a Windows batch shim cannot take one).
         assert!(args.iter().all(|a| !a.contains('\n')));
+        // No prompt caching, no title request, no advisor.
+        let env: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect();
+        for var in [
+            "DISABLE_PROMPT_CACHING",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_ADVISOR_TOOL",
+        ] {
+            assert!(env.contains(&(var.to_string(), "1".to_string())), "{var} missing from {env:?}");
+        }
 
         let line = stdin(&req);
         assert_eq!(line.last(), Some(&b'\n'));

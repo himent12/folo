@@ -72,7 +72,8 @@ export function mockAgents(codex: boolean): LabelAgent[] {
         { id: 'opus', label: 'Opus' },
       ],
       default_model: 'haiku',
-      default_effort: 'medium',
+      default_effort: 'low',
+      fast: false,
       hint: null,
     },
     {
@@ -88,6 +89,7 @@ export function mockAgents(codex: boolean): LabelAgent[] {
       ],
       default_model: null,
       default_effort: 'low',
+      fast: true,
       hint: codex ? null : 'Install Codex (npm install -g @openai/codex) and sign in with `codex login`, or set FOLO_CODEX_BIN to its path.',
     },
   ];
@@ -116,6 +118,7 @@ interface Run {
   agent: LabelAgentId;
   model: string | null;
   effort: LabelEffort;
+  fast: boolean;
   note: string;
   startedAt: number;
   finishedAt: number | null;
@@ -311,6 +314,7 @@ export class MockLabeling {
             agent: r.agent,
             model: r.model,
             effort: r.effort,
+            ...(r.fast ? { fast: true } : {}),
             started: iso(r.startedAt),
             finished: r.finishedAt === null ? null : iso(r.finishedAt),
             total: r.ids.length - r.left.size,
@@ -592,6 +596,8 @@ export class MockLabeling {
       throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
     if (!inRange(body.batch, BATCH_MAX)) throw new ApiError(400, 'invalid_body', `batch must be in 1..=${BATCH_MAX}`);
     if (!inRange(body.parallel, PARALLEL_MAX)) throw new ApiError(400, 'invalid_body', `parallel must be in 1..=${PARALLEL_MAX}`);
+    if (body.fast && !mockAgents(true).find((a) => a.id === body.agent)?.fast)
+      throw new ApiError(400, 'invalid_body', `${AGENT_NAME[body.agent]} has no faster service tier: send "fast": false`);
     const agent = mockAgents(this.codex).find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
     if (this.#active(j)) throw new ApiError(409, 'label_job_active', `An agent is already labeling ${j.name}.`, 'Wait for the run to finish, or stop it first.');
@@ -631,6 +637,7 @@ export class MockLabeling {
       agent: body.agent,
       model: body.model ?? agent?.default_model ?? null,
       effort: body.effort ?? agent?.default_effort ?? 'low',
+      fast: !!body.fast,
       note: body.note ?? '',
       startedAt: at,
       finishedAt: null,

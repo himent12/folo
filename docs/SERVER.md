@@ -136,10 +136,13 @@ dataset that the store registers.
   as child processes, one model request per batch of images with every tool, config file and session switched off, so
   a call costs little more than its images.
 - A run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the image)
-  before storing it, and ends the run at once on a failure that another call would repeat.
+  before storing it, and ends the run at once on a failure that another call would repeat. A provider's passing
+  fault (overloaded, a 5xx, a dropped stream: `agent::is_transient`) is asked once more after a pause
+  (`agent::label_with_retry`, which benchmark agent entries use too).
 - Events (`job`, `image`, `removed`, `reload`, `log`: `folo_api::LabelEvent`) fan out to SSE subscribers through a
   per-job broadcast channel, as for runs.
-- Tests script the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes.
+- Tests script the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes,
+  and `examples/label_eval.rs` measures them on COCO photos.
 
 ## Vision benchmarks
 `folo_server::bench` ([BENCH.md](BENCH.md)): benchmarks under `<data dir>/bench/<id>/` (the definition with every

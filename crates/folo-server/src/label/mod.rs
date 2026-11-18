@@ -26,7 +26,8 @@ mod run;
 mod tree;
 mod validate;
 
-pub(crate) use run::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of};
+pub(crate) use run::MAX_SOFT_FAILURES;
+pub use run::{AGENT_IMAGE_SIDE, AgentImage, TRANSIENT_BACKOFF, agent_jpeg, agent_jpeg_of};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -126,6 +127,8 @@ pub struct Labeler {
     agents: Vec<Arc<dyn Agent>>,
     /// How often a run writes `job.json` at most ([`run::SAVE_EVERY`]).
     save_every: Duration,
+    /// How long a call that failed on a passing fault waits before it is asked again ([`run::TRANSIENT_BACKOFF`]).
+    backoff: Duration,
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -180,6 +183,7 @@ impl Labeler {
             jobs: RwLock::new(jobs),
             agents: vec![Arc::new(ClaudeCode::new()), Arc::new(Codex::new())],
             save_every: run::SAVE_EVERY,
+            backoff: run::TRANSIENT_BACKOFF,
         }
     }
 
@@ -191,6 +195,11 @@ impl Labeler {
     /// Changes how often a run writes `job.json` at most (tests shorten it).
     pub fn set_save_every(&mut self, every: Duration) {
         self.save_every = every;
+    }
+
+    /// Changes how long a call that failed on a passing fault waits before it is asked again (tests shorten it).
+    pub fn set_transient_backoff(&mut self, backoff: Duration) {
+        self.backoff = backoff;
     }
 
     fn job(&self, id: &str) -> Result<Arc<Job>> {

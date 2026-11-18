@@ -19,8 +19,8 @@ use folo_bench::plan::{DEFAULT_SEVERITIES, MAX_WEIGHT};
 
 use super::state::Slot;
 use crate::error::{Error, Result};
-use crate::label::agent::{AgentError, AgentRequest};
-use crate::label::{agent_jpeg, check_model, check_text};
+use crate::label::agent::{AgentError, AgentRequest, label_with_retry};
+use crate::label::{TRANSIENT_BACKOFF, agent_jpeg, check_model, check_text};
 use crate::store::Store;
 use serde::Deserialize;
 use serde_json::Value;
@@ -206,12 +206,15 @@ pub(super) fn design(
     let model = model.or(info.default_model);
     let effort = req.effort.unwrap_or(info.default_effort);
     let file = slot.live()?.file.clone();
+    let side = agent.image_side();
     let jpegs = file
         .images
         .iter()
         .take(DESIGN_IMAGES)
         .map(|im| {
-            agent_jpeg(&slot.image_path(im)).map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
+            agent_jpeg(&slot.image_path(im), side)
+                .map(|image| image.jpeg)
+                .map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
         })
         .collect::<Result<Vec<_>>>()?;
     let prompt = user_prompt(&file.description, &note, &file.classes, &file.class_boxes(), jpegs.len());
@@ -250,6 +253,7 @@ pub(super) fn design(
             schema: &schema,
             model: model.as_deref(),
             effort,
+            fast: false,
             scratch: &scratch,
             cancel,
         };
@@ -257,7 +261,7 @@ pub(super) fn design(
         let mut why = String::new();
         let mut answer = None;
         for _attempt in 0..2 {
-            match agent.label(&request) {
+            match label_with_retry(&*agent, &request, TRANSIENT_BACKOFF, |_| {}) {
                 Ok(reply) => {
                     usage.add(&reply.usage);
                     match parse_answer(&reply.text, designer.clone()) {
@@ -277,7 +281,7 @@ pub(super) fn design(
                     answer = Some(Err(agent_failed(message, None)));
                     break;
                 }
-                Err(AgentError::Unavailable(m) | AgentError::Failed(m)) => {
+                Err(AgentError::Unavailable(m) | AgentError::Failed(m) | AgentError::Transient(m)) => {
                     let hint = agent.hint(&m);
                     answer = Some(Err(agent_failed(m, hint)));
                     break;

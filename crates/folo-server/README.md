@@ -109,7 +109,8 @@ live next to the code (`src/**/tests.rs` and `mod tests` blocks). Each folder un
 
 The two tests in `label_live.rs` are `#[ignore]`d: they need the CLI installed and signed in, and they spend tokens.
 Run one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`). The crate
-has no benchmarks.
+has no benchmarks; its one example, `examples/label_eval.rs`, measures agent labeling with the real CLIs on 60 COCO
+val2017 photos (found, right, IoU, tokens, cost and time per setting: docs/LABELING.md, How good the labels are).
 
 ## Further reading
 

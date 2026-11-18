@@ -18,7 +18,7 @@ async fn replies_that_cannot_be_read_fail_their_images_only() {
     // class and one good box. Call 3 (the retry of the failed ones, later): fine.
     let partial = json!({ "images": [{ "image": 2, "boxes": [
         { "label": "truck", "box": [0, 0, 500, 500] },
-        { "label": "Person", "box": [500, 500, 1000, 1000] },
+        { "label": "Person", "box": [100, 50, 200, 100] },
     ] }] });
     let steps = vec![
         Step::Reply("I'm sorry, I can't see any images.".into()),
@@ -96,6 +96,73 @@ async fn a_cli_error_ends_the_run_before_more_calls_are_made() {
     assert_eq!(idle(app, &job.id).await.counts.labeled, 6);
 }
 
+/// What Claude Code prints when Anthropic's API stays overloaded through its own retries.
+const OVERLOADED: &str =
+    r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+
+#[tokio::test]
+async fn a_passing_fault_is_asked_again_once_and_the_run_goes_on() {
+    let t = TestDir::new("label-transient");
+    // Call 1 is overloaded, then goes through; call 2 is overloaded twice, so its image fails; call 3 is fine.
+    let steps = vec![
+        Step::Fail(OVERLOADED),
+        Step::Reply(boxes_reply(1, "car")),
+        Step::Fail("stream disconnected before completion: error sending request"),
+        Step::Fail("exceeded retry limit, last status: 503 Service Unavailable"),
+    ];
+    let f = fixture(&t.join("home"), steps);
+    let app = &f.app;
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), body)).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.done, run.failed), (Some(LabelOutcome::Completed), 2, 1));
+    // Two calls for each of the first two images, one for the third; only replies count as usage.
+    assert_eq!((f.agent.calls(), run.usage.calls), (5, 2));
+    let page = images(app, &job.id, "").await;
+    assert_eq!(
+        page.images[1].error.as_deref(),
+        Some("exceeded retry limit, last status: 503 Service Unavailable")
+    );
+    let logs: RunLogs = ok(app, get(&format!("{uri}/logs"))).await;
+    let text: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert!(
+        text.iter().any(|m| m.starts_with("call 1: API Error: 529") && m.ends_with("asking again in 0 s")),
+        "{text:?}"
+    );
+    assert!(text.iter().any(|m| m.starts_with("call 2: stream disconnected")), "{text:?}");
+}
+
+#[tokio::test]
+async fn passing_faults_in_a_row_end_the_run_and_a_usage_limit_ends_it_at_once() {
+    let t = TestDir::new("label-transient-run");
+    let f = fixture(&t.join("home"), (0..6).map(|_| Step::Fail(OVERLOADED)).collect());
+    let app = &f.app;
+    let job = job_with_images(app, 5).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body.clone())).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    // Three calls (each asked twice) failed: the run gives up as on three timeouts.
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 6));
+    assert!(run.error.unwrap().starts_with("3 calls in a row failed; the last one: API Error: 529"));
+    assert_eq!(done.counts, LabelCounts { images: 5, pending: 2, labeled: 0, failed: 3, boxes: 0 });
+
+    // A usage limit is not a passing fault: no second try, the run ends on it.
+    let t = TestDir::new("label-usage-limit");
+    let limit = "You've hit your session limit · resets 3pm (Europe/Berlin)";
+    let f = fixture(&t.join("home"), vec![Step::Fail(limit)]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let run = idle(app, &job.id).await.run.unwrap();
+    assert_eq!((run.outcome, f.agent.calls()), (Some(LabelOutcome::Failed), 1));
+    assert_eq!(run.error.as_deref(), Some(limit));
+}
+
 #[tokio::test]
 async fn an_agent_that_only_returns_garbage_is_given_up_on_after_three_calls() {
     let t = TestDir::new("label-garbage");
@@ -158,6 +225,8 @@ async fn start_refuses_what_it_cannot_run() {
         json!({ "agent": "claude", "parallel": 9 }),
         json!({ "agent": "claude", "image_ids": ["404"] }),
         json!({ "agent": "claude", "note": "n".repeat(2001) }),
+        // This agent has no faster tier to ask for.
+        json!({ "agent": "claude", "fast": true }),
     ] {
         err(app, post(&start, bad), StatusCode::BAD_REQUEST, "invalid_body").await;
     }
@@ -179,7 +248,10 @@ async fn start_refuses_what_it_cannot_run() {
     idle(app, &job.id).await;
     // ... and without an effort the agent's default is used.
     let asked = f.agent.asked.lock().unwrap()[0].clone();
-    assert_eq!((asked.model.as_deref(), asked.effort), (Some("claude-opus-5-5[1m]"), LabelEffort::Medium));
+    assert_eq!(
+        (asked.model.as_deref(), asked.effort, asked.fast),
+        (Some("claude-opus-5-5[1m]"), LabelEffort::Medium, false)
+    );
     let empty = job_with_images(app, 0).await;
     let e = err(
         app,

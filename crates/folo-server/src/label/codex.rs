@@ -1,22 +1,32 @@
 //! Codex as a labeling [`Agent`]: `codex exec`, one turn per call.
 //!
 //! Codex is a coding agent first: by default every request carries its coding instructions and the definitions of
-//! its tools. A labeling call needs none of that, so FOLO's instructions replace Codex's, the features that add
-//! tools are switched off, and the user's config (plugins, MCP servers) is not loaded. That takes the fixed cost
-//! of a call from about 20000 input tokens to about 8000; the rest is Codex's own and stays, which is why
-//! [`Agent::default_batch`] is larger here. The images are attached with `--image`, and `--output-schema` holds
-//! the reply to FOLO's JSON shape.
+//! its tools. A labeling call needs none of that, so FOLO's instructions replace Codex's, the user's config
+//! (plugins, MCP servers) is not loaded, and everything that adds a tool or instructions is switched off:
+//!
+//! - the features that add tools ([`FEATURES_OFF`]) and the config keys of further text ([`CONFIG`]: skills,
+//!   subagents, `request_user_input`, the environment and permission notes);
+//! - the tools a model's own catalog entry brings: since codex-cli 0.16x every model runs in "code mode", whose
+//!   JavaScript `exec` tool (and its helpers) is in every request whatever the features say. A call hands Codex its
+//!   own catalog (`codex debug models`) back as `model_catalog_json` with those entries' tools taken off
+//!   ([`lean_catalog`]): the model, its instructions and everything else stay as Codex has them.
+//!
+//! On codex-cli 0.169.0 that takes the fixed cost of a call from about 20000 input tokens (Codex's defaults) and
+//! 7800 (the switches before November 2026) to about 50 of Codex's own; with FOLO's instructions and reply schema
+//! a call's fixed cost is about 700, so a call costs about what its images do. The images are attached with `--image`, and `--output-schema` holds the reply to FOLO's JSON shape. [`AgentRequest::fast`]
+//! asks for Codex's priority service tier (`service_tier`, what Codex calls Fast).
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::Value;
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT, last_line,
-    run,
+    Agent, AgentError, AgentReply, AgentRequest, BUSY, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT,
+    is_transient, last_line, limit_hint, run,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -40,35 +50,56 @@ const FEATURES_OFF: [&str; 14] = [
     "hooks",
 ];
 
-/// Config keys that drop further text a labeling call has no use for.
-const CONFIG: [&str; 4] = [
+/// Config keys that drop further text and tools a labeling call has no use for. A key this Codex version does
+/// not know is ignored with a warning. Measured on codex-cli 0.169.0: the skills list is about 3500 tokens, the
+/// subagent tools and their instructions about 1700, `request_user_input` about 400.
+const CONFIG: [&str; 7] = [
     "web_search='disabled'",
     "include_environment_context=false",
     "include_permissions_instructions=false",
     "include_collaboration_mode_instructions=false",
+    "skills.include_instructions=false",
+    "agents.enabled=false",
+    "tools.experimental_request_user_input.enabled=false",
 ];
+
+/// The service tier [`AgentRequest::fast`] asks for: the catalog's id of what Codex calls Fast (priority
+/// processing: about twice the speed, more of the plan's usage).
+const FAST_TIER: &str = "priority";
 
 /// Codex (`codex`, or the executable `FOLO_CODEX_BIN` names).
 pub struct Codex {
     cli: Cli,
-    models: Memo<Vec<LabelModel>>,
+    catalog: Memo<Catalog>,
+}
+
+/// What Codex's model catalog (`codex debug models`) gives FOLO.
+#[derive(Clone, Default)]
+struct Catalog {
+    /// The models that take images ([`catalog_models`]).
+    models: Vec<LabelModel>,
+    /// The catalog with its models' tools taken off ([`lean_catalog`]); `None` when it could not be read.
+    lean: Option<Arc<String>>,
 }
 
 impl Codex {
     /// The agent, looking for `codex` when it is first asked.
     pub const fn new() -> Codex {
-        Codex { cli: Cli::new("codex", "FOLO_CODEX_BIN"), models: Memo::new() }
+        Codex { cli: Cli::new("codex", "FOLO_CODEX_BIN"), catalog: Memo::new() }
     }
 
-    /// The models of Codex's own catalog that take images (`codex debug models`); none when it cannot be read.
-    fn models(&self) -> Vec<LabelModel> {
-        self.models.get(|| {
-            let Ok(path) = self.cli.path() else { return Vec::new() };
+    /// Codex's own model catalog (`codex debug models`); empty when it cannot be read.
+    fn catalog(&self) -> Catalog {
+        self.catalog.get(|| {
+            let Ok(path) = self.cli.path() else { return Catalog::default() };
             let mut cmd = Command::new(path);
             cmd.args(["debug", "models"]);
             match run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)) {
-                Ok(out) if out.success => catalog_models(&out.stdout),
-                _ => Vec::new(),
+                Ok(out) if out.success => Catalog {
+                    models: catalog_models(&out.stdout),
+                    lean: lean_catalog(&out.stdout).map(Arc::new),
+                },
+                _ => Catalog::default(),
             }
         })
     }
@@ -92,24 +123,36 @@ impl Agent for Codex {
             name: self.id().display_name().into(),
             available: version.is_some(),
             hint: version.is_none().then(|| self.cli.hint(INSTALL)),
-            models: if version.is_some() { self.models() } else { Vec::new() },
+            models: if version.is_some() { self.catalog().models } else { Vec::new() },
             version,
             // Codex picks its own default; its config file, where a user would set one, is not loaded.
             default_model: None,
-            // Its default model labels well without reasoning long; more effort mostly adds time.
+            // Measured November 2026 (gpt-6.2-sol): medium effort found 86% of the objects, as low did, with twice
+            // the output tokens and twice the time.
             default_effort: LabelEffort::Low,
+            fast: true,
         }
     }
 
     fn default_batch(&self) -> usize {
-        // Enough images to spread Codex's fixed cost per call thin.
+        // Measured November 2026 (codex-cli 0.169.0, gpt-6.2-sol): sixteen photos a call cost 9% less input than
+        // eight but found 84-85% of the objects against 86% (two passes each), and a failed call loses twice
+        // as many; four would pay a call's fixed cost (about 700 tokens) twice as often.
         8
+    }
+
+    fn image_side(&self) -> u32 {
+        // An image costs about 1050 input tokens at 1024 px and 650 at 768, and the labels are as good: photos
+        // scaled to 768 px found 87% of the objects against 86% at 1024 (and 640 px ones sent at 480, 85% against
+        // 86%).
+        768
     }
 
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
         let path = self.cli.path()?;
-        let files =
-            Files::write(req).map_err(|e| AgentError::Unavailable(format!("preparing the call: {e}")))?;
+        let catalog = self.catalog().lean;
+        let files = Files::write(req, catalog.as_deref().map(String::as_str))
+            .map_err(|e| AgentError::Unavailable(format!("preparing the call: {e}")))?;
         let cmd = command(&path, req, &files);
         parse(&run(cmd, Some(req.prompt.as_bytes().to_vec()), CALL_TIMEOUT, req.cancel)?)
     }
@@ -119,13 +162,12 @@ impl Agent for Codex {
         let signed_out = ["login", "log in", "logged in", "api key", "authenticat", "unauthorized", "401"];
         if signed_out.iter().any(|w| m.contains(w)) {
             Some("run `codex login` in a terminal on the server's machine, then start again".into())
+        } else if is_transient(message) {
+            Some(BUSY.into())
+        } else if ["limit", "quota", "credits", "spend cap"].iter().any(|w| m.contains(w)) {
+            Some(limit_hint(message))
         } else if m.contains("model") {
             Some("pick another model: this account may not have access to that one".into())
-        } else if m.contains("limit") || m.contains("quota") {
-            Some(
-                "the account's usage limit was reached; start again once it resets, or use another agent"
-                    .into(),
-            )
         } else if m.contains("printed no reply") {
             Some("run `codex exec hi` in a terminal on the server's machine to see why (a sign-in, a limit or an update it asks for)".into())
         } else {
@@ -140,20 +182,26 @@ struct Files {
     work: std::path::PathBuf,
     instructions: std::path::PathBuf,
     schema: std::path::PathBuf,
+    /// The lean model catalog, when there is one.
+    catalog: Option<std::path::PathBuf>,
     images: Vec<std::path::PathBuf>,
 }
 
 impl Files {
-    fn write(req: &AgentRequest<'_>) -> std::io::Result<Files> {
+    fn write(req: &AgentRequest<'_>, catalog: Option<&str>) -> std::io::Result<Files> {
         let files = Files {
             work: req.scratch.join("work"),
             instructions: req.scratch.join("instructions.md"),
             schema: req.scratch.join("schema.json"),
+            catalog: catalog.map(|_| req.scratch.join("models.json")),
             images: (1..=req.images.len()).map(|i| req.scratch.join(format!("{i}.jpg"))).collect(),
         };
         std::fs::create_dir_all(&files.work)?;
         std::fs::write(&files.instructions, req.system)?;
         std::fs::write(&files.schema, serde_json::to_vec(req.schema).expect("JSON values serialize"))?;
+        if let (Some(path), Some(catalog)) = (&files.catalog, catalog) {
+            std::fs::write(path, catalog)?;
+        }
         for (path, jpeg) in files.images.iter().zip(req.images) {
             std::fs::write(path, jpeg)?;
         }
@@ -161,7 +209,7 @@ impl Files {
     }
 }
 
-/// `codex exec` for one turn: FOLO's instructions, the tool features off, the prompt read from stdin.
+/// `codex exec` for one turn: FOLO's instructions, every tool off, the prompt read from stdin.
 fn command(path: &Path, req: &AgentRequest<'_>, files: &Files) -> Command {
     let mut cmd = Command::new(path);
     cmd.args(["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config"])
@@ -176,6 +224,12 @@ fn command(path: &Path, req: &AgentRequest<'_>, files: &Files) -> Command {
     }
     for feature in FEATURES_OFF {
         cmd.args(["-c", &format!("features.{feature}=false")]);
+    }
+    if let Some(catalog) = &files.catalog {
+        cmd.args(["-c", &format!("model_catalog_json={}", toml_string(&folo_api::json::path(catalog)))]);
+    }
+    if req.fast {
+        cmd.args(["-c", &format!("service_tier='{FAST_TIER}'")]);
     }
     if let Some(model) = req.model {
         cmd.args(["--model", model]);
@@ -239,6 +293,29 @@ fn parse(out: &Output) -> Result<AgentReply, AgentError> {
             cost_usd: None,
         },
     })
+}
+
+/// Codex's model catalog (`codex debug models`) as `model_catalog_json` for a labeling call: every model as Codex
+/// describes it, but without the tools its entry brings into every request. `tool_mode` "direct" instead of
+/// "code_mode_only" drops the JavaScript `exec` tool and its helpers, an empty `experimental_supported_tools` the
+/// `clock`, `send_message_to_user_async` and `request_user_input_async` tools, and no `apply_patch_tool_type` the
+/// patch tool. Only fields the catalog has are changed, so the file stays in the shape this version reads; `None`
+/// when the text is not a catalog.
+fn lean_catalog(json: &str) -> Option<String> {
+    let mut catalog: Value = serde_json::from_str(json).ok()?;
+    let models = catalog.get_mut("models")?.as_array_mut()?;
+    for model in models.iter_mut().filter_map(Value::as_object_mut) {
+        for (key, lean) in [
+            ("tool_mode", Value::from("direct")),
+            ("experimental_supported_tools", Value::Array(Vec::new())),
+            ("apply_patch_tool_type", Value::Null),
+        ] {
+            if let Some(v) = model.get_mut(key) {
+                *v = lean;
+            }
+        }
+    }
+    serde_json::to_string(&catalog).ok()
 }
 
 /// The listed models of `codex debug models` that accept images, in the catalog's order of preference.
@@ -306,6 +383,15 @@ mod tests {
         let err = parse(&output("", "", true)).unwrap_err();
         let AgentError::Unavailable(message) = &err else { panic!("{err:?}") };
         assert!(Codex::new().hint(message).unwrap().contains("`codex exec hi`"));
+        // A usage limit says when it resets; a server error that outlasted Codex's own retries is not a limit.
+        let limit = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again \
+                     at 3:04 PM.";
+        let hint = Codex::new().hint(limit).unwrap();
+        assert!(hint.contains("resets 3:04 PM: start again then"), "{hint}");
+        assert_eq!(
+            Codex::new().hint("exceeded retry limit, last status: 503 Service Unavailable").unwrap(),
+            BUSY
+        );
     }
 
     #[test]
@@ -319,12 +405,14 @@ mod tests {
             schema: &schema,
             model: Some("gpt-6-luna"),
             effort: LabelEffort::Low,
+            fast: true,
             scratch: dir.path(),
             cancel: &cancel,
         };
-        let files = Files::write(&req).unwrap();
+        let files = Files::write(&req, Some(r#"{"models":[]}"#)).unwrap();
         assert_eq!(std::fs::read_to_string(&files.instructions).unwrap(), "label things");
         assert_eq!(std::fs::read(&files.images[1]).unwrap(), vec![2, 2]);
+        assert_eq!(std::fs::read_to_string(files.catalog.as_ref().unwrap()).unwrap(), r#"{"models":[]}"#);
         assert_eq!(std::fs::read_dir(&files.work).unwrap().count(), 0);
 
         let cmd = command(Path::new("codex"), &req, &files);
@@ -344,12 +432,41 @@ mod tests {
         let config = values("-c");
         assert!(config.contains(&"model_reasoning_effort='low'"));
         assert!(config.contains(&"features.shell_tool=false") && config.contains(&"web_search='disabled'"));
+        for key in ["skills.include_instructions=false", "agents.enabled=false", "service_tier='priority'"] {
+            assert!(config.contains(&key), "{key} missing from {config:?}");
+        }
         let instructions = config.iter().find(|c| c.starts_with("model_instructions_file='")).unwrap();
         assert!(instructions.ends_with("instructions.md'") && !instructions.contains('\\'), "{instructions}");
+        let catalog = config.iter().find(|c| c.starts_with("model_catalog_json='")).unwrap();
+        assert!(catalog.ends_with("models.json'"), "{catalog}");
         // No argument needs quoting a batch shim could get wrong.
         assert!(args.iter().all(|a| !a.contains('"') && !a.contains('\n')));
         assert_eq!(toml_string("D:/data/x.md"), "'D:/data/x.md'");
         assert_eq!(toml_string(r#"C:/O'Brien/a "b".md"#), r#""C:/O'Brien/a \"b\".md""#);
+
+        // Without a catalog (it could not be read) and without the fast tier, neither is set.
+        let dir = TestDir::new("label-codex-command-plain");
+        let req = AgentRequest { fast: false, scratch: dir.path(), ..req };
+        let files = Files::write(&req, None).unwrap();
+        let cmd = command(Path::new("codex"), &req, &files);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a.starts_with("model_catalog_json") || a.starts_with("service_tier")));
+    }
+
+    #[test]
+    fn the_lean_catalog_takes_off_the_models_tools_and_nothing_else() {
+        let json = r#"{"models":[
+            {"slug":"a","tool_mode":"code_mode_only","experimental_supported_tools":["clock"],
+             "apply_patch_tool_type":"freeform","base_instructions":"x","priority":1},
+            {"slug":"old","priority":2}],"etag":"e"}"#;
+        let lean: Value = serde_json::from_str(&lean_catalog(json).unwrap()).unwrap();
+        let expected = serde_json::json!({"models":[
+            {"slug":"a","tool_mode":"direct","experimental_supported_tools":[],
+             "apply_patch_tool_type":null,"base_instructions":"x","priority":1},
+            {"slug":"old","priority":2}],"etag":"e"});
+        assert_eq!(lean, expected);
+        assert_eq!(lean_catalog("not json"), None);
+        assert_eq!(lean_catalog(r#"{"data":[]}"#), None);
     }
 
     #[test]

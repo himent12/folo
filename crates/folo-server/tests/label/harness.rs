@@ -38,6 +38,7 @@ pub(super) struct Asked {
     pub(super) images: usize,
     pub(super) model: Option<String>,
     pub(super) effort: LabelEffort,
+    pub(super) fast: bool,
 }
 
 /// An agent that follows a script, then labels every image with one box of the first class.
@@ -68,10 +69,10 @@ impl Scripted {
     }
 }
 
-/// A reply with one box of `label` per image, at the same relative place in each.
+/// A reply with one box of `label` per image, at the same pixels in each.
 pub(super) fn boxes_reply(images: usize, label: &str) -> String {
     let entries: Vec<Value> = (1..=images)
-        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [250, 100, 750, 600] }] }))
+        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [50, 10, 150, 60] }] }))
         .collect();
     json!({ "images": entries }).to_string()
 }
@@ -96,6 +97,7 @@ impl Agent for Scripted {
             models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
             default_model: Some("small".into()),
             default_effort: LabelEffort::Medium,
+            fast: false,
             hint: (!self.available).then(|| "install it".into()),
         }
     }
@@ -113,6 +115,7 @@ impl Agent for Scripted {
             images: req.images.len(),
             model: req.model.map(str::to_string),
             effort: req.effort,
+            fast: req.fast,
         });
         let step = self.steps.lock().unwrap().pop_front();
         let text = match step {
@@ -183,6 +186,7 @@ pub(super) fn fixture_with(
     let store = Arc::new(tune(
         RealStore::open(home.to_path_buf())
             .recheck_every(Duration::ZERO)
+            .label_transient_backoff(Duration::from_millis(20))
             .label_agents(vec![agent.clone(), missing]),
     ));
     Fixture { app: Server::new(store.clone(), Options::default()).router(), store, agent }

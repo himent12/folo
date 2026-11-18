@@ -373,6 +373,14 @@ impl RealStore {
         self
     }
 
+    /// Test support: how long a labeling call that failed on a passing fault waits before it is asked again
+    /// (default 15 s), so a test of that retry need not wait for it.
+    #[doc(hidden)]
+    pub fn label_transient_backoff(mut self, backoff: Duration) -> RealStore {
+        self.labeler.set_transient_backoff(backoff);
+        self
+    }
+
     /// Changes how often dataset files are re-checked for changes (default [`RECHECK_EVERY`]; zero checks on
     /// every request).
     pub fn recheck_every(mut self, every: Duration) -> RealStore {

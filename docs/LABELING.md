@@ -68,48 +68,104 @@ attaches the images to the prompt.
 | | Claude Code | Codex |
 |---|---|---|
 | Images per call (default) | 4 | 8 |
-| Fixed input tokens per call | a few hundred (FOLO's instructions) | about 8000 (Codex's own; 20000 without FOLO's switches) |
-| Input tokens per image | about 600 for a 640 px photo | about 400 for a 640 px photo |
+| Images sent at, long side at most | 1024 px | 768 px |
+| Fixed input tokens per call | about 900 (FOLO's instructions) | about 700 (FOLO's instructions and reply schema; 20000 with Codex's defaults) |
+| Input tokens per photo, all told | about 1280 for a photo of 1024 px or more, 620 for a 640 px one | about 650 for a photo of 768 px or more, 460 for a 640 px one |
+| Output tokens per photo | about 165 (Haiku at low effort, mostly its reasoning) | about 40 |
 | Calls in flight | 3 | 3 |
 
-Larger images cost more, up to a cap: images are scaled down to at most 1024 px on the long side before they are
-sent, so a 12-megapixel photo costs what a 1024 px one does. The boxes come back in relative coordinates and are
-stored in pixels of the original file.
+Larger images cost more, up to a cap: images are scaled down before they are sent, so a 12-megapixel photo costs
+what a 1024 px one does (768 px for Codex). The prompt gives each image's size as sent, the boxes come back in
+pixels of that, and they are stored in pixels of the original file. The sizes are where labels stop improving
+for their cost: Codex labels as well at 768 px as at 1024 for 40% fewer tokens, while Haiku labels worse on
+smaller images and better on larger ones (below).
 
-The fixed cost is per call, however few images it has: asking Codex again about a single image costs its 8000
-tokens for that one image, where Claude Code's call costs little more than the image.
+The fixed cost is per call, however few images it has, and it is small for both agents: asking again about a
+single image costs about one image's tokens plus the fixed cost.
+
+What made it this lean (November 2026, measured with the eval below; per photo on the 60 test photos, the
+defaults before and after):
+
+| | Claude Code before | after | Codex before | after |
+|---|---:|---:|---:|---:|
+| Input tokens per photo | 686 | 621 | 1456 | 462 |
+| Output tokens per photo | 290 | 165 | 73 | 40 |
+| Found / right / IoU | 74% / 87% / 0.85 | 80% / 90% / 0.86 | 83% / 80% / 0.89 | 86% / 79% / 0.89 |
+| Reported cost of the 60 photos | $0.020 | $0.009 | not reported | not reported |
+| Time for the 60 photos | 42 s | 28 s | 54 s | 35 s |
+
+- Claude Code is started without prompt caching (on a subscription it wrote every request, images included, to a
+  one-hour cache at twice the input price, and nothing but a short preamble was ever read back), without the
+  extra request that titles a session, and without the advisor tool. `--bare` would save a little more, but it
+  takes only an API key, never a subscription's sign-in.
+- Codex gets its own model catalog back with the models' tools taken off (since codex-cli 0.16x every model
+  carried a code-mode tool into every request, whatever the features said), and the skills list, subagent tools
+  and `request_user_input` switched off: a call's own overhead went from about 7800 tokens to about 50.
+- A box is a list, `["car", x1, y1, x2, y2]`, instead of `{"label": "car", "box": [x1, y1, x2, y2]}`: Codex
+  writes 25% fewer output tokens for the same labels.
+- Haiku runs at low effort and Codex sends images at 768 px (the reasons are in the next section).
+
+**Fast (Codex).** Codex offers a faster service tier (what it calls Fast: priority processing, which uses more of
+the plan's usage). Studio's agent panel has a Fast switch for Codex, and the API takes `"fast": true`. On the 60
+photos it took 28 s instead of 35, with the same labels and tokens. Claude Code offers no fast mode to `claude -p`.
 
 A run stops spending as soon as spending is pointless. If the CLI is missing, signed out, refuses the model or
-hits a rate limit, the run ends on that call with the CLI's own message, and the images it did not reach stay as
-they were. A reply that cannot be read is asked for once more, never in a loop, and one bad box in a reply costs
-only that box. Three calls in a row that time out or return garbage end the run.
+hits a rate limit or its plan's usage limit, the run ends on that call with the CLI's own message (and, for a
+limit, when it resets), and the images it did not reach stay as they were. A passing fault of the provider (it is
+overloaded, a server error, the connection dropped) is asked once more after 15 seconds; failing that way twice,
+the call's images fail. A reply that cannot be read is asked for once more, never in a loop, and one bad box in a
+reply costs only that box. Three calls in a row that time out, return garbage or fail twice on a passing fault
+end the run.
 
 ## How good the labels are
-Measured through `folo serve` on 24 COCO val2017 photos with 73 objects of 10 everyday classes (person, car,
-chair, dog, bottle, cup, tv, couch, bicycle, bus), against COCO's own boxes; Claude Code 2.1.302 and codex-cli
-0.167.0, November 2026. *Found* is the share of true boxes matched by a box of the same class at IoU 0.5,
-*right* the share of the agent's boxes that match one, *IoU* the mean overlap of the matches. With 73 objects a
-difference of a few points is noise.
+Measured with `crates/folo-server/examples/label_eval.rs` on 60 COCO val2017 photos with 133 objects of 10
+everyday classes (person, car, chair, dog, bottle, cup, tv, couch, bicycle, bus), against COCO's own boxes;
+Claude Code 2.1.326 and codex-cli 0.169.0, 18 November 2026. The photos are a fixed, seeded pick (every class in
+it, no crowd or tiny boxes). *Found* is the share of true boxes matched by a box of the same class at IoU 0.5,
+*right* the share of the agent's boxes that match one, *IoU* the mean overlap of the matches. With 133 objects a
+difference of 3 points is noise: two passes of the same setup differ by that much.
 
-| Agent, model, effort | Found | Right | IoU | Input / output tokens | Reported cost |
-|---|---:|---:|---:|---:|---:|
-| Claude Code, Haiku, medium (**default**) | 79% | 92% | 0.88 | 16300 / 8000 | $0.008 |
-| Claude Code, Haiku, high | 84% | 90% | 0.88 | 16300 / 11800 | $0.008 |
-| Claude Code, Sonnet, medium | 67% | 69% | 0.85 | 16200 / 2200 | $0.064 |
-| Claude Code, Opus, medium | 89% | 88% | 0.88 | 16100 / 2900 | $0.19 |
-| Codex, its default model, low (**default**) | 88% | 85% | 0.91 | 32800 / 1700 | not reported |
-| Codex, its default model, medium | 90% | 83% | 0.92 | 32800 / 3100 | not reported |
-| Codex, GPT-6-Luna, low | 64% | 82% | 0.80 | 32800 / 1100 | not reported |
+| Agent, model, effort | Found | Right | IoU | Input / output tokens per photo | Reported cost (60 photos) | Time |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude Code, Haiku, low (**default**) | 80% | 90% | 0.86 | 621 / 165 | $0.009 | 28 s |
+| Claude Code, Haiku, medium | 77% | 87% | 0.85 | 623 / 202 | $0.010 | 29 s |
+| Claude Code, Haiku, low, 8 photos a call | 72-74% | 85-88% | 0.85 | 511 / 135 | $0.007 | 18 s |
+| Claude Code, Sonnet, low | 76% | 79% | 0.89 | 616 / 44 | $0.10 | 15 s |
+| Claude Code, Sonnet, medium | 79% | 81% | 0.89 | 618 / 47 | $0.10 | 14 s |
+| Claude Code, Opus, medium | 87% | 70% | 0.89 | 617 / 56 | $0.22 | 24 s |
+| Codex, gpt-6.2-sol (its default), low (**default**) | 86% | 79% | 0.89 | 462 / 40 | not reported | 35 s |
+| Codex, gpt-6.2-sol, low, Fast | 85% | 80% | 0.89 | 462 / 38 | not reported | 28 s |
+| Codex, gpt-6.2-sol, medium | 86% | 79% | 0.89 | 454 / 88 | not reported | 61 s |
+| Codex, gpt-6.2-sol, low, 16 photos a call | 84-85% | 77-79% | 0.89 | 412-422 / 36 | not reported | 30 s |
+| Codex, gpt-6.2-astra, low | 88% | 82% | 0.89 | 454 / 36 | not reported | 33 s |
 
-That is where the defaults come from: Haiku at medium effort labels about as well as the larger Claude models at
-a small fraction of their cost (at low effort it found 47% in a smaller sample, so low is not the default), and
-Codex's default model is already good at low effort. On clean synthetic shapes
-(`crates/folo-server/tests/label_live.rs`) both defaults find every object at a mean IoU of 0.90 and 0.93.
+The Codex rows at medium effort and with gpt-6.2-astra were measured with the boxes in thousandths of the image
+(the shape before November 2026), which Codex labels as well with as with pixels; the Haiku medium, 8-a-call,
+Sonnet medium and Opus rows with an earlier wording of the image sizes in the prompt.
 
-To measure your own setup, run that test against the real CLIs:
-`cargo test -p folo-server --test label_live -- --ignored --nocapture` (`FOLO_LABEL_LIVE_MODEL` picks a model).
-`npm run label-smoke` in `web/` drives the whole flow through Studio against a running `folo serve` and a real
-agent, with a folder of your own images, and prints what the agent reported using.
+That is where the defaults come from:
+- **Haiku at low effort**: as good as at medium (two passes at low found 77% and 78% before the final one), with
+  less output and in less time. Eight photos a call would save 18% of the input but cost Haiku 4 to 5 points of
+  found. Sonnet finds as much for twelve times the cost; Opus finds more but draws more boxes that are wrong.
+- **Codex's default model at low effort**: medium adds nothing but output tokens and time. gpt-6.2-astra did as
+  well as gpt-6.2-sol (within the noise), so the default stays Codex's own. Sixteen photos a call saved 9% of the
+  input and found 1 to 2 points fewer in both passes.
+- **Image size**: COCO's photos are at most 640 px, so the eval measured the effect of size at that scale. Sent at
+  480 px (as 768 is to 1024), Codex labelled as well (85% / 80% / 0.89) and Haiku worse (75% / 87% / 0.80, from
+  79% / 85% / 0.84). Scaled up to 1024 px, Haiku found 83% (at twice the input tokens), and Codex at 768 px did as
+  well as at 1024 (87% against 86%) for 650 input tokens a photo instead of 1050.
+- **Pixels, not thousandths.** Until November 2026 a reply's coordinates were thousandths of the image's width and
+  height. The current Sonnet and Opus answer in pixels whatever they are told: Sonnet then found 5% of the objects
+  and Opus 62%, Haiku and Codex as many as now. Asked for pixels of the image as sent, every model does well.
+
+To measure your own setup, run the eval against the real CLIs (it spends about 60 images' worth of tokens a
+pass; COCO val2017 and its annotations are a free download):
+`cargo run -p folo-server --release --example label_eval -- --coco <coco dir> --agent claude --out eval.jsonl`,
+with `--model`, `--effort`, `--batch`, `--side` and `--fast` to try other settings, and `--table eval.jsonl` to
+print the passes side by side. On clean synthetic shapes `cargo test -p folo-server --test label_live --
+--ignored --nocapture` checks both CLIs end to end (`FOLO_LABEL_LIVE_MODEL` picks a model). `npm run
+label-smoke` in `web/` drives the whole flow through Studio against a running `folo serve` and a real agent, with
+a folder of your own images, and prints what the agent reported using.
 
 ## Getting better labels
 - Write the instructions for someone who has never seen your data. Name look-alikes ("vans count as car"), say

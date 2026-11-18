@@ -44,7 +44,7 @@ async fn agent_entries_follow_the_labeling_policy() {
     // Asked as agent labeling asks: the classes, the description as the instructions, two images a call.
     let prompts = f.agent.prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0], ("Classes: circle, square\nInstructions: Count the shapes.\n2 images follow, in order: image 1 to image 2.".to_string(), 2));
+    assert_eq!(prompts[0], ("Classes: circle, square\nInstructions: Count the shapes.\n2 images follow, in order: image 1 (64 x 64 pixels), image 2 (64 x 64 pixels).".to_string(), 2));
     let gallery: BenchEntryImagePage = ok(app, get(&format!("{entries}/{}/images", e.id))).await;
     assert!(gallery.images.iter().all(|i| i.detections.len() == 1 && i.detections[0].score == 1.0));
 

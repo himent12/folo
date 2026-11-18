@@ -1,4 +1,4 @@
-// Which agent, model and effort a labeling run asks for: picked in the job page's Agent panel and used by every run
+// Which agent, model, effort and service tier a labeling run asks for: picked in the job page's Agent panel and used by every run
 // started there (the panel's, and the editor's "Ask the agent again"). The agent is remembered per browser (prefs).
 
 import { signal } from 'fw';
@@ -11,6 +11,8 @@ export class AgentChoice {
   #model = signal('');
   /** The effort picked for each agent; one not picked is that agent's default. */
   #effort = signal<Partial<Record<LabelAgentId, LabelEffort>>>({});
+  /** The faster service tier asked for; it counts only with an agent that offers one (`LabelAgent.fast`). */
+  #fast = signal(false);
 
   constructor(readonly agents: () => readonly LabelAgent[] | undefined) {}
 
@@ -45,9 +47,17 @@ export class AgentChoice {
     if (a) this.#effort.set({ ...this.#effort.peek(), [a.id]: e });
   }
 
+  /** The faster service tier: asked for, and the agent offers one. */
+  get fast(): boolean {
+    return !!this.agent?.fast && this.#fast.get();
+  }
+  set fast(on: boolean) {
+    this.#fast.set(on);
+  }
+
   /** The request's agent part, or null when no agent is installed. */
-  request(): Pick<StartLabeling, 'agent' | 'model' | 'effort'> | null {
+  request(): Pick<StartLabeling, 'agent' | 'model' | 'effort' | 'fast'> | null {
     const a = this.agent;
-    return a ? { agent: a.id, model: this.model || null, effort: this.effort } : null;
+    return a ? { agent: a.id, model: this.model || null, effort: this.effort, ...(this.fast ? { fast: true } : {}) } : null;
   }
 }

@@ -6,7 +6,8 @@
 //!
 //! **Failures.** A call that cannot be made (the CLI missing or signed out, an unknown model, a rate limit) ends
 //! the entry at once, as it ends a labeling run, and so do three calls in a row that time out or return garbage.
-//! An image whose call failed otherwise (its reply could not be read even when asked once more, or left the image
+//! A call the provider failed on a passing fault (overloaded, a server error) is asked once more after a pause,
+//! as in a labeling run, and fails its images when that fails too. An image whose call failed otherwise (its reply could not be read even when asked once more, or left the image
 //! out) has no answer. Scoring such an image as one where the agent found nothing would understate the agent, so
 //! the entry is scored only when at most [`allowed_failures`] of its images failed (2%, at least one); with more,
 //! the entry fails and says how many.
@@ -24,8 +25,8 @@ use super::model::{PROGRESS_EVERY, finish_entry, passes};
 use super::results::{self, Pass};
 use super::state::{BenchFile, Slot};
 use crate::error::{Error, Result};
-use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT};
-use crate::label::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
+use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT, label_with_retry};
+use crate::label::{AgentImage, MAX_SOFT_FAILURES, TRANSIENT_BACKOFF, agent_jpeg, agent_jpeg_of, prompt};
 
 /// Agent calls in flight at once (as a labeling run's default).
 pub const PARALLEL: usize = crate::label::DEFAULT_PARALLEL as usize;
@@ -138,16 +139,17 @@ impl Run<'_> {
     }
 
     /// The image at `i` as the agent gets it under the unit's pass.
-    fn jpeg(&self, pass: usize, i: usize) -> std::result::Result<Vec<u8>, String> {
+    fn jpeg(&self, pass: usize, i: usize) -> std::result::Result<AgentImage, String> {
         let im = &self.file.images[i];
         let path = self.job.slot.image_path(im);
+        let side = self.job.agent.image_side();
         match self.passes[pass] {
-            None => agent_jpeg(&path),
+            None => agent_jpeg(&path, side),
             Some((c, s)) => {
                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
                 let seed = conditions::variant_seed(self.file.seed, &im.id, c, s);
                 let r = conditions::render(&bytes, c, s, &im.boxes, seed).map_err(|e| e.to_string())?;
-                agent_jpeg_of(folo_data::decode(&r.jpeg).map_err(|e| e.to_string())?)
+                agent_jpeg_of(folo_data::decode(&r.jpeg).map_err(|e| e.to_string())?, side)
             }
         }
     }
@@ -158,9 +160,10 @@ impl Run<'_> {
         let mut sizes = Vec::with_capacity(unit.images.len());
         for &i in &unit.images {
             match self.jpeg(unit.pass, i) {
-                Ok(j) => {
-                    jpegs.push(j);
-                    sizes.push((self.file.images[i].width, self.file.images[i].height));
+                Ok(image) => {
+                    let file = (self.file.images[i].width, self.file.images[i].height);
+                    sizes.push(prompt::ImageSize { sent: image.size(), file });
+                    jpegs.push(image.jpeg);
                 }
                 Err(why) => {
                     // A benchmark's files are its own: one that cannot be read is a broken benchmark.
@@ -174,7 +177,8 @@ impl Run<'_> {
             self.fail(format!("creating {}: {e}", scratch.display()));
             return;
         }
-        let text = prompt::user_prompt(&self.file.classes, &self.file.description, "", jpegs.len());
+        let sent: Vec<(u32, u32)> = sizes.iter().map(|s| s.sent).collect();
+        let text = prompt::user_prompt(&self.file.classes, &self.file.description, "", &sent);
         let request = AgentRequest {
             system: prompt::SYSTEM,
             prompt: &text,
@@ -182,6 +186,7 @@ impl Run<'_> {
             schema: &self.schema,
             model: self.job.model.as_deref(),
             effort: self.job.effort,
+            fast: false,
             scratch: &scratch,
             cancel: &self.job.cancel,
         };
@@ -192,7 +197,7 @@ impl Run<'_> {
             if self.cancelled() {
                 break None;
             }
-            let reply = match self.job.agent.label(&request) {
+            let reply = match label_with_retry(&*self.job.agent, &request, TRANSIENT_BACKOFF, |_| {}) {
                 Ok(reply) => reply,
                 Err(AgentError::Cancelled) => break None,
                 Err(AgentError::Timeout) => {
@@ -201,6 +206,10 @@ impl Run<'_> {
                         self.job.agent.id().display_name(),
                         CALL_TIMEOUT.as_secs()
                     );
+                    self.soft_failure(&why);
+                    break Some(Err(why));
+                }
+                Err(AgentError::Transient(why)) => {
                     self.soft_failure(&why);
                     break Some(Err(why));
                 }

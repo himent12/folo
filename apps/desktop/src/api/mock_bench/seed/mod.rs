@@ -31,6 +31,7 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             ],
             default_model: Some("sonnet".into()),
             default_effort: LabelEffort::Medium,
+            fast: false,
             hint: None,
         },
         LabelAgent {
@@ -44,6 +45,7 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             ],
             default_model: Some("o3".into()),
             default_effort: LabelEffort::Medium,
+            fast: true,
             hint: None,
         },
     ];

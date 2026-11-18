@@ -64,7 +64,7 @@ impl Scripted {
 /// A labeling reply with one box of `label` per image.
 fn boxes_reply(images: usize, label: &str) -> String {
     let entries: Vec<Value> = (1..=images)
-        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [250, 100, 750, 600] }] }))
+        .map(|i| json!({ "image": i, "boxes": [{ "label": label, "box": [50, 10, 150, 60] }] }))
         .collect();
     json!({ "images": entries }).to_string()
 }
@@ -83,6 +83,7 @@ impl Agent for Scripted {
             models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
             default_model: Some("small".into()),
             default_effort: LabelEffort::Medium,
+            fast: false,
             hint: (!self.available).then(|| "install it".into()),
         }
     }
