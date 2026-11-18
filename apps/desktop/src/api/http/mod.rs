@@ -3,6 +3,7 @@
 
 mod images;
 mod inference;
+mod refused;
 mod server;
 mod streams;
 mod transport;

@@ -93,12 +93,16 @@ pub fn is_loopback(url: &str) -> bool {
 }
 
 /// Whether a `folo serve` answers `GET /api/health` at `url`. On this machine the connection gets half a
-/// second: a port nothing listens on is refused only after Windows' SYN retries (2 s), and a listening one
-/// accepts at once however busy the server is.
+/// second: a listening port accepts at once however busy the server is, and a port nothing listens on is
+/// told first without waiting ([`super::refused`]: Windows refuses it only after its SYN retries, 2 s).
 pub fn probe(url: &str) -> bool {
     let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
     // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
     let health = super::HttpBackend::new(url).url("/health");
+    // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
+    if super::refused::refused(&health) {
+        return false;
+    }
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(connect))
