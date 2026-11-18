@@ -43,17 +43,29 @@ describe('the first handshake with an address that answers', () => {
     vi.useRealTimers();
   });
 
+  type Answer = (init?: RequestInit) => Response | Promise<Response>;
+
   /**
-   * Connects with `answers` for the health checks in turn (the last one repeats), and `runs` for the token check
-   * (`HEAD /api/runs`, in turn; nothing answers it by default); what the shell says.
+   * Starts a connect with `answers` for the health checks in turn (the last one repeats), and `runs` for the token check
+   * (`HEAD /api/runs`, in turn; nothing answers it by default); what the shell says, and the requests made.
    */
-  async function connectTo(answers: (() => Response | Promise<Response>)[], runs: (() => Response)[] = []) {
+  function start(answers: Answer[], runs: Answer[] = []) {
     let health = 0;
     let wall = 0;
+    let pending = 0;
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/api/runs') && init?.method === 'HEAD' && runs.length) return runs[Math.min(wall++, runs.length - 1)]!();
+      if (url.endsWith('/api/runs') && init?.method === 'HEAD') {
+        wall++;
+        if (!runs.length) throw new TypeError('Failed to fetch');
+        pending++;
+        try {
+          return await runs[Math.min(wall - 1, runs.length - 1)]!(init);
+        } finally {
+          pending--;
+        }
+      }
       if (!url.endsWith('/api/health')) throw new TypeError('Failed to fetch');
-      return answers[Math.min(health++, answers.length - 1)]!();
+      return answers[Math.min(health++, answers.length - 1)]!(init);
     });
     const shell = document.createElement('div');
     const view = render(
@@ -66,8 +78,7 @@ describe('the first handshake with an address that answers', () => {
       ),
       shell,
     );
-    await hub.connect();
-    flush();
+    const done = hub.connect();
     const said = () => {
       flush();
       return {
@@ -79,7 +90,15 @@ describe('the first handshake with an address that answers', () => {
         settings: `${shell.querySelector('.s-title')!.textContent!.trim()} | ${shell.querySelector('.s-desc')!.textContent!.trim()}`,
       };
     };
-    return { said, checks: () => health, unmount: () => view.unmount() };
+    return { said, done, checks: () => health, heads: () => wall, pending: () => pending, unmount: () => view.unmount() };
+  }
+
+  /** `start`, once the connect has settled. */
+  async function connectTo(answers: Answer[], runs: Answer[] = []) {
+    const c = start(answers, runs);
+    await c.done;
+    flush();
+    return c;
   }
 
   for (const [what, answer] of [
@@ -160,4 +179,91 @@ describe('the first handshake with an address that answers', () => {
     expect([said.label, said.notice, said.short, hub.refused]).toEqual(['Server offline', "Can't reach folo serve. Retrying…", 'Offline', null]);
     c.unmount();
   });
+
+  // The token check goes out together with the health check (index.ts), so its answer can come before or after the
+  // health's, or not at all: what Studio says must be what it said when the check went out after the health.
+  const after =
+    (ms: number, r: () => Response): Answer =>
+    () =>
+      new Promise((ok) => setTimeout(() => ok(r()), ms));
+  const resetAfter =
+    (ms: number): Answer =>
+    () =>
+      new Promise((_, no) => setTimeout(() => no(new TypeError('Failed to fetch')), ms));
+  /** A request that never answers until it is cancelled. */
+  const hang: Answer = (init) =>
+    new Promise((_, no) => init?.signal?.addEventListener('abort', () => no(init.signal!.reason as Error)));
+  const walls = () => Response.json({ error: { code: 'unauthorized', message: 'this server needs a token', hint: null } }, { status: 401 });
+  const opens = () => new Response(null, { status: 200 });
+  const notFolo = () => Response.json({ service: 'other' });
+
+  for (const [what, early] of [
+    ['fails at once (a reset connection)', resetAfter(0)],
+    ['fails after the health answered', resetAfter(1200)],
+  ] as const) {
+    it(`asks the token check again when the early one ${what}, and still finds the wall`, async () => {
+      const c = start([after(800, healthy)], [early, walls]);
+      await vi.advanceTimersByTimeAsync(1200);
+      await c.done;
+      expect(c.said()).toMatchObject({ mode: 'connecting', label: 'Not connected', notice: `${TOKEN_WALL} Retrying…` });
+      expect([hub.refused, hub.offline, c.heads(), c.pending()]).toEqual([TOKEN_WALL, true, 2, 0]);
+      c.unmount();
+    });
+
+    it(`asks the token check again when the early one ${what}, and goes live without a wall`, async () => {
+      const c = start([after(800, healthy)], [early, opens]);
+      await vi.advanceTimersByTimeAsync(1200);
+      await c.done;
+      expect([c.said().mode, c.said().label, hub.refused, hub.offline, c.heads()]).toEqual(['live', 'Connected', null, false, 2]);
+      c.unmount();
+    });
+  }
+
+  for (const [what, answer, said] of [
+    ['the wall', walls, { mode: 'connecting', label: 'Not connected', notice: `${TOKEN_WALL} Retrying…` }],
+    ['no wall', opens, { mode: 'live', label: 'Connected', notice: '' }],
+  ] as const) {
+    it(`waits for a token check that answers after the health, and reads ${what} from it`, async () => {
+      const c = start([healthy], [after(300, answer)]);
+      await vi.advanceTimersByTimeAsync(299);
+      // The health has answered; the token check has not: not live yet.
+      expect([hub.mode, hub.refused, c.heads()]).toEqual(['connecting', null, 1]);
+      await vi.advanceTimersByTimeAsync(1);
+      await c.done;
+      expect(c.said()).toMatchObject(said);
+      expect(c.heads()).toBe(1);
+      c.unmount();
+    });
+  }
+
+  for (const [what, runs] of [
+    ['before', [walls]],
+    ['after', [after(300, walls)]],
+  ] as const) {
+    it(`says an address that is not FOLO is not, when its token check answers 401 ${what} the health`, async () => {
+      const c = await connectTo([notFolo], [...runs]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(c.said()).toMatchObject({ mode: 'connecting', label: 'Not connected', notice: `${NOT_FOLO} Retrying…` });
+      expect([hub.refused, c.pending()]).toEqual([NOT_FOLO, 0]);
+      c.unmount();
+    });
+  }
+
+  for (const [what, health] of [
+    ['nothing answers the health check', () => Promise.reject(new TypeError('Failed to fetch'))],
+    ['the health answer is not FOLO', notFolo],
+  ] as const) {
+    it(`cancels a token check that hangs when ${what}, before the next check`, async () => {
+      const c = start([health], [hang]);
+      await c.done;
+      await vi.advanceTimersByTimeAsync(0);
+      expect([hub.mode, c.heads(), c.pending()]).toEqual(['connecting', 1, 0]);
+      // About five seconds of checks: each one's token check is cancelled when it ends, none left holding a connection.
+      await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+      expect([c.checks(), c.heads(), c.pending()]).toEqual([2, 2, 0]);
+      await vi.advanceTimersByTimeAsync(PROBE_DELAYS[1]!);
+      expect([c.checks(), c.heads(), c.pending()]).toEqual([3, 3, 0]);
+      c.unmount();
+    });
+  }
 });

@@ -37,6 +37,20 @@ export async function tokenWall(base: string, signal: AbortSignal): Promise<bool
 }
 
 /**
+ * The token check sent together with the health check, before the health has said this is a FOLO server: true or false
+ * when the server answered it (`401`: the token wall), null when it got no HTTP answer (sent before the server was up, a
+ * reset connection, cancelled). Null is no answer at all, so the caller asks `tokenWall` again once the health has
+ * passed, as when the check went out after it.
+ */
+export async function earlyTokenWall(base: string, signal: AbortSignal): Promise<boolean | null> {
+  try {
+    return (await fetch(`${base}/api/runs`, { method: 'HEAD', signal })).status === 401;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * What a failed health check got back from an address that answered but cannot be used, in words for the user; null
  * when nothing answered: no connection, a timeout, or a proxy with nothing behind it (Vite's dev proxy answers 500
  * with an empty body, a gateway 502 to 504).

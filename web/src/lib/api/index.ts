@@ -11,7 +11,7 @@
 import { computed, signal } from 'fw';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
-import { isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
+import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -170,17 +170,23 @@ class Hub {
     try {
       for (let i = 0; ; i++) {
         const slow = setTimeout(() => unreachable(), SLOW_CONNECT);
+        // This check's own requests: the one still out when it ends (a token check the health made moot) is cancelled
+        // before the next check, never left holding one of the browser's connections to the server.
+        const mine = new AbortController();
         try {
-          const check = AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]);
+          const check = AbortSignal.any([abort, mine.signal, AbortSignal.timeout(CONNECT_TIMEOUT)]);
           // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use. The token
           // check is asked together with the health, not after it (a round trip less before the first data on a
-          // remote server); its answer counts only once the health says this is a FOLO server.
-          const wall = tokenWall(http.base, check);
-          wall.catch(() => {});
+          // remote server); its answer counts only once the health says this is a FOLO server, and when it got no
+          // HTTP answer (sent before the server was up, a reset connection) it is asked again then, as it was after it.
+          const early = earlyTokenWall(http.base, check);
           const h: unknown = await http.health(check);
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
-          if (await wall) throw new ApiError(401, 'token_wall', TOKEN_WALL);
+          let walled = await early;
+          if (attempt !== this.#attempt) return;
+          walled ??= await tokenWall(http.base, check);
+          if (walled) throw new ApiError(401, 'token_wall', TOKEN_WALL);
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
@@ -203,6 +209,7 @@ class Hub {
           unreachable(refusal(e));
         } finally {
           clearTimeout(slow);
+          mine.abort();
         }
         if (attempt !== this.#attempt) return;
         await new Promise((next) => setTimeout(next, PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]));
