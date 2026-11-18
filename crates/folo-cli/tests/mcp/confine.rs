@@ -31,7 +31,6 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "cloud_connections",
         "cloud_offers",
         "cloud_instances",
-        "list_label_agents",
         "list_label_jobs",
         "label_status",
         "list_label_images",
@@ -88,7 +87,7 @@ fn confine_rejects_paths_outside_the_data_dir() {
     let job = json!({ "name": "x", "classes": ["a"], "paths": [root.path()] });
     c.tool_error("create_label_job", job, "path_outside_data_dir");
     let add = json!({ "job_id": "lb_1", "paths": ["../outside.jpg"] });
-    c.tool_error("add_label_images", add, "path_outside_data_dir");
+    c.tool_error("create_label_job", add, "path_outside_data_dir");
     c.finish();
 }
 

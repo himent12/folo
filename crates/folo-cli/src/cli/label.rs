@@ -184,7 +184,8 @@ pub struct LabelImagesArgs {
     /// Only reviewed (true) or not reviewed (false) images.
     #[arg(long)]
     pub reviewed: Option<bool>,
-    /// Include each image's boxes ([class, x1, y1, x2, y2] in 0..1000 of width / height).
+    /// Include each image's boxes ([class, x1, y1, x2, y2] in pixels of its default 1024 px view, which `size`
+    /// gives) and their revision.
     #[arg(long)]
     pub boxes: bool,
     /// Skip this many matching images.
@@ -207,9 +208,12 @@ pub struct LabelViewArgs {
     /// Where to write the JPEG [default: <job>-<image>.jpg in the current folder].
     #[arg(long, short)]
     pub output: Option<PathBuf>,
-    /// Long side of the view in pixels (256 to 1568).
+    /// Long side of the view in pixels (256 to 1568; never more than the image's own).
     #[arg(long, default_value_t = 1024)]
     pub size: u32,
+    /// The first box to list (a dense image lists 300 at a time).
+    #[arg(long, default_value_t = 1)]
+    pub from: u32,
     #[command(flatten)]
     pub conn: LabelServerArgs,
 }
@@ -221,8 +225,8 @@ pub struct LabelSetArgs {
     pub job: String,
     /// The image's id.
     pub image: String,
-    /// A box as CLASS,X1,Y1,X2,Y2 (class index or name, corners in 0..1000 of width / height), repeatable: the
-    /// image's boxes become exactly these.
+    /// A box as CLASS,X1,Y1,X2,Y2 (class index or name, corners in pixels of the view, see --size), repeatable:
+    /// the image's boxes become exactly these. A box given as `folo label view` lists it keeps its exact pixels.
     #[arg(long = "box", value_name = "C,X1,Y1,X2,Y2")]
     pub boxes: Vec<String>,
     /// Remove every box (a background image).
@@ -237,6 +241,14 @@ pub struct LabelSetArgs {
     /// Add a box, as CLASS,X1,Y1,X2,Y2, repeatable.
     #[arg(long, value_name = "C,X1,Y1,X2,Y2")]
     pub add: Vec<String>,
+    /// The revision of the boxes the edit was made on (`folo label view` prints it); needed with --remove,
+    /// --relabel and --add, whose numbers are that revision's. Another revision now: refused.
+    #[arg(long, value_name = "REVISION")]
+    pub expect: Option<String>,
+    /// The view the coordinates are in, as WxH [default: the image's 1024 px view, as `folo label view` writes
+    /// it].
+    #[arg(long, value_name = "WxH")]
+    pub size: Option<String>,
     #[command(flatten)]
     pub conn: LabelServerArgs,
 }
@@ -252,6 +264,9 @@ pub struct LabelReviewArgs {
     /// Mark them not reviewed instead.
     #[arg(long)]
     pub undo: bool,
+    /// IMAGE=REVISION: mark IMAGE only if its boxes are still that revision (as checked), repeatable.
+    #[arg(long, value_name = "IMAGE=REVISION")]
+    pub expect: Vec<String>,
     #[command(flatten)]
     pub conn: LabelServerArgs,
 }

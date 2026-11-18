@@ -219,7 +219,7 @@ Desktop is its own cargo workspace (the app and folo-ui), so the engine's builds
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28
-and 2025-11-25). It has 34 tools: build, register and check datasets, label images with a Claude Code or Codex agent
+and 2025-11-25). It has 32 tools: build, register and check datasets, label images with a Claude Code or Codex agent
 and review the boxes, train (here or on a cloud GPU), follow, stop, reorder and resume runs, evaluate, predict,
 export, compare runs, and look after cloud connections and instances. It also has `folo://` resources (dataset
 images, live run status and metrics, validation sample grids, the docs) and three prompts. It runs the real engine on its data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`).

@@ -1,12 +1,11 @@
 //! An image of a labeling job as an agent (or a person) checks it: its boxes outlined in class colours and
-//! numbered from 1 in list order, and ticks every 100 units (of 1000) along the edges to read coordinates off.
+//! numbered from 1 in list order, and ticks at round pixel steps along the edges to read coordinates off.
 
 use std::io::Cursor;
 
 use image::{Rgb, RgbImage};
 
 use crate::errors::Error;
-use crate::types::label::RelBox;
 
 /// `--class-0` ... `--class-11` of the design system (as the sample grid uses them).
 const CLASS_COLORS: [[u8; 3]; 12] = [
@@ -52,11 +51,23 @@ fn fill(img: &mut RgbImage, x1: i64, y1: i64, x2: i64, y2: i64, c: [u8; 3]) {
     }
 }
 
-/// Draws `boxes` (0..1000 units) on the JPEG `jpeg` and encodes the result as a JPEG.
-pub fn render(jpeg: &[u8], boxes: &[RelBox]) -> Result<Vec<u8>, Error> {
+/// One box to draw: its class and its corners in pixels of the view, unrounded.
+pub type DrawBox = (u32, [f32; 4]);
+
+/// The tick spacing of a view whose long side is `long` pixels: a round step that gives at most 12 ticks.
+pub fn tick_step(long: u32) -> u32 {
+    [10, 20, 25, 50, 100, 200, 250, 500, 1000].into_iter().find(|s| long / s <= 12).unwrap_or(1000)
+}
+
+/// Decodes the JPEG `jpeg`, scales it to `frame` (`[width, height]`) when it is another size, draws `boxes` and
+/// encodes the result as a JPEG.
+pub fn render(jpeg: &[u8], frame: [u32; 2], boxes: &[DrawBox]) -> Result<Vec<u8>, Error> {
     let mut img = image::load_from_memory(jpeg)
         .map_err(|e| Error::internal(format!("decoding the image to view: {e}")))?
         .to_rgb8();
+    if [img.width(), img.height()] != frame {
+        img = image::imageops::resize(&img, frame[0], frame[1], image::imageops::FilterType::Triangle);
+    }
     draw(&mut img, boxes);
     let mut out = Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82)
@@ -65,30 +76,32 @@ pub fn render(jpeg: &[u8], boxes: &[RelBox]) -> Result<Vec<u8>, Error> {
     Ok(out.into_inner())
 }
 
-/// Draws the ticks, then every box with its number (the last box on top).
-pub fn draw(img: &mut RgbImage, boxes: &[RelBox]) {
+/// Draws the ticks (every [`tick_step`] pixels on all four edges), then every box with its number from 1 (the
+/// last box on top).
+pub fn draw(img: &mut RgbImage, boxes: &[DrawBox]) {
     let (w, h) = (img.width() as i64, img.height() as i64);
     let long = w.max(h);
-    let px = |v: u32, side: i64| (v.min(1000) as i64 * side + 500) / 1000;
+    let step = tick_step(long as u32) as i64;
     // Ticks: white on a dark edge, so they show on any background.
     let tick = (long / 60).max(4);
-    for k in 1..10 {
-        let (x, y) = (px(k * 100, w), px(k * 100, h));
-        for (x1, y1, x2, y2) in [
-            (x - 1, 0, x + 2, tick),
-            (x - 1, h - tick, x + 2, h),
-            (0, y - 1, tick, y + 2),
-            (w - tick, y - 1, w, y + 2),
-        ] {
-            fill(img, x1 - 1, y1 - 1, x2 + 1, y2 + 1, [0; 3]);
-            fill(img, x1, y1, x2, y2, [255; 3]);
+    for (along, x_axis) in [(w, true), (h, false)] {
+        for v in (1..).map(|k| k * step).take_while(|v| *v < along) {
+            let marks = if x_axis {
+                [(v - 1, 0, v + 2, tick), (v - 1, h - tick, v + 2, h)]
+            } else {
+                [(0, v - 1, tick, v + 2), (w - tick, v - 1, w, v + 2)]
+            };
+            for (x1, y1, x2, y2) in marks {
+                fill(img, x1 - 1, y1 - 1, x2 + 1, y2 + 1, [0; 3]);
+                fill(img, x1, y1, x2, y2, [255; 3]);
+            }
         }
     }
     let t = (long / 400).max(2);
     let scale = (long / 256).clamp(2, 6);
-    for (n, b) in boxes.iter().enumerate() {
-        let c = class_color(b[0]);
-        let (x1, y1, x2, y2) = (px(b[1], w), px(b[2], h), px(b[3], w), px(b[4], h));
+    for (n, (class, corners)) in boxes.iter().enumerate() {
+        let c = class_color(*class);
+        let [x1, y1, x2, y2] = corners.map(|v| v.round() as i64);
         fill(img, x1, y1, x2, y1 + t, c);
         fill(img, x1, y2 - t, x2, y2, c);
         fill(img, x1, y1, x1 + t, y2, c);
@@ -125,26 +138,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boxes_are_drawn_where_their_units_say() {
+    fn boxes_are_drawn_where_their_pixels_say() {
         let mut img = RgbImage::from_pixel(400, 200, Rgb([10, 10, 10]));
-        draw(&mut img, &[[1, 250, 500, 750, 900]]);
+        draw(&mut img, &[(1, [100.0, 100.0, 300.0, 180.0])]);
         let c = Rgb(class_color(1));
-        // The left edge at x = 0.25 × 400, half way down the box.
+        // The left and right edges, half way down the box.
         assert_eq!(*img.get_pixel(100, 140), c);
         assert_eq!(*img.get_pixel(299, 140), c);
         // Inside the box nothing is drawn.
         assert_eq!(*img.get_pixel(200, 140), Rgb([10, 10, 10]));
         // The tag with the number sits above the top edge (y = 100).
         assert_eq!(*img.get_pixel(101, 98), c);
-        // A tick at x = 100 units on the top edge.
-        assert_eq!(*img.get_pixel(40, 1), Rgb([255; 3]));
+        // A tick at x = 50 (400 px wide: every 50) on the top edge.
+        assert_eq!(tick_step(400), 50);
+        assert_eq!(*img.get_pixel(50, 1), Rgb([255; 3]));
+        assert_eq!(tick_step(1024), 100);
         let jpeg = {
             let mut out = Cursor::new(Vec::new());
             image::codecs::jpeg::JpegEncoder::new(&mut out).encode_image(&img).unwrap();
             out.into_inner()
         };
-        let drawn = render(&jpeg, &[]).unwrap();
+        let drawn = render(&jpeg, [400, 200], &[]).unwrap();
         assert_eq!(&drawn[..2], &[0xff, 0xd8]);
         assert_eq!(image::load_from_memory(&drawn).unwrap().width(), 400);
+        // A thumbnail a pixel off the frame is scaled to it.
+        let drawn = render(&jpeg, [401, 200], &[]).unwrap();
+        assert_eq!(image::load_from_memory(&drawn).unwrap().width(), 401);
     }
 }

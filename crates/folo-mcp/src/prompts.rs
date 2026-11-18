@@ -103,25 +103,26 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
             let text = format!(
                 "Label the images of a folder with a coding agent, check its boxes yourself, and make a training \
                  dataset. Keep tool results small: use ids, counts and pages, not full listings.\n\n\
-                 1. `list_label_agents`: pick an available agent (prefer `claude`; its default model and effort \
-                 are the cheapest that label well). If none is available, tell the user what its `hint` says and \
-                 stop.\n\
-                 2. `create_label_job` with {create}. Sharpen `instructions` first if the user's words leave \
+                 1. `create_label_job` with {create}. Sharpen `instructions` first if the user's words leave \
                  a class unclear (look-alikes, what to skip, partly hidden objects).\n\
-                 3. Try the instructions on a sample: `list_label_images` (limit 20) and `start_labeling` with \
-                 those `image_ids`. Poll `label_status` every 20-30 s until `status` is `idle`; if the run \
-                 failed, report `run.error` and its hint and stop.\n\
-                 4. Review the sample: call `view_label_image` without `image_id` (the next image to review). It \
-                 shows the boxes numbered, with ticks every 100 of 1000 on the edges; boxes are [class, x1, y1, \
-                 x2, y2] in 0..1000 of the width and height. Right: collect its id for `review_label_images`. \
-                 Wrong: fix it with `set_label_boxes` (`remove` / `relabel` / `add` by number, or all `boxes`). \
-                 If the same mistake repeats, improve the instructions in a `note` and ask again with \
+                 2. Try the instructions on a sample: `list_label_images` (limit 20) and `start_labeling` with \
+                 those `image_ids` and agent `claude` (leave model and effort out: its defaults are the cheapest \
+                 that label well). If it answers `not_supported` (not installed), use `codex`; if neither is, \
+                 tell the user what the error's `hint` says and stop. Poll `label_status` every 20-30 s until \
+                 `status` is `idle`; if the run failed, report the error its `log` shows and stop.\n\
+                 3. Review the sample one image at a time: `view_label_image` without `image_id` shows the next \
+                 image to review, its boxes numbered, pixel ticks on the edges, the box list [class, x1, y1, x2, \
+                 y2] in pixels of the view (`size`) and the boxes' `revision`. Settle each image before the next \
+                 view, or the same image comes back: right: `review_label_images` with its id and `expect` \
+                 {{id: revision}}; wrong: `set_label_boxes` with `expect` set to the revision and `relabel` / \
+                 `remove` / `add` by number (or all `boxes`), in the view's pixels (this also marks it \
+                 reviewed). If the same mistake repeats, improve the instructions in a `note` and ask again with \
                  `start_labeling` and those `image_ids` rather than fixing every image by hand.\n\
-                 5. When the sample looks right, `start_labeling` with no `image_ids` (the rest), poll \
-                 `label_status`, and review every image the same way until `to_review` is 0 (review in batches: \
-                 several ids per `review_label_images` call).\n\
-                 6. `export_label_dataset`, then `train` with its `dataset_id` (see the `train_on_folder` prompt \
-                 for picking a scale and image size), and tell the user the tokens used (`label_status` usage), \
+                 4. When the sample looks right, `start_labeling` with no `image_ids` (the rest), poll \
+                 `label_status`, and review the same way until `to_review` is 0. More images later: \
+                 `create_label_job` with the `job_id` and their `paths`.\n\
+                 5. `export_label_dataset`, then `train` with its `dataset_id` (see the `train_on_folder` prompt \
+                 for picking a scale and image size), and tell the user the tokens used (`label_status` tokens), \
                  how many boxes you corrected, and the run id."
             );
             Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])

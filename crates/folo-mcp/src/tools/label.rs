@@ -1,34 +1,48 @@
 //! The labeling tools: agents, jobs, images, runs, a view of an image with its boxes, box edits, review and the
 //! dataset export. The operations are [`crate::label::Labels`]'s (shared with `folo label`); this file adds path
-//! resolution, `--confine`, the blocking pool and the one-line summaries.
+//! handling, `--confine`, the blocking pool, the hints in MCP words and the one-line summaries.
 
 use base64::Engine as _;
 use folo_api::{LabelDatasetRequest, LabelJobStatus, LabelOutcome, StartLabeling};
+use http::StatusCode;
 use rmcp::model::ContentBlock;
 
 use super::results::{Output, fit_page, out, page_of, page_window, short};
 use crate::errors::{Error, invalid_arguments};
-use crate::label::{BoxEdit, Labels};
+use crate::label::hints::{self, Front};
+use crate::label::{BoxEdit, Labels, looks_absolute};
 use crate::server::Inner;
 use crate::types::*;
 
-/// Longest text beside a view (one line per box).
+/// Longest text beside a view (the box list is at most [`crate::label::VIEW_BOXES`] lines).
 const MAX_VIEW_TEXT: usize = 16_000;
 
 impl Inner {
-    /// Runs labeling calls on the blocking pool (they read files or make HTTP requests).
+    /// Runs labeling calls on the blocking pool (they read files or make HTTP requests); errors get MCP hints.
     async fn labels<T, F>(&self, f: F) -> Result<T, Error>
     where
         T: Send + 'static,
         F: FnOnce(&Labels) -> Result<T, Error> + Send + 'static,
     {
         let labels = self.labels.clone();
-        tokio::task::spawn_blocking(move || f(&labels)).await.map_err(super::join)?
+        let r = tokio::task::spawn_blocking(move || f(&labels)).await.map_err(super::join)?;
+        r.map_err(|e| hints::decorate(e, Front::Mcp))
     }
 
-    /// Input paths of images to add, resolved as every input path is (relative to `--data-dir`; with
-    /// `--confine`, inside it), in the form the server takes.
+    /// Input paths of images to add, in the form the server takes. In process they resolve as every input path
+    /// does (relative to `--data-dir`; with `--confine`, inside it). Through a server they are paths on its
+    /// machine, passed on as given, so they must be absolute.
     async fn label_paths(&self, paths: Vec<String>) -> Result<Vec<String>, Error> {
+        if self.labels.is_remote() {
+            self.confine_reads("adding images")?;
+            if let Some(p) = paths.iter().find(|p| !looks_absolute(p)) {
+                return Err(invalid_arguments(format!(
+                    "`{}` is relative: through `folo serve`, give the full path of the folder on the server's machine",
+                    short(p, 80)
+                )));
+            }
+            return Ok(paths);
+        }
         let mut out = Vec::with_capacity(paths.len());
         for p in paths {
             out.push(folo_api::json::path(self.resolve(p).await?));
@@ -36,41 +50,39 @@ impl Inner {
         Ok(out)
     }
 
-    /// With `--confine` in process: fails unless every image of job `id` is inside the data dir (a run and an
-    /// export read them all, a view one of them). Through a server, it reads them itself.
+    /// With `--confine` through a server: refuses `doing` (a call that has the server read image files, which
+    /// the confinement cannot check there).
+    fn confine_reads(&self, doing: &str) -> Result<(), Error> {
+        if self.opts.confine && self.labels.is_remote() {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_supported",
+                format!("{doing} is not available with --confine through `folo serve` (it reads image files there)"),
+            )
+            .hint("run `folo mcp --confine` on the data dir itself (no server), or without --confine"));
+        }
+        Ok(())
+    }
+
+    /// With `--confine`: fails unless every image of job `id` is inside the data dir (in process; a job with
+    /// one outside is neither shown nor changed).
     async fn confine_job(&self, id: &str) -> Result<(), Error> {
         if !self.opts.confine {
             return Ok(());
         }
-        let (paths, id) = (self.paths.clone(), id.to_string());
-        self.labels(move |l| match l.files(&id)? {
-            Some(files) => paths.check_files(files.iter().map(|f| f.as_path())),
-            None => Ok(()),
-        })
-        .await
-    }
-
-    pub(super) async fn list_label_agents(&self, _: NoArgs) -> Result<Output, Error> {
-        let r = self.labels(|l| l.agent_list()).await?;
-        let parts: Vec<String> = r
-            .agents
-            .iter()
-            .map(|a| match (a.available, &a.default_model) {
-                (true, model) => format!(
-                    "{}: available{}, default {}/{}",
-                    a.id.as_str(),
-                    a.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default(),
-                    model.as_deref().unwrap_or("its own model"),
-                    a.default_effort.as_str()
-                ),
-                (false, _) => format!("{}: not installed", a.id.as_str()),
-            })
-            .collect();
-        out(&r, parts.join("; "))
+        let (c, id) = (self.confinement.clone(), id.to_string());
+        self.labels(move |l| c.label_job(l, &id)).await
     }
 
     pub(super) async fn list_label_jobs(&self, a: PageArgs) -> Result<Output, Error> {
-        let jobs = self.labels(|l| l.job_list()).await?;
+        let c = self.confinement.clone();
+        // With --confine, jobs with images outside the data dir are not listed.
+        let jobs = self
+            .labels(move |l| {
+                let jobs = l.job_list()?;
+                Ok(jobs.into_iter().filter(|j| c.label_job(l, &j.id).is_ok()).collect::<Vec<_>>())
+            })
+            .await?;
         let page = page_of(jobs, a.cursor.as_deref(), a.limit)?;
         let names: Vec<String> = page
             .items
@@ -88,29 +100,42 @@ impl Inner {
     }
 
     pub(super) async fn create_label_job(&self, a: CreateLabelJobArgs) -> Result<Output, Error> {
+        if let Some(id) = a.job_id {
+            if a.name.is_some() || a.classes.is_some() {
+                return Err(invalid_arguments(
+                    "name and classes are a new job's: leave them out with job_id",
+                ));
+            }
+            if a.paths.is_empty() {
+                return Err(invalid_arguments("paths must name at least one folder or image file"));
+            }
+            let paths = self.label_paths(a.paths).await?;
+            self.confine_job(&id).await?;
+            let r = self.labels(move |l| l.add_paths(&id, &paths)).await?;
+            let summary =
+                format!("added {} ({} skipped); {} has {} images", r.added, r.skipped, r.job_id, r.images);
+            return out(&r, summary);
+        }
+        let (Some(name), Some(classes)) = (a.name, a.classes) else {
+            return Err(invalid_arguments("a new job needs name and classes (or give job_id to add images)"));
+        };
         let paths = self.label_paths(a.paths).await?;
-        let (name, classes, instructions) = (a.name, a.classes, a.instructions);
-        let r = self.labels(move |l| l.create_job(name, classes, instructions, &paths)).await?;
+        let instructions = a.instructions;
+        let labels = self.labels.clone();
+        let r = tokio::task::spawn_blocking(move || labels.create_job(name, classes, instructions, &paths))
+            .await
+            .map_err(super::join)?
+            .map_err(|f| hints::create_failed(f, Front::Mcp))?;
         let summary =
             format!("{}: {} images ({} skipped); start_labeling labels them", r.job_id, r.images, r.skipped);
         out(&r, summary)
     }
 
-    pub(super) async fn add_label_images(&self, a: AddLabelImagesArgs) -> Result<Output, Error> {
-        if a.paths.is_empty() {
-            return Err(invalid_arguments("paths must name at least one folder or image file"));
-        }
-        let paths = self.label_paths(a.paths).await?;
-        let id = a.job_id;
-        let r = self.labels(move |l| l.add_paths(&id, &paths)).await?;
-        let summary =
-            format!("added {} ({} skipped); {} has {} images", r.added, r.skipped, r.job_id, r.images);
-        out(&r, summary)
-    }
-
     pub(super) async fn start_labeling(&self, a: StartLabelingArgs) -> Result<Output, Error> {
+        self.confine_reads("labeling")?;
         self.confine_job(&a.job_id).await?;
-        let id = a.job_id;
+        let (id, agent) = (a.job_id, a.agent);
+        let effort = a.effort.map_or("default", |e| e.as_str());
         let req = StartLabeling {
             agent: a.agent,
             model: a.model,
@@ -122,21 +147,18 @@ impl Inner {
             parallel: a.parallel,
         };
         let r = self.labels(move |l| l.start_run(&id, req)).await?;
-        let summary = match &r.run {
-            Some(run) => format!(
-                "{} ({}, {}) labels {} images of {}; follow it with label_status",
-                run.agent.as_str(),
-                run.model.as_deref().unwrap_or("its default model"),
-                run.effort.as_str(),
-                run.total,
-                r.job_id
-            ),
-            None => format!("{}: {}", r.job_id, status_name(r.status)),
-        };
+        let summary = format!(
+            "{} ({}, {effort} effort) labels {} images of {}; follow it with label_status",
+            agent.as_str(),
+            r.model.as_deref().unwrap_or("its default model"),
+            r.total,
+            r.job_id
+        );
         out(&r, summary)
     }
 
     pub(super) async fn stop_labeling(&self, a: JobIdArgs) -> Result<Output, Error> {
+        self.confine_job(&a.job_id).await?;
         let id = a.job_id;
         let r = self.labels(move |l| l.stop_run(&id)).await?;
         let summary =
@@ -148,6 +170,7 @@ impl Inner {
         if a.log_lines > 50 {
             return Err(invalid_arguments(format!("log_lines must be in 0..=50, got {}", a.log_lines)));
         }
+        self.confine_job(&a.job_id).await?;
         let id = a.job_id;
         let lines = a.log_lines as usize;
         let r = self.labels(move |l| l.status(&id, lines)).await?;
@@ -163,12 +186,10 @@ impl Inner {
         );
         if let Some(run) = &r.run {
             let state = match run.outcome {
-                None => "running".to_string(),
-                Some(LabelOutcome::Completed) => "completed".into(),
-                Some(LabelOutcome::Stopped) => "stopped".into(),
-                Some(LabelOutcome::Failed) => {
-                    format!("failed: {}", short(run.error.as_deref().unwrap_or("see log"), 120))
-                }
+                None => "running",
+                Some(LabelOutcome::Completed) => "completed",
+                Some(LabelOutcome::Stopped) => "stopped",
+                Some(LabelOutcome::Failed) => "failed (see log)",
             };
             summary.push_str(&format!(
                 "; run {} {}/{} ({} failed), {state}",
@@ -178,7 +199,7 @@ impl Inner {
                 run.failed
             ));
         }
-        let u = r.usage;
+        let u = &r.usage;
         summary.push_str(&format!("; {} in / {} out tokens", u.input_tokens, u.output_tokens));
         if let Some(cost) = u.cost_usd {
             summary.push_str(&format!(", ${cost:.3}"));
@@ -188,6 +209,7 @@ impl Inner {
 
     pub(super) async fn list_label_images(&self, a: ListLabelImagesArgs) -> Result<Output, Error> {
         let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
+        self.confine_job(&a.job_id).await?;
         let (id, status, reviewed, boxes) = (a.job_id, a.status, a.reviewed, a.include_boxes);
         let (items, total) =
             self.labels(move |l| l.image_page(&id, status, reviewed, boxes, offset, limit)).await?;
@@ -200,9 +222,13 @@ impl Inner {
         if !(256..=1568).contains(&a.size) {
             return Err(invalid_arguments(format!("size must be in 256..=1568, got {}", a.size)));
         }
+        if a.from == 0 {
+            return Err(invalid_arguments("from is a box number, 1 or more"));
+        }
+        self.confine_reads("viewing an image")?;
         self.confine_job(&a.job_id).await?;
-        let (id, image_id, size) = (a.job_id, a.image_id, a.size);
-        let (r, jpeg) = self.labels(move |l| l.view(&id, image_id.as_deref(), size)).await?;
+        let (id, image_id, size, from) = (a.job_id, a.image_id, a.size, a.from);
+        let (r, jpeg) = self.labels(move |l| l.view(&id, image_id.as_deref(), size, from)).await?;
         let text = match &r.image {
             Some(v) => short(&crate::label::view_text(&r.job_id, v, &r.classes, r.to_review), MAX_VIEW_TEXT),
             None => format!("{}: nothing left to review (every labeled image is reviewed)", r.job_id),
@@ -217,38 +243,41 @@ impl Inner {
     }
 
     pub(super) async fn set_label_boxes(&self, a: SetLabelBoxesArgs) -> Result<Output, Error> {
-        let edit = BoxEdit { boxes: a.boxes, remove: a.remove, relabel: a.relabel, add: a.add };
+        self.confine_job(&a.job_id).await?;
+        let edit = BoxEdit {
+            expect: a.expect,
+            size: a.size,
+            boxes: a.boxes,
+            relabel: a.relabel,
+            remove: a.remove,
+            add: a.add,
+        };
         let (id, image_id) = (a.job_id, a.image_id);
-        let (v, to_review) = self
-            .labels(move |l| {
-                let v = l.set_boxes(&id, &image_id, &edit)?;
-                Ok((v, l.to_review(&id)?))
-            })
-            .await?;
+        let v = self.labels(move |l| l.set_boxes(&id, &image_id, &edit)).await?;
         let summary = format!(
-            "image {}: {} boxes saved (by hand, reviewed); {to_review} left to review",
-            v.id,
-            v.boxes.len()
+            "image {}: {} boxes saved (by hand, reviewed); revision {}",
+            v.id, v.num_boxes, v.revision
         );
         out(&v, summary)
     }
 
     pub(super) async fn review_label_images(&self, a: ReviewLabelImagesArgs) -> Result<Output, Error> {
-        if a.image_ids.is_empty() || a.image_ids.len() > 500 {
-            return Err(invalid_arguments("image_ids must name 1 to 500 images"));
-        }
-        let (id, ids, reviewed) = (a.job_id, a.image_ids, a.reviewed);
-        let r = self.labels(move |l| l.review(&id, &ids, reviewed)).await?;
+        self.confine_job(&a.job_id).await?;
+        let (id, ids, reviewed, expect) = (a.job_id, a.image_ids, a.reviewed, a.expect);
+        let r = self.labels(move |l| l.review(&id, &ids, reviewed, &expect)).await?;
         let mut summary =
             format!("marked {} {}", r.updated, if reviewed { "reviewed" } else { "not reviewed" });
         if let Some(f) = r.failed.first() {
-            summary.push_str(&format!(" ({} failed, e.g. {}: {})", r.failed.len(), f.id, f.code));
+            summary.push_str(&format!(" ({} failed, e.g. {}: {})", r.failed_total, f.id, f.code));
         }
-        summary.push_str(&format!("; {} left to review", r.to_review));
+        if let Some(n) = r.to_review {
+            summary.push_str(&format!("; {n} left to review"));
+        }
         out(&r, summary)
     }
 
     pub(super) async fn export_label_dataset(&self, a: ExportLabelDatasetArgs) -> Result<Output, Error> {
+        self.confine_reads("exporting a dataset")?;
         self.confine_job(&a.job_id).await?;
         let id = a.job_id;
         let req = LabelDatasetRequest { name: a.name, val_fraction: a.val_fraction, seed: a.seed };

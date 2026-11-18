@@ -229,7 +229,7 @@ pub(super) fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-pub(super) const ALL_TOOLS: [&str; 34] = [
+pub(super) const ALL_TOOLS: [&str; 32] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -252,10 +252,8 @@ pub(super) const ALL_TOOLS: [&str; 34] = [
     "cloud_offers",
     "cloud_instances",
     "cloud_terminate",
-    "list_label_agents",
     "list_label_jobs",
     "create_label_job",
-    "add_label_images",
     "start_labeling",
     "stop_labeling",
     "label_status",
@@ -273,7 +271,14 @@ pub(super) fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections
     assert_eq!(names, expected);
     // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
     let bytes = serde_json::to_vec(&tools).unwrap().len();
-    assert!(bytes < 92 * 1024, "tools/list is {bytes} bytes");
+    assert!(bytes < 80 * 1024, "tools/list is {bytes} bytes");
+    // The labeling tools, measured on their own (an agent that never labels still pays for them).
+    let label: usize = tools
+        .iter()
+        .filter(|t| t["name"].as_str().unwrap().contains("label"))
+        .map(|t| serde_json::to_vec(t).unwrap().len())
+        .sum();
+    assert!(label < 14 * 1024, "the labeling tools take {label} bytes of tools/list");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);

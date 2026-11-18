@@ -28,7 +28,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/dataset.rs` | `folo dataset check \| stats \| synth \| convert`, on folo-data |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
-| `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir in this process, holding its lock) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`); `print.rs` is the human output |
+| `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |
 | `build.rs` | Bakes `FOLO_GIT_SHA` and `FOLO_BUILD_DATE` into `folo --version` |
 | `tests/` | Integration tests that run the built binary; see [Tests](#tests-and-benchmarks) |
 
@@ -106,7 +106,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/dataset.rs` | `dataset synth \| stats \| check \| convert` end to end |
 | `tests/weights.rs` | `weights pull` against a release server on loopback, and the `gh` fallback |
 | `tests/cloud.rs` | `folo cloud` against a `folo serve --token` child as a `remote` connection |
-| `tests/label.rs` | `folo label` with a fake `claude` script: a job labeled, reviewed, corrected and exported in process, the error codes, and the same through a `folo serve` child (found by its data dir, and with `--server`) |
+| `tests/label.rs` | `folo label`'s flags, JSON records and exit codes with a fake `claude` script, in process and through a `folo serve` child (found by its data dir, and with `--server`); every child has a deadline |
 | `tests/codes.rs` | Every error code the CLI, server and MCP sources construct is in `folo_api::codes` |
 | `tests/version.rs` | Every version in the repository matches the workspace version |
 | `tests/onnx.rs` | ONNX export parity against onnxruntime (see below) |

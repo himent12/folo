@@ -43,8 +43,8 @@ use datasets::{
 use inference::{predict, predict_stream};
 use label::{
     add_label_images, create_label_job, delete_label_image, delete_label_job, label_agents, label_dataset,
-    label_events, label_image, label_images, label_job, label_jobs, label_logs, start_labeling,
-    stop_labeling, update_label_image, update_label_job,
+    label_events, label_image, label_images, label_job, label_jobs, label_logs, review_label_images,
+    start_labeling, stop_labeling, update_label_image, update_label_job,
 };
 use models::{export_model, get_model, list_models, model_eval, model_weights, val};
 use runs::{
@@ -122,6 +122,7 @@ pub fn api() -> Router<AppState> {
         )
         .route("/label/jobs/{id}/start", post(start_labeling))
         .route("/label/jobs/{id}/stop", post(stop_labeling))
+        .route("/label/jobs/{id}/review", post(review_label_images))
         .route("/label/jobs/{id}/events", get(label_events))
         .route("/label/jobs/{id}/logs", get(label_logs))
         .route("/label/jobs/{id}/dataset", post(label_dataset))

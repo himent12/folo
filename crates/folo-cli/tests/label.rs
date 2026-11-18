@@ -1,13 +1,19 @@
-//! `folo label` with `--json`: a job labeled end to end in this process (a fake `claude` that always answers one
-//! car), its review and export, the error codes, and the same commands through a `folo serve` child, found by its
-//! data dir and named with `--server`. No real agent CLI is called.
+//! `folo label` with `--json`: the flags, the JSON it prints and its exit codes, on a job labeled in this process
+//! (a fake `claude` that always answers one car) and through a `folo serve` child, found by its data dir and named
+//! with `--server`. The operations themselves are tested in folo-mcp (`tools/label_tests.rs`). No real agent CLI
+//! is called, and every child has a deadline.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use folo_test_support::{ChildGuard, TestDir};
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// Longest a `folo label` command may take (a run of five images with the fake agent takes about a second).
+const DEADLINE: Duration = Duration::from_secs(60);
 
 /// What the fake `claude` prints for every request: one `result` event whose reply puts a car on image 1, so
 /// runs use `--batch 1`.
@@ -48,6 +54,30 @@ fn photos(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
+/// Runs `cmd` to its end within [`DEADLINE`] (killed and failed after it): exit code, stdout, stderr.
+fn run(mut cmd: Command) -> (i32, String, String) {
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut child = ChildGuard::new(child);
+    let pipe = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = r.read_to_string(&mut s);
+            s
+        })
+    };
+    let out = pipe(Box::new(child.stdout.take().unwrap()));
+    let err = pipe(Box::new(child.stderr.take().unwrap()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < DEADLINE, "{cmd:?} still runs after {DEADLINE:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    (status.code().unwrap_or(-1), out.join().unwrap(), err.join().unwrap())
+}
+
 struct Env {
     claude: PathBuf,
     no_codex: PathBuf,
@@ -82,19 +112,12 @@ impl Env {
 
     /// `folo label <args> --json`: exit code, stdout records, stderr.
     fn label(&self, args: &[&str]) -> (i32, Vec<Value>, String) {
-        let out = self
-            .cmd()
-            .arg("label")
-            .args(args)
-            .args(&self.after)
-            .arg("--json")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8(out.stdout).unwrap();
+        let mut c = self.cmd();
+        c.arg("label").args(args).args(&self.after).arg("--json");
+        let (code, stdout, stderr) = run(c);
         let records =
             stdout.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}"))).collect();
-        (out.status.code().unwrap(), records, String::from_utf8(out.stderr).unwrap())
+        (code, records, stderr)
     }
 
     /// The one record of a command that succeeds.
@@ -105,16 +128,20 @@ impl Env {
         records.remove(0)
     }
 
-    /// The error code of a command that fails with exit code `exit`.
-    fn fails(&self, args: &[&str], exit: i32) -> String {
+    /// The error of a command that fails with exit code `exit`.
+    fn error(&self, args: &[&str], exit: i32) -> Value {
         let (code, records, err) = self.label(args);
         assert_eq!(code, exit, "{args:?}: {err}");
-        records.last().unwrap()["error"]["code"].as_str().unwrap().to_string()
+        records.last().unwrap()["error"].clone()
+    }
+
+    fn fails(&self, args: &[&str], exit: i32) -> String {
+        s(&self.error(args, exit)["code"]).to_string()
     }
 }
 
 fn s(v: &Value) -> &str {
-    v.as_str().unwrap()
+    v.as_str().unwrap_or_else(|| panic!("not a string: {v}"))
 }
 
 #[test]
@@ -126,11 +153,7 @@ fn label_review_and_export_in_this_process() {
     let env = env.after(&["--data-dir", home.to_str().unwrap()]);
 
     let agents = env.ok(&["agents"]);
-    assert_eq!(
-        (s(&agents["agents"][0]["id"]), &agents["agents"][0]["available"]),
-        ("claude", &Value::Bool(true))
-    );
-    assert_eq!(s(&agents["agents"][0]["version"]), "9.9.9");
+    assert_eq!((s(&agents["agents"][0]["id"]), s(&agents["agents"][0]["version"])), ("claude", "9.9.9"));
     assert_eq!(agents["agents"][1]["available"], false);
     assert!(s(&agents["agents"][1]["hint"]).contains("FOLO_CODEX_BIN"));
 
@@ -141,51 +164,69 @@ fn label_review_and_export_in_this_process() {
     // No server owns the data dir: the run works in this process, which waits for it.
     let (code, events, err) = env.label(&["start", &job, "--agent", "claude", "--batch", "1"]);
     assert_eq!(code, 0, "{err}");
-    assert_eq!(s(&events[0]["event"]), "started");
-    assert_eq!(events[0]["run"]["total"], 5);
+    assert_eq!((s(&events[0]["event"]), events[0]["total"].as_u64()), ("started", Some(5)));
     let finished = events.last().unwrap();
     assert_eq!((s(&finished["event"]), finished["counts"]["labeled"].as_u64()), ("finished", Some(5)));
-    assert_eq!((s(&finished["run"]["outcome"]), finished["usage"]["calls"].as_u64()), ("completed", Some(5)));
+    assert_eq!((s(&finished["run"]["outcome"]), finished["calls"].as_u64()), ("completed", Some(5)));
+    let e = env.error(&["start", &job, "--agent", "claude"], 2);
+    assert_eq!(s(&e["code"]), "usage");
+    assert!(s(&e["hint"]).contains("--all"), "{e}");
 
+    // Boxes in pixels of the image's view (64 × 48 is its own), paged by offset.
     let page = env.ok(&["images", &job, "--boxes", "--limit", "2"]);
     assert_eq!((page["total"].as_u64(), page["items"].as_array().unwrap().len()), (Some(5), 2));
-    assert_eq!(s(&page["next_cursor"]), "o2");
+    assert_eq!(page["next_offset"], 2);
     let first = &page["items"][0];
-    assert_eq!(first["boxes"], serde_json::json!([[0, 250, 100, 750, 600]]));
+    assert_eq!(
+        (first["size"].clone(), first["boxes"].clone()),
+        (json!([64, 48]), json!([[0, 16, 5, 48, 29]]))
+    );
     let (a, b) = (s(&first["id"]).to_string(), s(&page["items"][1]["id"]).to_string());
 
-    // The next image to review, drawn to a file.
+    // The next image to review, drawn to a file, with the revision edits are made on.
     let out = t.join("view.jpg");
     let view = env.ok(&["view", &job, "-o", out.to_str().unwrap(), "--size", "256"]);
     assert_eq!((s(&view["image"]["id"]), view["to_review"].as_u64()), (a.as_str(), Some(5)));
     assert_eq!(Path::new(s(&view["path"])), out.as_path());
     let jpeg = image::open(&out).unwrap();
     assert_eq!((jpeg.width(), jpeg.height()), (64, 48), "never upscaled");
+    let rev = s(&view["image"]["revision"]).to_string();
 
-    let set = env.ok(&["set", &job, &a, "--relabel", "1=person", "--add", "car,0,0,500,500"]);
-    assert_eq!(set["boxes"], serde_json::json!([[1, 250, 100, 750, 600], [0, 0, 0, 500, 500]]));
+    let edit = ["set", &job, &a, "--relabel", "1=person", "--add", "car,0,0,16,12", "--size", "32x24"];
+    assert_eq!(env.fails(&edit, 2), "usage", "numbered edits need --expect");
+    let set = env.ok(&[&edit[..], &["--expect", &rev]].concat());
+    assert_eq!(set["boxes"], json!([[1, 8, 2, 24, 14], [0, 0, 0, 16, 12]]));
     assert_eq!((set["reviewed"].as_bool(), s(&set["source"])), (Some(true), "manual"));
+    assert_eq!(env.fails(&[&edit[..], &["--expect", &rev]].concat(), 1), "label_boxes_changed");
     assert_eq!(env.fails(&["set", &job, &a, "--add", "car,1,2"], 2), "usage");
-    assert_eq!(env.fails(&["set", &job, &a, "--add", "truck,0,0,9,9"], 2), "usage");
+    assert_eq!(env.fails(&["set", &job, &a, "--box", "truck,0,0,9,9"], 2), "usage");
+    assert_eq!(env.fails(&["set", &job, &a, "--box", "car,0,0,9,9", "--size", "9"], 2), "usage");
 
+    // One image marked, one not there; then nothing marked at all is a failure.
     let reviewed = env.ok(&["review", &job, &b, "nope"]);
     assert_eq!((reviewed["updated"].as_u64(), reviewed["to_review"].as_u64()), (Some(1), Some(3)));
-    assert_eq!(s(&reviewed["failed"][0]["id"]), "nope");
-    let left = env.ok(&["images", &job, "--status", "labeled", "--reviewed", "false"]);
-    assert_eq!(left["total"], 3);
+    assert_eq!((s(&reviewed["failed"][0]["id"]), reviewed["failed_total"].as_u64()), ("nope", Some(1)));
+    assert_eq!(env.fails(&["review", &job, "nope", "--expect", "x"], 2), "usage");
+    let stale = ["review", &job, "p", "--expect", "p=1-00000000"];
+    let (code, records, _) = env.label(&stale);
+    assert_eq!(code, 3, "{records:?}");
+    assert_eq!(s(&records.last().unwrap()["error"]["code"]), "image_not_found");
     let status = env.ok(&["status", &job, "--log", "0"]);
     assert_eq!((status["reviewed"].as_u64(), status["log"].as_array().unwrap().len()), (Some(2), 0));
 
     let ds = env.ok(&["export", &job, "--name", "cars-v1", "--val-fraction", "0.2"]);
     assert_eq!((s(&ds["name"]), ds["train"].as_u64(), ds["val"].as_u64()), ("cars-v1", Some(4), Some(1)));
     assert!(Path::new(s(&ds["path"])).join("data.yaml").is_file());
-    let jobs = env.ok(&["jobs"]);
-    assert_eq!(jobs["jobs"][0]["dataset_id"], ds["dataset_id"]);
+    assert_eq!(env.ok(&["jobs"])["jobs"][0]["dataset_id"], ds["dataset_id"]);
 
-    // The codes of `folo_api::codes`, with their exit codes.
-    assert_eq!(env.fails(&["status", "lb_nope"], 3), "label_job_not_found");
-    assert_eq!(env.fails(&["start", &job, "--agent", "codex", "--all"], 4), "not_supported");
+    // The codes of `folo_api::codes`, with their exit codes and hints in `folo label` words.
+    let e = env.error(&["status", "lb_nope"], 3);
+    assert_eq!((s(&e["code"]), s(&e["hint"])), ("label_job_not_found", "`folo label jobs` lists the jobs"));
+    let e = env.error(&["start", &job, "--agent", "codex", "--all"], 4);
+    assert_eq!(s(&e["code"]), "not_supported");
+    assert!(s(&e["hint"]).contains("--agent"), "{e}");
     assert_eq!(env.fails(&["view", &job, "nope"], 3), "image_not_found");
+    assert_eq!(env.fails(&["view", &job, "--from", "0"], 2), "usage");
     assert_eq!(env.fails(&["images", &job, "--limit", "0"], 2), "usage");
 }
 
@@ -205,8 +246,15 @@ fn label_through_a_folo_serve() {
         .spawn()
         .unwrap()
         .into();
-    let mut first = String::new();
-    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    // Its first line says where it listens; a server that never says is a failure, not a hang.
+    let (tx, rx) = mpsc::channel();
+    let stdout = serve.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        let mut first = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut first);
+        let _ = tx.send(first);
+    });
+    let first = rx.recv_timeout(DEADLINE).expect("folo serve never said where it listens");
     let url = serde_json::from_str::<Value>(&first).unwrap()["url"].as_str().unwrap().to_string();
 
     // The data dir's server is found through its lock; the paths are made absolute for it.
@@ -223,31 +271,17 @@ fn label_through_a_folo_serve() {
     let finished = events.last().unwrap();
     assert_eq!((s(&finished["event"]), finished["counts"]["labeled"].as_u64()), ("finished", Some(5)));
 
-    let page = env.ok(&[&["images", &job], &srv[..]].concat());
+    let page = env.ok(&[&["images", &job, "--limit", "1"], &srv[..]].concat());
     let a = s(&page["items"][0]["id"]).to_string();
-    let out = t.join("view.jpg");
-    let view = env.ok(&[&["view", &job, &a, "-o", out.to_str().unwrap()], &srv[..]].concat());
-    assert_eq!(s(&view["image"]["id"]), a);
-    assert!(out.is_file());
     let set = env.ok(&[&["set", &job, &a, "--clear"], &srv[..]].concat());
-    assert_eq!((set["boxes"].as_array().unwrap().len(), set["reviewed"].as_bool()), (0, Some(true)));
-    let reviewed = env.ok(&[&["review", &job, &a, "--undo"], &d[..]].concat());
+    assert_eq!((set["num_boxes"].as_u64(), set["reviewed"].as_bool()), (Some(0), Some(true)));
+    let rev = format!("{a}={}", s(&set["revision"]));
+    let reviewed = env.ok(&[&["review", &job, &a, "--undo", "--expect", &rev], &d[..]].concat());
     assert_eq!(reviewed["updated"], 1);
     assert_eq!(env.fails(&[&["status", "lb_nope"], &srv[..]].concat(), 3), "label_job_not_found");
 
-    // Without `--wait` the command returns at once; the server's run ends on its own.
-    let again =
-        [&["start", &job, "--agent", "claude", "--images", &a, "--note", "look again"], &srv[..]].concat();
+    // Without `--wait` the command returns at once.
+    let again = [&["start", &job, "--agent", "claude", "--images", &a, "--note", "again"], &srv[..]].concat();
     let started = env.ok(&again);
-    assert_eq!((s(&started["job_id"]), started["run"]["total"].as_u64()), (job.as_str(), Some(1)));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let status = env.ok(&[&["status", &job], &srv[..]].concat());
-        if s(&status["status"]) == "idle" {
-            assert_eq!(s(&status["run"]["outcome"]), "completed");
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{status}");
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    assert_eq!((s(&started["job_id"]), started["total"].as_u64()), (job.as_str(), Some(1)));
 }

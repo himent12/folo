@@ -55,7 +55,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
+| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `label_boxes_changed`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; a box edit or review made on a revision of an image's boxes that is no longer theirs; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
@@ -78,7 +78,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   and `RunEstimate.cli`), `web_wasm` (the Studio this server serves includes the in-browser runtime, folo-wasm,
   so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
   web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below), `label_image_filters`
-  (`reviewed` and `ids` on `GET /api/label/jobs/{id}/images`; older servers ignore them), `uploads` (`/api/uploads`),
+  (`reviewed` and `ids` on `GET /api/label/jobs/{id}/images`; older servers ignore them), `label_revisions`
+  (`expect` on `PUT /api/label/jobs/{id}/images/{image_id}` and `POST /api/label/jobs/{id}/review`), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
@@ -886,7 +887,7 @@ exported more than once.
   is what is left to review), `ids` (comma-separated) only those images (ids it does not know match nothing); both
   need `label_image_filters` in `features`.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
-- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool }` → `LabelImage`:
+- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool, "expect"?: string }` → `LabelImage`:
   labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes
   `labeled` with `source: "manual"` and `reviewed: true` (an empty list labels it as a background image).
   `reviewed` alone marks the labels it has as checked (or not) and leaves boxes and `source` alone; only a
@@ -894,7 +895,18 @@ exported more than once.
   non-finite coordinate, or less than a pixel left after clipping is `400 invalid_body`, as are more than 1000
   boxes. `409 label_job_active` while the image is in an agent call (`labeling`). Every other image of a running
   job can be edited: one that still waited for the run leaves it (`run.total` drops by one), so labels drawn by
-  hand are never replaced by a call that had not started.
+  hand are never replaced by a call that had not started. `expect` (feature `label_revisions`) is the revision of
+  the boxes the change was made on: `"<count>-<hash>"`, the number of boxes and the FNV-1a 32-bit hash (8 hex
+  digits) of each box's `class` (u32) and `x1`, `y1`, `x2`, `y2` (f32 bits), little-endian, in order
+  (`folo_api::label_box_revision`; JSON keeps f32 exact, so a client computes it from the `LabelImage` it read).
+  When the image's boxes are another revision now, nothing changes: `409 label_boxes_changed`. The check and the
+  save are made under the same lock, so a run (or another edit) cannot land in between.
+- `POST /api/label/jobs/{id}/review` body `{ "image_ids": [string] (at most 1000), "reviewed"?: true, "expect"?: {
+  image_id: revision } }` → `{ "updated", "failed"?: [{ "id", "code", "message" }] (the first 20), "failed_total",
+  "to_review" }` (feature `label_revisions`): marks many images reviewed (or not) in one save, each as `reviewed`
+  alone does in `PUT`. An image that is not there (`image_not_found`), is not `labeled`, is in an agent call
+  (`label_job_active`) or whose boxes are not its `expect` revision (`label_boxes_changed`) is counted in `failed`
+  and the rest are marked. `to_review` is the job's labeled images that are not reviewed, after the change.
 - `DELETE /api/label/jobs/{id}/images/{image_id}` → `204` (an uploaded image's file is deleted too). `409
   label_job_active` while the image is in an agent call, as for `PUT`.
 

@@ -15,8 +15,8 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, and
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
 | `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
 | `src/tools/` | The tools; see below |
-| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`RelBox`, compact jobs, images and views) |
-| `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, the labeler in this process or `/api/label` of a `folo serve`, with a fallback for servers without `label_image_filters`), the operations (`ops.rs`: status, review queue, views, box edits, review, export), the compact forms and 0..1000 box units (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, edge ticks) |
+| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views) |
+| `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
 | `src/resources.rs` | `folo://` URIs (`FoloUri`), the resource listing and templates, JSON snapshots |
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
 | `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |
@@ -41,9 +41,9 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `models.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export` |
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
-| `label.rs` | The twelve labeling tools on `crate::label::Labels`: path resolution, `--confine` of a job's images, the `view_label_image` image content |
+| `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |
 | `tests.rs` | Unit tests, including the tool count the docs state |
-| `label_tests.rs` | The labeling tools with a scripted agent: in process, through a loopback `folo serve` (also one without the image filters), `--confine` |
+| `label_tests.rs` | The labeling tools with a scripted agent: in process, through a loopback `folo serve` (also an older one without the image filters and revisions), revisions against a gated run, `--confine` |
 
 ### How the flags are applied
 
@@ -60,7 +60,8 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
   through its `schema` feature, which this crate's `Cargo.toml` turns on. `schemas.rs` generates each schema with
   rmcp's `schema_for_input` / `schema_for_output`, removes what does not help validation and marks every object
   `additionalProperties: false`; `train_input` makes `dataset_id` optional when `resume_run_id` is given, and
-  `terse_input` (the labeling tools) also writes enums as `enum` without the variants' descriptions.
+  `terse_input` (the labeling tools) also writes enums as `enum` without the variants' descriptions and drops empty
+  defaults and `null` in optional types; `terse_output` drops every description and `required` list.
 
 ## Start here
 

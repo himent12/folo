@@ -1,9 +1,9 @@
 //! Arguments and results of the labeling tools (docs/MCP.md, Labeling), which `folo label --json` prints too.
 //!
 //! They are small on purpose: an agent pays for every byte. Ids instead of records, counts instead of lists, and
-//! boxes as [`RelBox`] arrays (`[class, x1, y1, x2, y2]` with the corners in 0..1000 of the image's width and
-//! height, the units the labeling agents answer in), so a box means the same on the original image and on any
-//! view of it.
+//! boxes as [`PxBox`] arrays: `[class, x1, y1, x2, y2]` in pixels of the image as the view shows it (its `size`),
+//! the frame current vision models answer in when they look at an image. The output schemas lose their field
+//! descriptions in `tools/list` (docs/MCP.md documents the fields), so these doc comments are for Rust readers.
 
 use folo_api::{
     LabelAgentId, LabelCounts, LabelEffort, LabelImageStatus, LabelJobStatus, LabelOutcome, LabelRun,
@@ -12,10 +12,13 @@ use folo_api::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A box: `[class, x1, y1, x2, y2]`, the class index and the corners in 0..1000 of the image's width and height.
-pub type RelBox = [u32; 5];
+/// A box: `[class, x1, y1, x2, y2]`, the class index and the corners in pixels of a view of the image.
+pub type PxBox = [u32; 5];
 
-/// `list_label_agents` result.
+/// The long side of a view when a call names none.
+pub const DEFAULT_VIEW_SIZE: u32 = 1024;
+
+/// `folo label agents` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelAgentsResult {
     /// Claude Code, then Codex.
@@ -59,33 +62,28 @@ pub struct LabelJobSummary {
     pub dataset_id: Option<String>,
 }
 
-/// `create_label_job`.
+/// `create_label_job`: a new job, or (with `job_id`) more images for one.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateLabelJobArgs {
-    /// Job (and default dataset) name.
-    pub name: String,
-    /// Class names (1 to 80, distinct).
-    pub classes: Vec<String>,
-    /// What the agent should know: what counts as each class, what to skip.
+    /// Add `paths` to this job instead of making one.
+    #[serde(default)]
+    pub job_id: Option<String>,
+    /// New job: its name (also its dataset's).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// New job: class names (1 to 80).
+    #[serde(default)]
+    pub classes: Option<Vec<String>>,
+    /// New job: what counts as each class, what to skip.
     #[serde(default)]
     pub instructions: String,
-    /// Folders (searched recursively) or image files on the server's machine; read in place.
+    /// Folders (recursive) or image files on the server's machine, read in place.
     #[serde(default)]
     #[schemars(length(max = 100))]
     pub paths: Vec<String>,
 }
 
-/// `add_label_images`.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AddLabelImagesArgs {
-    /// Job id.
-    pub job_id: String,
-    /// Folders (searched recursively) or image files on the server's machine; read in place.
-    #[schemars(length(min = 1, max = 100))]
-    pub paths: Vec<String>,
-}
-
-/// `create_label_job` and `add_label_images` result.
+/// `create_label_job` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelImagesAddedResult {
     /// Job id.
@@ -113,43 +111,64 @@ pub struct JobIdArgs {
 pub struct StartLabelingArgs {
     /// Job id.
     pub job_id: String,
-    /// The agent (list_label_agents).
+    /// The agent CLI.
     pub agent: LabelAgentId,
-    /// Model; default: the agent's default_model.
+    /// Default: the agent's.
     #[serde(default)]
     pub model: Option<String>,
-    /// Reasoning effort; default: the agent's default_effort.
+    /// Default: the agent's.
     #[serde(default)]
     pub effort: Option<LabelEffort>,
-    /// `unlabeled` (pending and failed images) or `all` (relabel every image, hand edits too).
+    /// `all` also relabels labeled images.
     #[serde(default)]
     pub scope: LabelScope,
-    /// Exactly these images instead of `scope` (e.g. to ask again about some, with a `note`).
+    /// Only these images (e.g. a sample, or again with a `note`).
     #[serde(default)]
     pub image_ids: Option<Vec<String>>,
-    /// An extra instruction for this run only, e.g. what the last labels got wrong.
+    /// An instruction for this run only.
     #[serde(default)]
     pub note: String,
     /// Images per agent call (1 to 16).
     #[serde(default)]
     pub batch: Option<u32>,
-    /// Agent calls in flight (1 to 8, default 3).
+    /// Agent calls in flight (1 to 8).
     #[serde(default)]
     pub parallel: Option<u32>,
 }
 
-/// `start_labeling` and `stop_labeling` result.
+/// `start_labeling` result: the run is on its way (`label_status` follows it).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelRunStarted {
     /// Job id.
     pub job_id: String,
-    /// `running`, `stopping` or `idle`.
-    pub status: LabelJobStatus,
-    /// The run (`total`: images it labels).
-    pub run: Option<LabelRunSummary>,
+    /// Images the run labels.
+    pub total: u64,
+    /// The model it asks for; `null`: the CLI's default.
+    pub model: Option<String>,
 }
 
-/// An agent run of a job, without its timestamps and tokens (`label_status`'s `usage` sums those of every run).
+impl From<&folo_api::LabelJob> for LabelRunStarted {
+    fn from(j: &folo_api::LabelJob) -> Self {
+        let run = j.run.as_ref();
+        Self {
+            job_id: j.id.clone(),
+            total: run.map_or(0, |r| r.total),
+            model: run.and_then(|r| r.model.clone()),
+        }
+    }
+}
+
+/// `stop_labeling` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LabelJobState {
+    /// Job id.
+    pub job_id: String,
+    /// `stopping`, or `idle` once the run has ended.
+    pub status: LabelJobStatus,
+}
+
+/// An agent run of a job, without its timestamps, tokens and error (`label_status` has the job's tokens, its
+/// log the error).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelRunSummary {
     /// The agent.
@@ -166,12 +185,6 @@ pub struct LabelRunSummary {
     pub failed: u64,
     /// `null` while it runs.
     pub outcome: Option<LabelOutcome>,
-    /// Why it failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// What to do about it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
 }
 
 impl From<LabelRun> for LabelRunSummary {
@@ -184,8 +197,6 @@ impl From<LabelRun> for LabelRunSummary {
             done: r.done,
             failed: r.failed,
             outcome: r.outcome,
-            error: r.error,
-            hint: r.hint,
         }
     }
 }
@@ -195,17 +206,17 @@ impl From<LabelRun> for LabelRunSummary {
 pub struct LabelStatusArgs {
     /// Job id.
     pub job_id: String,
-    /// How many of the last log lines to include.
-    #[serde(default = "default_label_log")]
-    #[schemars(range(min = 0, max = 50))]
+    /// Last log lines to include.
+    #[serde(default = "default_log_lines")]
+    #[schemars(range(max = 50))]
     pub log_lines: u32,
 }
 
-fn default_label_log() -> u32 {
+fn default_log_lines() -> u32 {
     5
 }
 
-/// `label_status` result.
+/// `label_status` result: the job, its last run, the tokens of all its runs (flat) and its last log lines.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelStatusResult {
     /// Job id.
@@ -218,15 +229,16 @@ pub struct LabelStatusResult {
     pub classes: Vec<String>,
     /// Image counts.
     pub counts: LabelCounts,
-    /// Labeled images a person or an agent has checked (`review_label_images`, `set_label_boxes`).
+    /// Labeled images a person or an agent has checked.
     pub reviewed: u64,
     /// The active run, else the last one.
     pub run: Option<LabelRunSummary>,
     /// Tokens of every run of the job.
+    #[serde(flatten)]
     pub usage: LabelUsage,
     /// The dataset last exported from the job.
     pub dataset_id: Option<String>,
-    /// The last log lines, oldest first (`warn:` / `error:` marks those levels).
+    /// The last log lines, oldest first (`warn: ` / `error: ` before those levels).
     pub log: Vec<String>,
 }
 
@@ -238,10 +250,10 @@ pub struct ListLabelImagesArgs {
     /// Only this status.
     #[serde(default)]
     pub status: Option<LabelImageStatus>,
-    /// Only reviewed or not reviewed images (status `labeled` + `false`: what is left to review).
+    /// Only reviewed or not reviewed images.
     #[serde(default)]
     pub reviewed: Option<bool>,
-    /// Include each image's boxes.
+    /// Add each image's `boxes` (pixels of its default view, `size`) and `revision`.
     #[serde(default)]
     pub include_boxes: bool,
     /// `next_cursor` of the previous page.
@@ -264,16 +276,22 @@ pub struct LabelImageSummary {
     pub status: LabelImageStatus,
     /// Its boxes.
     pub num_boxes: u32,
-    /// Who drew them: `agent` (a run) or `manual` (set_label_boxes, Studio).
+    /// Who drew them: `agent` (a run) or `manual` (by hand).
     pub source: Option<LabelSource>,
     /// Checked by a person or an agent.
     pub reviewed: bool,
     /// Why its last agent call failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Its boxes (with include_boxes).
+    /// With include_boxes: the default view's size, `[width, height]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boxes: Option<Vec<RelBox>>,
+    pub size: Option<[u32; 2]>,
+    /// With include_boxes: the revision of its boxes (`set_label_boxes`' `expect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// With include_boxes: its boxes in pixels of that view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boxes: Option<Vec<PxBox>>,
 }
 
 /// `view_label_image`.
@@ -281,18 +299,30 @@ pub struct LabelImageSummary {
 pub struct ViewLabelImageArgs {
     /// Job id.
     pub job_id: String,
-    /// The image; omit for the next one to review (labeled, not reviewed).
+    /// Default: the next image to review.
     #[serde(default)]
     pub image_id: Option<String>,
-    /// Long side of the view in pixels.
+    /// Long side of the view, pixels.
     #[serde(default = "default_view_size")]
     #[schemars(range(min = 256, max = 1568))]
     pub size: u32,
+    /// First box (1-based) to list; a dense image lists 300 at a time.
+    #[serde(default = "first")]
+    #[schemars(range(min = 1))]
+    pub from: u32,
 }
 
-/// Default long side of `view_label_image`.
+/// [`DEFAULT_VIEW_SIZE`], for serde.
 pub fn default_view_size() -> u32 {
-    1024
+    DEFAULT_VIEW_SIZE
+}
+
+fn first() -> u32 {
+    1
+}
+
+fn is_first(n: &u32) -> bool {
+    *n == 1
 }
 
 /// `view_label_image` result (the image itself is the result's `image` content).
@@ -302,7 +332,7 @@ pub struct LabelImageViewResult {
     pub job_id: String,
     /// Class names; a box's class indexes them.
     pub classes: Vec<String>,
-    /// Labeled images not reviewed yet (this one included).
+    /// Labeled images not reviewed yet.
     pub to_review: u64,
     /// The image; `null` when nothing is left to review.
     pub image: Option<LabelImageView>,
@@ -315,10 +345,8 @@ pub struct LabelImageView {
     pub id: String,
     /// File name.
     pub file: String,
-    /// Width of the original, pixels.
-    pub width: u32,
-    /// Height of the original, pixels.
-    pub height: u32,
+    /// The view's `[width, height]`: the frame of `boxes`.
+    pub size: [u32; 2],
     /// Where it stands.
     pub status: LabelImageStatus,
     /// Who drew the boxes.
@@ -328,8 +356,15 @@ pub struct LabelImageView {
     /// Why its last agent call failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// `[class, x1, y1, x2, y2]` in 0..1000; box n of the view is `boxes[n-1]`.
-    pub boxes: Vec<RelBox>,
+    /// The revision of its boxes: `set_label_boxes`' and `review_label_images`' `expect`.
+    pub revision: String,
+    /// Its boxes.
+    pub num_boxes: u32,
+    /// The number of `boxes[0]` (1 unless the view was asked `from` another).
+    #[serde(default = "first", skip_serializing_if = "is_first")]
+    pub from: u32,
+    /// `[class, x1, y1, x2, y2]` in pixels of `size`; box `from + i` is `boxes[i]`.
+    pub boxes: Vec<PxBox>,
 }
 
 /// `set_label_boxes`: either `boxes`, or edits of the current boxes by their view number.
@@ -339,18 +374,24 @@ pub struct SetLabelBoxesArgs {
     pub job_id: String,
     /// Image id.
     pub image_id: String,
-    /// All the image's boxes, replacing what it has (`[]`: no objects, a background image).
+    /// The `revision` the edit was made on; required with relabel / remove / add.
     #[serde(default)]
-    pub boxes: Option<Vec<RelBox>>,
-    /// Box numbers (1-based, as the view shows them) to delete.
+    pub expect: Option<String>,
+    /// The frame of the coordinates, `[width, height]`; default: the default view's.
     #[serde(default)]
-    pub remove: Vec<u32>,
-    /// `[number, class]` pairs: give those boxes another class.
+    pub size: Option<[u32; 2]>,
+    /// All the image's boxes (`[]`: none).
+    #[serde(default)]
+    pub boxes: Option<Vec<PxBox>>,
+    /// `[number, class]`: give box `number` another class.
     #[serde(default)]
     pub relabel: Vec<[u32; 2]>,
+    /// Numbers of boxes to delete.
+    #[serde(default)]
+    pub remove: Vec<u32>,
     /// Boxes to append.
     #[serde(default)]
-    pub add: Vec<RelBox>,
+    pub add: Vec<PxBox>,
 }
 
 /// `review_label_images`.
@@ -361,9 +402,12 @@ pub struct ReviewLabelImagesArgs {
     /// Labeled images whose boxes are right.
     #[schemars(length(min = 1, max = 500))]
     pub image_ids: Vec<String>,
-    /// False takes the mark back.
+    /// `false` takes the mark back.
     #[serde(default = "yes")]
     pub reviewed: bool,
+    /// Image id → the `revision` it was checked on.
+    #[serde(default)]
+    pub expect: std::collections::BTreeMap<String, String>,
 }
 
 fn yes() -> bool {
@@ -378,27 +422,26 @@ pub struct ReviewLabelImagesResult {
     /// Images that could not be (first 20).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<ReviewFailure>,
-    /// Labeled images not reviewed yet.
-    pub to_review: u64,
+    /// Every image that could not be marked.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed_total: u64,
+    /// Labeled images not reviewed yet; `null` when it could not be counted after the change.
+    pub to_review: Option<u64>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// An image `review_label_images` could not mark.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ReviewFailure {
-    /// Image id.
-    pub id: String,
-    /// Error code.
-    pub code: String,
-    /// What went wrong.
-    pub message: String,
-}
+pub type ReviewFailure = folo_api::LabelReviewFailure;
 
 /// `export_label_dataset`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExportLabelDatasetArgs {
     /// Job id.
     pub job_id: String,
-    /// Dataset name; default: the job's.
+    /// Default: the job's name.
     #[serde(default)]
     pub name: Option<String>,
     /// Share of the images in the val split (0 to 0.5).

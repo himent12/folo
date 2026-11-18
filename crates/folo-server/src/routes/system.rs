@@ -47,6 +47,7 @@ pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResp
         (st.web_wasm, folo_api::FEATURE_WEB_WASM),
         (st.store.labeler().is_ok(), folo_api::FEATURE_AGENT_LABELING),
         (st.store.labeler().is_ok(), folo_api::FEATURE_LABEL_IMAGE_FILTERS),
+        (st.store.labeler().is_ok(), folo_api::FEATURE_LABEL_REVISIONS),
         (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
     ];
     let features = features

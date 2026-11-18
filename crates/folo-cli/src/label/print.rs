@@ -2,8 +2,8 @@
 
 use folo_api::{LabelJobStatus, LabelOutcome};
 use folo_mcp::types::{
-    LabelAgentsResult, LabelImageSummary, LabelImagesAddedResult, LabelJobSummary, LabelRunStarted,
-    LabelStatusResult, Page, ReviewLabelImagesResult,
+    LabelAgentsResult, LabelImageSummary, LabelImagesAddedResult, LabelJobSummary, LabelStatusResult,
+    ReviewLabelImagesResult,
 };
 
 use crate::output::Out;
@@ -66,17 +66,17 @@ pub(super) fn added(r: &LabelImagesAddedResult, out: Out) {
     }
 }
 
-pub(super) fn started(r: &LabelRunStarted, out: Out) {
+pub(super) fn started(r: &folo_api::LabelJob, out: Out) {
     match &r.run {
         Some(run) => out.human(format!(
             "{}: {} ({}, {} effort) labels {} images",
-            r.job_id,
+            r.id,
             run.agent.display_name(),
             run.model.as_deref().unwrap_or("its default model"),
             run.effort.as_str(),
             run.total
         )),
-        None => out.human(format!("{}: {}", r.job_id, status_name(r.status))),
+        None => out.human(format!("{}: {}", r.id, status_name(r.status))),
     }
 }
 
@@ -100,9 +100,7 @@ pub(super) fn status(r: &LabelStatusResult, out: Out) {
             None => "running".to_string(),
             Some(LabelOutcome::Completed) => "completed".into(),
             Some(LabelOutcome::Stopped) => "stopped".into(),
-            Some(LabelOutcome::Failed) => {
-                format!("failed: {}", run.error.as_deref().unwrap_or("see the log"))
-            }
+            Some(LabelOutcome::Failed) => "failed (see the log)".into(),
         };
         out.human(format!(
             "last run: {} ({}), {}/{} labeled, {} failed, {outcome}",
@@ -130,9 +128,9 @@ pub(super) fn status(r: &LabelStatusResult, out: Out) {
     }
 }
 
-pub(super) fn images(page: &Page<LabelImageSummary>, offset: u64, out: Out) {
+pub(super) fn images(items: &[LabelImageSummary], total: u64, offset: u64, out: Out) {
     out.human(format!("{:<6} {:<9} {:>5} {:<7} {:<8} file", "id", "status", "boxes", "source", "reviewed"));
-    for i in &page.items {
+    for i in items {
         let source = match i.source {
             Some(folo_api::LabelSource::Agent) => "agent",
             Some(folo_api::LabelSource::Manual) => "manual",
@@ -148,23 +146,27 @@ pub(super) fn images(page: &Page<LabelImageSummary>, offset: u64, out: Out) {
             i.file,
             i.error.as_deref().map(|e| format!("  ({e})")).unwrap_or_default()
         ));
-        if let Some(boxes) = &i.boxes {
+        if let (Some(boxes), Some([w, h])) = (&i.boxes, i.size) {
+            out.human(format!("         {w}x{h} px view, revision {}", i.revision.as_deref().unwrap_or("-")));
             for (n, b) in boxes.iter().enumerate() {
                 out.human(format!("         {} class {} {},{},{},{}", n + 1, b[0], b[1], b[2], b[3], b[4]));
             }
         }
     }
-    let shown = page.items.len() as u64;
+    let shown = items.len() as u64;
     let from = if shown == 0 { offset } else { offset + 1 };
-    out.human(format!("{from}-{} of {}", offset + shown, page.total));
+    let more =
+        if offset + shown < total { format!("; next: --offset {}", offset + shown) } else { String::new() };
+    out.human(format!("{from}-{} of {total}{more}", offset + shown));
 }
 
 pub(super) fn reviewed(r: &ReviewLabelImagesResult, reviewed: bool, out: Out) {
+    let left = r.to_review.map(|n| format!("; {n} left to review")).unwrap_or_default();
+    let failed = if r.failed_total > 0 { format!(", {} failed", r.failed_total) } else { String::new() };
     out.human(format!(
-        "marked {} {}; {} left to review",
+        "marked {} {}{failed}{left}",
         r.updated,
-        if reviewed { "reviewed" } else { "not reviewed" },
-        r.to_review
+        if reviewed { "reviewed" } else { "not reviewed" }
     ));
     for f in &r.failed {
         out.human(format!("  {}: {} ({})", f.id, f.message, f.code));

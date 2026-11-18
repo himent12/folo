@@ -9,8 +9,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use folo_api::{
     CreateLabelJob, ImportLabelImages, LabelAgentList, LabelDatasetRequest, LabelEvent, LabelImage,
-    LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, RunLogs, StartLabeling,
-    UpdateLabelImage, UpdateLabelJob,
+    LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, LabelReviewResult,
+    ReviewLabelImages, RunLogs, StartLabeling, UpdateLabelImage, UpdateLabelJob,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -147,6 +147,14 @@ pub(super) async fn update_label_image(
     ApiJson(req): ApiJson<UpdateLabelImage>,
 ) -> Result<Json<LabelImage>> {
     Ok(Json(blocking(&st, move |s| s.labeler()?.update_image(&id, &image_id, req)).await?))
+}
+
+pub(super) async fn review_label_images(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<ReviewLabelImages>,
+) -> Result<Json<LabelReviewResult>> {
+    Ok(Json(blocking(&st, move |s| s.labeler()?.review(&id, &req)).await?))
 }
 
 pub(super) async fn delete_label_image(

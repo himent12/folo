@@ -12,6 +12,31 @@ pub const FEATURE_AGENT_LABELING: &str = "agent_labeling";
 /// `reviewed` and `ids` filters (an older server ignores them and answers with every image).
 pub const FEATURE_LABEL_IMAGE_FILTERS: &str = "label_image_filters";
 
+/// [`SystemResponse::features`](crate::SystemResponse::features): `PUT /api/label/jobs/{id}/images/{image_id}`
+/// takes `expect` (a [`label_box_revision`] checked under the job's lock), and `POST /api/label/jobs/{id}/review`
+/// marks many images in one save.
+pub const FEATURE_LABEL_REVISIONS: &str = "label_revisions";
+
+/// The revision of an image's boxes: their count and a hash of their classes and exact pixel values, e.g.
+/// `"3-9f2c41d0"`. Any change to the boxes changes it (with overwhelming odds), so a client can send back the
+/// revision it saw (`UpdateLabelImage::expect`) and the server refuses a change made on stale boxes.
+pub fn label_box_revision(boxes: &[BBox]) -> String {
+    // FNV-1a, 32 bits: stable across platforms and versions, unlike std's hasher.
+    let mut h: u32 = 0x811c_9dc5;
+    let mut eat = |bytes: [u8; 4]| {
+        for b in bytes {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+    };
+    for b in boxes {
+        eat(b.class.to_le_bytes());
+        for v in [b.x1, b.y1, b.x2, b.y2] {
+            eat(v.to_bits().to_le_bytes());
+        }
+    }
+    format!("{}-{h:08x}", boxes.len())
+}
+
 /// A coding-agent CLI FOLO can ask for labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -434,6 +459,58 @@ pub struct UpdateLabelImage {
     /// Marks the image reviewed or not; absent: reviewed when `boxes` are given, else unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed: Option<bool>,
+    /// The [`label_box_revision`] of the boxes the change was made on: `409 label_boxes_changed` when the image's
+    /// boxes are no longer those (feature `label_revisions`; an older server ignores it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<String>,
+}
+
+/// `POST /api/label/jobs/{id}/review`: marks many images reviewed (or not) in one save (feature
+/// `label_revisions`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReviewLabelImages {
+    /// The images (at most 1000; repeats count once).
+    pub image_ids: Vec<String>,
+    /// Reviewed (`true`, the default) or not.
+    #[serde(default = "default_true")]
+    pub reviewed: bool,
+    /// Per image, the [`label_box_revision`] its boxes were checked on; one whose boxes changed since fails with
+    /// `label_boxes_changed`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub expect: std::collections::BTreeMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /api/label/jobs/{id}/review` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LabelReviewResult {
+    /// Images marked.
+    pub updated: u64,
+    /// The first 20 images that could not be, with why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<LabelReviewFailure>,
+    /// Every image that could not be marked.
+    #[serde(default)]
+    pub failed_total: u64,
+    /// Labeled images of the job that are not reviewed, after the change.
+    pub to_review: u64,
+}
+
+/// An image `POST /api/label/jobs/{id}/review` could not mark.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LabelReviewFailure {
+    /// The image id as sent.
+    pub id: String,
+    /// The error code (`image_not_found`, `label_boxes_changed`, `label_job_active`, `invalid_body`).
+    pub code: String,
+    /// What went wrong.
+    pub message: String,
 }
 
 /// Which images an agent run labels.
