@@ -372,8 +372,9 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
 - **Choosing.** Settings › Appearance: Theme (Dark / Light / System; with System its description says what the OS is
   now), Dark theme and Light theme (selects: built-ins in order, then custom themes by name), Custom themes, Reduce
   motion (`src/screens/settings/appearance.rs`). Picking a different theme of the other mode switches to that mode,
-  except with System; re-picking the theme a select shows does nothing (every select calls back only for a new
-  option, by pointer as by Enter and Space: `src/controls/select.rs`). The palette has "Theme: <name>" for every theme, offered for a query only (type "theme"); Ctrl Shift L and "Switch to light / dark
+  except with System; re-picking the theme a select shows does nothing, by pointer as by Enter and Space (the slot's
+  callback ignores its own theme; the select itself calls back for a click on its chosen option, which other selects
+  need, such as New run asking about its dataset again). The palette has "Theme: <name>" for every theme, offered for a query only (type "theme"); Ctrl Shift L and "Switch to light / dark
   theme" switch the mode only, to an explicit Dark or Light. The rules are `ThemePrefs` and `Catalog` in
   `src/theme/catalog.rs`; `FoloApp::apply_theme` (`src/app/preferences.rs`) sets the `Theme` global.
 - **System** follows the OS appearance live: folo-ui's `Window::on_appearance_changed` (Win32 `WM_SETTINGCHANGE`

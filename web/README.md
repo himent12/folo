@@ -168,8 +168,9 @@ and overrides over that mode's base; the first of each mode is its default and h
 tokens` (it writes one `:root[data-theme-id="<id>"]` block per non-default theme into `tokens.css` and every theme's
 resolved palette, `themeIds` and `colorVars` into `tokens.ts`, and fails naming the path of a malformed theme), and
 `npm run check` (`design/contrast.mjs` holds every theme to its mode's pairings). `npm run tokens` also rewrites the
-data line (`const T = …`) of `index.html`'s first-paint script: the built-in ids and every colour token's custom
-property, which it checks a stored custom theme against (`npm run check` fails while it is stale). The rules of a
+data line (`const T = …`) of `index.html`'s first-paint script: the built-in ids, the id pattern (`THEME_ID` in
+`scripts/themes.mjs`, also `themeIdPattern` in `tokens.ts`, which `themes.ts` checks ids with) and every colour token's
+custom property, which it checks a stored custom theme against (`npm run check` fails while it is stale). The rules of a
 custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, and a picked file's bytes go through
 `readThemeFile` (size, one byte order mark, strict UTF-8, `design/json-scan.mjs`'s check of what Desktop's JSON
 parser refuses, JSON; it never rejects, so one bad file can't stop a pick), both held to `design/theme-cases.json` (the same
