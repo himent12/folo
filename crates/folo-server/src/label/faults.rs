@@ -495,6 +495,15 @@ mod tests {
         // A new sentence ends the clause, read in the message's own case.
         assert_eq!(reset("Try again in 30 s. Contact support").as_deref(), Some("try again in 30 s"));
         assert_eq!(reset("Try again at 3 p.m. Contact support").as_deref(), Some("try again at 3 p.m."));
+        // ... for a wait's clause too: after "a.m." a capital letter starts a new sentence, a small one goes on.
+        assert_eq!(
+            reset("Rate limit reached. Retry after 90 seconds from 9 a.m. Contact support").as_deref(),
+            Some("retry after 90 seconds from 9 a.m.")
+        );
+        assert_eq!(
+            reset("Rate limit reached. Retry after 90 seconds from 9 a.m. today").as_deref(),
+            Some("retry after 90 seconds from 9 a.m. today")
+        );
         assert_eq!(reset("You've hit your usage limit. Try again later."), None);
         assert_eq!(reset("rate limit exceeded"), None);
     }

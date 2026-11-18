@@ -876,13 +876,16 @@ mod tests {
         let codex = Codex::new();
         let snapshot =
             |version: &str| Catalog { version: version.into(), ..Catalog::read(&catalog_json(), None) };
+        codex.cli.remember("codex", "0.169.0");
         let _ = codex.catalog.get(|| snapshot("0.169.0"));
         codex.refuse(&snapshot("0.169.0"));
         assert!(codex.refused(&snapshot("0.169.0")));
         // ... and the catalog is read again (with the probe): the next call may run a Codex updated in place.
         assert_eq!(codex.catalog.get(|| snapshot("0.170.0")).version, "0.170.0");
-        // A late refusal of the older version leaves the newer snapshot in place.
+        codex.cli.remember("codex", "0.170.0");
+        // A late refusal of the older version leaves the newer snapshot in place, the probe's and the catalog's.
         codex.refuse(&snapshot("0.169.0"));
+        assert_eq!(codex.cli.version().as_deref(), Some("0.170.0"), "the probe of the newer Codex stays");
         assert_eq!(codex.catalog.get(|| snapshot("0.171.0")).version, "0.170.0");
         assert!(!codex.refused(&snapshot("0.170.0")), "a newer Codex is given the lean catalog again");
         // Refusals interleave: the newer version refuses too, then a late refusal from a call that still held

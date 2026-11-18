@@ -246,6 +246,13 @@ impl Cli {
         self.found().map(|f| f.version)
     }
 
+    /// Remembers `version` at `path` as the probe's finding (tests).
+    #[cfg(test)]
+    pub(crate) fn remember(&self, path: &str, version: &str) {
+        let found = || Some(Found { path: PathBuf::from(path), version: version.into() });
+        self.probed.get_where(|_| false, found);
+    }
+
     /// Forgets the probe when it found `version`: the next question about the CLI runs it again (it may have been
     /// updated in place). A probe that already found another version stays.
     pub fn forget_version(&self, version: &str) {
