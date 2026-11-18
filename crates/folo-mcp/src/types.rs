@@ -1,5 +1,6 @@
 //! Tool arguments and results that are specific to MCP (paging, summaries, the extra fields of `run_status`, ...).
-//! Everything else is a `folo-api` type, so the schemas match the HTTP API. See docs/MCP.md.
+//! Everything else is a `folo-api` type, so the schemas match the HTTP API. See docs/MCP.md. The labeling tools'
+//! types are in `label`.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,9 @@ use folo_api::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub mod label;
+pub use label::*;
 
 /// Default page size of list tools.
 pub const DEFAULT_LIMIT: u32 = 50;

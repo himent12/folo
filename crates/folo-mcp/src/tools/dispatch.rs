@@ -26,6 +26,12 @@ impl Progress {
         Progress { target: token.map(|t| (peer, t)), last_sent: None, last_value: f64::NEG_INFINITY }
     }
 
+    /// No progress (tests call tools without a peer).
+    #[cfg(test)]
+    pub fn none() -> Progress {
+        Progress { target: None, last_sent: None, last_value: f64::NEG_INFINITY }
+    }
+
     /// Reports `done` of `total`. `last` forces the send (the final update before the result).
     pub async fn report(&mut self, done: f64, total: Option<f64>, last: bool) {
         let Some((peer, token)) = &self.target else { return };
@@ -83,6 +89,18 @@ impl Inner {
             "cloud_offers" => self.cloud_offers(parse_args(args)?).await,
             "cloud_instances" => self.cloud_instances(parse_args(args)?).await,
             "cloud_terminate" => self.cloud_terminate(parse_args(args)?).await,
+            "list_label_agents" => self.list_label_agents(parse_args(args)?).await,
+            "list_label_jobs" => self.list_label_jobs(parse_args(args)?).await,
+            "create_label_job" => self.create_label_job(parse_args(args)?).await,
+            "add_label_images" => self.add_label_images(parse_args(args)?).await,
+            "start_labeling" => self.start_labeling(parse_args(args)?).await,
+            "stop_labeling" => self.stop_labeling(parse_args(args)?).await,
+            "label_status" => self.label_status(parse_args(args)?).await,
+            "list_label_images" => self.list_label_images(parse_args(args)?).await,
+            "view_label_image" => self.view_label_image(parse_args(args)?).await,
+            "set_label_boxes" => self.set_label_boxes(parse_args(args)?).await,
+            "review_label_images" => self.review_label_images(parse_args(args)?).await,
+            "export_label_dataset" => self.export_label_dataset(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
         res.map_err(|e| mcp_code(crate::confine::map_denied(e)))

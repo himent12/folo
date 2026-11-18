@@ -5,8 +5,8 @@ on your machine, shows you every box for review, and turns the result into a dat
 
 ```
 unlabeled images ──► labeling job ──► agent run ──► review and correct ──► dataset ──► folo train
-   (upload or a          (classes +      (Claude Code      (Studio)          (YOLO folder,
-    folder)              instructions)    or Codex)                           registered)
+   (upload or a          (classes +      (Claude Code      (Studio, or an    (YOLO folder,
+    folder)              instructions)    or Codex)         agent via MCP)    registered)
 ```
 
 The agents' boxes are a draft. On everyday photos they find most objects and place most boxes well (numbers
@@ -14,7 +14,7 @@ below), and they also miss things and box things that are not there. Plan to loo
 view is built for that.
 
 ## What you need
-- `folo serve` (the real server, not `--mock`).
+- `folo serve` (the real server, not `--mock`), or `folo mcp` / `folo label` on a data dir.
 - At least one of the two CLIs on the machine that runs `folo serve`, signed in:
   - Claude Code: install it from <https://claude.com/claude-code>, then run `claude` once and sign in.
   - Codex: install it from <https://developers.openai.com/codex/cli>, then run `codex login`.
@@ -44,7 +44,33 @@ images you may not share with them.
    boxes is kept as a background image. The job stays, so you can add images, label them and export again.
 
 ## From a script or an agent
-Everything Studio does is the HTTP API ([API.md](API.md), Agent labeling):
+An agent (Claude Code, Codex, any MCP client) can run the whole loop itself through FOLO's MCP server
+([MCP.md](MCP.md), Labeling): `create_label_job` on a folder, `start_labeling` (a sample of about 20 images first,
+with `image_ids`), `label_status` until the run is idle, then for each image `view_label_image` (the image with its
+boxes drawn and numbered, as an image the model sees, plus the boxes as text) and either `review_label_images`
+("Looks right") or `set_label_boxes` (relabel, remove or add boxes by number, saved as a hand edit), and finally
+`export_label_dataset` and `train`. Boxes are `[class, x1, y1, x2, y2]` with the corners in 0..1000 of the
+image's width and height. The `label_folder` prompt walks an agent through it:
+
+```sh
+claude mcp add folo -- folo mcp        # then ask: "label ~/photos/street for cars and people, then train on it"
+```
+
+Scripts get the same operations, with `--json` and stable exit codes, from `folo label` ([CLI.md](CLI.md),
+Labeling). It goes through the `folo serve` that owns the data dir, so Studio shows the job as it changes:
+
+```sh
+folo label create street --classes car,person --instructions "Label every car and pedestrian." \
+  --path /data/photos/street --json                       # {"job_id":"lb_3f9a","images":240,"added":240,...}
+folo label start lb_3f9a --agent claude --wait --json      # progress records, then the job's status
+folo label images lb_3f9a --status labeled --reviewed false --boxes --json
+folo label view lb_3f9a -o next.jpg                        # the next image to review, boxes numbered
+folo label set lb_3f9a 17 --relabel 2=person --remove 3
+folo label review lb_3f9a 18 19 20
+folo label export lb_3f9a --json                           # {"dataset_id":"ds_8c1e",...,"train":192,"val":48}
+```
+
+Everything Studio does is also the HTTP API ([API.md](API.md), Agent labeling):
 
 ```sh
 api=http://127.0.0.1:7878/api
@@ -54,6 +80,7 @@ job=$(curl -s $api/label/jobs -H 'Content-Type: application/json' \
 curl -s $api/label/jobs/$job/start -H 'Content-Type: application/json' -d '{"agent": "claude"}'
 curl -sN $api/label/jobs/$job/events          # job / image / log events until you stop reading
 curl -s $api/label/jobs/$job                  # status "idle" once the run has ended; counts, usage, run.outcome
+curl -s "$api/label/jobs/$job/images?status=labeled&reviewed=false&limit=20"   # what is left to review
 curl -s $api/label/jobs/$job/dataset -H 'Content-Type: application/json' -d '{"val_fraction": 0.2}'
 ```
 
@@ -201,4 +228,11 @@ a folder of your own images, and prints what the agent reported using.
 - Boxes only (no masks or keypoints), up to 80 classes and 10000 images per job.
 - One agent run per job at a time; several jobs can run side by side.
 - `folo serve --mock` has no agent labeling. Studio's own demo mode (`?mock=1`) simulates it for a look around.
-- Not yet in FOLO Desktop, the `folo` CLI or the MCP server: use Studio or the HTTP API.
+- Not yet in FOLO Desktop: use Studio, `folo label`, the MCP tools or the HTTP API.
+- A run lives in the process that started it: `folo label start` without a `folo serve` on the data dir, and
+  `folo mcp` in embedded mode, keep running until it ends (the MCP server stops it when the client disconnects).
+- An agent reviewing through MCP sees each image at 1024 px on the long side by default (`size` goes up to 1568):
+  enough for most objects, but small ones in large photos may need a person, or a smaller `size` to save tokens
+  where they do not matter.
+- Label paths name files on the machine that runs the labeling (the server's, with `--server`); the MCP and CLI
+  commands do not upload images. Upload them in Studio, or copy them there first.

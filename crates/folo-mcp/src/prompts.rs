@@ -1,4 +1,5 @@
-//! Prompts (docs/MCP.md "Prompts"). Retrieval only builds messages: it never starts jobs or touches files.
+//! Prompts (docs/MCP.md "Prompts"): `train_on_folder`, `label_folder` and `diagnose_run`. Retrieval only builds
+//! messages: it never starts jobs or touches files.
 
 use folo_server::store::{LogsQuery, MetricsQuery};
 use rmcp::ErrorData as McpError;
@@ -7,7 +8,7 @@ use serde_json::json;
 
 use crate::server::Inner;
 
-/// The prompts a server lists (`train_on_folder` starts training, so read-only servers hide it).
+/// The prompts a server lists (`train_on_folder` and `label_folder` change state, so read-only servers hide them).
 pub fn list(read_only: bool) -> Vec<Prompt> {
     let mut out = Vec::new();
     if !read_only {
@@ -20,6 +21,23 @@ pub fn list(read_only: bool) -> Vec<Prompt> {
                     .with_required(true),
                 PromptArgument::new("goal")
                     .with_description("Free text, e.g. \"fast on CPU\" or \"best accuracy\".")
+                    .with_required(false),
+            ]),
+        ));
+    }
+    if !read_only {
+        out.push(Prompt::new(
+            "label_folder",
+            Some("Label a folder of unlabeled images with a coding agent, review the boxes, export a dataset and train."),
+            Some(vec![
+                PromptArgument::new("folder_path")
+                    .with_description("The folder of images on the server's machine, absolute or relative to --data-dir.")
+                    .with_required(true),
+                PromptArgument::new("classes")
+                    .with_description("The classes to find, comma-separated, e.g. \"car, person\".")
+                    .with_required(true),
+                PromptArgument::new("instructions")
+                    .with_description("What counts as each class and what to skip, in the user's words.")
                     .with_required(false),
             ]),
         ));
@@ -70,6 +88,44 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
             }
             Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
                 .with_description("Register a folder and train on it"))
+        }
+        "label_folder" if !inner.opts.read_only => {
+            let folder = arg(&req, "folder_path").ok_or_else(|| missing("label_folder", "folder_path"))?;
+            let classes = arg(&req, "classes").ok_or_else(|| missing("label_folder", "classes"))?;
+            let classes: Vec<&str> = classes.split(',').map(str::trim).filter(|c| !c.is_empty()).collect();
+            let instructions = arg(&req, "instructions").unwrap_or_default();
+            let create = json!({
+                "name": std::path::Path::new(&folder).file_name().and_then(|n| n.to_str()).unwrap_or("images"),
+                "classes": classes,
+                "instructions": instructions,
+                "paths": [folder],
+            });
+            let text = format!(
+                "Label the images of a folder with a coding agent, check its boxes yourself, and make a training \
+                 dataset. Keep tool results small: use ids, counts and pages, not full listings.\n\n\
+                 1. `list_label_agents`: pick an available agent (prefer `claude`; its default model and effort \
+                 are the cheapest that label well). If none is available, tell the user what its `hint` says and \
+                 stop.\n\
+                 2. `create_label_job` with {create}. Sharpen `instructions` first if the user's words leave \
+                 a class unclear (look-alikes, what to skip, partly hidden objects).\n\
+                 3. Try the instructions on a sample: `list_label_images` (limit 20) and `start_labeling` with \
+                 those `image_ids`. Poll `label_status` every 20-30 s until `status` is `idle`; if the run \
+                 failed, report `run.error` and its hint and stop.\n\
+                 4. Review the sample: call `view_label_image` without `image_id` (the next image to review). It \
+                 shows the boxes numbered, with ticks every 100 of 1000 on the edges; boxes are [class, x1, y1, \
+                 x2, y2] in 0..1000 of the width and height. Right: collect its id for `review_label_images`. \
+                 Wrong: fix it with `set_label_boxes` (`remove` / `relabel` / `add` by number, or all `boxes`). \
+                 If the same mistake repeats, improve the instructions in a `note` and ask again with \
+                 `start_labeling` and those `image_ids` rather than fixing every image by hand.\n\
+                 5. When the sample looks right, `start_labeling` with no `image_ids` (the rest), poll \
+                 `label_status`, and review every image the same way until `to_review` is 0 (review in batches: \
+                 several ids per `review_label_images` call).\n\
+                 6. `export_label_dataset`, then `train` with its `dataset_id` (see the `train_on_folder` prompt \
+                 for picking a scale and image size), and tell the user the tokens used (`label_status` usage), \
+                 how many boxes you corrected, and the run id."
+            );
+            Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
+                .with_description("Label a folder, review, export and train"))
         }
         "diagnose_run" => {
             let run_id = arg(&req, "run_id").ok_or_else(|| missing("diagnose_run", "run_id"))?;

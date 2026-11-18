@@ -305,6 +305,12 @@ fixes.
   20000 to about 8000), images scaled to at most 1024 px, and a run that ends on the first failure another call
   would only repeat. On 24 COCO photos the default (Claude Code, Haiku) found 79% of the objects with 92% of its
   boxes right for under a cent.
+- From an agent or a script: twelve MCP tools (`create_label_job`, `start_labeling`, `label_status`,
+  `view_label_image`, `set_label_boxes`, `review_label_images`, `export_label_dataset`, ...) and the `label_folder`
+  prompt let Claude Code or Codex run the whole loop, including the review: `view_label_image` returns the image
+  with its boxes drawn and numbered, and boxes are edited by number in 0..1000 units. `folo label` does the same
+  from the command line with `--json` (docs/CLI.md, Labeling). `GET /api/label/jobs/{id}/images` takes `reviewed`
+  and `ids` (feature `label_image_filters`).
 
 #### Desktop
 - The window works on Windows: Minimize, Maximize and Close in the title bar, dragging and double-clicking the

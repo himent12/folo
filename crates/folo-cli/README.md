@@ -1,7 +1,7 @@
 # folo-cli
 
-The `folo` binary: training, evaluation, inference, export, dataset tools, published weights, cloud compute, the
-Studio server (`folo serve`) and the MCP server (`folo mcp`). It sits on top of the stack and depends on folo-api,
+The `folo` binary: training, evaluation, inference, export, dataset tools, published weights, cloud compute, agent
+labeling, the Studio server (`folo serve`) and the MCP server (`folo mcp`). It sits on top of the stack and depends on folo-api,
 folo-client, folo-data, folo-gpu, folo-nn, folo-server, folo-mcp and folo-vision; no workspace crate depends on it.
 Its contract is [docs/CLI.md](../../docs/CLI.md). The library target (`src/lib.rs`) holds only the clap command tree
 and two constants, so tests can parse commands with the real parser; every command is a module of the binary
@@ -13,7 +13,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 |---|---|
 | `src/main.rs` | `main`: parses the command line, dispatches each subcommand (`run`), turns on the caches, resolves `--data-dir` |
 | `src/lib.rs` | `VERSION` (`folo --version`), `WEIGHTS_REPO` (default of `weights pull --repo`), `pub mod cli` |
-| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct. Help strings and defaults here are what `folo describe` prints |
+| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/label.rs`: `folo label`'s). Help strings and defaults here are what `folo describe` prints |
 | `src/output.rs` | `Out` (human text vs `--json` records), `CliError` and its JSON envelope, `ExitCode` |
 | `src/describe.rs` | `folo describe`: the clap tree as JSON, plus the MCP tool schemas from folo-mcp |
 | `src/engine.rs` | Opening datasets, registering the GPU backend for `--device`, engine errors as `CliError` |
@@ -28,6 +28,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/dataset.rs` | `folo dataset check \| stats \| synth \| convert`, on folo-data |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
+| `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir in this process, holding its lock) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`); `print.rs` is the human output |
 | `build.rs` | Bakes `FOLO_GIT_SHA` and `FOLO_BUILD_DATE` into `folo --version` |
 | `tests/` | Integration tests that run the built binary; see [Tests](#tests-and-benchmarks) |
 
@@ -47,6 +48,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `dataset check \| stats \| synth \| convert` | `src/dataset.rs` |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
 | `cloud providers \| connect \| connections \| check \| disconnect \| offers \| instances \| terminate` | `src/cloud.rs` |
+| `label agents \| jobs \| create \| add \| start \| stop \| status \| images \| view \| set \| review \| export` | `src/label/`, on folo-mcp's `label` module |
 | `mcp` | `src/mcp.rs`, on [folo-mcp](../folo-mcp/README.md) |
 
 ### The `--json` contract (`src/output.rs`)
@@ -104,6 +106,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/dataset.rs` | `dataset synth \| stats \| check \| convert` end to end |
 | `tests/weights.rs` | `weights pull` against a release server on loopback, and the `gh` fallback |
 | `tests/cloud.rs` | `folo cloud` against a `folo serve --token` child as a `remote` connection |
+| `tests/label.rs` | `folo label` with a fake `claude` script: a job labeled, reviewed, corrected and exported in process, the error codes, and the same through a `folo serve` child (found by its data dir, and with `--server`) |
 | `tests/codes.rs` | Every error code the CLI, server and MCP sources construct is in `folo_api::codes` |
 | `tests/version.rs` | Every version in the repository matches the workspace version |
 | `tests/onnx.rs` | ONNX export parity against onnxruntime (see below) |

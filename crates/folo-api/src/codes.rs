@@ -24,7 +24,12 @@ const fn c(code: &'static str, status: u16, exit: u8, meaning: &'static str) -> 
 pub const CODES: &[Code] = &[
     // Bad input.
     c("usage", 400, 2, "invalid command-line arguments or flags (CLI)"),
-    c("invalid_arguments", 400, 2, "tool arguments that fail the inputSchema or a documented range (MCP)"),
+    c(
+        "invalid_arguments",
+        400,
+        2,
+        "tool arguments that fail the inputSchema or a documented range (MCP; also `folo label set`)",
+    ),
     c("bad_request", 400, 2, "a malformed request (HTTP)"),
     c("invalid_path", 400, 2, "a malformed path parameter (HTTP)"),
     c("invalid_query", 400, 2, "a malformed query parameter (HTTP)"),
@@ -225,6 +230,12 @@ pub const CODES: &[Code] = &[
     ),
     c("data_dir_lock_failed", 500, 1, "the data dir's `serve.lock` could not be locked (CLI)"),
     c("mcp_failed", 500, 1, "`folo mcp` stopped with an error (CLI)"),
+    c(
+        "label_run_failed",
+        502,
+        1,
+        "`folo label start` waited for an agent run that ended failed (the agent CLI's message; CLI)",
+    ),
     c(
         "download_failed",
         502,

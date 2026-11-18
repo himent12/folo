@@ -99,6 +99,9 @@ pub(super) async fn add_label_images(
 #[derive(Deserialize)]
 pub(super) struct LabelImagesParams {
     status: Option<String>,
+    reviewed: Option<bool>,
+    /// Comma-separated image ids.
+    ids: Option<String>,
     #[serde(default)]
     offset: u64,
     limit: Option<u64>,
@@ -116,8 +119,16 @@ pub(super) async fn label_images(
                 .hint("status is one of pending, labeling, labeled, failed")
         })?),
     };
-    let limit = p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    Ok(Json(st.store.labeler()?.images(&id, status, p.offset, limit)?))
+    let ids =
+        p.ids.map(|ids| ids.split(',').map(str::trim).filter(|i| !i.is_empty()).map(String::from).collect());
+    let q = crate::label::LabelImageQuery {
+        status,
+        reviewed: p.reviewed,
+        ids,
+        offset: p.offset,
+        limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
+    };
+    Ok(Json(st.store.labeler()?.query(&id, &q)?))
 }
 
 pub(super) async fn label_image(

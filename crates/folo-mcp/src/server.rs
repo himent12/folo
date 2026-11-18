@@ -47,6 +47,8 @@ const SAFETY_POLL: u64 = 10;
 pub struct Inner {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) proxy: Option<Arc<HttpStore>>,
+    /// The labeling jobs: the store's, or the proxied server's.
+    pub(crate) labels: crate::label::Labels,
     pub(crate) mock: bool,
     pub(crate) opts: Options,
     pub(crate) paths: PathPolicy,
@@ -255,10 +257,15 @@ impl FoloMcp {
     pub fn new(store: Arc<dyn Store>, proxy: Option<Arc<HttpStore>>, opts: Options) -> FoloMcp {
         let mock = proxy.is_none() && store.is_mock();
         let paths = PathPolicy { data_dir: opts.data_dir.clone(), confine: opts.confine };
+        let labels = match &proxy {
+            Some(http) => crate::label::Labels::Http(http.clone()),
+            None => crate::label::Labels::Store(store.clone()),
+        };
         FoloMcp {
             inner: Arc::new(Inner {
                 store,
                 proxy,
+                labels,
                 mock,
                 opts,
                 confinement: Confinement::new(paths.clone()),
@@ -354,7 +361,9 @@ impl ServerHandler for FoloMcp {
             .with_instructions(
                 "FOLO: a fast YOLO-style object detector. Call folo_info first, then list_datasets / \
                  create_synthetic_dataset / register_dataset, train, run_status (or subscribe to \
-                 folo://runs/{run_id}), val and predict. Errors are isError results whose text is \
+                 folo://runs/{run_id}), val and predict. Unlabeled images: create_label_job, start_labeling, \
+                 view_label_image to check the boxes, export_label_dataset (the label_folder prompt walks \
+                 through it). Errors are isError results whose text is \
                  {code, message, hint}. Recipes: the folo://docs/AGENT_COOKBOOK resource.",
             )
     }

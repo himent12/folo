@@ -163,10 +163,15 @@ impl State {
             boxes: r.boxes.clone(),
             source: r.source,
             error: r.error.clone(),
-            // By the shown status: an image back in an agent call is not reviewed while the call may replace its labels
-            // (the stored flag stays, for a call that leaves them untouched).
-            reviewed: r.reviewed && self.status(r) == LabelImageStatus::Labeled,
+            reviewed: self.reviewed(r),
         }
+    }
+
+    /// Whether an image is reviewed as the API shows it: by the shown status, so an image back in an agent call is
+    /// not reviewed while the call may replace its labels (the stored flag stays, for a call that leaves them
+    /// untouched).
+    pub fn reviewed(&self, r: &Record) -> bool {
+        r.reviewed && self.status(r) == LabelImageStatus::Labeled
     }
 
     /// The stored image `image_id`.

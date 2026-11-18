@@ -1,7 +1,7 @@
 # `folo mcp`: FOLO for agents
 
 `folo mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. With it, an agent
-(Claude Code, Codex, any MCP client) can build datasets, train, evaluate, run and export FOLO models without screen
+(Claude Code, Codex, any MCP client) can label images, build datasets, train, evaluate, run and export FOLO models without screen
 scraping. It exposes the same operations as the CLI and `docs/API.md`, with the same error codes.
 
 ```jsonc
@@ -23,8 +23,8 @@ Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#u
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp/`.
 
 ## Status
-Implemented: both protocol revisions, all 22 tools with generated input and output schemas, every resource and
-both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
+Implemented: both protocol revisions, all 34 tools with generated input and output schemas, every resource and
+both subscription flows, the three prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
 tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
 it:
 
@@ -42,6 +42,7 @@ it:
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 | `cloud_*`, `train` with `compute` | the data dir's connections and instance ledger; cloud runs on their worker (docs/CLOUD.md) | the mock's RunPod connection `cc_4d2a`, simulated cloud runs | `/api/cloud/...`, `POST /api/runs` |
+| labeling (`*_label_*`, `start_labeling`, `stop_labeling`, `label_status`) | the data dir's labeling jobs; runs call the `claude` / `codex` CLI of this machine (docs/LABELING.md) | `not_implemented` (the mock has no labeler) | `/api/label/...` |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
 in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the ONNX switches `half`, `dynamic` and
@@ -80,7 +81,8 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 64 KB for all 22 tools; a test keeps it under 68 KiB): no `$schema`,
+meanings. They are compacted for `tools/list` (about 88 KB for all 34 tools, 24 KB of it the twelve labeling tools; a test
+keeps it under 92 KiB): no `$schema`,
 no numeric `format` annotations, no `minimum: 0` of unsigned types (also optional ones), defaults without f32 noise
 (`0.01`, not `0.009999999776482582`); output schemas also leave out defaults and the field descriptions of the shared
 types, in `$defs` and when the result is one (`Run`, `TrainConfig`, `Epoch`, `Dataset`, `CloudInstance`, ...;
@@ -160,9 +162,40 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `cloud_terminate` | `{ instance_id }` | `CloudInstance` (`terminated`, or `terminating` with the error FOLO retries): terminates the instance now; a run still using it fails with `cloud_instance_lost` |
 
 `train`'s `compute` (TrainConfig, docs/API.md *Cloud runs*) trains the run on a cloud connection; `run_status` then
-has the run's `cloud` (phase, instance, cost). Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`,
-`get_dataset`, `run_status`, `val`, `predict`, `predict_batch`, `compare_runs`, `cloud_connections`, `cloud_offers`
-and `cloud_instances`. Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
+has the run's `cloud` (phase, instance, cost).
+
+### Labeling
+Twelve tools take unlabeled images to a dataset with a Claude Code or Codex agent (docs/LABELING.md), and let the
+calling agent check and correct the boxes itself; the `label_folder` prompt walks through them. A box is
+`[class, x1, y1, x2, y2]`: the class index into the job's `classes`, the corners in **0..1000 of the image's width
+and height** (the units the labeling agents answer in), so a box means the same on the original and on any view.
+Results carry ids and counts, not records; no tool returns image bytes except `view_label_image`. Typical sizes
+(`structuredContent`): `create_label_job` 60 bytes, `list_label_agents` 430, `label_status` 700 with 5 log lines,
+`list_label_images` 110 per image (140 with `include_boxes`), `set_label_boxes` 160, `review_label_images` 30.
+
+| tool | input | output (`structuredContent`) |
+|---|---|---|
+| `list_label_agents` | `{}` | `agents`: per agent CLI (`claude`, `codex`) `id`, `available`, `version`, `models` (suggestions), `default_model`, `default_effort`, `hint` (how to install it, when missing) |
+| `list_label_jobs` | paging | page of `{ id, name, status: "idle"\|"running"\|"stopping", classes, counts: { images, pending, labeled, failed, boxes }, dataset_id }`, newest first |
+| `create_label_job` | `{ name, classes: string[] (1–80), instructions?: "", paths?: string[] (max 100) }` | `{ job_id, images, added, skipped, skipped_first? }` (`skipped_first`: the first 5 files left out, with the reason). `paths` are folders (searched recursively) or image files, read in place. A path that fails before any image was added leaves no job behind; a later one fails with a hint naming the job and `add_label_images` |
+| `add_label_images` | `{ job_id, paths: string[] (1–100) }` | as `create_label_job` |
+| `start_labeling` | `{ job_id, agent: "claude"\|"codex", model?, effort?: "low"\|"medium"\|"high", scope?: "unlabeled"\|"all", image_ids?: string[], note?: "", batch?: 1–16, parallel?: 1–8 }` | `{ job_id, status, run: { agent, model, effort, total, done, failed, outcome, error?, hint? } }`; returns at once. `image_ids` relabels exactly those images (hand edits too), e.g. a sample first, or "ask again" with a `note` saying what was wrong |
+| `stop_labeling` | `{ job_id }` | as `start_labeling`; labeled images stay |
+| `label_status` | `{ job_id, log_lines?: 5 (max 50) }` | `{ id, name, status, classes, counts, reviewed, run, usage: { calls, input_tokens, cached_input_tokens, output_tokens, cost_usd }, dataset_id, log }` (`log`: the last lines, `warn: ` / `error: ` before those levels) |
+| `list_label_images` | `{ job_id, status?: "pending"\|"labeling"\|"labeled"\|"failed", reviewed?: boolean, include_boxes?: false }` + paging (limit up to 200) | page of `{ id, file, status, num_boxes, source: "agent"\|"manual"\|null, reviewed, error?, boxes? }` in the order the images were added |
+| `view_label_image` | `{ job_id, image_id?, size?: 1024 (256–1568) }` | `{ job_id, classes, to_review, image: { id, file, width, height, status, source, reviewed, error?, boxes } }` plus an **`image` content item** (`image/jpeg`): the image scaled so its long side is `size` (never upscaled), each box outlined in its class colour with its number (1, 2, ...) in a tag, and ticks every 100 of 1000 on all four edges. The `text` item lists the boxes (`2 person 120,80,340,900`) and the classes. Without `image_id` it shows the next image to review (labeled, not reviewed); `image: null` when none is left |
+| `set_label_boxes` | `{ job_id, image_id, boxes?: Box[] }` or `{ job_id, image_id, relabel?: [number, class][], remove?: number[], add?: Box[] }` (numbers as the view shows them) | the image as in the view. Saved as a hand edit (`source: "manual"`) and **reviewed**, like Studio's Save. Edits apply relabel, then remove, then add; boxes they leave alone keep their exact pixels. `boxes: []` makes it a background image. Both forms at once, a number the image does not have, a class out of range or a box that is not `x1 < x2 ≤ 1000`, `y1 < y2 ≤ 1000` is `invalid_arguments` |
+| `review_label_images` | `{ job_id, image_ids: string[] (1–500), reviewed?: true }` | `{ updated, failed?: [{ id, code, message }] (first 20), to_review }`: Studio's "Looks right" (the boxes stay as they are, and stay the agent's); `reviewed: false` takes the mark back. An image without labels cannot be marked |
+| `export_label_dataset` | `{ job_id, name?, val_fraction?: 0.2 (0–0.5), seed?: 0 }` | `{ dataset_id, name, path, train, val }`: the labeled images as a registered YOLO dataset, ready for `train` |
+
+A view of a 1920×1080 photo at the default size is a 1024×576 JPEG, which a Claude model reads as about 800 input
+tokens; `size: 512` quarters that for a quick look. The usual loop: `view_label_image` (no `image_id`), then either
+`review_label_images` with that id, or `set_label_boxes` with the fixes, and again until `image` is `null`.
+
+Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`,
+`get_dataset`, `run_status`, `val`, `predict`, `predict_batch`, `compare_runs`, `cloud_connections`, `cloud_offers`,
+`cloud_instances`, `label_status` and `view_label_image` (`list_*` includes `list_label_agents`, `list_label_jobs`
+and `list_label_images`). Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
 error) if called anyway.
 
 ## Resources
@@ -215,16 +248,22 @@ calls tools itself.
 - `train_on_folder` (arguments: `folder_path` required; `goal` optional, free text, e.g. "fast on CPU"): returns
   instructions to call `register_dataset`, inspect `get_dataset` stats and issues, choose a scale and image size from
   the stats and `folo_info` devices, call `train`, and explain the choices to the user.
+- `label_folder` (arguments: `folder_path` and `classes` (comma-separated) required; `instructions` optional):
+  returns the labeling walk-through: check `list_label_agents`, `create_label_job` on the folder, label a sample
+  of about 20 images first (`start_labeling` with `image_ids`) and follow it with `label_status`, review the sample
+  with `view_label_image` / `set_label_boxes` / `review_label_images`, ask again with a `note` when the agent got
+  something wrong systematically, label the rest, review, `export_label_dataset`, then offer `train`.
 - `diagnose_run` (arguments: `run_id` required): returns the run's metric summary and last log lines embedded in the
   message, plus instructions to identify over/underfitting, class imbalance or LR problems and propose a concrete
   TrainConfig diff.
-In read-only mode, `train_on_folder` is not listed.
+In read-only mode, `train_on_folder` and `label_folder` are not listed.
 
 ## Files and safety
 - No tool deletes or overwrites existing files. Generated outputs (synthetic datasets, run directories, exports,
   prediction dumps) go to new, collision-free paths under `--data-dir` (`<name>`, then `<name>-2`, ... if taken).
   Writes go to a temp file first and are then renamed into place.
-- Input paths (`register_dataset.path`, `predict.image_path`, `predict_batch.paths/glob`) may be absolute or relative
+- Input paths (`register_dataset.path`, `predict.image_path`, `predict_batch.paths/glob`, the `paths` of
+  `create_label_job` and `add_label_images`) may be absolute or relative
   to `--data-dir`, and are resolved on the machine running `folo mcp`. `--data-dir` is where FOLO **writes**; it is not
   a read sandbox. `--confine` restricts reads to `--data-dir` as well, using canonicalised paths with symlinks and
   junctions resolved, and rejects anything outside it with `path_outside_data_dir`. Datasets are confined where they are read:
@@ -239,8 +278,12 @@ In read-only mode, `train_on_folder` is not listed.
   checked, so the agent gets a clear `path_outside_data_dir` error (results cached per dataset; the guard keeps
   enforcing if the dataset changes later). `register_dataset` unregisters a dataset that fails the check, and
   datasets registered earlier without `--confine` that fail it are left out of `list_datasets` and
-  `resources/list` and rejected everywhere else. In proxy mode `folo serve` reads the datasets, so `--confine`
-  covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`). The checks guard
+  `resources/list` and rejected everywhere else. Labeling jobs are checked the same way: label paths outside the
+  data dir are refused when they are added, and `start_labeling`, `view_label_image` and `export_label_dataset`
+  refuse a job (made earlier without `--confine`) that has images outside it. In proxy mode `folo serve` reads the
+  datasets and the label images, so `--confine`
+  covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`) and the label paths
+  it passes on (checked before they are sent). The checks guard
   what is reachable through FOLO's tools; they do not defend against another process re-pointing links inside the
   data dir between a check and the open (FOLO never creates links).
 
@@ -272,7 +315,11 @@ In read-only mode, `train_on_folder` is not listed.
   takes its `log` from `GET /api/runs/{id}/logs` and its `last_step` / `last_epoch` from `/metrics`, `val` →
   `POST /api/val`, `predict_batch` → one `POST /api/predict` upload per image (until the planned
   `POST /api/predict/batch` exists), `compare_runs` → `GET /api/runs/{id}` + `/metrics` per run, the `cloud_*`
-  tools → `/api/cloud/*`, dataset images and sample grids → `GET /api/datasets/{id}/images/{image_id}`. Run resources are polled the same way as in
+  tools → `/api/cloud/*`, the labeling tools → `/api/label/*` (`view_label_image` draws on the server's
+  `?thumb=` image; the `reviewed` filter and the lookups of one image use `GET /api/label/jobs/{id}/images` with
+  `reviewed` / `ids`, and a server without the `label_image_filters` feature is asked for every image instead and
+  they are filtered here; label paths name files on the server's machine), dataset
+  images and sample grids → `GET /api/datasets/{id}/images/{image_id}`. Run resources are polled the same way as in
   embedded mode, so subscriptions work through the proxy too. Every tool works in proxy mode; errors from the
   server keep their codes and statuses (an answer that is not FOLO's, such as a proxy's error page, is
   `bad_gateway`). A server that does not answer is the `server_unreachable` tool error. The URL may be `http://` or
@@ -305,4 +352,7 @@ its first epoch, resumed (same id) and left training when the client disconnects
 `stopped` by the graceful shutdown. Further tests cover `--confine` (with `FOLO_DATASET_RECHECK_MS=0`, test
 support: the server looks at a dataset's files again on every request instead of after 5 s, so the test can edit a
 registered dataset to read outside the data dir and ask again at once) and proxy mode against `folo serve --mock`
-(also with a token); folo-mcp's own tests cover an unreachable server.
+(also with a token); folo-mcp's own tests cover an unreachable server. The labeling tools are tested in
+`crates/folo-mcp/src/tools/label_tests.rs` with a scripted agent (no agent CLI): the whole flow in process and
+through a loopback `folo serve` (also one without `label_image_filters`), the `image/jpeg` content of a view,
+box edits and their errors, `--confine` and a job that a missing path leaves behind.

@@ -18,6 +18,32 @@ pub(super) fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
     Arc::new(s)
 }
 
+/// [`input`] of a labeling tool, shrunk further: a `oneOf` of string constants becomes an `enum` and the `$defs`
+/// lose their descriptions (the field's own description says what the values mean), as output schemas do.
+pub(super) fn terse_input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+    let mut s = (*input::<T>()).clone();
+    if let Some(Value::Object(defs)) = s.get_mut("$defs") {
+        for d in defs.values_mut().filter_map(Value::as_object_mut) {
+            d.remove("description");
+            const_enum(d);
+        }
+    }
+    Arc::new(s)
+}
+
+/// Writes a `oneOf` of string constants (a Rust enum with documented variants) as an `enum`.
+fn const_enum(o: &mut JsonObject) {
+    let consts: Option<Vec<Value>> = o
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(|b| b.get("const").filter(|c| c.is_string()).cloned()).collect());
+    if let Some(values) = consts {
+        o.remove("oneOf");
+        o.insert("type".into(), json!("string"));
+        o.insert("enum".into(), Value::Array(values));
+    }
+}
+
 /// Marks every object schema with `properties` (the root and the `$defs`) `additionalProperties: false`: tools
 /// reject arguments they do not know ([`unknown_argument`]) instead of silently ignoring a typo.
 ///
@@ -102,14 +128,7 @@ fn compact(s: &mut JsonObject, output: bool) {
                     if in_defs {
                         o.remove("description");
                     }
-                    let consts: Option<Vec<Value>> = o.get("oneOf").and_then(Value::as_array).and_then(|a| {
-                        a.iter().map(|b| b.get("const").filter(|c| c.is_string()).cloned()).collect()
-                    });
-                    if let Some(values) = consts {
-                        o.remove("oneOf");
-                        o.insert("type".into(), json!("string"));
-                        o.insert("enum".into(), Value::Array(values));
-                    }
+                    const_enum(o);
                 }
                 for (k, child) in o.iter_mut() {
                     let defs = k == "$defs" || k == "definitions";

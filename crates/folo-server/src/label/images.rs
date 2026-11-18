@@ -211,7 +211,7 @@ impl Labeler {
         Ok(LabelImagesAdded { added, skipped, job: state.job() })
     }
 
-    /// `GET /api/label/jobs/{id}/images`.
+    /// `GET /api/label/jobs/{id}/images` with only a status: [`Labeler::query`] without the other filters.
     pub fn images(
         &self,
         id: &str,
@@ -219,9 +219,19 @@ impl Labeler {
         offset: u64,
         limit: u64,
     ) -> Result<LabelImagePage> {
+        self.query(id, &LabelImageQuery { status, offset, limit, ..LabelImageQuery::default() })
+    }
+
+    /// `GET /api/label/jobs/{id}/images`: the images that pass every filter of `q`, paged.
+    pub fn query(&self, id: &str, q: &LabelImageQuery) -> Result<LabelImagePage> {
+        let (offset, limit) = (q.offset, q.limit);
         let job = self.job(id)?;
         let state = job.live()?;
-        let matching = state.file.images.iter().filter(|r| status.is_none_or(|s| s == state.status(r)));
+        let matching = state.file.images.iter().filter(|r| {
+            q.status.is_none_or(|s| s == state.status(r))
+                && q.reviewed.is_none_or(|v| v == state.reviewed(r))
+                && q.ids.as_ref().is_none_or(|ids| ids.contains(&r.id))
+        });
         let (mut total, mut images) = (0u64, Vec::new());
         for record in matching {
             if total >= offset && (images.len() as u64) < limit {
@@ -316,6 +326,21 @@ impl Labeler {
         job.emit_job(&state);
         Ok(())
     }
+}
+
+/// Filter and page of `GET /api/label/jobs/{id}/images` ([`Labeler::query`]).
+#[derive(Clone, Debug, Default)]
+pub struct LabelImageQuery {
+    /// Only images with this status (as shown: `labeling` while in an agent call).
+    pub status: Option<LabelImageStatus>,
+    /// Only reviewed (`true`) or not reviewed (`false`) images.
+    pub reviewed: Option<bool>,
+    /// Only these image ids (in the job's order, not this list's).
+    pub ids: Option<HashSet<String>>,
+    /// Skip this many matching images.
+    pub offset: u64,
+    /// Return at most this many.
+    pub limit: u64,
 }
 
 /// An image about to be added to a job.

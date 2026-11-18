@@ -18,9 +18,12 @@
 //! - [`proxy`]: `--server`, a `Store` over the HTTP API through `folo-client`.
 //! - `paths` and `confine`: relative input paths and `--confine`.
 //! - `errors`: tool errors (the server's error type); [`types`]: the MCP-only argument and result types.
+//! - [`label`]: agent labeling in process or through `folo serve`, shared with `folo label`; the view of an image
+//!   with its boxes numbered.
 
 mod confine;
 mod errors;
+pub mod label;
 mod paths;
 mod prompts;
 pub mod proxy;

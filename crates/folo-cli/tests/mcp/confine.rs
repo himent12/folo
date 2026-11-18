@@ -31,6 +31,11 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "cloud_connections",
         "cloud_offers",
         "cloud_instances",
+        "list_label_agents",
+        "list_label_jobs",
+        "label_status",
+        "list_label_images",
+        "view_label_image",
     ];
     check_tools(&mut c, &listed);
     for (tool, args) in [
@@ -41,6 +46,10 @@ fn read_only_hides_and_rejects_mutating_tools() {
         ("reorder_run", json!({ "run_id": "run_3c02", "action": "top" })),
         ("export", json!({ "model_id": "m_31aa", "format": "onnx" })),
         ("cloud_terminate", json!({ "instance_id": "ci_3c01" })),
+        ("create_label_job", json!({ "name": "x", "classes": ["a"] })),
+        ("start_labeling", json!({ "job_id": "lb_1", "agent": "claude" })),
+        ("set_label_boxes", json!({ "job_id": "lb_1", "image_id": "1", "boxes": [] })),
+        ("export_label_dataset", json!({ "job_id": "lb_1" })),
     ] {
         c.tool_error(tool, args, "read_only");
     }
@@ -75,6 +84,11 @@ fn confine_rejects_paths_outside_the_data_dir() {
         "path_outside_data_dir",
     );
     c.tool_error("register_dataset", json!({ "path": root.path() }), "path_outside_data_dir");
+    // Labeling reads images in place: folders and files to label are confined the same way.
+    let job = json!({ "name": "x", "classes": ["a"], "paths": [root.path()] });
+    c.tool_error("create_label_job", job, "path_outside_data_dir");
+    let add = json!({ "job_id": "lb_1", "paths": ["../outside.jpg"] });
+    c.tool_error("add_label_images", add, "path_outside_data_dir");
     c.finish();
 }
 

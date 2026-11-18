@@ -8,6 +8,10 @@ use crate::{BBox, LogLine};
 /// [`SystemResponse::features`](crate::SystemResponse::features): the `/api/label` endpoints exist.
 pub const FEATURE_AGENT_LABELING: &str = "agent_labeling";
 
+/// [`SystemResponse::features`](crate::SystemResponse::features): `GET /api/label/jobs/{id}/images` takes the
+/// `reviewed` and `ids` filters (an older server ignores them and answers with every image).
+pub const FEATURE_LABEL_IMAGE_FILTERS: &str = "label_image_filters";
+
 /// A coding-agent CLI FOLO can ask for labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

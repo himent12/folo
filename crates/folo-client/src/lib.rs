@@ -255,6 +255,14 @@ impl Client {
         self.parse(&b)
     }
 
+    /// `PUT /api{path}` with a JSON body, parsed.
+    pub fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        let json = serde_json::to_vec(body).expect("request bodies serialize");
+        let req = self.auth(self.agent.put(self.url(path))).header(CONTENT_TYPE, "application/json");
+        let (_, b) = self.finish(req.send(&json[..]))?;
+        self.parse(&b)
+    }
+
     /// `DELETE /api{path}`.
     pub fn delete(&self, path: &str) -> Result<()> {
         self.finish(self.auth(self.agent.delete(self.url(path))).call()).map(|_| ())

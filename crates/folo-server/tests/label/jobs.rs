@@ -1,4 +1,4 @@
-//! Jobs: upload, label, review and make a dataset; folder images read in place.
+//! Jobs: upload, label, review and make a dataset; folder images read in place; the image filters.
 
 use std::path::Path;
 
@@ -385,4 +385,30 @@ async fn a_person_marks_images_reviewed_and_the_agent_relabeling_one_clears_it()
     idle(app, &job.id).await;
     let again = images(app, &job.id, "").await;
     assert_eq!((again.images[0].source, again.images[0].reviewed), (Some(LabelSource::Agent), false));
+}
+
+#[tokio::test]
+async fn images_filter_by_review_state_and_ids() {
+    let t = TestDir::new("label-filters");
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let system: Value = ok(app, get("/api/system")).await;
+    assert!(system["features"].as_array().unwrap().contains(&json!(FEATURE_LABEL_IMAGE_FILTERS)), "{system}");
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    idle(app, &job.id).await;
+    let all = images(app, &job.id, "").await;
+    let ids: Vec<&str> = all.images.iter().map(|i| i.id.as_str()).collect();
+    ok::<LabelImage>(app, put(&format!("{uri}/images/{}", ids[1]), json!({ "reviewed": true }))).await;
+
+    let reviewed = images(app, &job.id, "?reviewed=true").await;
+    assert_eq!((reviewed.total, reviewed.images[0].id.as_str()), (1, ids[1]));
+    let to_review = images(app, &job.id, "?status=labeled&reviewed=false&limit=1").await;
+    assert_eq!((to_review.total, to_review.images.len(), to_review.images[0].id.as_str()), (2, 1, ids[0]));
+    let picked = images(app, &job.id, &format!("?ids={},{},nope", ids[2], ids[0])).await;
+    let got: Vec<&str> = picked.images.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!((picked.total, got), (2, vec![ids[0], ids[2]]), "in the order the images were added");
+    assert_eq!(images(app, &job.id, "?ids=nope&reviewed=true").await.total, 0);
+    err(app, get(&format!("{uri}/images?reviewed=maybe")), StatusCode::BAD_REQUEST, "invalid_query").await;
 }

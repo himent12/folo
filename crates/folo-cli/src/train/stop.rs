@@ -67,6 +67,11 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
 /// First Ctrl+C (on Windows also Ctrl+Break, which is what a script can send to a child started in its own
 /// process group): stop after the current batch (the last epoch's checkpoint is kept). A second one exits.
 pub(super) fn watch_ctrl_c(stop: Arc<AtomicBool>) {
+    watch_interrupt(stop, "stopping after the current batch (interrupt again to abort)…");
+}
+
+/// The first Ctrl+C (or Ctrl+Break) sets `stop` and prints `message`; a second one exits (130).
+pub(crate) fn watch_interrupt(stop: Arc<AtomicBool>, message: &'static str) {
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         rt.block_on(async {
@@ -86,7 +91,7 @@ pub(super) fn watch_ctrl_c(stop: Arc<AtomicBool>) {
                 if !first {
                     std::process::exit(130);
                 }
-                eprintln!("\nstopping after the current batch (interrupt again to abort)…");
+                eprintln!("\n{message}");
                 stop.store(true, Ordering::Relaxed);
             }
         });

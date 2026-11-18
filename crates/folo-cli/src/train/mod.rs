@@ -29,6 +29,7 @@ use resume::resume;
 use stop::{watch_ctrl_c, watch_stop_file};
 
 pub use stop::request_stop;
+pub(crate) use stop::watch_interrupt;
 
 /// `folo stop <run_dir>` creates this file in the run folder; `folo train` polls for it and stops after the
 /// current batch.
