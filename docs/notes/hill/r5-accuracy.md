@@ -1,8 +1,9 @@
-# Hill-climb 5: class-wise rank distillation and the fused distillation kernel (lab notebook)
+# Hill-climb 5: class-wise rank distillation, the fused distillation kernel and the long run (lab notebook)
 
 Lane `accuracy` of hill-climb 5 (2026-11-17). Goal: a third distillation term, **class-wise rank distillation**
 (a `distill.rank_gain` beside docs/MODEL.md §8.9's terms), gated at full COCO scale on forks of hill 4's control,
-then the round's long run (`folo-n-coco-v4` continued for 64 epochs with the teacher). **The gate killed the term**
+then the round's long run (`folo-n-coco-v4` continued for 64 epochs with the teacher; "Long run" at the end:
+val2017 AP 0.3701, weights not published). **The gate killed the term**
 (below), so it is not in main: its code, tests and `bench/distill/rank.py` are only in the closed PR #295 (commits
 c08fbc7c, 342699d8, e85a2cbe, a8235fd7, ba874d3b). What the round kept is the fused distillation kernel (#297). The design is the Fable 5.2 counsel of this
 round (not in the repo; summarised here where it matters); hill 4's distillation is
@@ -167,3 +168,60 @@ review fixes (the maximum subtracted before dividing by `T`, the folded class gr
 the per-element `q`) cost about 0.18 ms of GPU time per call (0.65 -> 0.83 ms; `kd_dfl` 0.38 -> 0.53 ms; the
 unchanged `kd_cls_bwd` also read 11% slower in round 2's hold, so part of it is the GPU's state). A first A/B that
 ran alongside this lane's own workspace tests was discarded (`logs/ab-noisy-tests/`).
+
+## Long run: `folo-n-coco-v4` continued for 64 epochs with the teacher
+
+**Why a continuation.** The round's first counsel proposed carving folo-n out of `folo-s-coco` (one channel subset
+per layer group) as the initialisation of a new 64-epoch run. The Fable 5.2 counsel rejected it before any code was
+written: `folo-n-coco-v4` (a real folo-n at 0.356) is a better warm start than any carve, needs no code, and the
+carve's proxy gate could not answer the question that decides it. The carve was not built. The counsel expected
+0.365-0.370 from a 64-epoch continuation of v4 with the teacher; the lane's target was 0.364 or more, claimed only
+with its interval.
+
+**Recipe** (`D:/folo-data/runs-hill5/accuracy/bin/LONG-RUN.md`, `bin/long.sh`; run folder
+`long/n-v4-cont-kd`, its `config.json` and `metrics.jsonl`): `folo train` on full COCO from `--weights
+folo-n-coco-v4` (all 417 tensors transferred) with `--teacher folo-s-coco` (f16, class gain 0.5, DFL gain 1.5,
+`T` 4; the fused kernel of #297 on the GPU; no rank term), 64 epochs, batch 16, 640 px, AMP, seed 0, 16 workers,
+`auto` optimizer (rule 5 with `--weights`: MuSGD, Muon / SGD 0.2 / 1.0). The run starts a new learning-rate schedule
+(3 warm-up epochs, `lr0` 0.01, `lrf` 0.01) and closes mosaic for its last 10 epochs. Binary `bin/folo-long.exe`:
+origin/main ac56a0c4 (#297 merged), release (`bin/folo-long.txt` has its sha256). Started 2026-11-17 23:05:21Z,
+`trainer exit 0` at 2026-11-18 05:02:46Z (`long/long.log`): 64 epochs in 21,439 s (about 6 h; 294-492 s per epoch),
+on the shared machine (the round's `gpu-training.txt` marker kept GPU speed measurements off it while it ran, but
+other work did not stop), so this is not an unloaded cost.
+
+**The trainer's own mAP50-95** (its validation after each epoch, EMA weights; `metrics.jsonl`): 0.3397 at epoch 1,
+down to 0.3031 at epoch 3 (likely the warm-up back to `lr0` moving v4's converged weights), back above epoch 1 at epoch 28
+(0.3398), 0.3664 at epoch 64. It was still rising at the end: +0.0082 over the last ten epochs, +0.0006 in the last.
+
+**val2017, read once** (the EMA weights of epoch 64 exported unfused as `weights/n-v4-cont-kd-e64.folo`, then
+`folo val --coco --save-json eval/dets-long.json` on the GPU, `logs/val-long.log`; `bin/records.py` scored the same
+detections with pycocotools, `eval/stats-long.json`, and gives the same numbers):
+
+| model | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---:|---:|---:|---:|---:|---:|
+| **long run, epoch 64 (NOT PUBLISHED)** | **0.3701** | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| `folo-n-coco-v4` (published), its start | 0.3559 | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
+| hill 4's control, 64 epochs from scratch without the teacher (not published) | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
+
+Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples, seed 0, records of
+`bin/records.py`; `logs/long-bootstrap.log`):
+
+| difference | AP | 95% interval | P(diff ≤ 0) |
+|---|---:|---|---:|
+| **long − v4** | **+0.0141** | [+0.0114, +0.0166] | 0.000 |
+| long − control | +0.0194 | [+0.0160, +0.0223] | 0.000 |
+
+The target (0.364) is met, and the gain shows in every AP column.
+
+**What is not shown.**
+- No teacher-free continuation of v4 was run, so +0.0141 is 64 more epochs and the teacher together; how much of
+  it each gives is not known.
+- One training seed: the intervals cover the sampling of the evaluation images, not the training seed.
+- The teacher was trained on train2017, the student's training set.
+- The trainer's mAP was still rising at epoch 64; a longer continuation is not measured.
+- Not measured on these weights: the fused f16 file, the opt-in box fusion flags, int8 (`folo quantize`).
+- The run's cost against v4's is not measured (loaded machine, no A/B).
+
+**The weights are not published.** The file is local, `D:/folo-data/runs-hill5/accuracy/weights/n-v4-cont-kd-e64.folo`;
+whether to publish it (as `folo-n-coco-v5`) is the owner's decision. Until then the published folo-n is v4, and
+docs/BENCHMARKS.md's headline numbers stay v4's 0.356.
