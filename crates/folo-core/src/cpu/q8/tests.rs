@@ -545,3 +545,15 @@ fn epilogue_rounds_exact_ties_to_even_on_both_paths() {
         assert_eq!(q.to_vec(), want, "AVX2 epilogue");
     }
 }
+
+#[test]
+fn conv_size_refuses_buffers_that_overflow() {
+    assert_eq!(conv_size(2, 64, 32, 80, 80, 3, 1, 1), Some((80, 80)));
+    // The padded copy, `c · (h + 2p + s) · (w + 2p + s)`, overflows although the output size does not.
+    let big = 1usize << (usize::BITS / 2 - 1);
+    assert_eq!(out_size(big, big, 1, 64, 0).map(|_| ()), Some(()));
+    assert_eq!(conv_size(1, 64, 4, big, big, 1, 64, 0), None);
+    // The output overflows.
+    assert_eq!(conv_size(usize::MAX / 2, 4, 64, 2, 2, 1, 1, 0), None);
+    assert_eq!(conv_size(1, 4, 4, 1, 2, 3, 1, 0), None, "kernel larger than the input");
+}

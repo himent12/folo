@@ -20,7 +20,9 @@ mod tests;
 
 use rayon::prelude::*;
 
-pub use conv::{MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, out_size, quantize_weights};
+pub use conv::{
+    MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, conv_size, out_size, quantize_weights,
+};
 pub use kernel::{silu_q8, uses_vnni};
 
 /// Words of readable slack after an activation's last plane.

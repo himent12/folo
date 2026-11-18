@@ -160,7 +160,8 @@ these kernels:
   the weights were packed with), an optional residual and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four
   to a word, the zero-point corrections, per-channel scales and biases; `C·k·k` at most `MAX_REDUCTION` = 2¹⁵ so
   the i32 sums cannot overflow, stride at most `MAX_STRIDE` = 64, padding at most `MAX_PAD` = 4096:
-  `QConv::supports` names these limits, and `q8::out_size` says whether a kernel fits an input) and writes u8 C4
+  `QConv::supports` names these limits, `q8::out_size` says whether a kernel fits an input, and `q8::conv_size`
+  also whether the input, padded-copy and output sizes fit `usize`, on 32-bit targets too) and writes u8 C4
   codes or `f32` NCHW. A micro-kernel computes 4 output channels ×
   24 output pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
   `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
@@ -181,7 +182,8 @@ these kernels:
 Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
 with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
 outputs, two images, and offset views with a longer image stride. They also check the task plan's bounds, the
-refusals (zero points, long reductions, wrapping views, kernels larger than the input), `supports` and `out_size`,
+refusals (zero points, long reductions, wrapping views, kernels larger than the input), `supports`, `out_size` and
+`conv_size`,
 VNNI against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for
 bit, the epilogue's exact ties (to even, on both paths), `quantize_weights`' known answers (ties away from zero,
 ±127 at the row maximum), quantise round trips and the pools. `cargo bench -p folo-core --bench

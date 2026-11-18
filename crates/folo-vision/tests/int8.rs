@@ -203,22 +203,51 @@ fn reloading_weights_repacks_and_an_explicit_precision_turns_int8_off() {
     assert!(p.model().int8().is_none());
 }
 
+/// `m`'s int8 forward on `x` with conv `name` left to the executors' own eligibility check, against the same with
+/// `name` listed in `f32_convs`: the fake-quant features and the int8 forward must be the same bits, so both
+/// executors kept that conv `f32` (and nothing panicked).
+fn assert_runs_in_f32(mut m: FoloModel, name: &str, x: &Tensor) {
+    let cal = Calibration { weights: None, ..calibrated(&m, x) };
+    let listed = Calibration { f32_convs: vec![name.to_string()], ..cal.clone() };
+    let _g = no_grad();
+    let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let (a, b) =
+        (FakeQuant::new(&cal).features(&m, x).unwrap(), FakeQuant::new(&listed).features(&m, x).unwrap());
+    for (p, q) in a.iter().zip(&b) {
+        assert_eq!(bits(p), bits(q), "{name}: the fake-quant reference quantised its weights");
+    }
+    m.set_int8(Some(listed)).unwrap();
+    let want = m.forward(x).unwrap().box_raw;
+    m.set_int8(Some(cal)).unwrap();
+    let got = m.forward(x).unwrap().box_raw;
+    assert_eq!(bits(&want), bits(&got), "{name}: the int8 forward differs from its f32 conv");
+}
+
+/// A fused conv `c → o` with `k`, `stride` and `padding` (no activation).
+fn fused(c: usize, o: usize, k: usize, stride: usize, padding: usize, seed: u64) -> folo_nn::ConvBnAct {
+    let cfg = folo_nn::Conv2dConfig::new(c, o, k).stride(stride).padding(padding);
+    let conv = folo_nn::Conv2d::new(cfg, &mut Rng::seed(seed));
+    folo_nn::ConvBnAct { conv, bn: None, act: folo_nn::Activation::Identity }
+}
+
 #[test]
 fn convs_the_kernel_does_not_take_run_in_f32() {
-    // A `qkv` whose stride (65) is past the int8 kernel's limit but whose output still fits the graph (2 × 2 at
-    // 64 × 64): both executors keep it `f32`, and the forward runs.
+    let x = input(1, 64, 64, 21);
+    // A `qkv` whose stride (65) is past the kernel's limit, though its output still fits the graph (2 × 2).
     let mut m = model(19);
     let attn = &mut m.backbone.psa.blocks.items_mut()[0].attn;
     let c = *attn.qkv.conv.config();
-    let cfg = folo_nn::Conv2dConfig::new(c.in_channels, c.out_channels, 1).stride(65).padding(32);
-    let conv = folo_nn::Conv2d::new(cfg, &mut Rng::seed(20));
-    attn.qkv = folo_nn::ConvBnAct { conv, bn: None, act: folo_nn::Activation::Identity };
-    let x = input(1, 64, 64, 21);
-    let cal = Calibration { weights: None, ..calibrated(&m, &x) };
-    m.set_int8(Some(cal.clone())).unwrap();
-    let _g = no_grad();
-    let want = FakeQuant::new(&cal).features(&m, &x).unwrap();
-    let got = folo_core::cpu::in_pool(|| quant::exec::features(&m, &Int8Plan::new(cal), &x)).unwrap();
-    assert_eq!(want[2].dims(), got[2].dims());
-    m.forward(&x).unwrap();
+    attn.qkv = fused(c.in_channels, c.out_channels, 1, 65, 32, 20);
+    assert_runs_in_f32(m, "backbone.psa.block0.attn.qkv", &x);
+    // A `proj` with a 2 × 2 kernel: its 1 × 1 output is broadcast over the 2 × 2 residual in f32.
+    let mut m = model(19);
+    let attn = &mut m.backbone.psa.blocks.items_mut()[0].attn;
+    let c = attn.proj.conv.config().in_channels;
+    attn.proj = fused(c, c, 2, 1, 0, 22);
+    assert_runs_in_f32(m, "backbone.psa.block0.attn.proj", &x);
+    // A weight of another shape (4 × 4) than the conv's config (3 × 3): the f32 conv follows the weight.
+    let mut m = model(19);
+    let d = m.backbone.down2.conv.weight.dims().to_vec();
+    m.backbone.down2.conv.weight = Tensor::rand_uniform([d[0], d[1], 4, 4], -0.05, 0.05, &mut Rng::seed(23));
+    assert_runs_in_f32(m, "backbone.down2", &x);
 }

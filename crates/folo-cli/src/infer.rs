@@ -97,8 +97,8 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
     }
     if !folo_vision::model::quant::uses_vnni() {
         eprintln!(
-            "note: --precision int8: this CPU has no AVX-VNNI (AVX-512 VNNI is not used), so the int8 kernels take \
-             their portable path, several times slower than f32"
+            "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
+             (they need AVX-VNNI, which this CPU lacks, AVX-512 VNNI not being used; or FOLO_Q8_SCALAR is set)"
         );
     }
     if tensor_cores {

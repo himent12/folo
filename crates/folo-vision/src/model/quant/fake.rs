@@ -50,6 +50,11 @@ pub fn fake_weights(w: &Tensor, in_scales: &[f32]) -> Result<Tensor> {
     Ok(Tensor::from_vec(v, d)?)
 }
 
+fn dims4(t: &Tensor) -> [usize; 4] {
+    let d = t.dims();
+    [d[0], d[1], d[2], d[3]]
+}
+
 impl<'a> FakeQuant<'a> {
     /// The executor for `cal`.
     pub fn new(cal: &'a Calibration) -> Self {
@@ -63,9 +68,11 @@ impl<'a> FakeQuant<'a> {
     }
 
     /// The conv's weights on their s8 grid, or its `f32` weights when it stays `f32` in the int8 plan.
-    fn weight(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq]) -> Result<Tensor> {
+    fn weight(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Tensor> {
         let d = parts[0].t.dims();
-        if self.cal.is_f32(name) || int8_able(conv, d[2], d[3]).is_none() {
+        let c = parts.iter().map(|p| p.t.dims()[1]).sum();
+        if self.cal.is_f32(name) || int8_able(conv, [d[0], c, d[2], d[3]], res.map(|r| dims4(&r.t))).is_none()
+        {
             return Ok(conv.conv.weight.clone());
         }
         if let Some(w) = self.weights.get(name) {
@@ -78,8 +85,8 @@ impl<'a> FakeQuant<'a> {
         Ok(w)
     }
 
-    fn run(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq]) -> Result<Tensor> {
-        let w = self.weight(name, conv, parts)?;
+    fn run(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Tensor> {
+        let w = self.weight(name, conv, parts, res)?;
         let ts: Vec<&Tensor> = parts.iter().map(|p| &p.t).collect();
         let p = conv.conv.config().params();
         Ok(Tensor::conv2d_act_cat(&ts, &w, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?)
@@ -95,7 +102,7 @@ impl Exec for FakeQuant<'_> {
     }
 
     fn conv(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Fq> {
-        let y = self.run(name, conv, parts)?;
+        let y = self.run(name, conv, parts, res)?;
         let y = match res {
             Some(r) => r.t.add(&y)?,
             None => y,
@@ -105,7 +112,7 @@ impl Exec for FakeQuant<'_> {
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Fq) -> Result<Tensor> {
-        self.run(name, conv, &[x])
+        self.run(name, conv, &[x], None)
     }
 
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<Fq> {
@@ -130,7 +137,6 @@ impl Exec for FakeQuant<'_> {
     }
 
     fn dims(&self, x: &Fq) -> [usize; 4] {
-        let d = x.t.dims();
-        [d[0], d[1], d[2], d[3]]
+        dims4(&x.t)
     }
 }

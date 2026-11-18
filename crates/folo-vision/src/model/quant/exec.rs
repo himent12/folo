@@ -84,6 +84,23 @@ impl QAct {
     }
 }
 
+/// Everything a conv's packed weights are made from besides the weights' elements, kept with the packing so a
+/// hash collision cannot pass for a hit.
+#[derive(Clone, PartialEq, Hash)]
+struct Key {
+    geometry: [usize; 5],
+    silu: bool,
+    /// Each input part's channels, scale bits and zero point.
+    inputs: Vec<(usize, u32, u8)>,
+    bias_bits: Vec<u32>,
+}
+
+/// A packed conv and its [`Key`].
+struct Packed {
+    key: Key,
+    conv: Arc<QConv>,
+}
+
 /// The int8 executor of one forward.
 struct Int8<'a> {
     plan: &'a Int8Plan,
@@ -103,15 +120,22 @@ impl Int8<'_> {
         let inputs: Vec<(usize, u32, u8)> =
             parts.iter().map(|a| (a.dims[1], a.grid.scale.to_bits(), a.grid.zero)).collect();
         let bias_bits: Vec<u32> = bias.iter().map(|b| b.to_bits()).collect();
+        let key = Key { geometry, silu, inputs, bias_bits };
         let mut h = std::hash::DefaultHasher::new();
-        ("folo-vision int8 QConv", geometry, silu, &inputs, &bias_bits).hash(&mut h);
-        let qc = conv.conv.weight.derived_f32(h.finish(), |w| {
+        ("folo-vision int8 QConv", &key).hash(&mut h);
+        let pack = |w: &[f32]| {
             let grids: Vec<Grid> =
                 parts.iter().flat_map(|a| std::iter::repeat_n(a.grid, a.dims[1])).collect();
             let shape = (cfg.out_channels, cfg.in_channels, cfg.kernel);
-            QConv::new(w, &bias, shape, cfg.stride, cfg.padding, silu, &grids)
-        })?;
-        Ok(qc)
+            Arc::new(QConv::new(w, &bias, shape, cfg.stride, cfg.padding, silu, &grids))
+        };
+        let kept =
+            conv.conv.weight.derived_f32(h.finish(), |w| Packed { key: key.clone(), conv: pack(w) })?;
+        if kept.key == key {
+            return Ok(kept.conv.clone());
+        }
+        // Another key under the same hash: pack these weights without keeping them.
+        Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
     }
 
     /// The int8 conv into `out`.
@@ -147,23 +171,25 @@ impl Exec for Int8<'_> {
     fn conv(&mut self, name: &str, conv: &ConvBnAct, parts: &[&QAct], res: Option<&QAct>) -> Result<QAct> {
         let grid = self.plan.cal.param(name)?;
         let [n, _, h, w] = parts[0].dims;
-        let (Some((oh, ow)), false) = (int8_able(conv, h, w), self.plan.cal.is_f32(name)) else {
+        let c = parts.iter().map(|a| a.dims[1]).sum();
+        let o = conv.conv.config().out_channels;
+        let able = int8_able(conv, [n, c, h, w], res.map(|r| r.dims));
+        let (Some((oh, ow)), false) = (able, self.plan.cal.is_f32(name)) else {
             let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
             let r = res.map(QAct::to_f32).transpose()?;
             let y = conv_f32(conv, &ts.iter().collect::<Vec<_>>(), r.as_ref())?;
             return QAct::from_f32(&y, grid);
         };
-        let mut out = q8::alloc(n, conv.conv.config().out_channels, oh * ow);
+        let mut out = q8::alloc(n, o, oh * ow);
         let dims = self.run(name, conv, parts, res, QOut::U8 { data: &mut out, grid })?;
         Ok(QAct::new(out, dims, grid))
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &QAct) -> Result<Tensor> {
-        let [n, _, h, w] = x.dims;
-        let (Some((oh, ow)), false) = (int8_able(conv, h, w), self.plan.cal.is_f32(name)) else {
+        let (Some((oh, ow)), false) = (int8_able(conv, x.dims, None), self.plan.cal.is_f32(name)) else {
             return conv_f32(conv, &[&x.to_f32()?], None);
         };
-        let o = conv.conv.config().out_channels;
+        let (n, o) = (x.dims[0], conv.conv.config().out_channels);
         // Every element of the output is written.
         let mut out = folo_core::cpu::take_buffer(n * o * oh * ow);
         let dims = self.run(name, conv, &[x], None, QOut::F32 { data: &mut out })?;

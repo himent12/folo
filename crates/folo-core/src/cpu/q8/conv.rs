@@ -61,6 +61,27 @@ pub fn out_size(h: usize, w: usize, k: usize, stride: usize, pad: usize) -> Opti
     Some((side(h)?, side(w)?))
 }
 
+/// [`out_size`] when [`conv`] also takes the buffer sizes: `n` images of `c` channels in, `o` out, and no size it
+/// computes (input, padded copy, output) overflows `usize` (on 32-bit targets too). `None` otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn conv_size(
+    n: usize,
+    c: usize,
+    o: usize,
+    h: usize,
+    w: usize,
+    k: usize,
+    stride: usize,
+    pad: usize,
+) -> Option<(usize, usize)> {
+    let (oh, ow) = out_size(h, w, k, stride, pad)?;
+    let side = |v: usize| v.checked_add(pad.checked_mul(2)?)?.checked_add(stride);
+    side(h)?.checked_mul(side(w)?)?.checked_mul(c)?;
+    n.checked_mul(c)?.checked_mul(h.checked_mul(w)?)?;
+    n.checked_mul(o)?.checked_mul(oh.checked_mul(ow)?)?;
+    Some((oh, ow))
+}
+
 /// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in
 /// `-127..=127` (`round(w / scale)`, ties away from zero). Returns `(q, scale)`.
 pub fn quantize_weights(w: &[f32], o: usize) -> (Vec<i8>, Vec<f32>) {
@@ -342,14 +363,12 @@ pub fn conv(
         ch += x.c;
     }
     let (oh, ow) = cv.out_hw(h, w);
-    // The padded copy of an image (`image_rows`) is about `c / 4 · (h + 2p + s) · (w + 2p + s)` words.
-    let side = |v: usize| v.checked_add(2 * cv.pad + cv.stride);
-    let copy = side(h).zip(side(w)).and_then(|(a, b)| a.checked_mul(b)).and_then(|v| v.checked_mul(cv.c));
-    assert!(copy.is_some(), "q8::conv: {h}×{w} overflows");
-    let ohw = oh.checked_mul(ow).expect("q8::conv: output size overflows");
-    let words = |c: usize| {
-        n.checked_mul(c).and_then(|v| v.checked_mul(ohw)).expect("q8::conv: output size overflows")
-    };
+    // The padded copy of an image (`image_rows`) is about `c / 4 · (h + 2p + s) · (w + 2p + s)` words; it and the
+    // output sizes must not overflow.
+    let sizes = conv_size(n, cv.c, cv.o, h, w, cv.k, cv.stride, cv.pad);
+    assert!(sizes.is_some(), "q8::conv: {n} × {h}×{w} overflows");
+    let ohw = oh * ow;
+    let words = |c: usize| n * c * ohw;
     let og = cv.o / 4;
     if let Some((r, _)) = &res {
         assert_eq!(r.c, cv.o, "q8::conv: residual channels");

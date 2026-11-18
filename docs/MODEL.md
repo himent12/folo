@@ -1152,9 +1152,10 @@ GPU forwards, training, export and the `f32` default are unchanged.
   between them. The range is then the `p`, `1 − p` quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or
   the histogram-edge range of least expected squared error (rounding `Δ²/12` inside, clipping outside).
 - **Mixed precision.** A conv named in `f32_convs`, or one the int8 kernel does not take (grouped, dilated,
-  channels not a multiple of 4, a reduction `c · k²` over 2¹⁵, stride over 64, padding over 4096, or a kernel
-  larger than its padded input), dequantises its inputs, runs in `f32` and quantises its output. The fake-quant
-  reference keeps such a conv's `f32` weights too.
+  channels not a multiple of 4, a weight shaped other than its config says, a reduction `c · k²` over 2¹⁵, stride
+  over 64, padding over 4096, a kernel larger than its padded input, buffer sizes that overflow, or a residual not
+  on the output's shape, which `f32` broadcasts), dequantises its inputs, runs in `f32` and quantises its output.
+  The fake-quant reference keeps such a conv's `f32` weights too.
 - **CPU.** The fast kernel needs AVX-VNNI (`vpdpbusd` on 256-bit registers, with AVX2 and FMA). Without it, AVX-512
   VNNI CPUs included (that form is not used), the int8 convs run a portable kernel with the same integers that is
   several times slower than the `f32` path: one folo-n row-8 run in review took 66.3 ms against 17.0 ms in `f32`.
