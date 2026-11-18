@@ -161,9 +161,9 @@ these kernels:
   to a word, the zero-point corrections, per-channel scales and biases; `C·k·k` at most `MAX_REDUCTION` = 2¹⁵ so
   the i32 sums cannot overflow, stride at most `MAX_STRIDE` = 64, padding at most `MAX_PAD` = 4096:
   `QConv::supports` names these limits, `q8::out_size` says whether a kernel fits an input, and `q8::conv_size`
-  also whether the input, padded-copy and output sizes fit `usize`, on 32-bit targets too) and writes u8 C4
-  codes or `f32` NCHW. A micro-kernel computes 4 output channels ×
-  24 output pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
+  also whether the input, padded copy and output each fit one allocation (`isize::MAX` bytes), on 32-bit
+  targets too) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output
+  pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
   `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
   the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
   zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one

@@ -233,12 +233,32 @@ fn fused(c: usize, o: usize, k: usize, stride: usize, padding: usize, seed: u64)
 #[test]
 fn convs_the_kernel_does_not_take_run_in_f32() {
     let x = input(1, 64, 64, 21);
-    // A `qkv` whose stride (65) is past the kernel's limit, though its output still fits the graph (2 × 2).
+    // A `qkv` whose stride (65) is past the kernel's limit, though its output still fits the graph: on the 2 × 2
+    // input, padding 64 gives a 2 × 2 output whose second row and column read input pixel (1, 1).
     let mut m = model(19);
     let attn = &mut m.backbone.psa.blocks.items_mut()[0].attn;
     let c = *attn.qkv.conv.config();
-    attn.qkv = fused(c.in_channels, c.out_channels, 1, 65, 32, 20);
-    assert_runs_in_f32(m, "backbone.psa.block0.attn.qkv", &x);
+    attn.qkv = fused(c.in_channels, c.out_channels, 1, 65, 64, 20);
+    // The fake-quant `qkv` output itself (no requantisation after it to hide a difference): the same bits as with
+    // the conv listed `f32`.
+    let name = "backbone.psa.block0.attn.qkv";
+    let cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    let listed = Calibration { f32_convs: vec![name.to_string()], ..cal.clone() };
+    let q = cal.param("backbone.psa.cv1").unwrap();
+    let t = quant::fake::fake_quantize(
+        &Tensor::rand_uniform([1, c.in_channels, 2, 2], -1.0, 3.0, &mut Rng::seed(24)),
+        q,
+    )
+    .unwrap();
+    let fq = quant::fake::Fq { t, q };
+    let qkv = &m.backbone.psa.blocks.items()[0].attn.qkv;
+    let run = |cal: &Calibration| {
+        let _g = no_grad();
+        let y = quant::walk::Exec::conv_f32(&mut FakeQuant::new(cal), name, qkv, &fq).unwrap();
+        y.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    };
+    assert_eq!(run(&cal), run(&listed), "the fake-quant reference quantised the unsupported conv's weights");
+    assert_runs_in_f32(m, name, &x);
     // A `proj` with a 2 × 2 kernel: its 1 × 1 output is broadcast over the 2 × 2 residual in f32.
     let mut m = model(19);
     let attn = &mut m.backbone.psa.blocks.items_mut()[0].attn;

@@ -553,7 +553,17 @@ fn conv_size_refuses_buffers_that_overflow() {
     let big = 1usize << (usize::BITS / 2 - 1);
     assert_eq!(out_size(big, big, 1, 64, 0).map(|_| ()), Some(()));
     assert_eq!(conv_size(1, 64, 4, big, big, 1, 64, 0), None);
-    // The output overflows.
-    assert_eq!(conv_size(usize::MAX / 2, 4, 64, 2, 2, 1, 1, 0), None);
+    // Only the output overflows (n · c fits, n · o does not).
+    let n = usize::MAX / 64 + 1;
+    assert!(n.checked_mul(4).is_some() && n.checked_mul(64).is_none());
+    assert_eq!(conv_size(n, 4, 64, 1, 1, 1, 1, 0), None);
+    // No size overflows `usize`, but the input and the padded copy are over `isize::MAX` bytes.
+    let side = 1usize << (usize::BITS / 2 - 3);
+    assert!((8 * side * side).checked_mul(4).is_none_or(|b| b > isize::MAX as usize));
+    assert_eq!(conv_size(1, 8, 4, side, side, 1, 1, 0), None);
+    assert_eq!(conv_size(1, 8, 4, side / 2, side / 2, 1, 1, 0).map(|_| ()), Some(()));
+    // A padded copy over `isize::MAX` bytes on 32-bit targets (8194² · 32 codes).
+    let wide = conv_size(1, 32, 4, 1, 1, 1, 1, 4096);
+    assert_eq!(wide.is_none(), usize::BITS == 32);
     assert_eq!(conv_size(1, 4, 4, 1, 2, 3, 1, 0), None, "kernel larger than the input");
 }

@@ -61,8 +61,9 @@ pub fn out_size(h: usize, w: usize, k: usize, stride: usize, pad: usize) -> Opti
     Some((side(h)?, side(w)?))
 }
 
-/// [`out_size`] when [`conv`] also takes the buffer sizes: `n` images of `c` channels in, `o` out, and no size it
-/// computes (input, padded copy, output) overflows `usize` (on 32-bit targets too). `None` otherwise.
+/// [`out_size`] when [`conv`] also takes the buffer sizes: `n` images of `c` channels in, `o` out, and no buffer
+/// it reads or allocates (input, padded copy, `f32` output) is over `isize::MAX` bytes, the most one allocation
+/// can hold (on 32-bit targets too). `None` otherwise.
 #[allow(clippy::too_many_arguments)]
 pub fn conv_size(
     n: usize,
@@ -75,11 +76,13 @@ pub fn conv_size(
     pad: usize,
 ) -> Option<(usize, usize)> {
     let (oh, ow) = out_size(h, w, k, stride, pad)?;
+    // Elements of 4 bytes (u8 codes in C4 words, or f32), at most isize::MAX bytes.
+    let fits = |v: Option<usize>| v.and_then(|v| v.checked_mul(4)).is_some_and(|b| b <= isize::MAX as usize);
     let side = |v: usize| v.checked_add(pad.checked_mul(2)?)?.checked_add(stride);
-    side(h)?.checked_mul(side(w)?)?.checked_mul(c)?;
-    n.checked_mul(c)?.checked_mul(h.checked_mul(w)?)?;
-    n.checked_mul(o)?.checked_mul(oh.checked_mul(ow)?)?;
-    Some((oh, ow))
+    let copy = side(h).zip(side(w)).and_then(|(a, b)| a.checked_mul(b)).and_then(|v| v.checked_mul(c));
+    let input = n.checked_mul(c).zip(h.checked_mul(w)).and_then(|(a, b)| a.checked_mul(b));
+    let output = n.checked_mul(o).zip(oh.checked_mul(ow)).and_then(|(a, b)| a.checked_mul(b));
+    (fits(copy) && fits(input) && fits(output)).then_some((oh, ow))
 }
 
 /// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in

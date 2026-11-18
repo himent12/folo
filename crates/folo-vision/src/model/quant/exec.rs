@@ -88,6 +88,8 @@ impl QAct {
 /// hash collision cannot pass for a hit.
 #[derive(Clone, PartialEq, Hash)]
 struct Key {
+    /// The weight view's dims, offset and strides (the elements it reads).
+    layout: (Vec<usize>, usize, Vec<usize>),
     geometry: [usize; 5],
     silu: bool,
     /// Each input part's channels, scale bits and zero point.
@@ -120,7 +122,9 @@ impl Int8<'_> {
         let inputs: Vec<(usize, u32, u8)> =
             parts.iter().map(|a| (a.dims[1], a.grid.scale.to_bits(), a.grid.zero)).collect();
         let bias_bits: Vec<u32> = bias.iter().map(|b| b.to_bits()).collect();
-        let key = Key { geometry, silu, inputs, bias_bits };
+        let l = conv.conv.weight.layout();
+        let layout = (l.shape().dims().to_vec(), l.offset(), l.strides().to_vec());
+        let key = Key { layout, geometry, silu, inputs, bias_bits };
         let mut h = std::hash::DefaultHasher::new();
         ("folo-vision int8 QConv", &key).hash(&mut h);
         let pack = |w: &[f32]| {
