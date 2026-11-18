@@ -297,8 +297,10 @@ describe('the first connect (v-shell N1, v-models-label N1)', () => {
 
     // Down again from the start: Reconnect starts over, and the older connect's next check never goes out.
     health = 0;
-    vi.stubGlobal('fetch', async () => {
-      health++;
+    let heads = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (init?.method === 'HEAD') heads++;
+      else if (url.endsWith('/api/health')) health++;
       throw new TypeError('Failed to fetch');
     });
     await hub.connect();
@@ -306,5 +308,7 @@ describe('the first connect (v-shell N1, v-models-label N1)', () => {
     expect([hub.mode, hub.offline, health]).toEqual(['connecting', true, 2]);
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
     expect(health).toBe(3);
+    // The token check goes out with each health check, not after it.
+    expect(heads).toBe(3);
   });
 });

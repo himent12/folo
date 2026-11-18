@@ -172,11 +172,15 @@ class Hub {
         const slow = setTimeout(() => unreachable(), SLOW_CONNECT);
         try {
           const check = AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]);
+          // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use. The token
+          // check is asked together with the health, not after it (a round trip less before the first data on a
+          // remote server); its answer counts only once the health says this is a FOLO server.
+          const wall = tokenWall(http.base, check);
+          wall.catch(() => {});
           const h: unknown = await http.health(check);
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
-          // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use.
-          if (await tokenWall(http.base, check)) throw new ApiError(401, 'token_wall', TOKEN_WALL);
+          if (await wall) throw new ApiError(401, 'token_wall', TOKEN_WALL);
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
