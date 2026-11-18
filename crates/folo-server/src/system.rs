@@ -103,9 +103,9 @@ pub struct SystemProbe {
 enum Probe {
     Starting(std::thread::JoinHandle<(System, Instant)>),
     /// `measured_from`: when the counters last read (set up or refreshed), the start of the next reading's interval;
-    /// `first`: no reading made yet.
+    /// `first`: no reading made yet. Boxed: a `System` is large on Linux.
     Ready {
-        sys: System,
+        sys: Box<System>,
         measured_from: Instant,
         first: bool,
     },
@@ -121,7 +121,7 @@ fn new_system() -> (System, Instant) {
 }
 
 fn ready((sys, measured_from): (System, Instant)) -> Probe {
-    Probe::Ready { sys, measured_from, first: true }
+    Probe::Ready { sys: Box::new(sys), measured_from, first: true }
 }
 
 impl Default for SystemProbe {
@@ -181,7 +181,8 @@ impl SystemProbe {
 fn warm_up(probe: &mut Probe) {
     if let Probe::Starting(_) = probe {
         // Swapped out for a moment to take the thread by value; a set-up that panicked is done again here.
-        let placeholder = Probe::Ready { sys: System::new(), measured_from: Instant::now(), first: true };
+        let placeholder =
+            Probe::Ready { sys: Box::new(System::new()), measured_from: Instant::now(), first: true };
         let Probe::Starting(thread) = std::mem::replace(probe, placeholder) else {
             unreachable!("matched above")
         };
