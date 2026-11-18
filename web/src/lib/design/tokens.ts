@@ -186,6 +186,9 @@ export interface Palette {
 export const themeIds = ["dark","midnight","dim","contrast-dark","light","paper","contrast-light"] as const;
 export type ThemeId = (typeof themeIds)[number];
 
+/** A theme id's pattern (design/THEMES.md, `id`), as a RegExp source: index.html's first-paint script has the same. */
+export const themeIdPattern = "^[a-z0-9][a-z0-9-]{0,39}$" as const;
+
 export interface BuiltinTheme {
   readonly id: ThemeId;
   readonly name: string;

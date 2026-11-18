@@ -5,6 +5,13 @@
 // into tokens.ts (colorVars, which Studio's runtime reads) and into index.html's first-paint data.
 
 const HEX = /^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+/**
+ * A theme id (design/THEMES.md, `id`): 1 to 40 of a-z, 0-9 and -, starting with a letter or digit (a leading `-` would
+ * read as a flag in Desktop's `--theme <id>`). The one copy in web/: the built-in ids are checked with it here, and
+ * tokens.mjs writes its source into tokens.ts (themeIdPattern, which themes.ts checks custom ids with) and into
+ * index.html's first-paint data, so the three can't drift.
+ */
+export const THEME_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const MODES = /** @type {const} */ (['dark', 'light']);
 const isMeta = (/** @type {string} */ k) => k.startsWith('$');
 const isObj = (/** @type {unknown} */ v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -92,7 +99,7 @@ export function builtinThemes(tokens) {
   for (const [id, th] of Object.entries(tokens.themes)) {
     if (isMeta(id)) continue;
     const where = `themes.${id}`;
-    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(id)) throw new Error(`${where}: an id is 1-40 of a-z, 0-9 and -, starting with a letter or digit`);
+    if (!THEME_ID.test(id)) throw new Error(`${where}: an id is 1-40 of a-z, 0-9 and -, starting with a letter or digit`);
     if (id === 'system') throw new Error(`${where}: "system" is reserved (Desktop's --theme system is the mode)`);
     if (!isObj(th)) throw new Error(`${where}: expected an object`);
     const t = /** @type {Record<string, unknown>} */ (th);

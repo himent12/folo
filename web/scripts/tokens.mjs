@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { builtinThemes, cssVar, leaves } from './themes.mjs';
+import { THEME_ID, builtinThemes, cssVar, leaves } from './themes.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -203,6 +203,9 @@ ${paletteType(t.color.dark)}
 export const themeIds = ${JSON.stringify(ids)} as const;
 export type ThemeId = (typeof themeIds)[number];
 
+/** A theme id's pattern (design/THEMES.md, \`id\`), as a RegExp source: index.html's first-paint script has the same. */
+export const themeIdPattern = ${JSON.stringify(THEME_ID.source)} as const;
+
 export interface BuiltinTheme {
   readonly id: ThemeId;
   readonly name: string;
@@ -225,8 +228,9 @@ ${vars}
 }
 /**
  * What index.html's first-paint script needs to check a stored custom theme as src/lib/design/themes.ts does and set
- * only colour token properties: the built-in ids of each mode, the palette's shape with every colour token as its CSS
- * custom property (a list token: one per entry), and the number tokens' properties.
+ * only colour token properties: the built-in ids of each mode, the id pattern (themes.mjs's THEME_ID), the palette's
+ * shape with every colour token as its CSS custom property (a list token: one per entry), and the number tokens'
+ * properties.
  */
 function firstPaintData() {
   /** @type {string[]} */
@@ -246,7 +250,7 @@ function firstPaintData() {
     );
   const color = shape(t.color.dark, '');
   const ids = (/** @type {string} */ mode) => themes.filter((th) => th.mode === mode).map((th) => th.id);
-  return { dark: ids('dark'), light: ids('light'), color, number };
+  return { dark: ids('dark'), light: ids('light'), id: THEME_ID.source, color, number };
 }
 
 /** index.html with its first-paint data line regenerated. */

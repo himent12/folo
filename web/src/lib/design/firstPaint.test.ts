@@ -8,8 +8,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrefsStore, THEMES_KEY } from '../prefs';
+import { jsonProblem } from '../../../../design/json-scan.mjs';
 import { applyTheme } from './applyTheme';
-import { colorVars, themeIds, themes } from './tokens';
+import { colorVars, themeIdPattern, themeIds, themes } from './tokens';
 
 const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
 const source = /<script id="first-paint">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -66,7 +67,9 @@ describe('the first-paint script', () => {
 
   it("has tokens.ts's built-in themes and colour tokens (scripts/tokens.mjs writes them)", () => {
     const line = /const T = (\{[^\n]*\});\n/.exec(source)![1]!;
-    const T = JSON.parse(line) as { dark: string[]; light: string[]; color: Record<string, unknown>; number: string[] };
+    const T = JSON.parse(line) as { dark: string[]; light: string[]; id: string; color: Record<string, unknown>; number: string[] };
+    expect(T.id).toBe(themeIdPattern);
+    expect(source).toContain('new RegExp(T.id).test(c.id)');
     expect({ dark: T.dark, light: T.light }).toEqual({ dark: themeIds.filter((id) => themes[id].mode === 'dark'), light: themeIds.filter((id) => themes[id].mode === 'light') });
     const names = (v: unknown): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? (v as string[]) : Object.values(v as object).flatMap(names));
     expect(names(T.color)).toEqual(colorVars.map(([, name]) => name));
@@ -95,6 +98,8 @@ describe('the first-paint script', () => {
     ['a good entry before a broken one with its id', { 'folo.prefs': JSON.stringify({ darkTheme: 'night' }), [THEMES_KEY]: JSON.stringify([night, malformed]) }, 'dark'],
     ['an entry with an unknown key', { 'folo.prefs': JSON.stringify({ darkTheme: 'night' }), [THEMES_KEY]: JSON.stringify([{ ...night, extra: 1 }]) }, 'dark'],
     ['an entry deeper than the palette', { 'folo.prefs': JSON.stringify({ darkTheme: 'night' }), [THEMES_KEY]: JSON.stringify([{ ...night, color: { bg: { app: { deeper: { still: '#000000' } } } } }]) }, 'dark'],
+    // Valid by the old id rule, stored by an earlier build: with a base and colours, a wrong accept would show (review r5).
+    ['a flag-shaped id with a base and colours', { 'folo.prefs': JSON.stringify({ darkTheme: '--help' }), [THEMES_KEY]: JSON.stringify([{ ...night, id: '--help' }]) }, 'dark'],
     ['a stored list that is not a list', { 'folo.prefs': JSON.stringify({ darkTheme: 'night' }), [THEMES_KEY]: JSON.stringify({ night }) }, 'dark'],
   ];
   for (const [what, stored, mode] of states) {
@@ -118,15 +123,27 @@ describe('the first-paint script', () => {
   }
 
   // Every shared format case, stored as the active theme: the script applies exactly the entries the app accepts. The
-  // byte cases (`hex`) test the file reader (encoding), which a stored entry never meets: they are left out.
+  // byte cases (`hex`) test the file reader (encoding), which a stored entry never meets: they are left out. An invalid
+  // entry without colours gets a marker colour, so a wrong accept shows as an inline property, not as the mode's default
+  // (review r5: `--help` passed the script's old id check unseen). A raw case that only its text makes invalid (too deep,
+  // a number out of range, a lone surrogate: what json-scan.mjs finds) parses to an entry with none of that, which both
+  // show: as a stored entry it is valid.
+  const marked = (valid: boolean, entry: Record<string, unknown>) =>
+    !valid && entry !== null && typeof entry === 'object' && !Array.isArray(entry) && !('color' in entry) ? { ...entry, color: { bg: { app: '#010203' } } } : entry;
   const entries = [...cases.invalid.map((c) => ({ ...c, valid: false })), ...cases.valid.map((c) => ({ ...c, valid: true }))]
     .filter((c) => (c as { hex?: string }).hex === undefined)
-    .map((c) => ({
-      what: c.what,
-      valid: c.valid,
-      entry: (c.text !== undefined ? JSON.parse(c.text.replace(/^\uFEFF/, '')) : c.theme) as Record<string, unknown>,
-    }));
+    .map((c) => {
+      const valid = c.valid || (c.text !== undefined && jsonProblem(c.text) !== undefined);
+      return {
+        what: c.what,
+        valid,
+        entry: marked(valid, (c.text !== undefined ? JSON.parse(c.text.replace(/^\uFEFF/, '')) : c.theme) as Record<string, unknown>),
+      };
+    });
   it('has the shared format cases to replay', () => expect(entries.length).toBeGreaterThan(50));
+  it('marks the invalid ones that have no colours of their own', () => {
+    expect(entries.filter((e) => !e.valid && (e.entry?.color as { bg?: { app?: string } } | undefined)?.bg?.app === '#010203').length).toBeGreaterThan(20);
+  });
   for (const { what, valid, entry } of entries) {
     it(`applies a stored entry only when the app would (${valid ? 'valid' : 'invalid'}: ${what})`, () => {
       const mode = entry && (entry as { mode?: unknown }).mode === 'light' ? 'light' : 'dark';

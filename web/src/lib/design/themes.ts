@@ -8,7 +8,7 @@
 // The JSON Desktop's serde_json refuses and JSON.parse accepts (depth, lone surrogate escapes, numbers out of range),
 // shared with design/contrast.mjs so the two JS readers can't drift.
 import { jsonProblem } from '../../../../design/json-scan.mjs';
-import { colorVars, themeIds, themes as builtins, type BuiltinTheme, type Palette, type ThemeId } from './tokens';
+import { colorVars, themeIdPattern, themeIds, themes as builtins, type BuiltinTheme, type Palette, type ThemeId } from './tokens';
 
 export type Mode = 'dark' | 'light';
 
@@ -42,7 +42,8 @@ export interface Theme {
 /** The format version this Studio reads. */
 export const THEME_FORMAT = 1;
 const HEX = /^#(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
-const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** Generated from scripts/themes.mjs's THEME_ID, as index.html's first-paint check is. */
+const ID = new RegExp(themeIdPattern);
 const KEYS = ['folo_theme', 'id', 'name', 'mode', 'base', 'description', 'color'];
 const NAME_MAX = 40;
 const DESCRIPTION_MAX = 120;
