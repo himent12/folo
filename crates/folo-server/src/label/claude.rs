@@ -20,7 +20,7 @@ use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::{Value, json};
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Output, fault_hint, last_line,
+    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Failure, Output, fault_hint, last_line,
     limit_hint, run,
 };
 
@@ -109,10 +109,10 @@ impl Agent for ClaudeCode {
             Some("run `claude` in a terminal on the server's machine and sign in, then start again".into())
         } else if m.contains("unknown option") {
             Some("update Claude Code (`claude update`): FOLO needs version 2.1 or newer".into())
-        } else if let Some(hint) = fault_hint(message) {
+        } else if let Some(hint) = fault_hint(message, None) {
             Some(hint)
         } else if m.contains("limit") {
-            Some(limit_hint(message))
+            Some(limit_hint(message, None))
         } else if m.contains("model") {
             Some("pick another model: this account may not have access to that one".into())
         } else if m.contains("printed no result") {
@@ -162,7 +162,8 @@ fn stdin(req: &AgentRequest<'_>) -> Vec<u8> {
 }
 
 /// Reads the `result` event of Claude Code's `stream-json` output. An error result says what went wrong in its
-/// structured fields ([`error_message`]) and still reports what the call used, which the failure carries.
+/// structured fields ([`error_message`], and the HTTP status in `api_error_status`, which the failure carries as
+/// its status) and still reports what the call used, which the failure carries too.
 fn parse(out: &Output) -> Result<AgentReply, AgentError> {
     let result = out
         .stdout
@@ -179,7 +180,8 @@ fn parse(out: &Output) -> Result<AgentReply, AgentError> {
     };
     let usage = usage_of(&result);
     if result["is_error"].as_bool().unwrap_or(!out.success) {
-        return Err(AgentError::Failed(error_message(&result), usage));
+        let status = result["api_error_status"].as_u64().and_then(|s| u16::try_from(s).ok());
+        return Err(AgentError::Failed(Failure { message: error_message(&result), status, used: usage }));
     }
     Ok(AgentReply { text: result["result"].as_str().unwrap_or_default().to_string(), usage })
 }
@@ -202,10 +204,9 @@ fn usage_of(result: &Value) -> LabelUsage {
     usage
 }
 
-/// The message of an error result: its text (`result`, else the `errors` of an `error_during_execution`), with
-/// the API's status and error type when the result has them (`api_error_status`: "API Error: 503 api_error"), so
-/// that a passing fault or a limit reads as one ([`super::agent::is_transient`]); the subtype when there is
-/// nothing else.
+/// The message of an error result: its text (`result`, the `errors` of an `error_during_execution`, `api_error`);
+/// when it has none, the API's status and error type ("API Error: 503 api_error") or else the subtype. In full:
+/// only what is shown is cut short. (The status that counts is the failure's own, not this text's.)
 fn error_message(result: &Value) -> String {
     /// Adds `part` unless it is empty or already said.
     fn add(parts: &mut Vec<String>, part: &str) {
@@ -229,8 +230,8 @@ fn error_message(result: &Value) -> String {
         Value::Object(_) => add(&mut parts, result["api_error"]["message"].as_str().unwrap_or_default()),
         _ => {}
     }
-    if let Some(status) = result["api_error_status"].as_u64()
-        && !parts.iter().any(|p| p.contains(&status.to_string()))
+    if parts.is_empty()
+        && let Some(status) = result["api_error_status"].as_u64()
     {
         let kind =
             result["api_error_type"].as_str().or(result["api_error_code"].as_str()).unwrap_or_default();
@@ -243,7 +244,7 @@ fn error_message(result: &Value) -> String {
         };
         add(&mut parts, &why);
     }
-    folo_api::codes::cap(&parts.join(" · "), folo_api::codes::MAX_MESSAGE_CHARS)
+    parts.join(" · ")
 }
 
 #[cfg(test)]
@@ -281,10 +282,10 @@ mod tests {
     fn an_error_result_is_a_failure_with_the_cli_message() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"There's an issue with the selected model (nope). It may not exist or you may not have access to it.","usage":{}}"#;
         let err = parse(&output(stdout, "", false)).unwrap_err();
-        let AgentError::Failed(message, used) = &err else { panic!("{err:?}") };
-        assert!(message.starts_with("There's an issue with the selected model (nope)"));
-        assert_eq!(*used, LabelUsage::default(), "it never reached the model");
-        assert!(ClaudeCode::new().hint(message).unwrap().contains("another model"));
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert!(failure.message.starts_with("There's an issue with the selected model (nope)"));
+        assert_eq!(failure.used, LabelUsage::default(), "it never reached the model");
+        assert!(ClaudeCode::new().hint(&failure.message).unwrap().contains("another model"));
         let hint = ClaudeCode::new().hint("Invalid API key · Please run /login").unwrap();
         assert!(hint.contains("sign in"), "{hint}");
         // A limit says when it resets; an overloaded provider is not "pick another model".
@@ -324,27 +325,45 @@ mod tests {
             serde_json::to_string(api_error).unwrap()
         );
         let err = parse(&output(&failed_stream(api_error, &fields), "", false)).unwrap_err();
-        let AgentError::Failed(message, used) = &err else { panic!("{err:?}") };
-        assert!(message.starts_with("API Error: 503"), "{message}");
-        assert!(crate::label::agent::is_transient(message));
-        assert_eq!(ClaudeCode::new().hint(message).as_deref(), Some(crate::label::agent::BUSY));
-        assert_eq!((used.calls, used.input_tokens, used.cost_usd), (1, 1200, Some(0.0004)));
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert!(failure.message.starts_with("API Error: 503"), "{}", failure.message);
+        assert!(failure.is_transient());
+        assert_eq!(ClaudeCode::new().hint(&failure.message).as_deref(), Some(crate::label::agent::BUSY));
+        assert_eq!(
+            (failure.used.calls, failure.used.input_tokens, failure.used.cost_usd),
+            (1, 1200, Some(0.0004))
+        );
         // The status alone, in the structured fields of a result without text: still a passing fault.
         let fields = r#""subtype":"success","is_error":true,"result":"","api_error_status":529,"api_error_type":"overloaded_error","usage":{"input_tokens":0,"output_tokens":0}"#;
         let err = parse(&output(&failed_stream("API Error", fields), "", false)).unwrap_err();
-        let AgentError::Failed(message, used) = &err else { panic!("{err:?}") };
-        assert_eq!(message, "API Error: 529 overloaded_error");
-        assert!(crate::label::agent::is_transient(message));
-        assert_eq!(*used, LabelUsage::default());
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert_eq!(
+            (failure.message.as_str(), failure.status),
+            ("API Error: 529 overloaded_error", Some(529))
+        );
+        assert!(failure.is_transient());
+        assert_eq!(failure.used, LabelUsage::default());
+        // The status is the field's, whatever numbers the text has: a 503 here, though the text names none in a
+        // status's place.
+        let fields = r#""subtype":"error_during_execution","is_error":true,"api_error_status":503,"usage":{},"errors":["upstream failed after processing 503 tokens"]"#;
+        let err = parse(&output(&failed_stream("", fields), "", false)).unwrap_err();
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert_eq!(failure.message, "upstream failed after processing 503 tokens");
+        assert!(failure.is_transient());
+        // ... and a 400 is a client error, whatever server fault the text names.
+        let fields = r#""subtype":"error_during_execution","is_error":true,"api_error_status":400,"usage":{},"errors":["API Error: 503 Service Unavailable"]"#;
+        let err = parse(&output(&failed_stream("", fields), "", false)).unwrap_err();
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert!(!failure.is_transient());
         // A limit in `errors`: not asked again, and the hint keeps when it resets.
         let limit = "You've hit your session limit · resets 3pm (Europe/Berlin)";
         let fields = format!(
             r#""subtype":"error_during_execution","is_error":true,"api_error_status":429,"usage":{{}},"errors":["{limit}"]"#
         );
         let err = parse(&output(&failed_stream(limit, &fields), "", false)).unwrap_err();
-        let AgentError::Failed(message, _) = &err else { panic!("{err:?}") };
-        assert!(!crate::label::agent::is_transient(message), "{message}");
-        let hint = ClaudeCode::new().hint(message).unwrap();
+        let AgentError::Failed(failure) = &err else { panic!("{err:?}") };
+        assert!(!failure.is_transient(), "{failure:?}");
+        let hint = ClaudeCode::new().hint(&failure.message).unwrap();
         assert!(hint.contains("usage limit was reached (resets 3pm (Europe/Berlin))"), "{hint}");
         // Nothing but the subtype.
         let fields = r#""subtype":"error_max_turns","is_error":true"#;

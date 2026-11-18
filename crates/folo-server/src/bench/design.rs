@@ -19,7 +19,7 @@ use folo_bench::plan::{DEFAULT_SEVERITIES, MAX_WEIGHT};
 
 use super::state::Slot;
 use crate::error::{Error, Result};
-use crate::label::agent::{AgentError, AgentRequest, label_with_retry};
+use crate::label::agent::{AgentRequest, BatchError, ask, failure_hint};
 use crate::label::{agent_jpeg, check_model, check_text};
 use crate::store::Store;
 use serde::Deserialize;
@@ -259,44 +259,34 @@ pub(super) fn design(
             cancel,
         };
         let mut usage = LabelUsage::default();
-        let mut why = String::new();
-        let mut answer = None;
-        for _attempt in 0..2 {
-            match label_with_retry(&*agent, &request, backoff, |_, _| {}) {
-                Ok(reply) => {
-                    usage.add(&reply.usage);
-                    match parse_answer(&reply.text, designer.clone()) {
-                        Ok(plan) => {
-                            answer = Some(Ok(BenchDesign { plan, usage }));
-                            break;
-                        }
-                        Err(e) => why = e,
-                    }
-                }
-                Err(AgentError::Cancelled | AgentError::Timeout) => {
-                    let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
-                        format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
-                    } else {
-                        "the server is shutting down".to_string()
-                    };
-                    answer = Some(Err(agent_failed(message, None)));
-                    break;
-                }
-                // A design that failed has no usage to show.
-                Err(AgentError::Unavailable(m) | AgentError::Failed(m, _) | AgentError::Transient(m, _)) => {
-                    let hint = agent.hint(&m);
-                    answer = Some(Err(agent_failed(m, hint)));
-                    break;
-                }
+        // Two calls at most, whatever made the first fail (a passing fault, or an answer that is not a plan).
+        let read = |text: &str| parse_answer(text, designer.clone());
+        let answer = match ask(&*agent, &request, backoff, &mut usage, read, |_| {}) {
+            Ok(plan) => Ok(BenchDesign { plan, usage }),
+            Err(BatchError::Cancelled | BatchError::Timeout) => {
+                let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
+                    format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
+                } else {
+                    "the server is shutting down".to_string()
+                };
+                Err(agent_failed(message, None))
             }
-        }
-        drop(done);
-        answer.unwrap_or_else(|| {
-            Err(agent_failed(
+            Err(BatchError::Unreadable(why)) => Err(agent_failed(
                 format!("{name}'s answer is not a plan, also when asked once more: {why}"),
                 Some("try again, or a larger model".into()),
-            ))
-        })
+            )),
+            // A design that failed has no usage to show.
+            Err(BatchError::Failed(failure) | BatchError::Transient(failure)) => {
+                let hint = failure_hint(&*agent, &failure);
+                Err(agent_failed(failure.shown(), hint))
+            }
+            Err(BatchError::Unavailable(m)) => {
+                let hint = agent.hint(&m);
+                Err(agent_failed(m, hint))
+            }
+        };
+        drop(done);
+        answer
     });
     let _ = std::fs::remove_dir_all(&scratch);
     answer

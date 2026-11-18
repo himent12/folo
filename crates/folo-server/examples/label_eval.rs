@@ -41,13 +41,13 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use folo_server::api::{BBox, LabelAgentId, LabelEffort, LabelUsage};
-use folo_server::label::agent::label_with_retry;
+use folo_server::label::agent::{BatchError, Event, ask};
 use folo_server::label::prompt::ImageSize;
 use folo_server::label::{
-    Agent, AgentError, AgentImage, AgentRequest, ClaudeCode, Codex, TRANSIENT_BACKOFF, agent_jpeg, prompt,
+    Agent, AgentImage, AgentRequest, ClaudeCode, Codex, TRANSIENT_BACKOFF, agent_jpeg, prompt,
 };
 use folo_test_support::TestDir;
 use serde::{Deserialize, Serialize};
@@ -569,59 +569,58 @@ fn label(
                         cancel: &cancel,
                     };
                     let t = Instant::now();
-                    for attempt in 0..2 {
-                        let retry = |why: &str, wait: Duration| {
-                            eprintln!("call {n}: {why}; asking again in {} s", wait.as_secs());
-                        };
-                        // What a failed call used counts in the totals, as a run's usage does.
-                        let reply = match label_with_retry(agent, &req, TRANSIENT_BACKOFF, retry) {
-                            Ok(reply) => reply,
-                            Err(AgentError::Cancelled) => break,
-                            Err(AgentError::Timeout) => {
-                                eprintln!("call {n}: timed out");
-                                break;
-                            }
-                            Err(AgentError::Transient(why, used)) => {
-                                // Its photos go unanswered (as missed objects); the eval goes on.
-                                usage.lock().unwrap().add(&used);
-                                eprintln!("call {n}: {why}");
-                                break;
-                            }
-                            Err(AgentError::Failed(why, used)) => {
-                                usage.lock().unwrap().add(&used);
-                                eprintln!("call {n}: {why}");
-                                fatal.lock().unwrap().get_or_insert(why);
-                                cancel.store(true, Ordering::Relaxed);
-                                break;
-                            }
-                            Err(AgentError::Unavailable(why)) => {
-                                eprintln!("call {n}: {why}");
-                                fatal.lock().unwrap().get_or_insert(why);
-                                cancel.store(true, Ordering::Relaxed);
-                                break;
-                            }
-                        };
-                        usage.lock().unwrap().add(&reply.usage);
+                    // As a run asks: two calls at most, whatever made the first fail, and what every call used
+                    // counts in the totals.
+                    let mut attempt = 0;
+                    let read = |text: &str| {
+                        attempt += 1;
                         if let Some(dir) = &args.replies {
                             let _ = std::fs::create_dir_all(dir);
-                            let _ = std::fs::write(dir.join(format!("call-{n}-{attempt}.txt")), &reply.text);
+                            let _ = std::fs::write(dir.join(format!("call-{n}-{}.txt", attempt - 1)), text);
                         }
-                        match prompt::parse_reply(&reply.text, &classes, &sizes) {
-                            Ok(labels) => {
-                                let mut answers = answers.lock().unwrap();
-                                for (&i, labels) in ids.iter().zip(labels) {
-                                    answers[i] = labels.map(|l| l.boxes);
-                                }
-                                eprintln!(
-                                    "call {n}: {} photos in {:.1} s, {} in / {} out",
-                                    ids.len(),
-                                    t.elapsed().as_secs_f64(),
-                                    reply.usage.input_tokens,
-                                    reply.usage.output_tokens
-                                );
-                                break;
+                        prompt::parse_reply(text, &classes, &sizes)
+                    };
+                    let on = |event: Event<'_>| match event {
+                        Event::Unreadable(why) => eprintln!("call {n}: {why}"),
+                        Event::Again { why, wait } => {
+                            eprintln!(
+                                "call {n}: {why}; asking again in {} s",
+                                wait.unwrap_or_default().as_secs()
+                            );
+                        }
+                    };
+                    let mut used = LabelUsage::default();
+                    let answer = ask(agent, &req, TRANSIENT_BACKOFF, &mut used, read, on);
+                    usage.lock().unwrap().add(&used);
+                    match answer {
+                        Ok(labels) => {
+                            let mut answers = answers.lock().unwrap();
+                            for (&i, labels) in ids.iter().zip(labels) {
+                                // An image left out, or whose every box was dropped, is no answer (as in a run).
+                                answers[i] = prompt::image_answer(labels).ok().map(|l| l.boxes);
                             }
-                            Err(why) => eprintln!("call {n}, attempt {}: {why}", attempt + 1),
+                            eprintln!(
+                                "call {n}: {} photos in {:.1} s, {} in / {} out",
+                                ids.len(),
+                                t.elapsed().as_secs_f64(),
+                                used.input_tokens,
+                                used.output_tokens
+                            );
+                        }
+                        Err(BatchError::Cancelled) => {}
+                        Err(BatchError::Timeout) => eprintln!("call {n}: timed out"),
+                        // Its photos go unanswered (as missed objects); the eval goes on.
+                        Err(BatchError::Transient(failure)) => eprintln!("call {n}: {}", failure.shown()),
+                        Err(BatchError::Unreadable(why)) => eprintln!("call {n}: no readable reply: {why}"),
+                        Err(BatchError::Failed(failure)) => {
+                            eprintln!("call {n}: {}", failure.shown());
+                            fatal.lock().unwrap().get_or_insert(failure.shown());
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                        Err(BatchError::Unavailable(why)) => {
+                            eprintln!("call {n}: {why}");
+                            fatal.lock().unwrap().get_or_insert(why);
+                            cancel.store(true, Ordering::Relaxed);
                         }
                     }
                     let _ = std::fs::remove_dir_all(&scratch);

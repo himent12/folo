@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
 
+pub use super::ask::{BatchError, Event, MAX_CALLS, ask, failure_hint};
 pub use super::faults::{BUSY, fault_hint, is_limit, is_transient, limit_hint, reset_time, retry_after};
 use super::tree::Tree;
 
@@ -20,7 +21,7 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a probe's result is reused.
 const PROBE_TTL: Duration = Duration::from_secs(60);
 /// How often a running child is checked for its exit, the deadline and the cancel switch.
-const POLL: Duration = Duration::from_millis(40);
+pub(super) const POLL: Duration = Duration::from_millis(40);
 /// How long a child's output pipes may stay open after it exited (a process it started still holds them) before
 /// what has been read is taken as its output.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
@@ -62,13 +63,8 @@ pub struct AgentReply {
 pub enum AgentError {
     /// The CLI could not be started, or said something FOLO does not understand. Calling again will not help.
     Unavailable(String),
-    /// The CLI ran and reported an error (not signed in, an unknown model, a rate limit): its message, and what
-    /// the call used before it failed (Claude Code reports that; zero when the CLI does not).
-    Failed(String, LabelUsage),
-    /// The provider failed the call twice on a passing fault ([`is_transient`]: overloaded, a server error, a
-    /// dropped stream, a short rate limit): its message, and what both attempts used. Only [`label_with_retry`]
-    /// returns it; the next call may well go through.
-    Transient(String, LabelUsage),
+    /// The CLI ran and reported an error (not signed in, an unknown model, a limit, a passing fault).
+    Failed(Failure),
     /// No answer within [`CALL_TIMEOUT`]; the process was killed.
     Timeout,
     /// The cancel switch was set; the process was killed.
@@ -76,9 +72,39 @@ pub enum AgentError {
 }
 
 impl AgentError {
-    /// [`AgentError::Failed`] with nothing used.
+    /// [`AgentError::Failed`] with `message` alone.
     pub fn failed(message: impl Into<String>) -> AgentError {
-        AgentError::Failed(message.into(), LabelUsage::default())
+        AgentError::Failed(Failure::new(message))
+    }
+}
+
+/// An error a CLI reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Failure {
+    /// Its message, in full: what it is ([`is_transient`], [`is_limit`]) is read from all of it, and only what is
+    /// shown is cut short ([`Failure::shown`]).
+    pub message: String,
+    /// The HTTP status the CLI reported in a field of its own (Claude Code's `api_error_status`): it stands for
+    /// the statuses in the text, which may be any number.
+    pub status: Option<u16>,
+    /// What the call used before it failed (Claude Code reports that; zero when the CLI does not).
+    pub used: LabelUsage,
+}
+
+impl Failure {
+    /// A failure with `message` alone.
+    pub fn new(message: impl Into<String>) -> Failure {
+        Failure { message: message.into(), ..Failure::default() }
+    }
+
+    /// Whether the same call can get past it a little later ([`is_transient`]).
+    pub fn is_transient(&self) -> bool {
+        is_transient(&self.message, self.status)
+    }
+
+    /// The message as a run, an image or a log line shows it: at most [`folo_api::codes::MAX_MESSAGE_CHARS`].
+    pub fn shown(&self) -> String {
+        folo_api::codes::cap(&self.message, folo_api::codes::MAX_MESSAGE_CHARS)
     }
 }
 
@@ -110,50 +136,11 @@ pub trait Agent: Send + Sync + 'static {
     /// Labels one batch: one model request, no tools. Blocks until the reply, the deadline or `cancel`.
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError>;
     /// What to do about a failure with this `message` ([`AgentError::Failed`] / [`AgentError::Unavailable`]),
-    /// when the agent can tell (sign in, pick another model, ...).
+    /// when the agent can tell (sign in, pick another model, ...). [`failure_hint`] puts a failure's own status
+    /// first.
     fn hint(&self, message: &str) -> Option<String> {
         let _ = message;
         None
-    }
-}
-
-/// [`Agent::label`], asked once more when the call failed on a passing fault ([`is_transient`]), after `backoff`
-/// or the wait the message asks for if that is longer; `on_retry` is told the fault and the wait first. A second
-/// passing fault is returned as [`AgentError::Transient`], any other outcome as it is, with what the first
-/// attempt used added to it. The wait ends early, as [`AgentError::Cancelled`], when `req.cancel` is set.
-pub fn label_with_retry(
-    agent: &dyn Agent,
-    req: &AgentRequest<'_>,
-    backoff: Duration,
-    on_retry: impl FnOnce(&str, Duration),
-) -> Result<AgentReply, AgentError> {
-    let (why, first) = match agent.label(req) {
-        Err(AgentError::Failed(why, used)) if is_transient(&why) => (why, used),
-        other => return other,
-    };
-    let wait = retry_after(&why).map_or(backoff, |asked| asked.max(backoff));
-    on_retry(&why, wait);
-    let until = Instant::now() + wait;
-    while Instant::now() < until {
-        if req.cancel.load(Ordering::Relaxed) {
-            return Err(AgentError::Cancelled);
-        }
-        std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
-    }
-    let with_first = |mut used: LabelUsage| {
-        used.add(&first);
-        used
-    };
-    match agent.label(req) {
-        Ok(mut reply) => {
-            reply.usage = with_first(reply.usage);
-            Ok(reply)
-        }
-        Err(AgentError::Failed(why, used)) if is_transient(&why) => {
-            Err(AgentError::Transient(why, with_first(used)))
-        }
-        Err(AgentError::Failed(why, used)) => Err(AgentError::Failed(why, with_first(used))),
-        Err(other) => Err(other),
     }
 }
 
@@ -258,6 +245,7 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 /// What a finished child printed.
+#[derive(Clone, Debug)]
 pub struct Output {
     /// Whether it exited with status 0.
     pub success: bool,
@@ -470,79 +458,6 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(60), "the process left behind was not killed");
             std::thread::sleep(POLL);
         }
-    }
-
-    /// An agent that fails with the messages it is given, in turn, then replies.
-    struct Flaky(Mutex<Vec<&'static str>>, std::sync::atomic::AtomicUsize);
-
-    impl Agent for Flaky {
-        fn id(&self) -> LabelAgentId {
-            LabelAgentId::Claude
-        }
-        fn info(&self) -> LabelAgent {
-            unreachable!()
-        }
-        fn default_batch(&self) -> usize {
-            1
-        }
-        fn label(&self, _: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            let used = LabelUsage { calls: 1, input_tokens: 100, ..LabelUsage::default() };
-            match self.0.lock().unwrap().pop() {
-                Some(why) => Err(AgentError::Failed(why.into(), used)),
-                None => Ok(AgentReply { text: "{}".into(), usage: used }),
-            }
-        }
-    }
-
-    #[test]
-    fn a_passing_fault_is_asked_once_more_and_no_more() {
-        let schema = serde_json::json!({});
-        let cancel = AtomicBool::new(false);
-        let req = AgentRequest {
-            system: "",
-            prompt: "",
-            images: &[],
-            schema: &schema,
-            model: None,
-            effort: LabelEffort::Low,
-            fast: false,
-            scratch: Path::new("."),
-            cancel: &cancel,
-        };
-        let wait = Duration::from_millis(30);
-        let ask = |fails: Vec<&'static str>| {
-            let agent = Flaky(Mutex::new(fails), Default::default());
-            let mut heard = Vec::new();
-            let t0 = Instant::now();
-            let r = label_with_retry(&agent, &req, wait, |why, _| heard.push(why.to_string()));
-            (r, agent.1.load(Ordering::SeqCst), heard, t0.elapsed())
-        };
-        let used = |calls: u64| LabelUsage { calls, input_tokens: 100 * calls, ..LabelUsage::default() };
-        // Overloaded once: asked again after the wait, and the reply comes back with what both attempts used.
-        let (r, calls, heard, took) = ask(vec!["API Error: 529 Overloaded"]);
-        assert!(calls == 2 && heard == ["API Error: 529 Overloaded"] && took >= wait);
-        assert_eq!(r.unwrap().usage, used(2));
-        // Overloaded twice: a transient failure, not a third call. (The list pops from its end.)
-        let (r, calls, _, _) = ask(vec!["status 503 again", "API Error: 529 Overloaded"]);
-        assert_eq!((r, calls), (Err(AgentError::Transient("status 503 again".into(), used(2))), 2));
-        // Overloaded, then a real error: that error.
-        let (r, calls, _, _) = ask(vec!["Please run /login", "API Error: 529 Overloaded"]);
-        assert_eq!((r, calls), (Err(AgentError::Failed("Please run /login".into(), used(2))), 2));
-        // A limit is never asked again.
-        let (r, calls, heard, _) = ask(vec!["You've hit your session limit"]);
-        assert_eq!(
-            (r, calls, heard.len()),
-            (Err(AgentError::Failed("You've hit your session limit".into(), used(1))), 1, 0)
-        );
-        // A short rate limit is waited out (for as long as it asks, when that is longer than the pause).
-        let (r, calls, _, took) = ask(vec!["Rate limit reached. Please try again in 0.2s."]);
-        assert!(r.is_ok() && calls == 2 && took >= Duration::from_millis(200), "{took:?}");
-        // Cancelled while it waits: no second call.
-        cancel.store(true, Ordering::SeqCst);
-        let (r, calls, _, took) = ask(vec!["API Error: 529 Overloaded"]);
-        assert_eq!((r, calls), (Err(AgentError::Cancelled), 1));
-        assert!(took < Duration::from_secs(5));
     }
 
     #[test]

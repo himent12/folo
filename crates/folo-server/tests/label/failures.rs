@@ -184,11 +184,38 @@ async fn passing_faults_in_a_row_end_the_run_and_a_usage_limit_ends_it_at_once()
 }
 
 #[tokio::test]
+async fn a_batch_makes_two_calls_at_most_whatever_made_them_fail() {
+    let t = TestDir::new("label-mixed-failures");
+    // Call 1 fails on a passing fault, is asked again and replies garbage: that is its second and last call (the
+    // third step, another passing fault, is call 2's first).
+    let steps = vec![
+        Step::FailPaid("API Error: 503 Service Unavailable"),
+        Step::Reply("Sure! Here are the boxes.".into()),
+        Step::Fail("API Error: 503 Service Unavailable"),
+    ];
+    let f = fixture(&t.join("home"), steps);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.done, run.failed), (Some(LabelOutcome::Completed), 1, 1));
+    // Two calls each: four, not five.
+    assert_eq!(f.agent.calls(), 4);
+    // Every call that reported usage is counted: the paid fault, the garbage reply and call 2's reply.
+    assert_eq!((run.usage.calls, run.usage.input_tokens), (3, paid().input_tokens + 2 * 1000));
+    let page = images(app, &job.id, "").await;
+    assert_eq!(page.images[0].error.as_deref(), Some("the reply has no JSON object"));
+}
+
+#[tokio::test]
 async fn an_image_whose_every_box_was_dropped_fails_instead_of_looking_empty() {
     let t = TestDir::new("label-all-dropped");
-    // Image 1: its one box is of no class of the job. Image 2: nothing on it, which is an answer.
+    // Image 1 (200 x 100): its one box is of a class of the job but lies wholly outside it, so nothing is left
+    // of it. Image 2: nothing on it, which is an answer.
     let reply = json!({ "images": [
-        { "image": 1, "boxes": [{ "label": "truck", "box": [10, 10, 40, 40] }] },
+        { "image": 1, "boxes": [["car", 300, 150, 400, 200]] },
         { "image": 2, "boxes": [] },
     ] });
     let f = fixture(&t.join("home"), vec![Step::Reply(reply.to_string())]);

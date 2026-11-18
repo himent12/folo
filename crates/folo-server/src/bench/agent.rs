@@ -25,7 +25,7 @@ use super::model::{PROGRESS_EVERY, finish_entry, passes};
 use super::results::{self, Pass};
 use super::state::{BenchFile, Slot};
 use crate::error::{Error, Result};
-use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT, label_with_retry};
+use crate::label::agent::{Agent, AgentRequest, BatchError, CALL_TIMEOUT, Event, ask, failure_hint};
 use crate::label::{AgentImage, MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
 
 /// Agent calls in flight at once (as a labeling run's default).
@@ -69,7 +69,8 @@ struct Run<'a> {
     /// Images whose call failed, with the first reason.
     failed: Mutex<(usize, Option<String>)>,
     soft_failures: AtomicU32,
-    fatal: Mutex<Option<String>>,
+    /// Why the entry gave up, and what to do about it when that is known then.
+    fatal: Mutex<Option<(String, Option<String>)>>,
     done: Mutex<(u64, Option<Instant>)>,
 }
 
@@ -130,14 +131,15 @@ impl Run<'_> {
         }
     }
 
-    fn fail(&self, why: String) {
-        self.fatal.lock().unwrap().get_or_insert(why);
+    /// Gives up, with `hint` (else the agent's for `why`).
+    fn fail(&self, why: String, hint: Option<String>) {
+        self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.job.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn soft_failure(&self, why: &str) {
+    fn soft_failure(&self, why: &str, hint: Option<String>) {
         if self.soft_failures.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_SOFT_FAILURES {
-            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"));
+            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"), hint);
         }
     }
 
@@ -170,14 +172,14 @@ impl Run<'_> {
                 }
                 Err(why) => {
                     // A benchmark's files are its own: one that cannot be read is a broken benchmark.
-                    self.fail(format!("image '{}': {why}", self.file.images[i].id));
+                    self.fail(format!("image '{}': {why}", self.file.images[i].id), None);
                     return;
                 }
             }
         }
         let scratch = self.job.slot.dir.join("tmp").join(&self.job.entry).join(format!("call-{}", unit.n));
         if let Err(e) = std::fs::create_dir_all(&scratch) {
-            self.fail(format!("creating {}: {e}", scratch.display()));
+            self.fail(format!("creating {}: {e}", scratch.display()), None);
             return;
         }
         let sent: Vec<(u32, u32)> = sizes.iter().map(|s| s.sent).collect();
@@ -194,52 +196,42 @@ impl Run<'_> {
             cancel: &self.job.cancel,
         };
         let mut usage = LabelUsage::default();
-        let mut retried = false;
         // `Some(labels per image)` on a reply that was read, `Err(why)` when the images failed, `None` untouched.
-        let result: Option<std::result::Result<Vec<Option<prompt::Labels>>, String>> = loop {
-            if self.cancelled() {
-                break None;
+        let read = |text: &str| prompt::parse_reply(text, &self.file.classes, &sizes);
+        // Every unreadable reply counts towards the cutoff, as in a labeling run.
+        let on = |event: Event<'_>| {
+            if let Event::Unreadable(why) = event {
+                self.soft_failure(why, None);
             }
-            let reply = match label_with_retry(&*self.job.agent, &request, self.job.backoff, |_, _| {}) {
-                Ok(reply) => reply,
-                Err(AgentError::Cancelled) => break None,
-                Err(AgentError::Timeout) => {
-                    let why = format!(
-                        "{} did not answer within {} s",
-                        self.job.agent.id().display_name(),
-                        CALL_TIMEOUT.as_secs()
-                    );
-                    self.soft_failure(&why);
-                    break Some(Err(why));
-                }
-                Err(AgentError::Transient(why, used)) => {
-                    usage.add(&used);
-                    self.soft_failure(&why);
-                    break Some(Err(why));
-                }
-                Err(AgentError::Failed(why, used)) => {
-                    usage.add(&used);
-                    self.fail(why);
-                    break None;
-                }
-                Err(AgentError::Unavailable(why)) => {
-                    self.fail(why);
-                    break None;
-                }
-            };
-            usage.add(&reply.usage);
-            match prompt::parse_reply(&reply.text, &self.file.classes, &sizes) {
-                Ok(labels) => {
-                    self.soft_failures.store(0, Ordering::Relaxed);
-                    break Some(Ok(labels));
-                }
-                Err(why) => {
-                    self.soft_failure(&why);
-                    if retried || self.cancelled() {
-                        break Some(Err(why));
-                    }
-                    retried = true;
-                }
+        };
+        let agent = &*self.job.agent;
+        let result = match ask(agent, &request, self.job.backoff, &mut usage, read, on) {
+            Ok(labels) => {
+                self.soft_failures.store(0, Ordering::Relaxed);
+                Some(Ok(labels))
+            }
+            Err(BatchError::Cancelled) => None,
+            Err(BatchError::Timeout) => {
+                let why = format!(
+                    "{} did not answer within {} s",
+                    agent.id().display_name(),
+                    CALL_TIMEOUT.as_secs()
+                );
+                self.soft_failure(&why, None);
+                Some(Err(why))
+            }
+            Err(BatchError::Transient(failure)) => {
+                self.soft_failure(&failure.shown(), failure_hint(agent, &failure));
+                Some(Err(failure.shown()))
+            }
+            Err(BatchError::Unreadable(why)) => Some(Err(why)),
+            Err(BatchError::Failed(failure)) => {
+                self.fail(failure.shown(), failure_hint(agent, &failure));
+                None
+            }
+            Err(BatchError::Unavailable(why)) => {
+                self.fail(why, None);
+                None
             }
         };
         let _ = std::fs::remove_dir_all(&scratch);
@@ -266,8 +258,9 @@ impl Run<'_> {
                 let mut answers = self.answers.lock().unwrap();
                 for (&i, labels) in unit.images.iter().zip(labels) {
                     answered += 1;
-                    match labels {
-                        Some(l) => {
+                    // As a labeling run judges an image: one left out, or whose every box was dropped, failed.
+                    match prompt::image_answer(labels) {
+                        Ok(l) => {
                             answers[unit.pass][i] = Some(
                                 l.boxes
                                     .iter()
@@ -282,10 +275,10 @@ impl Run<'_> {
                                     .collect(),
                             )
                         }
-                        None => {
+                        Err(why) => {
                             let mut f = self.failed.lock().unwrap();
                             f.0 += 1;
-                            f.1.get_or_insert_with(|| "the agent's reply left an image out".into());
+                            f.1.get_or_insert(why);
                         }
                     }
                 }
@@ -311,8 +304,8 @@ impl Run<'_> {
 
     /// The entry's grade, `Ok(None)` when it was stopped, or why it failed.
     fn outcome(&self) -> Result<Option<results::Graded>> {
-        if let Some(why) = self.fatal.lock().unwrap().take() {
-            let hint = self.job.agent.hint(&why);
+        if let Some((why, hint)) = self.fatal.lock().unwrap().take() {
+            let hint = hint.or_else(|| self.job.agent.hint(&why));
             let e = Error::new(axum::http::StatusCode::BAD_GATEWAY, "agent_failed", why);
             return Err(match hint {
                 Some(h) => e.hint(h),

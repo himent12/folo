@@ -106,6 +106,28 @@ pub struct Labels {
     pub dropped: usize,
 }
 
+/// What a reply gave one image ([`parse_reply`]'s entry), as an answer: its labels, or why the image failed. An
+/// image the reply left out fails, and so does one whose every box was dropped: that is not an image with nothing
+/// on it. Labeling runs, benchmark agent entries and the eval all judge an image this way.
+pub fn image_answer(labels: Option<Labels>) -> Result<Labels, String> {
+    match labels {
+        None => Err("the agent's reply left this image out".into()),
+        Some(labels) if labels.boxes.is_empty() && labels.dropped > 0 => {
+            let all = if labels.dropped == 1 {
+                "the one box".to_string()
+            } else {
+                format!("all {} boxes", labels.dropped)
+            };
+            Err(format!(
+                "{all} the agent gave this image {} dropped (a label that is not a class, or a box that is not one \
+                 or lies outside the image)",
+                if labels.dropped == 1 { "was" } else { "were" }
+            ))
+        }
+        Some(labels) => Ok(labels),
+    }
+}
+
 /// Reads a reply for images of the given `sizes` (image 1 first). `Ok` has one entry per image: its labels, or
 /// `None` when the reply does not mention it. `Err` says why the text is not the JSON asked for.
 pub fn parse_reply(
@@ -319,6 +341,18 @@ mod tests {
             ["car",0,0,500,500]]}]}"#;
         let l = parse_reply(text, &classes(), &[thousandths(10, 10)]).unwrap().remove(0).unwrap();
         assert_eq!((l.boxes.len(), l.dropped), (1, 5));
+    }
+
+    #[test]
+    fn an_image_whose_every_box_was_dropped_is_no_answer() {
+        // A box of a known class that lies wholly outside the image is clipped to nothing.
+        let text = r#"{"images":[{"image":1,"boxes":[["car",700,700,900,900]]},{"image":2,"boxes":[]}]}"#;
+        let size = ImageSize { sent: (640, 480), file: (640, 480) };
+        let mut out = parse_reply(text, &classes(), &[size, size]).unwrap().into_iter();
+        let why = image_answer(out.next().unwrap()).unwrap_err();
+        assert!(why.starts_with("the one box the agent gave this image was dropped"), "{why}");
+        assert_eq!(image_answer(out.next().unwrap()), Ok(Labels::default()), "nothing on it is an answer");
+        assert_eq!(image_answer(None).unwrap_err(), "the agent's reply left this image out");
     }
 
     #[test]

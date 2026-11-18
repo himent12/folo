@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_nn::io::ModelConfig;
 use folo_server::api::*;
-use folo_server::label::agent::fault_hint;
+use folo_server::label::agent::{Failure, fault_hint};
 use folo_server::label::{Agent, AgentError, AgentReply, AgentRequest};
 use folo_server::{Options, RealStore, Server};
 use folo_vision::FoloModel;
@@ -115,7 +115,9 @@ impl Agent for Scripted {
         let text = match step {
             Some(Step::Reply(text)) => text,
             Some(Step::Fail(why)) => return Err(AgentError::failed(why)),
-            Some(Step::FailPaid(why)) => return Err(AgentError::Failed(why.into(), paid())),
+            Some(Step::FailPaid(why)) => {
+                return Err(AgentError::Failed(Failure { used: paid(), ..Failure::new(why) }));
+            }
             Some(Step::Hold) => {
                 while !req.cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(5));
@@ -139,7 +141,7 @@ impl Agent for Scripted {
 
     fn hint(&self, message: &str) -> Option<String> {
         // As the real agents: their own hints, then the ones every agent gives (a limit, a passing fault).
-        message.contains("/login").then(|| "sign in first".into()).or_else(|| fault_hint(message))
+        message.contains("/login").then(|| "sign in first".into()).or_else(|| fault_hint(message, None))
     }
 }
 

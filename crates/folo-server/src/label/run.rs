@@ -8,8 +8,9 @@
 //! the calls in flight. A failure that is the provider's passing fault (overloaded, a server error, a dropped
 //! stream, a rate limit that asks for a wait of a minute at most: [`super::agent::is_transient`]) is not one of
 //! those: the call is asked once more after [`TRANSIENT_BACKOFF`] (or the wait asked for, if longer), and if it
-//! fails that way again its images fail and it counts towards the calls in a row that end the run. What a failed
-//! call used is counted in the run's usage as a reply's is.
+//! fails that way again its images fail and it counts towards the calls in a row that end the run. A batch makes
+//! two calls at most, whatever made the first fail ([`super::agent::ask`]), and what every call used is counted in
+//! the run's usage, whatever came of it.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelEffort, LabelEvent, LabelImageStatus, LabelOutcome, LabelSource, LabelUsage, LogLevel};
 
-use super::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT, label_with_retry};
+use super::agent::{Agent, AgentRequest, BatchError, CALL_TIMEOUT, Event, ask, failure_hint};
 use super::job::Job;
 use super::prompt::{self, ImageSize, Labels};
 use crate::util::{rfc3339, unix_now};
@@ -89,8 +90,8 @@ struct Run<'a> {
     queue: Mutex<VecDeque<(usize, Vec<String>)>>,
     /// Calls in a row that timed out or returned garbage.
     soft_failures: AtomicU32,
-    /// Why the run gave up, once it has.
-    fatal: Mutex<Option<String>>,
+    /// Why the run gave up, once it has, and what to do about it when that is known then.
+    fatal: Mutex<Option<(String, Option<String>)>>,
     /// Results are in memory that `job.json` does not have yet.
     unsaved: AtomicBool,
     /// The agent's notices ([`Agent::notice`]) the log has, so each is logged once.
@@ -168,9 +169,10 @@ impl Run<'_> {
         self.job.log(&mut state, LogLevel::Warn, format!("{}: {notice}", self.agent_name()));
     }
 
-    /// Gives up: no further calls, and the ones in flight are ended.
-    fn fail(&self, why: String) {
-        self.fatal.lock().unwrap().get_or_insert(why);
+    /// Gives up: no further calls, and the ones in flight are ended. `hint` says what to do about it; without one
+    /// the agent's hint for `why` is given ([`Agent::hint`]).
+    fn fail(&self, why: String, hint: Option<String>) {
+        self.fatal.lock().unwrap().get_or_insert((why, hint));
         self.plan.cancel.store(true, Ordering::Relaxed);
     }
 
@@ -214,7 +216,7 @@ impl Run<'_> {
         self.settle(n, outcomes, &usage);
     }
 
-    /// One agent call for `batch` (a second one when the first reply cannot be read): what became of each image.
+    /// The agent calls for `batch` ([`ask`]: two at most, whatever made the first fail): what became of each image.
     fn ask(&self, n: usize, batch: &Batch, usage: &mut LabelUsage) -> Vec<(String, Outcome)> {
         let all = |outcome: fn(String) -> Outcome, why: &str| -> Vec<(String, Outcome)> {
             batch.ids.iter().map(|id| (id.clone(), outcome(why.to_string()))).collect()
@@ -222,7 +224,7 @@ impl Run<'_> {
         let untouched = |_| Outcome::Untouched;
         let scratch = self.job.dir.join("tmp").join(format!("call-{n}"));
         if let Err(e) = std::fs::create_dir_all(&scratch) {
-            self.fail(format!("creating {}: {e}", scratch.display()));
+            self.fail(format!("creating {}: {e}", scratch.display()), None);
             return all(untouched, "");
         }
         let sent: Vec<(u32, u32)> = batch.sizes.iter().map(|s| s.sent).collect();
@@ -238,90 +240,73 @@ impl Run<'_> {
             scratch: &scratch,
             cancel: &self.plan.cancel,
         };
-        let mut retried = false;
-        let outcomes = loop {
-            // Decoding the images took a moment, and so did a first attempt: the run may have ended meanwhile.
-            if self.cancelled() {
-                break all(untouched, "");
-            }
-            let on_retry = |why: &str, wait: Duration| {
+        // Decoding the images took a moment: the run may have ended meanwhile.
+        if self.cancelled() {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return all(untouched, "");
+        }
+        let on = |event: Event<'_>| match event {
+            // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that only
+            // returns garbage is given up on after three calls, not three batches.
+            Event::Unreadable(why) => self.soft_failure(why, None),
+            Event::Again { why, wait } => {
+                let again = match wait {
+                    Some(wait) => format!("asking again in {} s", wait.as_secs()),
+                    None => "asking once more".into(),
+                };
                 let mut state = self.job.lock();
-                let wait = wait.as_secs();
-                self.job.log(
-                    &mut state,
-                    LogLevel::Warn,
-                    format!("call {n}: {why}; asking again in {wait} s"),
-                );
-            };
-            let answer = label_with_retry(&*self.plan.agent, &request, self.plan.backoff, on_retry);
-            self.notice();
-            let reply = match answer {
-                Ok(reply) => reply,
-                Err(AgentError::Cancelled) => break all(untouched, ""),
-                Err(AgentError::Timeout) => {
-                    let why =
-                        format!("{} did not answer within {} s", self.agent_name(), CALL_TIMEOUT.as_secs());
-                    self.soft_failure(&why);
-                    break all(Outcome::Failed, &why);
-                }
-                Err(AgentError::Transient(why, used)) => {
-                    usage.add(&used);
-                    self.soft_failure(&why);
-                    break all(Outcome::Failed, &why);
-                }
-                Err(AgentError::Failed(why, used)) => {
-                    usage.add(&used);
-                    self.fail(why);
-                    break all(untouched, "");
-                }
-                Err(AgentError::Unavailable(why)) => {
-                    self.fail(why);
-                    break all(untouched, "");
-                }
-            };
-            usage.add(&reply.usage);
-            match prompt::parse_reply(&reply.text, &self.classes, &batch.sizes) {
-                Ok(labels) => {
-                    self.soft_failures.store(0, Ordering::Relaxed);
-                    break batch
-                        .ids
-                        .iter()
-                        .zip(labels)
-                        .map(|(id, labels)| {
-                            let outcome = match labels {
-                                // Every box the agent gave this image was dropped: not an image with nothing
-                                // on it, so it is not marked labeled (and empty).
-                                Some(labels) if labels.boxes.is_empty() && labels.dropped > 0 => {
-                                    Outcome::Failed(all_dropped(labels.dropped))
-                                }
-                                Some(labels) => Outcome::Labeled(labels),
-                                None => Outcome::Failed("the agent's reply left this image out".into()),
-                            };
-                            (id.clone(), outcome)
-                        })
-                        .collect();
-                }
-                Err(why) => {
-                    // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that
-                    // only returns garbage is given up on after three calls, not three batches.
-                    self.soft_failure(&why);
-                    if retried || self.cancelled() {
-                        break all(Outcome::Failed, &why);
-                    }
-                    retried = true;
-                    let mut state = self.job.lock();
-                    self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}; asking once more"));
-                }
+                self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}; {again}"));
+            }
+        };
+        let read = |text: &str| prompt::parse_reply(text, &self.classes, &batch.sizes);
+        let answer = ask(&*self.plan.agent, &request, self.plan.backoff, usage, read, on);
+        self.notice();
+        let outcomes = match answer {
+            Ok(labels) => {
+                self.soft_failures.store(0, Ordering::Relaxed);
+                batch
+                    .ids
+                    .iter()
+                    .zip(labels)
+                    .map(|(id, labels)| {
+                        let outcome = match prompt::image_answer(labels) {
+                            Ok(labels) => Outcome::Labeled(labels),
+                            Err(why) => Outcome::Failed(why),
+                        };
+                        (id.clone(), outcome)
+                    })
+                    .collect()
+            }
+            Err(BatchError::Cancelled) => all(untouched, ""),
+            Err(BatchError::Timeout) => {
+                let why = format!("{} did not answer within {} s", self.agent_name(), CALL_TIMEOUT.as_secs());
+                self.soft_failure(&why, None);
+                all(Outcome::Failed, &why)
+            }
+            Err(BatchError::Transient(failure)) => {
+                self.soft_failure(&failure.shown(), failure_hint(&*self.plan.agent, &failure));
+                all(Outcome::Failed, &failure.shown())
+            }
+            // Counted towards the cutoff as each reply came in.
+            Err(BatchError::Unreadable(why)) => all(Outcome::Failed, &why),
+            Err(BatchError::Failed(failure)) => {
+                self.fail(failure.shown(), failure_hint(&*self.plan.agent, &failure));
+                all(untouched, "")
+            }
+            Err(BatchError::Unavailable(why)) => {
+                self.fail(why, None);
+                all(untouched, "")
             }
         };
         let _ = std::fs::remove_dir_all(&scratch);
         outcomes
     }
 
-    /// Counts a call that timed out or returned garbage; too many in a row end the run.
-    fn soft_failure(&self, why: &str) {
+    /// Counts a call that timed out, returned garbage or failed on passing faults; too many in a row end the run,
+    /// with the last one's `hint`.
+    fn soft_failure(&self, why: &str, hint: Option<String>) {
         if self.soft_failures.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_SOFT_FAILURES {
-            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"));
+            self.fail(format!("{MAX_SOFT_FAILURES} calls in a row failed; the last one: {why}"), hint);
         }
     }
 
@@ -403,7 +388,13 @@ impl Run<'_> {
         let mut state = self.job.lock();
         state.active = None;
         let name = self.agent_name();
-        let hint = fatal.as_deref().and_then(|why| self.plan.agent.hint(why));
+        let (fatal, hint) = match fatal {
+            Some((why, hint)) => {
+                let hint = hint.or_else(|| self.plan.agent.hint(&why));
+                (Some(why), hint)
+            }
+            None => (None, None),
+        };
         let Some(run) = state.file.run.as_mut() else { return };
         run.finished = Some(rfc3339(unix_now()));
         run.outcome = Some(match &fatal {
@@ -455,16 +446,6 @@ impl Drop for CloseOnPanic<'_> {
         let _ = self.0.save(&state);
         self.0.emit_job(&state);
     }
-}
-
-/// Why an image whose every box the reply gave was dropped failed.
-fn all_dropped(dropped: usize) -> String {
-    let all = if dropped == 1 { "the one box".to_string() } else { format!("all {dropped} boxes") };
-    format!(
-        "{all} the agent gave this image {} dropped (a label that is not a class, or a box that is not one or lies \
-         outside the image)",
-        if dropped == 1 { "was" } else { "were" }
-    )
 }
 
 fn plural(n: u64, word: &'static str) -> String {

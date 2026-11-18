@@ -846,8 +846,10 @@ exported more than once.
   Code `haiku` at `low`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
   them). `fast` says the agent's default model has a faster service tier a run can ask for
   (`StartLabeling.fast`): Codex's Fast (priority processing, which uses more of the plan's usage); a model's own
-  `fast` says whether it offers it (Codex: its catalog entry lists the `priority` tier). Claude Code has none for
-  `claude -p`.
+  `fast` says whether it offers it (Codex: its catalog entry lists the `priority` tier). No Codex model offers it
+  when the user's Codex `config.toml` sets `model_catalog_json`, `profile`, `openai_base_url` or
+  `chatgpt_base_url` (the catalog FOLO reads may then not be its calls'; `start` with `fast` says so). Claude Code
+  has none for `claude -p`.
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "/data/photos" }`
   → `201 LabelJob`. `name` must not be blank (one line of at most 100 characters); `classes`: 1 to 80 distinct,
@@ -935,8 +937,9 @@ exported more than once.
   instructions, web search, the features and config keys that add tools or text switched off, Codex's own model
   catalog handed back without the models' tools (`model_catalog_json`, read with `codex debug models` for the
   built-in provider a call uses, and left out, with a warning in the run's log, when it cannot be read, the user's
-  `config.toml` points Codex at another catalog or server, or Codex refuses it: a refused call is made once more
-  without it), the images as `--image` attachments and
+  `config.toml` sets one of the keys above, or Codex refuses it as it starts: that call, which used no tokens, is
+  made again without it, and calls go without it until another Codex version is installed), the images as
+  `--image` attachments and
   the reply shape as `--output-schema` (class names limited to the job's classes), and with `fast` its
   `service_tier` set to `priority`; that takes a call's fixed cost from about 20000 tokens to about 700. Both run
   in an empty scratch folder and use the account the CLI is signed in with. The eval
@@ -945,7 +948,8 @@ exported more than once.
   without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
   image the reply does not mention, or whose every box was dropped, is `failed` with the reason. One bad box costs only itself, and the JSON is found with text
   around it or split into one object per image. A reply with no such JSON at all is asked for once more; then
-  its images are `failed` with the reason.
+  its images are `failed` with the reason. A batch makes two calls at most, whatever made the first fail (an
+  unreadable reply or a passing fault, below).
 - A run never burns tokens on a broken setup: when the CLI cannot be started or exits with an error (not signed
   in, an unknown model, a usage limit or a rate limit that asks for a wait of more than a minute, with when to
   start again in `run.hint`, in the CLI's words), or three calls in a row
@@ -954,11 +958,13 @@ exported more than once.
   provider (overloaded, a 5xx status, a dropped stream, a rate limit that asks for a minute or less) is not such an
   error: the call is made once more after 15 s (or the wait asked for, if longer), and if it fails that way again
   its images are `failed` and the call counts towards the three in a row (`run.hint` then says the provider is
-  busy). Claude Code's error results are read from their structured fields (`errors`, `api_error_status`) as well
-  as their text. Once a run is stopped or has failed, no further call is started and
+  busy). A 4xx status other than 429 is never a passing fault, and a fault that asks for a wait of more than a
+  minute ends the run as a limit does. Claude Code's error results are read from their structured fields
+  (`errors`, `api_error`, and `api_error_status`, which stands for any number in the text) as well as their
+  text. Once a run is stopped or has failed, no further call is started and
   the ones in flight are killed. `POST …/start` again continues with what is left.
 - `usage` adds up what the CLIs report per call, a failed call's too (Claude Code reports what a call that failed
-  used). `cost_usd` is Claude Code's own figure (list prices, also on a subscription); Codex reports none.
+  used), whatever became of the batch (stopped during a wait, timed out). `cost_usd` is Claude Code's own figure (list prices, also on a subscription); Codex reports none.
 
 **Making the dataset**
 - `POST /api/label/jobs/{id}/dataset` body `{ "name"?, "val_fraction"?: 0.2, "seed"?: 0 }` → `201 Dataset` with
@@ -1131,8 +1137,9 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     thread of its own (never behind the model queue). `501 not_supported` when its CLI is not installed. `scored`
     is false: agents give no confidences. `usage` adds up the calls. Failures follow labeling runs: a CLI that
     cannot be started or reports an error ends the entry at once as `failed` with the CLI's message and the
-    agent's hint, and so do three calls in a row that time out or return garbage; a reply that cannot be read is
-    asked for once more. An image whose call still failed, or that a reply left out, has no answer: when at most
+    agent's hint, and so do three calls in a row that time out or return garbage; a reply that cannot be read, or
+    a passing fault, is asked once more (two calls a batch at most). An image whose call still failed, that a
+    reply left out, or whose every box was dropped has no answer: when at most
     2% of the entry's image answers (at least one) are missing they count as images where the agent found
     nothing; with more the entry is `failed` ("N of M images got no usable answer from the agent"), because that
     score would not be honest.
