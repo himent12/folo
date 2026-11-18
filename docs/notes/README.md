@@ -34,7 +34,7 @@ down their method, commands, A/B tables and what did not work. BENCHMARKS has th
 
 Round 4 (2026-11-14): [Dense output distillation from a frozen teacher, on the proxy](hill/r4-distill.md).
 
-Round 5 (2026-11-17; merged results in [BENCHMARKS, Hill-climb 5](../BENCHMARKS.md#hill-climb-5-2026-11-17)):
+Round 5 (2026-11-17; round summary in [BENCHMARKS, Hill-climb 5](../BENCHMARKS.md#hill-climb-5-2026-11-17)):
 - [Distillation on full COCO: a gated accuracy idea, the fused distillation kernel and the long run](hill/r5-accuracy.md)
 - [Int8 inference on the CPU](hill/r5-cpuq8.md)
 - [GPU training glue, backward GEMM shapes, BatchNorm in the conv](hill/r5-gputrain.md) (its PR #294 was closed,

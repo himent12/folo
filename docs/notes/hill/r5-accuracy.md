@@ -185,13 +185,13 @@ folo-n-coco-v4` (all 417 tensors transferred) with `--teacher folo-s-coco` (f16,
 `auto` optimizer (rule 5 with `--weights`: MuSGD, Muon / SGD 0.2 / 1.0). The run starts a new learning-rate schedule
 (3 warm-up epochs, `lr0` 0.01, `lrf` 0.01) and closes mosaic for its last 10 epochs. Binary `bin/folo-long.exe`:
 origin/main ac56a0c4 (#297 merged), release (`bin/folo-long.txt` has its sha256). Started 2026-11-17 23:05:21Z,
-`trainer exit 0` at 2026-11-18 05:02:46Z (`long/long.log`): 64 epochs in 21,439 s (about 6 h; 294-492 s per epoch),
+`trainer exit 0` at 2026-11-18 05:02:46Z (`long/long.log`): 64 epochs in 21,439 s (the trainer's "finished 64 epochs in 21438.9 s"; about 6 h; 294-492 s per epoch),
 on the shared machine (the round's `gpu-training.txt` marker kept GPU speed measurements off it while it ran, but
 other work did not stop), so this is not an unloaded cost.
 
 **The trainer's own mAP50-95** (its validation after each epoch, EMA weights; `metrics.jsonl`): 0.3397 at epoch 1,
 down to 0.3031 at epoch 3 (likely the warm-up back to `lr0` moving v4's converged weights), back above epoch 1 at epoch 28
-(0.3398), 0.3664 at epoch 64. It was still rising at the end: +0.0082 over the last ten epochs, +0.0006 in the last.
+(0.3398), 0.3664 at epoch 64. It was still rising at the end: +0.0081 over the last ten epochs, +0.0006 in the last.
 
 **val2017, read once** (the EMA weights of epoch 64 exported unfused as `weights/n-v4-cont-kd-e64.folo`, then
 `folo val --coco --save-json eval/dets-long.json` on the GPU, `logs/val-long.log`; `bin/records.py` scored the same

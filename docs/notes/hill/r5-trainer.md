@@ -41,7 +41,7 @@ branches.
 `win-mini1`, mini320 images at 640 px (20k COCO train images resized to a 320 px long side, so decode is cheap),
 `--mosaic 0 --workers 12`, prototype timing on. Per window (4 batches), host-side phases of the window-end batch:
 
-| phase | ms (s1 / s2 / s3, epoch 2) |
+| phase | ms (s1 / s2 / s3; each arm's last prototype print, epoch 1 or 2) |
 |---|---|
 | `unscale_clip` (norm partials, clip factor, unscale, **one readback**) | 10.2 / 10.0 / 10.4 |
 | optimizer step (MuSGD, ~70 dispatches, 2 submissions) | 2.2 - 8.4 |
@@ -174,8 +174,8 @@ Method. Other lanes' builds and tests ran beside every set; the load is per arm.
 throughput.** Mean img/s with the same stall rule for every arm (steps longer than 0.3 s dropped: both binaries
 have them, from the environment, e.g. mini2 b1 7 gaps / 6.9 s and n1 4 gaps / 3.5 s): **568 (521-586, 7 arms)
 against 501 (390-556, 10 arms), +13%.** The raw means (459 against 568, +24%) leave more stall time in the `main`
-arms and overstate the gain. The three bracketed arms are excluded from img/s only; their cycles are unaffected
-and keep the cycle median at 110.1 ms. Every pair's cycle favours the branch (−1.1 to −38.4 ms per window without
+arms and overstate the gain. The three bracketed arms are excluded from img/s; the two cold-cache arms (mini3
+n1, n2) keep their cycles in the median, the CPU-starved mini4 n2 does not (with it the median is 110.55 ms). Every pair's cycle favours the branch (−1.1 to −38.4 ms per window without
 the bracketed arms) except mini4's starved n2. The gain grows with the CPU load, likely because `main`'s host
 thread waits for the GPU at every window end and then has to be scheduled again before it encodes anything, and
 with the CPU at 100% that costs more (mini4's base cycle 123-149 ms against 114-116 ms in the quieter mini2). In
@@ -253,6 +253,7 @@ loader bench of mine and is discarded):
 | b6 main | 409 | 120.0 ms | +15.2 ms | 98%, 1.8, 5.4 cores |
 
 Cycle median 111.8 against 115.8 ms (−3.5%), but `main`'s cycle drifted up with the load (110.9 → 120.0 ms as the
-CPU went from 80% to 98%) and the first pair is a tie (+0.9 ms); mean img/s pairs −13% / +21% / +6%. Row 10 (full
-COCO folo-n AMP, `logs/amp-row10/`): epoch-2 median step 289.7 → 294.2 img/s (+1.6%). Not resolved outside ±3%: not
+CPU went from 80% to 98%) and the first pair is a tie (+0.9 ms); mean img/s pairs −13% / +21% / +6%. Row 10 (the
+512-image synthetic trainer set, folo-n AMP, 3 rounds, `logs/amp-row10/ab.txt`): epoch-2 training img/s, median of
+the rounds, 289.7 → 294.2 (+1.6%). Not resolved outside ±3%: not
 shipped. A quiet-machine re-measure could settle whether the ~3% is real.

@@ -159,7 +159,8 @@ A/B, AMP, against #294's binary (`glue1`) so only the statistics differ:
 
 (`ab-bn1`, bn1 against main, 5 rounds, cpu 34–100 %: AMP 548 → 568, f32 363 → 372, i.e. #294 and the epilogue together.) The
 medians swing ±5 % between runs (`glue1` is bimodal, 566–580 or 604–624 per round); the fastest step moves −0.7 %
-in both, which is the sub-gate's 270 µs of a 26 ms step. **A tie: not shipped.** A summation-order change to AMP
+in both (25.18 → 25.01 and 25.21 → 25.03 ms, 170 and 180 µs; the sub-gate's 270 µs per forward would be about
+1 % of a 26 ms step). **A tie: not shipped.** A summation-order change to AMP
 training, and the proxy-P1 pair it needs (about 17 GPU minutes), are not worth a 1 % that the A/B cannot resolve;
 the proxy pair was therefore not run.
 
@@ -180,7 +181,7 @@ together would not reach the brief's targets either.
 
 Row 9 targets: AMP 599 → ≥ 700, f32 369 → ≥ 420. Proposed: PR #294 only, a tie on both (f32 +2.4 %, AMP +1.9 %,
 fastest step −2 % / −3 %), and it was closed, not merged. Not reached. The gates say why: the glue that proposal 1
-removes is worth 0 % in AMP at its ceiling, BatchNorm statistics in the epilogue keep 38 % of their cost, and the
+removes is worth 0 to +0.7 % in AMP at its ceiling (three A/Bs, inside the tie band), BatchNorm statistics in the epilogue keep 38 % of their cost, and the
 step's GPU time is dominated by the coop GEMMs: in `profile-base-amp.txt` (main, AMP) the backward's input- and
 weight-gradient GEMMs take 12.7 ms (6.46 + 6.22) of the backward's 22.5 ms, in a step of about 33.9 GPU-ms
 (forward 9.75, loss 0.32, backward 22.49, optimizer 1.29).

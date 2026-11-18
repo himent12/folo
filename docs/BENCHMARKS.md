@@ -280,16 +280,21 @@ lanes, each on its own branches with PRs reviewed by GPT Sol and Opus 5.5 agents
 - **trainer**, [the trainer's host side](notes/hill/r5-trainer.md): one PR, #298, closed, not merged; the mosaic
   window and the rebased `train/amp-step` got no PR.
 
-Unlike hill-climbs 2 and 3, `main` was not measured again after the round: every number below is a lane's own A/B
-against `main` at the round's start (cf65f7a5), on a machine shared by the four lanes, the CI runners and the long
-run, with the load each notebook states. Nothing merged changes a default speed path (#297 runs only with
+Unlike hill-climbs 2 and 3, `main` was not measured again after the round: every number below is a lane's own,
+from its notebook, on a machine shared by the four lanes, the CI runners and the long run, with the load each
+notebook states. Most speed numbers are A/Bs against `main` at the round's start (cf65f7a5); where a comparison is
+another one (the folo-s int8 row's in-process alternation, the BatchNorm epilogue against #294's binary, the long
+run, trained by a build of ac56a0c4, against earlier weights), the text says so. Nothing merged changes a default speed path (#297 runs only with
 `--teacher`, int8 only with `--precision int8`), so [FOLO targets](#folo-targets) is unchanged.
 
 ### The fused distillation kernel (#297)
 
 On a GPU, the class and DFL distillation terms of [docs/MODEL.md](MODEL.md) §8.9 run as one folo-gpu op instead of
 about 50 tensor commands over `[16, 80, 8400]` and `[16, 4, 16, 8400]` teacher tensors. It changes GPU distillation
-numerics by rounding only (values and gradients within 1e-5 of the tensor path; measured at most 5e-7 and 6e-7);
+numerics by rounding only (in the correctness test at 4 × 80 × 2100 anchors, values and gradients within 1e-5 of the
+tensor path, measured at most 5e-7 and 6e-7; at teacher box logits near 2^24 the tensor path's own rounding of
+`z / T` dominates and the fused value is the more accurate one, and a term near f32's largest value can overflow in
+one path's sums and not the other's);
 the CPU path, inference, export and `.folo` files do not change. From the notebook's "The fused distillation kernel":
 
 | | tensor path | fused | change |
@@ -328,7 +333,7 @@ int8 weights files exist only in the lane's run folder (not published).
 ### The long COCO run (weights not published)
 
 `folo-n-coco-v4` continued for 64 epochs on full COCO with the `folo-s-coco` teacher (the fused kernel; no rank
-term), AMP, seed 0, `auto` rule 5 (MuSGD): 21,439 s of epochs (about 6 h) on the shared machine, ending
+term), AMP, seed 0, `auto` rule 5 (MuSGD): 64 epochs in 21,439 s (the trainer's "finished 64 epochs in 21438.9 s"; about 6 h) on the shared machine, ending
 2026-11-18. val2017 of the EMA weights of epoch 64, read once (`folo val --coco`, pycocotools-exact;
 [notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md), Long run):
 
@@ -350,7 +355,7 @@ still rising at epoch 64 (0.3658 → 0.3664). The weights are a local file; whet
   full-COCO fork gate (bar +0.0005), so the long run went without it ([notes/hill/r5-accuracy.md](notes/hill/r5-accuracy.md)).
 - **Training glue: in-place fan-in accumulation and `cat` without its zero fill** (#294, closed): f32 +2.4%, AMP
   +1.9%, a tie, for 576 added lines touching autograd's fan-in, in which review found two real races (fixed); its
-  ceiling gate was +4.5-4.7% in f32 and 0% in AMP ([notes/hill/r5-gputrain.md](notes/hill/r5-gputrain.md)).
+  ceiling gate was +4.5-4.7% in f32 and 0 to +0.7% in AMP, inside the tie band, in three A/Bs ([notes/hill/r5-gputrain.md](notes/hill/r5-gputrain.md)).
 - **BatchNorm statistics in the tensor-core conv epilogue** (branch `gpu/bn-epilogue`, no PR): AMP +0.6% pooled
   over 14 rounds, a tie (the ceiling of removing the statistics pass and BN's backward `dx` was +8%). The stride-2
   sub-pixel input gradient (594 µs against a 450 µs bar) and the 1×1 weight gradient as a plain GEMM (2.6-62x
@@ -362,8 +367,8 @@ still rising at epoch 64 (0.3658 → 0.3664). The weights are a local file; whet
 - **A decode-once mosaic window** (branch `train/mosaic-window`, no PR): the loader 1.56x faster over a whole COCO
   epoch (median of three pairs), under its 1.8x gate; its accuracy gate passed at K = 2048 (proxy 0.1274 against 0.1255)
   and failed at K = 512 (0.1232).
-- **`train/amp-step` again** (cached f16 weight copies, rebased): a tie (cycle −3.5% with the load drifting; row 10's
-  epoch-2 median step +1.6%), not shipped.
+- **`train/amp-step` again** (cached f16 weight copies, rebased): a tie (cycle −3.5% with the load drifting; row 10,
+  the 512-image synthetic trainer, epoch-2 img/s median of 3 +1.6%), not shipped.
 - **Carving folo-n out of folo-s** as the long run's initialisation: rejected by the round's Fable 5.2 counsel before
   any code (v4 is a better warm start and needs none); not built.
 
@@ -1102,7 +1107,7 @@ not published, and the headline folo-n numbers of this page stay v4's until they
 | folo-n control, f32 (**NOT PUBLISHED**, hill-climb 4) | 2.6 M | 64 epochs from scratch, `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
 | **folo-n v4, f32** (`folo-n-coco-v4`, hill-climb 4) | 2.6 M | **the control's epoch 32, then epochs 33-64 with the folo-s teacher** (`--teacher`) | **0.356** | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 |
 | folo-n v4, f16 (`--half`, `folo-n-coco-v4-f16`) | 2.6 M | the same weights, fused f16 file | 0.356 | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 |
-| folo-n long run, f32 (**NOT PUBLISHED**, pending publication; hill-climb 5) | 2.6 M | v4 + 64 more epochs with the folo-s teacher (128 from scratch), `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3701 | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
+| folo-n long run, f32 (**NOT PUBLISHED**, pending publication; hill-climb 5) | 2.6 M | v4 + 64 more epochs with the folo-s teacher (128 cumulative epochs; the second 64 a new run from v4's weights), `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3701 | 0.5250 | 0.4000 | 0.1789 | 0.4052 | 0.5396 |
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
@@ -1832,7 +1837,7 @@ the last list):
    `gemm_cat` would remove them ([notes/hill/r2-gpu-train.md](notes/hill/r2-gpu-train.md)).
    Under AMP the backward GEMMs are the step too (hill-climb 5, `FOLO_GPU_PROFILE=1` on `main`): of about 33.9
    GPU-ms per folo-n AMP step the backward takes 22.5, and its input- and weight-gradient GEMMs 12.7 of those
-   (6.46 + 6.22). Removing the glue around them was worth 0% in AMP at its ceiling (gradient fan-in and `cat`'s
+   (6.46 + 6.22). Removing the glue around them was worth 0 to +0.7% in AMP at its ceiling (three A/Bs) (gradient fan-in and `cat`'s
    zero fill skipped outright) and BatchNorm statistics in the conv epilogue +0.6%, so glue removal cannot reach
    that lane's row 9 targets (AMP 700, f32 420 img/s): the backward GEMMs' shapes have to get faster. Measured
    candidates on tensor cores: the stride-2 input gradient as one sub-pixel conv (about 0.7 ms per AMP step) and
@@ -1881,8 +1886,9 @@ the last list):
    and 330 dispatches per AMP step but measured a tie under load (branch `train/amp-step`, re-measure quietly);
    the Muon gram GEMMs take 1.14 GPU-ms per folo-n step ([notes/hill/r2-gpu-train.md](notes/hill/r2-gpu-train.md)).
    Hill-climb 5 rebased it and measured a tie again (row 10 +1.6%). The AMP window's host wait for the overflow
-   flag is worth more: deferring it measured +13% img/s GPU-bound (#298, closed for its error paths in the
-   training step); a later attempt should keep the host-side read and only defer it, without a device guard
+   flag is worth more: #298's guarded implementation measured +13% img/s GPU-bound (stall-free means; the
+   prototype that only deferred the read saved 4.4 ms per window, under its 5 ms gate), and it was closed for its
+   error paths in the training step; a later attempt should keep the host-side read and only defer it, without a device guard
    ([notes/hill/r5-trainer.md](notes/hill/r5-trainer.md)).
 9. **Batch-1 latency for spaced-out calls**: with 200 ms between calls the GPU drops to P8 (16 ms per f32 call); the
    driver decides the clocks (its "Prefer maximum performance" mode for the process), FOLO cannot through Vulkan
