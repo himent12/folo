@@ -265,10 +265,12 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 | `folo-s-coco-f16` | `weights-v3` | the same, fused and cast to f16 (`folo export`): inference only |
 | `folo-n-coco-v3` | `weights-v4` | folo-n from scratch on COCO: `folo-n-coco-v2` annealed for 16 more epochs, 78 in all (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.340. examples/coco/README.md, v3 |
 | `folo-n-coco-v3-f16` | `weights-v4` | the same, fused and cast to f16 (`folo export`): inference only |
-| `folo-n-coco-v4` | `weights-v5` | folo-n from scratch on COCO train2017, 64 epochs, the second half distilled from the frozen `folo-s-coco` (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.356, the best folo-n weights. examples/coco/README.md, v4 |
+| `folo-n-coco-v4` | `weights-v5` | folo-n from scratch on COCO train2017, 64 epochs, the second half distilled from the frozen `folo-s-coco` (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.356. examples/coco/README.md, v4 |
 | `folo-n-coco-v4-f16` | `weights-v5` | the same, fused and cast to f16 (`folo export`): inference only |
+| `folo-n-coco-v5` | `weights-v6` | `folo-n-coco-v4` continued for 64 epochs on COCO train2017 with the frozen `folo-s-coco` teacher, 128 in all (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.370, the best folo-n weights. examples/coco/README.md, v5 |
+| `folo-n-coco-v5-f16` | `weights-v6` | the same, fused and cast to f16 (`folo export`): inference only |
 
-`weights-v1` to `weights-v5` are published releases. `folo weights pull` downloads their files over plain
+`weights-v1` to `weights-v6` are published releases. `folo weights pull` downloads their files over plain
 HTTPS: no `gh`, no account, nothing but the `folo` binary. Only when that download is refused (`404` from a private
 fork or mirror, a draft) does the pull fall back to `gh release download`, which needs a logged-in
 [`gh`](https://cli.github.com) (`gh auth login`) with access to that repository. A progress line shows on a
@@ -285,8 +287,8 @@ A command that takes a published name that is not downloaded (`train --weights`,
 `export`) does not download it: it stops at once with `weights_not_found` (exit 3) and the hint
 ``run `folo weights pull NAME`, then this command again``, so a run never starts on a download it did not ask for. A
 first fine-tune is two commands ([QUICKSTART](QUICKSTART.md#fine-tune-from-pretrained-weights)):
-`folo weights pull folo-n-coco-v4`, then `folo train --data <dataset> --weights folo-n-coco-v4`. Without `folo`,
-`gh release download weights-v5 --repo himent12/folo --pattern 'folo-n-coco-v4*' --pattern SHA256SUMS` (or the
+`folo weights pull folo-n-coco-v5`, then `folo train --data <dataset> --weights folo-n-coco-v5`. Without `folo`,
+`gh release download weights-v6 --repo himent12/folo --pattern 'folo-n-coco-v5*' --pattern SHA256SUMS` (or the
 release URLs) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Cloud

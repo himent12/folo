@@ -18,11 +18,16 @@ like-for-like comparison, and how much of the gap each accounts for is not known
 1%, mosaic off for the last 8), published as `folo-n-coco-v3` (release `weights-v4`):
 `folo weights pull folo-n-coco-v3` ([v3](#v3-v2-annealed-for-16-epochs)).
 
-**v4: AP 0.356 / AP50 0.509**, the best folo-n weights: a new 64-epoch run from random init (`auto` rule 5, MuSGD),
+**v4: AP 0.356 / AP50 0.509**: a new 64-epoch run from random init (`auto` rule 5, MuSGD),
 its second half (epochs 33–64) distilled from the frozen `folo-s-coco` below, published as `folo-n-coco-v4`
 (release `weights-v5`): `folo weights pull folo-n-coco-v4`
 ([v4](#v4-64-epochs-the-second-half-distilled-from-folo-s)). It is a **distilled** model; the teacher was itself
 trained from scratch on COCO train2017, so no data beyond COCO train2017 is anywhere in the chain.
+
+**v5: AP 0.370 / AP50 0.525**, the best folo-n weights: v4 continued for 64 more epochs with the same teacher (128
+in all, 96 of them distilled), published as `folo-n-coco-v5` (release `weights-v6`): `folo weights pull
+folo-n-coco-v5` ([v5](#v5-v4-continued-for-64-epochs-with-the-folo-s-teacher)). +0.014 AP over v4; no
+teacher-free continuation was run, so that is the epochs and the teacher together. Still COCO train2017 only.
 
 **folo-s: AP 0.416 / AP50 0.580** after 56 epochs from scratch on one rented RTX PRO 4000 Blackwell (9.5 h of epochs,
 about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`): `folo weights pull folo-s-coco`. That is 0.05–0.06 AP
@@ -558,8 +563,117 @@ defaults; `folo val --save-json` of `best.folo` on each set's evaluation split, 
 | signature | 0.9894 | 0.9871 | 0.9883 | 0.9880 | 0.9908 | 0.9894 | +0.0012 |
 | medical pills | 0.8064 | 0.8050 | 0.8057 | 0.8066 | 0.8055 | 0.8061 | +0.0003 |
 
-The bar was that v4's mean is not more than 0.010 AP below v3's on any of the three; it is not below on any, so v4 is
-the recommended start for fine-tuning. Two seeds on three small test sets cannot show a gain, and none is claimed.
+The bar was that v4's mean is not more than 0.010 AP below v3's on any of the three; it is not below on any, so v4 became
+the recommended start for fine-tuning (until v5, [Publish (v5)](#publish-v5)). Two seeds on three small test sets cannot show a gain, and none is claimed.
+
+## v5: v4 continued for 64 epochs with the folo-s teacher
+
+Hill-climb 5 (lane accuracy; notebook [docs/notes/hill/r5-accuracy.md](../../docs/notes/hill/r5-accuracy.md), "Long
+run") continued `folo-n-coco-v4` for 64 more epochs on COCO train2017 with the same frozen `folo-s-coco` teacher
+(dense output distillation, [docs/MODEL.md](../../docs/MODEL.md) §8.9: class gain 0.5, DFL gain 1.5, temperature 4;
+the fused distillation kernel of #297 on the GPU), one seed. It is a new run that starts from v4's weights, not a
+resume: a new learning-rate schedule and a new optimizer state. With v4's own 64 epochs that is 128 epochs from
+random init, 96 of them with the teacher. val2017 **AP 0.370 (0.3701)**, published as `folo-n-coco-v5` (release
+`weights-v6`). Still no data beyond COCO train2017 anywhere in the chain.
+
+```sh
+# folo weights pull folo-n-coco-v4 and folo weights pull folo-s-coco first
+folo train --data datasets/coco --format coco --weights folo-n-coco-v4 --teacher folo-s-coco \
+  --epochs 64 --batch 16 --imgsz 640 --amp --seed 0 --workers 16 --device gpu:0 \
+  --project runs-coco --name n-v4-cont-kd
+```
+
+**What the run resolved to** (`config.json`): all 417 of v4's tensors transferred; MuSGD (`auto` rule 5 with
+`--weights`: muon 0.2, sgd 1.0, class-head lr × 3), lr0 0.01 decaying linearly to `lr0 · lrf` (lrf 0.01), momentum
+0.937, weight decay 5e-4, 3 warmup epochs, batch 16 × accumulate 4 (nominal 64), 1849 optimizer steps per epoch, EMA,
+mosaic 1.0 closed for the last 10 epochs, the default augmentation, AMP, seed 0; the `distill` block: teacher
+`folo-s-coco` (run in f16), class gain 0.5, DFL gain 1.5, temperature 4. 64 epochs in 21,439 s (about 6 h) on one
+RTX 4080 SUPER shared with other jobs, so that is not a cost number.
+
+The trainer's own validation (mAP50-95, EMA weights) after each epoch, from the run's `metrics.jsonl`. The warm-up
+back to lr0 first moves v4's converged weights away (epoch 3), and the run passes its epoch-1 reading at epoch 28:
+
+| epoch | 1 | 3 | 16 | 28 | 32 | 48 | 56 | **64** (last, best) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| mAP50-95 | 0.3397 | 0.3031 | 0.3311 | 0.3398 | 0.3425 | 0.3542 | 0.3604 | **0.3664** |
+
+It was still rising at the end: +0.0081 over the last ten epochs, +0.0006 in the last.
+
+### Evaluate (v5)
+
+```sh
+folo val --model folo-n-coco-v5 --data datasets/coco --coco --device gpu:0
+folo val --model folo-n-coco-v5-f16 --data datasets/coco --coco --half --device gpu:0
+```
+
+The published files, 640 px, the MODEL.md §9.3 validation settings, 5000 images:
+
+| | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR1 | AR10 | AR100 | AR_S | AR_M | AR_L |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **v5 f32** (`folo-n-coco-v5`) | **0.370** | **0.525** | 0.400 | 0.179 | 0.405 | 0.540 | 0.314 | 0.520 | 0.576 | 0.337 | 0.638 | 0.763 |
+| v5 f16 (`--half`, `folo-n-coco-v5-f16`) | 0.370 | 0.525 | 0.400 | 0.179 | 0.405 | 0.540 | 0.315 | 0.520 | 0.576 | 0.337 | 0.637 | 0.763 |
+| v4 f32 (`folo-n-coco-v4`), its start | 0.356 | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 | 0.307 | 0.510 | 0.566 | 0.330 | 0.624 | 0.761 |
+
+pycocotools' own `COCOeval` on the same detections (`--save-json`) gives f32 AP 0.370076, AP50 0.524983, AP75
+0.399993: all 12 numbers agree with FOLO's, with a largest difference of 3.3e-16 for f32 (814,520 detections at
+`conf > 0.001`, the lane's count) and 2.2e-16 for f16 (815,473). f16 is within 0.0007 of f32 on every stat, inside
+MODEL.md §9.1's 0.002 bound.
+
+A paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples, seed 0): v5 − v4 **+0.0141
+AP** [+0.0114, +0.0166], v5 − hill-climb 4's control +0.0194 [+0.0160, +0.0223]. **No teacher-free continuation of v4
+was run**, so +0.0141 is the 64 more epochs and the teacher together; how much of it each gives is not known. The
+interval covers the sampling of the evaluation images, not the training seed (one run). With DFL evidence fusion
+(docs/MODEL.md §9.4, `--fusion dfl --iou 0.65 --max-det 1000`) the f32 file gives AP 0.373 (0.3730); that is a
+different post-process, not the §9.3 protocol of the table. The gap to YOLO11n (0.395) and YOLO26n (0.409) is now
+0.025–0.039 AP; data, schedule, recipe and architecture still differ.
+
+Not measured: a teacher-free continuation of the same length; a longer continuation (the trainer's mAP was still
+rising); a second seed. The teacher was trained on train2017, the student's training set; val2017 is unseen by both.
+
+### Publish (v5)
+
+```sh
+mkdir -p out/weights-v6
+folo export --model runs-coco/n-v4-cont-kd/weights/last.folo --format weights \
+  --output out/weights-v6/folo-n-coco-v5.folo
+folo export --model out/weights-v6/folo-n-coco-v5.folo --format folo-f16 \
+  --output out/weights-v6/folo-n-coco-v5-f16.folo
+cd out/weights-v6 && sha256sum folo-n-coco-v5.folo folo-n-coco-v5-f16.folo > SHA256SUMS
+gh release create weights-v6 --latest=false --target main --repo himent12/folo \
+  --title "FOLO pretrained weights v6 (folo-n v5)" --notes-file notes.md \
+  folo-n-coco-v5.folo folo-n-coco-v5-f16.folo SHA256SUMS
+```
+
+| asset | what | bytes | SHA-256 |
+|---|---|---:|---|
+| `folo-n-coco-v5.folo` | folo-n, 80 classes, EMA weights of the run's epoch 64, unfused f32: fine-tune or predict | 10,601,456 | `4287860180880cd887852ebc9d1bea6485280e5361ef00c47e99c2cdaa4d33cb` |
+| `folo-n-coco-v5-f16.folo` | the same, BatchNorm fused, f16: inference only | 5,251,088 | `57de91dd56246d91922ededb3215891b71b5f0668442b88090a9179a75c5e53d` |
+
+`weights-v6` was published on 2026-11-18 (UTC) with `--latest=false`, like the other weights releases. It pulls and
+verifies as the others do:
+
+```sh
+folo weights pull folo-n-coco-v5          # → ~/.folo/weights/folo-n-coco-v5.folo, sha256 verified
+folo weights pull folo-n-coco-v5-f16
+folo train --data <your dataset> --weights folo-n-coco-v5 ...
+folo predict --model folo-n-coco-v5-f16 --half <images>
+```
+
+**Fine-tuning from v5.** v5 was checked as a starting point against v4 with hill-climb 2's protocol, as v4 was against
+v3 (bench/finetune/README.md: folo-n, 640 px, batch 16, 100 epochs, f32, defaults; `folo val --save-json` of
+`best.folo` on each set's evaluation split, scored by pycocotools), seeds 0 and 1, both sides run again with `main`
+d0c0907d (the v4 runs reproduce [v4's own check](#publish-v4), made with 069935d6, to every digit):
+
+| dataset | v4 s0 | v4 s1 | v4 mean | v5 s0 | v5 s1 | v5 mean | v5 − v4 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BCCD | 0.6390 | 0.6267 | 0.6329 | 0.6166 | 0.6363 | 0.6264 | −0.0064 |
+| signature | 0.9880 | 0.9908 | 0.9894 | 0.9881 | 0.9849 | 0.9865 | −0.0029 |
+| medical pills | 0.8066 | 0.8055 | 0.8061 | 0.8069 | 0.8034 | 0.8051 | −0.0009 |
+
+The bar, set before the runs, was that v5's mean is not more than 0.010 AP below v4's on any of the three. It is
+inside the bar on all three, so v5 is the recommended start for fine-tuning. It is also a little below v4 on all
+three (by less than the seed-to-seed spread on BCCD and signature): the better COCO model is not a better fine-tuning
+start here, and two seeds on three small test sets can show neither a gain nor a loss of this size.
 
 ## folo-s: 56 epochs on a rented GPU
 
