@@ -176,7 +176,7 @@ impl Window {
         self.frame_times.raster_us = micros_since(start);
         if !self.damage.is_empty() {
             self.platform_window.present(&self.framebuffer, &self.damage);
-            crate::app::trace::first_frame();
+            crate::app::trace::frame_presented();
         }
         self.frame_times.present_us = micros_since(rastered);
         self.needs_present = false;

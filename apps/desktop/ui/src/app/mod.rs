@@ -29,6 +29,7 @@ pub(crate) use effects::*;
 pub use entity_map::*;
 pub use global::*;
 pub use subscription::*;
+pub use trace::{trace_at_next_frame, trace_point};
 
 use std::{
     any::{Any, TypeId},

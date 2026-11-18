@@ -49,6 +49,7 @@ impl FoloApp {
                 let late =
                     this.reconnects != reconnects && matches!(&r, Err(e) if e.code == "server_unreachable");
                 apply(this, r, cx);
+                this.trace_first_data();
                 if late && !this.store.unreachable() {
                     this.forget_unreachable_loads();
                 }
@@ -57,6 +58,25 @@ impl FoloApp {
             .ok();
         })
         .detach();
+    }
+
+    /// `FOLO_UI_TRACE`: says once when the lists every page starts from (runs, datasets and models) have
+    /// all arrived (`first-lists`) and when the frame showing them is presented (`first-lists-frame`), and
+    /// the same for `/system` (`system`, `system-frame`: Overview's hardware card).
+    fn trace_first_data(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LISTS: AtomicBool = AtomicBool::new(false);
+        static SYSTEM: AtomicBool = AtomicBool::new(false);
+        let s = &self.store;
+        let lists = s.runs.ready().is_some() && s.datasets.ready().is_some() && s.models.ready().is_some();
+        if lists && !LISTS.swap(true, Ordering::Relaxed) {
+            folo_ui::trace_point("first-lists");
+            folo_ui::trace_at_next_frame("first-lists-frame");
+        }
+        if s.system.ready().is_some() && !SYSTEM.swap(true, Ordering::Relaxed) {
+            folo_ui::trace_point("system");
+            folo_ui::trace_at_next_frame("system-frame");
+        }
     }
 
     /// Fetch the model list again after it failed (nothing else retries a failed load).

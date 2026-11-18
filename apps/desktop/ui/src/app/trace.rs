@@ -1,10 +1,11 @@
 //! Startup trace: with `FOLO_UI_TRACE` set (any value but `0`), the app prints `first-render <ms>` (the root
 //! view's first `render`) and `first-frame <ms>` (the first frame presented) to stderr, in milliseconds since
-//! the process was created. Owner tag: `"runtime"`.
+//! the process was created. The app adds its own points with [`trace_point`] (printed at once) and
+//! [`trace_at_next_frame`] (printed when the next frame is presented). Owner tag: `"runtime"`.
 
 use std::{
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -22,10 +23,35 @@ pub(crate) fn first_render() {
     once(&DONE, "first-render");
 }
 
-/// Prints `first-frame` the first time it is called (the window calls it after presenting).
-pub fn first_frame() {
+/// Prints `first-frame` the first time it is called (the window calls it after presenting), and the
+/// labels [`trace_at_next_frame`] left for this frame.
+pub fn frame_presented() {
     static DONE: AtomicBool = AtomicBool::new(false);
     once(&DONE, "first-frame");
+    if enabled() {
+        let labels = std::mem::take(&mut *PENDING.lock().unwrap_or_else(|e| e.into_inner()));
+        for label in labels {
+            eprintln!("{label} {:.1}", since_process_start_ms());
+        }
+    }
+}
+
+/// Labels waiting for the next presented frame.
+static PENDING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// With `FOLO_UI_TRACE` set, prints `<label> <ms since the process was created>` to stderr now.
+pub fn trace_point(label: &str) {
+    if enabled() {
+        eprintln!("{label} {:.1}", since_process_start_ms());
+    }
+}
+
+/// With `FOLO_UI_TRACE` set, prints `<label> <ms>` when the next frame is presented (a frame showing what
+/// changed when this was called).
+pub fn trace_at_next_frame(label: &'static str) {
+    if enabled() {
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(label);
+    }
 }
 
 fn once(done: &AtomicBool, label: &str) {
