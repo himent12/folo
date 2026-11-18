@@ -126,6 +126,22 @@ fn adapter_rank(a: &folo_gpu::AdapterSummary) -> (u8, u8) {
     (ty, backend)
 }
 
+/// The physical adapters [`gpus`] lists, best first (software ones left out), before it moves the running GPU
+/// backend's adapter to the front. Enumerated once per process (about 150 ms on Windows: a GPU instance of its own),
+/// so `/api/system` runs it beside creating the device ([`crate::Store::prepare_gpus`]).
+pub fn adapters() -> &'static [folo_gpu::AdapterSummary] {
+    static ADAPTERS: OnceLock<Vec<folo_gpu::AdapterSummary>> = OnceLock::new();
+    ADAPTERS.get_or_init(|| {
+        let mut adapters: Vec<folo_gpu::AdapterSummary> =
+            folo_gpu::GpuContext::enumerate(&folo_gpu::GpuOptions::from_env())
+                .into_iter()
+                .filter(|a| a.device_type != "Cpu" && api_backend(&a.backend).is_some())
+                .collect();
+        adapters.sort_by_key(adapter_rank);
+        adapters
+    })
+}
+
 /// `/api/system`'s `gpus`: each physical adapter once (through its preferred backend; software adapters are left
 /// out), best first, so ordinal 0 is the adapter `gpu:0` uses. When the GPU backend is already running, its
 /// adapter is ordinal 0. Enumerated once per process. `memory_bytes` is the adapter's largest device-local heap where
@@ -133,12 +149,7 @@ fn adapter_rank(a: &folo_gpu::AdapterSummary) -> (u8, u8) {
 pub fn gpus() -> Vec<GpuInfo> {
     static GPUS: OnceLock<Vec<GpuInfo>> = OnceLock::new();
     GPUS.get_or_init(|| {
-        let mut adapters: Vec<folo_gpu::AdapterSummary> =
-            folo_gpu::GpuContext::enumerate(&folo_gpu::GpuOptions::from_env())
-                .into_iter()
-                .filter(|a| a.device_type != "Cpu" && api_backend(&a.backend).is_some())
-                .collect();
-        adapters.sort_by_key(adapter_rank);
+        let mut adapters = adapters().to_vec();
         if folo_core::backend::backend(Device::Gpu(0)).is_ok()
             && let Ok(ctx) = folo_gpu::GpuContext::shared()
         {

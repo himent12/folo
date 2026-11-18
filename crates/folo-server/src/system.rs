@@ -83,35 +83,76 @@ fn cpu_name(sys: &System) -> String {
 }
 
 /// Keeps a [`System`] between calls so CPU utilisation is measured over the interval since the last call.
+///
+/// Setting up the CPU usage counters takes Windows about 150 ms, which `folo serve` spent before it said it was
+/// listening (and FOLO Desktop waited on). They are set up on a thread of their own instead, started where the
+/// probe is made; the first [`SystemProbe::sample`] waits for them if they are not ready yet.
 pub struct SystemProbe {
-    sys: Mutex<System>,
+    sys: Mutex<Probe>,
+}
+
+/// The probe's [`System`], or the thread still setting it up.
+enum Probe {
+    Starting(std::thread::JoinHandle<System>),
+    Ready(System),
+}
+
+fn new_system() -> System {
+    System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+            .with_memory(MemoryRefreshKind::nothing().with_ram()),
+    )
 }
 
 impl Default for SystemProbe {
     fn default() -> Self {
-        let sys = System::new_with_specifics(
-            RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-                .with_memory(MemoryRefreshKind::nothing().with_ram()),
-        );
-        SystemProbe { sys: Mutex::new(sys) }
+        let probe = match std::thread::Builder::new().name("folo-system-probe".into()).spawn(new_system) {
+            Ok(thread) => Probe::Starting(thread),
+            Err(_) => Probe::Ready(new_system()),
+        };
+        SystemProbe { sys: Mutex::new(probe) }
     }
 }
 
 impl SystemProbe {
     /// Current CPU and memory.
     pub fn sample(&self) -> (CpuInfo, MemoryInfo) {
-        let mut sys = self.sys.lock().unwrap();
+        let mut probe = self.sys.lock().unwrap_or_else(|e| e.into_inner());
+        if let Probe::Starting(_) = &*probe {
+            // Swapped out for a moment to take the thread by value; a set-up that panicked is done again here.
+            let Probe::Starting(thread) = std::mem::replace(&mut *probe, Probe::Ready(System::new())) else {
+                unreachable!("matched above")
+            };
+            *probe = Probe::Ready(thread.join().unwrap_or_else(|_| new_system()));
+        }
+        let Probe::Ready(sys) = &mut *probe else { unreachable!("made ready above") };
         sys.refresh_cpu_usage();
         sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
         let util = (sys.global_cpu_usage() / 100.0).clamp(0.0, 1.0);
         let cpu = CpuInfo {
-            name: cpu_name(&sys),
+            name: cpu_name(sys),
             threads: sys.cpus().len().max(1) as u32,
             util: (util * 100.0).round() / 100.0,
         };
         let total = sys.total_memory();
         let mem = MemoryInfo { used_bytes: total.saturating_sub(sys.available_memory()), total_bytes: total };
         (cpu, mem)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_probe_samples_once_its_counters_are_set_up_off_the_caller() {
+        let probe = SystemProbe::default();
+        for _ in 0..2 {
+            let (cpu, mem) = probe.sample();
+            assert!(cpu.threads >= 1);
+            assert!((0.0..=1.0).contains(&cpu.util), "{}", cpu.util);
+            assert!(mem.total_bytes > 0 && mem.used_bytes <= mem.total_bytes);
+        }
     }
 }

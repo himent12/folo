@@ -55,14 +55,26 @@ fn features(st: &AppState) -> Vec<String> {
 pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
     let probe = st.probe.clone();
     let store = st.store.clone();
-    let ((cpu, memory), capabilities, gpu_pool) =
-        tokio::task::spawn_blocking(move || (probe.sample(), store.capabilities(), store.gpu_pool()))
-            .await
-            .map_err(|e| Error::internal(format!("task failed: {e}")))?;
+    let ((cpu, memory), capabilities, gpu_pool, gpus) = tokio::task::spawn_blocking(move || {
+        // The first call's three slow parts overlap: creating the GPU device (`capabilities`), enumerating the
+        // adapters, and the CPU counters the probe may still be setting up. `gpus` itself comes after the device,
+        // which it puts first.
+        std::thread::scope(|s| {
+            let adapters = s.spawn(|| store.prepare_gpus());
+            let sample = s.spawn(|| probe.sample());
+            let capabilities = store.capabilities();
+            let gpu_pool = store.gpu_pool();
+            let _ = adapters.join();
+            let sample = sample.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
+            (sample, capabilities, gpu_pool, store.gpus())
+        })
+    })
+    .await
+    .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
     let features = features(&st);
     Ok(Json(SystemResponse {
-        system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
+        system: SystemInfo { cpu, memory, gpus },
         data_dir,
         features,
         capabilities,

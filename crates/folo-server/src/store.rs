@@ -386,6 +386,9 @@ pub trait Store: Send + Sync + 'static {
     fn is_mock(&self) -> bool;
     /// GPUs to report in `/api/system`.
     fn gpus(&self) -> Vec<GpuInfo>;
+    /// Does the slow part of [`Store::gpus`] that doesn't depend on [`Store::capabilities`] having run (the real
+    /// store enumerates the adapters), so `/api/system` overlaps the two. May block; the default does nothing.
+    fn prepare_gpus(&self) {}
     /// What runs with `device: auto` can use, for `/api/system`'s `capabilities` (`None`: not reported). May block
     /// (the real store creates the GPU context on first use).
     fn capabilities(&self) -> Option<Capabilities> {
