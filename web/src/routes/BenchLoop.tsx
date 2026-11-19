@@ -211,7 +211,10 @@ export default function BenchLoop() {
       {hint() ? (
         <span class="hint">{hint()}</span>
       ) : c() === null && !graded.get() ? (
-        <span class="hint">No generation graded yet: the first point is the teacher’s, once its benchmark entry is done.</span>
+        // The first point promised only while the loop runs: a stopping one stops the teacher's entry with it.
+        <span class="hint">
+          {loop.get()?.status === 'running' ? 'No generation graded yet: the first point is the teacher’s, once its benchmark entry is done.' : 'No generation was graded.'}
+        </span>
       ) : c() === null ? (
         <>
           <span class="key">
