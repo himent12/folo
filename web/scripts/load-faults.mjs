@@ -1,10 +1,13 @@
 // Load faults on the production build: one of the app's own files fails to load (a dropped connection, or gone for
 // good), and Studio must end where it ends on `main` or better, without a reload.
-//   node scripts/load-faults.mjs [--dist <built dir>] [--base <url>] [--only <case,...>] [--delay <regex>=<ms>] [--verbose]
+//   node scripts/load-faults.mjs [--dist <built dir>] [--base <url>] [--only <case,...>] [--delay <regex>=<ms>]
+//     [--retry-wait <ms>] [--verbose]
 // Without --dist or --base it builds the app into a new folder under the OS temp dir (never in the checkout), serves
 // it with `vite preview` and removes it at the end; --dist serves a build made elsewhere (another version's, to
 // compare), --base uses a running server. --delay: every request of an asset whose path matches is answered that much
-// later in each case (a slow file; the script must not take a file still loading for a failed one).
+// later in each case (a slow file; the script must not take a file still loading for a failed one). --retry-wait: a
+// screen that says it could not load is given that long before Retry is clicked (a busy machine; Studio may retry it
+// itself meanwhile, the idle preload of the other screens loading it too, and then there is no Retry to click).
 // Each case opens a cold `/?mock=1#/` (Overview, demo data) in a fresh context, then goes to Settings by a link (a hash
 // change), with one file failing (the first request of it the case picks, and as many more as it says):
 // - stylesheet: the first stylesheet a screen needs beyond the entry's (the shared one: every screen's ui parts), once.
@@ -21,7 +24,8 @@
 // case says (the retry really went out), and in the end loaded (a stylesheet: a link of it loaded) or, gone for good,
 // never; no uncaught error, no reload. A stylesheet's outcome is its link's `load` or `error` event: a link with neither
 // yet (the idle preload of the other screens, still on its way) is still loading, neither loaded nor failed, and only
-// the stylesheets a screen needs are waited for. Exits 1 on any failure (`npm run qa`, so CI: its first shard).
+// the stylesheets a screen needs are waited for; a loaded link counts only while it applies (it has a sheet, is not
+// disabled and its media matches). Exits 1 on any failure (`npm run qa`, so CI: its first shard).
 // Uses the installed Chrome (playwright-core, channel "chrome"); without one, Playwright's Chromium.
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
@@ -78,16 +82,24 @@ async function launch() {
 
 /**
  * Runs in every page before its own scripts: the outcome of each stylesheet link, from its `load` or `error` event
- * (neither bubbles: heard on the way down), in `window.__sheets` (a link with none yet is still loading); and, when a
- * screen first shows (its title in `.page h1`), the stylesheets loaded at that moment, in `window.__atShow[title]`.
+ * (neither bubbles: heard on the way down), in `window.__sheets` (a link with none yet is still loading); whether a
+ * loaded link applies, `window.__applies(link)` (it has a sheet, is not disabled and its media matches); when a screen
+ * first shows (its title in `.page h1`), the stylesheets loaded and applying at that moment, in
+ * `window.__atShow[title]`; and each screen that said it could not load, even for a moment, in `window.__said[title]`.
  */
 const watchSheets = () => {
   /** @type {WeakMap<Element, 'load' | 'error'>} */
   const sheets = new WeakMap();
   /** @type {Record<string, string[]>} */
   const atShow = {};
+  /** @type {Record<string, true>} */
+  const said = {};
+  const applies = (/** @type {HTMLLinkElement} */ l) =>
+    l.sheet !== null && !l.disabled && !l.sheet.disabled && (!l.media || matchMedia(l.media).matches);
   Object.defineProperty(window, '__sheets', { value: sheets });
+  Object.defineProperty(window, '__applies', { value: applies });
   Object.defineProperty(window, '__atShow', { value: atShow });
+  Object.defineProperty(window, '__said', { value: said });
   const on = (/** @type {'load' | 'error'} */ outcome) => (/** @type {Event} */ e) => {
     const t = e.target;
     if (t instanceof HTMLLinkElement && t.rel === 'stylesheet') sheets.set(t, outcome);
@@ -96,10 +108,12 @@ const watchSheets = () => {
   document.addEventListener('error', on('error'), true);
   new MutationObserver(() => {
     const title = document.querySelector('.page h1')?.textContent?.trim();
-    if (!title || title in atShow) return;
-    atShow[title] = [...document.querySelectorAll('link[rel=stylesheet]')]
-      .filter((l) => sheets.get(l) === 'load')
-      .map((l) => new URL(/** @type {HTMLLinkElement} */ (l).href).pathname);
+    if (!title) return;
+    if (!(title in said) && document.body?.innerText.includes('Could not load this screen')) said[title] = true;
+    if (title in atShow) return;
+    atShow[title] = /** @type {HTMLLinkElement[]} */ ([...document.querySelectorAll('link[rel=stylesheet]')])
+      .filter((l) => sheets.get(l) === 'load' && applies(l))
+      .map((l) => new URL(l.href).pathname);
   }).observe(document, { childList: true, subtree: true, characterData: true });
 };
 
@@ -107,17 +121,23 @@ const watchSheets = () => {
 const state = (page) =>
   page.evaluate(() => {
     const links = /** @type {HTMLLinkElement[]} */ ([...document.querySelectorAll('link[rel=stylesheet]')]);
-    const outcome = /** @type {WeakMap<Element, 'load' | 'error'>} */ (/** @type {any} */ (window).__sheets);
+    const w = /** @type {any} */ (window);
+    const outcome = /** @type {WeakMap<Element, 'load' | 'error'>} */ (w.__sheets);
+    const applies = /** @type {(l: HTMLLinkElement) => boolean} */ (w.__applies);
     const path = (/** @type {HTMLLinkElement} */ l) => new URL(l.href).pathname;
+    const title = document.querySelector('.page h1')?.textContent?.trim() ?? '';
     return {
-      title: document.querySelector('.page h1')?.textContent?.trim() ?? '',
+      title,
       failed: document.body.innerText.includes('Could not load this screen'),
+      // The screen titled so said it could not load at some point (it may have been retried since).
+      said: title in w.__said,
       conn: document.querySelector('.conn .label')?.textContent?.trim() ?? '',
-      // Every stylesheet the page links to and has loaded, by file name with its hash, in document order; every one
-      // whose load failed; every one still loading.
-      sheets: [...new Set(links.filter((l) => outcome.get(l) === 'load').map(path))],
+      // Every stylesheet the page links to and has loaded and that applies, by file name with its hash, in document
+      // order; every one whose load failed; every one still loading; every one loaded that does not apply.
+      sheets: [...new Set(links.filter((l) => outcome.get(l) === 'load' && applies(l)).map(path))],
       dead: links.filter((l) => outcome.get(l) === 'error').map(path),
       loading: links.filter((l) => !outcome.has(l)).map(path),
+      inert: links.filter((l) => outcome.get(l) === 'load' && !applies(l)).map(path),
     };
   });
 
@@ -143,6 +163,28 @@ const showing = (/** @type {string} */ title) => (/** @type {Awaited<ReturnType<
 /** The stylesheets whose order is checked: the entry's, the shared one and the two screens' own. */
 const ordered = (/** @type {string[]} */ sheets) => sheets.filter((f) => /\/assets\/(index|shared|Overview|Settings)-[^/]+\.css$/.test(f));
 
+/**
+ * Clicks the screen's Retry if it is still there; whether it did. Studio may have retried the screen itself since its
+ * error was seen (the idle preload of the other screens loads it too), and then the error and its button are gone: not
+ * a failure, what follows checks the screen shows. Bounded: a button that detaches before a click lands is looked for
+ * again, for `ms` in all.
+ * @param {import('playwright-core').Page} page
+ */
+async function retryIfThere(page, ms = 5_000) {
+  const button = page.getByRole('button', { name: 'Retry' }).first();
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if ((await button.count()) === 0) return false;
+    try {
+      await button.click({ timeout: Math.max(1, Math.min(1_000, end - Date.now())) });
+      return true;
+    } catch (e) {
+      if (!(e instanceof Error && e.name === 'TimeoutError')) throw e;
+    }
+  }
+  return false;
+}
+
 // `npm run qa` runs this after the shoot's checks, on the build they made; CI splits the QA over runners
 // (FOLO_QA_SHARD=i/n), and the first one runs this.
 const shard = process.env.FOLO_QA_SHARD;
@@ -156,25 +198,30 @@ const dist = opt('--dist');
 const delayArg = opt('--delay');
 const delay = delayArg ? { re: new RegExp(delayArg.slice(0, delayArg.lastIndexOf('='))), ms: Number(delayArg.slice(delayArg.lastIndexOf('=') + 1)) } : null;
 if (delay && !(delay.ms >= 0)) throw new Error(`--delay ${delayArg}: expected <regex>=<ms>`);
-/** @type {{ close(): Promise<void> }} */
-let server = { close: async () => {} };
-/** The build this run made (under the OS temp dir), removed at the end. */
-let made = '';
-let base = given?.replace(/\/$/, '');
-if (!base) {
-  if (!dist) made = mkdtempSync(join(tmpdir(), 'folo-load-faults-'));
-  const outDir = dist ? resolve(dist) : made;
-  if (!dist) await buildApps(root, outDir);
-  const p = await preview({ root, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 5197, strictPort: false } });
-  server = p;
-  base = (p.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5197/').replace(/\/$/, '');
-}
-
-const browser = await launch();
+const retryWait = Number(opt('--retry-wait') ?? 0);
+if (!(retryWait >= 0)) throw new Error(`--retry-wait ${opt('--retry-wait')}: expected <ms>`);
 const only = opt('--only')?.split(',');
 /** @type {string[]} */
 const problems = [];
+// What the set-up made, undone at the end whatever fails (the build, the server, the browser).
+/** @type {{ close(): Promise<void> } | undefined} */
+let server;
+/** The build this run made (under the OS temp dir), removed at the end. */
+let made = '';
+/** @type {import('playwright-core').Browser | undefined} */
+let browser;
 try {
+  let base = given?.replace(/\/$/, '');
+  if (!base) {
+    if (!dist) made = mkdtempSync(join(tmpdir(), 'folo-load-faults-'));
+    const outDir = dist ? resolve(dist) : made;
+    if (!dist) await buildApps(root, outDir);
+    const p = await preview({ root, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 5197, strictPort: false } });
+    server = p;
+    base = (p.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5197/').replace(/\/$/, '');
+  }
+  browser = await launch();
+
   // What each screen needs: the stylesheets a cold load of it alone (a fresh context, no fault) had loaded when it
   // first showed, before the idle preload of the other screens. The reference for each case.
   /** @type {Record<string, string[]>} */
@@ -254,7 +301,9 @@ try {
     for (const [i, sc] of SCREENS.entries()) {
       if (i > 0) await page.evaluate((h) => (location.hash = h), sc.hash);
       let s = await until(page, showing(sc.title), sc.title);
-      if (i === 0 && c.first === 'says' && !s.failed) fail(`${sc.hash} did not say it could not load while ${failed} failed (as main does)`);
+      // Whether it said so is what the page recorded (`said`), not only this snapshot: on a busy machine Studio may
+      // have retried it before the first look.
+      if (i === 0 && c.first === 'says' && !s.failed && !s.said) fail(`${sc.hash} did not say it could not load while ${failed} failed (as main does)`);
       if (s.failed && !(i === 0 && c.first !== 'shows'))
         fail(`${sc.hash} said it could not load: ${await page.evaluate(() => document.querySelector('main')?.textContent?.replace(/\s+/g, ' ').slice(0, 300))}`);
       if (s.failed && c.gone) {
@@ -262,16 +311,18 @@ try {
         continue;
       }
       if (s.failed) {
-        say(`${sc.hash}: "Could not load this screen" (${failed} failed ${asked} time(s)); Retry`);
-        await page.getByRole('button', { name: 'Retry' }).first().click();
-      }
+        const seen = `${sc.hash}: "Could not load this screen" (${failed} failed ${asked} time(s))`;
+        if (retryWait) await page.waitForTimeout(retryWait);
+        const clicked = await retryIfThere(page);
+        say(`${seen}; ${clicked ? 'Retry' : 'no Retry left to click (the error went away: the screen was loaded again meanwhile)'}`);
+      } else if (s.said) say(`${sc.hash}: "Could not load this screen" for a moment, gone before the first look (the screen was loaded again meanwhile)`);
       // Every stylesheet the screen needs (but the one gone for good): a stylesheet asked for again applies when it
       // arrives, so give it the time a load takes. Others still loading (the idle preload) are not waited for.
       const want = clean[sc.hash].filter((f) => !(c.gone && f === failed));
       s = await until(page, (x) => showing(sc.title)(x) && want.every((f) => x.sheets.includes(f)));
       if (!showing(sc.title)(s)) fail(`${sc.hash} did not show: title "${s.title}", load error ${s.failed}, footer "${s.conn}"`);
       const missing = want.filter((x) => !s.sheets.includes(x));
-      if (missing.length) fail(`${sc.hash} without ${missing.join(', ')}`);
+      if (missing.length) fail(`${sc.hash} without ${missing.map((x) => (s.inert.includes(x) ? `${x} (loaded, does not apply)` : x)).join(', ')}`);
       const order = ordered(s.sheets);
       const inOrder = cleanOrder[sc.hash].filter((f) => order.includes(f));
       if (order.filter((f) => inOrder.includes(f)).join() !== inOrder.join()) fail(`${sc.hash}: stylesheets in the order ${order.join(', ')}; a clean load: ${inOrder.join(', ')}`);
@@ -287,7 +338,8 @@ try {
       if (c.gone) {
         if (outcomes.finished > 0 || (css && end.sheets.includes(failed))) fail(`${failed} loaded, but it is gone for good`);
       } else if (outcomes.finished === 0) fail(`${failed} never loaded (${outcomes.failed} request(s) failed)`);
-      else if (css && !end.sheets.includes(failed)) fail(`${failed} loaded, but no link of it has (${end.loading.includes(failed) ? 'still loading' : 'not linked'})`);
+      else if (css && !end.sheets.includes(failed))
+        fail(`${failed} loaded, but no link of it has and applies (${end.loading.includes(failed) ? 'still loading' : end.inert.includes(failed) ? 'loaded, does not apply' : 'not linked'})`);
     }
     if (!failed) fail('the request to fail was never made');
     else if (asked < c.asked) fail(`${failed} asked for ${asked} time(s), expected at least ${c.asked} (the retry never went out)`);
@@ -298,8 +350,8 @@ try {
     await ctx.close();
   }
 } finally {
-  await browser.close();
-  await server.close();
+  await browser?.close().catch((e) => console.error(`load-faults: closing the browser: ${e}`));
+  await server?.close().catch((e) => console.error(`load-faults: closing the server: ${e}`));
   if (made) rmSync(made, { recursive: true, force: true });
 }
 if (problems.length) {
