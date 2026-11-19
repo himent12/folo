@@ -323,7 +323,8 @@ with `--token` shows as needing one (the app can't send a token); the server the
 `FOLO_TOKEN` from the app's environment, so it is always one the app can use. A run's live event stream that stays
 silent for 45 s (three of the server's 15 s keep-alives) counts as dropped: the app opens it again and reads the history
 anew, and when the run list says the run ended meanwhile it loads the final history. When the server answers again
-after being unreachable, every list that failed (runs too) is read again. `--open run:<id>` (or `dataset:`, `model:`, `runs`,
+after being unreachable, every list that failed (runs too) is read again; until then the 5 s refresh asks for a failed
+list again (one request at a time) and its page keeps the error and its actions meanwhile. `--open run:<id>` (or `dataset:`, `model:`, `runs`,
 …) starts on a screen. The deciding is `FoloApp::autoconnect` (`src/app/connection.rs`); finding the binary,
 starting and stopping it is `src/api/http/server.rs`.
 

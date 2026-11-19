@@ -370,3 +370,52 @@ fn a_failed_datasets_list_is_said_on_overview() {
         assert!(!drawn.contains_key("ov-empty-ds"), "not Add dataset under No datasets yet");
     });
 }
+
+/// The server is down: a failed list keeps its error (and its Retry) while the 5 s refresh asks again,
+/// not the loading state at every refresh; one ask at a time, so a server that never answers isn't
+/// asked again at each refresh; the answer replaces the error.
+#[test]
+fn a_failed_list_keeps_its_error_while_it_is_asked_again() {
+    use crate::store::Load;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let down =
+        crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
+    let failed =
+        |this: &FoloApp| matches!(&this.store.datasets, Load::Failed(e) if e.code == "server_unreachable");
+    let held = api.hold("datasets");
+    start(&mut app, window, 1, |this, _, cx| {
+        this.store.datasets = Load::Failed(down);
+        this.refresh_lists(cx);
+    });
+    held.wait_held();
+    // The next refresh while that ask is out: nothing more is asked (an answer would replace the error).
+    start(&mut app, window, 1, |this, _, cx| this.refresh_lists(cx));
+    assert!(held.is_held());
+    assert!(start(&mut app, window, 1, |this, _, _| failed(this)), "the error stays while it is asked again");
+    held.release();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.datasets.ready().is_some(), "the list replaces it")
+    });
+}
+
+/// Still failing, the newer error replaces the one shown, without the loading state in between.
+#[test]
+fn a_failed_list_asked_again_shows_the_newer_error() {
+    use crate::store::Load;
+    let (mut app, window) = super::tests::open();
+    drive(&mut app, window, |this, _, cx| {
+        this.store.api = Arc::new(MockBackend::new(4200, true).failing());
+        this.store.runs = Load::Failed(crate::api::ApiError::new("internal", "runs.json is malformed"));
+        this.refresh_lists(cx);
+        assert!(this.store.runs.error().is_some_and(|e| e.code == "internal"), "shown until the answer");
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.runs.error().is_some_and(|e| e.code == "server_unreachable"),
+            "{:?}",
+            this.store.runs
+        );
+    });
+}

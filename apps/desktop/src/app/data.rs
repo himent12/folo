@@ -685,23 +685,23 @@ impl FoloApp {
 
     /// Reload the dataset, model and run lists in place (no loading state): added or removed
     /// elsewhere (Studio, the CLI, another data dir behind the same server), they show here too, and a
-    /// run's "(removed)" goes once its dataset is listed again. A list that failed is fetched again from
-    /// scratch.
+    /// run's "(removed)" goes once its dataset is listed again. A list that failed is fetched again, its
+    /// error kept on screen meanwhile (`retry_list`).
     pub fn refresh_lists(&mut self, cx: &mut Context<Self>) {
         if matches!(self.store.datasets, Load::Failed(_)) {
-            self.store.datasets = Load::Idle;
+            self.retry_list(List::Datasets, cx);
         } else if matches!(self.store.datasets, Load::Ready(_)) {
             self.fetch_list(List::Datasets, cx);
         }
         if matches!(self.store.models, Load::Failed(_)) {
-            self.store.models = Load::Idle;
+            self.retry_list(List::Models, cx);
         } else if matches!(self.store.models, Load::Ready(_)) {
             self.fetch_list(List::Models, cx);
         }
         // A failed run list too: nothing else asks for it again (Runs and Overview said "Could not
         // reach folo serve" for good when the app was opened before its server).
         if matches!(self.store.runs, Load::Failed(_)) {
-            self.store.runs = Load::Idle;
+            self.retry_list(List::Runs, cx);
         } else if matches!(self.store.runs, Load::Ready(_)) {
             self.refresh_runs(cx);
         }

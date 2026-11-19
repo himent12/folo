@@ -25,6 +25,9 @@ impl FoloApp {
         let active = count(RunFilter::Active);
         let subtitle = if self.store.runs.is_loading() {
             "Loading…".to_string()
+        } else if self.store.runs.error().is_some() {
+            // Not "0 runs" over the error.
+            "The run list didn't load".to_string()
         } else {
             format!("{} · {} active · {} failed", plural(runs.len(), "run"), active, count(RunFilter::Failed))
         };

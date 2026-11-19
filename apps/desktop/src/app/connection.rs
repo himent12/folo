@@ -109,6 +109,7 @@ impl FoloApp {
         // way (its picker open) is the old server's too.
         self.ds_reads.clear();
         self.issue_reads.clear();
+        self.list_tickets.forget_retries();
         self.play_loading = None;
         self.play_open_seq += 1;
         *self.ds_filter_cache.borrow_mut() = None;
