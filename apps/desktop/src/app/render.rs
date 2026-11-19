@@ -234,8 +234,8 @@ impl Render for FoloApp {
                     return;
                 }
                 if let Some(p) = paths.paths().first().cloned() {
-                    let from = this.route.clone();
-                    this.open_play_file(p, &from, w, cx);
+                    let req = this.open_request();
+                    this.open_play_file(p, req, w, cx);
                 }
             }))
             .child(sidebar)

@@ -110,45 +110,6 @@ impl FoloApp {
         );
     }
 
-    pub fn play_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        // Also after a picker that opened while models were there, if they've gone since.
-        if let Some(why) = self.open_image_blocked() {
-            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
-            return;
-        }
-        let name: SharedString =
-            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
-        let n2 = name.to_string();
-        self.play_load_seq += 1;
-        let seq = self.play_load_seq;
-        self.play_loading = Some(None);
-        self.fetch(
-            cx,
-            move |_| {
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
-                let (render, w, h) = upright_render(&bytes).ok_or_else(|| undecodable(&n2, &bytes))?;
-                Ok((Arc::new(bytes), render, w, h))
-            },
-            move |this, r, cx| {
-                if seq != this.play_load_seq {
-                    return;
-                }
-                this.play_loading = None;
-                match r {
-                    Ok((bytes, image, width, height)) => {
-                        let input = PredictInput::File { name: name.to_string(), bytes };
-                        this.set_play_image(
-                            PlayImage { name: name.clone(), input, encoded: None, image, width, height },
-                            cx,
-                        );
-                    }
-                    Err(e) => this.toast(Tone::Danger, e.message.clone(), e.hint.map(Into::into), cx),
-                }
-            },
-        );
-    }
-
     pub fn play_zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         (self.play_zoom, self.play_pan) = crate::viz::zoom_step(self.play_zoom, self.play_pan, f);
         cx.notify();
@@ -431,14 +392,14 @@ impl FoloApp {
     }
 
     /// Open image (the button, Ctrl+O, the palette): the picker, then [`Self::open_play_file`] with the
-    /// page it was asked for on. A cancelled picker changes nothing.
+    /// request it was accepted as. A cancelled picker changes nothing.
     pub fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The shortcut and palette obey the button's rule, and say why.
         if let Some(why) = self.open_image_blocked() {
             self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
             return;
         }
-        let from = self.route.clone();
+        let req = self.open_request();
         let handle = window.window_handle();
         let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
@@ -450,7 +411,7 @@ impl FoloApp {
             if let Some(p) = super::actions::picked(&this, rx.await, cx) {
                 handle
                     .update(cx, |_, window, cx| {
-                        this.update(cx, |this, cx| this.open_play_file(p, &from, window, cx))
+                        this.update(cx, |this, cx| this.open_play_file(p, req, window, cx))
                     })
                     .ok();
             }
@@ -458,44 +419,114 @@ impl FoloApp {
         .detach();
     }
 
-    /// An image file into the Playground (picked, or dropped on the window) from page `from`: there
-    /// through navigation, so Back returns to `from`, running the model of `from` when it has one
-    /// ([`Self::model_in_context`]), else the Playground's own choice.
+    /// An Open image or a drop accepted on the current page: a new ticket (older requests are dropped
+    /// from now on), and the page's model ([`Self::model_in_context`]).
+    pub(super) fn open_request(&mut self) -> OpenRequest {
+        self.play_open_seq += 1;
+        OpenRequest { ticket: self.play_open_seq, model: self.model_in_context(&self.route) }
+    }
+
+    /// The image file of request `req` (picked, or dropped on the window), read and decoded off the UI
+    /// thread, then [`Self::open_answered`]. A newer image load (a dataset's image, another file)
+    /// supersedes it.
     pub(super) fn open_play_file(
         &mut self,
         path: std::path::PathBuf,
-        from: &Route,
+        req: OpenRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Also after a picker that opened while models were there, if they've gone since: nothing moves.
-        if let Some(why) = self.open_image_blocked() {
-            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+        if req.ticket != self.play_open_seq {
             return;
         }
-        let model = self.model_in_context(from);
-        self.navigate(Route::Playground, window, cx);
-        if let Some(id) = model.filter(|id| self.play_model.as_ref() != Some(id)) {
-            self.pick_play_model(id, cx);
+        let name: SharedString =
+            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
+        let n2 = name.to_string();
+        self.play_load_seq += 1;
+        let seq = self.play_load_seq;
+        self.play_loading = Some(None);
+        let read = cx.background_executor().spawn(async move {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
+            let (image, width, height) = upright_render(&bytes).ok_or_else(|| undecodable(&n2, &bytes))?;
+            let input = PredictInput::File { name: n2, bytes: Arc::new(bytes) };
+            Ok(PlayImage { name, input, encoded: None, image, width, height })
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let r = read.await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        if seq == this.play_load_seq {
+                            this.play_loading = None;
+                            this.open_answered(req, r, window, cx);
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The one step that applies an open request, if it is still the latest: the Playground, its
+    /// image and its model together, then one prediction. A page model gone from the catalog since,
+    /// or no model at all: nothing changes, and the person is told why.
+    fn open_answered(
+        &mut self,
+        req: OpenRequest,
+        image: ApiResult<PlayImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if req.ticket != self.play_open_seq {
+            return;
         }
-        self.play_file(path, cx);
+        let image = match image {
+            Ok(image) => image,
+            Err(e) => return self.toast(Tone::Danger, e.message.clone(), e.hint.map(Into::into), cx),
+        };
+        if let Some(id) = &req.model
+            && self.store.models.ready().is_some_and(|m| !m.iter().any(|m| m.id == *id))
+        {
+            let body = format!("Model {} is no longer available.", self.deleted.get(id).unwrap_or(id));
+            return self.toast(Tone::Neutral, "The image was not opened", Some(body.into()), cx);
+        }
+        if let Some(why) = self.open_image_blocked() {
+            return self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+        }
+        self.navigate(Route::Playground, window, cx);
+        if let Some(id) = req.model {
+            self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
+            self.play_model = Some(id);
+        }
+        self.set_play_image(image, cx);
     }
 
     /// The model page `route` is about, as its Try in Playground picks it: a model's page, that model;
-    /// a finished (or stopped) run's page, its model. Other pages have none.
+    /// a finished (or stopped) run's page, its model (in the catalog or not). Other pages have none.
     pub(super) fn model_in_context(&self, route: &Route) -> Option<String> {
-        let id = match route {
-            Route::Model(id) => id.clone(),
+        match route {
+            Route::Model(id) => Some(id.clone()),
             Route::Run(id) => self
                 .store
                 .run(id)
                 .filter(|r| matches!(r.status, RunStatus::Completed | RunStatus::Stopped))?
                 .model_id
-                .clone()?,
-            _ => return None,
-        };
-        self.store.model(&id).map(|m| m.id.clone())
+                .clone(),
+            _ => None,
+        }
     }
+}
+
+/// One Open image or dropped file, from when it is accepted to when its image is applied
+/// ([`FoloApp::open_answered`]): its ticket (an answer for an older request, or one from before a
+/// backend change, is dropped) and the model of the page it was asked on, applied with the image or
+/// not at all (`None`: the Playground keeps its own).
+pub(super) struct OpenRequest {
+    ticket: u64,
+    model: Option<String>,
 }
 
 #[cfg(test)]

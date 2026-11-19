@@ -224,7 +224,11 @@ fn an_outage_only_the_prediction_saw_is_recovered_too() {
 
 /// A small PNG on disk, for the file prompt to answer with.
 fn png_file(tag: &str) -> folo_test_support::TestFile {
-    let file = folo_test_support::TestFile::new(tag, "cells.png");
+    png_file_named(tag, "cells.png")
+}
+
+fn png_file_named(tag: &str, name: &str) -> folo_test_support::TestFile {
+    let file = folo_test_support::TestFile::new(tag, name);
     image::RgbImage::new(8, 8).save(file.path()).unwrap();
     file
 }
@@ -301,6 +305,141 @@ fn a_cancelled_open_image_changes_nothing() {
         assert_eq!(this.play_model.as_ref(), Some(&current));
         assert_eq!(this.history.len(), history);
         assert!(this.play_image.is_none());
+    });
+    // With an image on stage: it, its model and its boxes stay, and nothing is asked for.
+    let (_, other) = stage_an_image(&mut app, window);
+    let before = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(other), w, cx);
+        playground(this)
+    });
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| assert_eq!(playground(this), before));
+}
+
+/// What the Playground shows and has asked for: its model, its image (by name and generation) and the
+/// number of predictions asked for so far.
+fn playground(this: &super::FoloApp) -> (Option<String>, Option<String>, u64, u64) {
+    let image = this.play_image.as_ref().map(|i| i.name.to_string());
+    (this.play_model.clone(), image, this.play_image_gen, this.play_pred_seq)
+}
+
+/// A dataset image on the Playground's stage under its model, predicted; returns that model and
+/// another one.
+fn stage_an_image(
+    app: &mut folo_ui::HeadlessApp,
+    window: folo_ui::WindowHandle<super::FoloApp>,
+) -> (String, String) {
+    let ids = drive(app, window, |this, w, cx| {
+        this.navigate(super::Route::Playground, w, cx);
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+        let current = this.play_model.clone().expect("the best model is picked");
+        let other = this.store.models.ready().unwrap().iter().find(|m| m.id != current).unwrap().id.clone();
+        (current, other)
+    });
+    drive(app, window, |this, _, _| assert!(this.play_pred.ready().is_some(), "predicted"));
+    ids
+}
+
+/// The last toast's title and body.
+fn last_toast(this: &super::FoloApp) -> (String, String) {
+    let t = this.toasts.last().expect("a toast");
+    (t.title.to_string(), t.body.as_ref().map(|b| b.to_string()).unwrap_or_default())
+}
+
+/// s4 #336 review: the page's model left the catalog while the picker was open (deleted elsewhere, or
+/// a finished run's checkpoint gone): the image is not opened under another model in its place.
+/// Nothing in the Playground changes, nothing is asked for, and a toast says why, naming the model.
+#[test]
+fn an_image_for_a_page_model_no_longer_available_is_not_opened() {
+    let (mut app, window) = open();
+    let file = png_file("desktop-open-gone");
+    app.platform().answer_prompts(Some(vec![file.path().to_path_buf()]));
+    let (current, other) = stage_an_image(&mut app, window);
+    let page = super::Route::Model(other.clone());
+    let before = drive(&mut app, window, |this, w, cx| {
+        this.navigate(page.clone(), w, cx);
+        playground(this)
+    });
+    // The picker opens; the model goes before it answers.
+    drive(&mut app, window, |this, w, cx| {
+        this.pick_image(w, cx);
+        this.store.models.ready_mut().unwrap().retain(|m| m.id != other);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), before, "the Playground is left as it was");
+        assert_eq!(this.route, page, "and not shown");
+        let body = format!("Model {other} is no longer available.");
+        assert_eq!(last_toast(this), ("The image was not opened".into(), body));
+    });
+
+    // A finished run whose model id is still there, but not its checkpoint in the catalog.
+    let (run, of_run) = drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| {
+            r.status == crate::api::RunStatus::Completed && r.model_id.as_ref().is_some_and(|m| *m != current)
+        });
+        let r = r.expect("a finished run with another model");
+        (r.id.clone(), r.model_id.clone().unwrap())
+    });
+    drive(&mut app, window, |this, w, cx| {
+        this.store.models.ready_mut().unwrap().retain(|m| m.id != of_run);
+        this.navigate(super::Route::Run(run.clone()), w, cx);
+    });
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), before);
+        assert_eq!(this.route, super::Route::Run(run.clone()));
+        assert_eq!(last_toast(this).1, format!("Model {of_run} is no longer available."));
+    });
+}
+
+/// s4 #336 review: two pickers open at once (the second from the Overview) answered in reverse order:
+/// the older answer, coming last, replaces neither the newer image nor its model.
+#[test]
+fn an_older_open_image_answered_last_is_dropped() {
+    let (mut app, window) = open();
+    let (newer, older) = (png_file("desktop-open-newer"), png_file_named("desktop-open-older", "older.png"));
+    let (current, other) = stage_an_image(&mut app, window);
+    // The first picker opens on another model's page, and stays open.
+    let first = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(other.clone()), w, cx);
+        this.open_request()
+    });
+    let seq = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Overview, w, cx);
+        this.play_pred_seq
+    });
+    // The second, from the Overview, is answered first.
+    app.platform().answer_prompts(Some(vec![newer.path().to_path_buf()]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    let shown = drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_image.as_ref().map(|i| i.name.to_string()).as_deref(), Some("cells.png"));
+        playground(this)
+    });
+    drive(&mut app, window, |this, w, cx| this.open_play_file(older.path().to_path_buf(), first, w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), shown, "the older answer changed the Playground");
+        assert_eq!(this.play_model.as_ref(), Some(&current), "the Overview has no model of its own");
+        assert_eq!(this.play_pred_seq, seq + 1, "one prediction, for the newer image");
+    });
+}
+
+/// s4 #336 review: opening an image on another model's page with an image already in the Playground
+/// asks for one prediction, the new image's under the page's model, not one for the old image too.
+#[test]
+fn opening_an_image_on_another_model_page_asks_for_one_prediction() {
+    let (mut app, window) = open();
+    let file = png_file("desktop-open-one");
+    app.platform().answer_prompts(Some(vec![file.path().to_path_buf()]));
+    let (_, other) = stage_an_image(&mut app, window);
+    let seq = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(other.clone()), w, cx);
+        this.play_pred_seq
+    });
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_pred_seq, seq + 1, "one prediction");
+        assert_eq!(this.play_pred_for, Some((this.play_image_gen, other.clone())), "the new image's");
+        assert_eq!(this.play_image.as_ref().map(|i| i.name.to_string()).as_deref(), Some("cells.png"));
     });
 }
 
