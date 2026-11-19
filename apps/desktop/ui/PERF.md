@@ -187,7 +187,9 @@ over rounds with the range. "Before" is `origin/main` at `c265b78b`; for the lau
 trace points of this pull request (`FOLO_UI_TRACE=1`: `probe-none`, `server-started`, `first-lists`, `system`,
 the image queue's first drain, and the `-frame` lines of the last three), which change nothing else. Release builds,
 warm file cache. The tables below are the first measurement, of the pull request before its review fixes; the
-fixes were measured again afterwards ("After the review fixes", below), on a busier machine.
+fixes were measured again afterwards ("After the review fixes", below), on a busier machine, and the second
+round's fixes against `origin/main` at `c39e1862` ("After the second review round", below), which are the
+numbers of the branch as it is.
 
 ### Launch to data on screen
 
@@ -302,13 +304,84 @@ Frames, `--bench-frames 100`, headless, scale 1.5, five alternating rounds, us (
 | run-live | 2560x1440 | 4155 (3952-4652) | 3840 (3393-4286) | 1493 | 1101 | 9390 |
 | settings | 2560x1440 | 1697 (1321-1885) | 2017 (1350-2154) | 405 | 474 | 4627 |
 
-Overview and settings at 2560 x 1440 are ties (the ranges cover each other). The run-live rows with all three
+Overview and settings at 2560 x 1440 were called ties here (the ranges cover each other), although settings'
+median was 19 % higher; forty alternating rounds of these same binaries, run again later, put both 8 to 9 %
+faster ("After the second review round", below). The run-live rows with all three
 builds (five rounds, full frame / paint): 1280 x 800 2972 / 1023 before, 2828 / 810 PR, 2490 / 685 fixed;
 2560 x 1440 3943 / 1483, 3839 / 1137, 3420 / 997. The path cache's one-pass eviction and exact accounting
 cost nothing measurable.
 
 Pixels: all 90 scenarios rendered with `--shot` by "before" and "fixed" at 1280 x 800 @ 1 and 1920 x 1200 @ 1.5:
 180 of 180 identical (`tools/parity.py --tol 0`).
+
+### After the second review round
+
+The second round's fixes: `/api/system`'s preparation owned by the server (a request that goes away cancels
+nothing), CPU readings closer than sysinfo's 200 ms interval giving the last reading again, the path cache
+counting its table at its allocated size and rebuilding it after an eviction, and the refused-at-once check's
+Winsock guards made only on success. The branch was rebased onto `origin/main` at `c39e1862` first, so the two
+builds differ only by this pull request: "main" is `c39e1862` (for the launch, plus the two trace-point commits
+of this pull request, which only print), "fixed" is the branch at `a1ff2cca`. Release builds, warm file cache,
+other programs using about a quarter of the CPU.
+
+Launch, as above (fresh data dir, `folo serve` from the matching build), ten alternating rounds, ms since the
+process was created. A first batch of ten gave the same medians except for one cold start of the freshly built
+`folo.exe` (server listening at 645 ms in its first round); these are the second batch:
+
+| | main | fixed |
+| --- | ---: | ---: |
+| first frame | 34.8 (33.6-38.9) | 35.1 (33.8-37.8) |
+| probe of port 7878 says nobody is there | 549.9 (544.5-560.1) | 45.8 (35.8-65.3) |
+| `folo serve` listening | 727.8 (722.6-765.0) | 73.0 (70.0-91.4) |
+| runs, datasets and models on screen | 745.8 (740.5-780.0) | 92.1 (87.9-111.2) |
+| the system card on screen | 1174.2 (1166.8-1215.4) | 433.2 (428.8-470.8) |
+| the next frame after the image queue first drained | 751.9 (748.0-794.5) | 108.0 (102.8-125.1) |
+
+`folo serve` alone, six rounds: ms from spawn to listening and to the answer of a `/api/system` asked at once,
+that answer's CPU reading, then eight `/api/system` calls at once (microseconds apart at the probe), and one 2 s
+later. `main` has the burst weakness too: it refreshes the counters on every call.
+
+| | main | fixed |
+| --- | ---: | ---: |
+| listening | 164.4 (151.7-167.5) | 17.1 (13.8-21.1) |
+| first `/api/system` answered | 608.2 (596.6-632.1) | 369.1 (364.4-370.8) |
+| its CPU reading | 0.08 0.10 0.00 0.19 0.00 1.00 | 0.08 0.06 0.13 0.05 0.06 0.05 |
+| burst readings at 1.00 | 28 of 48 | 0 of 48 |
+| the reading 2 s later | 0.03 0.04 0.03 0.03 0.04 0.03 | 0.03 0.03 0.03 0.03 0.03 0.03 |
+
+Frames, `--bench-frames 100`, headless, scale 1.5, fifteen alternating rounds, us; "faster" counts the rounds in
+which the fixed build's full frame was shorter than main's in the same round:
+
+| screen | window | full main | full fixed | paint main | paint fixed | faster | scroll fixed |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| overview | 1280x800 | 897 (828-1006) | 829 (751-951) | 246 | 209 | 14/15 | 1994 |
+| runs | 1280x800 | 769 (716-886) | 608 (565-775) | 287 | 162 | 14/15 | 592 |
+| dataset | 1280x800 | 890 (826-941) | 819 (781-907) | 221 | 201 | 15/15 | 1939 |
+| run-live | 1280x800 | 2663 (2321-3223) | 2298 (2050-2585) | 901 | 612 | 15/15 | 3944 |
+| settings | 1280x800 | 1050 (924-1107) | 846 (778-883) | 204 | 187 | 15/15 | 1748 |
+| overview | 2560x1440 | 1034 (1004-1172) | 957 (933-1049) | 265 | 224 | 15/15 | 949 |
+| runs | 2560x1440 | 993 (804-2448) | 725 (630-2036) | 339 | 186 | 13/15 | 720 |
+| dataset | 2560x1440 | 2623 (2516-2919) | 2399 (2295-2609) | 642 | 581 | 15/15 | 7043 |
+| run-live | 2560x1440 | 2420 (2260-2711) | 2003 (1876-2115) | 894 | 583 | 15/15 | 5534 |
+| settings | 2560x1440 | 928 (881-1034) | 842 (828-896) | 219 | 206 | 15/15 | 2470 |
+
+Settings and overview at 2560 x 1440, which the first round of fixes reported as ties although settings' median
+was 19 % higher there, measured again with forty alternating rounds (full frame; the ratio is the median of the
+per-round fixed / main ratios, with its quartiles):
+
+| row | build pair | full main | full fixed | ratio | faster | paint main / fixed |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| settings 2560x1440 | `c39e1862` / `a1ff2cca` | 1080 (926-1571) | 962 (862-1216) | 0.888 (0.837-0.924) | 37/40 | 243 / 228 |
+| overview 2560x1440 | `c39e1862` / `a1ff2cca` | 1076 (1020-1662) | 993 (948-1339) | 0.927 (0.899-0.944) | 36/40 | 270 / 230 |
+| settings 2560x1440 | the first fix round's two binaries | 1024 (890-1698) | 918 (830-1414) | 0.912 (0.789-0.974) | 32/40 | 234 / 218 |
+| overview 2560x1440 | the first fix round's two binaries | 1094 (1046-2398) | 1018 (956-1832) | 0.917 (0.874-0.938) | 36/40 | 270 / 233 |
+
+The binaries of that round, run again, are faster too: its +19 % came from five rounds on a busier machine, not
+from the build.
+
+Pixels: all 90 scenarios rendered with `--shot` by "main" (`c39e1862`, no trace points) and "fixed" at
+1280 x 800 @ 1 and 1920 x 1200 @ 1.5: 180 of 180 identical (`tools/parity.py --tol 0`). The release exe is
+31,053,824 bytes on main and 31,145,472 with this pull request.
 
 ## Not measured
 
