@@ -63,6 +63,47 @@ fn check_finds_every_kind_of_problem() {
 }
 
 #[test]
+fn check_finds_label_files_whose_image_is_gone() {
+    let t = TempDir::new("check-orphans");
+    let ds = t.join("ds");
+    write(&ds.join("classes.txt"), "object\n");
+    write_png(&ds.join("images/train/kept.png"), 16, 16, [200, 0, 0]);
+    write(&ds.join("labels/train/kept.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write(&ds.join("labels/train/missing-photo.txt"), "99 0.5 0.5 0.30 0.30\n");
+    // Not orphans: class names, a cache, a label whose image the loader skips by extension or matches by case.
+    write(&ds.join("labels/train/classes.txt"), "object\n");
+    write(&ds.join("labels/train.cache"), "x");
+    write(&ds.join("images/train/raw.heic"), "x");
+    write(&ds.join("labels/train/raw.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write_png(&ds.join("images/train/Upper.png"), 16, 16, [0, 200, 0]);
+    write(&ds.join("labels/train/upper.txt"), "0 0.5 0.5 0.3 0.3\n");
+    // A split whose last image is gone.
+    std::fs::create_dir_all(ds.join("images/val")).unwrap();
+    write(&ds.join("labels/val/gone.txt"), "0 0.5 0.5 0.3 0.3\n");
+    let report = check(&ds, &CheckOptions::default()).unwrap();
+    let orphans: Vec<_> = report.issues.iter().filter(|i| i.kind == CheckKind::MissingImage).collect();
+    let names: Vec<_> = orphans.iter().map(|i| i.file.file_name().unwrap().to_string_lossy()).collect();
+    assert_eq!(names, ["missing-photo.txt", "gone.txt"], "{:?}", report.issues);
+    assert!(orphans[0].message.contains("missing-photo in images/train"), "{}", orphans[0].message);
+    assert_eq!(orphans[1].fix.as_deref(), Some("delete the label file, or add its image to images/val"));
+    assert!(!report.is_clean());
+
+    // A split given as a list names only some images; labels of the others still have their image.
+    let listed = t.join("listed");
+    write(&listed.join("data.yaml"), "train: train.txt\nnames: [a]\n");
+    write(&listed.join("train.txt"), "images/a.png\n");
+    for stem in ["a", "b"] {
+        write_png(&listed.join(format!("images/{stem}.png")), 16, 16, [0, 0, 200]);
+        write(&listed.join(format!("labels/{stem}.txt")), "0 0.5 0.5 0.3 0.3\n");
+    }
+    let report = check(&listed, &CheckOptions::default()).unwrap();
+    assert!(report.is_clean(), "{:?}", report.issues);
+    write(&listed.join("labels/c.txt"), "0 0.5 0.5 0.3 0.3\n");
+    let report = check(&listed, &CheckOptions::default()).unwrap();
+    assert_eq!(kinds(&report), [(CheckKind::MissingImage, "c.txt".to_string(), None)]);
+}
+
+#[test]
 fn synthetic_datasets_check_clean_and_convert_round_trip() {
     let t = TempDir::new("convert");
     let names = vec!["apple".to_string(), "Square".to_string(), "pear".to_string()];

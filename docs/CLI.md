@@ -211,7 +211,7 @@ to truncated image data) and hashes file contents. Each issue has a kind and a s
 | `class_overflow` | error | a class id that is negative, fractional, `>= nc` (when names are declared) or `>= 65536` |
 | `out_of_range_box` | error | coordinates clearly outside `[0, 1]` (pixels, not normalised) or a negative size |
 | `corrupt_image` | error | an image that cannot be read or decoded, or a JPEG cut off mid-scan (no end-of-image marker after the scan data; decoders fill the missing rows with grey, so only the full check sees it) |
-| `missing_image` | error | an image named by an image list or COCO JSON that does not exist |
+| `missing_image` | error | an image named by an image list or COCO JSON that does not exist; a YOLO label file whose image is gone (`labels/train/a.txt` with no `images/train/a.*`: training ignores it) |
 | `clipped_box` | warning | a box up to 0.01 outside the image (the loader clips it) |
 | `zero_size_box` | warning | a box with no area inside the image (the loader drops it) |
 | `duplicate_label` | warning | the same box twice in one file |
