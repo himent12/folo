@@ -404,6 +404,14 @@ describe("a loop's page", () => {
     expect(document.querySelector('.steps')).toBeNull();
   });
 
+  it('calls a failed loop’s missing results never coming, a running one’s still to come', async () => {
+    const missing = () => [...document.querySelectorAll('table.gens tbody .no-value .sr-only')].map((x) => x.textContent);
+    await page(BenchLoop, '/benchmarks/bn_5e12/loops/bl_9e40');
+    expect(missing()).toEqual(['not benchmarked', 'not benchmarked', 'not run', 'not run']);
+    await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
+    expect(missing()).toContain('not yet');
+  });
+
   it('shows the step a running loop is on, and offers Stop', async () => {
     await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
     expect([...document.querySelectorAll('.steps li .s-state')].map((x) => x.textContent)).toEqual(['done', 'now', 'next']);
