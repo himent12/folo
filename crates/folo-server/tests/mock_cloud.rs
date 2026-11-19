@@ -1,7 +1,7 @@
 //! The mock's cloud (docs/API.md, Mock mode → Cloud) over HTTP: the real providers, the demo connection and its
 //! offers, connecting (a secret with `bad` is rejected), the seeded cloud run `run_3c01`, a new cloud run through
-//! its phases with its instance (terminated by hand, it fails with `cloud_instance_lost`), and `FOLO_MOCK_CLOUD`'s
-//! `none` and `off`.
+//! its phases with its instance (terminated by hand, it fails with `cloud_instance_lost` and ended in `training`), and
+//! `FOLO_MOCK_CLOUD`'s `none` and `off`. The phase a run ended in at each moment: `mock/runs/tests.rs`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,6 +92,7 @@ async fn the_mock_cloud_has_a_connection_offers_and_a_finished_cloud_run() {
         (Some("completed"), Some("cc_4d2a"))
     );
     assert_eq!(run["cloud"]["phase"], "released");
+    assert_eq!(run["cloud"]["ended_in"], "collecting", "it trained and copied its weights");
     assert!(run["cloud"]["cost_usd"].as_f64().unwrap() > 0.0);
     let (_, instances) = send(&app, "GET", "/api/cloud/instances", None).await;
     let i = &instances["instances"][0];
@@ -166,8 +167,8 @@ async fn a_mock_cloud_run_hands_over_and_fails_when_its_instance_is_terminated()
     assert_eq!((status, ended["status"].as_str()), (StatusCode::OK, Some("terminated")));
     let lost = wait_run(&app, &id, |r| r["status"] == "failed").await;
     assert_eq!(
-        (lost["error_code"].as_str(), lost["cloud"]["phase"].as_str()),
-        (Some("cloud_instance_lost"), Some("released"))
+        (lost["error_code"].as_str(), lost["cloud"]["phase"].as_str(), lost["cloud"]["ended_in"].as_str()),
+        (Some("cloud_instance_lost"), Some("released"), Some("training"))
     );
     let (status, e) = send(&app, "DELETE", "/api/cloud/instances/ci_none", None).await;
     assert_eq!((status, e["error"]["code"].as_str()), (StatusCode::NOT_FOUND, Some("instance_not_found")));
