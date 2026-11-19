@@ -1,5 +1,5 @@
 /**
- * Evaluation samples (lib/evaluated `scoresTitle`): the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
+ * Evaluation samples (lib/evaluated `scoresTitle`): the same images every epoch (up to 16), predictions (solid, class colour) over ground truth (dashed,
  * neutral in the thumbnails). Follows the
  * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
  */

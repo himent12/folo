@@ -11,7 +11,7 @@ import { render, type Rendered } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { Run as RunT } from '$lib/api/types';
+import type { Dataset, Run as RunT } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import Run from './Run';
 
@@ -32,13 +32,21 @@ afterEach(() => {
 type Tier = 'wide' | 'tablet' | 'phone';
 
 /** Opens a run's page at a tier (a tablet: 768–1023 px; a phone: under 768), the run changed by `change`. */
-async function open(pick: (rs: RunT[]) => RunT, { change = {}, tier = 'wide', nothing = false, ready = '#chart-map .legend' }: { change?: Partial<RunT>; tier?: Tier; nothing?: boolean; ready?: string } = {}) {
+async function open(
+  pick: (rs: RunT[]) => RunT,
+  { change = {}, tier = 'wide', nothing = false, ready = '#chart-map .legend', splits }: { change?: Partial<RunT>; tier?: Tier; nothing?: boolean; ready?: string; splits?: Partial<Dataset['splits']> | null } = {},
+) {
   const narrow = (q: string) => (q.includes('max-width: 767px') ? tier === 'phone' : q.includes('max-width: 1023px') ? tier !== 'wide' : false);
   window.matchMedia = ((q: string) => ({ matches: narrow(q), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
   const api = new MockApi('normal', 0);
   const run = { ...pick(await api.runs()), ...change };
   const get = api.run.bind(api);
   api.run = (id, ...rest) => (id === run.id ? Promise.resolve(run) : get(id, ...rest));
+  // The run's dataset with other split sizes (some not reported), or removed (null).
+  const datasets = api.datasets.bind(api);
+  const mine = (d: Dataset) => d.id === run.config.dataset_id;
+  if (splits === null) api.datasets = async () => (await datasets()).filter((d) => !mine(d));
+  else if (splits) api.datasets = async () => (await datasets()).map((d) => (mine(d) ? { ...d, splits: splits as Dataset['splits'] } : d));
   // A model that detected nothing: every epoch scored 0 (the page takes the best from the epochs it loads).
   const metrics = api.runMetrics.bind(api);
   if (nothing)
@@ -173,5 +181,25 @@ describe('a queued run', () => {
   it("has the run's id in its Config's header", async () => {
     const run = await open((rs) => rs.find((r) => r.status === 'queued' && !r.cloud)!, { ready: '.waiting #config' });
     expect(target.querySelector('.waiting #config .run-id')?.textContent).toBe(run.id);
+  });
+  // The page cannot know how many images the trainer will find when the run starts: its limit, never a count.
+  const samplesLine = async (splits: Partial<Dataset['splits']> | null) => {
+    await open((rs) => rs.find((r) => r.status === 'queued' && !r.cloud)!, { ready: '.waiting #later', splits });
+    let line = '';
+    await vi.waitFor(() => {
+      flushSync();
+      line = [...target.querySelectorAll('#later li')].map((li) => li.textContent ?? '').find((t) => t.includes('Predictions')) ?? '';
+      expect(line).toContain('up to 16');
+    });
+    return line;
+  };
+  it("promises up to the trainer's 16 sample images, not a count, on a dataset with two validation images", async () => {
+    expect(await samplesLine({ train: 10, val: 2, test: 0 })).toContain('Predictions on up to 16 validation images after every epoch');
+  });
+  it('says "validation" only when the dataset reports a validation split', async () => {
+    expect(await samplesLine({ train: 10 })).not.toContain('validation');
+  });
+  it('says "validation" not at all once its dataset is removed', async () => {
+    expect(await samplesLine(null)).not.toContain('validation');
   });
 });
