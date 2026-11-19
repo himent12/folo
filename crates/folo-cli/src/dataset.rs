@@ -51,6 +51,10 @@ fn data_error(e: DataError, path: &Path) -> CliError {
             format!("{} does not exist", folo_api::json::path(path)),
         )
         .hint("pass a dataset folder, a data.yaml or a COCO instances .json"),
+        // An output's staging folder (folo_data::staging) that is another process's or not FOLO's.
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            CliError::new(ExitCode::Runtime, "output_exists", source.to_string())
+        }
         DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
             CliError::new(ExitCode::Runtime, "unknown_format", m).hint(
                 "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",

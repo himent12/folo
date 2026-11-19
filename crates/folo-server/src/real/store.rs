@@ -224,7 +224,10 @@ impl Store for RealStore {
         self.registry_loaded()?;
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
         let t0 = Instant::now();
-        if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
+        // Straight into the claimed folder: it is a dataset only once registered below, so a server stopped part
+        // way leaves a folder that is listed nowhere.
+        let format = folo_data::ImageFormat::Jpeg(90);
+        if let Err(e) = folo_data::synthetic::write_yolo_into(&cfg, &dir, format, |_| {}) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(data_error(e, &dir.to_string_lossy()));
         }

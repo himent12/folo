@@ -17,7 +17,8 @@
 //!   dataset as one tar stream for another FOLO server.
 //! - **Support**: [`guard`] (a process-wide read guard, installed by `folo mcp --confine`), [`par`] (row
 //!   parallelism that the loader's workers switch off), [`paths`] (file names shared by `folo dataset check --json`
-//!   and the server), [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
+//!   and the server), [`staging`] (a dataset folder written beside its place and renamed there when complete),
+//!   [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
 //!
 //! See `docs/DATA.md` for formats, augmentation parameters and the determinism rules.
 //!
@@ -69,6 +70,7 @@ pub mod paths;
 mod ram_cache;
 pub mod resize;
 mod rng;
+pub mod staging;
 mod stats;
 pub mod synthetic;
 pub mod warp;

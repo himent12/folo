@@ -86,6 +86,28 @@ fn synth_then_stats_and_a_clean_check() {
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
 }
 
+/// A synth killed part way (issue #316) leaves only `.<name>.partial` beside the folder, and the same command run
+/// again replaces it; a folder of that name that is not FOLO's is refused and left as it is.
+#[test]
+fn synth_again_after_a_stopped_one() {
+    let t = TestDir::new("cli-synth-again");
+    let leftover = t.join(".shapes.partial");
+    std::fs::create_dir_all(leftover.join("images/train")).unwrap();
+    std::fs::write(leftover.join(".folo-partial"), "stopped").unwrap();
+    std::fs::write(leftover.join("images/train/000000.jpg"), "half").unwrap();
+    let (code, _, _) = folo(&["dataset", "stats", s(&t.join("shapes")), "--json"]);
+    assert_eq!(code, 3, "not a dataset yet");
+    let dir = synth(&t, "shapes", &[]);
+    assert!(dir.join("data.yaml").is_file() && !leftover.exists());
+
+    std::fs::create_dir(t.join(".other.partial")).unwrap();
+    let (code, stdout, _) = folo(&["dataset", "synth", s(&t.join("other")), "--images", "2", "--json"]);
+    assert_eq!(code, 1);
+    let err = json_lines(&stdout).pop().unwrap()["error"].take();
+    assert_eq!(err["code"], "output_exists", "{err}");
+    assert!(t.join(".other.partial").is_dir() && !t.join("other").exists());
+}
+
 #[test]
 fn check_reports_each_issue_and_exits_1() {
     let t = TestDir::new("cli-check");

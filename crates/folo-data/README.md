@@ -21,10 +21,11 @@ the determinism rules.
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
-| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
+| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo` / `write_yolo_into`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
 | `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |
+| `src/staging.rs` | `Staging`: a dataset folder written beside its place (`.<name>.partial`) and renamed there when complete; `write_yolo` and `convert` use it |
 | `src/stats.rs` | `DatasetStats`, the `stats` object of docs/API.md |
 | `src/guard.rs` | An optional process-wide read guard (`folo mcp --confine` installs one) |
 | `src/par.rs` | Row parallelism that the loader's worker threads switch off |

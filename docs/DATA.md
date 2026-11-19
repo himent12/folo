@@ -126,7 +126,8 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   cleanup would do. The YOLO line rules are the loader's (`dataset::labels::parse_line`), so the checker and the
   loader cannot disagree. `folo dataset check` prints it (docs/CLI.md).
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
-  (images copied unchanged, stems made unique per split, COCO category ids 1-based).
+  (images copied unchanged, stems made unique per split, COCO category ids 1-based), staged like synthetic
+  datasets (below): nothing is at `out` until it is complete.
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`.
 
@@ -214,7 +215,14 @@ keeps one, as the YOLO reader drops duplicate label lines.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
-and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
+and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `SyntheticDataset::new(cfg, split)` renders the same images on demand.
+`dir` must not exist or be an empty folder: the files go to a staging folder beside it, `.<name>.partial`, renamed
+to `dir` once complete (`staging::Staging`), so a write stopped part way never leaves a folder that reads as a
+finished dataset. A `.folo-partial` marker inside the staging folder is locked while its writer runs: the next write
+of `dir` removes a staging folder whose marker nobody holds (a stopped run's leftover), and refuses one being
+written or one without the marker (not FOLO's; never deleted), with an `AlreadyExists` `DataError::Io`.
+`write_yolo_into` writes straight into a folder, for a caller that makes it known another way once complete (the
+server registers it). Classes are any of
 `circle, square, triangle, star, ring, cross, hexagon, heart`, drawn with anti-aliased signed distance fields, soft
 shadows and light shading on gradient, marbled, striped or grainy backgrounds, with small objects, partial occlusion,
 objects cut by the frame and some empty images. Output is a pure function of the config and seed.

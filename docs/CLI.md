@@ -181,7 +181,13 @@ folo export --model o2o.folo --format onnx --decode                    # o2o mod
 `PATH` is anything `folo_data::open` accepts (docs/DATA.md): a dataset folder, a `data.yaml` or a COCO instances
 `.json`. Shared error codes: `path_not_found` (exit 3), `unknown_format` (nothing there looks like a dataset, exit 1),
 `invalid_dataset` (a malformed `data.yaml` or COCO file, exit 1), `output_exists` (`synth` / `convert` into a folder
-that exists and is not empty, exit 1), `usage` (bad flag values such as nine classes, exit 2).
+that exists and is not empty, or whose staging folder below is another process's or not FOLO's, exit 1), `usage`
+(bad flag values such as nine classes, exit 2).
+
+`synth` and `convert` write into `.<name>.partial` beside the output folder and rename it to the output folder once
+the dataset is complete: a command stopped part way (Ctrl+C, killed) leaves no output folder, only that staging
+folder, and the same command run again replaces it. A `.<name>.partial` folder is never a finished dataset; delete
+it if you do not run the command again.
 
 ### `folo dataset synth OUT_DIR`
 Generates `--images` images with folo-data's shapes generator (deterministic in the flags) into `OUT_DIR/images/{train,val}`,

@@ -480,6 +480,9 @@ pub struct WrittenDataset {
 
 /// Writes a YOLO-format dataset to `dir`: `images/{train,val}/NNNNNN.jpg|png`, `labels/{train,val}/NNNNNN.txt` and
 /// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic.
+///
+/// `dir` must not exist or be an empty folder. The dataset is written beside it and moved there in one rename once
+/// complete ([`crate::staging`]), so a stopped write never leaves a partial dataset at `dir`.
 pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Result<WrittenDataset> {
     write_yolo_with_progress(cfg, dir, format, |_| {})
 }
@@ -487,6 +490,20 @@ pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Res
 /// [`write_yolo`] that calls `progress(done)` after each image is written. Calls come from worker threads and
 /// `done` counts up to `cfg.images`.
 pub fn write_yolo_with_progress(
+    cfg: &SyntheticConfig,
+    dir: &Path,
+    format: ImageFormat,
+    progress: impl Fn(usize) + Sync,
+) -> Result<WrittenDataset> {
+    let staging = crate::staging::Staging::begin(dir)?;
+    let written = write_yolo_into(cfg, staging.path(), format, progress)?;
+    staging.publish()?;
+    Ok(WrittenDataset { root: dir.to_path_buf(), yaml: dir.join("data.yaml"), ..written })
+}
+
+/// [`write_yolo_with_progress`] straight into `dir`, `data.yaml` last, for a caller that makes the folder known
+/// some other way once this returns (the server registers it): stopped part way, it leaves a partial dataset.
+pub fn write_yolo_into(
     cfg: &SyntheticConfig,
     dir: &Path,
     format: ImageFormat,

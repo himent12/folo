@@ -3,8 +3,10 @@
 mod common;
 
 use common::TempDir;
-use folo_data::synthetic::{SHAPES, SyntheticConfig, SyntheticDataset, generate, write_yolo};
-use folo_data::{Dataset, Format, ImageFormat, Split, open};
+use folo_data::synthetic::{
+    SHAPES, SyntheticConfig, SyntheticDataset, generate, write_yolo, write_yolo_with_progress,
+};
+use folo_data::{DataError, Dataset, Format, ImageFormat, Split, open};
 
 fn small(seed: u64) -> SyntheticConfig {
     SyntheticConfig { images: 24, imgsz: 96, seed, ..Default::default() }
@@ -85,4 +87,64 @@ fn round_trip_through_the_yolo_reader() {
     write_yolo(&cfg, t2.path(), ImageFormat::Jpeg(90)).unwrap();
     let dj = open(t2.path()).unwrap();
     assert_eq!(dj.train.image_size(0), ds.train.image_size(0));
+}
+
+/// A write stopped part way (issue #316: `folo dataset synth` killed early) leaves nothing at the folder that reads
+/// as a dataset: the images go to `.<name>.partial` beside it until the dataset is complete.
+#[test]
+fn nothing_is_at_the_folder_until_the_dataset_is_complete() {
+    let t = TempDir::new("synth-staged");
+    let dir = t.join("shapes");
+    let staging = t.join(".shapes.partial");
+    let seen = std::sync::Mutex::new(Vec::new());
+    write_yolo_with_progress(&small(4), &dir, ImageFormat::Png, |done| {
+        seen.lock().unwrap().push((done, dir.exists(), staging.join(".folo-partial").is_file()));
+    })
+    .unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), 24);
+    assert!(seen.iter().all(|&(_, published, marked)| !published && marked), "{seen:?}");
+    assert!(dir.join("data.yaml").is_file() && !staging.exists());
+    assert!(!dir.join(".folo-partial").exists());
+    assert_eq!(open(&dir).unwrap().split_sizes(), [19, 5, 0]);
+}
+
+/// The next write after a stopped one replaces its leftover (the marker is there and nobody holds it), refuses a
+/// folder of that name that is not FOLO's without touching it, and replaces an empty folder at the destination.
+#[test]
+fn a_stopped_writes_leftover_is_replaced_and_nothing_else_is_touched() {
+    let t = TempDir::new("synth-leftover");
+    let leftover = t.join(".a.partial");
+    common::write(&leftover.join(".folo-partial"), "stopped");
+    common::write(&leftover.join("images/train/000000.png"), "half");
+    write_yolo(&small(5), &t.join("a"), ImageFormat::Png).unwrap();
+    assert!(!leftover.exists());
+    assert_eq!(open(t.join("a")).unwrap().split_sizes(), [19, 5, 0]);
+
+    let theirs = t.join(".b.partial");
+    common::write(&theirs.join("notes.txt"), "mine");
+    let err = write_yolo(&small(5), &t.join("b"), ImageFormat::Png).unwrap_err();
+    assert!(
+        matches!(&err, DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists)
+    );
+    assert!(err.to_string().contains("not FOLO's"), "{err}");
+    assert_eq!(std::fs::read_to_string(theirs.join("notes.txt")).unwrap(), "mine");
+    assert!(!t.join("b").exists());
+
+    std::fs::create_dir(t.join("c")).unwrap();
+    write_yolo(&small(5), &t.join("c"), ImageFormat::Png).unwrap();
+    assert!(t.join("c/data.yaml").is_file());
+}
+
+/// While one process writes a folder, a second write of it is refused and leaves the first one's files alone.
+#[test]
+fn a_folder_being_written_is_not_taken_over() {
+    let t = TempDir::new("synth-busy");
+    let dir = t.join("shapes");
+    let busy = folo_data::staging::Staging::begin(&dir).unwrap();
+    let err = write_yolo(&small(6), &dir, ImageFormat::Png).unwrap_err();
+    assert!(err.to_string().contains("another process is writing"), "{err}");
+    assert!(busy.path().join(".folo-partial").is_file());
+    drop(busy);
+    assert!(!t.join(".shapes.partial").exists() && !dir.exists());
 }
