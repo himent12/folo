@@ -131,7 +131,12 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             out.record(&r);
             out.human(format!(
                 "dataset {} '{}' in {}: {} train, {} val images\ntrain it: folo train --data {}",
-                r.dataset_id, r.name, r.path, r.train, r.val, r.path
+                r.dataset_id,
+                r.name,
+                r.path,
+                r.train,
+                r.val,
+                folo_api::json::cli_path(&r.path)
             ));
         }
     }

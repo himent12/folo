@@ -16,8 +16,9 @@ pub fn ground_truth(data: &str, split: Split) -> Result<CocoGroundTruth, CliErro
         folo_data::DataError::Format(m) => CliError::new(ExitCode::Usage, "usage", format!("--coco: {m}")).hint(
             format!(
                 "--coco and --save-json need COCO annotations: pass a COCO folder (annotations/instances_<split>.json) \
-                 or the split's instances JSON; `folo dataset convert {data} <out> --to coco` writes one from a YOLO \
-                 dataset"
+                 or the split's instances JSON; `folo dataset convert {} <out> --to coco` writes one from a YOLO \
+                 dataset",
+                folo_api::json::cli_path(data)
             ),
         ),
         e => CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string()),

@@ -1,5 +1,5 @@
 //! JSON presentation helpers shared by the CLI's `--json` records and the MCP results: floats without f32 → f64
-//! noise and paths with `/` separators.
+//! noise and paths with `/` separators (quoted where needed in a command the user may paste: [`cli_path`]).
 
 use std::path::Path;
 
@@ -50,6 +50,16 @@ pub fn path(p: impl AsRef<Path>) -> String {
         .map(|rest| format!(r"\\{rest}"))
         .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
     if cfg!(windows) { s.replace('\\', "/") } else { s }
+}
+
+/// A path as an argument of a command FOLO prints for the user to paste ("folo train --resume …"): [`path`], in
+/// double quotes when it holds anything but ASCII letters, digits and `-_./:`. PowerShell, cmd and POSIX shells all
+/// read a double-quoted path with spaces, commas or non-ASCII letters as one argument. Not covered: `"`, `$`, `` ` ``,
+/// `%` and `!`, which some of those shells expand inside double quotes (no one quoting works in all three).
+pub fn cli_path(p: impl AsRef<Path>) -> String {
+    let s = path(p);
+    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c));
+    if plain { s } else { format!("\"{s}\"") }
 }
 
 /// A duration in milliseconds as FOLO reports it: rounded to 0.1 µs, so a sum of stage times reads `10.5163` rather
@@ -112,6 +122,17 @@ mod tests {
             assert_eq!(path(r"runs\shapes-n\weights/best.folo"), "runs/shapes-n/weights/best.folo");
             assert_eq!(path(r"\\?\D:\data\x"), "D:/data/x");
             assert_eq!(path(r"\\?\UNC\server\share\x"), "//server/share/x");
+        }
+    }
+
+    #[test]
+    fn command_paths_are_quoted_when_they_need_it() {
+        assert_eq!(cli_path("D:/data/shapes-n_2.folo"), "D:/data/shapes-n_2.folo");
+        assert_eq!(cli_path("runs/run with space/stop café"), "\"runs/run with space/stop café\"");
+        assert_eq!(cli_path("D:/a,b"), "\"D:/a,b\"");
+        assert_eq!(cli_path(""), "\"\"");
+        if cfg!(windows) {
+            assert_eq!(cli_path(r"C:\Users\a b\x"), "\"C:/Users/a b/x\"");
         }
     }
 }

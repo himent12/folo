@@ -441,7 +441,7 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
         .collect();
     out.human(format!("  classes  {}", mapping.join(", ")));
     out.human(format!("  yaml     {}", folo_api::json::path(&written.yaml)));
-    out.human(format!("next: folo dataset stats {}", folo_api::json::path(&args.out_dir)));
+    out.human(format!("next: folo dataset stats {}", folo_api::json::cli_path(&args.out_dir)));
     Ok(())
 }
 
@@ -485,7 +485,7 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
     if skipped > 0 {
         out.human(format!(
             "  {skipped} image(s) were skipped (unreadable or broken labels); run `folo dataset check {}`",
-            folo_api::json::path(&args.input)
+            folo_api::json::cli_path(&args.input)
         ));
     }
     Ok(())

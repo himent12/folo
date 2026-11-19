@@ -144,6 +144,17 @@ fn train_val_predict_export_with_json() {
     assert!(
         e["hint"].as_str().unwrap().contains("--model") && e["hint"].as_str().unwrap().contains("best.folo")
     );
+    // ... in double quotes when its path has a space, so the command pastes as it is (#314).
+    let spaced = root.join("run with space/weights");
+    std::fs::create_dir_all(&spaced).unwrap();
+    for f in ["last.folo", "best.folo"] {
+        std::fs::copy(run.join("weights").join(f), spaced.join(f)).unwrap();
+    }
+    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&spaced.join("last.folo"))]);
+    assert_eq!(code, 1, "{stderr}");
+    let model = format!("--model \"{}\" ", folo_api::json::path(spaced.join("best.folo")));
+    assert!(lines.last().unwrap()["error"]["hint"].as_str().unwrap().contains(&model), "{lines:?}");
+    assert!(stderr.contains(&model), "{stderr}");
 
     // val: one object with the metrics.
     let (code, lines, stderr) =

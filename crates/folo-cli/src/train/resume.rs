@@ -59,8 +59,8 @@ pub(super) fn resume(
         )
         .hint(format!(
             "to train further, start a new run from its weights: folo train --model {} --data {} --epochs <n>",
-            folo_api::json::path(if best.is_file() { &best } else { ckpt }),
-            if stored.dataset.is_empty() { "<dataset>" } else { &stored.dataset }
+            folo_api::json::cli_path(if best.is_file() { &best } else { ckpt }),
+            if stored.dataset.is_empty() { "<dataset>".into() } else { folo_api::json::cli_path(&stored.dataset) }
         )));
     }
     if let Some(s) = args.set.iter().find(|s| !s.trim_start().starts_with("distill.")) {

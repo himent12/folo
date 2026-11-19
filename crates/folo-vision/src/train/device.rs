@@ -94,7 +94,7 @@ pub(super) fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> Stri
         Some((p, n)) => format!(
             "{} holds the state after epoch {n}: resume with `folo train --resume {}`",
             folo_api::json::path(p),
-            folo_api::json::path(p)
+            folo_api::json::cli_path(p)
         ),
         None => "no checkpoint was written yet: start the run again".into(),
     };
