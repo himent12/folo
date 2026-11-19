@@ -467,7 +467,8 @@ pub struct FoloApp {
     /// The latest image load while it is on its way: `Some((dataset, image))` for a dataset's image,
     /// `None` for a file ([`FoloApp::forget_play_dataset`] asks again for one whose files changed).
     play_loading: Option<Option<(String, String)>>,
-    /// The ticket of the latest accepted Open image or drop ([`playground::OpenRequest`]).
+    /// The ticket of the person's latest action that sets the Playground's image or model (an Open
+    /// image or drop accepted, a dataset's image, a model picked: [`playground::OpenRequest`]).
     play_open_seq: u64,
     /// Generation of the image on stage; predictions are tagged with it.
     play_image_gen: u64,

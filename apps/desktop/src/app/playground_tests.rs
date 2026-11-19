@@ -471,3 +471,110 @@ fn an_image_dropped_on_a_model_page_runs_that_model() {
     drive(&mut app, window, |this, w, cx| this.back(w, cx));
     drive(&mut app, window, |this, _, _| assert_eq!(this.route, page));
 }
+
+/// A 1×1 image named `name`, for an open request's decode to answer with.
+fn decoded(name: &str) -> crate::api::ApiResult<PlayImage> {
+    let image = Arc::new(folo_ui::RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+    let input = PredictInput::File { name: name.into(), bytes: Arc::new(Vec::new()) };
+    Ok(PlayImage { name: name.to_string().into(), input, encoded: None, image, width: 1, height: 1 })
+}
+
+/// The name of the image on the Playground's stage.
+fn on_stage(this: &super::FoloApp) -> Option<String> {
+    this.play_image.as_ref().map(|i| i.name.to_string())
+}
+
+/// s4 #336 review round 2: an Open image asked for on another model's page is still decoding (held)
+/// when a newer one, from the Playground, is applied; the older decode, answering last, replaces
+/// neither the newer image nor its model, and leaves nothing loading.
+#[test]
+fn an_older_open_image_still_decoding_when_a_newer_lands_is_dropped() {
+    let (mut app, window) = open();
+    let newer = png_file("desktop-open-decoding");
+    let (current, other) = stage_an_image(&mut app, window);
+    let (release, held) = folo_ui::oneshot::channel::<()>();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(other.clone()), w, cx);
+        let req = this.open_request();
+        let older = async move {
+            held.await.ok();
+            decoded("older.png")
+        };
+        this.open_decoding(req, older, w, cx);
+        this.navigate(super::Route::Playground, w, cx);
+    });
+    app.platform().answer_prompts(Some(vec![newer.path().to_path_buf()]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    let shown = drive(&mut app, window, |this, _, _| {
+        assert_eq!(on_stage(this).as_deref(), Some("cells.png"), "the newer image is applied");
+        playground(this)
+    });
+    release.send(()).unwrap();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), shown, "the older decode replaced the newer image");
+        assert_eq!(this.play_model.as_ref(), Some(&current));
+        assert!(this.play_loading.is_none());
+    });
+}
+
+/// s4 #336 review round 2: a picker opened on another model's page answers after the person chose a
+/// validation image in the Playground: the newer choice stays, and so does the model.
+#[test]
+fn an_open_image_answered_after_a_validation_image_was_chosen_is_dropped() {
+    let (mut app, window) = open();
+    let file = png_file("desktop-open-then-sample");
+    let (current, other) = stage_an_image(&mut app, window);
+    let picker = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(other.clone()), w, cx);
+        let picker = this.open_request();
+        this.navigate(super::Route::Playground, w, cx);
+        this.play_dataset_image("ds_3b91", "img_03418", cx);
+        picker
+    });
+    let shown = drive(&mut app, window, |this, _, _| {
+        let input = this.play_image.as_ref().map(|i| &i.input);
+        assert!(matches!(input, Some(PredictInput::Dataset { image_id, .. }) if image_id == "img_03418"));
+        playground(this)
+    });
+    drive(&mut app, window, |this, w, cx| this.open_play_file(file.path().to_path_buf(), picker, w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), shown, "the older picker replaced the validation image");
+        assert_eq!(this.play_model.as_ref(), Some(&current));
+    });
+}
+
+/// s4 #336 review round 2: an image dropped on model A's page is still decoding when the person
+/// clicks model B's Try in Playground: that later, explicit choice stands, and the drop's answer is
+/// dropped whole (its image too), leaving nothing loading.
+#[test]
+fn try_in_playground_after_a_drop_still_decoding_keeps_its_model() {
+    let (mut app, window) = open();
+    let (b, a) = stage_an_image(&mut app, window);
+    let (release, held) = folo_ui::oneshot::channel::<()>();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Model(a.clone()), w, cx);
+        let drop = this.open_request();
+        let dropped = async move {
+            held.await.ok();
+            decoded("dropped.png")
+        };
+        this.open_decoding(drop, dropped, w, cx);
+        this.navigate(super::Route::Model(b.clone()), w, cx);
+    });
+    // Model B's Try in Playground, as its button does it.
+    drive(&mut app, window, |this, w, cx| {
+        this.play_pred = Load::Idle;
+        this.navigate(super::Route::Playground, w, cx);
+        this.pick_play_model(b.clone(), cx);
+    });
+    let shown = drive(&mut app, window, |this, _, _| playground(this));
+    release.send(()).unwrap();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(playground(this), shown, "the drop replaced Try in Playground's choice");
+        assert_eq!(this.play_model.as_ref(), Some(&b));
+        assert_eq!(this.route, super::Route::Playground);
+        assert!(this.play_loading.is_none());
+    });
+}

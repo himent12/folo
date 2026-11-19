@@ -60,7 +60,15 @@ impl PlayImage {
 impl FoloApp {
     // ---------- playground ----------
 
+    /// The person chose a dataset's image for the Playground: it takes a ticket, so an Open image or a
+    /// drop asked for before it is dropped when it answers.
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
+        self.play_open_seq += 1;
+        self.load_play_dataset_image(dataset, image_id, cx);
+    }
+
+    /// Fetch a dataset's image for the Playground stage; a newer image load supersedes it.
+    fn load_play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         let input = PredictInput::Dataset { dataset_id: dataset.to_string(), image_id: image_id.to_string() };
         let (d, i) = (dataset.to_string(), image_id.to_string());
         // Named by its file, as the dataset grid names it; by its id while the list isn't loaded.
@@ -166,7 +174,7 @@ impl FoloApp {
             None => shown,
         };
         if let Some(image) = again {
-            self.play_dataset_image(dataset, &image, cx);
+            self.load_play_dataset_image(dataset, &image, cx);
         }
         dropped
     }
@@ -221,8 +229,10 @@ impl FoloApp {
     }
 
     /// Playground uses model `id` (picked from its list, or a model's Try in Playground) and runs it on
-    /// the image on stage.
+    /// the image on stage. The person's choice takes a ticket: an Open image or a drop asked for before
+    /// it is dropped when it answers, image and page model together (the newest action wins whole).
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
+        self.play_open_seq += 1;
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
         self.run_predict(cx);
@@ -432,8 +442,7 @@ impl FoloApp {
     }
 
     /// The image file of request `req` (picked, or dropped on the window), read and decoded off the UI
-    /// thread, then [`Self::open_answered`]. A newer image load (a dataset's image, another file)
-    /// supersedes it.
+    /// thread, then [`Self::open_decoding`].
     pub(super) fn open_play_file(
         &mut self,
         path: std::path::PathBuf,
@@ -447,9 +456,6 @@ impl FoloApp {
         let name: SharedString =
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
-        self.play_load_seq += 1;
-        let seq = self.play_load_seq;
-        self.play_loading = Some(None);
         let read = cx.background_executor().spawn(async move {
             let bytes = std::fs::read(&path)
                 .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
@@ -457,6 +463,21 @@ impl FoloApp {
             let input = PredictInput::File { name: n2, bytes: Arc::new(bytes) };
             Ok(PlayImage { name, input, encoded: None, image, width, height })
         });
+        self.open_decoding(req, read, window, cx);
+    }
+
+    /// Request `req`'s image on its way (`read`): [`Self::open_answered`] when it comes, unless a newer
+    /// image load (a dataset's image, another file) came first.
+    pub(super) fn open_decoding(
+        &mut self,
+        req: OpenRequest,
+        read: impl std::future::Future<Output = ApiResult<PlayImage>> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.play_load_seq += 1;
+        let seq = self.play_load_seq;
+        self.play_loading = Some(None);
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let r = read.await;
