@@ -190,7 +190,8 @@ pub struct LabelCounts {
     pub pending: u64,
     /// Images with labels (possibly zero boxes: a background image).
     pub labeled: u64,
-    /// Images whose last agent call failed.
+    /// Images whose status is `failed`: an agent call failed for them while they had no labels. A labeled image
+    /// whose call fails stays labeled (with an `error`) and is not counted here.
     pub failed: u64,
     /// Boxes over all labeled images.
     pub boxes: u64,
@@ -259,7 +260,7 @@ pub struct LabelRun {
     pub total: u64,
     /// Images labeled so far.
     pub done: u64,
-    /// Images whose call failed so far.
+    /// Images whose call failed so far, labeled ones that kept their labels too (unlike `counts.failed`).
     pub failed: u64,
     /// How it ended; `null` while the run is active.
     pub outcome: Option<LabelOutcome>,
@@ -377,7 +378,8 @@ pub enum LabelImageStatus {
     Labeling,
     /// Labeled (by an agent or by hand).
     Labeled,
-    /// The last agent call for it failed; `error` says why.
+    /// An agent call for it failed while it had no labels; `error` says why. (A labeled image whose call fails
+    /// stays `labeled`, with an `error`.)
     Failed,
 }
 

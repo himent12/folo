@@ -966,11 +966,17 @@ exported more than once.
   in an empty scratch folder and use the account the CLI is signed in with. The eval
   `crates/folo-server/examples/label_eval.rs` measures both on COCO photos (docs/LABELING.md).
 - A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
-  without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
-  image the reply does not mention, or whose every box was dropped, is `failed` with the reason. One bad box costs only itself, and the JSON is found with text
+  without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and the
+  call has failed (below) for an image the reply does not mention or whose every box was dropped. One bad box costs only itself, and the JSON is found with text
   around it or split into one object per image. A reply with no such JSON at all is asked for once more; then
-  its images are `failed` with the reason. A batch makes two calls at most, whatever made the first fail (an
+  the call has failed for all its images. A batch makes two calls at most, whatever made the first fail (an
   unreadable reply or a passing fault, below).
+- A call that has failed for an image puts the reason in the image's `error`. An image without labels (`pending`,
+  or `failed` before) becomes `failed`. An image with labels stays `labeled`: its `boxes`, `source` and `reviewed`
+  stay as they were, and so does its place in a dataset; `error` holds the reason until a call labels it or its
+  boxes are saved (`PUT …/images/{image_id}` with `boxes`). The job's `counts.failed` counts the images whose
+  status is `failed`, so such an image does not add to it; the run's own `failed` counts every image of the run
+  whose call failed, labeled ones too.
 - A run never burns tokens on a broken setup: when the CLI cannot be started or exits with an error (not signed
   in, an unknown model, a usage limit or a rate limit that asks for a wait of more than a minute, with when to
   start again in `run.hint`, in the CLI's words), or three calls in a row
@@ -978,7 +984,7 @@ exported more than once.
   "failed"`, the CLI's message in `run.error` and the images it did not get to unchanged. A passing fault of the
   provider (overloaded, a 5xx status, a dropped stream, a rate limit that asks for a minute or less) is not such an
   error: the call is made once more after 15 s (or the wait asked for, if longer), and if it fails that way again
-  its images are `failed` and the call counts towards the three in a row (`run.hint` then says the provider is
+  it has failed for its images and counts towards the three in a row (`run.hint` then says the provider is
   busy). A 4xx status other than 429 is never a passing fault, and a fault that asks for a wait of more than a
   minute ends the run as a limit does. Claude Code's error results are read from their structured fields
   (`errors`, `api_error`, and `api_error_status`, which stands for any number in the text) as well as their
@@ -1015,14 +1021,15 @@ exported more than once.
 // LabelJob
 { "id": "lb_3f9a", "name": "street", "classes": ["car", "person"], "instructions": "Label every ...",
   "created": "...", "status": "idle|running|stopping",
-  "counts": { "images": 120, "pending": 20, "labeled": 96, "failed": 4, "boxes": 513 },
+  "counts": { "images": 120, "pending": 20, "labeled": 96, "failed": 4, "boxes": 513 },  // images by status
   "run": LabelRun | null,        // the active run, else the most recent one
   "usage": LabelUsage,           // every run of the job
   "dataset_id": "ds_8f2c" | null }
 // LabelRun
 { "id": "lr_9f1c...", // unique per run (absent from older servers): `started` has one-second resolution
   "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "fast"?: true, "started": "...",
-  "finished": "..." | null, "total": 24, "done": 16, "failed": 0,   // images of this run
+  "finished": "..." | null, "total": 24, "done": 16, "failed": 0,   // images of this run (`failed`: its call
+                                                                     // failed, labeled images too)
   "outcome": null | "completed|stopped|failed", "error": null | "...", "hint"?: "...", "usage": LabelUsage }
 // LabelUsage
 { "calls": 4, "input_tokens": 18400, "cached_input_tokens": 3252, "output_tokens": 5100, "cost_usd": 0.021 | null }

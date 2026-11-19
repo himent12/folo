@@ -89,7 +89,11 @@ export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 
   return { tone: 'success', title: 'New boxes', detail: imageState(img) };
 }
 
-/** An image's state in words, as the editor says it: a failed one with the reason the server gives. */
+/**
+ * An image's state in words, as the editor says it: a failed one with the reason the server gives, a labeled one
+ * whose last agent call failed (it kept its labels) with that reason after its labels' state, until new labels or a
+ * save clear it.
+ */
 export function imageState(img: LabelImage): string {
   if (img.status === 'labeling') return 'The agent is labeling it';
   if (img.status === 'failed') return img.error ? `The agent could not label it: ${img.error}` : 'The agent could not label it';
@@ -97,5 +101,6 @@ export function imageState(img: LabelImage): string {
   const n = img.boxes.length;
   const what = n === 0 ? 'No objects' : `${num(n)} ${n === 1 ? 'box' : 'boxes'}`;
   const by = img.source === 'manual' ? `${what}, edited by hand` : `${what}, drawn by the agent`;
-  return img.reviewed ? `${by}, reviewed` : by;
+  const state = img.reviewed ? `${by}, reviewed` : by;
+  return img.error ? `${state}. Last ask failed: ${img.error}` : state;
 }

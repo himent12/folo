@@ -51,6 +51,10 @@ describe('agents and images', () => {
     expect(imageState(img('labeled', 0, 'manual'))).toBe('No objects, edited by hand');
     expect(imageState(img('failed'))).toBe('The agent could not label it');
     expect(imageState({ ...img('failed'), error: 'the reply left this image out' })).toBe('The agent could not label it: the reply left this image out');
+    // A labeled image whose last call failed kept its labels; the reason follows their state.
+    expect(imageState({ ...img('labeled', 2), reviewed: true, error: 'the reply has no JSON object' })).toBe(
+      '2 boxes, drawn by the agent, reviewed. Last ask failed: the reply has no JSON object',
+    );
   });
 });
 
