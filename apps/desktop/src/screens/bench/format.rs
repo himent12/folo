@@ -6,6 +6,7 @@ use crate::api::{
 };
 use crate::app::FoloApp;
 use crate::ui::*;
+use folo_bench::score::CALIBRATION_FLOOR;
 
 /// An axis's short name, as the leaderboard heads its column.
 pub fn axis_short(a: BenchAxis) -> &'static str {
@@ -197,18 +198,20 @@ pub fn prf_label(a: &BenchAccuracy) -> String {
 /// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it gave no confidences,
 /// or none of its detections reached the calibration floor, 0.1 (docs/BENCH.md, Calibration). Short enough for the
 /// tile at 1280 px; [`calibration_why_not`] says it in full.
-pub fn calibration_none(e: &BenchEntry) -> &'static str {
-    if e.scored { "none reached 0.1" } else { "no confidences" }
+pub fn calibration_none(e: &BenchEntry) -> String {
+    if e.scored { format!("none reached {CALIBRATION_FLOOR}") } else { "no confidences".into() }
 }
 
 /// The same in a sentence, in Studio's words (`axisWhyNot`).
-pub fn calibration_why_not(e: &BenchEntry) -> &'static str {
+/// Calibration is measured on the unchanged images only, so a confident detection on a condition does not count.
+pub fn calibration_why_not(e: &BenchEntry) -> String {
     match (&e.contestant, e.scored) {
-        (_, true) => "No detection reached confidence 0.1.",
+        (_, true) => format!("No detection on the unchanged images reached confidence {CALIBRATION_FLOOR}."),
         (BenchContestant::Agent { .. }, false) => {
             "Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate."
+                .into()
         }
-        (_, false) => "Its predictions came without confidences.",
+        (_, false) => "Its predictions came without confidences.".into(),
     }
 }
 
@@ -321,7 +324,7 @@ mod tests {
         // A model whose scores all stay under the floor gave confidences: it is told none reached 0.1.
         e.scored = true;
         assert_eq!(calibration_none(&e), "none reached 0.1");
-        assert_eq!(calibration_why_not(&e), "No detection reached confidence 0.1.");
+        assert_eq!(calibration_why_not(&e), "No detection on the unchanged images reached confidence 0.1.");
         // A contestant that gives none keeps the explanation about missing confidences.
         e.scored = false;
         e.contestant = BenchContestant::External;

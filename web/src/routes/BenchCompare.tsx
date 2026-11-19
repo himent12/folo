@@ -386,7 +386,7 @@ export default function BenchCompare() {
             <For each={noCal.get()} key={(e) => e.id}>
               {(e) => (
                 <span>
-                  {e().name}: {e().scored ? 'no detection reached confidence 0.1' : 'no confidences'}, not measured.
+                  {e().name}: {e().scored ? 'no detection on the unchanged images reached confidence 0.1' : 'no confidences'}, not measured.
                 </span>
               )}
             </For>

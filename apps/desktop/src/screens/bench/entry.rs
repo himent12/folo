@@ -191,10 +191,9 @@ impl FoloApp {
                     BenchReadiness::Partial => "partly ready".into(),
                     BenchReadiness::NotReady => "not ready".into(),
                 },
-                BenchAxis::Calibration => r
-                    .calibration
-                    .as_ref()
-                    .map_or(calibration_none(e).into(), |c| format!("ECE {}", f3(c.ece))),
+                BenchAxis::Calibration => {
+                    r.calibration.as_ref().map_or(calibration_none(e), |c| format!("ECE {}", f3(c.ece)))
+                }
                 BenchAxis::Localization => r
                     .localization
                     .mean_iou
@@ -402,11 +401,9 @@ impl FoloApp {
 
         // Calibration and localization.
         let calib = panel(&t).flex_1().min_w(px(320.)).child(panel_header(&t, "Calibration").child(
-            text(ty::SM, t.text_tertiary).child(
-                r.calibration.as_ref().map_or(calibration_none(e).to_string(), |c| {
-                    format!("ECE {} over {} detections", f3(c.ece), int(c.detections))
-                }),
-            ),
+            text(ty::SM, t.text_tertiary).child(r.calibration.as_ref().map_or(calibration_none(e), |c| {
+                format!("ECE {} over {} detections", f3(c.ece), int(c.detections))
+            })),
         ));
         let calib = match &r.calibration {
             Some(c) => calib.child(div().px(px(16.)).py(px(8.)).children(c.bins.iter().filter(|b| b.count > 0).map(|bin| {

@@ -234,7 +234,7 @@ export const CALIBRATION_NONE = 'calibration not measured';
 export function partialWhy(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 'plan'>): string {
   const f = coverageFacts(e, b)
     .filter((x) => !x.startsWith('knows') && x !== STALE_FACT)
-    .map((x) => (x === CALIBRATION_NONE ? 'calibration not measured (no detection reached confidence 0.1)' : x));
+    .map((x) => (x === CALIBRATION_NONE ? 'calibration not measured (no detection on the unchanged images reached confidence 0.1)' : x));
   return `Partial: ${f.join(', ')}. It compares only loosely with complete entries.`;
 }
 
@@ -404,7 +404,7 @@ export function axisWhyNot(axis: BenchAxis, e: Pick<BenchEntry, 'conditions' | '
       return e.contestant.kind === 'agent'
         ? 'Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate.'
         : 'Its predictions came without confidences.';
-    return 'No detection reached confidence 0.1.';
+    return 'No detection on the unchanged images reached confidence 0.1.';
   }
   return null;
 }
@@ -447,7 +447,7 @@ const QUOTE_MIN = 20;
 export function calibrationReading(c: Pick<BenchCalibration, 'ece' | 'bins'>): { tone: CalibrationTone; sentence: string } {
   const filled = c.bins.filter((b) => b.count > 0 && b.confidence !== null && b.precision !== null);
   const n = filled.reduce((s, b) => s + b.count, 0);
-  if (!n) return { tone: 'close', sentence: 'No detection reached confidence 0.1, so there is nothing to read.' };
+  if (!n) return { tone: 'close', sentence: 'No detection on the unchanged images reached confidence 0.1, so there is nothing to read.' };
   const gapOf = (b: BenchCalibrationBin) => b.confidence! - b.precision!;
   const meaningful = filled.filter((b) => b.count >= Math.max(QUOTE_MIN, 0.05 * n));
   const says = (b: BenchCalibrationBin) => `when it says ${num(b.confidence!, 2)}, it is right ${pct(b.precision!, 0)} of the time`;
