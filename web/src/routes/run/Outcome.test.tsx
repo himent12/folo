@@ -161,7 +161,7 @@ describe('Outcome', () => {
     const run = { ...failed(error), error_code: 'data_error', epoch: 1, step: 25, steps_per_epoch: 13, best: null };
     const target = document.createElement('div');
     document.body.appendChild(target);
-    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy', datasetRegistered: true } });
+    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy' } });
     flushSync();
     expect(target.querySelector('.c-title')?.textContent).toBe('Failed in epoch 2');
     expect(target.querySelector('.c-msg')?.textContent?.trim()).toBe('Files of dataset bccd-copy went missing or changed during training.');
@@ -173,21 +173,19 @@ describe('Outcome', () => {
     target.remove();
   });
 
-  // Sweep 4 (#319) and its review: Check dataset only once the list has the dataset; never for one removed since the run
-  // failed ("Dataset not found"), nor while the list loads or cannot be read (Run's datasetPresence).
-  it('offers no Check dataset unless the dataset is known to be registered', () => {
+  // Sweep 4 (#319) and its reviews: no Check dataset for a dataset removed since the run failed ("Dataset not found");
+  // while that is not known (Run's datasetPresence) it is offered as before.
+  it('offers no Check dataset for a dataset known to be removed', () => {
     const run = { ...failed('io error at D:/x.jpg: not found'), error_code: 'data_error', best: null };
-    for (const datasetRegistered of [false, undefined]) {
-      const target = document.createElement('div');
-      document.body.appendChild(target);
-      const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy', datasetRegistered } });
-      flushSync();
-      const acts = [...target.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
-      expect(acts.map((b) => b.textContent?.trim())).toEqual(['Start again', 'Details']);
-      expect(target.querySelector('a[href^="#/datasets/"]')).toBeNull();
-      unmount(c);
-      target.remove();
-    }
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy', datasetRemoved: true } });
+    flushSync();
+    const acts = [...target.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
+    expect(acts.map((b) => b.textContent?.trim())).toEqual(['Start again', 'Details']);
+    expect(target.querySelector('a[href^="#/datasets/"]')).toBeNull();
+    unmount(c);
+    target.remove();
   });
 
   const SHORT =

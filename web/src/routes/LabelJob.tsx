@@ -33,7 +33,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { toast } from '$lib/ui/toast';
 import Logs from './run/Logs';
-import { datasetPresence, type DatasetPresence } from './overview/newDatasets';
+import { datasetPresence, datasetsFor, type DatasetPresence } from './overview/newDatasets';
 import AddImagesDialog from './label/AddImagesDialog';
 import AgentPanel from './label/AgentPanel';
 import { AgentChoice } from './label/agentChoice';
@@ -60,8 +60,6 @@ export default function LabelJob() {
 
   const system = new Resource((s) => hub.api.system(s));
   const agents = new Resource((s) => hub.api.labelAgents(s));
-  // Read again every 5 s: a dataset made from the job and removed while the page is open (another tab) stops linking.
-  const datasets = new Resource((s) => hub.api.datasets(s), { poll: 5000 });
   const live = new LiveLabelJob(() => id.get() || null);
   const choice = new AgentChoice(() => agents.data);
   const uploads = new Uploads(() => id.get(), live);
@@ -193,7 +191,10 @@ export default function LabelJob() {
   }
   // The dataset made from the job, by the id the job keeps (also once it was removed from FOLO): linked only while it is
   // registered, "since removed" once it is known removed, and neither while that is not known (./overview/newDatasets).
+  // The list is read (every 5 s: one removed while the page is open stops linking) while the job loads and once it made a
+  // dataset, never for a job that made none.
   const madeId = computed(() => job.get()?.dataset_id ?? null);
+  const datasets = datasetsFor(() => (job.get() ? [madeId.get()] : undefined));
   const presence = datasetPresence(datasets, () => [madeId.get()]);
   const madeDataset = computed(() => {
     const dsId = madeId.get();

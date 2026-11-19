@@ -159,6 +159,58 @@ describe('Model: what was evaluated', () => {
       vi.useRealTimers();
     }
   });
+
+  // Review of #335, round 2: a datasets read that fails (503) between two good ones unlinked both until the next poll;
+  // a failed read changes nothing.
+  it('keeps both dataset links through a datasets read that fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      const real = api.datasets.bind(api);
+      let failing = false;
+      let reads = 0;
+      api.datasets = async () => {
+        reads++;
+        if (failing) throw new ApiError(503, 'unavailable', 'The server is busy.');
+        return real();
+      };
+      await open('m_fast_n');
+      const kv = (label: string) => [...target.querySelectorAll('#details .kv')].find((k) => k.querySelector('dt')?.textContent === label)?.querySelector('dd');
+      const links = () => !!kv('Evaluated on')?.querySelector('a[href^="#/datasets/"]') && !!kv('Source')?.querySelector('a[href^="#/datasets/"]');
+      await until(links, 'both links');
+      failing = true;
+      const before = reads;
+      await vi.advanceTimersByTimeAsync(5000);
+      await until(() => reads > before, 'the failing poll');
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync();
+      expect(links()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Model: no dataset named', () => {
+  // Review of #335, round 2: a model that names no dataset (an imported file nothing can be evaluated on) polled the
+  // datasets list every 5 s for nothing.
+  it('reads no datasets list for a model that names no dataset', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      api.modelEval = async () => {
+        throw new ApiError(404, 'no_matching_dataset', "no registered dataset has this model's 80 classes", 'register a dataset');
+      };
+      const reads = vi.spyOn(api, 'datasets');
+      router.route = parse('#/models/m_coco_s');
+      c = mount(Model, { target });
+      await until(() => target.querySelector('.empty'), 'the empty state');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(reads).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // s4-models-1 (and its reviews): "Trained for" says the epochs the run finished, never the planned count: a completed

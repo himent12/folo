@@ -87,30 +87,42 @@ describe('a run that ended without training', () => {
   });
 });
 
-// Review of #335: Check dataset links to the run's dataset only once the datasets list has it; while the list is
-// delayed, or after its first read failed, the action waits (a removed dataset's page is "Dataset not found").
+// #335 and its reviews: Check dataset is withdrawn once the datasets list says the run's dataset was removed (its page
+// is "Dataset not found"); while that is not known (the list is delayed, or cannot be read) it is offered as on main.
 describe("a failed run's Check dataset", () => {
   const failed = { status: 'failed', error_code: 'data_error', error: "dataset folder 'D:/gone' not found" } as const;
   const check = () => [...target.querySelectorAll<HTMLElement>('.c-acts a')].find((a) => a.textContent?.trim() === 'Check dataset');
   const shown = () => !!target.querySelector('.c-acts');
 
-  it('waits for the datasets list', async () => {
+  it('is offered while the datasets list is delayed, and stays for a registered dataset', async () => {
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
+    let reads = 0;
     const run = await open(failed, [], shown, (api) => {
       const datasets = api.datasets.bind(api);
-      api.datasets = async () => (await held, datasets());
+      api.datasets = async () => (reads++, await held, datasets());
     });
-    expect(check()).toBeUndefined();
+    expect(check()!.getAttribute('href')).toBe(`#/datasets/${run.config.dataset_id}`);
     release();
     await vi.waitFor(() => {
-      flushSync();
-      if (!check()) throw new Error('no Check dataset');
+      if (reads < 1) throw new Error('not read');
     });
+    await held;
+    flushSync();
     expect(check()!.getAttribute('href')).toBe(`#/datasets/${run.config.dataset_id}`);
   });
 
-  it('is not offered when the datasets cannot be read', async () => {
+  it('is withdrawn once the list says the dataset was removed', async () => {
+    await open(failed, [], shown, (api) => {
+      api.datasets = async () => [];
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      if (check()) throw new Error('still offered');
+    });
+  });
+
+  it('is offered when the datasets cannot be read', async () => {
     let reads = 0;
     await open(failed, [], shown, (api) => {
       api.datasets = async () => {
@@ -122,6 +134,6 @@ describe("a failed run's Check dataset", () => {
       if (reads < 1) throw new Error('not read');
     });
     flushSync();
-    expect(check()).toBeUndefined();
+    expect(check()).toBeDefined();
   });
 });

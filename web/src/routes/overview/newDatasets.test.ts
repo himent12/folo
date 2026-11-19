@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// datasetPresence (sweep 4, #319 and its review): a page links to a dataset only once an answer requested after it
-// learned the id has it, says "removed" only once such an answer does not, and claims nothing in between.
+// datasetPresence (sweep 4, #319 and its reviews): any good answer that has an id makes it registered; "removed" only
+// once an answer requested after the page learned the id does not have it; a failed read changes nothing.
 import { createRoot, flush as flushSync, signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -43,16 +43,39 @@ describe('datasetPresence', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('is unknown while the first read is delayed, then registered or removed by its answer', async () => {
+  it('is unknown while the first read is delayed, then registered by it; removed only by a read sent after', async () => {
     const t = setup(['ds_a', 'ds_b']);
     await settle();
     expect(t.at('ds_a')).toBe('unknown');
     expect(t.at('ds_b')).toBe('unknown');
-    // The read sent for the ids (the first one is superseded by it).
-    for (const c of t.calls) c.resolve([{ id: 'ds_a' }]);
+    expect(t.calls).toHaveLength(1);
+    t.last().resolve([{ id: 'ds_a' }]);
     await settle();
     expect(t.at('ds_a')).toBe('registered');
+    // The first read may predate ds_b: it is read again for it.
+    expect(t.at('ds_b')).toBe('unknown');
+    expect(t.calls).toHaveLength(2);
+    t.last().resolve([{ id: 'ds_a' }]);
+    await settle();
     expect(t.at('ds_b')).toBe('removed');
+    t.stop();
+  });
+
+  // Review of #335, round 2: the read sent again for every new id held the link back (and cost a request) even when
+  // the list already had the id.
+  it('is registered by the first list that has the id, with no read after it', async () => {
+    const t = setup(['ds_a']);
+    await settle();
+    expect(t.calls).toHaveLength(1);
+    t.last().resolve([{ id: 'ds_a' }, { id: 'ds_b' }]);
+    await settle();
+    expect(t.at('ds_a')).toBe('registered');
+    expect(t.calls).toHaveLength(1);
+    // An id learned later that the list already has: registered at once, nothing read.
+    t.ids.set(['ds_a', 'ds_b']);
+    expect(t.at('ds_b')).toBe('registered');
+    await settle();
+    expect(t.calls).toHaveLength(1);
     t.stop();
   });
 
@@ -72,11 +95,15 @@ describe('datasetPresence', () => {
   it('says removed once the dataset leaves the list while the page is open', async () => {
     const t = setup(['ds_a']);
     await settle();
-    for (const c of t.calls) c.resolve([{ id: 'ds_a' }]);
+    t.last().resolve([{ id: 'ds_a' }]);
     await settle();
     expect(t.at('ds_a')).toBe('registered');
     await vi.advanceTimersByTimeAsync(5000);
     expect(t.at('ds_a')).toBe('registered'); // no flicker while the poll is in flight
+    t.last().resolve([]);
+    await settle();
+    // Read once more for it (the first list may have been requested before the page learned the id), then removed.
+    expect(t.at('ds_a')).toBe('registered');
     t.last().resolve([]);
     await settle();
     expect(t.at('ds_a')).toBe('removed');
@@ -86,21 +113,24 @@ describe('datasetPresence', () => {
   it('never calls a new id removed when the read for it fails (the old list does not have it)', async () => {
     const t = setup(['ds_old']);
     await settle();
-    for (const c of t.calls) c.resolve([]);
+    t.last().resolve([]);
+    await settle();
+    t.last().resolve([]);
     await settle();
     expect(t.at('ds_old')).toBe('removed');
     // Exported again from another tab: the page learns a new id; the read for it fails.
+    const before = t.calls.length;
     t.ids.set(['ds_new']);
     flushSync();
+    expect(t.calls.length).toBe(before + 1);
     t.last().reject(new Error('503'));
     await settle();
     expect(t.at('ds_new')).toBe('unknown');
     // The poll keeps trying, one read at a time.
-    const before = t.calls.length;
     await vi.advanceTimersByTimeAsync(5000);
-    expect(t.calls.length).toBe(before + 1);
+    expect(t.calls.length).toBe(before + 2);
     await vi.advanceTimersByTimeAsync(5000);
-    expect(t.calls.length).toBe(before + 1);
+    expect(t.calls.length).toBe(before + 2);
     t.last().resolve([{ id: 'ds_new' }]);
     await settle();
     expect(t.at('ds_new')).toBe('registered');
@@ -116,26 +146,31 @@ describe('datasetPresence', () => {
     const early = t.last();
     t.ids.set(['ds_new']);
     flushSync();
-    const fresh = t.last();
-    expect(fresh).not.toBe(early);
+    expect(t.last()).toBe(early); // the poll in flight may have the id: it is waited for, not cut short
     early.resolve([]);
     await settle();
     expect(t.at('ds_new')).toBe('unknown');
+    const fresh = t.last();
+    expect(fresh).not.toBe(early);
     fresh.resolve([{ id: 'ds_new' }]);
     await settle();
     expect(t.at('ds_new')).toBe('registered');
     t.stop();
   });
 
-  it('turns unknown again when a later read fails', async () => {
-    const t = setup(['ds_a']);
+  // Review of #335, round 2: a failed read changes nothing, either way.
+  it('keeps what the last good answer said when a later read fails', async () => {
+    const t = setup(['ds_a', 'ds_b']);
     await settle();
-    for (const c of t.calls) c.resolve([{ id: 'ds_a' }]);
+    t.last().resolve([{ id: 'ds_a' }]);
     await settle();
+    t.last().resolve([{ id: 'ds_a' }]);
+    await settle();
+    expect([t.at('ds_a'), t.at('ds_b')]).toEqual(['registered', 'removed']);
     await vi.advanceTimersByTimeAsync(5000);
     t.last().reject(new Error('503'));
     await settle();
-    expect(t.at('ds_a')).toBe('unknown');
+    expect([t.at('ds_a'), t.at('ds_b')]).toEqual(['registered', 'removed']);
     t.stop();
   });
 });

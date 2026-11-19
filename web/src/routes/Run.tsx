@@ -104,7 +104,7 @@ export default function Run() {
   /** The datasets are in and the run's is not among them: it was removed. */
   const datasetGone = computed(() => !!datasets.data && !dataset.get());
   const datasetName = computed(() => dataset.get()?.name ?? recorded.get()?.name);
-  /** Whether the run's dataset is registered, removed or not known yet (./overview/newDatasets): Outcome's Check dataset. */
+  /** Whether the run's dataset is known removed (./overview/newDatasets): Outcome's Check dataset is then withdrawn. */
   const presence = datasetPresence(datasets, () => [config.get()?.dataset_id]);
   const modelClasses = computed(() => {
     const id = run.get()?.model_id;
@@ -534,7 +534,7 @@ export default function Run() {
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
               datasetName={datasetName.get()}
-              datasetRegistered={presence(config.get()?.dataset_id) === 'registered'}
+              datasetRemoved={presence(config.get()?.dataset_id) === 'removed'}
               system={system.data ?? (system.error ? null : undefined)}
             />
 

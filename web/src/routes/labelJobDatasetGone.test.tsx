@@ -140,4 +140,18 @@ describe('a labeling job whose dataset was removed', () => {
     expect(made()?.textContent).toBe(`made ${ds.name}`);
     expect(shown.some((t) => t.includes('removed'))).toBe(false);
   });
+
+  // Review of #335, round 2: a job that made no dataset links to none, yet its page read the datasets every 5 s. It reads
+  // them once while the job loads, as main does (an exported job's link would otherwise wait for the job, then the list).
+  it('polls no datasets list for a job that made no dataset', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = new MockApi('normal', 0);
+    const reads = vi.spyOn(api, 'datasets');
+    await open(api, () => !!target.querySelector('h1') && !target.querySelector('[aria-busy="true"]'));
+    const atLoad = reads.mock.calls.length;
+    expect(atLoad).toBeLessThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(made()).toBeNull();
+    expect(reads).toHaveBeenCalledTimes(atLoad);
+  });
 });

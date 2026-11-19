@@ -3,9 +3,10 @@
 // another tab) would then read "<name> (removed)" (lib/runDataset), and the Datasets panel would never list it.
 // `datasetPresence` states the rule for pages that link to one dataset by id (a labeling job, a model, a failed run).
 
-import { effect, signal, untrack } from 'fw';
+import { computed, effect, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Run } from '$lib/api/types';
+import { Resource } from '$lib/api/resource';
+import type { Dataset, Run } from '$lib/api/types';
 
 /**
  * Reads `datasets` again when a run of `runs` names a dataset the list does not have: once per dataset (one that was
@@ -39,9 +40,9 @@ export function followNewDatasets(
 /** What a page knows of a dataset it names by id: see `datasetPresence`. */
 export type DatasetPresence = 'registered' | 'removed' | 'unknown';
 
-/** The datasets list as a page reads it: a Resource of `hub.api.datasets`, polled (lib/api/resource). */
+/** The datasets list as a page reads it: `datasetsFor`, or a page's own polled Resource of `hub.api.datasets`. */
 export interface DatasetList {
-  readonly data: readonly { id: string }[] | undefined;
+  readonly data: readonly { id: string }[] | null | undefined;
   readonly error: unknown;
   readonly stale: unknown;
   readonly loading: boolean;
@@ -50,42 +51,59 @@ export interface DatasetList {
 }
 
 /**
- * Whether the datasets a page names by id (a labeling job's, a model's evaluation, a failed run's) are registered in
- * FOLO, one rule for every page that links to one or offers an action on it (sweep 4, #319):
- * - `registered`: a successful answer of `datasets` requested after the page learned the id has it: link, offer actions;
- * - `removed`: such an answer does not have it: say so, link nowhere;
- * - `unknown`: no such answer yet (the list loads; it is read again for an id it was not asked about), or the last read
- *   failed: neutral text, no link and no claim.
- * Each id is read once more when the page learns it (an answer to a request sent before then may predate a dataset made
- * in another tab); after that the list's own poll keeps it current (one read in flight at a time, stopped with the page).
+ * The datasets list for `datasetPresence` on a page that reads it for nothing else: read, and polled every 5 s, only
+ * while `ids` names a dataset, or is undefined (the page does not know yet: read alongside what it waits for, not after
+ * it); a page that names none sends no request (null).
+ */
+export function datasetsFor(ids: () => readonly (string | null | undefined)[] | undefined): Resource<Dataset[] | null> {
+  const named = computed(() => ids()?.some(Boolean) ?? true);
+  return new Resource((s) => (named.get() ? hub.api.datasets(s) : Promise.resolve(null)), { poll: 5000 });
+}
+
+/**
+ * Whether the datasets a page names by id (a labeling job's, a model's run and evaluation, a failed run's) are registered
+ * in FOLO (sweep 4, #319). The invariant: for a dataset that is registered, a page never shows less than it did before
+ * this rule, and never later; the only difference is that an id a successful read of the list says is absent is shown
+ * as removed. So:
+ * - `registered`: a successful answer has the id, whenever it was requested (the first one too: nothing more is read);
+ * - `removed`: a successful answer requested after the page learned the id does not have it (one requested before may
+ *   predate a dataset made since, in another tab: the list is read once more for an id it lacks);
+ * - `unknown`: neither yet; the page shows what it showed before the rule.
+ * A failed read changes nothing: only a successful answer moves an id, either way. The list's poll keeps it current.
  */
 export function datasetPresence(
   datasets: DatasetList,
   ids: () => readonly (string | null | undefined)[] | undefined,
 ): (id: string | null | undefined) => DatasetPresence {
   const key = (id: string) => `${hub.server} ${id}`;
-  /** The ids (by `key`) learned so far. */
+  /** The ids (by `key`) the list was read again for: the page learned them while the list lacked them. */
   const asked = new Set<string>();
-  /** The ids read again since they were learned: every answer from then on was requested after. */
-  const ready = signal<ReadonlyMap<string, string>>(new Map());
+  /** Those whose read is back: every answer from then on was requested after the page learned them. */
+  const ready = signal<ReadonlySet<string>>(new Set());
   const known = signal<ReadonlyMap<string, DatasetPresence>>(new Map());
   effect(() => {
-    const fresh = new Map<string, string>();
-    for (const id of ids() ?? []) if (id && !asked.has(key(id))) fresh.set(key(id), id);
-    if (!fresh.size) return;
-    for (const k of fresh.keys()) asked.add(k);
-    // A later read (a poll, another new id) supersedes this one; it was requested later still.
-    untrack(() => void datasets.refresh().finally(() => ready.set(new Map([...ready.peek(), ...fresh]))));
-  });
-  effect(() => {
-    // While a read is in flight, what the last answer settled stands (no flicker at every poll).
+    // An answer is on its way: what the last ones settled stands until it lands.
     if (datasets.loading || datasets.refreshing) return;
-    const list = datasets.error === undefined && datasets.stale === undefined ? datasets.data : undefined;
+    const failed = datasets.error !== undefined || datasets.stale !== undefined;
+    const list = failed ? null : datasets.data;
+    if (!list && !failed) return; // nothing read (`datasetsFor` while the page names no dataset)
     const have = new Set((list ?? []).map((d) => d.id));
-    const next = new Map<string, DatasetPresence>();
-    for (const [k, id] of ready.get()) next.set(k, !list ? 'unknown' : have.has(id) ? 'registered' : 'removed');
     const was = known.peek();
-    if (next.size !== was.size || [...next].some(([k, p]) => was.get(k) !== p)) known.set(next);
+    const next = new Map(was);
+    const fresh: string[] = [];
+    for (const id of ids() ?? []) {
+      if (!id) continue;
+      const k = key(id);
+      if (list && have.has(id)) next.set(k, 'registered');
+      else if (ready.get().has(k)) {
+        if (list) next.set(k, 'removed');
+      } else if (!asked.has(k)) fresh.push(k);
+    }
+    if ([...next].some(([k, p]) => was.get(k) !== p)) known.set(next);
+    if (!fresh.length) return;
+    for (const k of fresh) asked.add(k);
+    // A later read (a poll) supersedes this one; it was requested later still.
+    untrack(() => void datasets.refresh().finally(() => ready.set(new Set([...ready.peek(), ...fresh]))));
   });
   return (id) => (id ? (known.get().get(key(id)) ?? 'unknown') : 'unknown');
 }

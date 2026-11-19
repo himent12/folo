@@ -42,7 +42,7 @@ import KpiSummary from './model/KpiSummary';
 import DetailsList, { type ModelContext } from './model/DetailsList';
 import { finishedEpochs, weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
-import { datasetPresence } from './overview/newDatasets';
+import { datasetPresence, datasetsFor } from './overview/newDatasets';
 
 export default function Model() {
   const id = computed(() => router.route.params.id ?? '');
@@ -135,11 +135,11 @@ export default function Model() {
       fallback: empty ? { requested: 'val', reason: 'empty_split', message: '' } : null,
     };
   });
-  // The datasets the page links to (the run's, the evaluation's) are linked only while registered: the list is read every
-  // 5 s, apart from the models, so one removed while the page is open stops linking (./overview/newDatasets).
-  const datasets = new Resource((s) => hub.api.datasets(s), { poll: 5000 });
-  const presence = datasetPresence(datasets, () => [context.data?.dataset?.id, source.get().datasetId]);
-  const registered = (dsId: string | null | undefined) => presence(dsId) === 'registered';
+  // The datasets the page links to (the run's, the evaluation's) stop linking once removed: the list is read every 5 s,
+  // apart from the models, while the page names one, so one removed while the page is open unlinks (./overview/newDatasets).
+  const named = () => [context.data?.dataset?.id, source.get().datasetId];
+  const presence = datasetPresence(datasetsFor(named), named);
+  const removed = (dsId: string | null | undefined) => presence(dsId) === 'removed';
   /** Said once on the page, under the headline metrics, when the numbers are not on the validation split. */
   const notice = computed(() => fallbackNotice(source.get()));
   // The curves' qualifier names what was evaluated ("fasteners · validation split · IoU 0.5"); phones keep the split.
@@ -452,7 +452,7 @@ export default function Model() {
                     unevaluated={unevaluable.get()}
                     stored={stored.get()}
                     head={head()}
-                    registered={registered}
+                    removed={removed}
                     bind:aboutOpen={aboutOpen}
                   />
                 </Panel>
