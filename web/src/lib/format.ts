@@ -21,6 +21,19 @@ export function metric(x: number | null | undefined): string {
   return num(x, 3);
 }
 
+/**
+ * A 0–1 score in the legend of a chart whose y axis is fitted to `top` (lib/charts/domain `unitTop`), as Desktop's
+ * `fmt_score_on` writes it (#338): three decimals down to a top of 0.01, then one more per power of ten, at most five.
+ */
+export function axisMetric(x: number | null | undefined, top?: number): string {
+  return num(x, scoreDecimals(top));
+}
+
+/** `clamp(ceil(-log10(top) - 1e-6) + 1, 3, 5)`; no top: 3. The `1e-6` puts a power-of-ten top on Desktop's (f32) side. */
+export function scoreDecimals(top?: number): number {
+  return top !== undefined && top > 0 ? Math.min(5, Math.max(3, Math.ceil(-Math.log10(top) - 1e-6) + 1)) : 3;
+}
+
 /** 0.7412 → "74.1%". */
 export function pct(x: number | null | undefined, digits = 1): string {
   return ok(x) ? `${nf(digits).format(x * 100)}%` : '—';

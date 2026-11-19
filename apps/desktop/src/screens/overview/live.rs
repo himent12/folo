@@ -106,9 +106,10 @@ impl FoloApp {
                     r.eta_s.map_or(SharedString::default(), |s| format!("ETA {}", time::duration(s)).into()),
                 ));
                 map.best = best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
-                let v = |pts: &[(f32, f32)]| {
-                    crate::charts::value_at(pts, hover, 0., total).map(|x| format!("{x:.3}"))
-                };
+                // Scores at the decimals the axis's fitted top needs (#338).
+                let top = map.unit_max.map_or(1., crate::charts::domain::unit_top);
+                let sv = |x: f32| fmt_score_on(x, top);
+                let v = |pts: &[(f32, f32)]| crate::charts::value_at(pts, hover, 0., total).map(sv);
                 let legend_el = div()
                     .flex()
                     .items_center()
@@ -118,7 +119,7 @@ impl FoloApp {
                     // The best ring on the chart, keyed as on the run dashboard.
                     .children(
                         best.as_ref()
-                            .map(|b| crate::ui::best_legend(&t, format!("{} @ {}", f3(b.map50_95), b.epoch))),
+                            .map(|b| crate::ui::best_legend(&t, format!("{} @ {}", sv(b.map50_95), b.epoch))),
                     )
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending

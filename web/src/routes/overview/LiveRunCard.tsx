@@ -8,7 +8,7 @@ import LineChart from '$lib/charts/LineChart';
 import { UNIT_ZOOM_NOTE, unitZoomed } from '$lib/charts/domain';
 import { ETA_PENDING, etaSettled, progressText, runProgress, trainingSeconds } from '$lib/api/progress';
 import { cloudGpu } from '$lib/cloud';
-import { deviceName, duration, eta, metric, num } from '$lib/format';
+import { axisMetric, deviceName, duration, eta, metric, num } from '$lib/format';
 import { asOf, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
 import { starting, STARTING } from './slot';
@@ -195,11 +195,11 @@ export default function LiveRunCard(props: LiveRunCardProps) {
                 yTickValues={fit.get()?.ticks}
                 yDecimals={fit.get()?.decimals}
                 yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
-                valueFormat={(v) => metric(v)}
+                valueFormat={(v) => axisMetric(v, fit.get()?.domain[1])}
                 xTitle={(x) => `Epoch ${Math.round(x)}`}
                 curve="monotone"
                 markers={model.best.get()}
-                legendBest={phoneQuery.current ? undefined : model.bestLegend.get()}
+                legendBest={phoneQuery.current ? undefined : model.bestLegend(fit.get()?.domain[1])}
                 endDots
                 legendNote={phoneQuery.current ? undefined : latest.get() ? `Latest · ep ${latest.get()}` : 'Latest'}
                 label={`${scores.get() ?? 'Evaluation'} mAP by epoch`}
