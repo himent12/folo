@@ -126,26 +126,20 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   cleanup would do. The YOLO line rules are the loader's (`dataset::labels::parse_line`), so the checker and the
   loader cannot disagree. `folo dataset check` prints it (docs/CLI.md).
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
-  (images copied unchanged, stems made unique per split, COCO category ids 1-based), marked unfinished while it
-  writes (below).
+  (images copied unchanged, stems made unique per split, COCO category ids 1-based).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`.
 
 ### Unfinished datasets
-`synthetic::write_yolo` and `convert::convert` write in place, into the folder they are given, which must not exist,
-be empty, or hold a stopped write. A `.folo-unfinished` file in it is the first thing they write and the last they
-remove (`unfinished::Writing`). Every reader (`open`, `open_splits`, `detect_format`, `check::check`, so `folo
-dataset stats` / `check` / `convert`, `folo train`, registering in `folo serve`) refuses a folder holding that
-file, also through its `data.yaml` or an `annotations/` JSON, with `DataError::Unfinished` (code
-`dataset_unfinished`, exit 1): a write stopped part way (killed, Ctrl+C, a crash) never reads as a dataset.
-
-The marker is also the writers' lock: a writer opens or creates it and takes an exclusive OS lock on it without
-waiting (`lock::try_lock`, which `serve.lock` uses too), and one that cannot is refused (`AlreadyExists`, CLI
-`output_exists`) before it touches anything. The holder writes a note into the marker before anything else and
-empties it before removing it. A writer that takes the lock of a marker holding the note has found a stopped write:
-it removes every other entry of the folder (links as links, never what they point to) and writes the folder whole.
-A folder with other entries and no marker, or whose marker is not a plain file holding the note or nothing, is
-refused untouched. Nothing outside the folder is touched.
+`synthetic::write_yolo` and `convert::convert` create a `.folo-unfinished` file in their output folder before any
+other file and remove it as their last step, so a write stopped part way (killed, Ctrl+C, a crash) leaves it. A writer
+that finds the file already there (another writer's folder, running or stopped) stops with an `AlreadyExists`
+`DataError::Io` and changes nothing; FOLO never clears or deletes a marked folder. Every reader (`open`,
+`open_splits`, `detect_format`, `check::check`) refuses a dataset whose folder holds the file, found from where the
+dataset's files are (the folder, its `data.yaml` and the root that file's `path:` names, the folder above an
+`annotations/` JSON), with `DataError::Unfinished` (CLI `dataset_unfinished`, exit 1; HTTP 400). To recover, delete
+the folder and run the command again. When only removing the file failed, the error says so: the dataset is
+complete and that one file is to be deleted.
 
 ## Packing
 `pack::pack(&loaded, &mut out)` writes an opened dataset, of any format and layout, as one tar stream into any
@@ -231,8 +225,7 @@ keeps one, as the YOLO reader drops duplicate label lines.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
-and `data.yaml` (`write_yolo_with_progress` also reports each finished image), marked unfinished until complete
-(Unfinished datasets, above); `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
+and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
 `circle, square, triangle, star, ring, cross, hexagon, heart`, drawn with anti-aliased signed distance fields, soft
 shadows and light shading on gradient, marbled, striped or grainy backgrounds, with small objects, partial occlusion,
 objects cut by the frame and some empty images. Output is a pure function of the config and seed.

@@ -86,47 +86,44 @@ fn synth_then_stats_and_a_clean_check() {
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
 }
 
-/// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, and the
-/// same command run again, for fewer images than the stopped one wrote, writes exactly its own dataset.
+/// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, the
+/// same command run again says what to do and deletes nothing, and run again after deleting the folder it writes
+/// the whole dataset.
 #[test]
-fn synth_again_after_a_stopped_one() {
+fn synth_after_a_stopped_one() {
     let t = TestDir::new("cli-synth-again");
     let dir = t.join("NEW");
-    drop(folo_data::unfinished::Writing::begin(&dir).unwrap());
-    std::fs::create_dir_all(dir.join("images/train")).unwrap();
-    for i in 0..300 {
-        std::fs::write(dir.join(format!("images/train/{i:06}.jpg")), "half").unwrap();
+    // What a synth stopped after its first image leaves.
+    for d in ["images/train", "labels/train"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
     }
+    std::fs::write(dir.join(folo_data::unfinished::MARKER), "").unwrap();
+    std::fs::write(dir.join("images/train/000000.jpg"), "half").unwrap();
+    let hint = |err: &serde_json::Value| {
+        err["hint"].as_str().unwrap().contains("delete the folder and run the command")
+    };
     for cmd in ["stats", "check"] {
         let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
         let err = &json_lines(&stdout).pop().unwrap()["error"];
         assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{err}");
-        assert!(err["message"].as_str().unwrap().contains("run that command again"), "{err}");
+        assert!(hint(err), "{err}");
     }
-    let (code, _, stderr) =
-        folo(&["dataset", "synth", s(&dir), "--images", "240", "--imgsz", "32", "--json"]);
+    let synth = ["dataset", "synth", s(&dir), "--images", "8", "--imgsz", "32", "--json"];
+    let (code, stdout, _) = folo(&synth);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("output_exists")), "{err}");
+    assert!(hint(err), "{err}");
+    assert!(
+        dir.join("images/train/000000.jpg").is_file() && dir.join(folo_data::unfinished::MARKER).is_file()
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+    let (code, _, stderr) = folo(&synth);
     assert_eq!(code, 0, "{stderr}");
-    let images = |split: &str| std::fs::read_dir(dir.join("images").join(split)).unwrap().count();
-    assert_eq!(images("train") + images("val"), 240);
     assert!(!dir.join(folo_data::unfinished::MARKER).exists());
     let (code, stdout, _) = folo(&["dataset", "stats", s(&dir), "--json"]);
     assert_eq!(code, 0);
-    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 192, "val": 48, "test": 0 }));
-}
-
-/// A second synth into a folder another process is writing stops with `output_exists` and changes nothing.
-#[test]
-fn synth_into_a_folder_being_written_is_refused() {
-    let t = TestDir::new("cli-synth-busy");
-    let dir = t.join("NEW");
-    let writer = folo_data::unfinished::Writing::begin(&dir).unwrap();
-    let (code, stdout, _) = folo(&["dataset", "synth", s(&dir), "--images", "4", "--imgsz", "32", "--json"]);
-    let err = &json_lines(&stdout).pop().unwrap()["error"];
-    assert_eq!((code, err["code"].as_str()), (1, Some("output_exists")), "{err}");
-    assert!(err["message"].as_str().unwrap().contains("another FOLO command is writing"), "{err}");
-    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(names, [folo_data::unfinished::MARKER]);
-    writer.finish().unwrap();
+    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 6, "val": 2, "test": 0 }));
 }
 
 /// Output folders `main` wrote into: the current folder (`synth .`) and a 250-character name.

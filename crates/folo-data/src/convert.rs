@@ -28,8 +28,8 @@ pub struct Converted {
     pub boxes: usize,
 }
 
-/// Writes `ds` to `out` in `to` format (`Yolo` or `Coco`). `out` must not exist, be an empty directory or hold a
-/// stopped write; it is marked unfinished until complete ([`crate::unfinished`]). Fails
+/// Writes `ds` to `out` in `to` format (`Yolo` or `Coco`). `out` must not exist or be an empty directory; it is
+/// marked unfinished until complete ([`crate::unfinished`]). Fails
 /// with [`DataError::Config`] before writing anything when the result would be unreadable: no images at all, or
 /// YOLO output without train or val images.
 pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> {
@@ -50,7 +50,12 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
                 .into(),
         ));
     }
-    let writing = crate::unfinished::Writing::begin(out)?;
+    if let Ok(mut rd) = std::fs::read_dir(out)
+        && rd.next().is_some()
+    {
+        return Err(DataError::Config(format!("output folder {} is not empty", crate::paths::shown(out))));
+    }
+    let marker = crate::unfinished::begin(out)?;
     let mut splits = [0usize; 3];
     let mut boxes = 0;
     let mut yaml_splits = String::new();
@@ -127,7 +132,7 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
         let p = out.join("data.yaml");
         std::fs::write(&p, yaml).map_err(|e| DataError::io(&p, e))?;
     }
-    writing.finish()?;
+    crate::unfinished::finish(&marker)?;
     Ok(Converted { root: out.to_path_buf(), format: to, splits, boxes })
 }
 

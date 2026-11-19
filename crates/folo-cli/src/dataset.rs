@@ -51,11 +51,13 @@ fn data_error(e: DataError, path: &Path) -> CliError {
             format!("{} does not exist", folo_api::json::path(path)),
         )
         .hint("pass a dataset folder, a data.yaml or a COCO instances .json"),
-        // An output folder that holds something else, or that another process is writing (folo_data::unfinished).
+        // Another writer's output folder (folo_data::unfinished::begin).
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {
             CliError::new(ExitCode::Runtime, "output_exists", source.to_string())
+                .hint(folo_data::unfinished::HINT)
         }
-        e @ DataError::Unfinished(_) => CliError::new(ExitCode::Runtime, "dataset_unfinished", e.to_string()),
+        e @ DataError::Unfinished(_) => CliError::new(ExitCode::Runtime, "dataset_unfinished", e.to_string())
+            .hint(folo_data::unfinished::HINT),
         DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
             CliError::new(ExitCode::Runtime, "unknown_format", m).hint(
                 "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",
@@ -69,22 +71,25 @@ fn data_error(e: DataError, path: &Path) -> CliError {
     }
 }
 
-/// Refuses an output folder that exists and is not empty (or is a file). One that holds a stopped write
-/// (folo_data::unfinished) goes on: the writer clears it.
+/// Refuses an output folder that exists and is not empty (or is a file).
 fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
     let busy = if dir.is_dir() {
-        let stopped = dir.join(folo_data::unfinished::MARKER).is_file();
-        !stopped && std::fs::read_dir(dir).map(|mut rd| rd.next().is_some()).unwrap_or(true)
+        std::fs::read_dir(dir).map(|mut rd| rd.next().is_some()).unwrap_or(true)
     } else {
         dir.exists()
     };
     if busy {
+        let unfinished = dir.join(folo_data::unfinished::MARKER).exists();
         return Err(CliError::new(
             ExitCode::Runtime,
             "output_exists",
             format!("{} exists and is not an empty folder", folo_api::json::path(dir)),
         )
-        .hint("pick a new folder, or delete this one first"));
+        .hint(if unfinished {
+            folo_data::unfinished::HINT
+        } else {
+            "pick a new folder, or delete this one first"
+        }));
     }
     Ok(())
 }

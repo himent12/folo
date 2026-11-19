@@ -479,10 +479,8 @@ pub struct WrittenDataset {
 }
 
 /// Writes a YOLO-format dataset to `dir`: `images/{train,val}/NNNNNN.jpg|png`, `labels/{train,val}/NNNNNN.txt` and
-/// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic.
-///
-/// `dir` must not exist, be empty or hold a stopped write; it is marked unfinished until the dataset is complete
-/// ([`crate::unfinished`]).
+/// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic. `dir`
+/// is marked unfinished until the dataset is complete ([`crate::unfinished`]).
 pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Result<WrittenDataset> {
     write_yolo_with_progress(cfg, dir, format, |_| {})
 }
@@ -497,7 +495,7 @@ pub fn write_yolo_with_progress(
 ) -> Result<WrittenDataset> {
     let done = std::sync::atomic::AtomicUsize::new(0);
     let kinds = cfg.kinds()?;
-    let writing = crate::unfinished::Writing::begin(dir)?;
+    let marker = crate::unfinished::begin(dir)?;
     for split in ["train", "val"] {
         for kind in ["images", "labels"] {
             let d = dir.join(kind).join(split);
@@ -534,7 +532,7 @@ pub fn write_yolo_with_progress(
     }
     let yaml_path = dir.join("data.yaml");
     std::fs::write(&yaml_path, yaml).map_err(|e| DataError::io(&yaml_path, e))?;
-    writing.finish()?;
+    crate::unfinished::finish(&marker)?;
     Ok(WrittenDataset {
         root: dir.to_path_buf(),
         yaml: yaml_path,

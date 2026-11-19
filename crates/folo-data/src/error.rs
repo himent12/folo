@@ -40,8 +40,8 @@ pub enum DataError {
     Format(String),
     /// A dataset folder whose writer has not finished it ([`crate::unfinished`]).
     #[error(
-        "{} holds an unfinished dataset from an interrupted `folo dataset synth` or `folo dataset convert` (it has a \
-         {} file): run that command again",
+        "{} is an unfinished dataset: `folo dataset synth` or `convert` is writing it or was stopped while writing \
+         it (it has a {} file)",
         crate::paths::shown(.0),
         crate::unfinished::MARKER
     )]

@@ -224,10 +224,7 @@ impl Store for RealStore {
         self.registry_loaded()?;
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
         let t0 = Instant::now();
-        if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(data_error(e, &dir.to_string_lossy()));
-        }
+        write_generated(&cfg, &dir).map_err(|e| data_error(e, &dir.to_string_lossy()))?;
         tracing::info!(path = %dir.display(), images = cfg.images, secs = t0.elapsed().as_secs_f32(), "generated");
         let path = dir.to_string_lossy().into_owned();
         // A registration that fails writes nothing to the registry: the generated folder would be nobody's.
@@ -589,4 +586,23 @@ impl Store for RealStore {
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
     }
+}
+
+/// Writes the sample set `cfg` into `dir`, a folder [`RealStore::claim_dataset_dir`] made. A failed write removes
+/// `dir` only once it created the marker in it (folo_data::unfinished): not after an error on the marker itself
+/// (creating it failed: another writer, such as `folo dataset synth`, may be filling the folder), nor when the config
+/// was refused before it.
+pub(super) fn write_generated(
+    cfg: &folo_data::synthetic::SyntheticConfig,
+    dir: &Path,
+) -> folo_data::Result<()> {
+    let Err(e) = folo_data::synthetic::write_yolo(cfg, dir, folo_data::ImageFormat::Jpeg(90)) else {
+        return Ok(());
+    };
+    let marker = dir.join(folo_data::unfinished::MARKER);
+    let on_marker = matches!(&e, folo_data::DataError::Io { path, .. } if *path == marker);
+    if !on_marker && !matches!(e, folo_data::DataError::Config(_)) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Err(e)
 }

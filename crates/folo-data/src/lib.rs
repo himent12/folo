@@ -14,12 +14,10 @@
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
 //! - **Tools** ([`check`], [`convert`], [`pack`]): line-level dataset validation, YOLO / COCO conversion, and a
-//!   dataset as one tar stream for another FOLO server. [`unfinished`] marks a folder they write until it is
-//!   complete, and readers refuse a marked folder.
+//!   dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being written.
 //! - **Support**: [`guard`] (a process-wide read guard, installed by `folo mcp --confine`), [`par`] (row
 //!   parallelism that the loader's workers switch off), [`paths`] (file names shared by `folo dataset check --json`
-//!   and the server), [`lock`] (a file lock taken without waiting), [`CacheMode`] (`--cache ram`) and
-//!   [`DatasetStats`].
+//!   and the server), [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
 //!
 //! See `docs/DATA.md` for formats, augmentation parameters and the determinism rules.
 //!
@@ -65,7 +63,6 @@ pub mod guard;
 mod image;
 mod letterbox;
 mod loader;
-pub mod lock;
 pub mod pack;
 pub mod par;
 pub mod paths;

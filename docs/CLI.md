@@ -181,16 +181,14 @@ folo export --model o2o.folo --format onnx --decode                    # o2o mod
 `PATH` is anything `folo_data::open` accepts (docs/DATA.md): a dataset folder, a `data.yaml` or a COCO instances
 `.json`. Shared error codes: `path_not_found` (exit 3), `unknown_format` (nothing there looks like a dataset, exit 1),
 `invalid_dataset` (a malformed `data.yaml` or COCO file, exit 1), `dataset_unfinished` (below, exit 1),
-`output_exists` (`synth` / `convert` into a folder that exists and is not empty, or that another FOLO command is
-writing, exit 1), `usage` (bad flag values such as nine classes, exit 2).
+`output_exists` (`synth` / `convert` into a folder that exists and is not empty, exit 1), `usage` (bad flag values
+such as nine classes, exit 2).
 
-`synth` and `convert` write into the output folder itself, with a `.folo-unfinished` file in it until the dataset is
-complete. A command stopped part way (Ctrl+C, killed, a crash) leaves that file: `stats`, `check`, `convert`, `folo
-train` and registering in `folo serve` refuse the folder with `dataset_unfinished` ("… holds an unfinished dataset
-from an interrupted `folo dataset synth` or `folo dataset convert` …: run that command again"), and the same command
-run again (any flags) clears what the stopped one wrote and writes the folder whole. A second command into a folder
-that one is still writing stops with `output_exists` and changes nothing. docs/DATA.md (Unfinished datasets) has the
-rules.
+`synth` and `convert` keep a `.folo-unfinished` file in the output folder until the dataset is complete. A command
+stopped part way leaves it: `stats`, `check`, `convert`, `folo train` and registering in `folo serve` refuse the
+folder with `dataset_unfinished`, and `synth` / `convert` into it stop with `output_exists`; both hint "delete the
+folder and run the command again", which is the way to recover. FOLO never deletes it for you (docs/DATA.md,
+Unfinished datasets).
 
 ### `folo dataset synth OUT_DIR`
 Generates `--images` images with folo-data's shapes generator (deterministic in the flags) into `OUT_DIR/images/{train,val}`,

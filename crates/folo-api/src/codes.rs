@@ -56,7 +56,7 @@ pub const CODES: &[Code] = &[
         "dataset_unfinished",
         400,
         1,
-        "a dataset folder that an interrupted `folo dataset synth` / `convert` left unfinished (`.folo-unfinished`)",
+        "a dataset folder holding `.folo-unfinished`: `folo dataset synth` / `convert` is writing it or was stopped",
     ),
     c("dataset_issues", 400, 1, "`folo dataset check` found errors or warnings (CLI)"),
     c(
