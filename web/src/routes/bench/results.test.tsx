@@ -404,6 +404,36 @@ describe("a loop's page", () => {
     expect(document.querySelector('.steps')).toBeNull();
   });
 
+  it('calls a failed loop’s missing results never coming, a running one’s still to come', async () => {
+    const missing = () => [...document.querySelectorAll('table.gens tbody .no-value .sr-only')].map((x) => x.textContent);
+    await page(BenchLoop, '/benchmarks/bn_5e12/loops/bl_9e40');
+    expect(missing()).toEqual(['not benchmarked', 'not benchmarked', 'not run', 'not run']);
+    await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
+    expect(missing()).toContain('not yet');
+  });
+
+  it('promises the chart’s first point only while the loop runs, never once it failed or was stopped', async () => {
+    const hint = () => document.querySelector('.hint')?.textContent;
+    // At generation 0, its teacher's entry waiting: ended there, by its entry stopped under it (failed) or by Stop.
+    for (const [end, status] of [
+      ['entry', 'failed'],
+      ['loop', 'stopped'],
+    ] as const) {
+      hub.api = new MockApi('bench-loop-gen0', 0);
+      await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_g0a1');
+      expect(hint()).toMatch(/^No generation graded yet: the first point is the teacher’s/);
+      const l = await hub.api.benchLoop('bn_3c90', 'bl_g0a1');
+      if (end === 'entry') await hub.api.stopBenchEntry('bn_3c90', l.generations[0]!.entry_id!);
+      else await hub.api.stopBenchLoop('bn_3c90', 'bl_g0a1');
+      const later = Date.now() + 60_000;
+      vi.spyOn(Date, 'now').mockReturnValue(later);
+      expect((await hub.api.benchLoop('bn_3c90', 'bl_g0a1')).status).toBe(status);
+      await settle();
+      expect(hint()).toBe('No generation was graded.');
+      vi.restoreAllMocks();
+    }
+  });
+
   it('shows the step a running loop is on, and offers Stop', async () => {
     await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
     expect([...document.querySelectorAll('.steps li .s-state')].map((x) => x.textContent)).toEqual(['done', 'now', 'next']);
@@ -522,6 +552,24 @@ describe('the loops tab', () => {
     const row = [...document.querySelectorAll('table.loops tbody tr')].find((r) => r.textContent?.includes(loop.name))!;
     expect(row.querySelector('.cause')?.textContent).toContain(loop.error!.slice(0, 40));
   });
+
+  it('gives a running loop a score and a verdict still to come, never once it failed', async () => {
+    hub.api = new MockApi('bench-loop-gen0', 0);
+    const missing = async () => {
+      await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
+      const loop = await hub.api.benchLoop('bn_3c90', 'bl_g0a1');
+      const row = [...document.querySelectorAll('table.loops tbody tr')].find((r) => r.textContent?.includes(loop.name))!;
+      return [...row.querySelectorAll('.no-value .sr-only')].map((x) => x.textContent);
+    };
+    expect(await missing()).toEqual(['no score yet', 'no verdict yet']);
+    // Its teacher's entry stopped under it: the loop fails at generation 0, nothing graded.
+    const l = await hub.api.benchLoop('bn_3c90', 'bl_g0a1');
+    await hub.api.stopBenchEntry('bn_3c90', l.generations[0]!.entry_id!);
+    const later = Date.now() + 60_000;
+    vi.spyOn(Date, 'now').mockReturnValue(later);
+    expect((await hub.api.benchLoop('bn_3c90', 'bl_g0a1')).status).toBe('failed');
+    expect(await missing()).toEqual(['no score', 'no verdict']);
+  });
 });
 
 describe('an open external entry', () => {
@@ -565,6 +613,14 @@ describe('the leaderboard', () => {
     expect(mini.querySelector('path.off')).not.toBeNull();
     expect(mini.querySelector('line.whisker')).toBeNull();
     expect(rows[0]!.querySelector('line.whisker')).not.toBeNull();
+  });
+
+  it('labels a failed entry’s missing speed and cost unavailable, a running one’s not yet', async () => {
+    const cost = (id: string) => document.querySelector(`table.board tbody tr[data-id="${id}"] td.cost .no-value .sr-only`)?.textContent;
+    await page(BenchmarkPage, '/benchmarks/bn_3c90');
+    // be_f107 failed (its agent not signed in), be_f108 runs.
+    expect(cost('be_f107')).toBe('unavailable');
+    expect(cost('be_f108')).toBe('not yet');
   });
 
   it('marks an entry graded on an earlier version on Compare, with no difference against it', async () => {

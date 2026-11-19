@@ -58,6 +58,11 @@ describe('Model: what was evaluated', () => {
     await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
     expect(target.querySelector('[role="note"][aria-label="Evaluation split"]')).toBeNull();
     expect(text('#pr-title .meta')).toBe('fasteners · validation split · IoU 0.5');
+    // The run's dataset is registered: Evaluated on links it.
+    const runDs = (await hub.api.run((await hub.api.model('m_fast_n')).run_id!)).config.dataset_id;
+    const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
+    await until(() => dd?.querySelector('a'), 'the link');
+    expect(dd?.querySelector('a')?.getAttribute('href')).toBe(`#/datasets/${runDs}`);
     // The matrix's header and notes name its own thresholds: the KPIs above are at another operating point.
     expect(text('#cm-title .meta')).toContain('conf 0.25 · IoU 0.45');
     expect(text('#cm .cm-notes')).toContain('conf 0.25, IoU 0.45');
@@ -114,6 +119,112 @@ describe('Model: what was evaluated', () => {
     expect(text('#pr .foot')).not.toContain('validation');
     expect(text('#cm .cm-notes')).toContain('does not report');
     expect(text('#cm .cm-notes')).not.toContain('conf 0.25');
+  });
+
+  // Sweep 4 (#319): /eval names a run's removed dataset by the id it had; Evaluated on named it with a link that opened
+  // "Dataset not found".
+  it("names a run's removed dataset without linking to it", async () => {
+    const api = hub.api as MockApi;
+    const real = api.modelEval.bind(api);
+    api.modelEval = async (id: string) => ({ ...(await real(id)), dataset_id: 'ds_gone', dataset_name: 'fasteners-old' });
+    api.dataset = async () => {
+      throw new ApiError(404, 'dataset_not_found', 'No dataset with id ds_gone.');
+    };
+    await open('m_fast_n');
+    const dd = await until(
+      () => [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd'),
+      'Evaluated on',
+    );
+    await until(() => dd.textContent?.includes('fasteners-old'), 'the evaluated dataset');
+    expect(dd.querySelector('a')).toBeNull();
+  });
+
+  // Review of #335: removing the dataset leaves the models as they were, so nothing the page read about the model
+  // changes; its datasets are read on their own, and Evaluated on (and Source) stop linking with the name as plain text.
+  it('stops linking the evaluated dataset when it is removed while the page is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      await open('m_fast_n');
+      const kv = (label: string) => [...target.querySelectorAll('#details .kv')].find((k) => k.querySelector('dt')?.textContent === label)?.querySelector('dd');
+      const evald = await until(() => kv('Evaluated on')?.querySelector('a[href^="#/datasets/"]'), 'the link');
+      const name = evald.textContent;
+      await until(() => kv('Source')?.querySelector('a[href^="#/datasets/"]'), "the run's dataset link");
+      const dsId = (await api.run((await api.model('m_fast_n')).run_id!)).config.dataset_id;
+      await api.deleteDataset(dsId);
+      await vi.advanceTimersByTimeAsync(5000);
+      await until(() => !kv('Evaluated on')?.querySelector('a') && !kv('Source')?.querySelector('a[href^="#/datasets/"]'), 'no dataset link');
+      expect(kv('Evaluated on')?.textContent).toContain(name);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Review of #335, round 2: a datasets read that fails (503) between two good ones unlinked both until the next poll;
+  // a failed read changes nothing.
+  it('keeps both dataset links through a datasets read that fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      const real = api.datasets.bind(api);
+      let failing = false;
+      let reads = 0;
+      api.datasets = async () => {
+        reads++;
+        if (failing) throw new ApiError(503, 'unavailable', 'The server is busy.');
+        return real();
+      };
+      await open('m_fast_n');
+      const kv = (label: string) => [...target.querySelectorAll('#details .kv')].find((k) => k.querySelector('dt')?.textContent === label)?.querySelector('dd');
+      const links = () => !!kv('Evaluated on')?.querySelector('a[href^="#/datasets/"]') && !!kv('Source')?.querySelector('a[href^="#/datasets/"]');
+      await until(links, 'both links');
+      failing = true;
+      const before = reads;
+      await vi.advanceTimersByTimeAsync(5000);
+      await until(() => reads > before, 'the failing poll');
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync();
+      expect(links()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Model: no dataset named', () => {
+  // Review of #335, round 2: a model that names no dataset (an imported file nothing can be evaluated on) polled the
+  // datasets list every 5 s for nothing.
+  it('reads no datasets list for a model that names no dataset', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      api.modelEval = async () => {
+        throw new ApiError(404, 'no_matching_dataset', "no registered dataset has this model's 80 classes", 'register a dataset');
+      };
+      const reads = vi.spyOn(api, 'datasets');
+      router.route = parse('#/models/m_coco_s');
+      c = mount(Model, { target });
+      await until(() => target.querySelector('.empty'), 'the empty state');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(reads).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Review of #335, round 3: a model that is not there names no dataset; its error page reads no datasets list.
+  it('reads no datasets list for a model that is not found', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const reads = vi.spyOn(hub.api as MockApi, 'datasets');
+      router.route = parse('#/models/m_gone');
+      c = mount(Model, { target });
+      await until(() => target.textContent?.includes('Model not found'), 'the error');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(reads).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

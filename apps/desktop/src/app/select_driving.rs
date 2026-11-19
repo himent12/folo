@@ -22,6 +22,18 @@ pub(crate) fn press(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, key: &
 /// A left click at `(x, y)`: the pointer moves there (a frame drawn, so it hovers), then presses and
 /// releases.
 pub(crate) fn click_at(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, x: f32, y: f32) {
+    click_n_at(app, window, x, y, 1);
+}
+
+/// [`click_at`] as the platform reports the `click_count`th click of a quick series there (2: the
+/// second half of a double-click).
+pub(crate) fn click_n_at(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    x: f32,
+    y: f32,
+    click_count: usize,
+) {
     use folo_ui::{
         Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, point, px,
     };
@@ -31,7 +43,7 @@ pub(crate) fn click_at(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, x: 
     app.simulate_input(window.into(), PlatformInput::MouseMove(moved));
     app.run_until_idle();
     app.frame(window.into());
-    let (button, click_count) = (MouseButton::Left, 1);
+    let button = MouseButton::Left;
     let down = MouseDownEvent { button, position, modifiers, click_count, first_mouse: false };
     app.simulate_input(window.into(), PlatformInput::MouseDown(down));
     app.run_until_idle();

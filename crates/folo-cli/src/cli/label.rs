@@ -172,7 +172,7 @@ pub enum ImageStatusArg {
     Labeling,
     /// Labeled.
     Labeled,
-    /// The last agent call failed.
+    /// An agent call failed and it has no labels (a labeled image keeps its labels and status).
     Failed,
 }
 

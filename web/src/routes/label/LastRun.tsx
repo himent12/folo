@@ -6,6 +6,7 @@ import { computed, css, For } from 'fw';
 import type { LabelAgent, LabelJob, LabelRun } from '$lib/api/types';
 import { ago, num } from '$lib/format';
 import Meta from '$lib/ui/Meta';
+import ModelId from './ModelId';
 import { OUTCOME, runAgent, usageFacts } from './words';
 
 export interface LastRunProps {
@@ -17,6 +18,7 @@ export interface LastRunProps {
 export default function LastRun(props: LastRunProps) {
   const used = computed(() => usageFacts(props.run.usage));
   const total = computed(() => (props.job.usage.calls > props.run.usage.calls ? usageFacts(props.job.usage) : []));
+  const who = computed(() => runAgent(props.run, props.agents));
 
   return (
     <div class="last">
@@ -26,7 +28,8 @@ export default function LastRun(props: LastRunProps) {
           <span>{props.run.outcome ? OUTCOME[props.run.outcome] : 'Running'}</span>
           <span>{num(props.run.done)} labeled</span>
           {props.run.failed ? <span>{num(props.run.failed)} failed</span> : null}
-          <For each={runAgent(props.run, props.agents)}>{(f) => <span>{f()}</span>}</For>
+          <span>{who.get()[0]}</span>
+          <ModelId id={who.get()[1]} />
           {props.run.finished ? <span>{ago(props.run.finished)}</span> : null}
         </Meta>
       </p>
@@ -51,8 +54,10 @@ export default function LastRun(props: LastRunProps) {
 }
 
 css`
+  /* One column no wider than the rail: a long model id wraps (ModelId) instead of widening the panel and the page. */
   .last {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
   .line {

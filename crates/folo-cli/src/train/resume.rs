@@ -47,6 +47,9 @@ pub(super) fn resume(
         c.best.fitness.is_some() && (c.epoch as i64 - 1) - c.best.epoch >= stored.patience as i64;
     if c.epoch >= stored.epochs as u64 || early_stopped {
         let best = ckpt.with_file_name("best.folo");
+        // A run without a stored dataset prints `<dataset>` there.
+        let mut paths = vec![("model", if best.is_file() { best.as_path() } else { ckpt })];
+        paths.extend((!stored.dataset.is_empty()).then(|| ("dataset", Path::new(&stored.dataset))));
         return Err(CliError::new(
             ExitCode::Runtime,
             "run_not_resumable",
@@ -58,10 +61,9 @@ pub(super) fn resume(
                 if early_stopped { ", stopped early" } else { "" }
             ),
         )
-        .hint(format!(
-            "to train further, start a new run from its weights: folo train --model {} --data {} --epochs <n>",
-            folo_api::json::path(if best.is_file() { &best } else { ckpt }),
-            if stored.dataset.is_empty() { "<dataset>" } else { &stored.dataset }
+        .hint(folo_api::json::cli_command(
+            "to train further, start a new run from its weights: folo train --model {model} --data {dataset} --epochs <n>",
+            &paths,
         )));
     }
     if let Some(s) = args.set.iter().find(|s| !s.trim_start().starts_with("distill.")) {

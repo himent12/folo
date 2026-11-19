@@ -2,15 +2,32 @@
 import ChevronRight from '$icons/chevron-right';
 import Copy from '$icons/copy';
 import TriangleAlert from '$icons/triangle-alert';
-import { css, Index } from 'fw';
-import { SHELL } from '$lib/trainCli';
+import { computed, css, Index } from 'fw';
+import type { Model, TrainConfig } from '$lib/api/types';
+import { SHELL, trainCommand } from '$lib/trainCli';
 import Button from '$lib/ui/Button';
 import { toast } from '$lib/ui/toast';
+
+/**
+ * The command for New run's settings: the server's (`served`, where it builds one: only it knows its files), else
+ * Studio's, from the CLI's own mapping ($lib/trainCli). A fine-tune names the weights file by path; where the server
+ * does not report it, a placeholder and a note say what to fill in.
+ */
+export function cliOf(config: () => TrainConfig, data: () => string, model: () => Model | undefined, served: () => string | null) {
+  const own = computed(() => trainCommand(config(), data(), model()));
+  return {
+    parts: computed(() => served()?.split(/ (?=--)/) ?? own.get().parts),
+    line: computed(() => served() ?? own.get().line),
+    placeholder: computed(() => (served() ? null : own.get().placeholder)),
+  };
+}
 
 export interface CliCommandProps {
   cliParts: string[];
   cli: string;
   cliPlaceholder: string | null;
+  /** The Seed field holds no seed: held as Start is (lib/seed), never a command that would run with another seed. */
+  seedMissing?: boolean;
 }
 
 export default function CliCommand(props: CliCommandProps) {
@@ -34,55 +51,61 @@ export default function CliCommand(props: CliCommandProps) {
         <ChevronRight size={14} aria-hidden="true" />
         CLI command <span class="faint">the same run from a terminal</span>
       </summary>
-      <p class="cli-shell">In {SHELL}:</p>
-      {props.cliPlaceholder ? (
-        <p class="cli-req">
-          <TriangleAlert size={14} aria-hidden="true" />
-          Weights path required
-        </p>
-      ) : null}
-      <div class="cli-body">
-        <code aria-describedby={props.cliPlaceholder ? 'cli-note' : undefined}>
-          <Index each={props.cliParts}>
-            {(p, i) => (
-              <span class="ln" class:cont={i > 0}>
-                {props.cliPlaceholder && p() === `--weights <path to ${props.cliPlaceholder}>` ? (
-                  <>
-                    {'--weights '}
-                    <span class="ph">
-                      {'<path to '}
-                      <span class="ph-file">{props.cliPlaceholder}</span>
-                      {'>'}
-                    </span>
-                  </>
-                ) : (
-                  p()
-                )}
-                {i < props.cliParts.length - 1 ? ' `' : ''}
-              </span>
-            )}
-          </Index>
-        </code>
-        <span class="cli-copy">
+      {props.seedMissing ? (
+        <p class="cli-note">Enter a seed first: the command needs one.</p>
+      ) : (
+        <>
+          <p class="cli-shell">In {SHELL}:</p>
           {props.cliPlaceholder ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={Copy}
-              aria-label="Copy template"
-              title="Copy template"
-              onclick={() => copy(props.cli, 'Template copied: replace the weights path')}
-            />
-          ) : (
-            <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(props.cli, 'Command copied')} />
-          )}
-        </span>
-      </div>
-      {props.cliPlaceholder ? (
-        <p class="cli-note" id="cli-note">
-          Put the path of {props.cliPlaceholder} on the server in its place: this server does not report it.
-        </p>
-      ) : null}
+            <p class="cli-req">
+              <TriangleAlert size={14} aria-hidden="true" />
+              Weights path required
+            </p>
+          ) : null}
+          <div class="cli-body">
+            <code aria-describedby={props.cliPlaceholder ? 'cli-note' : undefined}>
+              <Index each={props.cliParts}>
+                {(p, i) => (
+                  <span class="ln" class:cont={i > 0}>
+                    {props.cliPlaceholder && p() === `--weights <path to ${props.cliPlaceholder}>` ? (
+                      <>
+                        {'--weights '}
+                        <span class="ph">
+                          {'<path to '}
+                          <span class="ph-file">{props.cliPlaceholder}</span>
+                          {'>'}
+                        </span>
+                      </>
+                    ) : (
+                      p()
+                    )}
+                    {i < props.cliParts.length - 1 ? ' `' : ''}
+                  </span>
+                )}
+              </Index>
+            </code>
+            <span class="cli-copy">
+              {props.cliPlaceholder ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={Copy}
+                  aria-label="Copy template"
+                  title="Copy template"
+                  onclick={() => copy(props.cli, 'Template copied: replace the weights path')}
+                />
+              ) : (
+                <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(props.cli, 'Command copied')} />
+              )}
+            </span>
+          </div>
+          {props.cliPlaceholder ? (
+            <p class="cli-note" id="cli-note">
+              Put the path of {props.cliPlaceholder} on the server in its place: this server does not report it.
+            </p>
+          ) : null}
+        </>
+      )}
     </details>
   );
 }

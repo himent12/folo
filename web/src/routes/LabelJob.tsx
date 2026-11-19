@@ -33,6 +33,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { toast } from '$lib/ui/toast';
 import Logs from './run/Logs';
+import { datasetPresence, datasetsFor, type DatasetPresence } from './overview/newDatasets';
 import AddImagesDialog from './label/AddImagesDialog';
 import AgentPanel from './label/AgentPanel';
 import { AgentChoice } from './label/agentChoice';
@@ -59,7 +60,6 @@ export default function LabelJob() {
 
   const system = new Resource((s) => hub.api.system(s));
   const agents = new Resource((s) => hub.api.labelAgents(s));
-  const datasets = new Resource((s) => hub.api.datasets(s));
   const live = new LiveLabelJob(() => id.get() || null);
   const choice = new AgentChoice(() => agents.data);
   const uploads = new Uploads(() => id.get(), live);
@@ -189,10 +189,24 @@ export default function LabelJob() {
       run: () => router.go(`/datasets/${ds.id}`),
     });
   }
-  const made = computed(() => {
-    const dsId = job.get()?.dataset_id;
+  // The dataset made from the job, by the id the job keeps (also once it was removed from FOLO): linked only while it is
+  // registered, "since removed" once it is known removed, and neither while that is not known (./overview/newDatasets).
+  // The list is read (every 5 s: one removed while the page is open stops linking) while the job loads and once it made a
+  // dataset, never for a job that made none nor while the page shows an error (a job not found names none).
+  const madeId = computed(() => job.get()?.dataset_id ?? null);
+  const datasets = datasetsFor(() => (live.error ? [] : job.get() ? [madeId.get()] : undefined));
+  const presence = datasetPresence(datasets, () => [madeId.get()]);
+  const madeDataset = computed(() => {
+    const dsId = madeId.get();
     return dsId ? datasets.data?.find((d) => d.id === dsId) : undefined;
   });
+  const made = computed<'none' | DatasetPresence>(() => (madeId.get() ? presence(madeId.get()) : 'none'));
+  /** Where a removed dataset's files are, unless they were deleted with it (the server writes them under its data dir). */
+  const removedWhere = computed(() =>
+    system.data?.data_dir
+      ? `Its files stay in ${system.data.data_dir}/datasets unless they were deleted with it.`
+      : 'Its files stay on disk unless they were deleted with it.',
+  );
 
   // ---------- adding images ----------
   let fileInput: HTMLInputElement | undefined;
@@ -310,12 +324,18 @@ export default function LabelJob() {
                 <span class="num">
                   {j().classes.length} {j().classes.length === 1 ? 'class' : 'classes'}
                 </span>
-                {j().dataset_id ? (
-                  <span>
+                {made.get() !== 'none' ? (
+                  <span data-made>
                     made{' '}
-                    <a class="link" href={href(`/datasets/${j().dataset_id}`)}>
-                      {made.get()?.name ?? 'a dataset'}
-                    </a>
+                    {made.get() === 'registered' ? (
+                      <a class="link" href={href(`/datasets/${madeId.get()}`)}>
+                        {madeDataset.get()?.name ?? 'a dataset'}
+                      </a>
+                    ) : made.get() === 'removed' ? (
+                      <span title={`The dataset made from this job is no longer registered in FOLO. ${removedWhere.get()}`}>a dataset, since removed from FOLO</span>
+                    ) : (
+                      'a dataset'
+                    )}
                   </span>
                 ) : null}
                 <span class="faint">created {ago(j().created)}</span>

@@ -116,8 +116,9 @@ impl State {
         let mut counts = LabelCounts { images: self.file.images.len() as u64, ..Default::default() };
         for r in &self.file.images {
             match r.status {
-                // Only a labeled image's boxes count: one whose relabeling failed keeps its old boxes, but they
-                // are not labels (and go into no dataset) until it is labeled again.
+                // Only a labeled image's boxes count (one whose relabeling failed stays labeled, with an `error`).
+                // A failed image with boxes is one an older server left that way (#317): they go into no dataset
+                // until it is labeled or saved again.
                 LabelImageStatus::Labeled => {
                     counts.labeled += 1;
                     counts.boxes += r.boxes.len() as u64;

@@ -146,7 +146,8 @@ export default function RunChart(props: RunChartProps) {
               : undefined
       }
     >
-      {props.loading ? (
+      {/* A per-epoch chart of a run that ended holds its place while its validated epochs are on their way. */}
+      {props.loading || (unit && m.pending.get()) ? (
         <ChartSkeleton height={height()} />
       ) : (
         <>

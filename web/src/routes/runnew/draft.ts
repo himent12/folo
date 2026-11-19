@@ -39,7 +39,10 @@ export interface Draft {
   amp: boolean;
   e2e: boolean;
   lr0: number | null;
-  seed: number | null;
+  /** As typed (lib/seed): checked as text, never rounded by a number field. */
+  seed: string;
+  /** The seed was left empty because the copied run's is over what Studio holds exactly (runnew/jump `copiedSeed`). */
+  seedOver: boolean;
   weights: string;
   name: string;
   nameEdited: boolean;
@@ -77,11 +80,11 @@ function isCloud(c: unknown): c is CloudDraft {
 export function isDraft(d: unknown): d is Draft {
   return (
     isObject(d) &&
-    strings(d, ['server', 'query', 'datasetId', 'batch', 'imgsz', 'device', 'weights', 'name']) &&
-    flags(d, ['imgszChosen', 'amp', 'e2e', 'nameEdited', 'closeEdited', 'advancedOpen', 'augOpen']) &&
+    strings(d, ['server', 'query', 'datasetId', 'seed', 'batch', 'imgsz', 'device', 'weights', 'name']) &&
+    flags(d, ['imgszChosen', 'seedOver', 'amp', 'e2e', 'nameEdited', 'closeEdited', 'advancedOpen', 'augOpen']) &&
     ARCHS.includes(d.arch as string) &&
     OPTIMIZERS.includes(d.optimizer as string) &&
-    [d.epochs, d.lr0, d.seed].every(typed) &&
+    [d.epochs, d.lr0].every(typed) &&
     isAugment(d.augment) &&
     isCloud(d.cloud)
   );

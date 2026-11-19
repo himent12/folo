@@ -336,9 +336,12 @@ impl Run<'_> {
                 }
                 Outcome::Failed(why) => {
                     failed += 1;
-                    record.status = LabelImageStatus::Failed;
+                    // An image labeled before keeps its labels as they were (boxes, source, review, its place in a
+                    // dataset): no answer replaced them. `error` says why the call failed.
+                    if record.status != LabelImageStatus::Labeled {
+                        record.status = LabelImageStatus::Failed;
+                    }
                     record.error = Some(why.clone());
-                    record.reviewed = false;
                     if !failures.contains(&why) {
                         failures.push(why);
                     }
