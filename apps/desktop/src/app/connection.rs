@@ -239,6 +239,7 @@ impl FoloApp {
             let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
             let found = cx.background_executor().spawn(async move { (connector.probe)(&probe) }).await;
+            folo_ui::trace_point(if found { "probe-found" } else { "probe-none" });
             if found {
                 this.update(cx, |this, cx| {
                     if !current(this) {
@@ -278,6 +279,12 @@ impl FoloApp {
                     .background_executor()
                     .spawn(async move { (connector.start)(std::time::Duration::from_secs(15)) })
                     .await;
+                // `server-started` only for a new server that said it is listening.
+                folo_ui::trace_point(match &started {
+                    Ok(Spawned::Started(_)) => "server-started",
+                    Ok(Spawned::Running(_)) => "server-in-use",
+                    Err(_) => "server-failed",
+                });
                 match started {
                     Ok(spawned) => {
                         this.update(cx, |this, cx| {

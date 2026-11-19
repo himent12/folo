@@ -17,7 +17,7 @@ mod inference;
 mod label;
 mod models;
 mod runs;
-mod system;
+pub(crate) mod system;
 mod uploads;
 
 use std::time::Duration;

@@ -49,6 +49,7 @@ impl FoloApp {
                 let late =
                     this.reconnects != reconnects && matches!(&r, Err(e) if e.code == "server_unreachable");
                 apply(this, r, cx);
+                this.trace_first_data();
                 if late && !this.store.unreachable() {
                     this.forget_unreachable_loads();
                 }
@@ -57,6 +58,28 @@ impl FoloApp {
             .ok();
         })
         .detach();
+    }
+
+    /// `FOLO_UI_TRACE`: says once when the lists every page starts from (runs, datasets and models) have
+    /// all arrived (`first-lists`) and when the frame showing them is presented (`first-lists-frame`), and
+    /// the same for `/system` (`system`, `system-frame`: Overview's hardware card). The image queue says when it
+    /// first runs dry (`images-drained`, `images-drained-frame`: every image asked for so far was answered, which
+    /// on a server that serves them all is the open grid's thumbnails on screen; a failed one asked again later
+    /// is not waited for, so its placeholder may still show).
+    fn trace_first_data(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LISTS: AtomicBool = AtomicBool::new(false);
+        static SYSTEM: AtomicBool = AtomicBool::new(false);
+        let s = &self.store;
+        let lists = s.runs.ready().is_some() && s.datasets.ready().is_some() && s.models.ready().is_some();
+        if lists && !LISTS.swap(true, Ordering::Relaxed) {
+            folo_ui::trace_point("first-lists");
+            folo_ui::trace_at_next_frame("first-lists-frame");
+        }
+        if s.system.ready().is_some() && !SYSTEM.swap(true, Ordering::Relaxed) {
+            folo_ui::trace_point("system");
+            folo_ui::trace_at_next_frame("system-frame");
+        }
     }
 
     /// Fetch the model list again after it failed (nothing else retries a failed load).
@@ -550,6 +573,16 @@ impl FoloApp {
                         cx.drop_image(img, None);
                     }
                     this.start_queued_images(cx);
+                    if this.store.image_queue.in_flight() == 0 {
+                        // `FOLO_UI_TRACE`: the first time the queue ran dry, every image asked for answered (an
+                        // error included: see `trace_first_data`).
+                        static DONE: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            folo_ui::trace_point("images-drained");
+                            folo_ui::trace_at_next_frame("images-drained-frame");
+                        }
+                    }
                     cx.notify();
                 })
                 .ok();

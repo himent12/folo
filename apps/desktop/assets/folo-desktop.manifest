@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!-- FOLO Desktop's application manifest (RT_MANIFEST 1, embedded by build.rs): what GPUI 0.2.2's build
      script embedded. Per-monitor-v2 DPI awareness from the first instruction (the platform also sets it
-     in code), and Common Controls 6 for the system dialogs (file pickers, message boxes). -->
+     in code), and Common Controls 6 for the system dialogs (file pickers, message boxes). The segment
+     heap (Windows 10 2004 and later; older versions ignore it): a frame makes thousands of small
+     allocations, and the default heap spent about a quarter of a frame in them; the segment heap made
+     full frames 4 to 18% shorter (ui/PERF.md) with the same memory. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
     <asmv3:application>
         <asmv3:windowsSettings>
             <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
             <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+            <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
         </asmv3:windowsSettings>
     </asmv3:application>
     <dependency>

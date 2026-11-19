@@ -31,6 +31,7 @@ mod easing;
 mod image;
 mod layout;
 mod path_builder;
+mod path_cache;
 mod style;
 mod styled;
 mod svg;

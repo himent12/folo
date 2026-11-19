@@ -290,8 +290,98 @@ impl PathBuilder {
         self.then_transform(Affine([cos, sin, -sin, cos, 0., 0.]));
     }
 
-    /// Builds the path as GPUI does: the lyon path (transformed), dashed, then tessellated.
+    /// Builds the path as GPUI does: the lyon path (transformed), dashed, then tessellated. A builder
+    /// equal to one built recently on this thread gets a copy of that result (`path_cache`), which is the
+    /// same path.
     pub fn build(self) -> anyhow::Result<BuiltPath<Pixels>> {
+        crate::path_cache::cached(self.key(), || self.build_uncached())
+    }
+
+    /// Every input of [`PathBuilder::build`] as words, each float by its bits: builders with equal keys
+    /// build equal paths. Each part says its kind and length, so no two inputs give the same words.
+    fn key(&self) -> Vec<u32> {
+        // Exactly the words pushed below, so the key the cache keeps needs no shrinking.
+        let style = match self.style {
+            PathStyle::Stroke(_) => 6,
+            PathStyle::Fill(_) => 3,
+        };
+        let transform = if self.transform.is_some() { 7 } else { 1 };
+        let dashes = self.dash_array.as_ref().map_or(1, |d| 2 + d.len());
+        let subpaths: usize = self
+            .subpaths
+            .iter()
+            .map(|s| {
+                let segments: usize = s
+                    .segments
+                    .iter()
+                    .map(|seg| match seg {
+                        Segment::Line(_) => 3,
+                        Segment::Quadratic { .. } => 5,
+                        Segment::Cubic { .. } => 7,
+                    })
+                    .sum();
+                5 + segments
+            })
+            .sum();
+        let len = style + transform + dashes + subpaths;
+        let mut k = Vec::with_capacity(len);
+        match self.style {
+            PathStyle::Stroke(o) => k.extend([
+                0,
+                o.line_width.to_bits(),
+                o.line_cap as u32,
+                o.line_join as u32,
+                o.miter_limit.to_bits(),
+                o.tolerance.to_bits(),
+            ]),
+            PathStyle::Fill(o) => k.extend([1, o.fill_rule as u32, o.tolerance.to_bits()]),
+        }
+        match self.transform {
+            Some(Affine(t)) => {
+                k.push(1);
+                k.extend(t.map(f32::to_bits));
+            }
+            None => k.push(0),
+        }
+        match &self.dash_array {
+            Some(d) => {
+                k.extend([1, d.len() as u32]);
+                k.extend(d.iter().map(|v| f32::from(*v).to_bits()));
+            }
+            None => k.push(0),
+        }
+        let point = |k: &mut Vec<u32>, p: Point<Pixels>| {
+            k.extend([f32::from(p.x).to_bits(), f32::from(p.y).to_bits()])
+        };
+        for subpath in &self.subpaths {
+            k.extend([2, u32::from(subpath.closed), subpath.segments.len() as u32]);
+            point(&mut k, subpath.start);
+            for segment in &subpath.segments {
+                match *segment {
+                    Segment::Line(to) => {
+                        k.push(0);
+                        point(&mut k, to);
+                    }
+                    Segment::Quadratic { ctrl, to } => {
+                        k.push(1);
+                        point(&mut k, ctrl);
+                        point(&mut k, to);
+                    }
+                    Segment::Cubic { ctrl1, ctrl2, to } => {
+                        k.push(2);
+                        point(&mut k, ctrl1);
+                        point(&mut k, ctrl2);
+                        point(&mut k, to);
+                    }
+                }
+            }
+        }
+        debug_assert_eq!((k.len(), k.capacity()), (len, len));
+        k
+    }
+
+    /// [`PathBuilder::build`] without the cache: always tessellates.
+    pub(crate) fn build_uncached(&self) -> anyhow::Result<BuiltPath<Pixels>> {
         let mut b = lyon::path::Path::svg_builder();
         let lp = |p: Point<Pixels>| lyon::math::point(p.x.into(), p.y.into());
         for subpath in &self.subpaths {
@@ -320,7 +410,7 @@ impl PathBuilder {
             None => b.build(),
         };
         match self.style {
-            PathStyle::Stroke(options) => tessellate_stroke(self.dash_array, &path, &options),
+            PathStyle::Stroke(options) => tessellate_stroke(self.dash_array.as_deref(), &path, &options),
             PathStyle::Fill(options) => tessellate_fill(&path, &options),
         }
     }
@@ -348,7 +438,7 @@ fn tessellate_fill(path: &lyon::path::Path, options: &FillOptions) -> anyhow::Re
 /// `f32` at that length); here the cutting stops there, so an all-zero pattern draws nothing, which is
 /// what GPUI's endless zero-length dashes would draw.
 fn tessellate_stroke(
-    dash_array: Option<Vec<Pixels>>,
+    dash_array: Option<&[Pixels]>,
     path: &lyon::path::Path,
     options: &StrokeOptions,
 ) -> anyhow::Result<BuiltPath<Pixels>> {

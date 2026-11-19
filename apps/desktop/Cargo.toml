@@ -56,9 +56,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Tie a spawned `folo serve` to the app's lifetime (Job Object, kill on close). `Win32_Security` gates
-# `CreateJobObjectW`.
+# `CreateJobObjectW`. `Win32_Networking_WinSock` and `Win32_System_IO` (which gates `WSAIoctl`): the probe's
+# refused-at-once check (src/api/http/refused.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # Test temp dirs under FOLO_TEST_TMP, removed on drop (docs/CI.md, Test temp dirs).

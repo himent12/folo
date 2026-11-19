@@ -3,6 +3,7 @@
 
 mod images;
 mod inference;
+mod refused;
 mod server;
 mod streams;
 mod transport;
@@ -362,12 +363,24 @@ mod tests {
 
     /// A server answering each connection with the next canned response (and recording requests).
     fn canned_server(responses: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
-        use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        canned_server_on(listener, std::time::Duration::ZERO, responses)
+    }
+
+    /// [`canned_server`] on `listener`, taking its first connection only `after` that long.
+    fn canned_server_on(
+        listener: std::net::TcpListener,
+        after: std::time::Duration,
+        responses: Vec<Vec<u8>>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for resp in responses {
+            std::thread::sleep(after);
+            let mut responses = responses.into_iter();
+            let mut resp = responses.next();
+            while let Some(answer) = &resp {
                 let Ok((mut sock, _)) = listener.accept() else { return };
                 // The whole request, body included (answering before a POST's body is read would
                 // reset the connection under the client).
@@ -389,10 +402,16 @@ mod tests {
                         break;
                     }
                 }
+                // A connection closed before sending anything is no request (the probe's check that a
+                // port on this machine is not refused, `refused.rs`): it gets no answer of the list.
+                if req.is_empty() {
+                    continue;
+                }
                 let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
-                let _ = sock.write_all(&resp);
+                let _ = sock.write_all(answer);
                 let _ = sock.flush();
                 // Dropping the socket closes the connection (cutting a short body).
+                resp = responses.next();
             }
         });
         (format!("http://{addr}"), rx)
@@ -630,6 +649,73 @@ connection: close
             let hint = e.hint.unwrap();
             assert!(hint.contains("--token") && !hint.contains("Authorization"), "{hint}");
         }
+    }
+
+    /// `FOLO_SERVER` on this machine reached through a proxy (`ALL_PROXY` without a matching `NO_PROXY`):
+    /// nothing listens on that port here, but the proxy answers for it, so the probe finds the server
+    /// (the refused-at-once check would say nobody is there, and the app would start a second server).
+    #[test]
+    fn a_server_behind_a_proxy_is_found_although_its_port_is_closed_here() {
+        use std::io::{BufRead, BufReader, Write};
+        // A closed loopback port, held through both checks: on Windows a socket bound there that never
+        // listens, so no other process can take the port meanwhile. Elsewhere (no refused-at-once check,
+        // and std can't bind without listening) a port bound for a moment and let go: another process may
+        // take it, so the direct probe below is asked only on Windows.
+        #[cfg(windows)]
+        let (_held, closed) = {
+            let held = super::refused::ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+            let port = held.port;
+            (held, std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+        };
+        #[cfg(not(windows))]
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        // The proxy: takes the CONNECT to that port and answers the health check through the tunnel.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let (tx, connects) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = proxy.accept() else { return };
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            // A request's head: its first line, then the headers up to the blank line.
+            let mut head = || {
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                loop {
+                    let mut l = String::new();
+                    if reader.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                        break first;
+                    }
+                }
+            };
+            let _ = tx.send(head());
+            let _ = sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+            let _get = head();
+            let _ =
+                sock.write_all(&json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#));
+        });
+        let url = format!("http://{closed}");
+        let probe_through = super::server::probe_through;
+        assert!(probe_through(&url, Some(ureq::Proxy::new(&proxy_url).unwrap())));
+        let connect = connects.recv().unwrap();
+        assert!(connect.starts_with(&format!("CONNECT {closed} ")), "{connect}");
+        // Without the proxy the same address is closed (where it is still held: Windows).
+        #[cfg(windows)]
+        assert!(!probe_through(&url, None));
+    }
+
+    /// A server whose accept queue has one free slot: the refused-at-once check's connection, closed
+    /// without a request, takes it until the server accepts it, and the probe's own connection then finds
+    /// the queue full (Windows turns it away; it times out). The check saw a listener, so the probe tries
+    /// once more and finds the server, which took its queue meanwhile (here 200 ms in, inside the first
+    /// attempt's half second). With one attempt the app said nobody was there and started its own server.
+    #[cfg(windows)]
+    #[test]
+    fn a_server_whose_queue_the_check_filled_is_still_found() {
+        let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
+        let listener = super::refused::ports::listener(1);
+        let (url, requests) = canned_server_on(listener, std::time::Duration::from_millis(200), vec![health]);
+        assert!(super::server::probe_through(&url, None));
+        assert!(requests.recv().unwrap().starts_with("GET /api/health "));
     }
 
     #[test]

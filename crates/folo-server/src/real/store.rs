@@ -44,6 +44,10 @@ impl Store for RealStore {
         engine::gpus()
     }
 
+    fn prepare_gpus(&self) {
+        engine::adapters();
+    }
+
     fn capabilities(&self) -> Option<Capabilities> {
         Some(engine::capabilities())
     }
