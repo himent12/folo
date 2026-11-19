@@ -7,7 +7,7 @@ import PlugZap from '$icons/plug-zap';
 import WifiOff from '$icons/wifi-off';
 import { computed, css, effect, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
-import { isHealth, NOT_FOLO, refusal } from '$lib/api/handshake';
+import { isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -71,9 +71,15 @@ export default function ConnectionPanel() {
     const mine = tested;
     const t0 = performance.now();
     try {
-      const h: unknown = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
+      // As a connect checks it: FOLO's health, then whether it lets Studio in without a token (`tokenWall`).
+      const base = normalized.peek();
+      const within = AbortSignal.timeout(3000);
+      const h: unknown = await new HttpApi(base).health(within);
       if (mine !== tested) return;
-      test.set(isHealth(h) ? { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 } : { ok: false, message: NOT_FOLO });
+      if (!isHealth(h)) return test.set({ ok: false, message: NOT_FOLO });
+      const walled = await tokenWall(base, within);
+      if (mine !== tested) return;
+      test.set(walled ? { ok: false, message: TOKEN_WALL } : { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
     } catch (e) {
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
       const message = timeout ? 'No answer within 3 s.' : (refusal(e) ?? (e instanceof Error ? e.message : String(e)));

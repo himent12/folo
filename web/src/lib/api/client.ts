@@ -357,6 +357,7 @@ export class HttpApi implements Api {
     }
     const request = `${method} /api${path.split('?')[0]}`;
     let res: Response;
+    const sent = performance.now();
     try {
       res = await fetch(`${this.base}/api${path}`, init);
     } catch (e) {
@@ -364,7 +365,10 @@ export class HttpApi implements Api {
       this.reach?.failed();
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.', request);
     }
-    this.reach?.ok();
+    // A 401 or 403 may be the server refusing Studio from now on (a proxy that stopped sending the token): a suspicion
+    // `reach` checks, as it checks one that reached nothing.
+    if (res.status === 401 || res.status === 403) this.reach?.failed();
+    else this.reach?.ok(sent);
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     let json: unknown;
