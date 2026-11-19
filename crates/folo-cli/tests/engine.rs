@@ -591,21 +591,10 @@ fn stop_resume_and_epoch_only_records() {
     let project = root.join("runs");
     let run = project.join("long");
     let records = train_until_stopped(
-        &[
-            "--device",
-            "cpu",
-            "--data",
-            s(&data),
-            "--imgsz",
-            "64",
-            "--batch",
-            "4",
-            "--epochs",
-            UNSTOPPED_EPOCHS,
-        ]
-        .into_iter()
-        .chain(["--workers", "1", "--project", s(&project), "--name", "long"])
-        .collect::<Vec<_>>(),
+        &["--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4", "--epochs"]
+            .into_iter()
+            .chain([UNSTOPPED_EPOCHS, "--workers", "1", "--project", s(&project), "--name", "long"])
+            .collect::<Vec<_>>(),
         &run,
     );
     let done = records.last().unwrap();
