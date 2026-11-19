@@ -444,7 +444,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   none before the first epoch ends). `409 run_not_active` when the run already finished. A queued run stops at once
   (one that never started is better deleted: `DELETE /api/runs/{id}` below); a running one after its current batch (the epoch in
   progress is discarded; `weights/last.folo` is the last finished epoch's). `model_id` is set when at least one epoch
-  was validated. The final `status` event is sent once the run can be resumed or deleted.
+  was validated. The final `status` event is sent once the run can be resumed or deleted. A stop that comes after the
+  last batch (while the last epoch validates) is answered the same way but changes nothing: the run ends `completed`
+  with all its results, and the stop's log line says that this can happen.
 - `POST /api/runs/{id}/queue` body `{ "action": "top|up|down|bottom|start" }` or `{ "position": 1 }` → `Run` (with
   its new `queue_position`). Moves a run that waits in the training queue. The queue holds the runs that are
   `queued` and not yet taken by the worker, front first; `Run.queue_position` is a run's 1-based place in it (`1`

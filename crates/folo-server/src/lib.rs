@@ -71,6 +71,7 @@ use tracing::Level;
 pub use folo_api as api;
 pub use mock::MockStore;
 pub use real::RealStore;
+pub use runs::STOP_REQUESTED;
 pub use store::Store;
 
 /// Which browser origins may call the API.

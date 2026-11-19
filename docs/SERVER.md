@@ -86,6 +86,9 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
 - The trainer's event sink is `RunEntry::on_event` (`runs/entry.rs`): it updates the run, persists what matters and
   forwards each event to SSE subscribers through a per-run broadcast channel (`Runs::subscribe`, `runs/history.rs`).
 - `RunEntry::execute` is the one claim-execute-publish path, shared by local and cloud runs.
+- A stop (`Runs::stop`) sets the run's flag, which the trainer checks after each batch and before each epoch, and logs
+  `runs::STOP_REQUESTED`. One that comes after the last batch changes nothing (the run ends `completed` with all its
+  results), so that line names both outcomes.
 - On open, **local** runs a previous process left `queued`, `running` or `stopping` become `stopped`;
   `Runs::resume` continues one from `weights/last.folo`. An active cloud run is left for `crate::cloud` to follow
   again or end (`runs/registry.rs`, `Runs::open`).

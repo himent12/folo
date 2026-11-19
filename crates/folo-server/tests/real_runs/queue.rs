@@ -1,6 +1,6 @@
 //! The queue: stop, resume and restart, moves, the resolved config, and shutdown.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_server::Store;
@@ -303,4 +303,38 @@ async fn no_runs_start_after_shutdown() {
     let resume = json!({ "resume_run_id": stopped.id });
     err(&app, post_json("/api/runs", resume), StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
     assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
+}
+
+/// A stop after the last batch (the run held after its only epoch: validated, nothing left to train) is accepted as
+/// `stopping`, but the run completes with its model, and the log's acknowledgment says that this can happen; no
+/// line says it stopped (#333). The run is read by polling it, so no event can be missed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_after_the_last_batch_completes_the_run() {
+    let t = TestDir::new("runs-stop-last");
+    let s = store(&t.join("home"));
+    let app = app(&s);
+    let ds = dataset(&app, "last", 4).await;
+    s.hold_runs_after_epochs(true);
+    let run: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let until = async |done: fn(&Run) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            let now: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+            if done(&now) {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "{:?} at epoch {}", now.status, now.epoch);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    until(|r| r.epoch == 1).await;
+    let stopping: Run = ok(&app, post(&format!("/api/runs/{}/stop", run.id))).await;
+    assert_eq!(stopping.status, RunStatus::Stopping);
+    let done = until(|r| !r.status.is_active()).await;
+    assert_eq!((done.status, done.epoch, done.model_id.is_some()), (RunStatus::Completed, 1, true));
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
+    let messages: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(messages.iter().filter(|m| **m == folo_server::STOP_REQUESTED).count(), 1, "{messages:?}");
+    assert!(!messages.iter().any(|m| m.starts_with("stopped")), "{messages:?}");
+    s.hold_runs_after_epochs(false);
 }
