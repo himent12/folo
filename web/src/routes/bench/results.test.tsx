@@ -218,7 +218,7 @@ describe('the compare page', () => {
     await page(BenchCompare, '/benchmarks/bn_7a41/compare?entries=be_p201,be_p205');
     await settle(40);
     const note = [...document.querySelectorAll('.pair p.note')].map((p) => p.textContent ?? '').find((t) => /yolo26n-pond-raw/.test(t)) ?? '';
-    expect(note).toMatch(/yolo26n-pond-raw: no detection reached confidence 0\.1/);
+    expect(note).toMatch(/yolo26n-pond-raw: no detection on the unchanged images reached confidence 0\.1/);
     expect(note).not.toMatch(/no confidences/);
   });
 

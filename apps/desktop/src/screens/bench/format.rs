@@ -6,6 +6,7 @@ use crate::api::{
 };
 use crate::app::FoloApp;
 use crate::ui::*;
+use folo_bench::score::CALIBRATION_FLOOR;
 
 /// An axis's short name, as the leaderboard heads its column.
 pub fn axis_short(a: BenchAxis) -> &'static str {
@@ -194,6 +195,26 @@ pub fn prf_label(a: &BenchAccuracy) -> String {
     }
 }
 
+/// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it gave no confidences,
+/// or none of its detections reached the calibration floor, 0.1 (docs/BENCH.md, Calibration). Short enough for the
+/// tile at 1280 px; [`calibration_why_not`] says it in full.
+pub fn calibration_none(e: &BenchEntry) -> String {
+    if e.scored { format!("none reached {CALIBRATION_FLOOR}") } else { "no confidences".into() }
+}
+
+/// The same in a sentence, in Studio's words (`axisWhyNot`).
+/// Calibration is measured on the unchanged images only, so a confident detection on a condition does not count.
+pub fn calibration_why_not(e: &BenchEntry) -> String {
+    match (&e.contestant, e.scored) {
+        (_, true) => format!("No detection on the unchanged images reached confidence {CALIBRATION_FLOOR}."),
+        (BenchContestant::Agent { .. }, false) => {
+            "Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate."
+                .into()
+        }
+        (_, false) => "Its predictions came without confidences.".into(),
+    }
+}
+
 /// What the images panel shows of a scored entry's detections, from the confidence its images were taken at (the
 /// page's `conf`, `best_conf` from a server before it): its best-F1 confidence as before; 0, its detections at every
 /// confidence, said as the cutoff and not a total so it is true on a partial page (or that it made none, once every
@@ -294,6 +315,24 @@ mod tests {
         assert_eq!(prf_label(&some), "P · R · F1 at 0.31");
         assert_eq!(images_shown(&page(Some(0.31), 1, 1, 2), &some), " at confidence 0.31 and up");
         assert_eq!(images_shown(&page(None, 1, 1, 2), &some), " at confidence 0.31 and up");
+    }
+
+    #[test]
+    fn calibration_says_why_it_was_not_measured() {
+        let (_, entries) = demo_board();
+        let mut e = entries[0].clone();
+        // A model whose scores all stay under the floor gave confidences: it is told none reached 0.1.
+        e.scored = true;
+        assert_eq!(calibration_none(&e), "none reached 0.1");
+        assert_eq!(calibration_why_not(&e), "No detection on the unchanged images reached confidence 0.1.");
+        // A contestant that gives none keeps the explanation about missing confidences.
+        e.scored = false;
+        e.contestant = BenchContestant::External;
+        assert_eq!(calibration_none(&e), "no confidences");
+        assert_eq!(calibration_why_not(&e), "Its predictions came without confidences.");
+        let effort = crate::api::LabelEffort::Medium;
+        e.contestant = BenchContestant::Agent { agent: LabelAgentId::Claude, model: None, effort };
+        assert!(calibration_why_not(&e).starts_with("Agents give no confidences"));
     }
 
     #[test]
