@@ -463,6 +463,24 @@ describe('the calibration panel', () => {
   });
 });
 
+describe('an entry none of whose detections is right', () => {
+  it('says it has no best F1, in its accuracy and its images, instead of calling 1.00 its best', async () => {
+    // F1 0 at every confidence: the server reports `best_conf` 1 (the grid's top) and grades the images at every detection.
+    const real = hub.api.benchResult.bind(hub.api);
+    vi.spyOn(hub.api, 'benchResult').mockImplementation(async (id, entryId) => {
+      const r = await real(id, entryId);
+      return { ...r, accuracy: { ...r.accuracy, precision: 0, recall: 0, f1: 0, best_conf: 1 } };
+    });
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
+    await settle(40);
+    const accuracy = document.querySelector('#accuracy')!.textContent ?? '';
+    const images = document.querySelector('#images .what')!.textContent ?? '';
+    expect(accuracy).toMatch(/No confidence gives a right detection/);
+    expect(images).toMatch(/^Every detection it made \(none is right at any confidence, so there is no best F1\)/);
+    expect(accuracy + images).not.toMatch(/1\.00|\(best F1\)|its best F1/);
+  });
+});
+
 describe('the accuracy panel', () => {
   it('says a size is missing from the images an entry ran, not from a benchmark it ran a part of', async () => {
     // An agent's 48 of 360 images hold no small object; the others may (the server measures the images it ran).

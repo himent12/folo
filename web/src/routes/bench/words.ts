@@ -4,6 +4,7 @@
 
 import type {
   Bench,
+  BenchAccuracy,
   BenchAxis,
   BenchAxisScore,
   BenchCalibration,
@@ -781,6 +782,19 @@ export function forecastText(f: LabelForecast, poolImages: number | null): { tit
     text: `${at}${cost} ${f.stops ? `A loop stops when fewer than ${MIN_LABELED_IMAGES} pool images get a box.` : 'A student learns little from so few.'}`,
     remedy: f.from === 'chosen' ? 'A still lower confidence keeps more of its detections, fewer of them right.' : 'A lower confidence keeps more of its detections, fewer of them right.',
   };
+}
+
+/**
+ * An entry's best-F1 confidence, or null when it has none: no confidence gives a right detection, so F1 is 0 at every
+ * one and `best_conf` is only the grid's top, 1 (docs/BENCH.md, Accuracy).
+ */
+export function bestF1Conf(a: Pick<BenchAccuracy, 'f1' | 'best_conf'>): number | null {
+  return a.f1 > 0 ? a.best_conf : null;
+}
+
+/** What the Images section shows of a scored entry's detections: those from its best-F1 confidence up, else all. */
+export function imagesShownText(bestConf: number | null): string {
+  return bestConf !== null ? `Its detections from confidence ${conf(bestConf)} up (its best F1)` : 'Every detection it made (none is right at any confidence, so there is no best F1)';
 }
 
 /**

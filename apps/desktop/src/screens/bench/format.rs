@@ -1,8 +1,8 @@
 //! Benchmarks as text: axis names and scores, contestants, sources, status tones, ranks and names.
 
 use crate::api::{
-    Bench, BenchAxis, BenchContestant, BenchEntry, BenchEntryStatus, BenchLoop, BenchPlan, BenchSource,
-    Label, LabelAgentId,
+    Bench, BenchAccuracy, BenchAxis, BenchContestant, BenchEntry, BenchEntryStatus, BenchLoop, BenchPlan,
+    BenchSource, Label, LabelAgentId,
 };
 use crate::app::FoloApp;
 use crate::ui::*;
@@ -180,9 +180,57 @@ pub fn plan_intro(designed_by: Option<&str>, plan: &BenchPlan, default_len: Opti
     }
 }
 
+/// An entry's best-F1 confidence, `None` when it has none: no confidence gives a right detection, so F1 is 0
+/// at every one and `best_conf` is only the grid's top, 1 (docs/BENCH.md, Accuracy).
+pub fn best_f1_conf(a: &BenchAccuracy) -> Option<f32> {
+    operating_conf(Some(a.best_conf), a.precision, a.recall)
+}
+
+/// The label of an entry's precision, recall and F1: where they were read.
+pub fn prf_label(a: &BenchAccuracy) -> String {
+    match best_f1_conf(a) {
+        Some(c) => format!("P · R · F1 at {}", fmt_conf(c)),
+        None => "P · R · F1 (none right at any confidence)".into(),
+    }
+}
+
+/// What the images panel shows of a scored entry's detections: from its best-F1 confidence up, else all.
+pub fn images_shown(best_conf: Option<f32>) -> String {
+    match best_conf {
+        Some(c) => format!(" at confidence {} and up", fmt_conf(c)),
+        None => ", every one (none is right at any confidence)".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_with_no_right_detection_has_no_best_f1_confidence() {
+        // F1 0 at every confidence: the server's `best_conf` is the grid's top, 1, which is no best F1.
+        let none = BenchAccuracy {
+            map50_95: 0.,
+            ci95: [0., 0.],
+            map50: 0.,
+            map75: 0.,
+            precision: 0.,
+            recall: 0.,
+            f1: 0.,
+            best_conf: 1.,
+            map_small: Some(0.),
+            map_medium: None,
+            map_large: None,
+            per_class: Vec::new(),
+        };
+        assert_eq!(best_f1_conf(&none), None);
+        assert_eq!(prf_label(&none), "P · R · F1 (none right at any confidence)");
+        assert_eq!(images_shown(best_f1_conf(&none)), ", every one (none is right at any confidence)");
+        let some = BenchAccuracy { precision: 0.8, recall: 0.5, f1: 0.62, best_conf: 0.31, ..none };
+        assert_eq!(best_f1_conf(&some), Some(0.31));
+        assert_eq!(prf_label(&some), "P · R · F1 at 0.31");
+        assert_eq!(images_shown(Some(0.31)), " at confidence 0.31 and up");
+    }
 
     #[test]
     fn only_the_default_plan_is_called_the_default_one() {

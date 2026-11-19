@@ -32,7 +32,7 @@ import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Switch from '$lib/ui/Switch';
-import { forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
+import { bestF1Conf, forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
 
 export interface NewLoopDialogProps {
   open?: boolean;
@@ -159,7 +159,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const teacherEntry = computed(() => props.entries.find((e) => ofTeacher(e) && !e.score?.partial));
   /** What the forecast reads: the complete entry, else a finished one on part of the benchmark (an estimate). */
   const readEntry = computed(() => teacherEntry.get() ?? props.entries.find(ofTeacher));
-  const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number } | null>(null);
+  const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number | null } | null>(null);
   // By id: the page hands down a new benchmark and new entries on every `bench` event and every load of the lists, and
   // a finished entry's result never changes.
   const benchId = computed(() => props.bench.id);
@@ -170,7 +170,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     if (!id) return;
     let gone = false;
     hub.api.benchResult(benchId.get(), id).then(
-      (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: r.accuracy.best_conf }),
+      (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: bestF1Conf(r.accuracy) }),
       () => {},
     );
     return () => (gone = true);
@@ -216,7 +216,8 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const f = found.peek();
     if (!f) return;
     const from = forecast.peek()?.threshold ?? null;
-    minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round(f.bestConf * 100) / 100)).toFixed(2));
+    // Without a threshold, from its best-F1 confidence; without that either (nothing it found is right), from the floor.
+    minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round((f.bestConf ?? 0) * 100) / 100)).toFixed(2));
     ownThreshold.set(false);
     await tick();
     document.getElementById(`${uid}-conf`)?.focus();

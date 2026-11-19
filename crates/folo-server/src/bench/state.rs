@@ -141,7 +141,7 @@ pub struct ResultParts {
 pub struct ImageOutcome {
     /// The image's id.
     pub image: String,
-    /// The detections at or above the entry's best-F1 confidence, highest first.
+    /// The detections at or above the entry's best-F1 confidence (every detection without one), highest first.
     pub detections: Vec<BenchDetection>,
     pub missed: u32,
     pub wrong: u32,

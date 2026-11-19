@@ -384,7 +384,7 @@ export interface BenchAccuracy {
   precision: number;
   recall: number;
   f1: number;
-  /** The confidence with the best class-mean F1. */
+  /** The confidence with the best class-mean F1; 1 when no confidence gives a right detection (`f1` 0: no best F1). */
   best_conf: number;
   /** mAP@0.5:0.95 of objects under 32² px, 32²–96² px, over 96² px; null when the benchmark has none. */
   map_small: number | null;
@@ -512,7 +512,7 @@ export interface BenchResult {
 export interface BenchEntryImage {
   /** The image with its true boxes. */
   image: BenchImage;
-  /** The detections at or above the entry's `best_conf`, highest confidence first. */
+  /** The detections at or above the entry's `best_conf` (every detection when its `f1` is 0), highest confidence first. */
   detections: BenchDetection[];
   /** True boxes none of them matches (IoU at least 0.5, same class). */
   missed: number;

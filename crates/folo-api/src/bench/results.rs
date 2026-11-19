@@ -41,7 +41,8 @@ pub struct BenchAccuracy {
     pub recall: f32,
     /// Class-mean F1 at `best_conf`.
     pub f1: f32,
-    /// The confidence with the best class-mean F1.
+    /// The confidence with the best class-mean F1; when no confidence gives a right detection (`f1` is 0 at every
+    /// confidence) there is no best F1, and this is the grid's top, 1.
     pub best_conf: f32,
     /// mAP@0.5:0.95 of objects under 32² px; `null` when the benchmark has none.
     pub map_small: Option<f32>,
@@ -208,7 +209,8 @@ pub struct BenchLabelPoint {
 pub struct BenchEntryImage {
     /// The image with its true boxes.
     pub image: BenchImage,
-    /// The detections at or above the entry's `best_conf`, highest confidence first.
+    /// The detections at or above the entry's `best_conf` (every detection when its `f1` is 0), highest
+    /// confidence first.
     pub detections: Vec<BenchDetection>,
     /// True boxes none of them matches (IoU at least 0.5, same class).
     pub missed: u32,

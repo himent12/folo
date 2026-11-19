@@ -102,7 +102,8 @@ the class mean, so resamples run a little higher than the measurement; the shift
 number it belongs to). Two entries whose intervals overlap are not clearly different on this benchmark; more
 images make the interval narrower.
 Also reported: mAP@0.5, mAP@0.75, mAP for small / medium / large objects (COCO's area ranges), per-class AP, and
-precision / recall / F1 at the confidence with the best F1.
+precision / recall / F1 at the confidence with the best F1. When no confidence gives a right detection, F1 is 0
+at every confidence and there is no best F1: the three are 0 and that confidence reads 1 (the grid's top).
 
 **Robustness.** For condition `c` at severity `s`, `kept(c, s) = min(1, mAP(c, s) / mAP(unchanged))` with
 mAP@0.5:0.95 on both sides. A condition's value is the mean of `kept` over its severities; the axis is the mean of

@@ -20,7 +20,7 @@ import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
 import MatchView, { type Outcome } from './MatchView';
-import { imagesText } from '../words';
+import { imagesShownText, imagesText } from '../words';
 
 /** Images per page of the gallery: a page more each time, so 5000 images never load at once. */
 export const GALLERY_PAGE = 24;
@@ -28,7 +28,8 @@ export const GALLERY_PAGE = 24;
 export interface ImagesSectionProps {
   bench: Bench;
   entry: BenchEntry;
-  bestConf: number;
+  /** The entry's best-F1 confidence; null when it has none (./words bestF1Conf): the images then hold every detection. */
+  bestConf: number | null;
 }
 
 /** What a tile says under its image: what it found right, missed and got wrong, in words. */
@@ -221,7 +222,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
       >
         <div class="head">
           <p class="what">
-            {props.entry.scored ? `Its detections from confidence ${conf(props.bestConf)} up (its best F1)` : 'Every box it gave'}, on the unchanged
+            {props.entry.scored ? imagesShownText(props.bestConf) : 'Every box it gave'}, on the unchanged
             images. {sort.get() === 'worst' ? 'The most missed and wrong first.' : 'In the benchmark’s order.'}
           </p>
           <p class="legend">{legend()}</p>
