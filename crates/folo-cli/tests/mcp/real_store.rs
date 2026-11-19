@@ -67,21 +67,14 @@ fn real_store_end_to_end() {
     );
     assert_eq!(c.ok("list_runs", json!({}))["total"], 0, "nothing was started");
 
-    // Train, following the run through its resource subscription (fed by the run's live events; the first notice
-    // comes within the watch interval, while it trains).
     let t = checked(&mut c, &schemas, "train", tiny(1, "tiny-n"));
     let run_id = t["run_id"].as_str().unwrap().to_string();
     let run_uri = format!("folo://runs/{run_id}");
-    c.result("resources/subscribe", json!({ "uri": run_uri }));
     let done =
         wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
     assert_eq!(done["status"], "completed", "{done}");
     assert_eq!(done["last_epoch"]["epoch"], 1);
     assert!(!done["log"].as_array().unwrap().is_empty());
-    let update =
-        c.notification(Duration::from_secs(30), |n| n["method"] == "notifications/resources/updated");
-    assert_eq!(update["params"]["uri"], run_uri);
-    c.result("resources/unsubscribe", json!({ "uri": run_uri }));
     let model_id = done["model_id"].as_str().unwrap().to_string();
 
     let models = checked(&mut c, &schemas, "list_models", json!({}));
@@ -175,6 +168,16 @@ fn real_store_end_to_end() {
     // trains: the shutdown stops it gracefully and the next session lists it as stopped.
     let long = checked(&mut c, &schemas, "train", tiny(200, "tiny-long"));
     let long_id = long["run_id"].as_str().unwrap().to_string();
+    // Followed through its resource subscription (fed by the run's live events; the first notice comes within the
+    // watch interval, while it trains). A subscription sees only later changes, so it is made on a run that keeps
+    // training: a one-epoch run can end before the subscription's first look on a busy machine, and then nothing
+    // changes again.
+    let long_uri = format!("folo://runs/{long_id}");
+    c.result("resources/subscribe", json!({ "uri": long_uri }));
+    let update =
+        c.notification(Duration::from_secs(30), |n| n["method"] == "notifications/resources/updated");
+    assert_eq!(update["params"]["uri"], long_uri);
+    c.result("resources/unsubscribe", json!({ "uri": long_uri }));
     let done_epochs = |s: &Value| s["last_epoch"]["epoch"].as_u64().unwrap_or(0);
     wait_run(&mut c, &long_id, 60, |s| done_epochs(s) >= 1);
     checked(&mut c, &schemas, "stop_run", json!({ "run_id": long_id }));

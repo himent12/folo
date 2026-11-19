@@ -154,11 +154,21 @@ fn image_probes_are_reused_only_while_the_stamp_and_class_count_match() {
 
 #[test]
 fn files_modified_in_the_last_seconds_are_not_cached() {
+    // The rule, on a clock the test sets: a stamp less than `SETTLE` old, or ahead of the clock, is not settled.
+    let now = SystemTime::now();
+    let stamp =
+        |t: SystemTime| Stamp { len: 1, mtime: t.duration_since(UNIX_EPOCH).unwrap().as_nanos() as i64 };
+    assert!(!stamp(now - Duration::from_millis(500)).settled(now));
+    assert!(!stamp(now + Duration::from_secs(60)).settled(now));
+    assert!(stamp(now - SETTLE).settled(now));
+
+    // An open follows it: a file stamped ahead of the clock (still unsettled at each open, however long the open
+    // takes) is probed again after a same-stamp rewrite.
     let data = TestDir::new("scan-recent");
     let cache = TestDir::new("scan-recent-cache");
     yolo(&data);
     let img = data.join("images/train/0.png");
-    let recent = SystemTime::now() - Duration::from_millis(500);
+    let recent = SystemTime::now() + Duration::from_secs(60);
     padded_png(&img, 20, 10, 4096);
     set_mtime(&img, recent);
     open(&data, settings(&cache));
