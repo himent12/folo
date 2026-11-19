@@ -116,11 +116,6 @@ pub const AMP_KEY: &str = "folo.amp";
 /// loss scale has backed off by `2^50`, so the gradients are not finite at any scale.
 pub const MAX_AMP_SKIPS: usize = 50;
 
-/// The log line of a run asked to stop after its last batch: there was nothing left to stop, so it completed
-/// ([`TrainOptions::stop`]). folo-server and `folo train` say the same of a stop that comes later still.
-pub const STOP_AFTER_LAST_BATCH: &str =
-    "the stop came after the last batch: training had already finished, so the run completed";
-
 /// The data of a run.
 #[derive(Clone)]
 pub struct TrainData {
@@ -141,8 +136,7 @@ pub struct TrainOptions {
     /// Minimum interval between `step` events sent to `events` (docs/API.md: about 10 per second).
     pub step_interval: Duration,
     /// Set to stop the run: the current batch finishes, the partial epoch is discarded and the last epoch-boundary
-    /// checkpoint is kept (status `stopped`). Set after the last batch (while the last epoch validates), it has
-    /// nothing left to stop: the run completes, logs [`STOP_AFTER_LAST_BATCH`] and clears the flag.
+    /// checkpoint is kept (status `stopped`).
     pub stop: Arc<AtomicBool>,
     /// Start from these weights (transfer learning: matching tensors load, the class outputs are re-initialised
     /// when the class list differs). Ignored by [`Trainer::resume`].

@@ -199,6 +199,13 @@ struct Queue {
     shutdown: bool,
 }
 
+/// The log line of a stop accepted while a run trains (`Runs::stop`). The stop is noticed after a batch, so one that
+/// comes after the last batch (while the last epoch validates) changes nothing, and the line must hold then too.
+pub const STOP_REQUESTED: &str = concat!(
+    "stop requested: the run stops after the batch it is on; ",
+    "if its last batch is already done, it finishes and ends completed"
+);
+
 /// The registry, the queue and the worker. See the module docs.
 pub struct Runs {
     dir: PathBuf,
@@ -221,8 +228,8 @@ pub struct Runs {
 
 /// Test support: while `on`, a run's trainer waits after each epoch (its checkpoint written and its `epoch` event
 /// sent) until the hold is lifted or the run is asked to stop, so a test's stop always lands before the next epoch.
-/// After the last epoch there is no next one: a run stopped there still completes (and logs that the stop came
-/// after its last batch), so tests stop runs that have epochs left.
+/// After the last epoch there is no next one: a run stopped there still completes, so tests stop runs that have
+/// epochs left.
 #[derive(Default)]
 struct EpochHold {
     on: Mutex<bool>,

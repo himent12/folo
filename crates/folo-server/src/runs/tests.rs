@@ -153,7 +153,8 @@ fn lines_appended_at_once_stay_whole() {
 }
 
 /// A stop that lands after the trainer's last look at its flag (it reported `completed`, the run is not published
-/// yet) has nothing left to stop: the run is published `completed`, its log says so last, and the flag is cleared.
+/// yet) is accepted (`stopping`) but has nothing left to stop: the run is published `completed`, and the log's
+/// acknowledgment, its last line, says that this can happen (#333).
 #[test]
 fn a_stop_after_the_trainers_last_look_completes_the_run() {
     let dir = TestDir::new("runs-stop-late");
@@ -176,13 +177,7 @@ fn a_stop_after_the_trainers_last_look_completes_the_run() {
     });
     assert_eq!(runs.snapshot(e.id()).unwrap().status, RunStatus::Completed);
     let logs = runs.logs(e.id(), &LogsQuery::last(10)).unwrap();
-    assert_eq!(
-        logs.lines.last().unwrap().message,
-        folo_vision::train::STOP_AFTER_LAST_BATCH,
-        "{:?}",
-        logs.lines
-    );
-    assert!(!e.stop_requested());
+    assert_eq!(logs.lines.last().unwrap().message, STOP_REQUESTED, "{:?}", logs.lines);
     runs.shutdown(None);
 }
 

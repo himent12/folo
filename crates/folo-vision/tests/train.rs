@@ -405,31 +405,6 @@ fn stop_inside_an_epoch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A stop after the last batch (set at the boundary after the last epoch's validation) has nothing left to stop:
-/// the run completes with every epoch, its last log line says so and the flag is cleared. After a validation with
-/// epochs left the same stop ends the run `stopped` before the next epoch's first batch.
-#[test]
-fn a_stop_after_the_last_batch_completes_the_run() {
-    let ds = shapes(8, 2, 64);
-    for (epochs, status) in [(1, RunStatus::Completed), (2, RunStatus::Stopped)] {
-        let (opts, log) = options(None);
-        let stop = opts.stop.clone();
-        let opts = TrainOptions { after_epoch: Some(Box::new(StopAfter(1))), ..opts };
-        let s = Trainer::new(micro_config(epochs), data(&ds), opts).unwrap().run().unwrap();
-        assert_eq!((s.status, s.epochs_completed), (status, 1));
-        let log = log.lock().unwrap();
-        let lines: Vec<&str> = log
-            .iter()
-            .filter_map(|e| if let RunEvent::Log(l) = e { Some(l.message.as_str()) } else { None })
-            .collect();
-        let told = lines.last() == Some(&folo_vision::train::STOP_AFTER_LAST_BATCH);
-        assert_eq!(told, status == RunStatus::Completed, "{lines:?}");
-        assert!(matches!(log.last(), Some(RunEvent::Status(e)) if e.status == status));
-        // Taken by a completed run (nothing later sees it); a stopped run's caller still sees why it stopped.
-        assert_eq!(stop.load(Ordering::Relaxed), status == RunStatus::Stopped);
-    }
-}
-
 /// docs/MODEL.md §10.4 overfit: folo-n at 320 px on 8 images, augmentation off, AdamW `lr0 = 0.002`, 300 steps of
 /// batch 8 without accumulation. The loss falls below 25 % of its first value and mAP@0.5 on the same images
 /// exceeds 0.95. Minutes on a desktop CPU:

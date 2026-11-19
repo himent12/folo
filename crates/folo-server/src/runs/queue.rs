@@ -14,7 +14,7 @@ use crate::util::{fnv1a, unique_id, unix_now};
 
 use super::entry::{Ended, INTERRUPTED, status_event};
 use super::train::execute;
-use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, now};
+use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, STOP_REQUESTED, now};
 
 impl Runs {
     /// Sends every waiting run its place in the queue (the SSE `queue` event). Called with the queue locked, after
@@ -282,8 +282,7 @@ impl Runs {
     }
 
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
-    /// epoch's checkpoint). One past its last batch has nothing left to stop: it completes, and its log says so
-    /// ([`folo_vision::train::STOP_AFTER_LAST_BATCH`]).
+    /// epoch's checkpoint).
     pub fn stop(&self, id: &str) -> Result<Run> {
         self.stop_as(id, false)
     }
@@ -322,12 +321,11 @@ impl Runs {
                 drop(st);
                 let message = match run.cloud.as_ref().map(|c| c.phase) {
                     Some(p) if cloud && p < CloudPhase::Training => "stop requested; releasing the instance",
-                    _ if cloud => "stop requested; the worker stops after its current batch",
-                    _ if interrupted => {
+                    _ if interrupted && !cloud => {
                         "the server is shutting down: the run stops after the current batch and keeps its last \
                          checkpoint; resume it from its page in Studio"
                     }
-                    _ => "stop requested; stopping after the current batch",
+                    _ => STOP_REQUESTED,
                 };
                 e.log(LogLevel::Info, message);
                 Ok(run)

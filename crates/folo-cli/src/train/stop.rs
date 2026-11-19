@@ -31,13 +31,6 @@ pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>) {
     });
 }
 
-/// After the run: whether a stop was asked for that the trainer did not take (the stop file written after the last
-/// poll, which is removed here, or a flag raised after the trainer's last look).
-pub(super) fn late_stop(run_dir: &Path, stop: &AtomicBool) -> bool {
-    let file = std::fs::remove_file(run_dir.join(STOP_FILE)).is_ok();
-    stop.swap(false, Ordering::Relaxed) | file
-}
-
 /// `folo stop <run_dir>`: asks the `folo train` writing that run folder to stop after its current batch.
 pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
     let not_a_run = |code: &str, exit, msg: String| {
@@ -65,8 +58,7 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
         "stop_file": folo_api::json::path(&file),
     }));
     out.human(format!(
-        "Asked the run in {} to stop after its current batch; its `folo train` ends with status `stopped` \
-         (`completed` if its last batch is already done).",
+        "Asked the run in {} to stop after its current batch; its `folo train` ends with status `stopped`.",
         folo_api::json::path(run_dir)
     ));
     Ok(())

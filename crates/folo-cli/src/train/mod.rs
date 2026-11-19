@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use folo_api::RunStatus;
 use folo_data::{Dataset, Split};
 use folo_vision::{TrainData, TrainOptions, Trainer};
 
@@ -25,9 +24,9 @@ use crate::cli::TrainArgs;
 use crate::engine::{engine_error, open_dataset};
 use crate::output::{CliError, ExitCode, Out};
 use config::{apply_sets, config_of};
-use progress::{finish, log_line, progress_sink};
+use progress::{finish, progress_sink};
 use resume::resume;
-use stop::{late_stop, watch_ctrl_c, watch_stop_file};
+use stop::{watch_ctrl_c, watch_stop_file};
 
 pub use stop::request_stop;
 pub(crate) use stop::watch_interrupt;
@@ -58,7 +57,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
         Some(ckpt) => resume(&args, ckpt, out, stop.clone(), nb.clone())?,
         None => start(&args, out, stop.clone(), nb.clone())?,
     };
-    watch_stop_file(&run_dir, stop.clone());
+    watch_stop_file(&run_dir, stop);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
     if !out.json {
         out.human(format!("Run folder: {}", folo_api::json::path(&run_dir)));
@@ -73,12 +72,6 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
             return Err(engine_error("train", e));
         }
     };
-    // A stop that came after the trainer's last look (the stop file written after the last poll, or Ctrl+C) found
-    // nothing left to stop either; its stop file is not left behind.
-    let late = late_stop(&run_dir, &stop);
-    if late && summary.status == RunStatus::Completed {
-        log_line(out, folo_vision::train::STOP_AFTER_LAST_BATCH);
-    }
     finish(&summary, &run_dir, trainer.config(), &trainer.resolved_train(), out);
     Ok(())
 }

@@ -92,7 +92,7 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   that fails is tried again a minute later, not at every epoch.
 - **Stopping.** `POST /api/runs/{id}/stop` stops the worker's run, collects its checkpoint and releases the
   instance; before `training` it releases at once. `Run.model_id` is set as for a local run, and a stop after the
-  worker's last batch completes the run, as a local one does.
+  worker's last batch changes nothing, as for a local run: the run ends `completed` with all its results.
 - **Deadline.** `compute.max_hours` (default 12) bounds what a run can cost: the instance is asked to stop the run
   when the time is up (it ends `stopped`, with its checkpoint, and can be resumed), and is terminated whatever
   happens. Providers that can (`self_terminates`) also arm the instance to terminate itself 10 minutes after the
