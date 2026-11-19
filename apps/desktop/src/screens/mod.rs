@@ -181,6 +181,8 @@ impl FoloApp {
         use crate::store::Load;
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
+        // A list's answer still out (the refresh's) would undo the request asked for now.
+        self.restart_lists();
         let s = &mut self.store;
         s.health = Load::Idle;
         s.system = Load::Idle;

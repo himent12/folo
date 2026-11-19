@@ -26,6 +26,9 @@ pub struct ListTickets {
     seq: u64,
     installed: [u64; 3],
     changed: [u64; 3],
+    /// Per list, the ticket of a failed list's retry still out (0: none): one at a time, so a server
+    /// that never answers isn't asked again at every refresh.
+    retrying: [u64; 3],
 }
 
 impl ListTickets {
@@ -49,6 +52,29 @@ impl ListTickets {
     pub fn changed(&mut self, list: List) {
         self.changed[list as usize] = self.seq;
     }
+
+    /// A ticket for a retry of failed `list`, unless the last one is still out.
+    pub fn retry(&mut self, list: List) -> Option<u64> {
+        if self.retrying[list as usize] != 0 {
+            return None;
+        }
+        self.retrying[list as usize] = self.ask();
+        Some(self.seq)
+    }
+
+    /// The answer to `ticket` is in (news or not): a retry it was is out no longer.
+    pub fn answered(&mut self, list: List, ticket: u64) {
+        if self.retrying[list as usize] == ticket {
+            self.retrying[list as usize] = 0;
+        }
+    }
+
+    /// `list` is asked for again from scratch (Retry, a server switch): every answer still out is
+    /// dropped, a retry among them too, so the new request goes out at once and only its answer counts.
+    pub fn restart(&mut self, list: List) {
+        self.changed(list);
+        self.retrying[list as usize] = 0;
+    }
 }
 
 impl FoloApp {
@@ -56,8 +82,29 @@ impl FoloApp {
     /// place (a failure leaves it as it is). Either way only while it is still news.
     pub(super) fn fetch_list(&mut self, list: List, cx: &mut Context<Self>) {
         let ticket = self.list_tickets.ask();
+        self.fetch_list_as(list, ticket, cx);
+    }
+
+    /// Fetches failed `list` again in place: its error stays on screen until an answer replaces it (the
+    /// list, or a newer error), as Studio's polls do, not the loading state at every refresh while the
+    /// server is down. Nothing is asked while the last retry is still out.
+    pub(super) fn retry_list(&mut self, list: List, cx: &mut Context<Self>) {
+        if let Some(ticket) = self.list_tickets.retry(list) {
+            self.fetch_list_as(list, ticket, cx);
+        }
+    }
+
+    /// Retry: the three lists are asked for again from scratch ([`ListTickets::restart`]).
+    pub fn restart_lists(&mut self) {
+        for list in [List::Datasets, List::Models, List::Runs] {
+            self.list_tickets.restart(list);
+        }
+    }
+
+    fn fetch_list_as(&mut self, list: List, ticket: u64, cx: &mut Context<Self>) {
         // Only the answer that is still news counts; a failure shows only on a list not loaded yet.
         fn take<T>(this: &mut FoloApp, list: List, ticket: u64, r: ApiResult<T>, loaded: bool) -> Option<T> {
+            this.list_tickets.answered(list, ticket);
             if !this.list_tickets.current(list, ticket) {
                 return None;
             }

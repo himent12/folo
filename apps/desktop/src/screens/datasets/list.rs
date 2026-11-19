@@ -23,6 +23,8 @@ impl FoloApp {
         let list = self.store.datasets.ready().cloned();
         let subtitle = match &list {
             Some(l) => self.datasets_subtitle(l),
+            // As Models and Benchmarks say: not "Loading…" over the error while it is asked again.
+            None if self.store.datasets.error().is_some() => "The dataset list didn't load".into(),
             None => "Loading…".into(),
         };
         let add = self
