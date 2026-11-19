@@ -221,6 +221,8 @@ fn predict_save_overlapping_a_source_is_a_usage_error() {
         ("photos", "photos"),
         ("photos", "./photos/annotated"),
         ("photos", "photos/sub/../annotated"),
+        // `..` after a folder that does not exist (`scratch`) is folded before the existing part is resolved.
+        ("photos", "scratch/../photos/out"),
         ("photos", absolute.to_str().unwrap()),
         ("photos/sub", "photos"),
         ("photos/a.jpg", "photos"),
@@ -244,10 +246,20 @@ fn predict_save_overlapping_a_source_is_a_usage_error() {
     }
     assert_eq!((listing("."), listing("photos")), before, "a refused run creates nothing");
     // Outside the sources (also a sibling sharing the name's start) this check passes: the missing model stops it.
-    for save in ["annotated", "photos-annotated"] {
+    for save in ["annotated", "photos-annotated", "photos/new/../../out"] {
         let (code, last) = predict("photos", save);
         assert_eq!((code, &last["error"]["code"]), (3, &"model_not_found".into()), "--save {save}: {last}");
     }
+    // A source that does not exist gets the answer it gets without `--save` (the missing model, which main checks
+    // first; with a model, `path_not_found`): the overlap with `photos` does not hide it.
+    let run = |save: &[&str]| {
+        let args = ["predict", "--json", "--model", "none.folo", "missing", "photos"];
+        let out = folo_cmd().current_dir(&dir).args(args).args(save).output().unwrap();
+        let last = json_lines(&String::from_utf8(out.stdout).unwrap()).pop().unwrap();
+        (out.status.code().unwrap(), last["error"]["code"].clone())
+    };
+    assert_eq!(run(&[]), (3, "model_not_found".into()));
+    assert_eq!(run(&["--save", "photos/out"]), run(&[]));
 }
 
 /// A `--data-dir` that is a file is a usage error up front: `serve` reported `listening` and `mcp` and `cloud` ran,
