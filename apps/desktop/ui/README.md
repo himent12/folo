@@ -133,7 +133,9 @@ A test opens a window on the headless platform through `HeadlessApp` (`src/headl
 then draw with `frame` (the framebuffer) or read the `scene`. `open` in `src/window/tests/mod.rs` is the smallest
 example: a `HeadlessApp` with `HeadlessOptions { size, scale_factor, text: TextBackend::Fixed }`, one window
 whose view renders a closure, and its first frame drawn. The app's own tests use the same harness
-(`apps/desktop/src/app/tests.rs`).
+(`apps/desktop/src/app/tests.rs`). File dialogs answer at once with what `HeadlessPlatform::answer_prompts` set
+(the paths picked, or `None`: cancelled, the default); a file dropped on a window is
+`PlatformInput::FileDrop` with its paths built by `ExternalPaths::new`.
 
 ## Platforms
 

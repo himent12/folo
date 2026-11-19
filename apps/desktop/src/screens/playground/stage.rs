@@ -67,7 +67,7 @@ impl FoloApp {
                     Some("icons/image-up.svg"),
                     window,
                     cx,
-                    act(|this, _, cx| this.pick_image(cx)),
+                    act(|this, w, cx| this.pick_image(w, cx)),
                 )
             };
             let drop_hover = self.play_drop_hover;
