@@ -37,6 +37,8 @@ export interface RunSource {
   /** The run's finished epochs (`live.epochsLog`). */
   readonly epochs: AppendLog<Epoch>;
   readonly version: number;
+  /** The run ended and its final history is still on its way (`live.settling`): its epochs may still come. */
+  readonly settling?: boolean;
 }
 
 type EpochField = 'map50_95' | 'map50' | 'precision' | 'recall';
@@ -68,6 +70,7 @@ function extentOf(series: Series[], log = false): [number, number] | null {
 
 export class RunModel {
   readonly run: () => Run;
+  private readonly settling: () => boolean;
   readonly live = computed(() => ACTIVE.includes(this.run().status));
   readonly progress = computed(() => runProgress(this.run()));
   readonly elapsed = computed(() => trainingSeconds(this.run()));
@@ -109,6 +112,7 @@ export class RunModel {
 
   constructor(src: RunSource) {
     this.run = () => src.run!;
+    this.settling = () => src.settling ?? false;
     this.stepData = new StepSeries(untrack(() => src.steps));
     this.epochData = new EpochSeries(untrack(() => src.epochs));
     const stepsRev = computed(() => {
@@ -348,10 +352,17 @@ export class RunModel {
 
   // ---- the words of the readings ----
   /**
-   * It ended (stopped, failed) after training steps but before its first validation: the per-epoch readings will never
-   * come, so they say so instead of "after the first epoch" and "Waiting for the first validation…".
+   * It ended and the epochs it validated are still on their way (its final history, issue #327): the per-epoch
+   * readings hold their place as loading, and say neither "Waiting for the first validation…" nor that it never
+   * validated.
    */
-  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get());
+  readonly pending = computed(() => !this.live.get() && !this.lastEpoch.get() && this.settling());
+  /**
+   * It ended (stopped, failed) after training steps but before its first validation, as its final history says: the
+   * per-epoch readings will never come, so they say so instead of "after the first epoch" and "Waiting for the first
+   * validation…".
+   */
+  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get() && !this.settling());
   readonly firstEpoch = computed(() => (this.unvalidated.get() ? 'not validated' : 'after the first epoch'));
   /** "Latest · ep 37", the per-epoch legends' note; per-step readings name the epoch the last step is in. */
   readonly latestEp = computed(() => (this.lastEpoch.get() ? `Latest · ep ${this.lastEpoch.get()!.epoch}` : undefined));

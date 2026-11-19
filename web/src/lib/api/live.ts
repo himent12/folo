@@ -107,6 +107,7 @@ export class LiveRun {
   #loading = signal(true);
   #connection = signal<'idle' | 'open' | 'reconnecting'>('idle');
   #lost = signal<number | null>(null);
+  #settling = signal(false);
   #waiting = signal<number | null>(null);
   #version = signal(0);
 
@@ -144,6 +145,15 @@ export class LiveRun {
   }
   set lost(v: number | null) {
     this.#lost.set(v);
+  }
+  /**
+   * The run ended while this view followed it and the server's final history is still on its way: the view may not
+   * hold all of its epochs yet (one the stream delivered is published with the end, one it missed comes with that
+   * history), so a page shows them as loading, never as a run that ended before its first validation. False again once
+   * that history has applied.
+   */
+  get settling(): boolean {
+    return this.#settling.get();
   }
   /** How many runs wait in the training queue, this one included, from its latest `queue` event (null: none yet). */
   get waiting(): number | null {
@@ -234,6 +244,7 @@ export class LiveRun {
       untrack(() => {
         this.lost = null;
         this.waiting = null;
+        this.#settling.set(false);
         this.loading = true;
         this.error = undefined;
         this.run = undefined;
@@ -311,13 +322,16 @@ export class LiveRun {
         }
         held(logs);
         this.loading = false;
+        // The run's final history: what it validated is all here.
+        if (final) this.#settling.set(false);
         // A history that failed before (the panels said so) is in now.
         this.error = undefined;
         // The history just applied is current: no longer "last known" (DESIGN_DIRECTION §2.8).
         this.#heard = Date.now();
         // Still down (a retry of the load got through): the view is last known as of now.
         if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? this.#heard : null;
-        this.#bump();
+        // Published with the run it came with, not a frame later: a finished run never shows without its epochs.
+        this.#publish();
       };
 
       // Re-synchronising history (on open / reconnect) must not silently give up: a gap would stay forever.
@@ -344,6 +358,7 @@ export class LiveRun {
         this.#streamedTail = [];
         this.lost = null;
         this.waiting = null;
+        this.#settling.set(false);
         this.connection = 'idle';
         this.loading = false;
         this.error = e;
@@ -369,6 +384,9 @@ export class LiveRun {
         clearTimeout(syncTimer);
         load().catch((e) => {
           if (closed || gone(e)) return;
+          // The ended run's final history failed and the view holds none of its epochs: the panels say so, with Retry,
+          // as for a failed first load, rather than wait in silence or guess (the retries go on).
+          if (this.settling && !this.epochs.length) this.error = e;
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
@@ -429,6 +447,10 @@ export class LiveRun {
             // (/run and /metrics are read independently): invalidate them and fetch the final one, every time.
             this.#replay = null;
             this.#gen++;
+            // Until the final history applies, the epochs the stream delivered are what the view has: published with
+            // the end (not a frame later), and the rest are on their way.
+            this.#settling.set(true);
+            this.#publish();
             sync();
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
             const seq = this.#statusSeq;
@@ -580,6 +602,7 @@ export class LiveRun {
    */
   #rewind() {
     this.#gen++;
+    this.#settling.set(false);
     this.#replay = { until: this.steps[this.steps.length - 1]?.step ?? 0, steps: [], epochs: [] };
     const done = this.epochs[this.epochs.length - 1]?.epoch ?? 0;
     this.steps = this.steps.filter((s) => s.epoch <= done);
@@ -629,6 +652,13 @@ export class LiveRun {
   /** A snapshot's cloud state, corrected: a `cloud` event that arrived after the request was sent is newer. */
   #clouded(run: Run, cloudSeqAtStart: number): Run {
     return this.#cloudSeq !== cloudSeqAtStart && this.#lastCloud ? { ...run, cloud: this.#lastCloud } : run;
+  }
+
+  /** Publishes now rather than at the next frame (`#bump`): for what must be read together with the run's status. */
+  #publish() {
+    if (this.#raf) cancelAnimationFrame(this.#raf);
+    this.#raf = 0;
+    this.#version.set((v) => v + 1);
   }
 
   #bump() {

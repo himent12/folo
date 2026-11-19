@@ -30,8 +30,10 @@ export interface SamplesProps {
   unavailable?: boolean;
   /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
   datasetGone?: boolean;
-  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
+  /** The run ended before its first validation (its final history says so): none will come, and the panel says so. */
   ended?: boolean;
+  /** The run ended and the epochs it validated are still on their way: the tiles hold their place. */
+  pending?: boolean;
 }
 
 export default function Samples(props: SamplesProps) {
@@ -149,13 +151,13 @@ export default function Samples(props: SamplesProps) {
         ) : null}
         {props.unavailable ? (
           <p class="none">Samples show once the run's metrics load.</p>
-        ) : props.epochsDone === 0 ? (
+        ) : props.epochsDone === 0 && !props.pending ? (
           <p class="none">{props.ended ? 'No samples: it ended before its first validation.' : 'Samples appear after the first validation pass.'}</p>
         ) : samples.error && !samples.data && props.datasetGone ? (
           <p class="none">The dataset was removed, so its sample images are gone.</p>
         ) : samples.error && !samples.data ? (
           <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
-        ) : !samples.data ? (
+        ) : !samples.data || props.epochsDone === 0 ? (
           <div class="grid" ref={gridEl}>
             <Index each={Array.from({ length: FIRST.get() })}>{() => <Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />}</Index>
           </div>

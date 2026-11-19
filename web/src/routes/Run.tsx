@@ -145,6 +145,9 @@ export default function Run() {
     get version() {
       return live.version;
     },
+    get settling() {
+      return live.settling;
+    },
   });
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
@@ -634,13 +637,22 @@ export default function Run() {
                           classes={classes.get()}
                           datasetGone={datasetGone.get()}
                           epochsDone={epochsDone.get()}
-                          ended={!!status.get() && !active.get()}
+                          ended={model.unvalidated.get()}
+                          pending={model.pending.get()}
                           title={`${scoresTitle(evalOn.get())} samples`}
                           unavailable={historyError.get() !== undefined}
                         />
                       </div>
                       <div class="part" data-part="classes">
-                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} ended={!!status.get() && !active.get()} />
+                        <PerClass
+                          classes={classes.get()}
+                          epochs={live.epochs}
+                          version={live.version}
+                          loading={live.loading || model.pending.get()}
+                          compact
+                          unavailable={historyError.get() !== undefined}
+                          ended={model.unvalidated.get()}
+                        />
                       </div>
                     </>
                   ) : null}

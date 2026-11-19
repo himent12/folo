@@ -345,6 +345,30 @@ describe('LiveRun ordering', () => {
     stop();
   });
 
+  it('publishes the epoch the stream delivered with the run’s end, and is settling until the final history (issue #327)', async () => {
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    const ep = { epoch: 1, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 };
+    const final = deferred<RunMetrics>();
+    (hub.api as { runMetrics: Api['runMetrics'] }).runMetrics = () => final.promise;
+    (hub.api as { run: Api['run'] }).run = () => Promise.resolve({ ...snapshot, status: 'completed', step: 1, epoch: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.step?.({ ...step(1), epoch: 1 });
+    handlers.epoch?.(ep as never);
+    const v = live.version;
+    handlers.status?.({ status: 'completed', error: null });
+    expect(live.version).toBeGreaterThan(v); // at once, not at the next frame: read with the end
+    expect(live.settling).toBe(true);
+    final.resolve({ steps: [{ ...step(1), epoch: 1 }], epochs: [ep] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect([live.settling, live.epochs.length]).toEqual([false, 1]);
+    stop();
+  });
+
   it('refreshes the snapshot on a terminal status even while history is loading', async () => {
     let calls = 0;
     (hub.api as { run: Api['run'] }).run = () => {

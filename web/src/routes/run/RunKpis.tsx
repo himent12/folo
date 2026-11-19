@@ -64,6 +64,8 @@ export default function RunKpis(props: RunKpisProps) {
     return t.avg !== null ? `avg ${num(t.avg, 0)}` : waiting() ? 'Not started' : 'after the first step';
   });
   const ended = () => !m.live.get();
+  /** The per-epoch tiles: loading too while an ended run's validated epochs are on their way (runModel `pending`). */
+  const epochLoading = () => props.loading || m.pending.get();
   const timeValue = computed(() => {
     const r = run();
     if (ended()) return duration(m.elapsed.get());
@@ -107,14 +109,14 @@ export default function RunKpis(props: RunKpisProps) {
         </div>
       </div>
       <div class="tile">
-        <Stat label={mapLabel.get()} value={metric(m.lastEpoch.get()?.val.map50_95)} sub={mapCap.get()} loading={props.loading} />
+        <Stat label={mapLabel.get()} value={metric(m.lastEpoch.get()?.val.map50_95)} sub={mapCap.get()} loading={epochLoading()} />
       </div>
       <div class="tile">
         <Stat
           label="Precision / Recall"
           value={m.lastEpoch.get() ? `${metric(m.lastEpoch.get()!.val.precision)} / ${metric(m.lastEpoch.get()!.val.recall)}` : '—'}
           sub={prCap.get()}
-          loading={props.loading}
+          loading={epochLoading()}
         />
       </div>
       <div class="tile ips">
