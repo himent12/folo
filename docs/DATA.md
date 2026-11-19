@@ -131,15 +131,19 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   a `DataError::Format` whose message starts with `UNDETECTED`.
 
 ### Unfinished datasets
-`synthetic::write_yolo` and `convert::convert` create a `.folo-unfinished` file in their output folder before any
-other file and remove it as their last step, so a write stopped part way (killed, Ctrl+C, a crash) leaves it. A writer
-that finds the file already there (another writer's folder, running or stopped) stops with an `AlreadyExists`
-`DataError::Io` and changes nothing; FOLO never clears or deletes a marked folder. Every reader (`open`,
-`open_splits`, `detect_format`, `check::check`) refuses a dataset whose folder holds the file, found from where the
-dataset's files are (the folder, its `data.yaml` and the root that file's `path:` names, the folder above an
-`annotations/` JSON), with `DataError::Unfinished` (CLI `dataset_unfinished`, exit 1; HTTP 400). To recover, delete
-the folder and run the command again. When only removing the file failed, the error says so: the dataset is
-complete and that one file is to be deleted.
+Every writer (`synthetic::write_yolo`, `convert::convert`, the server's sample sets) starts with
+`unfinished::claim(dir)`: it creates `dir` when missing, then a `.folo-unfinished` file in it with `create_new`, then,
+holding that file, checks that nothing else is in the folder; the writer removes the file as its last step
+(`Claim::finish`), so a write stopped part way (killed, Ctrl+C, a crash) leaves it. The claim fails with a
+`DataError::Io` saying the folder "exists and is not an empty folder" and leaves the folder as it was: of kind
+`AlreadyExists` when the file was there (another writer's folder, running or stopped), `DirectoryNotEmpty` when
+other files are (it removes the file it created). Only one writer can hold a folder, and FOLO never clears or deletes
+a marked one. Every reader (`open`, `open_splits`, `detect_format`, `check::check`) refuses a dataset whose folder
+holds the file, found from where the dataset's files are (the folder, its `data.yaml` and the root that file's `path:`
+names, a COCO JSON's own folder and the one above it), with `DataError::Unfinished` (CLI `dataset_unfinished`, exit
+1; HTTP 400). A YAML elsewhere whose split paths point into a marked folder without a `path:` is not refused. To
+recover, delete the folder and run the command again. When only removing the file failed, the error says so: the
+dataset is complete and that one file is to be deleted.
 
 ## Packing
 `pack::pack(&loaded, &mut out)` writes an opened dataset, of any format and layout, as one tar stream into any

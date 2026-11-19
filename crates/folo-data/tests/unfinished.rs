@@ -6,7 +6,7 @@ mod common;
 use common::{TempDir, write};
 use folo_data::check::{CheckOptions, check};
 use folo_data::synthetic::{SyntheticConfig, write_yolo, write_yolo_with_progress};
-use folo_data::unfinished::MARKER;
+use folo_data::unfinished::{MARKER, claim};
 use folo_data::{DataError, Format, ImageFormat, detect_format, open};
 use std::path::Path;
 
@@ -38,8 +38,14 @@ fn assert_unfinished(path: &Path) {
     assert_refused(check(path, &CheckOptions::default()).unwrap_err());
 }
 
+/// The error of an output folder [`claim`] refused: `AlreadyExists` (a marker there) or `DirectoryNotEmpty`.
+fn is_refused_output(err: &DataError, kind: std::io::ErrorKind) -> bool {
+    matches!(err, DataError::Io { source, .. }
+        if source.kind() == kind && source.to_string().ends_with("exists and is not an empty folder"))
+}
+
 fn is_already_exists(err: &DataError) -> bool {
-    matches!(err, DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists)
+    is_refused_output(err, std::io::ErrorKind::AlreadyExists)
 }
 
 /// Stopped part way through the images (here: a panic from the progress callback), the folder keeps the marker and
@@ -49,7 +55,9 @@ fn a_write_stopped_part_way_is_refused_and_kept() {
     let t = TempDir::new("unfinished-midway");
     let dir = t.join("shapes");
     let stop = std::panic::catch_unwind(|| {
-        write_yolo_with_progress(&small(40), &dir, ImageFormat::Png, |done| assert!(done < 20, "stopped"))
+        write_yolo_with_progress(&small(40), claim(&dir).unwrap(), ImageFormat::Png, |done| {
+            assert!(done < 20, "stopped")
+        })
     });
     assert!(stop.is_err());
     let left = files(&dir);
@@ -78,10 +86,29 @@ fn a_second_writer_is_refused_and_changes_nothing() {
     let err = write_yolo(&small(6), &dir, ImageFormat::Png).unwrap_err();
     assert!(is_already_exists(&err), "{err}");
     for to in [Format::Yolo, Format::Coco] {
-        assert!(folo_data::convert::convert(&ds, &dir, to).is_err());
+        let err = folo_data::convert::convert(&ds, &dir, to).unwrap_err();
+        assert!(is_already_exists(&err), "{err}");
     }
     assert_eq!(files(&dir), [MARKER]);
     assert_eq!(std::fs::read_to_string(dir.join(MARKER)).unwrap(), "theirs");
+}
+
+/// A folder that holds another file when the marker is created (one put there after a caller saw it empty) is
+/// refused as not empty: the marker this claim created is removed again and the other file is untouched.
+#[test]
+fn a_folder_filled_before_the_claim_is_refused_as_not_empty() {
+    let t = TempDir::new("unfinished-filled");
+    write_yolo(&small(6), &t.join("src"), ImageFormat::Png).unwrap();
+    let ds = open(t.join("src")).unwrap();
+    let dir = t.join("filled");
+    write(&dir.join("theirs.txt"), "theirs");
+    let not_empty =
+        |err: DataError| assert!(is_refused_output(&err, std::io::ErrorKind::DirectoryNotEmpty), "{err}");
+    not_empty(claim(&dir).unwrap_err());
+    not_empty(write_yolo(&small(6), &dir, ImageFormat::Png).unwrap_err());
+    not_empty(folo_data::convert::convert(&ds, &dir, Format::Coco).unwrap_err());
+    assert_eq!(files(&dir), ["theirs.txt"]);
+    assert_eq!(std::fs::read_to_string(dir.join("theirs.txt")).unwrap(), "theirs");
 }
 
 /// A `data.yaml` outside a marked folder whose `path:` points into it is refused (registering it reads it the same
@@ -100,7 +127,8 @@ fn a_yaml_pointing_into_a_marked_folder_is_refused() {
     assert_unfinished(&dir.join("data.yaml"));
 }
 
-/// A marked COCO output is refused through its annotation file, also spelled in another letter case on Windows.
+/// A marked COCO output is refused through its annotation file (the marker is in the folder above the JSON's), also
+/// spelled in another letter case on Windows.
 #[test]
 fn a_coco_annotation_file_of_a_marked_folder_is_refused() {
     let t = TempDir::new("unfinished-coco");

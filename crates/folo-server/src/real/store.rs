@@ -223,8 +223,18 @@ impl Store for RealStore {
         // Registration would refuse it (a registry not loaded at start): said before anything is generated.
         self.registry_loaded()?;
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
+        let claim = claim_generated(&dir)?;
         let t0 = Instant::now();
-        write_generated(&cfg, &dir).map_err(|e| data_error(e, &dir.to_string_lossy()))?;
+        // Only a folder this call claimed is removed: no other writer can have put a file in it.
+        if let Err(e) = folo_data::synthetic::write_yolo_with_progress(
+            &cfg,
+            claim,
+            folo_data::ImageFormat::Jpeg(90),
+            |_| {},
+        ) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(data_error(e, &dir.to_string_lossy()));
+        }
         tracing::info!(path = %dir.display(), images = cfg.images, secs = t0.elapsed().as_secs_f32(), "generated");
         let path = dir.to_string_lossy().into_owned();
         // A registration that fails writes nothing to the registry: the generated folder would be nobody's.
@@ -588,21 +598,17 @@ impl Store for RealStore {
     }
 }
 
-/// Writes the sample set `cfg` into `dir`, a folder [`RealStore::claim_dataset_dir`] made. A failed write removes
-/// `dir` only once it created the marker in it (folo_data::unfinished): not after an error on the marker itself
-/// (creating it failed: another writer, such as `folo dataset synth`, may be filling the folder), nor when the config
-/// was refused before it.
-pub(super) fn write_generated(
-    cfg: &folo_data::synthetic::SyntheticConfig,
-    dir: &Path,
-) -> folo_data::Result<()> {
-    let Err(e) = folo_data::synthetic::write_yolo(cfg, dir, folo_data::ImageFormat::Jpeg(90)) else {
-        return Ok(());
-    };
-    let marker = dir.join(folo_data::unfinished::MARKER);
-    let on_marker = matches!(&e, folo_data::DataError::Io { path, .. } if *path == marker);
-    if !on_marker && !matches!(e, folo_data::DataError::Config(_)) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    Err(e)
+/// Claims `dir`, the new folder of a sample set ([`folo_data::unfinished::claim`]). Refused when another writer (such
+/// as `folo dataset synth` into this path) took it first: `409 output_exists`, the folder left as it is.
+pub(super) fn claim_generated(dir: &Path) -> Result<folo_data::unfinished::Claim> {
+    use std::io::ErrorKind;
+    folo_data::unfinished::claim(dir).map_err(|e| match e {
+        folo_data::DataError::Io { source, .. }
+            if matches!(source.kind(), ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty) =>
+        {
+            let e = Error::new(StatusCode::CONFLICT, "output_exists", source.to_string());
+            if source.kind() == ErrorKind::AlreadyExists { e.hint(folo_data::unfinished::HINT) } else { e }
+        }
+        e => data_error(e, &dir.to_string_lossy()),
+    })
 }

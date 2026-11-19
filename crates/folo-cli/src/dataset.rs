@@ -51,10 +51,12 @@ fn data_error(e: DataError, path: &Path) -> CliError {
             format!("{} does not exist", folo_api::json::path(path)),
         )
         .hint("pass a dataset folder, a data.yaml or a COCO instances .json"),
-        // Another writer's output folder (folo_data::unfinished::begin).
+        // An output folder that `folo_data::unfinished::claim` refused: another writer's, or not empty.
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {
-            CliError::new(ExitCode::Runtime, "output_exists", source.to_string())
-                .hint(folo_data::unfinished::HINT)
+            output_exists(path, true)
+        }
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            output_exists(path, false)
         }
         e @ DataError::Unfinished(_) => CliError::new(ExitCode::Runtime, "dataset_unfinished", e.to_string())
             .hint(folo_data::unfinished::HINT),
@@ -79,19 +81,23 @@ fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
         dir.exists()
     };
     if busy {
-        let unfinished = dir.join(folo_data::unfinished::MARKER).exists();
-        return Err(CliError::new(
-            ExitCode::Runtime,
-            "output_exists",
-            format!("{} exists and is not an empty folder", folo_api::json::path(dir)),
-        )
-        .hint(if unfinished {
-            folo_data::unfinished::HINT
-        } else {
-            "pick a new folder, or delete this one first"
-        }));
+        return Err(output_exists(dir, dir.join(folo_data::unfinished::MARKER).exists()));
     }
     Ok(())
+}
+
+/// `output_exists` for `dir`; `unfinished` when it holds another writer's marker.
+fn output_exists(dir: &Path, unfinished: bool) -> CliError {
+    CliError::new(
+        ExitCode::Runtime,
+        "output_exists",
+        format!("{} exists and is not an empty folder", folo_api::json::path(dir)),
+    )
+    .hint(if unfinished {
+        folo_data::unfinished::HINT
+    } else {
+        "pick a new folder, or delete this one first"
+    })
 }
 
 /// `p` relative to `root` with `/` separators, or `p` as is when it is outside `root`.
@@ -416,6 +422,7 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
         ..Default::default()
     };
     ensure_empty_output(&args.out_dir)?;
+    cfg.check().map_err(|e| data_error(e, &args.out_dir))?;
     let format = match args.image_format {
         SynthImageFormat::Jpeg => ImageFormat::Jpeg(90),
         SynthImageFormat::Png => ImageFormat::Png,
@@ -423,7 +430,8 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
     let t0 = Instant::now();
     let progress =
         Progress { out, total: cfg.images, tty: std::io::stderr().is_terminal(), last: Mutex::new(None) };
-    let written = write_yolo_with_progress(&cfg, &args.out_dir, format, |d| progress.update(d))
+    let claim = folo_data::unfinished::claim(&args.out_dir).map_err(|e| data_error(e, &args.out_dir))?;
+    let written = write_yolo_with_progress(&cfg, claim, format, |d| progress.update(d))
         .map_err(|e| data_error(e, &args.out_dir))?;
     let secs = t0.elapsed().as_secs_f64();
     let [train, val] = written.splits;

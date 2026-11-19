@@ -380,14 +380,22 @@ pub(crate) enum Source {
 
 /// Finds the dataset at `path` (rules of [`open_with`]) without reading any labels or images. A folder a writer has
 /// not finished ([`crate::unfinished`]) is refused once found: the YAML's folder (and the root its `path:` gives,
-/// `yolo::scan_yaml`) or the folder images resolve against.
+/// `yolo::scan_yaml`), the folder images resolve against, or a COCO JSON's own folder or the one above it.
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     let source = locate(path, format)?;
-    let dir = match &source {
-        Source::Yaml(yaml) => yaml.parent().unwrap_or(Path::new(".")),
-        Source::Coco { root, .. } | Source::YoloDir(root) => root,
-    };
-    crate::unfinished::check(dir)?;
+    match &source {
+        Source::Yaml(yaml) => crate::unfinished::check(yaml.parent().unwrap_or(Path::new(".")))?,
+        Source::YoloDir(root) => crate::unfinished::check(root)?,
+        Source::Coco { root, jsons } => {
+            crate::unfinished::check(root)?;
+            // By plain path, names not resolved: a writer starts in an empty folder, so all below a marked folder is
+            // its unfinished output (`annotations/x.json` and `ANNOTATIONS/x.json` alike).
+            for dir in jsons.iter().filter_map(|(_, json)| json.parent()) {
+                crate::unfinished::check(dir)?;
+                dir.parent().map_or(Ok(()), crate::unfinished::check)?;
+            }
+        }
+    }
     Ok(source)
 }
 
@@ -404,12 +412,8 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
             (Format::Auto | Format::Yolo, Some("yaml" | "yml")) => Ok(Source::Yaml(path.to_path_buf())),
             (Format::Auto | Format::Coco, Some("json")) => {
                 let parent = path.parent().unwrap_or(Path::new("."));
-                // Named as on disk, whatever the spelling in `path` (`ANNOTATIONS` on Windows).
-                let named =
-                    std::fs::canonicalize(parent).ok().and_then(|p| p.file_name().map(|n| n.to_owned()));
-                let annotations =
-                    named.as_deref().map_or(parent.ends_with("annotations"), |n| n == "annotations");
-                let root = if annotations { parent.parent().unwrap_or(parent) } else { parent };
+                let root =
+                    if parent.ends_with("annotations") { parent.parent().unwrap_or(parent) } else { parent };
                 Ok(Source::Coco {
                     root: root.to_path_buf(),
                     jsons: vec![(coco::guess_split(path), path.to_path_buf())],

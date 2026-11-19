@@ -498,23 +498,22 @@ fn a_file_in_place_of_a_store_folder_is_said() {
     }
 }
 
-/// Issue #316: a generation that could not create the marker (another writer, such as `folo dataset synth`, is
-/// filling the folder) removes nothing; one that failed after creating it removes its own folder, as before.
+/// Issue #316: the new folder of a sample set that another writer took first (its marker there, or other files) is
+/// refused as `409 output_exists` and left as it is.
 #[test]
-fn a_generation_removes_only_the_folder_it_marked() {
-    let t = TestDir::new("real-generate");
-    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 32, ..Default::default() };
-    let theirs = t.join("theirs");
-    std::fs::create_dir_all(theirs.join("images")).unwrap();
-    std::fs::write(theirs.join(folo_data::unfinished::MARKER), "").unwrap();
-    std::fs::write(theirs.join("images").join("000000.jpg"), b"half").unwrap();
-    assert!(super::store::write_generated(&cfg, &theirs).is_err());
-    assert!(theirs.join(folo_data::unfinished::MARKER).is_file());
-    assert_eq!(std::fs::read(theirs.join("images").join("000000.jpg")).unwrap(), b"half");
-
-    let ours = t.join("ours");
-    std::fs::create_dir_all(&ours).unwrap();
-    std::fs::write(ours.join("images"), b"a file where a folder goes").unwrap();
-    assert!(super::store::write_generated(&cfg, &ours).is_err());
-    assert!(!ours.exists());
+fn a_sample_set_folder_another_writer_took_is_refused_and_kept() {
+    use folo_data::unfinished::MARKER;
+    let t = TestDir::new("real-generate-taken");
+    for (name, theirs) in [("marked", MARKER), ("filled", "data.yaml")] {
+        let dir = t.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(theirs), "theirs").unwrap();
+        let e = super::store::claim_generated(&dir).unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "output_exists"), "{name}");
+        assert!(e.body.message.contains("exists and is not an empty folder"), "{}", e.body.message);
+        assert_eq!(e.body.hint.is_some(), theirs == MARKER, "{name}");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [theirs]);
+        assert_eq!(std::fs::read_to_string(dir.join(theirs)).unwrap(), "theirs");
+    }
 }
