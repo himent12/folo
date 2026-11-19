@@ -46,6 +46,20 @@ export function runEvalSource(d: Pick<Dataset, 'id' | 'name' | 'splits'> | null 
   };
 }
 
+/** The trainer's sample images an epoch: at most the first 16 of the split it validates on (docs/API.md `/samples`). */
+const SAMPLE_LIMIT = 16;
+
+/**
+ * What a run that has not trained yet will show in Samples: "Predictions on 2 validation images after every epoch",
+ * the smaller of the trainer's limit and the split's size (the training split's when there are no validation images).
+ * No count while the dataset is not known (removed, not loaded): never a number the page cannot know.
+ */
+export function samplesAhead(s: EvalSource | null, d: Pick<Dataset, 'splits'> | null | undefined): string {
+  const kind = scoresTitle(s).toLowerCase();
+  const n = d ? Math.min(SAMPLE_LIMIT, d.splits.val || d.splits.train) : 0;
+  return n ? `Predictions on ${num(n)} ${kind} ${n === 1 ? 'image' : 'images'} after every epoch` : `Predictions on ${kind} images after every epoch`;
+}
+
 /**
  * The scores' name where a title names them: "Validation" ("Validation mAP50-95", "Validation samples") on a known
  * validation split, else the split they are really on ("Training-split mAP50-95"). "Evaluation" while the split is

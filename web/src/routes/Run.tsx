@@ -52,7 +52,7 @@ import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
 import Outcome, { canContinue } from './run/Outcome';
 import Callout from './run/Callout';
-import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
+import { fallbackNotice, runEvalSource, samplesAhead, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
@@ -299,7 +299,7 @@ export default function Run() {
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = computed(() => [
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
-    { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn.get()).toLowerCase()} images after every epoch` },
+    { name: 'Samples', what: samplesAhead(evalOn.get(), dataset.get()) },
     { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
