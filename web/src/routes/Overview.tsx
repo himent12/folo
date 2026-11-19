@@ -84,7 +84,7 @@ export default function Overview() {
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
   // A run's dataset by name, a placeholder while the datasets load, the name it recorded once it was removed.
   // A run on a dataset made since the list loaded (./overview/newDatasets): the name it recorded while the list is read again.
-  const lookingUp = followNewDatasets(datasets, () => runList.get()?.map((r) => r.config.dataset_id));
+  const lookingUp = followNewDatasets(datasets, () => runList.get());
   const dsLabel = (r: Run) =>
     lookingUp(r.config.dataset_id) ? (r.dataset?.name ?? undefined) : runDatasetLabel(r, datasets.data ? dsById.get() : undefined, !!datasets.error);
   const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));

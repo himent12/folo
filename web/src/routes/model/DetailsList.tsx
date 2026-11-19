@@ -47,6 +47,11 @@ export interface DetailsListProps {
   unevaluated?: boolean;
   stored: string | null;
   head: 'o2m' | 'o2o';
+  /**
+   * Whether a dataset is known to be registered (../overview/newDatasets `datasetPresence`): linked only then. /eval
+   * still names a run's dataset by its id once it was removed from FOLO (docs/API.md); its name is then plain text.
+   */
+  registered: (id: string | null | undefined) => boolean;
   aboutOpen?: boolean;
 }
 
@@ -64,9 +69,6 @@ export default function DetailsList(props: DetailsListProps) {
   const m = () => props.m;
   const done = () => props.context.data?.epochs ?? null;
   const src = () => props.source;
-  // A run's model is evaluated on the run's dataset, which /eval still names by its id once it was removed from FOLO
-  // (docs/API.md): linked only while the run's dataset is registered (the context read it), never to "Dataset not found".
-  const evalLinked = () => !m().run_id || (!!src().datasetId && props.context.data?.dataset?.id === src().datasetId);
   const h = () => here.get()!;
 
   // Three columns of label / value rows (as Desktop's Details): what the model is, how it was trained and stored,
@@ -163,9 +165,13 @@ export default function DetailsList(props: DetailsListProps) {
                 {props.context.data?.dataset ? (
                   <>
                     <span class="faint">{' on '}</span>
-                    <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
-                      {props.context.data.dataset.name}
-                    </a>
+                    {props.registered(props.context.data.dataset.id) ? (
+                      <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
+                        {props.context.data.dataset.name}
+                      </a>
+                    ) : (
+                      <span>{props.context.data.dataset.name}</span>
+                    )}
                   </>
                 ) : null}
               </>
@@ -198,7 +204,7 @@ export default function DetailsList(props: DetailsListProps) {
           <dd class="evald">
             {props.unevaluated ? (
               <span class="muted">Not evaluated: no registered dataset has its classes</span>
-            ) : src().datasetName && src().datasetId && evalLinked() ? (
+            ) : src().datasetName && props.registered(src().datasetId) ? (
               <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
                 {src().datasetName}
               </a>

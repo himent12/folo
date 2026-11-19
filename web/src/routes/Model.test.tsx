@@ -138,6 +138,27 @@ describe('Model: what was evaluated', () => {
     await until(() => dd.textContent?.includes('fasteners-old'), 'the evaluated dataset');
     expect(dd.querySelector('a')).toBeNull();
   });
+
+  // Review of #335: removing the dataset leaves the models as they were, so nothing the page read about the model
+  // changes; its datasets are read on their own, and Evaluated on (and Source) stop linking with the name as plain text.
+  it('stops linking the evaluated dataset when it is removed while the page is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = hub.api as MockApi;
+      await open('m_fast_n');
+      const kv = (label: string) => [...target.querySelectorAll('#details .kv')].find((k) => k.querySelector('dt')?.textContent === label)?.querySelector('dd');
+      const evald = await until(() => kv('Evaluated on')?.querySelector('a[href^="#/datasets/"]'), 'the link');
+      const name = evald.textContent;
+      await until(() => kv('Source')?.querySelector('a[href^="#/datasets/"]'), "the run's dataset link");
+      const dsId = (await api.run((await api.model('m_fast_n')).run_id!)).config.dataset_id;
+      await api.deleteDataset(dsId);
+      await vi.advanceTimersByTimeAsync(5000);
+      await until(() => !kv('Evaluated on')?.querySelector('a') && !kv('Source')?.querySelector('a[href^="#/datasets/"]'), 'no dataset link');
+      expect(kv('Evaluated on')?.textContent).toContain(name);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // s4-models-1 (and its reviews): "Trained for" says the epochs the run finished, never the planned count: a completed

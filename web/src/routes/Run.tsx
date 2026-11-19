@@ -51,6 +51,7 @@ import ConfigPanel from './run/ConfigPanel';
 import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
 import Outcome, { canContinue } from './run/Outcome';
+import { datasetPresence } from './overview/newDatasets';
 import Callout from './run/Callout';
 import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
@@ -103,6 +104,8 @@ export default function Run() {
   /** The datasets are in and the run's is not among them: it was removed. */
   const datasetGone = computed(() => !!datasets.data && !dataset.get());
   const datasetName = computed(() => dataset.get()?.name ?? recorded.get()?.name);
+  /** Whether the run's dataset is registered, removed or not known yet (./overview/newDatasets): Outcome's Check dataset. */
+  const presence = datasetPresence(datasets, () => [config.get()?.dataset_id]);
   const modelClasses = computed(() => {
     const id = run.get()?.model_id;
     return id ? models.data?.find((m) => m.id === id)?.classes : undefined;
@@ -531,7 +534,7 @@ export default function Run() {
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
               datasetName={datasetName.get()}
-              datasetGone={datasetGone.get()}
+              datasetRegistered={presence(config.get()?.dataset_id) === 'registered'}
               system={system.data ?? (system.error ? null : undefined)}
             />
 

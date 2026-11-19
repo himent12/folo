@@ -49,8 +49,11 @@ export interface OutcomeProps {
   warnings?: string[];
   /** The run's dataset's name, for a failure that names it. */
   datasetName?: string;
-  /** The run's dataset was removed from FOLO: no Check dataset (its page is gone). */
-  datasetGone?: boolean;
+  /**
+   * The run's dataset is known to be registered (../overview/newDatasets `datasetPresence`): Check dataset is offered
+   * only then, never while the datasets load or cannot be read, nor once it was removed (its page is gone).
+   */
+  datasetRegistered?: boolean;
   /**
    * `/api/system`: the GPU's memory and whether the server estimates runs, to forecast the fixes. Undefined while it
    * loads; null when it could not be read (the fixes are then offered unforecast).
@@ -262,7 +265,7 @@ export default function Outcome(props: OutcomeProps) {
           also={short.get()}
           actions={() => (
             <>
-              {props.run.error_code === 'data_error' && !props.datasetGone ? (
+              {props.run.error_code === 'data_error' && props.datasetRegistered ? (
                 <Button size="sm" icon={Database} href={href(`/datasets/${props.run.config.dataset_id}`)}>
                   Check dataset
                 </Button>

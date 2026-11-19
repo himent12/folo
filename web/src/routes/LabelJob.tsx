@@ -33,7 +33,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { toast } from '$lib/ui/toast';
 import Logs from './run/Logs';
-import { followNewDatasets } from './overview/newDatasets';
+import { datasetPresence, type DatasetPresence } from './overview/newDatasets';
 import AddImagesDialog from './label/AddImagesDialog';
 import AgentPanel from './label/AgentPanel';
 import { AgentChoice } from './label/agentChoice';
@@ -191,21 +191,15 @@ export default function LabelJob() {
       run: () => router.go(`/datasets/${ds.id}`),
     });
   }
-  // The dataset made from the job, by the id the job keeps (also once it was removed from FOLO): linked only when the
-  // datasets list has it. While the list loads, or is read again for an id it does not have yet (made in another tab),
-  // the line names no dataset and links nowhere; an id still missing after that was removed.
+  // The dataset made from the job, by the id the job keeps (also once it was removed from FOLO): linked only while it is
+  // registered, "since removed" once it is known removed, and neither while that is not known (./overview/newDatasets).
   const madeId = computed(() => job.get()?.dataset_id ?? null);
-  const lookingUp = followNewDatasets(datasets, () => (madeId.get() ? [madeId.get()!] : undefined));
+  const presence = datasetPresence(datasets, () => [madeId.get()]);
   const madeDataset = computed(() => {
     const dsId = madeId.get();
     return dsId ? datasets.data?.find((d) => d.id === dsId) : undefined;
   });
-  const made = computed<'none' | 'unknown' | 'there' | 'removed'>(() => {
-    const dsId = madeId.get();
-    if (!dsId) return 'none';
-    if (madeDataset.get()) return 'there';
-    return !datasets.data || lookingUp(dsId) ? 'unknown' : 'removed';
-  });
+  const made = computed<'none' | DatasetPresence>(() => (madeId.get() ? presence(madeId.get()) : 'none'));
   /** Where a removed dataset's files are, unless they were deleted with it (the server writes them under its data dir). */
   const removedWhere = computed(() =>
     system.data?.data_dir
@@ -332,9 +326,9 @@ export default function LabelJob() {
                 {made.get() !== 'none' ? (
                   <span data-made>
                     made{' '}
-                    {made.get() === 'there' ? (
+                    {made.get() === 'registered' ? (
                       <a class="link" href={href(`/datasets/${madeId.get()}`)}>
-                        {madeDataset.get()?.name}
+                        {madeDataset.get()?.name ?? 'a dataset'}
                       </a>
                     ) : made.get() === 'removed' ? (
                       <span title={`The dataset made from this job is no longer registered in FOLO. ${removedWhere.get()}`}>a dataset, since removed from FOLO</span>

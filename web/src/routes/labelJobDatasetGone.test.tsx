@@ -5,6 +5,7 @@
 import { flush as flushSync } from 'fw';
 import { render, type Rendered } from '../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
@@ -102,6 +103,40 @@ describe('a labeling job whose dataset was removed', () => {
       },
       { timeout: 4000, interval: 1 },
     );
+    expect(made()?.textContent).toBe(`made ${ds.name}`);
+    expect(shown.some((t) => t.includes('removed'))).toBe(false);
+  });
+
+  // Review of #335: the job exported again (another tab) after its first export was removed; the list the page has
+  // predates the new export and the read for it fails (503). An older list without the id is no reason to call it
+  // removed: the line claims nothing until a read succeeds.
+  it('never calls a dataset removed when the read for it fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = new MockApi('normal', 0);
+    const ds = await api.createLabelDataset('lb_51d0', {});
+    const real = api.datasets.bind(api);
+    let reads = 0;
+    let failing = true;
+    vi.spyOn(api, 'datasets').mockImplementation(async () => {
+      reads++;
+      if (reads === 1) return (await real()).filter((d) => d.id !== ds.id);
+      if (failing) throw new ApiError(503, 'unavailable', 'The server is busy.');
+      return real();
+    });
+    const shown: string[] = [];
+    const look = () => (flushSync(), shown.push(made()?.textContent ?? ''), shown[shown.length - 1]!);
+    await open(api, () => !!look() && reads >= 2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(look()).toBe('made a dataset');
+    expect(link()).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000); // a poll that fails too
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(look()).toBe('made a dataset');
+    failing = false;
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.waitFor(() => {
+      if (!look() || !link()) throw new Error('not linked');
+    });
     expect(made()?.textContent).toBe(`made ${ds.name}`);
     expect(shown.some((t) => t.includes('removed'))).toBe(false);
   });

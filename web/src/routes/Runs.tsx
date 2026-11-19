@@ -73,7 +73,7 @@ export default function Runs() {
   const dsName = computed(() => new Map((datasets.data ?? []).map((d) => [d.id, d])));
   // A run on a dataset made since the list loaded (another tab, a benchmark loop): the datasets are read again, and the
   // run says the name it recorded meanwhile instead of "(removed)" (./overview/newDatasets, as Overview does).
-  const lookingUp = followNewDatasets(datasets, () => runs.data?.map((r) => r.config.dataset_id));
+  const lookingUp = followNewDatasets(datasets, () => runs.data);
   /** A run's dataset by name (lib/runDataset), the one it recorded while the datasets load; marked once it was removed. */
   const datasetName = (r: Run) =>
     (lookingUp(r.config.dataset_id) ? r.dataset?.name : runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error)) ?? r.dataset?.name ?? '';

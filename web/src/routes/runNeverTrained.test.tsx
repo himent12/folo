@@ -6,6 +6,7 @@ import { flush as flushSync } from 'fw';
 import { render, type Rendered } from '../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { Run as RunT, Step } from '$lib/api/types';
 import { parse, router } from '$lib/router';
@@ -20,13 +21,19 @@ afterEach(() => {
   target?.remove();
 });
 
-async function open(change: Partial<RunT>, steps: Step[] = [], loaded = (t: HTMLElement) => !!t.querySelector('.metrics .never')) {
+async function open(
+  change: Partial<RunT>,
+  steps: Step[] = [],
+  loaded = (t: HTMLElement) => !!t.querySelector('.metrics .never'),
+  prep: (api: MockApi) => void = () => {},
+) {
   const api = new MockApi('normal', 0);
   const done = (await api.runs()).find((r) => r.status === 'completed')!;
   const run: RunT = { ...done, epoch: 0, step: 0, best: null, model_id: null, ...change };
   api.run = async () => run;
   api.runMetrics = async () => ({ steps, epochs: [] });
   api.runLogs = async () => ({ lines: [{ t: '2026-11-11T10:00:00Z', level: 'error', message: 'dataset folder not found' }], total: 1 });
+  prep(api);
   hub.api = api;
   hub.mode = 'mock';
   router.route = parse(`#/runs/${run.id}`);
@@ -77,5 +84,44 @@ describe('a run that ended without training', () => {
     expect(text).not.toContain('appear after the first validation');
     expect(text).toContain('not validated');
     expect(text).toContain('No samples: it ended before its first validation.');
+  });
+});
+
+// Review of #335: Check dataset links to the run's dataset only once the datasets list has it; while the list is
+// delayed, or after its first read failed, the action waits (a removed dataset's page is "Dataset not found").
+describe("a failed run's Check dataset", () => {
+  const failed = { status: 'failed', error_code: 'data_error', error: "dataset folder 'D:/gone' not found" } as const;
+  const check = () => [...target.querySelectorAll<HTMLElement>('.c-acts a')].find((a) => a.textContent?.trim() === 'Check dataset');
+  const shown = () => !!target.querySelector('.c-acts');
+
+  it('waits for the datasets list', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const run = await open(failed, [], shown, (api) => {
+      const datasets = api.datasets.bind(api);
+      api.datasets = async () => (await held, datasets());
+    });
+    expect(check()).toBeUndefined();
+    release();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!check()) throw new Error('no Check dataset');
+    });
+    expect(check()!.getAttribute('href')).toBe(`#/datasets/${run.config.dataset_id}`);
+  });
+
+  it('is not offered when the datasets cannot be read', async () => {
+    let reads = 0;
+    await open(failed, [], shown, (api) => {
+      api.datasets = async () => {
+        reads++;
+        throw new ApiError(503, 'unavailable', 'The server is busy.');
+      };
+    });
+    await vi.waitFor(() => {
+      if (reads < 1) throw new Error('not read');
+    });
+    flushSync();
+    expect(check()).toBeUndefined();
   });
 });
