@@ -10,7 +10,7 @@
  * marks labels nobody changed as reviewed and opens the next image to review; saved boxes are reviewed too, so with
  * unsaved changes Enter saves them and opens the next image to review (Ctrl+S / ⌘S saves and stays). Both are made on
  * the labels shown (`expect`): once another tab, the CLI or an agent saved others, the server refuses them, the edits
- * stay and the stream shows the new labels. "Ask the agent again"
+ * stay and the stream (for a mark, a load of the image) shows the new labels. "Ask the agent again"
  * runs the agent on this image alone with a note; "Remove image" takes it out of the job. An image the agent has right
  * now cannot be edited, and says so; one that waits for its turn in a run can, and then leaves the run. Its keys work
  * while it is the topmost dialog (shell/pageCommands `dialogKey`), also after a button that had focus turned disabled.
@@ -217,8 +217,9 @@ export default function Editor(props: EditorProps) {
     const id = cur.id;
     const sent = draft.peek();
     // Made on the labels shown here: refused once the image has others (another tab, the CLI or an agent saved some
-    // this editor has not shown yet), which the save would otherwise replace unseen.
-    const expect = boxRevision(base.peek());
+    // this editor has not shown yet), which the save would otherwise replace unseen. The revision is the newest
+    // image's, not `base`'s: boxes that compare equal here (0 and -0) can still be another revision.
+    const expect = boxRevision(cur.boxes);
     const mark = props.live.mark();
     // A save ends a run of arrow presses: the next one is a step of its own, back to what was saved.
     history.seal();
@@ -267,8 +268,9 @@ export default function Editor(props: EditorProps) {
     if (!cur || reviewing.peek()) return;
     // Read before the answer: under "To review" the image leaves the filter once it is reviewed.
     const next = reviewed ? nextToReview(cur.id) : null;
-    // The mark is for the labels on screen: once the image has others, the server refuses it.
-    const expect = boxRevision(base.peek());
+    // The mark is for the labels on screen (the newest image's, as in `save`): once the image has others, the server
+    // refuses it.
+    const expect = boxRevision(cur.boxes);
     const mark = props.live.mark();
     reviewing.set(true);
     status.clear();
@@ -279,13 +281,24 @@ export default function Editor(props: EditorProps) {
       if (next) props.onnavigate(next);
       else status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
-      // The stream shows the new labels here, for a fresh look.
       if (!changedElsewhere(e)) status.error(e, 'Could not mark the image');
-      else if (shownId === cur.id)
-        status.show('info', 'Changed elsewhere', 'Its labels were changed from another tab or window before your mark got there, so nothing was marked. Check the labels shown now.');
+      else await reload(cur.id);
     } finally {
       reviewing.set(false);
     }
+  }
+  /** After a refused mark: the image's labels as the server has them now (the stream may tell later), then the ask. */
+  async function reload(id: string) {
+    const at = props.live.mark();
+    const now = await hub.api.labelImages(props.job.id, { ids: [id] }).then(
+      (p) => p.images.find((i) => i.id === id),
+      () => undefined,
+    );
+    if (now) props.live.put([now], at);
+    if (shownId !== id) return;
+    const why = 'Its labels were changed from another tab or window before your mark got there, so nothing was marked.';
+    if (now) status.show('info', 'Changed elsewhere', `${why} Check the labels shown now.`);
+    else status.show('error', 'Changed elsewhere', `${why} The new labels could not be loaded, so the ones shown may be out of date.`);
   }
 
   /** Enter with unsaved changes: saves them (which marks the image reviewed) and opens the next image to review. */

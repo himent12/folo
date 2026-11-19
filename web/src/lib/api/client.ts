@@ -519,7 +519,7 @@ export class HttpApi implements Api {
   labelImages(jobId: string, q: LabelImagesQuery = {}, signal?: AbortSignal) {
     // A page without its images, or without the `total` that bounds the paging, would stop LiveLabelJob's paging
     // early and show a truncated job as whole (review round 2).
-    return this.#envelope<LabelImagePage>(`/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, offset: q.offset, limit: q.limit })}`, 'images', true, signal);
+    return this.#envelope<LabelImagePage>(`/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, ids: q.ids?.join(','), offset: q.offset, limit: q.limit })}`, 'images', true, signal);
   }
   async addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void) {
     const send = (chunk: File[]) => {

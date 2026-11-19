@@ -169,6 +169,8 @@ export interface LabelImagesQuery {
   offset?: number;
   /** Default 100, at most 1000. */
   limit?: number;
+  /** Only these images (feature `label_image_filters`, which every server with `label_revisions` has). */
+  ids?: readonly string[];
 }
 
 /** `GET /api/label/jobs/{id}/images`: `total` counts every match before offset / limit; in the order added. */

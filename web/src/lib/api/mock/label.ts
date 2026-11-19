@@ -351,7 +351,7 @@ export class MockLabeling {
     this.advance(j, now);
     if (q.status && !['pending', 'labeling', 'labeled', 'failed'].includes(q.status))
       throw new ApiError(400, 'invalid_query', `unknown status \`${q.status}\`: pending, labeling, labeled or failed`);
-    const all = q.status ? j.images.filter((i) => i.status === q.status) : j.images;
+    const all = j.images.filter((i) => (!q.status || i.status === q.status) && (!q.ids || q.ids.includes(i.id)));
     const offset = Math.max(0, q.offset ?? 0);
     const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
     return { total: all.length, images: all.slice(offset, offset + limit).map((i) => this.#toImage(i)) };
