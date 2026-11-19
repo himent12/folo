@@ -19,7 +19,7 @@ describe('format', () => {
     expect(axisMetric(0.00039, 0.00042)).toBe('0.00039');
     // On 0–0.001, two scores 44 % of the plot apart read apart.
     expect(axisMetric(0.00051, 0.001)).toBe('0.0005');
-    expect(axisMetric(0.00095, 0.001)).not.toBe(axisMetric(0.00051, 0.001));
+    expect(axisMetric(0.00094, 0.001)).toBe('0.0009');
     // A full-scale chart keeps main's three decimals.
     expect(axisMetric(0.00007, 1)).toBe('0.000');
     expect(axisMetric(0.5, 1)).toBe('0.500');

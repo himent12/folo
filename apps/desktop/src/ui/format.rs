@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(fmt_score_on(0.000_39, 0.000_42), "0.00039");
         // On 0–0.001, two scores 44 % of the plot apart read apart.
         assert_eq!(fmt_score_on(0.000_51, 0.001), "0.0005");
-        assert_ne!(fmt_score_on(0.000_51, 0.001), fmt_score_on(0.000_95, 0.001));
+        assert_eq!(fmt_score_on(0.000_94, 0.001), "0.0009");
         // A full-scale chart keeps main's three decimals.
         assert_eq!(fmt_score_on(0.000_07, 1.), "0.000");
         assert_eq!(fmt_score_on(0.5, 1.), "0.500");
