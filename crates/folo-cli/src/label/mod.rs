@@ -130,13 +130,16 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             let r = s.labels.export(&a.job, req).map_err(api_error)?;
             out.record(&r);
             out.human(format!(
-                "dataset {} '{}' in {}: {} train, {} val images\ntrain it: folo train --data {}",
+                "dataset {} '{}' in {}: {} train, {} val images\n{}",
                 r.dataset_id,
                 r.name,
                 r.path,
                 r.train,
                 r.val,
-                folo_api::json::cli_path(&r.path)
+                folo_api::json::cli_command(
+                    "train it: folo train --data {data}",
+                    &[("data", Path::new(&r.path))]
+                )
             ));
         }
     }

@@ -92,9 +92,12 @@ pub(super) fn device_lost(e: &Error) -> bool {
 pub(super) fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> String {
     let resume = match last {
         Some((p, n)) => format!(
-            "{} holds the state after epoch {n}: resume with `folo train --resume {}`",
+            "{} holds the state after epoch {n}: {}",
             folo_api::json::path(p),
-            folo_api::json::cli_path(p)
+            folo_api::json::cli_command(
+                "resume with `folo train --resume {checkpoint}`",
+                &[("checkpoint", p)]
+            )
         ),
         None => "no checkpoint was written yet: start the run again".into(),
     };

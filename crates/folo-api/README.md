@@ -25,7 +25,7 @@ Every module but `codes`, `json` and `weights` is private and re-exported at the
 | `src/cloud.rs` | Providers, connections, offers, instances, a run's `compute` and `cloud`, upload sessions | Cloud compute, Uploads |
 | `src/errors.rs` | `ErrorBody` and `ApiError`: the body of every non-2xx response | Errors |
 | `src/codes.rs` | `CODES`: every error code with its HTTP status, CLI exit code and meaning | Errors |
-| `src/json.rs` | JSON presentation helpers of the CLI's `--json` records and the MCP results; `cli_path`, a path in a command FOLO prints for the user to paste | |
+| `src/json.rs` | JSON presentation helpers of the CLI's `--json` records and the MCP results; `cli_command`, a command with paths FOLO prints for the user to paste: it pastes into PowerShell, cmd or a POSIX shell when no path holds `"`, `$`, `` ` ``, `%`, `!`, `\`, a typographic double quote or a control character; for a path that does, it shows the path and leaves the quoting to the person | |
 | `src/weights.rs` | The published weights `folo weights pull` downloads, their cache folder, `home_dir` | |
 | `src/tests.rs`, `src/bench/tests.rs` | Unit tests of defaults, round trips and compatibility | |
 

@@ -57,7 +57,8 @@ fn tiny_run() -> Arc<TinyRun> {
         return run;
     }
     let root = TestDir::new("cli-engine");
-    let data = root.join("shapes");
+    // A space in the folder name: the hints that print it must quote it (#314).
+    let data = root.join("shapes set");
     let cfg = SyntheticConfig {
         images: 12,
         classes: vec!["circle".into(), "square".into()],
@@ -152,9 +153,28 @@ fn train_val_predict_export_with_json() {
     }
     let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&spaced.join("last.folo"))]);
     assert_eq!(code, 1, "{stderr}");
-    let model = format!("--model \"{}\" ", folo_api::json::path(spaced.join("best.folo")));
-    assert!(lines.last().unwrap()["error"]["hint"].as_str().unwrap().contains(&model), "{lines:?}");
-    assert!(stderr.contains(&model), "{stderr}");
+    let cmd = format!(
+        "folo train --model \"{}\" --data \"{}\" --epochs <n>",
+        folo_api::json::path(spaced.join("best.folo")),
+        folo_api::json::path(data)
+    );
+    assert!(lines.last().unwrap()["error"]["hint"].as_str().unwrap().ends_with(&cmd), "{lines:?}");
+    assert!(stderr.contains(&cmd), "{stderr}");
+    // ... and never with a path a shell would change inside the quotes: a placeholder, and the path after it.
+    let dollar = root.join("run$HOME/weights");
+    std::fs::create_dir_all(&dollar).unwrap();
+    for f in ["last.folo", "best.folo"] {
+        std::fs::copy(run.join("weights").join(f), dollar.join(f)).unwrap();
+    }
+    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&dollar.join("last.folo"))]);
+    assert_eq!(code, 1, "{stderr}");
+    let hint = format!(
+        "folo train --model <model> --data \"{}\" --epochs <n>. In place of <model>, paste this path quoted for your \
+         shell: {}",
+        folo_api::json::path(data),
+        folo_api::json::path(dollar.join("best.folo"))
+    );
+    assert!(lines.last().unwrap()["error"]["hint"].as_str().unwrap().ends_with(&hint), "{lines:?}");
 
     // val: one object with the metrics.
     let (code, lines, stderr) =

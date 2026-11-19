@@ -1,5 +1,5 @@
 //! JSON presentation helpers shared by the CLI's `--json` records and the MCP results: floats without f32 → f64
-//! noise and paths with `/` separators (quoted where needed in a command the user may paste: [`cli_path`]).
+//! noise and paths with `/` separators (quoted where needed in a command the user may paste: [`cli_command`]).
 
 use std::path::Path;
 
@@ -52,15 +52,46 @@ pub fn path(p: impl AsRef<Path>) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s }
 }
 
-/// A path as an argument of a command FOLO prints for the user to paste ("folo train --resume …"): [`path`], in
-/// double quotes when it holds anything but ASCII letters, digits and `-_./:`. PowerShell, cmd and POSIX shells all
-/// read a double-quoted path with spaces, commas or non-ASCII letters as one argument. Not covered: `"`, `$`, `` ` ``,
-/// `%` and `!`, which some of those shells expand inside double quotes (no one quoting works in all three).
-pub fn cli_path(p: impl AsRef<Path>) -> String {
-    let s = path(p);
-    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c));
-    if plain { s } else { format!("\"{s}\"") }
+/// A command FOLO prints for the user to paste (`folo train --resume {checkpoint}`): each `{name}` in `template` is
+/// that name's path in `paths` ([`path`]), bare when it holds only ASCII letters, digits and `-_./:`, else in double
+/// quotes, which PowerShell, cmd and POSIX shells all read as one argument. A path that one of those shells changes
+/// inside double quotes (`UNQUOTABLE`, or a control character) is never put in the command: `<name>` stands in its
+/// place, and a sentence after the command gives the path as it is, for the user to quote for their shell. A `{name}`
+/// without a path also prints `<name>`. `template` is FOLO's own text: a path in it could hold a `{name}`.
+pub fn cli_command(template: &str, paths: &[(&str, &Path)]) -> String {
+    let (mut line, mut notes, mut rest) = (String::new(), String::new(), template);
+    while let Some((before, after)) = rest.split_once('{')
+        && let Some((name, after)) = after.split_once('}')
+    {
+        line.push_str(before);
+        let p = paths.iter().find(|(n, _)| *n == name).map(|(_, p)| path(p));
+        match p {
+            Some(p)
+                if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c)) =>
+            {
+                line.push_str(&p)
+            }
+            Some(p) if !p.chars().any(|c| UNQUOTABLE.contains(c) || c.is_control()) => {
+                line.push_str(&format!("\"{p}\""))
+            }
+            p => {
+                line.push_str(&format!("<{name}>"));
+                if let Some(p) = p {
+                    notes.push_str(&format!(
+                        ". In place of <{name}>, paste this path quoted for your shell: {p}"
+                    ));
+                }
+            }
+        }
+        rest = after;
+    }
+    line + rest + &notes
 }
+
+/// What PowerShell (`"` `$` `` ` `` and the typographic double quotes, which it reads as `"`), cmd (`%`, `!` with
+/// delayed expansion) or a POSIX shell (`$` `` ` `` `\`, `!` when interactive) changes inside double quotes. On
+/// Windows [`path`] has turned every `\` into `/`.
+const UNQUOTABLE: &str = "\"$`%!\\\u{201C}\u{201D}\u{201E}\u{201F}\u{2033}";
 
 /// A duration in milliseconds as FOLO reports it: rounded to 0.1 µs, so a sum of stage times reads `10.5163` rather
 /// than `10.516300000000001`. Timers are not that precise anyway.
@@ -127,12 +158,56 @@ mod tests {
 
     #[test]
     fn command_paths_are_quoted_when_they_need_it() {
-        assert_eq!(cli_path("D:/data/shapes-n_2.folo"), "D:/data/shapes-n_2.folo");
-        assert_eq!(cli_path("runs/run with space/stop café"), "\"runs/run with space/stop café\"");
-        assert_eq!(cli_path("D:/a,b"), "\"D:/a,b\"");
-        assert_eq!(cli_path(""), "\"\"");
-        if cfg!(windows) {
-            assert_eq!(cli_path(r"C:\Users\a b\x"), "\"C:/Users/a b/x\"");
+        let cmd = |p: &str| cli_command("folo dataset stats {data}", &[("data", Path::new(p))]);
+        let arg = |p: &str| cmd(p).strip_prefix("folo dataset stats ").unwrap().to_string();
+        for bare in ["D:/data/shapes-n_2.folo", "C:/", "//server/share/x", "runs/a.b:c"] {
+            assert_eq!(arg(bare), bare);
         }
+        for (p, quoted) in [
+            ("runs/run with space/stop café", "\"runs/run with space/stop café\""),
+            ("D:/a,b;c&d(e)#f~g=h", "\"D:/a,b;c&d(e)#f~g=h\""),
+            ("'lead/it's", "\"'lead/it's\""),
+            ("//server/share/a b", "\"//server/share/a b\""),
+            ("{data}/x", "\"{data}/x\""),
+            ("", "\"\""),
+        ] {
+            assert_eq!(arg(p), quoted);
+        }
+        if cfg!(windows) {
+            assert_eq!(arg(r"C:\Users\a b\x"), "\"C:/Users/a b/x\"");
+            assert_eq!(arg(r"\\server\share\a b"), "\"//server/share/a b\"");
+            assert_eq!(arg(r"C:\"), "C:/");
+        }
+        // A path a shell would change inside double quotes is never in the command.
+        let unquotable =
+            ['"', '$', '`', '%', '!', '\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}', '\u{2033}', '\n', '\t'];
+        for c in unquotable.into_iter().chain((!cfg!(windows)).then_some('\\')) {
+            let p = format!("D:/a{c}PROBE{c}b");
+            assert_eq!(
+                cmd(&p),
+                format!(
+                    "folo dataset stats <data>. In place of <data>, paste this path quoted for your shell: {p}"
+                ),
+                "{c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_hint_with_one_unquotable_path() {
+        let hint = |model: &str, data: Option<&str>| {
+            let mut paths = vec![("model", Path::new(model))];
+            paths.extend(data.map(|d| ("dataset", Path::new(d))));
+            cli_command("start a new run: folo train --model {model} --data {dataset} --epochs <n>", &paths)
+        };
+        assert_eq!(
+            hint("runs/a$b/weights/best.folo", Some("D:/data/my set")),
+            "start a new run: folo train --model <model> --data \"D:/data/my set\" --epochs <n>. In place of \
+             <model>, paste this path quoted for your shell: runs/a$b/weights/best.folo"
+        );
+        assert_eq!(
+            hint("runs/a/weights/best.folo", None),
+            "start a new run: folo train --model runs/a/weights/best.folo --data <dataset> --epochs <n>"
+        );
     }
 }
