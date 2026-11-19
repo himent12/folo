@@ -1542,6 +1542,7 @@ start, except live-run timestamps):
   through every phase (about 2 s each of `provisioning`, `booting` and `syncing` with progress, then training like
   any mock run, then `collecting` and `releasing`), with an instance in `/api/cloud/instances` whose cost grows
   with its price; `DELETE` on it fails the run with `cloud_instance_lost`. A run that ends (stopped, or its instance
-  terminated) records the phase it was in as `ended_in`, as a real one does. `run_3c01` is a finished cloud run
+  terminated) records the phase it was in when its end was decided as `ended_in`, as a real one does: stopped while
+  it trains, it ends in `collecting` (the worker's weights are copied). `run_3c01` is a finished cloud run
   (`cloud.phase: released`, with its cost). `FOLO_MOCK_CLOUD=none` starts without a connection, `off` leaves the
   `cloud` feature out. `/api/uploads` answers `501 not_implemented`.

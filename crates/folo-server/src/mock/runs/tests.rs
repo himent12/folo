@@ -1,6 +1,10 @@
-//! Unit tests of the simulated runs: checkpoints of stopped runs, the curves, the live clock and stopping.
+//! Unit tests of the simulated runs: checkpoints of stopped runs, the curves, the live clock, stopping and the phase
+//! a cloud run ended in.
+
+use folo_api::CloudPhase;
 
 use super::*;
+use crate::mock::cloud::{PHASE_S, offers};
 
 fn config(epochs: u32) -> TrainConfig {
     serde_json::from_value(serde_json::json!({ "dataset_id": "ds", "epochs": epochs })).unwrap()
@@ -91,4 +95,53 @@ fn stop_sequence() {
     let s = clock.snap(&curve, t0 + Duration::from_secs_f64(8.0));
     assert_eq!((s.status, s.step), (RunStatus::Stopped, 50));
     assert!(s.finished.is_some());
+}
+
+/// A cloud run as the store creates one (3 phases of [`PHASE_S`] before it trains 3 epochs of 6 s, from 6 s to 24 s,
+/// then collecting and releasing), stopped at `stop` and its instance lost at `lost` (seconds after its creation): its
+/// last status and every `cloud.ended_in` it showed, read every 0.25 s for 100 s from the first of them.
+fn cloud_end(stop: Option<f64>, lost: Option<f64>) -> (RunStatus, Vec<CloudPhase>) {
+    let cfg = config(3);
+    let curve = Curve::new(3, 0.5, 1, &cfg, 10);
+    let mut clock = LiveClock::new(6.0, 3.0 * PHASE_S, 0.0, false, 0.0).with_tail(2.0 * PHASE_S);
+    (clock.stop_at, clock.lost_at) = (stop, lost);
+    let t0 = clock.origin;
+    let t = Timeline::Live(Mutex::new(clock));
+    let run = SimRun::new("run_x".into(), cfg, vec!["a".into()], 10, curve, "cpu".into(), None, true, t)
+        .with_cloud(SimCloud::new("run_x", "cc_x", offers().remove(0), 1.0));
+    let Timeline::Live(c) = &run.timeline else { unreachable!() };
+    // From the first of the two on (the clock knows them in advance).
+    let from = [stop, lost].into_iter().flatten().reduce(f64::min).unwrap_or(0.0);
+    let (mut status, mut seen) = (RunStatus::Queued, Vec::new());
+    for i in 0..400 {
+        let snap = c.lock().unwrap().snap(&run.curve, t0 + Duration::from_secs_f64(from + i as f64 * 0.25));
+        status = snap.status;
+        if let Some(p) = run.cloud_at(&snap).unwrap().ended_in
+            && seen.last() != Some(&p)
+        {
+            seen.push(p);
+        }
+    }
+    (status, seen)
+}
+
+#[test]
+fn a_cloud_run_ends_in_the_phase_its_end_was_decided_in() {
+    use CloudPhase::*;
+    use RunStatus::{Completed, Failed, Stopped};
+    for (k, phase) in [Provisioning, Booting, Syncing].into_iter().enumerate() {
+        let mid = (k as f64 + 0.5) * PHASE_S;
+        assert_eq!(cloud_end(Some(mid), None), (Stopped, vec![phase]));
+        assert_eq!(cloud_end(None, Some(mid)), (Failed, vec![phase]));
+    }
+    // A lost instance cuts the training short; a stop ends it on the worker, which hands its weights over.
+    assert_eq!(cloud_end(None, Some(10.0)), (Failed, vec![Training]));
+    assert_eq!(cloud_end(Some(10.0), None), (Stopped, vec![Collecting]));
+    // Lost while it releases after a stop: the stop decided where it ended, even when the training would have started
+    // between the two.
+    assert_eq!(cloud_end(Some(5.9), Some(6.5)), (Failed, vec![Syncing]));
+    assert_eq!(cloud_end(Some(10.0), Some(10.5)), (Failed, vec![Collecting]));
+    // Lost while it collects, and never stopped.
+    assert_eq!(cloud_end(None, Some(25.0)), (Failed, vec![Collecting]));
+    assert_eq!(cloud_end(None, None), (Completed, vec![Collecting]));
 }

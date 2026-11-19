@@ -1,7 +1,7 @@
 //! The mock's cloud (docs/API.md, Mock mode → Cloud) over HTTP: the real providers, the demo connection and its
 //! offers, connecting (a secret with `bad` is rejected), the seeded cloud run `run_3c01`, a new cloud run through
-//! its phases with its instance (terminated by hand, it fails with `cloud_instance_lost`), the phase a run ended in
-//! (`ended_in`, terminated or stopped in each phase up to training), and `FOLO_MOCK_CLOUD`'s `none` and `off`.
+//! its phases with its instance (terminated by hand, it fails with `cloud_instance_lost` and ended in `training`), and
+//! `FOLO_MOCK_CLOUD`'s `none` and `off`. The phase a run ended in at each moment: `mock/runs/tests.rs`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,6 +92,7 @@ async fn the_mock_cloud_has_a_connection_offers_and_a_finished_cloud_run() {
         (Some("completed"), Some("cc_4d2a"))
     );
     assert_eq!(run["cloud"]["phase"], "released");
+    assert_eq!(run["cloud"]["ended_in"], "collecting", "it trained and copied its weights");
     assert!(run["cloud"]["cost_usd"].as_f64().unwrap() > 0.0);
     let (_, instances) = send(&app, "GET", "/api/cloud/instances", None).await;
     let i = &instances["instances"][0];
@@ -166,8 +167,8 @@ async fn a_mock_cloud_run_hands_over_and_fails_when_its_instance_is_terminated()
     assert_eq!((status, ended["status"].as_str()), (StatusCode::OK, Some("terminated")));
     let lost = wait_run(&app, &id, |r| r["status"] == "failed").await;
     assert_eq!(
-        (lost["error_code"].as_str(), lost["cloud"]["phase"].as_str()),
-        (Some("cloud_instance_lost"), Some("released"))
+        (lost["error_code"].as_str(), lost["cloud"]["phase"].as_str(), lost["cloud"]["ended_in"].as_str()),
+        (Some("cloud_instance_lost"), Some("released"), Some("training"))
     );
     let (status, e) = send(&app, "DELETE", "/api/cloud/instances/ci_none", None).await;
     assert_eq!((status, e["error"]["code"].as_str()), (StatusCode::NOT_FOUND, Some("instance_not_found")));
@@ -179,47 +180,6 @@ async fn a_mock_cloud_run_hands_over_and_fails_when_its_instance_is_terminated()
     )
     .await;
     assert_eq!((status, e["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_config")));
-}
-
-#[tokio::test]
-async fn a_mock_cloud_run_ends_in_the_phase_it_was_in() {
-    let (store, app) = mock(MockCloud::On);
-    let (_, seeded) = send(&app, "GET", "/api/runs/run_3c01", None).await;
-    assert_eq!(seeded["cloud"]["ended_in"], "collecting", "it trained and copied its weights");
-    let compute = json!({ "connection_id": "cc_4d2a", "offer_id": "NVIDIA RTX A4000@community" });
-    let body = json!({ "dataset_id": "ds_5a1e", "epochs": 3, "compute": compute });
-    let phases = ["provisioning", "booting", "syncing", "training"];
-    for (k, phase) in phases.into_iter().enumerate() {
-        for terminate in [true, false] {
-            let (_, run) = send(&app, "POST", "/api/runs", Some(body.clone())).await;
-            let id = run["id"].as_str().unwrap().to_string();
-            store.pass_time(Duration::from_secs_f64((k as f64 + 0.5) * PHASE_S));
-            let (_, run) = send(&app, "GET", &format!("/api/runs/{id}"), None).await;
-            assert_eq!(run["cloud"]["phase"], phase, "{run}");
-            let (status, _) = if terminate {
-                send(
-                    &app,
-                    "DELETE",
-                    &format!("/api/cloud/instances/{}", run["cloud"]["instance_id"].as_str().unwrap()),
-                    None,
-                )
-                .await
-            } else {
-                send(&app, "POST", &format!("/api/runs/{id}/stop"), None).await
-            };
-            assert_eq!(status, StatusCode::OK);
-            // Long after: past the stop, and past the moment its training would have ended.
-            store.pass_time(Duration::from_secs(120));
-            let (_, ended) = send(&app, "GET", &format!("/api/runs/{id}"), None).await;
-            let want = if terminate { "failed" } else { "stopped" };
-            assert_eq!(
-                (&ended["status"], &ended["cloud"]["phase"]),
-                (&json!(want), &json!("released")),
-                "{ended}"
-            );
-            assert_eq!(ended["cloud"]["ended_in"], phase, "terminate {terminate}: {ended}");
-        }
-    }
 }
 
 #[tokio::test]
