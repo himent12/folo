@@ -268,3 +268,19 @@ fn server_cli_commands_train_the_servers_config() {
         assert_eq!(got, want, "{}", cmd.cli);
     }
 }
+
+/// After a run, a stop the trainer did not take (a stop file written after the last poll, or the flag raised after
+/// the trainer's last look) is seen once and leaves nothing behind for a later `--resume`.
+#[test]
+fn a_late_stop_is_taken_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = TestDir::new("late-stop");
+    let flag = AtomicBool::new(false);
+    assert!(!super::late_stop(&dir, &flag));
+    std::fs::write(dir.join(super::STOP_FILE), b"stop\n").unwrap();
+    assert!(super::late_stop(&dir, &flag));
+    assert!(!dir.join(super::STOP_FILE).exists());
+    flag.store(true, Ordering::Relaxed);
+    assert!(super::late_stop(&dir, &flag));
+    assert!(!flag.load(Ordering::Relaxed) && !super::late_stop(&dir, &flag));
+}

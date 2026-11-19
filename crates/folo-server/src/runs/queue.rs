@@ -282,7 +282,8 @@ impl Runs {
     }
 
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
-    /// epoch's checkpoint).
+    /// epoch's checkpoint). One past its last batch has nothing left to stop: it completes, and its log says so
+    /// ([`folo_vision::train::STOP_AFTER_LAST_BATCH`]).
     pub fn stop(&self, id: &str) -> Result<Run> {
         self.stop_as(id, false)
     }

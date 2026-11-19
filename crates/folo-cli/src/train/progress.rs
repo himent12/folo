@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use folo_api::{RunEvent, RunStatus};
+use folo_api::{LogLevel, LogLine, RunEvent, RunStatus};
 use folo_vision::TrainConfig;
-use folo_vision::train::{TrainSummary, event_record};
+use folo_vision::train::{TrainSummary, event_record, rfc3339_now};
 use serde_json::json;
 
 use crate::cli::JsonEvents;
@@ -127,6 +127,16 @@ impl Progress {
             println!();
             self.live = false;
         }
+    }
+}
+
+/// An `info` log line of `folo train` itself, after the trainer's events: as the trainer's own are shown.
+pub(super) fn log_line(out: Out, message: &str) {
+    if out.json {
+        let line = LogLine { t: rfc3339_now(), level: LogLevel::Info, message: message.to_string() };
+        out.record(&event_record(&RunEvent::Log(line)));
+    } else {
+        println!("{message}");
     }
 }
 

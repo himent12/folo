@@ -1,6 +1,7 @@
 //! The run loop ([`Trainer::run`]): epochs, validation, early stopping, the summary, and the status and log
 //! events around them.
 
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use folo_api::{LogLevel, RunEvent, RunStatus};
@@ -9,7 +10,7 @@ use folo_nn::io::BestState;
 
 use super::device::{device_loss_message, device_lost};
 use super::epoch::Clock;
-use super::{OptimizerChoice, TrainSummary, Trainer};
+use super::{OptimizerChoice, STOP_AFTER_LAST_BATCH, TrainSummary, Trainer};
 use crate::error::{Error, Result};
 use crate::val::{ValConfig, ValResult, val_metrics, validate};
 
@@ -50,7 +51,15 @@ impl Trainer {
         // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
         self.prefetched = None;
         match &r {
-            Ok(s) => self.emitter.status(s.status, None),
+            Ok(s) => {
+                // A stop that came after the last batch (during the last validation) had nothing left to stop: the run
+                // completed, and says so instead of leaving the stop's "after the current batch" as its last word. The
+                // flag is taken, so the caller sees whether a stop came later still.
+                if s.status == RunStatus::Completed && self.stop.swap(false, Ordering::Relaxed) {
+                    self.emitter.log(LogLevel::Info, STOP_AFTER_LAST_BATCH);
+                }
+                self.emitter.status(s.status, None)
+            }
             Err(e) => {
                 // The status carries the (capped) message; the log line only names the failure, so a driver
                 // report is not repeated in every record.

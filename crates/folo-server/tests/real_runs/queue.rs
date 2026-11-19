@@ -304,3 +304,28 @@ async fn no_runs_start_after_shutdown() {
     err(&app, post_json("/api/runs", resume), StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
     assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
 }
+
+/// A stop after the last batch (the run held after its only epoch: validated, nothing left to train) is accepted as
+/// `stopping`, but the run completes with its model, and its log ends saying the stop came too late (#333).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_after_the_last_batch_completes_the_run() {
+    let t = TestDir::new("runs-stop-last");
+    let s = store(&t.join("home"));
+    let app = app(&s);
+    let ds = dataset(&app, "last", 4).await;
+    s.hold_runs_after_epochs(true);
+    let run: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let mut sse = Events::open(&app, &run.id).await;
+    sse.until_epoch().await;
+    let stopping: Run = ok(&app, post(&format!("/api/runs/{}/stop", run.id))).await;
+    assert_eq!(stopping.status, RunStatus::Stopping);
+    let events = sse.until_status(&["stopped", "completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    assert_eq!((done.status, done.epoch, done.model_id.is_some()), (RunStatus::Completed, 1, true));
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
+    let messages: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(messages.last(), Some(&folo_vision::train::STOP_AFTER_LAST_BATCH), "{messages:?}");
+    assert_eq!(messages.iter().filter(|m| **m == folo_vision::train::STOP_AFTER_LAST_BATCH).count(), 1);
+    s.hold_runs_after_epochs(false);
+}

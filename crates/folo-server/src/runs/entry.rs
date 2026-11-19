@@ -271,6 +271,15 @@ impl RunEntry {
         st.claimed = false;
         let code =
             if status == RunStatus::Stopped && st.interrupted { Some(INTERRUPTED.to_string()) } else { code };
+        // A stop that came after the trainer's last look (it takes the flag of one that came before, and says so
+        // itself) found nothing left to stop either: the run completed, and its log says so before the status does.
+        // A cloud run's worker says it in its own log, which is mirrored here.
+        if status == RunStatus::Completed
+            && st.file.run.cloud.is_none()
+            && self.stop.swap(false, Ordering::Relaxed)
+        {
+            self.log(LogLevel::Info, folo_vision::train::STOP_AFTER_LAST_BATCH);
+        }
         self.finish_with_code(&mut st, status, error, code);
     }
 
