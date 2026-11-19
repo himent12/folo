@@ -222,13 +222,16 @@ impl SimCloud {
         let end = snap.finished.unwrap_or(snap.at);
         let cost = self.offer.price_per_hour.map(|p| ((end - launched) / 3600.0 * p * 100.0).round() / 100.0);
         let synced = (done > 0).then(|| snap.started.map(|s| rfc3339(s + done as f64 * epoch_s))).flatten();
-        // Where the hand-over was when the run ended: the collection after training, training cut short, or the upload
-        // of a run stopped before it trained.
+        // Where the hand-over was when the run ended (stopped, its instance lost, or the release after the collection),
+        // as the real control plane records the phase a release starts in.
         let ended_in = matches!(phase, CloudPhase::Releasing | CloudPhase::Released).then(|| {
+            let ended = [snap.stop_requested, snap.finished].into_iter().flatten().fold(snap.at, f64::min);
             match (snap.started, trained) {
-                (_, Some(end)) if snap.at >= end => CloudPhase::Collecting,
+                (_, Some(end)) if ended >= end => CloudPhase::Collecting,
                 (Some(_), _) => CloudPhase::Training,
-                (None, _) => CloudPhase::Syncing,
+                _ if ended - launched < PHASE_S => CloudPhase::Provisioning,
+                _ if ended - launched < 2.0 * PHASE_S => CloudPhase::Booting,
+                _ => CloudPhase::Syncing,
             }
         });
         RunCloud {
