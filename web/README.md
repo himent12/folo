@@ -224,7 +224,7 @@ node scripts/parity.mjs <dirA> <dirB>         # compare two shot folders
 node scripts/perf.mjs --runs 5                # load, memory and CPU of this version
 node scripts/perf.mjs --ref origin/main       # against another git ref (its web/ built in a temporary worktree)
 node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (another version's dist/)
-node scripts/perf.mjs --folo <folo binary> --net 50,20 --only cold,warm   # served by folo serve, a remote server's network
+node scripts/perf.mjs --folo <folo binary> --net 50,20 --only cold,warm   # served by folo serve, a remote server's network (Chrome's network throttling)
 ```
 
 - `shoot.mjs --exact` (what parity uses) makes a shot reproducible to the pixel: the clock paused as for `--qa`,
@@ -246,5 +246,11 @@ node scripts/perf.mjs --folo <folo binary> --net 50,20 --only cold,warm   # serv
   alternated, and compared. `--api <url>` uses a running `folo serve --mock` instead of `?mock=1`; `--folo <binary>`
   serves each build with that binary (`folo serve --mock --web-dir`, so the server's own headers and compression are in
   the numbers; `--base-folo` serves the baseline with another one), and `--net <rtt ms>,<Mbit/s>` emulates a network
-  for the cold loads and the `warm` ones (a second load from a filled cache: requests and KB that still went out);
-  `--only bundle,cold,warm,nav,live,large` (default all but warm). Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).
+  for the cold loads and the `warm` ones with Chrome's network throttling (a delay per request and a bandwidth cap; it
+  does not model TCP connection set-up or slow start, which cost one large file more round trips than many small
+  ones, so its numbers are that emulation's, not a real link's). `--served base=<url>,app=<url>` measures builds a
+  server already serves there instead (another machine, or a relay over a link with real delay). The KB of a load are
+  those received by the time its content showed, a response still arriving counted with what has arrived. `warm` is a
+  reload of the same build from a filled cache (requests and KB that still went out), not a return visit after a
+  release, where a new build renames almost every chunk (on main too). `--only bundle,cold,warm,nav,live,large`
+  (default all but warm). Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).
