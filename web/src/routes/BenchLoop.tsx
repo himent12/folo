@@ -211,7 +211,10 @@ export default function BenchLoop() {
       {hint() ? (
         <span class="hint">{hint()}</span>
       ) : c() === null && !graded.get() ? (
-        <span class="hint">No generation graded yet: the first point is the teacher’s, once its benchmark entry is done.</span>
+        // The first point promised only while the loop runs: a stopping one stops the teacher's entry with it.
+        <span class="hint">
+          {loop.get()?.status === 'running' ? 'No generation graded yet: the first point is the teacher’s, once its benchmark entry is done.' : 'No generation was graded.'}
+        </span>
       ) : c() === null ? (
         <>
           <span class="key">
@@ -251,7 +254,7 @@ export default function BenchLoop() {
             ) : null}
           </>
         ) : (
-          <span>{g() ? 'not benchmarked yet' : ended.get() ? 'not run' : 'to come'}</span>
+          <span>{g() ? (ended.get() ? 'not benchmarked' : 'not benchmarked yet') : ended.get() ? 'not run' : 'to come'}</span>
         )}
       </>
     );
@@ -334,6 +337,8 @@ export default function BenchLoop() {
 
   const genRow = (k: () => number) => {
     const g = () => genAt(k());
+    // A missing score or mAP: still to come while the loop runs, never once it has failed or stopped.
+    const noResult = () => (ended.get() ? (g() ? 'not benchmarked' : 'not run') : 'not yet');
     return (
       <tr class:future={!g()}>
         <td class="lead num">{k() === 0 ? 'Teacher' : `Gen ${k()}`}</td>
@@ -366,7 +371,7 @@ export default function BenchLoop() {
         </td>
         <td class="hide-sm lbl">{g() ? labelsCell(g as () => BenchGeneration) : <span class="faint">—</span>}</td>
         <td class="hide-md">{g()?.labels ? madeOf(g as () => BenchGeneration) : <span class="faint">{k() === 0 ? 'none' : '—'}</span>}</td>
-        <td class="r num hide-sm">{g()?.score != null ? scoreText(g()!.score!) : <NoValue label="not yet" />}</td>
+        <td class="r num hide-sm">{g()?.score != null ? scoreText(g()!.score!) : <NoValue label={noResult()} />}</td>
         <td class="r num">
           {g()?.map50_95 != null ? (
             <>
@@ -374,7 +379,7 @@ export default function BenchLoop() {
               {g()!.ci95 ? <span class="ci">{intervalText(g()!.ci95!)}</span> : null}
             </>
           ) : (
-            <NoValue label="not yet" />
+            <NoValue label={noResult()} />
           )}
         </td>
       </tr>

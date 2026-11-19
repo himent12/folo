@@ -2,6 +2,7 @@
 import { effect, signal, untrack, type ReadSignal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { RunEstimate, TrainConfig } from '$lib/api/types';
+import { withoutInexactSeed } from '$lib/seed';
 
 /**
  * The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
@@ -22,7 +23,8 @@ export function serverEstimate(config: ReadSignal<TrainConfig>, estKey: ReadSign
   effect(() => {
     const key = estKey.get();
     const c = config.get();
-    const body = { ...c, name: c.name || 'estimate' };
+    // A Seed field that holds no seed is left out (lib/seed, rule B): the estimate does not depend on it.
+    const body = withoutInexactSeed({ ...c, name: c.name || 'estimate' });
     const seq = ++estSeq;
     // No request for these settings (none possible, or the answer is already in): none is pending either, even where
     // the one this replaced (since cancelled) was.

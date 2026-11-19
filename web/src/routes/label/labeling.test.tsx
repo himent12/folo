@@ -6,6 +6,7 @@ import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import type { Dataset, LabelImagesAdded, LabelJob } from '$lib/api/types';
+import { LABEL_FEATURE } from '$lib/label';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -530,4 +531,28 @@ describe('the job list: the palette’s New labeling job', () => {
     flushSync();
     expect(dialogOpen()).toBe(true);
   });
+
+  // #324: on `folo serve --mock` the ask opened the form over "This server cannot label images", and Create could only
+  // fail (501). It follows the server's health (`hub.features`), at once: there is no answer to wait for.
+  afterEach(() => (hub.features = null));
+  for (const [what, features, opens] of [
+    ['lists labeling', [LABEL_FEATURE], true],
+    ['lists features without labeling', ['queue_control'], false],
+    ['lists no features (an older server, the demo)', null, true],
+  ] as const) {
+    it(`on a server whose health ${what}: ${opens ? 'the form' : 'the explanation, never the form'}`, async () => {
+      if (!opens) hub.api = new MockApi('no-labeling', 0);
+      hub.features = features;
+      history.replaceState(null, '', '#/datasets/label?new=1');
+      router.route = parse('#/datasets/label?new=1');
+      open(LabelJobs, {});
+      expect(dialogOpen()).toBe(opens);
+      // The ask is used up: the URL no longer has it, and nothing opens later.
+      expect(location.hash).toBe('#/datasets/label');
+      if (!opens) {
+        await vi.waitFor(() => (flushSync(), expect(text()).toMatch(/This server cannot label images/)));
+        expect(dialogOpen()).toBe(false);
+      }
+    });
+  }
 });

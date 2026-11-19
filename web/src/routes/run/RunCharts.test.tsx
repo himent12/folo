@@ -148,7 +148,7 @@ describe('the live KPI strip', () => {
     });
     expect(tile('Precision / Recall')?.value).toBe('0.500 / 0.400');
     v.c.unmount();
-    v = show({ ...run, status: 'completed', epoch: 5 }, { steps: [step(250)], epochs: [epoch(1, 0.312), epoch(2, 0.3)] });
+    v = show({ ...run, status: 'completed', epoch: 5 }, { steps: [step(250)], epochs: [1, 2, 3, 4, 5].map((n) => epoch(n, n === 1 ? 0.312 : 0.3)) });
     expect(tile('mAP50-95 · final')?.sub).toBe('best 0.312 · ep 1');
     expect(tile('Duration')).toBeDefined();
     expect(tile('Time left')).toBeUndefined();
@@ -253,7 +253,7 @@ describe('the four run charts', () => {
       split: 'val',
       fallback: null,
     };
-    const { c } = show({ ...base, status: 'completed' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)], evalOn });
+    const { c } = show({ ...base, status: 'completed', epoch: 2, best: { epoch: 1, map50_95: 0.3 } }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)], evalOn });
     const title = (t: Element) => t.textContent!.replace(t.querySelector('.meta')?.textContent ?? '', '').trim();
     expect([...target.querySelectorAll('.run-chart .title')].map(title)).toEqual(['Validation mAP', 'Training loss', 'Precision / Recall', 'Learning rate']);
     expect(target.querySelector('[role=tablist], select[aria-label="Metric to chart"]')).toBeNull();
@@ -328,7 +328,7 @@ describe('the four run charts', () => {
       expect(ended.model.lossSeries.get().find((s) => s.ghost)!.end).toBeUndefined();
       ended.c.unmount();
     }
-    const done = show({ ...base, status: 'completed' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
+    const done = show({ ...base, status: 'completed', epoch: 2, best: { epoch: 1, map50_95: 0.3 } }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
     expect(first(done.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
     expect(rest(done.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
     done.c.unmount();
@@ -350,6 +350,7 @@ describe('the four run charts', () => {
           epochs: 3,
           step: 150,
           steps_per_epoch: 50,
+          best: { epoch: 3, map50_95: 0.3 },
         },
         {
           steps: [step(50), step(100), step(150)],

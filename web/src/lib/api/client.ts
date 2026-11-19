@@ -68,6 +68,7 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
+import type { AccessWatch } from './access';
 import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
 import { uploadInChunks, type UploadProgress } from './upload';
@@ -332,12 +333,20 @@ export class HttpApi implements Api {
 
   /**
    * `base` is the server origin ('' for same origin, e.g. behind the Vite proxy or `folo serve`). `reach` hears whether
-   * each request and event stream reached the server (the hub's: `hub.offline`); a one-off check passes none.
+   * each request and event stream reached the server (the hub's: `hub.offline`); a one-off check passes none. `access`
+   * hears of each 401 or 403 (the hub's: whether the server still lets Studio in, `hub.refused`).
    */
   constructor(
     readonly base: string = '',
     readonly reach?: Reachability,
+    readonly access?: AccessWatch,
   ) {}
+
+  /** A 401 or 403 to an `/api/` request may be the server no longer letting Studio in (a proxy that stopped sending the
+   * token): `access` checks. `seen`: its `checks` when the request went out. */
+  #answered(res: Response, seen: number): void {
+    if (res.status === 401 || res.status === 403) this.access?.refused(seen);
+  }
 
   /** An event stream whose opening and dropping also tell `reach` whether the server is there. */
   #stream<M>(url: string, events: readonly (keyof M & string)[], handlers: EventHandlers<M>): () => void {
@@ -361,6 +370,7 @@ export class HttpApi implements Api {
     }
     const request = `${method} /api${path.split('?')[0]}`;
     let res: Response;
+    const seen = this.access?.checks ?? 0;
     try {
       res = await fetch(`${this.base}/api${path}`, init);
     } catch (e) {
@@ -369,6 +379,7 @@ export class HttpApi implements Api {
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.', request);
     }
     this.reach?.ok();
+    this.#answered(res, seen);
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     let json: unknown;
@@ -634,6 +645,7 @@ export class HttpApi implements Api {
 
   async modelWeights(id: string, signal?: AbortSignal) {
     let res: Response;
+    const seen = this.access?.checks ?? 0;
     try {
       res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { signal });
     } catch (e) {
@@ -642,6 +654,7 @@ export class HttpApi implements Api {
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
     if (res.ok) return res.arrayBuffer();
+    this.#answered(res, seen);
     const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
   }
@@ -659,6 +672,7 @@ export class HttpApi implements Api {
   /** A `/weights` export as a file, under the name the server gives it (`fallback` when it gives none). */
   async #weightsFile(id: string, query: string, fallback: string, what: string, signal?: AbortSignal) {
     let res: Response;
+    const seen = this.access?.checks ?? 0;
     try {
       res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights${query}`, { signal });
     } catch (e) {
@@ -667,6 +681,7 @@ export class HttpApi implements Api {
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
     if (!res.ok) {
+      this.#answered(res, seen);
       const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
       throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download ${what} (HTTP ${res.status}).`, err?.hint);
     }
@@ -675,8 +690,10 @@ export class HttpApi implements Api {
   }
 
   async modelWeightsTag(id: string, signal?: AbortSignal) {
+    const seen = this.access?.checks ?? 0;
     try {
       const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { method: 'HEAD', signal });
+      this.#answered(res, seen);
       return res.ok ? res.headers.get('etag') : null;
     } catch {
       return null;

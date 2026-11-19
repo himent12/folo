@@ -7,6 +7,7 @@ import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { count, duration } from '$lib/format';
 import { href, router } from '$lib/router';
+import { parseSeed, seedArrows, seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
@@ -98,7 +99,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const classes = signal<string[]>(['circle', 'square', 'triangle']);
   const classDraft = signal('');
   const imgsz = signal<'320' | '480' | '640' | '1024'>('640');
-  const seed = signal<number | null>(0);
+  const seed = signal('0'); // as typed (lib/seed)
 
   /** The path as it will be sent: a pasted "Copy as path" loses its quotes. */
   const cleaned = computed(() => cleanPath(path.get()));
@@ -124,12 +125,11 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       };
     }
     const images = sImages.get();
-    const s = seed.get();
     return {
       name: nameError(synthName.get()),
       images: images === null || !Number.isFinite(images) || images < 10 || images > 20000 ? 'Between 10 and 20,000.' : null,
       classes: classes.get().length === 0 ? 'Add at least one class.' : null,
-      seed: s === null || !Number.isInteger(s) || s < 0 ? 'A non-negative integer.' : null,
+      seed: seedError(seed.get()),
     };
   });
   const valid = computed(() => Object.values(errs.get()).every((e) => !e));
@@ -199,7 +199,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
               images,
               classes: classes.get(),
               imgsz: Number(imgsz.get()),
-              seed: seed.get() ?? 0,
+              seed: parseSeed(seed.get())!, // checked (`errs`)
             });
       const known = before.some((d) => d.id === ds.id);
       const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
@@ -377,7 +377,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                     <Input id={`${uid}-images`} type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.get().images)} />
                   </Field>{' '}
                   <Field label="Seed" for={`${uid}-seed`} error={show(errs.get().seed)}>
-                    <Input id={`${uid}-seed`} type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.get().seed)} />
+                    <Input id={`${uid}-seed`} inputmode="numeric" bind:value={seed} onkeydown={seedArrows(seed)} invalid={!!show(errs.get().seed)} />
                   </Field>
                 </div>{' '}
                 <Field label="Image size" hint={`Square images, ${imgsz.get()} × ${imgsz.get()} px. 80% train, 20% val.`}>

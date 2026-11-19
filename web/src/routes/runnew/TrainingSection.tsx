@@ -12,6 +12,7 @@ import { deviceName, pricePerHour, sentence, usd } from '$lib/format';
 import { availabilityNote, maxCost, menuOrder, offerLine, validHours } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
+import { seedArrows } from '$lib/seed';
 import Button from '$lib/ui/Button';
 import Field from '$lib/ui/Field.tsx';
 import Input from '$lib/ui/Input';
@@ -39,7 +40,7 @@ export interface TrainingSectionProps {
   ampRefused?: { device: string; message: string } | null;
   e2e?: boolean;
   lr0?: number;
-  seed?: number;
+  seed?: string;
   advancedOpen?: boolean;
   arch: Arch;
   errors: FormErrors;
@@ -418,7 +419,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
             <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!props.errors.lr0} />
           </Field>
           <Field label="Seed" for="seed" hint="Same seed, same run." error={props.errors.seed}>
-            <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!props.errors.seed} />
+            <Input id="seed" inputmode="numeric" bind:value={seed} onkeydown={seedArrows(seed)} invalid={!!props.errors.seed} />
           </Field>
           {/* TrainConfig.head `o2o` (docs/MODEL.md §6.6); the cost measured on the shapes gate (docs/BENCHMARKS.md). */}
           <div class="field sw-field">

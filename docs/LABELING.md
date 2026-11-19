@@ -40,7 +40,8 @@ images you may not share with them.
    image to review; the To review and Reviewed filters and the count in the header show how far you are. A save or
    a Looks right is made on the boxes you see: if another tab, the CLI or an agent changed them first, nothing is
    saved or marked, your edits stay, and the editor shows the new boxes to look at again. If the agent got an image wrong in a way you can describe, ask it again with a note ("the boxes are too
-   loose", "that is a van, not a truck"). Failed images wait for the next run.
+   loose", "that is a van, not a truck"). If the agent cannot answer, the image keeps the boxes it had, reviewed or
+   not, and the editor says why. Failed images wait for the next run.
 5. **Create dataset.** The labeled images become a YOLO dataset under the server's data dir, split into train and
    val, registered and ready for a training run. Images without labels are left out; a labeled image without
    boxes is kept as a background image. The job stays, so you can add images, label them and export again.

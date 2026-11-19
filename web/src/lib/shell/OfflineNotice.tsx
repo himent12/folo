@@ -1,6 +1,6 @@
 /**
- * The app-wide word that the server stopped answering (`hub.offline`), or answered a connect as something that is not
- * a usable FOLO server (`hub.refused`, said instead), while Studio probes it: a pill in the top bar,
+ * The app-wide word that the server stopped answering (`hub.offline`), or answers as something that is not a usable
+ * FOLO server or stopped letting Studio in (`hub.refused`, said instead), while Studio probes it: a pill in the top bar,
  * between the page's trail and the bar's actions. The bar's height is fixed, so nothing on the page moves when it comes
  * or goes, and nothing of the page is ever under it (v-shell N5). Phones say "Offline" (the sidebar's Settings page has
  * the rest). It goes when the server answers again; the sidebar footer then says Connected.

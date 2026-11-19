@@ -20,6 +20,7 @@ import Gate from '$lib/ui/Gate';
 import { OFFLINE_REASON } from '$lib/ui/offline';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
+import { isLoopActive } from '$lib/bench/rules';
 import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import StatusBadge from '$lib/ui/StatusBadge';
@@ -145,7 +146,7 @@ export default function LoopsTab(props: LoopsTabProps) {
                         <td>
                           <span class="gens">
                             {s.get().length >= 2 ? <Sparkline values={s.get()} width={56} height={20} color="var(--text-secondary)" fill={false} /> : null}
-                            <span class="num g-text">{s.get().length ? s.get().map(scoreText).join(' → ') : <NoValue label="no score yet" />}</span>
+                            <span class="num g-text">{s.get().length ? s.get().map(scoreText).join(' → ') : <NoValue label={isLoopActive(l()) ? 'no score yet' : 'no score'} />}</span>
                           </span>
                         </td>
                         <td>
@@ -154,7 +155,7 @@ export default function LoopsTab(props: LoopsTabProps) {
                               {VERDICT[l().verdict!].word}
                             </span>
                           ) : (
-                            <NoValue label="no verdict yet" />
+                            <NoValue label={isLoopActive(l()) ? 'no verdict yet' : 'no verdict'} />
                           )}
                         </td>
                         <td class="r faint hide-md" title={date(l().created)}>
