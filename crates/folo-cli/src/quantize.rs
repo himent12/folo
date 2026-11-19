@@ -14,8 +14,8 @@ use serde_json::json;
 
 use crate::cli::{QuantMethodArg, QuantizeArgs, SplitArg};
 use crate::engine::{engine_error, open_dataset_splits};
-use crate::infer::claim_output;
 use crate::output::{CliError, ExitCode, Out};
+use crate::output_file::OutputFile;
 
 fn nn_error(e: folo_nn::Error) -> CliError {
     engine_error("quantize", e.into())
@@ -62,20 +62,15 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let workers = args.workers.unwrap_or_else(folo_vision::train::default_workers);
     // Claimed first, so a taken --output fails before the calibration, not after it.
-    let output = claim_output("quantize", &path, args.output.clone(), "-int8", "folo")?;
+    let output = OutputFile::new("quantize", &path, args.output.clone(), "-int8", "folo")?;
     out.human(format!("Calibrating int8 on {n} {} images at {imgsz}px (two passes)", split.as_str()));
     let t = Instant::now();
     let sizes = (imgsz, args.batch as usize, workers);
     let done = quant::calibrate_sample(&model, part, args.images, args.seed, sizes, method)
         .map_err(nn_error)
-        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, &output).map(|()| (cal, n)));
-    let (cal, n) = match done {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = std::fs::remove_file(&output); // only the file claimed above
-            return Err(e);
-        }
-    };
+        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, output.tmp()).map(|()| (cal, n)));
+    let (cal, n) = done?;
+    let output = output.publish()?;
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     let method_name = match args.method {
         QuantMethodArg::Percentile => "percentile",

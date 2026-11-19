@@ -6,9 +6,12 @@
 //! `open()`, an antivirus or backup scan, an editor. Such readers usually let go within milliseconds, so the rename
 //! is tried again with a growing wait. On other platforms a rename over an open file succeeds, and nothing is
 //! retried. The success path is a single `std::fs::rename`, as before: same atomicity, no extra sync.
+//!
+//! Also publishing a finished temporary file under a name only while that name is free ([`publish_new`],
+//! [`publish_free`]): exports that never overwrite.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// How [`rename_over_with`] waits for a target that another program holds open: `first`, doubled after every
@@ -122,6 +125,41 @@ fn held_open(e: &io::Error, path: &Path) -> bool {
 #[cfg(not(windows))]
 fn held_open(_: &io::Error, _: &Path) -> bool {
     false
+}
+
+/// Gives the finished file `tmp` the name `path` only when no file has it, atomically: never replacing a file, and
+/// nothing exists at `path` until the file is complete, so a writer that fails or is killed before this leaves the
+/// name free. `AlreadyExists` when `path` is taken. A hard link (refused when `path` exists, on Windows and Unix),
+/// then `tmp` is removed; on a file system without hard links (FAT, some network shares) `path` is claimed with
+/// `create_new` and `tmp` renamed over the claim, which then lives only for that rename. `tmp` is left in place
+/// when this fails: the caller removes it.
+pub fn publish_new(tmp: &Path, path: &Path) -> io::Result<()> {
+    match std::fs::hard_link(tmp, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+            std::fs::rename(tmp, path).inspect_err(|_| {
+                let _ = std::fs::remove_file(path);
+            })
+        }
+    }
+}
+
+/// [`publish_new`] under the first free name of `name(1)`, `name(2)`, ...; returns the name `tmp` took.
+pub fn publish_free(tmp: &Path, mut name: impl FnMut(u32) -> PathBuf) -> io::Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let p = name(n);
+        match publish_new(tmp, &p) {
+            Ok(()) => return Ok(p),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +374,20 @@ mod tests {
         assert!(super::rename_over_with(&tmp, &path, huge).is_err());
         drop(held);
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn publishing_never_replaces_and_takes_the_next_free_name() {
+        let dir = TestDir::new("nn-replace-publish");
+        let (path, tmp) = (dir.join("m.onnx"), dir.join("m.onnx.1.0.tmp"));
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::write(&tmp, b"new").unwrap();
+        let err = super::publish_new(&tmp, &path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        let name = |n: u32| dir.join(if n == 1 { "m.onnx".into() } else { format!("m-{n}.onnx") });
+        assert_eq!(super::publish_free(&tmp, name).unwrap(), dir.join("m-2.onnx"));
+        assert_eq!(std::fs::read(dir.join("m-2.onnx")).unwrap(), b"new");
+        assert_eq!(names(&dir), ["m-2.onnx", "m.onnx"]);
     }
 }
