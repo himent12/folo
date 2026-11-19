@@ -435,7 +435,8 @@ pub struct LabelImage {
     pub boxes: Vec<BBox>,
     /// Who drew `boxes`; `null` until labeled.
     pub source: Option<LabelSource>,
-    /// Why the last agent call for it failed (`status: failed`), else `null`.
+    /// Why the last agent call for it failed, else `null`: a `failed` image, or a `labeled` one that keeps the labels
+    /// (and review) it had. New labels or saved boxes clear it.
     pub error: Option<String>,
     /// A person checked its labels: saved boxes drawn by hand, or marked them right. Only a `labeled` image is
     /// reviewed; an agent that labels it again clears it.

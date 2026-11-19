@@ -1031,8 +1031,9 @@ exported more than once.
   "status": "pending|labeling|labeled|failed",
   "boxes": [Box],                       // pixel xyxy; kept while the image is labeled again
   "source": null | "agent|manual",      // who drew `boxes`
-  "error": null | "...",                // why the last agent call failed
-  "reviewed": false }                   // a person checked its labels (labeled images only); an agent run clears it
+  "error": null | "...",                // why the last agent call failed; a labeled image it failed for stays labeled,
+                                        // boxes, review and all (new labels or saved boxes clear it)
+  "reviewed": false }                   // a person checked its labels (labeled images only); new agent labels clear it
 // StartLabeling (only agent is required; the rest shows the defaults)
 { "agent": "claude", "model": null, "effort": null, "fast": false, "scope": "unlabeled", "image_ids": null,
   "note": "", "batch": null, "parallel": null }

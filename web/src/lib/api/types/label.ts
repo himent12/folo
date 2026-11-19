@@ -124,7 +124,7 @@ export interface LabelImage {
   boxes: Box[];
   /** null until labeled. */
   source: LabelSource | null;
-  /** Why the last agent call for it failed (`status: failed`). */
+  /** Why the last agent call for it failed: a `failed` image, or a `labeled` one that keeps the labels (and review) it had. */
   error: string | null;
   /**
    * A person checked its labels (saved boxes drawn by hand, or marked them right); only a `labeled` image is. An

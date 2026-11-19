@@ -84,6 +84,8 @@ export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 
   if (run.outcome === 'stopped') return { tone: 'info', title: 'The run was stopped', detail: 'The image keeps the boxes it had.' };
   if (!img || img.status === 'labeling') return null;
   if (img.status === 'failed') return { tone: 'error', title: failed, detail: said(img.error) };
+  // A labeled image the agent could not label again stays labeled, with the reason (an answer clears it).
+  if (img.error) return { tone: 'error', title: failed, detail: said(img.error, 'It keeps the boxes it had.') };
   return { tone: 'success', title: 'New boxes', detail: imageState(img) };
 }
 

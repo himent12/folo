@@ -66,6 +66,12 @@ describe('askOutcome', () => {
     });
     expect(askOutcome(run('completed'), img('failed', 0, 'the reply left this image out'))).toMatchObject({ tone: 'error', detail: 'The reply left this image out.' });
     expect(askOutcome(run('completed'), img('labeled', 2))).toEqual({ tone: 'success', title: 'New boxes', detail: '2 boxes, drawn by the agent' });
+    // A labeled image whose new call failed keeps its boxes and says why.
+    expect(askOutcome(run('completed'), img('labeled', 2, 'the reply has no JSON object'))).toEqual({
+      tone: 'error',
+      title: 'Claude Code could not label it again',
+      detail: 'The reply has no JSON object. It keeps the boxes it had.',
+    });
     expect(askOutcome(run('stopped'), img('labeled', 2))?.tone).toBe('info');
   });
 
