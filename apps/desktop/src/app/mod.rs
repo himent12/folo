@@ -20,6 +20,8 @@ mod list_tests;
 mod lists;
 mod navigation;
 mod new_run;
+#[cfg(test)]
+mod overlay_press_tests;
 mod overlay_state;
 mod page;
 mod playground;
@@ -534,6 +536,8 @@ pub struct FoloApp {
     /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
     /// it opens, offered only for a dataset the server wrote.
     pub delete_files: bool,
+    /// Keeps the second press of the double-click that opened an overlay from dismissing it.
+    pub overlay_presses: crate::overlays::OverlayPresses,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
@@ -766,6 +770,7 @@ impl FoloApp {
             confirm_close: None,
             close_checking: false,
             delete_files: false,
+            overlay_presses: Default::default(),
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,

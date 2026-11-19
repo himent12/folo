@@ -189,7 +189,11 @@ from the hit test. Each scrim carries the caption areas again (`caption_controls
 tokens as `titlebar()`), over the scrim and under the overlay's own panel: with an overlay open the window still
 moves, maximizes, minimizes and closes, and that doesn't dismiss the overlay. The whole dimmed title bar and brand
 row are one drag band then (the crumbs and the search field take no clicks); a press on the dimmed page still
-dismisses. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
+dismisses. An overlay takes no press that continues a double-click begun before it came up (`OverlayPresses`, by
+the platform's click count, so the system's double-click time and distance): double-clicking the button that
+opens a dialog leaves it open, and the second press cannot press what opened under the pointer (a confirmation's
+Delete); any later press on the scrim dismisses. Menus and selects are not overlays: a double-click on a select
+opens and closes it, as on a Windows combo box. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
 `window.close`, `window.close_text`).
 
 `F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the

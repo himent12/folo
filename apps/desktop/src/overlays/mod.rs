@@ -15,8 +15,8 @@ mod toasts;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::app::{Action, FoloApp};
@@ -25,6 +25,36 @@ use crate::ui::*;
 
 pub use confirm_close::closing_stops;
 pub use new_run_footer::estimate;
+
+/// Whether the overlay on top has seen a press begin, so that the second press of a double-click
+/// whose first press opened it is not taken as a press of its own: on the backdrop it would
+/// dismiss the overlay at once, on the panel it could press what opened under the pointer (a
+/// confirmation's Delete). The platform counts the clicks with the system's double-click time and
+/// distance (`MouseDownEvent::click_count`), so no timer is kept here: a press that starts a new
+/// click (count 1) is the overlay's own, and so is every later press of that click.
+#[derive(Default)]
+pub struct OverlayPresses {
+    top: Option<&'static str>,
+    began: bool,
+}
+
+impl OverlayPresses {
+    /// The overlay now on top (each render): one that has just come up has seen no press.
+    pub fn shown(&mut self, top: Option<&'static str>) {
+        if self.top != top {
+            self.top = top;
+            self.began = false;
+        }
+    }
+
+    /// Whether the overlay on top takes a press with this click count.
+    pub fn admits(&mut self, click_count: usize) -> bool {
+        if click_count <= 1 {
+            self.began = true;
+        }
+        self.began
+    }
+}
 
 /// A dialog's footer: its actions on the raised band under a hairline.
 fn dialog_footer(t: &Theme) -> Div {
@@ -65,43 +95,67 @@ fn error_note(t: &Theme, message: String, hint: Option<String>) -> Div {
 impl FoloApp {
     pub fn overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
+        // The last one pushed is on top (toasts aside: they take no presses for it).
+        let mut top = None;
         if self.inspector.is_some() {
             out.push(self.inspector_view(window, cx));
+            top = Some("inspector");
         }
         if self.new_run.is_some() {
             out.push(self.new_run_dialog(window, cx));
+            top = Some("new-run");
         }
         if self.synth.is_some() {
             out.push(self.synth_dialog(window, cx));
+            top = Some("synth");
         }
         if let Some(id) = self.confirm_stop.clone() {
             out.push(self.stop_dialog(&id, window, cx));
+            top = Some("confirm-stop");
         }
         if let Some(target) = self.confirm_delete.clone() {
             out.push(self.delete_dialog(&target, window, cx));
+            top = Some("confirm-delete");
         }
         if let Some(names) = self.confirm_close.clone() {
             out.push(self.close_dialog(&names, window, cx));
+            top = Some("confirm-close");
         }
         if self.cloud.connect.is_some() {
             out.push(self.connect_dialog(window, cx));
+            top = Some("cloud-connect");
         }
         if self.cloud.disconnect.is_some() {
             out.push(self.disconnect_dialog(window, cx));
+            top = Some("cloud-disconnect");
         }
         if self.cloud.terminate.is_some() {
             out.push(self.terminate_dialog(window, cx));
+            top = Some("cloud-terminate");
         }
         if self.palette.is_some() {
             out.push(self.palette_view(window, cx));
+            top = Some("palette");
         }
+        self.overlay_presses.shown(top);
         if !self.toasts.is_empty() {
             out.push(self.toasts_view(window, cx));
         }
         out
     }
 
-    /// The dimmed backdrop under an overlay's panel: a press on it calls `on_click` (dismisses).
+    /// For an overlay's backdrop and panel (the parts that take its presses): drops a press that
+    /// continues a double-click begun before the overlay came up (`OverlayPresses`).
+    fn guard_presses(cx: &mut Context<Self>) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+            if !this.overlay_presses.admits(ev.click_count) {
+                cx.stop_propagation();
+            }
+        })
+    }
+
+    /// The dimmed backdrop under an overlay's panel: a press on it calls `on_click` (dismisses),
+    /// unless it is the second half of the double-click that opened the overlay.
     /// The window's caption areas go over it (`caption_controls`), since it hides the title bar's.
     fn scrim(
         &self,
@@ -117,13 +171,21 @@ impl FoloApp {
             .top_0()
             .left_0()
             .size_full()
-            .child(div().id("fill").size_full().bg(t.bg_scrim).occlude().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, w, cx| {
-                    on_click(this, w, cx);
-                    cx.notify();
-                }),
-            ))
+            .child(
+                div()
+                    .id("fill")
+                    .size_full()
+                    .bg(t.bg_scrim)
+                    .occlude()
+                    .capture_any_mouse_down(Self::guard_presses(cx))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, w, cx| {
+                            on_click(this, w, cx);
+                            cx.notify();
+                        }),
+                    ),
+            )
             .child(self.caption_controls(window, cx))
     }
 
@@ -168,6 +230,7 @@ impl FoloApp {
                                 .w(px(width))
                                 .max_h(folo_ui::relative(0.92))
                                 .occlude()
+                                .capture_any_mouse_down(Self::guard_presses(cx))
                                 .flex()
                                 .flex_col()
                                 .rounded(px(radius::XL))
@@ -242,5 +305,31 @@ impl FoloApp {
                 ),
             &format!("{id}-in"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OverlayPresses;
+
+    #[test]
+    fn an_overlay_takes_the_presses_of_clicks_that_began_on_it() {
+        let mut p = OverlayPresses::default();
+        p.shown(Some("synth"));
+        assert!(!p.admits(2), "the double-click that opened it");
+        assert!(p.admits(1) && p.admits(2), "a double-click of its own");
+        // A dialog it opens on a press: that press's next one is not the new dialog's.
+        p.shown(Some("confirm-delete"));
+        assert!(!p.admits(2));
+        // Back to the first one when it closes: the second press of the click that closed it is
+        // not the first one's either.
+        p.admits(1);
+        p.shown(Some("synth"));
+        assert!(!p.admits(2));
+        // Closed, then opened again by a double-click.
+        p.admits(1);
+        p.shown(None);
+        p.shown(Some("synth"));
+        assert!(!p.admits(2) && p.admits(1));
     }
 }
