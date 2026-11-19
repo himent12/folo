@@ -8,6 +8,7 @@ import { hub } from './index';
 import { LiveRun } from './live';
 import { MockApi } from './mock';
 import { epochsValidated } from './progress';
+import { RunModel } from '../../routes/run/runModel';
 import type { Epoch, Run, RunLogs, RunMetrics, Step } from './types';
 
 const root = (fn: () => void) => createRoot((dispose) => (fn(), dispose));
@@ -20,6 +21,25 @@ function deferred<T>() {
 }
 
 const steps: Step[] = [1, 2, 3, 4].map((n) => ({ epoch: 1, step: n, lr: 0.01, loss: { box: 1, cls: 1, dfl: 1, total: 3 }, imgs_per_s: 100, eta_s: 4 - n }));
+/** The run page's readings over the view, as Run.tsx builds them: the "final" wording and the short-history note. */
+const readings = (live: LiveRun) =>
+  new RunModel({
+    get run() {
+      return live.run;
+    },
+    steps: live.stepsLog,
+    epochs: live.epochsLog,
+    get version() {
+      return live.version;
+    },
+    get server() {
+      return live.server;
+    },
+    get shortAnswers() {
+      return live.shortAnswers;
+    },
+  });
+
 const ep: Epoch = { epoch: 1, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 } as never;
 
 describe('LiveRun at a run’s end (issue #327)', () => {
@@ -169,5 +189,53 @@ describe('LiveRun at a run’s end (issue #327)', () => {
     final.resolve({ steps, epochs: [ep] });
     await vi.advanceTimersByTimeAsync(0);
     expect(live.epochs).toHaveLength(1);
+  });
+
+  it('calls nothing final after a lost stream until the late ended snapshot and the last epoch are in', async () => {
+    // A two-epoch run: the stream delivers epoch 1 and drops; it comes back after the run completed, with the server's
+    // snapshot and history late. The view holds epoch 1 of a completed run, and the server has validated epoch 2.
+    const two: Run = { ...completed, epochs: 2, epoch: 2, best: { epoch: 2, map50_95: 0.4 } };
+    const m = readings(live);
+    handlers.epoch?.(ep);
+    handlers.connection?.('reconnecting');
+    const snap = deferred<Run>();
+    const history = deferred<RunMetrics>();
+    run = () => snap.promise;
+    metrics = () => history.promise;
+    handlers.connection?.('open');
+    handlers.reconnect?.();
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect([live.run?.status, live.epochs.map((e) => e.epoch)]).toEqual(['completed', [1]]);
+    expect([live.results?.final, m.final.get(), m.pending.get()]).toEqual([false, false, false]);
+    snap.resolve(two);
+    history.resolve({ steps, epochs: [ep, { ...ep, epoch: 2 }] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1, 2]);
+    expect([live.results?.final, m.final.get()]).toEqual([true, true]);
+  });
+
+  it('takes a history that stays short of the ended snapshot as all there is after three answers, and stops asking', async () => {
+    // A completed three-epoch run whose metrics file recorded only epoch 1 (a write failed during training): /metrics
+    // answers 200 with epoch 1 every time.
+    const three: Run = { ...completed, epochs: 3, epoch: 3, best: { epoch: 3, map50_95: 0.4 } };
+    const m = readings(live);
+    run = () => Promise.resolve(three);
+    metrics = () => Promise.resolve({ steps, epochs: [ep] });
+    const asked = calls;
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect([m.pending.get(), m.shortNote.get()]).toEqual([true, null]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls - asked).toBe(3);
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1]);
+    expect([m.pending.get(), m.final.get(), live.error]).toEqual([false, false, undefined]);
+    expect(m.shortNote.get()).toEqual({
+      title: 'Epochs 2–3 are missing from its history',
+      why: "The run's record names 3 validated epochs; its history ends at epoch 1. The readings show what was recorded.",
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(calls - asked).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

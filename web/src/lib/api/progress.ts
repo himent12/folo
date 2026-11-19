@@ -72,15 +72,34 @@ export function epochsValidated(run: Pick<Run, 'status' | 'epoch' | 'best'>): nu
   return Math.max(run.best?.epoch ?? 0, run.status === 'completed' ? run.epoch : 0);
 }
 
+/** Complete answers of an ended run's history, each short of what its snapshot says it validated, after which the view
+ * takes the history as all there is (its metrics file missed epochs) and stops asking. */
+export const SHORT_ANSWERS = 3;
+
+/** What a view holding epochs to `lastHeld` has of an ended run's results ([`heldResults`]). */
+export interface HeldResults {
+  /** The epochs it validated are on their way: the per-epoch readings hold their place, and the view asks again. */
+  pending: boolean;
+  /** An ended snapshot confirms the last epoch held is the run's last validated one: the reading may say "final". */
+  final: boolean;
+  /** The history came back short `SHORT_ANSWERS` times: it is all there is, and the page says what it misses. */
+  short: boolean;
+  /** `epochsValidated` of the snapshot. */
+  validated: number | null;
+}
+
 /**
- * An ended run's results are still on their way to a view whose last epoch is `lastHeld` (0: none): the server's
- * snapshot `server` says it validated a later one (issue #327). While that snapshot still says the run is active (the
- * stream reported the end first), only an empty history is. The one rule for the loading panels, the "final" wording,
- * the refetch and when a failed retry shows its error.
+ * The one rule for an ended run's results (issue #327), from the server's snapshot `server`, the last epoch the view
+ * holds (0: none) and how many complete history answers in a row came back short of that snapshot: the loading panels,
+ * the "final" wording, the refetch, when a failed retry shows its error and the note on a short history. While the
+ * snapshot still says the run is active (the stream reported the end first), only an empty history is pending, and
+ * nothing is final.
  */
-export function resultsPending(server: Pick<Run, 'status' | 'epoch' | 'best'>, lastHeld: number): boolean {
+export function heldResults(server: Pick<Run, 'status' | 'epoch' | 'best'>, lastHeld: number, shortAnswers: number): HeldResults {
   const validated = epochsValidated(server);
-  return validated === null ? lastHeld === 0 : lastHeld < validated;
+  if (validated === null) return { pending: lastHeld === 0, final: false, short: false, validated };
+  const short = lastHeld < validated && shortAnswers >= SHORT_ANSWERS;
+  return { pending: lastHeld < validated && !short, final: lastHeld > 0 && lastHeld >= validated, short, validated };
 }
 
 /** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */

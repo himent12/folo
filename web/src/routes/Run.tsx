@@ -148,6 +148,9 @@ export default function Run() {
     get server() {
       return live.server;
     },
+    get shortAnswers() {
+      return live.shortAnswers;
+    },
   });
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
@@ -540,6 +543,11 @@ export default function Run() {
             {splitNotice.get() && !waitingLayout.get() ? (
               <Callout tone="warning" icon={TriangleAlert} title={splitNotice.get()!.title} role="note" label="Evaluation split">
                 {splitNotice.get()!.why}
+              </Callout>
+            ) : null}
+            {model.shortNote.get() && !waitingLayout.get() ? (
+              <Callout tone="warning" icon={TriangleAlert} title={model.shortNote.get()!.title} role="note" label="Run history">
+                {model.shortNote.get()!.why}
               </Callout>
             ) : null}
 
