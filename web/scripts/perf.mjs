@@ -1,5 +1,6 @@
 // Performance of the Studio on the production build, alone or against a baseline (another version's build).
-//   node scripts/perf.mjs [--runs 5] [--out <dir>] [--api <url>] [--only bundle,cold,nav,live,large]
+//   node scripts/perf.mjs [--runs 5] [--out <dir>] [--api <url> | --folo <binary> [--base-folo <binary>]]
+//       [--only bundle,cold,warm,nav,live,large] [--net <rtt ms>,<Mbit/s>] [--served base=<url>,app=<url>]
 //       [--long-runs N] [--cycles 20] [--live-secs 15]
 //       [--baseline-dist <dir> | --ref <git ref>] [--app app|base|both]
 // The app is built into <out>/.dist (a run's own build). The baseline, `base`, is a built web/dist of another version
@@ -12,7 +13,16 @@
 // - cold: each main screen loaded in a fresh context with the cache off (--runs times): first contentful paint, the
 //   screen's content present (its selector, plus one frame), CDP Performance.getMetrics' ScriptDuration, TaskDuration,
 //   LayoutDuration and RecalcStyleDuration at that point, long tasks, JS heap after a forced GC, DOM elements, nodes,
-//   event listeners, requests.
+//   event listeners, and what went over the network by the time the content showed (the mark's own time, from CDP's
+//   Network events, each with its time; what came after never counts): the HTTP requests sent by then (a redirect hop
+//   is a request; one still waiting for its first byte counts) and the KB received by then as Chrome counts them on the
+//   wire (encoded; headers, redirect hops and a response still arriving included, the latter with what had arrived).
+//   Settings' content is its own panel and a connected footer (its panel shows while "Connecting…").
+// - warm: each main screen loaded again in a context whose cache the same screen's load filled (it first waits until
+//   no request but an event stream is out and nothing went over the network for 500 ms): content shown, and the
+//   requests sent and KB received by then as for cold, without what the cache answered (revalidations count). A reload
+//   of the same build, not a return visit after a release: a new build renames almost every chunk (on main too), and
+//   those are fetched again.
 // - nav: from a loaded Overview, `--cycles` hash navigations through every main screen (each timed in the page, from
 //   the hash change to the content's selector plus one frame); heap after GC after the first cycle and at the end
 //   (the leak indicator), nodes and listeners at the end.
@@ -25,17 +35,28 @@
 // --long-runs (default: --runs, at most 2) is how many times nav, live and large run per app.
 // --app both alternates the two (base first, then app first) so a shared machine's load falls on both; the
 // report gives medians, min–max and the change. Data: the in-browser mock (?mock=1); --api <url> proxies /api to a
-// running server instead (e.g. `folo serve --mock --port 7979`), without ?mock=1.
+// running server instead (e.g. `folo serve --mock --port 7979`), without ?mock=1. --folo <binary> serves each build
+// with that FOLO binary instead of `vite preview` (`folo serve --mock --web-dir <build>`: its headers, compression and
+// caching, data from the server's mock), the baseline's with --base-folo when given (a server change against the old
+// server); a server that fails to start, takes over 60 s to listen or exits during the run fails the run or its samples.
+// --net emulates a network for the cold and warm loads (Chrome's network throttling: that much latency added to every
+// request, that bandwidth both ways), e.g. `--net 50,20` for a server elsewhere on a LAN or VPN. It does not model TCP
+// connection set-up or slow start, which cost one large file more round trips than many small ones: its numbers are
+// that emulation's, not a real link's. --served base=<url>,app=<url> measures builds a server already serves at those
+// addresses (data from those servers): another machine, or a relay over a link with real delay (a Linux veth pair
+// under `tc netem`), instead of --net's emulation. The bundle figures still come from the builds on disk: each served
+// index.html must be the one on disk (the same build) and every file a page loads must be in it, else the run fails.
 // Output: perf.json (every sample) and perf.md, in --out (default D:/folo-build/ui-fast-runtime/perf/<timestamp>).
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brotliCompressSync, constants as zc, gzipSync } from 'node:zlib';
 import { buildApps } from './entries.mjs';
+import { settleRequests, wireOf } from './perfWire.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -52,8 +73,32 @@ const runs = Math.max(1, Number(opt('--runs') ?? 5));
 const longRuns = Math.max(1, Number(opt('--long-runs') ?? Math.min(runs, 2)));
 const cycles = Math.max(1, Number(opt('--cycles') ?? 20));
 const liveSecs = Math.max(1, Number(opt('--live-secs') ?? 15));
-const api = opt('--api');
+let api = opt('--api');
+const folo = opt('--folo');
+const baseFolo = opt('--base-folo') ?? folo;
+if (api && folo) throw new Error('--api and --folo: pick one');
+/** --served base=<url>,app=<url>: each build already served there (by `folo serve --web-dir`, on another machine or behind
+ * a link that delays it); no server is started, and the data are those servers'. */
+const served = opt('--served')
+  ? Object.fromEntries(
+      /** @type {string} */ (opt('--served')).split(',').map((kv) => {
+        const [k, v] = kv.split('=');
+        if ((k !== 'base' && k !== 'app') || !v) throw new Error(`--served ${opt('--served')}: expected base=<url>,app=<url>`);
+        return [k, v.replace(/\/$/, '')];
+      }),
+    )
+  : null;
+if (served && (api || folo)) throw new Error('--served with --api or --folo: pick one');
 const phases = new Set((opt('--only') ?? 'bundle,cold,nav,live,large').split(',').map((s) => s.trim()));
+const netArg = opt('--net');
+/** Emulated network of the cold and warm loads (CDP Network.emulateNetworkConditions), or null. */
+const net = netArg
+  ? (() => {
+      const [rtt, mbps] = netArg.split(',').map(Number);
+      if (!(rtt >= 0) || !(mbps > 0)) throw new Error(`--net ${netArg}: expected <rtt ms>,<Mbit/s>`);
+      return { offline: false, latency: rtt, downloadThroughput: (mbps * 1e6) / 8, uploadThroughput: (mbps * 1e6) / 8 };
+    })()
+  : null;
 const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const outDir = resolve(opt('--out') ?? (existsSync('D:/') ? `D:/folo-build/ui-fast-runtime/perf/${stamp}` : join(root, 'shots/perf', stamp)));
 mkdirSync(outDir, { recursive: true });
@@ -83,8 +128,11 @@ async function screens() {
     { key: 'models', label: 'Models', path: '/models', ready: 'table.models[aria-busy="false"] tbody tr' },
     { key: 'playground', label: 'Playground', path: '/playground', ready: 'main button.sample' },
     { key: 'benchmarks', label: 'Benchmarks', path: '/benchmarks', ready: 'table.benches[aria-busy="false"] tbody tr[data-row]' },
-    { key: 'settings', label: 'Settings', path: '/settings', ready: 'main details.tech summary' },
+    // Its own content shows before the connect has settled ("Connecting…"): ready once the footer says connected too.
+    { key: 'settings', label: 'Settings', path: '/settings', ready: 'body:has(.conn:is(.live, .mock)) main details.tech summary' },
   ];
+  // A server without vision benchmarks (`folo serve --mock` has none) has no Benchmarks table to wait for.
+  if (api && !(await fetch(`${api}/api/bench/benchmarks`)).ok) return list.filter((s) => s.key !== 'benchmarks');
   return list;
 }
 
@@ -121,21 +169,86 @@ if (apps.includes('base') && !existsSync(join(dists.base, 'index.html'))) throw 
 /** What the baseline is, for the report. */
 const baseLabel = ref ? `\`${ref}\` (built from its web/)` : baselineDist ? `\`${baselineDist}\`` : '';
 
-/** @type {{ close(): Promise<void> }[]} */
+/** Every server started, stopped in the run's `finally` (also when a later one fails to start). @type {{ close(): Promise<void> }[]} */
 const servers = [];
 /** Each app's server. @type {Record<App, string>} */
 const bases = /** @type {any} */ ({});
-for (const [i, a] of apps.entries()) {
-  const server = await preview({
-    root,
-    logLevel: 'error',
-    build: { outDir: dists[a] },
-    preview: { host: '127.0.0.1', port: 5197 + i * 10, strictPort: false, ...(api ? { proxy: { '/api': { target: api, changeOrigin: true } } } : {}) },
+/** With --served: every URL a page of the run requested, checked against the builds on disk once the run is over. @type {Set<string>} */
+const loadedUrls = new Set();
+/** Set when a server exits during the run: every later sample fails with it (never measured against a dead server). */
+let serverDied = '';
+/** How long `folo serve` may take to say it listens. */
+const LISTEN_TIMEOUT = 60_000;
+/** Serves `dist` with `folo serve --mock` on a free port; resolves with its URL once it listens. */
+function serveFolo(/** @type {string} */ binary, /** @type {string} */ dist) {
+  const child = spawn(binary, ['serve', '--json', '--mock', '--port', '0', '--web-dir', dist], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let listening = false;
+  let stopping = false;
+  servers.push({
+    close: () =>
+      new Promise((done) => {
+        if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return done(undefined);
+        stopping = true;
+        child.once('exit', () => done(undefined));
+        child.kill();
+        setTimeout(done, 5000);
+      }),
   });
-  servers.push(server);
-  bases[a] = (server.resolvedUrls?.local[0] ?? `http://127.0.0.1:${5197 + i * 10}/`).replace(/\/$/, '');
+  return new Promise((done, fail) => {
+    let out = '';
+    const timer = setTimeout(() => fail(new Error(`${binary} serve did not say it listens within ${LISTEN_TIMEOUT / 1000} s`)), LISTEN_TIMEOUT);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      fail(new Error(`${binary}: ${e.message}`));
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (!listening) fail(new Error(`${binary} serve exited (${code ?? signal}) before listening`));
+      else if (!stopping) serverDied = `${binary} serve (${dist}) exited (${code ?? signal}) during the run`;
+    });
+    child.stdout.on('data', (b) => {
+      if (listening) return;
+      out += b;
+      const m = /\{"event":"listening"[^\n]*\}/.exec(out);
+      if (!m) return;
+      listening = true;
+      clearTimeout(timer);
+      done(/** @type {string} */ (JSON.parse(m[0]).url).replace(/\/$/, ''));
+    });
+  });
 }
-const url = (/** @type {App} */ app, /** @type {string} */ path) => `${bases[app]}/${api ? '' : '?mock=1'}#${path}`;
+/** Starts each app's server (inside the run's try, so a failure stops the ones already started). */
+async function startServers() {
+  if (served) {
+    for (const a of apps) {
+      if (!served[a]) throw new Error(`--served names no server for ${a}`);
+      bases[a] = served[a];
+      // The bundle figures come from the build on disk: it must be the one served. index.html names the entry's files by
+      // their content hashes, and the entry every other chunk by its own, so the same index.html is the same build.
+      const html = await (await fetch(`${served[a]}/`)).text();
+      if (html !== readFileSync(join(dists[a], 'index.html'), 'utf8'))
+        throw new Error(`--served ${a}=${served[a]} serves another build than ${dists[a]} (its index.html differs)`);
+    }
+    api = served[apps[0]];
+    return;
+  }
+  for (const [i, a] of apps.entries()) {
+    if (folo) {
+      bases[a] = await serveFolo(a === 'base' ? /** @type {string} */ (baseFolo) : folo, dists[a]);
+      api ??= bases[a];
+      continue;
+    }
+    const server = await preview({
+      root,
+      logLevel: 'error',
+      build: { outDir: dists[a] },
+      preview: { host: '127.0.0.1', port: 5197 + i * 10, strictPort: false, ...(api ? { proxy: { '/api': { target: api, changeOrigin: true } } } : {}) },
+    });
+    servers.push(server);
+    bases[a] = (server.resolvedUrls?.local[0] ?? `http://127.0.0.1:${5197 + i * 10}/`).replace(/\/$/, '');
+  }
+}
+const url = (/** @type {App} */ app, /** @type {string} */ path) => `${bases[app]}/${api || served ? '' : '?mock=1'}#${path}`;
 
 async function launch() {
   if (process.env.FOLO_SHOOT_BROWSER !== 'chromium') {
@@ -147,10 +260,13 @@ async function launch() {
   }
   return chromium.launch({ headless: true });
 }
-const browser = await launch();
-const chrome = browser.version();
-const SCREENS = await screens();
-const byKey = Object.fromEntries(SCREENS.map((s) => [s.key, s]));
+/** Set in the run's try, once the servers are up. @type {import('playwright-core').Browser} */
+let browser = /** @type {any} */ (null);
+let chrome = '';
+/** @type {Screen[]} */
+let SCREENS = [];
+/** @type {Record<string, Screen>} */
+let byKey = {};
 
 /**
  * What the page records (an init script): the screen's content showing (`readyDom`, then one frame later `ready`, in
@@ -186,7 +302,7 @@ function instrument(/** @type {string} */ sel) {
       P.onReady?.();
     });
   };
-  new MutationObserver(() => P.check()).observe(document, { subtree: true, childList: true, attributes: true });
+  new MutationObserver(() => P.check()).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
 }
 
 /** CDP Performance.getMetrics as an object. */
@@ -203,20 +319,32 @@ async function afterGc(/** @type {import('playwright-core').CDPSession} */ cdp) 
   return { heapMB: usedSize / 2 ** 20, m: await metrics(cdp) };
 }
 
-/** A fresh context and page with CDP, the cache off, and the page instrumented for `sel`. */
-async function open(/** @type {string} */ sel) {
+/**
+ * A fresh context and page with CDP, the cache off (`cache`: on), --net's network, and the page instrumented for `sel`;
+ * `wire` follows what goes over the network (./perfWire.mjs).
+ */
+async function open(/** @type {string} */ sel, cache = false) {
   const context = await browser.newContext(VIEW);
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.enable');
-  await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+  await cdp.send('Network.setCacheDisabled', { cacheDisabled: !cache });
+  if (net) await cdp.send('Network.emulateNetworkConditions', net);
   await cdp.send('Performance.enable');
   await cdp.send('HeapProfiler.enable');
   await page.addInitScript(instrument, sel);
-  /** @type {string[]} */
-  const requests = [];
-  page.on('request', (r) => requests.push(r.url()));
-  return { context, page, cdp, requests };
+  if (served) cdp.on('Network.requestWillBeSent', (e) => void loadedUrls.add(e.request.url));
+  const wire = wireOf(cdp);
+  return { context, page, cdp, wire };
+}
+
+/**
+ * The CDP time (monotonic seconds, the Network events' clock) of the page's `ready` mark: performance.now() counts from
+ * the document's navigation start, which CDP's Performance metrics give on that clock.
+ */
+async function readyAt(/** @type {import('playwright-core').Page} */ page, /** @type {import('playwright-core').CDPSession} */ cdp) {
+  const ready = await page.evaluate(() => /** @type {any} */ (window).__perf.ready);
+  return (await metrics(cdp)).NavigationStart + ready / 1000;
 }
 
 /** Waits for the screen's content; on a timeout, says what the page shows instead (a port missing a screen). */
@@ -244,7 +372,10 @@ const failures = [];
  */
 async function sample(what, f) {
   try {
-    return await f();
+    if (serverDied) throw new Error(serverDied);
+    const v = await f();
+    if (serverDied) throw new Error(serverDied);
+    return v;
   } catch (e) {
     const msg = `${what}: ${e instanceof Error ? e.message : e}`;
     failures.push(msg);
@@ -256,12 +387,12 @@ async function sample(what, f) {
 // ---------------------------------------------------------------- the phases
 /** One cold load of `screen`. */
 async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
-  const { context, page, cdp, requests } = await open(screen.ready);
+  const { context, page, cdp, wire } = await open(screen.ready);
   try {
     await page.goto(url(app, screen.path), { waitUntil: 'commit' });
     await waitReady(page);
-    const reqs = requests.length;
     const m = await metrics(cdp);
+    const at = m.NavigationStart + (await page.evaluate(() => /** @type {any} */ (window).__perf.ready)) / 1000;
     const t = await page.evaluate(async () => {
       const P = /** @type {any} */ (window).__perf;
       // Content can show before the first paint entry is recorded (a screen with nothing to fetch): wait for it.
@@ -281,6 +412,11 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
       };
     });
     const g = await afterGc(cdp);
+    // The network up to the mark, by each event's own time: what came after it never counts, however late CDP said so.
+    const got = wire.upTo(at);
+    // The two clocks are one: the document's own request went out after its navigation started and before the mark.
+    const doc = wire.events.find((e) => e.kind === 'sent');
+    if (!doc || doc.ts < m.NavigationStart || doc.ts > at) throw new Error(`the page's clock and CDP's disagree (navigation ${m.NavigationStart}, document request ${doc?.ts}, mark ${at})`);
     return {
       fcp: t.fcp,
       ready: t.ready,
@@ -294,9 +430,41 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
       elements: t.elements,
       nodes: g.m.Nodes,
       listeners: g.m.JSEventListeners,
-      requests: reqs,
-      startup: requests.slice(0, reqs),
+      requests: got.requests,
+      kb: got.bytes / 1024,
+      startup: got.urls,
     };
+  } finally {
+    await context.close();
+  }
+}
+
+/** `screen` loaded a second time, its first load having filled the context's cache (the cache on, --net's network). */
+async function warm(/** @type {App} */ app, /** @type {Screen} */ screen) {
+  const { context, page, cdp, wire } = await open(screen.ready, true);
+  try {
+    await page.goto(url(app, screen.path), { waitUntil: 'commit' });
+    await waitReady(page);
+    // Let what the screen fetched after its content showed (images, later chunks) reach the cache: every request but
+    // a live run's event stream, which never ends (Playwright's networkidle never came on the Run page, so its
+    // warm-up waited 30 s and preloaded more than the other screens').
+    await settleRequests(wire, (ms) => page.waitForTimeout(ms));
+    // A new document: the instrument starts over, and the counts are this load's.
+    await page.goto('about:blank');
+    wire.reset();
+    await page.goto(url(app, screen.path), { waitUntil: 'commit' });
+    await waitReady(page);
+    const start = (await metrics(cdp)).NavigationStart;
+    const at = await readyAt(page, cdp);
+    // Events up to the mark that CDP has not delivered yet: they are cut by their own time, so waiting costs nothing.
+    await page.waitForTimeout(250);
+    // From this navigation's start: an event of the first load that CDP delivered after the reset is not this load's.
+    const got = wire.upTo(at, start);
+    const t = await page.evaluate(() => ({
+      ready: /** @type {any} */ (window).__perf.ready,
+      fcp: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
+    }));
+    return { fcp: t.fcp, ready: t.ready, requests: got.requests, kb: got.bytes / 1024 };
   } finally {
     await context.close();
   }
@@ -304,7 +472,7 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
 
 /** The navigation cycle, from a loaded Overview. */
 async function nav(/** @type {App} */ app) {
-  const order = ['runs', 'run', 'dataset', 'models', 'playground', 'benchmarks', 'settings', 'overview'].map((k) => byKey[k]);
+  const order = ['runs', 'run', 'dataset', 'models', 'playground', 'benchmarks', 'settings', 'overview'].filter((k) => byKey[k]).map((k) => byKey[k]);
   const { context, page, cdp } = await open(byKey.overview.ready);
   try {
     await page.goto(url(app, '/'), { waitUntil: 'commit' });
@@ -435,7 +603,8 @@ function sizes(/** @type {string} */ dist, /** @type {string[]} */ paths) {
   let b = 0;
   for (const p of paths) {
     const f = join(dist, p.replace(/^\//, ''));
-    if (!existsSync(f)) continue;
+    // A file the page loaded that this build does not have: the page ran another build.
+    if (!existsSync(f)) throw new Error(`${p} is not in the build ${dist}`);
     const buf = readFileSync(f);
     raw += buf.length;
     g += gz(buf);
@@ -470,13 +639,21 @@ function emitted(/** @type {App} */ app) {
 
 // ---------------------------------------------------------------- run
 /** @type {Record<App, any>} */
-const raw = /** @type {any} */ ({ base: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] }, app: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] } });
+const raw = /** @type {any} */ ({
+  base: { cold: {}, warm: {}, nav: [], live: { run: [], overview: [] }, large: [] },
+  app: { cold: {}, warm: {}, nav: [], live: { run: [], overview: [] }, large: [] },
+});
 /** The order of the apps for round `i`: alternated, so neither always goes first. */
 const orderFor = (/** @type {number} */ i) => (apps.length === 2 && i % 2 === 1 ? [...apps].reverse() : apps);
 const log = (/** @type {string} */ s) => console.log(`[${Math.round((Date.now() - started) / 1000)}s] ${s}`);
 /** @type {Record<App, any>} */
 const bundles = /** @type {any} */ ({});
 try {
+  await startServers();
+  browser = await launch();
+  chrome = browser.version();
+  SCREENS = await screens();
+  byKey = Object.fromEntries(SCREENS.map((s) => [s.key, s]));
   if (phases.has('cold') || phases.has('bundle')) {
     for (let r = 0; r < runs; r++) {
       for (const [si, s] of SCREENS.entries()) {
@@ -491,6 +668,17 @@ try {
       }
       log(`cold run ${r + 1}/${runs}`);
       if (!phases.has('cold')) break;
+    }
+  }
+  if (phases.has('warm')) {
+    for (let r = 0; r < runs; r++) {
+      for (const [si, s] of SCREENS.entries()) {
+        for (const app of orderFor(r + si)) {
+          const v = await sample(`warm ${app} ${s.key}`, () => warm(app, s));
+          if (v) (raw[app].warm[s.key] ??= []).push(v);
+        }
+      }
+      log(`warm run ${r + 1}/${runs}`);
     }
   }
   for (let r = 0; r < longRuns; r++) {
@@ -514,8 +702,14 @@ try {
       }
     }
   }
+  // --served: every asset any page of the run loaded from a served build is in that build on disk.
+  for (const u of loadedUrls)
+    for (const a of apps) {
+      const p = u.startsWith(`${bases[a]}/`) ? new URL(u).pathname : '';
+      if (p.startsWith('/assets/') && !existsSync(join(dists[a], p.slice(1)))) throw new Error(`--served ${a}=${bases[a]} loaded ${p}, which is not in the build ${dists[a]}`);
+    }
 } finally {
-  await browser.close();
+  await browser?.close();
   for (const s of servers) await s.close();
 }
 
@@ -552,7 +746,9 @@ md.push(
   `# Studio perf: ${apps.join(' vs ')}`,
   '',
   `${new Date().toISOString()} · ${cpus()[0]?.model ?? '?'} ×${cpus().length}, ${Math.round(totalmem() / 2 ** 30)} GB · Chrome ${chrome} headless · ` +
-    `production build (vite preview) · data: ${api ? `server ${api}` : 'in-browser mock (?mock=1)'} · ${runs} cold run(s) per screen, ` +
+    `production build (${served ? `served at ${Object.entries(served).map(([k, v]) => `${k} ${v}`).join(', ')}` : folo ? `served by ${folo}${baseFolo !== folo ? `, the baseline's by ${baseFolo}` : ''}` : 'vite preview'}) · ` +
+    `data: ${folo ? "the server's mock" : api ? `server ${api}` : 'in-browser mock (?mock=1)'} · ` +
+    `${net ? `network: ${netArg} (RTT ms, Mbit/s), Chrome's network throttling (a delay per request and a bandwidth cap; no TCP set-up or slow start) · ` : ''}${runs} cold run(s) per screen, ` +
     `${longRuns} nav/live/large run(s), ${cycles} nav cycles, ${liveSecs} s live · ${Math.round((Date.now() - started) / 1000)} s in all` +
     `${apps.length === 2 ? ' · alternated (base first, then app first)' : ''}. Cells: median (min–max). Times in ms.`,
   '',
@@ -573,7 +769,7 @@ if (phases.has('bundle') || phases.has('cold')) {
   row('JS requested before Overview shows, KB raw', (a) => b(a, (x) => kb(x.startupJs.raw)), 1);
   row('JS requested before Overview shows, KB brotli', (a) => b(a, (x) => kb(x.startupJs.brotli)), 1);
   row('JS files requested before Overview shows', (a) => b(a, (x) => x.startupJs.files), 0);
-  row('requests before Overview shows (all)', (a) => b(a, (x) => x.startupRequests), 0);
+  row('requests sent before Overview shows (all)', (a) => b(a, (x) => x.startupRequests), 0);
   md.push(
     '',
     `In-browser mock in the startup JS: ${apps.map((a) => `${a} ${bundles[a] ? (bundles[a].mockInStartup ? '**yes**' : 'no') : '?'}`).join(', ')}. ` +
@@ -603,15 +799,33 @@ if (phases.has('cold')) {
     row('DOM elements', (a) => c(a, 'elements'), 0);
     row('DOM nodes (CDP)', (a) => c(a, 'nodes'), 0);
     row('JS event listeners', (a) => c(a, 'listeners'), 0);
-    row('requests', (a) => c(a, 'requests'), 0);
+    row('requests sent by content shown (on the wire)', (a) => c(a, 'requests'), 0);
+    row('KB received by content shown (on the wire)', (a) => c(a, 'kb'), 1);
     md.push('');
   }
+}
+if (phases.has('warm')) {
+  md.push(
+    '## Warm load (a reload of the same build, the first load having filled the cache)',
+    '',
+    'Not a return visit after a release: a new build renames almost every chunk (on main too), and those are fetched again.',
+    '',
+    ...head,
+  );
+  for (const s of SCREENS) {
+    const w = (/** @type {App} */ a, /** @type {string} */ k) => raw[a].warm[s.key]?.map((/** @type {any} */ v) => v[k]).filter((/** @type {any} */ x) => x !== null);
+    row(`${s.label}: first contentful paint`, (a) => w(a, 'fcp'), 0);
+    row(`${s.label}: content shown (+1 frame)`, (a) => w(a, 'ready'), 0);
+    row(`${s.label}: requests sent by content shown (on the wire)`, (a) => w(a, 'requests'), 0);
+    row(`${s.label}: KB received by content shown (on the wire)`, (a) => w(a, 'kb'), 1);
+  }
+  md.push('');
 }
 if (phases.has('nav')) {
   md.push(`## Navigation (${cycles} cycles through the screens, from a loaded Overview)`, '', ...head);
   const all = (/** @type {App} */ a) => raw[a].nav.flatMap((/** @type {any} */ n) => Object.values(n.times).flat());
   row('any screen, ms', all, 1);
-  for (const s of ['runs', 'run', 'dataset', 'models', 'playground', 'benchmarks', 'settings', 'overview'])
+  for (const s of ['runs', 'run', 'dataset', 'models', 'playground', 'benchmarks', 'settings', 'overview'].filter((k) => byKey[k]))
     row(`→ ${byKey[s].label}, ms`, (a) => raw[a].nav.flatMap((/** @type {any} */ n) => n.times[s]), 1);
   const n = (/** @type {App} */ a, /** @type {string} */ k) => raw[a].nav.map((/** @type {any} */ v) => v[k]);
   row('heap after GC after cycle 1, MB', (a) => n(a, 'heapFirstMB'), 2);

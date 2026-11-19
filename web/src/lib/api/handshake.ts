@@ -36,6 +36,36 @@ export async function tokenWall(base: string, signal: AbortSignal): Promise<bool
   }
 }
 
+/** What `HEAD /api/runs` answers on a FOLO server that wants no token (axum answers HEAD as GET, without the body). */
+export const NO_WALL = 200;
+
+/**
+ * The token check sent together with the health check (see `Hub`'s connect for when its answer is used). `answer`:
+ * true for `401` (the token wall), false for `NO_WALL`, null for anything else: any other status, no HTTP answer, or
+ * cancelled. `cancel` aborts the request while it is still waiting for its answer, and does nothing once it has one
+ * (or failed): aborting a request that has answered only shows it as cancelled in the browser's network log.
+ */
+export function earlyTokenWall(base: string, signal: AbortSignal): { answer: Promise<boolean | null>; cancel: () => void } {
+  const mine = new AbortController();
+  let out = true;
+  const answer = fetch(`${base}/api/runs`, { method: 'HEAD', signal: AbortSignal.any([signal, mine.signal]) }).then(
+    (r) => {
+      out = false;
+      return r.status === 401 ? true : r.status === NO_WALL ? false : null;
+    },
+    () => {
+      out = false;
+      return null;
+    },
+  );
+  return {
+    answer,
+    cancel: () => {
+      if (out) mine.abort();
+    },
+  };
+}
+
 /**
  * What a failed health check got back from an address that answered but cannot be used, in words for the user; null
  * when nothing answered: no connection, a timeout, or a proxy with nothing behind it (Vite's dev proxy answers 500
