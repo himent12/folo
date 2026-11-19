@@ -79,7 +79,9 @@ impl Backend for HttpBackend {
     }
 
     fn health(&self) -> ApiResult<Health> {
-        self.get("/health")
+        let resp = self.agent.get(&self.url("/health")).call().map_err(|e| self.unreachable(&e))?;
+        let status = resp.status().as_u16();
+        self.decode(resp).map_err(|e| self.health_failed(e, status))
     }
 
     fn system(&self) -> ApiResult<SystemResponse> {
@@ -574,8 +576,58 @@ FOLO"
             json("200 OK", "[{\"id\":"),
         ]);
         let api = HttpBackend::new(&url);
-        let codes: Vec<String> = (0..3).map(|_| api.datasets().unwrap_err().code).collect();
+        let errors: Vec<ApiError> = (0..3).map(|_| api.datasets().unwrap_err()).collect();
+        let codes: Vec<&str> = errors.iter().map(|e| e.code.as_str()).collect();
         assert_eq!(codes, ["server_unreachable", "bad_response", "bad_response"]);
+        // For a person: the parser's words ("json: expected value at line 1 column 1") go to the log.
+        for e in &errors[1..] {
+            assert_eq!(e.message, "folo serve sent an answer FOLO Desktop can't read");
+            assert!(!format!("{e:?}").contains("json:"), "{e:?}");
+        }
+    }
+
+    /// #349: an address with a path after the port ("http://127.0.0.1:7878/subpath") reached folo
+    /// serve's Studio page, and Settings said "Unexpected response from folo serve: json: expected
+    /// value at line 1 column 1". Anything at the address that answers its health but not as a FOLO
+    /// server (a web page, another JSON, a 404) says so, with the address to check; a token server,
+    /// a 5xx and nothing listening keep their own words.
+    #[test]
+    fn an_address_that_answers_but_not_as_folo_serve_says_so() {
+        let page = |status: &str| {
+            let body = "<!doctype html><title>FOLO Studio</title>";
+            format!(
+                "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        };
+        let (url, requests) = canned_server(vec![
+            page("200 OK"),
+            json("200 OK", r#"{ "ok": true }"#),
+            page("404 Not Found"),
+            json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#),
+            json("401 Unauthorized", r#"{ "error": { "code": "unauthorized", "message": "no token" } }"#),
+            json("500 Internal Server Error", r#"{ "error": { "code": "internal", "message": "boom" } }"#),
+        ]);
+        let typed = format!("{url}/subpath/");
+        let api = HttpBackend::new(&typed);
+        for _ in 0..3 {
+            let e = api.health().unwrap_err();
+            assert_eq!(e.code, "not_folo");
+            assert_eq!(e.message, format!("{} answered, but not as a FOLO server", api.describe()));
+            // The address to try instead: the one without the path.
+            assert!(e.hint.unwrap().ends_with(&format!("Try {url}.")));
+            assert!(requests.recv().unwrap().starts_with("GET /subpath/api/health "));
+        }
+        let api = HttpBackend::new(&url);
+        assert_eq!(api.health().unwrap().version, "0.1.0");
+        assert_eq!(api.health().unwrap_err(), needs_token());
+        assert_eq!(api.health().unwrap_err().code, "internal");
+        // No path to drop: what a base address looks like.
+        assert!(api.not_folo().hint.unwrap().ends_with("base address, like http://127.0.0.1:7878."));
+        let addr = url.trim_start_matches("http://");
+        let shouted = HttpBackend::new(&format!("HTTP://{addr}/x"));
+        assert!(shouted.not_folo().hint.unwrap().ends_with(&format!("Try HTTP://{addr}.")));
     }
 
     #[test]

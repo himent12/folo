@@ -136,6 +136,12 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // The address answered, but not as folo serve: the health check says so, and what a page's
+        // own call got back (a web page, another answer) would only say it couldn't read it.
+        let e = match self.store.health.error() {
+            Some(h) if h.code == "not_folo" => h,
+            _ => e,
+        };
         let hint = match &self.start_error {
             // Nothing answers because the local server didn't start: why, not "start it yourself" alone.
             Some(why) if e.code == "server_unreachable" => {
