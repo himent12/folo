@@ -73,6 +73,7 @@ impl ProcDataset {
             created,
             splits,
             stats: None,
+            revision: None,
         };
         ProcDataset { meta, theme, w, h, seed, labels, stats: sb.finish() }
     }

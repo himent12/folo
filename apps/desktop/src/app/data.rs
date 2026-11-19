@@ -289,7 +289,11 @@ impl FoloApp {
         // Read before and shown again on a page with cards (`ds_recheck`): read again in place, the
         // card keeping what it shows until the answer. Only an answer about the dataset replaces it
         // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
-        if self.ds_recheck.remove(id) && self.store.dataset.get(id).is_some_and(|l| !l.is_loading()) {
+        // Never under an open inspector: the read waits until it closes ([`FoloApp::take_inspector`]).
+        if !self.inspecting(id)
+            && self.ds_recheck.remove(id)
+            && self.store.dataset.get(id).is_some_and(|l| !l.is_loading())
+        {
             let ticket = self.ds_read_ticket(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
@@ -309,6 +313,11 @@ impl FoloApp {
                             // Back from a failure, or its contents changed: the images, their labels and
                             // their pixels are read again (image ids are positions, docs/API.md).
                             if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
+                                // An inspector opened on it since: all stays, read again when it closes.
+                                if this.inspecting(&b) {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
                                 this.forget_dataset_contents(&b, cx);
                             }
                             this.store.dataset.insert(b, Load::Ready(d));
@@ -317,6 +326,11 @@ impl FoloApp {
                             if e.code == "dataset_not_found"
                                 || crate::screens::dataset_problem(&e).is_some() =>
                         {
+                            // The same under an open inspector: its record and list stay until it closes.
+                            if this.inspecting(&b) {
+                                this.ds_recheck.insert(b);
+                                return;
+                            }
                             this.store.dataset.insert(b, Load::Failed(e));
                         }
                         Err(_) => {}
@@ -451,6 +465,11 @@ impl FoloApp {
                 cx.notify();
             },
         );
+    }
+
+    /// Whether an inspector (the grid's or a run sample's) is open on dataset `id`: its list stays.
+    pub(super) fn inspecting(&self, id: &str) -> bool {
+        self.inspector.as_ref().is_some_and(|i| i.dataset == id)
     }
 
     /// Whether more of a dataset's image list is still on its way (the grid shows what came).

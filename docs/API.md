@@ -171,7 +171,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   when `name` is blank, `images` is outside `1..=100000`, `imgsz` outside `32..=4096`, or `classes` breaks those
   rules (the message says which). `409 output_exists` when another writer (such as `folo dataset synth`) took the
   new folder first; that folder is left as it is.
-- `GET /api/datasets/{id}` → `Dataset` with `stats`
+- `GET /api/datasets/{id}` → `Dataset` with `stats` and, in real mode, `revision`: an opaque string that changes
+  whenever the dataset's files do (the fingerprint of its index, below), also when an edit leaves every other field as
+  it was (a box moved within its image). A client holding the image list reads it again when `revision` differs from
+  the one it read; clients of servers without it (and mock mode, whose datasets do not change) see none.
 - `GET /api/datasets/{id}/images?split=train|val|test&offset=0&limit=100&class=<id>` →
   `{ "total", "images": [{ "id", "file", "split", "width", "height", "boxes": [Box] }] }`.
   Every parameter is optional: no `split` means all splits; `limit` defaults to 100 and is capped at 1000; `class`
@@ -234,7 +237,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     // relative box size = sqrt(box area / image area)
     "box_size_hist": { "edges": [0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0], "counts": [5, 80, 600, 1500, 1400, 600, 25] },
     "boxes_per_image_hist": { "edges": [0,1,2,4,8,16,32], "counts": [12, 100, 300, 350, 200, 38] }
-  } }
+  },
+  "revision": "9c1f0e2a7b44d3e8" }                // with stats in real mode; changes when the files do
 // Histograms: counts[i] counts values in [edges[i], edges[i+1]); the last bin also takes values above its upper edge.
 // Box (ground truth)
 { "class": 0, "x1": 10, "y1": 20, "x2": 200, "y2": 180 }

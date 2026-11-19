@@ -31,6 +31,8 @@ mod preferences;
 mod previews;
 mod render;
 #[cfg(test)]
+mod revision_tests;
+#[cfg(test)]
 mod run_charts_tests;
 #[cfg(test)]
 mod run_page_tests;
@@ -532,6 +534,9 @@ pub struct FoloApp {
     pub restore_pending: bool,
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
+    /// The window's activations seen by the last render: one more (each return to the window) reads
+    /// the dataset shown, or inspected, again.
+    pub window_activations: u64,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
     /// Closing the window would stop these runs (on the server this app started): asked first. Empty:
@@ -774,6 +779,7 @@ impl FoloApp {
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
+            window_activations: 0,
             confirm_stop: None,
             confirm_delete: None,
             confirm_close: None,

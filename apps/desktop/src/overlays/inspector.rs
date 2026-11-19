@@ -59,7 +59,7 @@ impl FoloApp {
             // Still loading the image list (or the filter emptied it): keep the scrim up.
             if self.store.images.get(&ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(&ds_id)
             {
-                self.inspector = None;
+                self.take_inspector(cx);
             }
             // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
             return self

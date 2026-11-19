@@ -238,8 +238,9 @@ impl FoloApp {
         self.store.samples.remove(id);
         self.store.logs.remove(id);
         self.forget_history(id);
+        self.ds_recheck.remove(id);
         if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
-            self.inspector = None;
+            self.take_inspector(cx);
         }
         if let Some((name, list)) = super::navigation::deleted_route(&self.deleted, &self.route) {
             let title = super::navigation::gone_title(&name, &self.route);

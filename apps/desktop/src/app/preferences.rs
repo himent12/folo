@@ -156,7 +156,7 @@ impl FoloApp {
             self.new_run_draft =
                 self.new_run.take().and_then(|f| self.keep_draft(f)).or(self.new_run_draft.take());
             self.synth = None;
-            self.inspector = None;
+            self.take_inspector(cx);
             self.overlay_return = None;
             self.confirm_close = Some(stops.unwrap_or_default());
             let fh = self.fh("close-cancel", cx);

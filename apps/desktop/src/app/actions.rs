@@ -392,8 +392,9 @@ impl FoloApp {
         if let Some(d) = self.store.dataset_summary(id) {
             self.deleted.insert(id.to_string(), d.name.clone());
         }
+        self.ds_recheck.remove(id);
         if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
-            self.inspector = None;
+            self.take_inspector(cx);
             self.inspector_return = None;
         }
         if let Some(list) = self.store.datasets.ready_mut() {

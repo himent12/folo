@@ -108,6 +108,7 @@ impl FoloApp {
         // go (the numbers keep counting up, so none is handed out twice). An Open image still on its
         // way (its picker open) is the old server's too.
         self.ds_reads.clear();
+        self.ds_recheck.clear();
         self.issue_reads.clear();
         self.play_loading = None;
         self.play_open_seq += 1;

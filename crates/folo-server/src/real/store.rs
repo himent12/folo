@@ -185,7 +185,7 @@ impl Store for RealStore {
                     State::Ready(i) => Some(i.clone()),
                     _ => None,
                 };
-                Dataset { stats: None, ..Self::meta(&e.reg(), idx.as_deref()) }
+                Dataset { stats: None, revision: None, ..Self::meta(&e.reg(), idx.as_deref()) }
             })
             .collect())
     }
