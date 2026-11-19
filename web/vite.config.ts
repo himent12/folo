@@ -32,7 +32,7 @@ export default defineConfig({
     // bundler makes a chunk of every set of modules a distinct set of screens shares (115 files, many under 1 KB), and
     // a cold Overview fetched 41 JS and 19 CSS files: over HTTP/1.1 (folo serve) a browser opens 6 connections to a
     // host, so on a remote server those requests queued in waves of one round trip each. A first load fetches some
-    // code its screen does not use (the Overview: 15 KB more JS, brotli), and every later screen only its own chunk
+    // code its screen does not use (the Overview: 17 KB more JS, brotli), and every later screen only its own chunk
     // (README, Routing).
     rolldownOptions: {
       output: {
