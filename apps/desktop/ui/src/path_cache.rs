@@ -142,14 +142,16 @@ impl PathCache {
     /// Drops the least recently used paths until the cache, its table cut to what is left, is down to
     /// [`LOW_WATER`]: one sort of the entries by age, however many go. The table keeps its size when
     /// entries go, so it is then rebuilt for the rest (a table grown for many tiny paths was most of what
-    /// the cache held).
+    /// the cache held). The table counted is the one for a quarter more entries than are left: cut to a
+    /// table exactly full, the next insert would double it, go over [`BUDGET`] again and evict again, on
+    /// every insert or every second one (a cache of small paths, about 130 bytes each).
     fn evict(&mut self) {
         self.evictions += 1;
         let mut by_age: Vec<(u64, u64)> = self.entries.iter().map(|(&h, e)| (e.last_used, h)).collect();
         by_age.sort_unstable();
         let mut left = self.entries.len();
         for (_, h) in by_age {
-            if self.heap + table_bytes(left) <= LOW_WATER {
+            if self.heap + table_bytes(left + left / 4 + 1) <= LOW_WATER {
                 break;
             }
             if let Some(old) = self.entries.remove(&h) {
@@ -162,16 +164,17 @@ impl PathCache {
 }
 
 /// `build(key)`'s result, from this thread's cache when `key` was built recently; a result that is an
-/// error is never kept.
+/// error is never kept. While the thread is torn down and its cache already gone (a path built by another
+/// thread local's destructor), the path is built without the cache.
 pub(crate) fn cached<E>(
     key: Vec<u32>,
     build: impl FnOnce() -> Result<BuiltPath<Pixels>, E>,
 ) -> Result<BuiltPath<Pixels>, E> {
-    if let Some(hit) = CACHE.with_borrow_mut(|c| c.get(&key)) {
+    if let Some(hit) = CACHE.try_with(|c| c.borrow_mut().get(&key)).ok().flatten() {
         return Ok(hit);
     }
     let path = build()?;
-    CACHE.with_borrow_mut(|c| c.insert(key, &path));
+    let _ = CACHE.try_with(|c| c.borrow_mut().insert(key, &path));
     Ok(path)
 }
 
@@ -232,16 +235,23 @@ pub(crate) mod counting {
     // SAFETY: every method forwards to `System` with the caller's arguments unchanged; the counters are
     // const-initialised thread locals without destructors, which allocate nothing.
     unsafe impl GlobalAlloc for Counting {
+        // Counted only when the allocation succeeded: a null result holds nothing.
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            add(layout.size() as isize);
             // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract, which `System` shares.
-            unsafe { System.alloc(layout) }
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                add(layout.size() as isize);
+            }
+            p
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            add(layout.size() as isize);
             // SAFETY: as `alloc`.
-            unsafe { System.alloc_zeroed(layout) }
+            let p = unsafe { System.alloc_zeroed(layout) };
+            if !p.is_null() {
+                add(layout.size() as isize);
+            }
+            p
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -251,11 +261,15 @@ pub(crate) mod counting {
         }
 
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            // The new block is counted before the old one goes, as both may be held during the copy.
-            add(new_size as isize);
-            add(-(layout.size() as isize));
             // SAFETY: as `dealloc`, and the caller upholds `realloc`'s size contract.
-            unsafe { System.realloc(ptr, layout, new_size) }
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            // Only when it succeeded (on failure the old block stays, as counted). The new block is counted
+            // before the old one goes, as both may be held during the copy.
+            if !p.is_null() {
+                add(new_size as isize);
+                add(-(layout.size() as isize));
+            }
+            p
         }
     }
 }
@@ -419,6 +433,60 @@ mod tests {
         // The newest are kept, the oldest gone.
         assert!(c.get(&[u32::MAX]).is_some() && c.get(&[small_count - 1]).is_some());
         assert!(c.get(&[0]).is_none());
+    }
+
+    /// A cache full of small paths (136 bytes each, as a filled four-point polygon's) is cut down and then
+    /// takes thousands of inserts before the next cut: the cut leaves room for the table's next growth.
+    /// Cut to a table exactly full, the next insert doubled the table, went over the budget and cut again
+    /// (a sort of some 28 000 entries) on every insert or every second one.
+    #[test]
+    fn a_cache_of_small_paths_is_not_cut_on_every_insert() {
+        let mut c = PathCache::default();
+        let key = |i: u32| {
+            let mut k = vec![0; 22];
+            k[0] = i;
+            k
+        };
+        assert_eq!(entry_bytes(22, 6), 136);
+        let mut i = 0;
+        while c.evictions == 0 {
+            c.insert(key(i), &triangles(i, 2));
+            i += 1;
+        }
+        for _ in 0..3000 {
+            c.insert(key(i), &triangles(i, 2));
+            i += 1;
+            assert!(c.bytes() <= BUDGET, "{} bytes after {i}", c.bytes());
+        }
+        assert!(c.evictions <= 3, "{} cuts in 3000 inserts after the first", c.evictions - 1);
+    }
+
+    /// A path built while the thread is torn down, by the destructor of a thread local destroyed after
+    /// the cache: built without the cache (reaching it there panicked, and a panic in a destructor aborts).
+    #[test]
+    fn a_path_built_after_the_cache_is_gone_is_built_uncached() {
+        struct BuildsOnDrop(std::sync::mpsc::Sender<(bool, bool)>);
+        impl Drop for BuildsOnDrop {
+            fn drop(&mut self) {
+                let gone = CACHE.try_with(|_| ()).is_err();
+                let built = std::panic::catch_unwind(|| chart_line(50, 0., 1.5, false).build().is_ok());
+                let _ = self.0.send((gone, built.unwrap_or(false)));
+            }
+        }
+        thread_local! {
+            static LATE: RefCell<Option<BuildsOnDrop>> = const { RefCell::new(None) };
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Set before the cache is first used: thread locals are destroyed in the reverse order.
+            LATE.with_borrow_mut(|l| *l = Some(BuildsOnDrop(tx)));
+            let _ = chart_line(50, 0., 1.5, false).build().unwrap();
+        })
+        .join()
+        .unwrap();
+        let (gone, built) = rx.recv().unwrap();
+        assert!(gone, "the cache was still there: not the case this test is for");
+        assert!(built, "building the path panicked");
     }
 
     #[test]

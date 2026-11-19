@@ -97,8 +97,16 @@ async fn prepare_system(st: AppState) -> Result<()> {
 /// blocking thread. A request that goes away meanwhile (its client disconnected) changes nothing: the task goes on,
 /// and the next request waits for the same run. After a run that failed (and so ended, with all its jobs), the next
 /// request starts another; after one that succeeded, requests wait for nothing.
+///
+/// Its state belongs to one tokio runtime's life, as `folo serve`'s router does. A router used on a new runtime
+/// after the old one shut down mid-run starts a new run, while blocking jobs of the old one may still be running.
 #[derive(Default)]
-pub(crate) struct Preparation(std::sync::Mutex<Prepared>);
+pub(crate) struct Preparation {
+    state: std::sync::Mutex<Prepared>,
+    /// Requests that took the running preparation's receiver (and wait on it next). For tests.
+    #[cfg(test)]
+    waiters: std::sync::atomic::AtomicUsize,
+}
 
 /// Where [`Preparation`] is.
 #[derive(Default)]
@@ -119,7 +127,7 @@ impl Preparation {
         F: Future<Output = Result<()>> + Send + 'static,
     {
         let mut result = {
-            let mut prepared = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut prepared = self.state.lock().unwrap_or_else(|e| e.into_inner());
             match &*prepared {
                 Prepared::Done => return Ok(()),
                 // A run whose task went without a result (the runtime shutting down) is no run.
@@ -130,7 +138,7 @@ impl Preparation {
                     let this = self.clone();
                     tokio::spawn(async move {
                         let outcome = run.await;
-                        *this.0.lock().unwrap_or_else(|e| e.into_inner()) =
+                        *this.state.lock().unwrap_or_else(|e| e.into_inner()) =
                             if outcome.is_ok() { Prepared::Done } else { Prepared::Not };
                         tx.send_replace(Some(outcome));
                     });
@@ -139,6 +147,8 @@ impl Preparation {
                 }
             }
         };
+        #[cfg(test)]
+        self.waiters.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let outcome = result
             .wait_for(Option::is_some)
             .await
@@ -202,7 +212,12 @@ mod tests {
             let gate = st.probe.gate.close();
             let burst: Vec<_> = (0..16).map(|_| tokio::spawn(system(State(st.clone())))).collect();
             warm_ups_reach(&st, 1).await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            // Every call has entered the wait for the preparation's result.
+            let t = std::time::Instant::now();
+            while st.system_ready.waiters.load(Ordering::SeqCst) < 16 {
+                assert!(t.elapsed() < Duration::from_secs(30), "not every call is waiting");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
             assert!(
                 burst.iter().all(|call| !call.is_finished()),
                 "a call answered before the preparation ended"
@@ -246,6 +261,9 @@ mod tests {
         drop(gate);
         let Json(r) = second.await.unwrap().unwrap_or_else(|e| panic!("{e:?}"));
         assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
+        // This one settles it: the sleep above can miss a second preparation that starts late, but the second
+        // request answers only once the preparation it waits for has ended, and one of its own would have counted
+        // its warm-up by then.
         assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "prepared once");
     }
 

@@ -279,7 +279,12 @@ impl FoloApp {
                     .background_executor()
                     .spawn(async move { (connector.start)(std::time::Duration::from_secs(15)) })
                     .await;
-                folo_ui::trace_point("server-started");
+                // `server-started` only for a new server that said it is listening.
+                folo_ui::trace_point(match &started {
+                    Ok(Spawned::Started(_)) => "server-started",
+                    Ok(Spawned::Running(_)) => "server-in-use",
+                    Err(_) => "server-failed",
+                });
                 match started {
                     Ok(spawned) => {
                         this.update(cx, |this, cx| {

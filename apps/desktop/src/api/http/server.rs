@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::api::*;
 
+use super::refused::Found;
 use super::transport::{BODY_LIMIT, agent, json};
 
 /// A local `folo serve` started by the app; stopped when dropped.
@@ -94,7 +95,7 @@ pub fn is_loopback(url: &str) -> bool {
 
 /// Whether a `folo serve` answers `GET /api/health` at `url`. On this machine the connection gets half a
 /// second: a listening port accepts at once however busy the server is, and a port nothing listens on is
-/// told first without waiting ([`super::refused`]: Windows refuses it only after its SYN retries, 2 s).
+/// told first without waiting ([`super::refused::check`]: Windows refuses it only after its SYN retries, 2 s).
 /// Through the proxy the environment names (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, minus `NO_PROXY`),
 /// as every other call of the app goes.
 pub fn probe(url: &str) -> bool {
@@ -111,7 +112,8 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
     // whose NO_PROXY names the host): through a proxy, a refused direct connection says nothing about what
     // the proxy reaches. Before the client is made, which costs more than the check.
     let direct = proxy.as_ref().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
-    if direct && super::refused::refused(&health) {
+    let found = if direct { super::refused::check(&health) } else { Found::Unsure };
+    if found == Found::Nothing {
         return false;
     }
     let agent = ureq::Agent::config_builder()
@@ -121,13 +123,31 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
         .proxy(proxy)
         .build();
     let agent: ureq::Agent = agent.into();
-    agent
-        .get(&health)
-        .call()
+    let mut answer = agent.get(&health).call();
+    // The check's own connection, closed without a request, waits in the server's accept queue until the
+    // server takes it: with one free slot left there, this connection then finds the queue full (on Windows
+    // it is turned away and times out before its next attempt). Something listens, so once more (the
+    // server takes its queue meanwhile) before saying nobody is there. An answer, or a timeout after the
+    // connection was made, is final.
+    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
+        answer = agent.get(&health).call();
+    }
+    answer
         .ok()
         .filter(|r| r.status().is_success())
         // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
         .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok())
+}
+
+/// Whether a call failed on its connection: it could not connect in time, or the connection was refused,
+/// reset or aborted.
+fn not_connected(e: &ureq::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
+    match e {
+        ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(e) => matches!(e.kind(), ConnectionReset | ConnectionAborted | ConnectionRefused),
+        _ => false,
+    }
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).

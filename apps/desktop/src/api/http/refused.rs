@@ -6,13 +6,21 @@
 //!
 //! The check is bounded by one [`DEADLINE`], counted from the call: every address is tried at once, without
 //! blocking, and the wait for their answers ends at it. Resolving the name (an address, or `localhost` from
-//! the hosts file) counts against it but can't be cut short; once the deadline has passed, no connection is
-//! started and none is waited for. A connection still unanswered at the deadline (a filter that drops
-//! loopback SYNs silently) is not a refusal, and the probe decides as it did before, [`DEADLINE`] later.
+//! the hosts file) counts against it but can't be cut short. The deadline is looked at right before each
+//! connection is started and before a refusal is reported: once it has passed, no connection is started,
+//! none is waited for, and a refusal that came after it is not one. A connection still unanswered at the
+//! deadline (a filter that drops loopback SYNs silently) is not a refusal, and the probe decides as it did
+//! before, [`DEADLINE`] later. The wait is a `select`, which ends on the system timer's ticks: the check can
+//! last [`DEADLINE`] plus one tick (about 15 ms on Windows).
 //!
 //! A server that listens but whose accept queue is full answers with a reset, which reads as refused here:
 //! the app then starts its own `folo serve`, and the data dir's one-owner rule (`serve.lock`) makes the app
-//! connect to the server that owns it.
+//! connect to the server that owns it. A queue with one free slot left goes the other way: the check's
+//! connection, accepted by the system and closed without a request, holds that slot until the server takes
+//! it, so the probe's own connection right after finds the queue full (on Windows it is turned away and
+//! times out waiting for its next attempt). So when the check saw a listener ([`Found::Listener`]) and the
+//! probe then could not connect, the probe tries once more before it says nobody is there
+//! (`server::probe_through`).
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -22,27 +30,39 @@ use std::time::{Duration, Instant};
 /// under the probe's own 0.5 s.
 pub const DEADLINE: Duration = Duration::from_millis(100);
 
-/// Whether every address `url` names is on this machine and refused a TCP connection just now: then no
-/// server answers there, and the probe can say so without waiting. `false` whenever that is not certain
-/// (another machine's address, a name that doesn't resolve, a connection that was accepted, failed some
-/// other way or got no answer within [`DEADLINE`], a system without the option, any OS but Windows, where
-/// a refusal is immediate anyway): the caller then probes as before. The connection is made directly, so
-/// the caller asks only when its HTTP client would connect directly too (no proxy for that address).
-pub fn refused(url: &str) -> bool {
-    refused_within(url, DEADLINE)
+/// What [`check`] found at an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// Every address refused a connection by the deadline: no server answers there.
+    Nothing,
+    /// A connection to one of the addresses was accepted: something listens there.
+    Listener,
+    /// Neither is certain (the cases [`check`] lists).
+    Unsure,
 }
 
-/// [`refused`] with its deadline `limit` from now.
-fn refused_within(url: &str, limit: Duration) -> bool {
+/// Whether every address `url` names is on this machine and refused a TCP connection just now
+/// ([`Found::Nothing`]): then no server answers there, and the probe can say so without waiting.
+/// [`Found::Listener`] when a connection was accepted. [`Found::Unsure`] whenever neither is certain
+/// (another machine's address, a name that doesn't resolve, a connection that failed some other way or got
+/// no answer within [`DEADLINE`], a system without the option, any OS but Windows, where a refusal is
+/// immediate anyway): the caller then probes as before. The connection is made directly, so the caller
+/// asks only when its HTTP client would connect directly too (no proxy for that address).
+pub fn check(url: &str) -> Found {
+    check_within(url, DEADLINE)
+}
+
+/// [`check`] with its deadline `limit` from now.
+fn check_within(url: &str, limit: Duration) -> Found {
     if !cfg!(windows) {
-        return false;
+        return Found::Unsure;
     }
     let deadline = Instant::now() + limit;
     let Ok(uri) = url.parse::<ureq::http::Uri>() else {
-        return false;
+        return Found::Unsure;
     };
     let Some(host) = uri.host() else {
-        return false;
+        return Found::Unsure;
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
@@ -50,49 +70,56 @@ fn refused_within(url: &str, limit: Duration) -> bool {
     // this machine's, and its lookup would cost what this saves.
     let local_name = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok();
     if !local_name {
-        return false;
+        return Found::Unsure;
     }
     let Ok(addrs) = (host, port).to_socket_addrs() else {
-        return false;
+        return Found::Unsure;
     };
     let addrs: Vec<SocketAddr> = addrs.collect();
-    !addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback()) && all_refused(&addrs, deadline)
+    if addrs.is_empty() || !addrs.iter().all(|a| a.ip().is_loopback()) {
+        return Found::Unsure;
+    }
+    connect_all(&addrs, deadline, &Instant::now)
 }
 
-/// One TCP connection to each of `addrs` at once, without SYN retries: whether every one was refused by
-/// `deadline`. A deadline already past, an accepted connection, any other error, a connection still
-/// unanswered at the deadline or more addresses than one `select` takes are all `false`.
+/// One TCP connection to each of `addrs` at once, without SYN retries: [`Found::Nothing`] when every one
+/// was refused by `deadline` (on the clock `now`), [`Found::Listener`] as soon as one was accepted. A
+/// deadline already past (also one that passes between two addresses: nothing more is started), any other
+/// error, a connection still unanswered at the deadline, a refusal known only after it, or more addresses
+/// than one `select` takes are all [`Found::Unsure`].
 #[cfg(windows)]
-fn all_refused(addrs: &[SocketAddr], deadline: Instant) -> bool {
+fn connect_all(addrs: &[SocketAddr], deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
     use windows_sys::Win32::Networking::WinSock::FD_SETSIZE;
-    if addrs.len() > FD_SETSIZE as usize || Instant::now() >= deadline {
-        return false;
+    if addrs.len() > FD_SETSIZE as usize || now() >= deadline {
+        return Found::Unsure;
     }
     // Declared first, so dropped last: every socket is closed before Winsock is released.
-    let Some(_wsa) = win::Wsa::start() else { return false };
+    let Some(_wsa) = win::Wsa::start() else { return Found::Unsure };
     let mut pending: Vec<win::Socket> = Vec::with_capacity(addrs.len());
     for addr in addrs {
-        match win::start_connect(addr) {
+        match win::start_connect(addr, deadline, now) {
             win::Started::Pending(s) => pending.push(s),
             win::Started::Refused => {}
-            win::Started::Other => return false,
+            win::Started::Connected => return Found::Listener,
+            win::Started::Other => return Found::Unsure,
         }
     }
-    wait_refused(pending, deadline)
+    wait(pending, deadline, now)
 }
 
-/// Waits on the connections `pending` (started without blocking, at most `FD_SETSIZE`): `true` once every
-/// one was refused, `false` as soon as one connected or failed some other way, or at `deadline` with one
-/// still unanswered.
+/// Waits on the connections `pending` (started without blocking, at most `FD_SETSIZE`):
+/// [`Found::Nothing`] once every one was refused, if that is before `deadline` (on the clock `now`);
+/// [`Found::Listener`] as soon as one connected; [`Found::Unsure`] as soon as one failed some other way, or
+/// at `deadline` with one still unanswered.
 #[cfg(windows)]
-fn wait_refused(mut pending: Vec<win::Socket>, deadline: Instant) -> bool {
+fn wait(mut pending: Vec<win::Socket>, deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
     use windows_sys::Win32::Networking::WinSock::{
         FD_SET, SO_ERROR, SOCKET_ERROR, SOL_SOCKET, TIMEVAL, WSAECONNREFUSED, getsockopt, select,
     };
     while !pending.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
-            return false;
+            return Found::Unsure;
         }
         let mut connected = FD_SET::default();
         let mut failed = FD_SET::default();
@@ -109,7 +136,7 @@ fn wait_refused(mut pending: Vec<win::Socket>, deadline: Instant) -> bool {
         // `wait`; the first argument is ignored by Winsock.
         let ready = unsafe { select(0, std::ptr::null_mut(), &mut connected, &mut failed, &wait) };
         if ready < 0 {
-            return false;
+            return Found::Unsure;
         }
         // Nothing answered in the time asked: the loop gives up at the deadline (a wait can end a little
         // before it).
@@ -118,7 +145,7 @@ fn wait_refused(mut pending: Vec<win::Socket>, deadline: Instant) -> bool {
         }
         // On return each set holds only its ready sockets. A connection that completed: someone listens.
         if connected.fd_count > 0 {
-            return false;
+            return Found::Listener;
         }
         for &s in &failed.fd_array[..failed.fd_count as usize] {
             let mut error = 0i32;
@@ -127,24 +154,26 @@ fn wait_refused(mut pending: Vec<win::Socket>, deadline: Instant) -> bool {
             let got =
                 unsafe { getsockopt(s, SOL_SOCKET, SO_ERROR, (&mut error as *mut i32).cast(), &mut len) };
             if got == SOCKET_ERROR || error != WSAECONNREFUSED {
-                return false;
+                return Found::Unsure;
             }
             pending.retain(|p| p.0 != s);
         }
     }
-    true
+    // Every one refused, but a refusal known only after the deadline is not reported as one.
+    if now() >= deadline { Found::Unsure } else { Found::Nothing }
 }
 
 /// Elsewhere a refused loopback connection fails at once: the probe itself is quick.
 #[cfg(not(windows))]
-fn all_refused(_addrs: &[SocketAddr], _deadline: Instant) -> bool {
-    false
+fn connect_all(_addrs: &[SocketAddr], _deadline: Instant, _now: &dyn Fn() -> Instant) -> Found {
+    Found::Unsure
 }
 
 /// The Winsock parts of the check, each owning what it opens.
 #[cfg(windows)]
 mod win {
     use std::net::SocketAddr;
+    use std::time::Instant;
 
     use windows_sys::Win32::Networking::WinSock::{
         AF_INET, AF_INET6, FIONBIO, INVALID_SOCKET, IPPROTO_TCP, SIO_TCP_INITIAL_RTO, SOCK_STREAM, SOCKADDR,
@@ -185,6 +214,16 @@ mod win {
 
     /// A socket of ours, closed when dropped. Drop it before the [`Wsa`] it was opened under.
     pub struct Socket(pub SOCKET);
+
+    impl Socket {
+        /// The socket, no longer closed by this guard (its new owner closes it).
+        #[cfg(test)]
+        pub fn into_raw(self) -> SOCKET {
+            let s = self.0;
+            std::mem::forget(self);
+            s
+        }
+    }
 
     impl Drop for Socket {
         fn drop(&mut self) {
@@ -242,16 +281,31 @@ mod win {
 
     /// How a connection began.
     pub enum Started {
-        /// On its way: [`super::all_refused`] waits for it.
+        /// On its way: [`super::wait`] waits for it.
         Pending(Socket),
         /// Refused at once.
         Refused,
-        /// Anything else (connected at once, failed otherwise, the option not there).
+        /// Connected at once: something listens.
+        Connected,
+        /// Anything else (failed otherwise, the option not there, the deadline passed).
         Other,
     }
 
-    /// Starts a non-blocking TCP connection to `addr` with the SYN retries turned off.
-    pub fn start_connect(addr: &SocketAddr) -> Started {
+    #[cfg(test)]
+    thread_local! {
+        /// Connections this thread started (`connect` called), for the deadline tests.
+        static CONNECTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The connections this thread started so far. For tests.
+    #[cfg(test)]
+    pub fn connects() -> usize {
+        CONNECTS.with(std::cell::Cell::get)
+    }
+
+    /// Starts a non-blocking TCP connection to `addr` with the SYN retries turned off, unless `deadline`
+    /// (on the clock `now`) has passed by the time it would start.
+    pub fn start_connect(addr: &SocketAddr, deadline: Instant, now: &dyn Fn() -> Instant) -> Started {
         let addr = Addr::new(addr);
         let Some(s) = tcp_socket(&addr) else { return Started::Other };
         // `TCP_INITIAL_RTO_UNSPECIFIED_RTT` and `TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS` as mstcpip.h defines
@@ -277,8 +331,15 @@ mod win {
             if set != 0 || ioctlsocket(s.0, FIONBIO, &mut non_blocking) != 0 {
                 return Started::Other;
             }
-            if connect(s.0, name, len) != SOCKET_ERROR {
+            // Looked at right before the connection starts: the set-up, or an earlier address, may have
+            // taken this thread past it.
+            if now() >= deadline {
                 return Started::Other;
+            }
+            #[cfg(test)]
+            CONNECTS.with(|c| c.set(c.get() + 1));
+            if connect(s.0, name, len) != SOCKET_ERROR {
+                return Started::Connected;
             }
             match WSAGetLastError() {
                 WSAEWOULDBLOCK => Started::Pending(s),
@@ -289,12 +350,33 @@ mod win {
     }
 }
 
-/// For tests here and in [`super`]: a port of ours that nothing listens on.
+/// For tests here and in [`super`]: a port of ours that nothing listens on, and a listener with a short
+/// accept queue.
 #[cfg(all(test, windows))]
-pub(super) mod closed {
+pub(super) mod ports {
     use std::net::SocketAddr;
 
     use super::win;
+
+    /// A listener on a free loopback port whose accept queue holds `backlog` connections (std's listeners
+    /// take a long one).
+    pub fn listener(backlog: i32) -> std::net::TcpListener {
+        use std::os::windows::io::FromRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{bind, listen};
+        let wsa = win::Wsa::start().expect("Winsock starts");
+        let a = win::Addr::new(&"127.0.0.1:0".parse().unwrap());
+        let socket = win::tcp_socket(&a).expect("a socket");
+        let (name, len) = a.raw();
+        // SAFETY: our live socket and an address that outlives the calls.
+        unsafe {
+            assert_eq!(bind(socket.0, name, len), 0);
+            assert_eq!(listen(socket.0, backlog), 0);
+        }
+        // Winsock stays started for the listener's life (std's listener does not start it); a test process.
+        std::mem::forget(wsa);
+        // SAFETY: a live listening socket, handed to the listener, which closes it.
+        unsafe { std::net::TcpListener::from_raw_socket(socket.into_raw() as u64) }
+    }
 
     /// A TCP socket bound to a port but never listening: a connection there is refused, and no other
     /// process can take the port while this lives (a listener bound, read and dropped could be).
@@ -337,7 +419,10 @@ mod tests {
     fn a_listening_port_is_not_refused() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(!refused(&format!("http://127.0.0.1:{port}/api/health")));
+        let found = check(&format!("http://127.0.0.1:{port}/api/health"));
+        // Seen as a listener where the check runs (Windows); unsure elsewhere.
+        let expected = if cfg!(windows) { Found::Listener } else { Found::Unsure };
+        assert_eq!(found, expected);
     }
 
     /// The limit of the closed-port checks below: generous for a loaded machine (a refusal without SYN
@@ -349,16 +434,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_closed_loopback_port_is_refused_at_once() {
-        use closed::closed_port;
+        use ports::closed_port;
+        let refused = |url: String| check_within(&url, TEST_LIMIT) == Found::Nothing;
         let v4 = closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
-        assert!(refused_within(&format!("http://127.0.0.1:{}/api/health", v4.port), TEST_LIMIT));
+        assert!(refused(format!("http://127.0.0.1:{}/api/health", v4.port)));
 
         // IPv6, on a port of its own; a listener of its own there is not refused.
         if let Some(v6) = closed_port("[::1]:0".parse().unwrap()) {
-            assert!(refused_within(&format!("http://[::1]:{}", v6.port), TEST_LIMIT));
+            assert!(refused(format!("http://[::1]:{}", v6.port)));
             let listener = std::net::TcpListener::bind("[::1]:0").expect("IPv6 loopback works: bound above");
             let port = listener.local_addr().unwrap().port();
-            assert!(!refused_within(&format!("http://[::1]:{port}"), TEST_LIMIT));
+            assert_eq!(check_within(&format!("http://[::1]:{port}"), TEST_LIMIT), Found::Listener);
         }
 
         // `localhost` names both loopback addresses: one port reserved on both, neither listening.
@@ -369,7 +455,7 @@ mod tests {
         });
         // None on a machine without IPv6 loopback, where `localhost` is 127.0.0.1 alone (covered above).
         if let Some((v4, _v6)) = both {
-            assert!(refused_within(&format!("http://localhost:{}", v4.port), TEST_LIMIT));
+            assert!(refused(format!("http://localhost:{}", v4.port)));
         }
     }
 
@@ -380,35 +466,52 @@ mod tests {
     #[test]
     fn a_connection_unanswered_at_the_deadline_is_not_refused() {
         use std::os::windows::io::IntoRawSocket;
-        let closed = closed::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+        let closed = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
         let _wsa = win::Wsa::start().unwrap();
         let mut pending = Vec::new();
         // Refused at once, or later, in the wait.
-        match win::start_connect(&SocketAddr::from(([127, 0, 0, 1], closed.port))) {
+        let addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
+        match win::start_connect(&addr, Instant::now() + TEST_LIMIT, &Instant::now) {
             win::Started::Pending(s) => pending.push(s),
             win::Started::Refused => {}
-            win::Started::Other => panic!("a closed port neither refused nor pending"),
+            _ => panic!("a closed port neither refused nor pending"),
         }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         pending.push(win::Socket(listener.into_raw_socket() as usize));
         let limit = Duration::from_millis(50);
         let t = Instant::now();
-        assert!(!wait_refused(pending, t + limit));
+        assert_eq!(wait(pending, t + limit, &Instant::now), Found::Unsure);
         let took = t.elapsed();
         assert!(took >= limit, "{took:?}: gave up before the deadline");
         // It ends (with nothing to end it, the wait would last for ever); generous for a loaded machine.
         assert!(took < Duration::from_secs(10), "{took:?}");
     }
 
-    /// Once the deadline has passed, no connection is started: a closed port is not refused then.
+    /// Once the deadline has passed, no connection is started and no refusal is reported: a closed port
+    /// is not refused then. Also when the deadline passes between two addresses (a clock that jumps past it
+    /// once the first connection started): the second is not started.
     #[cfg(windows)]
     #[test]
     fn nothing_is_tried_after_the_deadline() {
-        let closed = closed::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+        let closed = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+        let other = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
-        assert!(!all_refused(&[addr], Instant::now()));
-        assert!(!refused_within(&format!("http://127.0.0.1:{}", closed.port), Duration::ZERO));
-        assert!(all_refused(&[addr], Instant::now() + TEST_LIMIT));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], other.port));
+        assert_eq!(connect_all(&[addr], Instant::now(), &Instant::now), Found::Unsure);
+        assert_eq!(check_within(&format!("http://127.0.0.1:{}", closed.port), Duration::ZERO), Found::Unsure);
+        assert_eq!(connect_all(&[addr, addr2], Instant::now() + TEST_LIMIT, &Instant::now), Found::Nothing);
+
+        let start = Instant::now();
+        let deadline = start + TEST_LIMIT;
+        let before = win::connects();
+        let clock = || if win::connects() > before { deadline } else { start };
+        assert_eq!(connect_all(&[addr, addr2], deadline, &clock), Found::Unsure);
+        assert_eq!(win::connects() - before, 1, "a connection started after the deadline");
+
+        // Every connection refused, but only known after the deadline: not a refusal.
+        let _wsa = win::Wsa::start().unwrap();
+        assert_eq!(wait(Vec::new(), deadline, &|| deadline), Found::Unsure);
+        assert_eq!(wait(Vec::new(), deadline, &|| start), Found::Nothing);
     }
 
     /// A Winsock start-up that failed is not released: that `WSACleanup` would release another user's.
@@ -456,7 +559,7 @@ mod tests {
     fn anything_else_is_left_to_the_probe() {
         // Another machine (TEST-NET-1: never connected to), a name, and things that aren't addresses.
         for url in ["http://192.0.2.1:7878", "http://folo.example:7878", "abc def", "", "http://"] {
-            assert!(!refused(url), "{url}");
+            assert_eq!(check(url), Found::Unsure, "{url}");
         }
     }
 }

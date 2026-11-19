@@ -363,11 +363,21 @@ mod tests {
 
     /// A server answering each connection with the next canned response (and recording requests).
     fn canned_server(responses: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
-        use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        canned_server_on(listener, std::time::Duration::ZERO, responses)
+    }
+
+    /// [`canned_server`] on `listener`, taking its first connection only `after` that long.
+    fn canned_server_on(
+        listener: std::net::TcpListener,
+        after: std::time::Duration,
+        responses: Vec<Vec<u8>>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            std::thread::sleep(after);
             let mut responses = responses.into_iter();
             let mut resp = responses.next();
             while let Some(answer) = &resp {
@@ -649,10 +659,11 @@ connection: close
         use std::io::{BufRead, BufReader, Write};
         // A closed loopback port, held through both checks: on Windows a socket bound there that never
         // listens, so no other process can take the port meanwhile. Elsewhere (no refused-at-once check,
-        // and std can't bind without listening) a port bound for a moment and let go.
+        // and std can't bind without listening) a port bound for a moment and let go: another process may
+        // take it, so the direct probe below is asked only on Windows.
         #[cfg(windows)]
         let (_held, closed) = {
-            let held = super::refused::closed::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+            let held = super::refused::ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
             let port = held.port;
             (held, std::net::SocketAddr::from(([127, 0, 0, 1], port)))
         };
@@ -687,8 +698,24 @@ connection: close
         assert!(probe_through(&url, Some(ureq::Proxy::new(&proxy_url).unwrap())));
         let connect = connects.recv().unwrap();
         assert!(connect.starts_with(&format!("CONNECT {closed} ")), "{connect}");
-        // Without the proxy the same address is closed.
+        // Without the proxy the same address is closed (where it is still held: Windows).
+        #[cfg(windows)]
         assert!(!probe_through(&url, None));
+    }
+
+    /// A server whose accept queue has one free slot: the refused-at-once check's connection, closed
+    /// without a request, takes it until the server accepts it, and the probe's own connection then finds
+    /// the queue full (Windows turns it away; it times out). The check saw a listener, so the probe tries
+    /// once more and finds the server, which took its queue meanwhile (here 200 ms in, inside the first
+    /// attempt's half second). With one attempt the app said nobody was there and started its own server.
+    #[cfg(windows)]
+    #[test]
+    fn a_server_whose_queue_the_check_filled_is_still_found() {
+        let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
+        let listener = super::refused::ports::listener(1);
+        let (url, requests) = canned_server_on(listener, std::time::Duration::from_millis(200), vec![health]);
+        assert!(super::server::probe_through(&url, None));
+        assert!(requests.recv().unwrap().starts_with("GET /api/health "));
     }
 
     #[test]
