@@ -69,12 +69,14 @@ pub fn claim(dir: &Path) -> Result<Claim> {
         _ => DataError::io(dir, e),
     })?;
     let marker = dir.join(MARKER);
-    let mut file = std::fs::File::create_new(&marker).map_err(|e| match e.kind() {
-        ErrorKind::AlreadyExists => in_use(ErrorKind::AlreadyExists),
-        _ => DataError::io(&marker, e),
-    })?;
-    let written = file.write_all(NOTE.as_bytes()).map_err(|e| DataError::io(&marker, e));
-    drop(file);
+    // The block owns the file, so it is closed before the folder is listed.
+    let written = {
+        let mut file = std::fs::File::create_new(&marker).map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => in_use(ErrorKind::AlreadyExists),
+            _ => DataError::io(&marker, e),
+        })?;
+        file.write_all(NOTE.as_bytes()).map_err(|e| DataError::io(&marker, e))
+    };
     let others = std::fs::read_dir(dir)
         .map_err(|e| DataError::io(dir, e))
         .map(|mut rd| rd.any(|e| e.map_or(true, |e| e.file_name() != MARKER)));
