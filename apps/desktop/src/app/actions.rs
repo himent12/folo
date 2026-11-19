@@ -402,6 +402,7 @@ impl FoloApp {
         self.changed_here(List::Datasets, cx);
         self.store.dataset.remove(id);
         self.store.images.remove(id);
+        self.store.previews.remove(id);
         // An open select may list it (New run's datasets): its highlight is an index into the list.
         // The forms hold their dataset by id, so the choice in them stays what it was.
         self.menu_open = None;

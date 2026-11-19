@@ -192,6 +192,7 @@ impl FoloApp {
         let s = &mut self.store;
         forget_unreachable(&mut s.dataset);
         forget_unreachable(&mut s.images);
+        forget_unreachable(&mut s.previews);
         forget_unreachable(&mut s.issues);
         forget_unreachable(&mut s.evals);
         forget_unreachable(&mut s.run_data);

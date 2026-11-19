@@ -86,14 +86,9 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        self.ensure_dataset(&d.id, cx);
-        let metas: Vec<crate::api::ImageInfo> = self
-            .store
-            .images
-            .get(&d.id)
-            .and_then(|l| l.ready())
-            .map(|v| v.iter().filter(|m| !m.boxes.is_empty()).take(4).cloned().collect())
-            .unwrap_or_default();
+        // Its first images only: the whole list is read when the dataset is opened.
+        self.ensure_dataset_card(d, cx);
+        let metas = self.card_images(&d.id, 4);
         let tiles: Vec<AnyElement> = (0..4)
             .map(|i| match metas.get(i) {
                 Some(m) => {

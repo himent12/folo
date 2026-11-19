@@ -257,7 +257,20 @@ impl FoloApp {
         }
     }
 
+    /// A dataset's own record and every one of its images (its page).
     pub fn ensure_dataset(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.ensure_dataset_record(id, cx);
+        if self.store.images.get(id).is_none_or(|l| l.needs_fetch()) {
+            self.store.images.insert(id.to_string(), Load::Loading);
+            self.images_seq += 1;
+            self.images_more.insert(id.to_string(), self.images_seq);
+            self.load_images_from(id.to_string(), self.images_seq, 0, cx);
+        }
+    }
+
+    /// A dataset's own record (its stats, or what is wrong with it), without its image list: what
+    /// a card needs besides its first images ([`FoloApp::ensure_dataset_card`]).
+    pub(super) fn ensure_dataset_record(&mut self, id: &str, cx: &mut Context<Self>) {
         // "Not found" once, listed now (its folder registered again, here or elsewhere): ask again,
         // its images too.
         let back = matches!(self.store.dataset.get(id), Some(Load::Failed(e)) if e.code == "dataset_not_found")
@@ -266,6 +279,9 @@ impl FoloApp {
             self.store.dataset.remove(id);
             if self.store.images.get(id).is_some_and(|l| l.error().is_some()) {
                 self.store.images.remove(id);
+            }
+            if self.store.previews.get(id).is_some_and(|l| l.error().is_some()) {
+                self.store.previews.remove(id);
             }
         }
         // Read before and shown again on a page with cards (`ds_recheck`): read again in place, the
@@ -320,12 +336,6 @@ impl FoloApp {
                 },
             );
         }
-        if self.store.images.get(id).is_none_or(|l| l.needs_fetch()) {
-            self.store.images.insert(id.to_string(), Load::Loading);
-            self.images_seq += 1;
-            self.images_more.insert(id.to_string(), self.images_seq);
-            self.load_images_from(id.to_string(), self.images_seq, 0, cx);
-        }
     }
 
     /// A number for a new read of dataset `id`, the latest from now on ([`FoloApp::ds_read_done`]).
@@ -346,10 +356,12 @@ impl FoloApp {
     }
 
     /// Drops what the app holds of a dataset's files (its image list and the page of it still on its
-    /// way, its label issues, its decoded images, the grid's filter): read again when shown.
+    /// way, its card's first images, its label issues, its decoded images, the grid's filter): read
+    /// again when shown.
     pub(super) fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
         self.store.images.remove(id);
         self.images_more.remove(id);
+        self.store.previews.remove(id);
         self.store.issues.remove(id);
         self.issue_reads.remove(id);
         *self.ds_filter_cache.borrow_mut() = None;
