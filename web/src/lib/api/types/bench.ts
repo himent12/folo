@@ -384,7 +384,10 @@ export interface BenchAccuracy {
   precision: number;
   recall: number;
   f1: number;
-  /** The confidence with the best class-mean F1; 1 when no confidence gives a right detection (`f1` 0: no best F1). */
+  /**
+   * The confidence with the best class-mean F1 (the highest on ties). With `f1` 0 there is no best F1: F1 is 0 at every
+   * confidence and this is 1, or 0 when no class has a true box.
+   */
   best_conf: number;
   /** mAP@0.5:0.95 of objects under 32² px, 32²–96² px, over 96² px; null when the benchmark has none. */
   map_small: number | null;
@@ -512,7 +515,7 @@ export interface BenchResult {
 export interface BenchEntryImage {
   /** The image with its true boxes. */
   image: BenchImage;
-  /** The detections at or above the entry's `best_conf` (every detection when its `f1` is 0), highest confidence first. */
+  /** The detections at or above the page's `conf`, highest confidence first. */
   detections: BenchDetection[];
   /** True boxes none of them matches (IoU at least 0.5, same class). */
   missed: number;
@@ -531,6 +534,12 @@ export interface BenchEntryImagesQuery {
 export interface BenchEntryImagePage {
   /** Images the entry ran (before offset / limit). */
   total: number;
+  /**
+   * The confidence the detections were taken at (those at or above it; 0 is every one): the entry's `best_conf`, or 0
+   * when it has no best F1 (`f1` 0). An entry graded by an older FOLO took `best_conf` in either case. Absent or null
+   * from a server older than this field (which took `best_conf`).
+   */
+  conf?: number | null;
   images: BenchEntryImage[];
 }
 

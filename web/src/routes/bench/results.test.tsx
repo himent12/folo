@@ -23,6 +23,7 @@ import { GALLERY_PAGE } from './entry/ImagesSection';
 import SelfLabelSection from './entry/SelfLabelSection';
 import NewLoopDialog from './NewLoopDialog';
 import { FROZEN, loopPlanText } from './words';
+import { conf } from '$lib/format';
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */
@@ -379,6 +380,24 @@ describe('New loop', () => {
     expect(fc().textContent).toMatch(/From 0\.050, /);
     expect(right()).toBeLessThan(before);
   });
+
+  it('proposes no lower confidence for a teacher with no best-F1 confidence, and lets a person set one', async () => {
+    // Its entry's F1 is 0 at every confidence: nothing is measured to propose a confidence from.
+    const real = hub.api.benchResult.bind(hub.api);
+    vi.spyOn(hub.api, 'benchResult').mockImplementation(async (id, entryId) => {
+      const r = await real(id, entryId);
+      return { ...r, accuracy: { ...r.accuracy, precision: 0, recall: 0, f1: 0, best_conf: 1 }, self_labeling: { ...r.self_labeling, readiness: 'not_ready' } };
+    });
+    await dialog('m_fast_n');
+    button(/^Keep labels from a lower confidence$/, q('.fc'))!.click();
+    await settle();
+    const field = q<HTMLInputElement>('input[id$="-conf"]');
+    expect(field.value).toBe('');
+    expect(q('.conf').textContent).toMatch(/This teacher has no measured best confidence: set one yourself\./);
+    type(field, '0.4');
+    await settle();
+    expect(q('.fc').textContent).toMatch(/From 0\.40, /);
+  });
 });
 
 describe("a loop's page", () => {
@@ -463,21 +482,72 @@ describe('the calibration panel', () => {
   });
 });
 
-describe('an entry none of whose detections is right', () => {
-  it('says it has no best F1, in its accuracy and its images, instead of calling 1.00 its best', async () => {
-    // F1 0 at every confidence: the server reports `best_conf` 1 (the grid's top) and grades the images at every detection.
-    const real = hub.api.benchResult.bind(hub.api);
+describe('an entry with no best F1 (F1 0 at every confidence)', () => {
+  type Page = Awaited<ReturnType<typeof hub.api.benchEntryImages>>;
+  /** be_f101 with `accuracy` changed and its images page made by `gallery` from the mock's; gives the two captions. */
+  async function entry(accuracy: Partial<BenchResultT['accuracy']>, gallery: (real: Page) => Page) {
+    const result = hub.api.benchResult.bind(hub.api);
+    const images = hub.api.benchEntryImages.bind(hub.api);
     vi.spyOn(hub.api, 'benchResult').mockImplementation(async (id, entryId) => {
-      const r = await real(id, entryId);
-      return { ...r, accuracy: { ...r.accuracy, precision: 0, recall: 0, f1: 0, best_conf: 1 } };
+      const r = await result(id, entryId);
+      return { ...r, accuracy: { ...r.accuracy, precision: 0, recall: 0, f1: 0, best_conf: 1, ...accuracy } };
     });
+    vi.spyOn(hub.api, 'benchEntryImages').mockImplementation(async (id, entryId, q) => gallery(await images(id, entryId, q)));
     await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
     await settle(40);
-    const accuracy = document.querySelector('#accuracy')!.textContent ?? '';
-    const images = document.querySelector('#images .what')!.textContent ?? '';
-    expect(accuracy).toMatch(/No confidence gives a right detection/);
-    expect(images).toMatch(/^Every detection it made \(none is right at any confidence, so there is no best F1\)/);
-    expect(accuracy + images).not.toMatch(/1\.00|\(best F1\)|its best F1/);
+    return {
+      accuracy: document.querySelector('#accuracy p.cap')!.textContent ?? '',
+      images: document.querySelector('#images .what')!.textContent ?? '',
+      tiles: [...document.querySelectorAll('#images .tile:not(.sk)')].map((t) => t.getAttribute('aria-label')),
+    };
+  }
+  const NOT_RIGHT = /none is right|no detection is right|right detection/i;
+
+  it('says F1 is 0 at every confidence and nothing of single detections, with one right after 100 wrong ones', async () => {
+    // 100 wrong boxes above one right one on one image: the scorer counts the top 100 of an image and class, so F1 is 0
+    // at every confidence; the gallery, graded at 0, holds all 101 and finds the right one.
+    const said = await entry({}, (real) => {
+      const im = real.images.find((x) => x.image.boxes.length)!;
+      const truth = im.image.boxes[0]!;
+      const wrong = Array.from({ length: 100 }, () => ({ class: truth.class, score: 0.9, x1: 0, y1: 0, x2: 1, y2: 1 }));
+      const image = { ...im.image, boxes: [truth] };
+      return { total: 1, conf: 0, images: [{ image, detections: [...wrong, { ...truth, score: 0.3 }], missed: 0, wrong: 100 }] };
+    });
+    expect(said.accuracy).toBe('F1 is 0 at every confidence, so there is no best-F1 confidence.');
+    expect(said.images).toMatch(/^Every detection it made, on the unchanged images\./);
+    expect(said.accuracy + said.images).not.toMatch(NOT_RIGHT);
+    expect(said.tiles).toEqual([expect.stringMatching(/: 1 of 1 found, 0 missed, 100 wrong\. Open$/)]);
+  });
+
+  it('says an entry stored by an older FOLO shows its detections from 1.00 up, not every one', async () => {
+    // Graded before the page's `conf`: the gallery was taken at `best_conf`, 1, and holds none of its detections.
+    const said = await entry({}, (real) => ({ total: real.total, images: real.images.map((im) => ({ ...im, detections: [], wrong: 0, missed: im.image.boxes.length })) }));
+    expect(said.images).toMatch(/^Its detections from confidence 1\.00 up, on the unchanged images: an older FOLO graded it, and running the benchmark again shows every detection\./);
+    expect(said.images).not.toMatch(/Every detection|best F1/);
+  });
+
+  it('says it made no detections when it made none', async () => {
+    const said = await entry({}, (real) => ({ total: 2, conf: 0, images: real.images.slice(0, 2).map((im) => ({ ...im, detections: [], wrong: 0, missed: im.image.boxes.length })) }));
+    expect(said.images).toMatch(/^It made no detections on the unchanged images\./);
+  });
+
+  it('with no class evaluated (no true box), reports no best-F1 confidence and every detection, not 0.00', async () => {
+    const said = await entry({ best_conf: 0, map_small: null, per_class: [] }, (real) => {
+      const im = real.images[0]!;
+      const image = { ...im.image, boxes: [] };
+      return { total: 1, conf: 0, images: [{ image, detections: [{ class: 0, score: 0.3, x1: 0, y1: 0, x2: 5, y2: 5 }], missed: 0, wrong: 1 }] };
+    });
+    expect(said.accuracy).toBe('F1 is 0 at every confidence, so there is no best-F1 confidence.');
+    expect(said.images).toMatch(/^Every detection it made, on the unchanged images\./);
+    expect(said.accuracy + said.images).not.toMatch(/0\.00/);
+  });
+
+  it('keeps a normal entry’s images at its best F1, as before', async () => {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
+    await settle(40);
+    const r = await hub.api.benchResult('bn_3c90', 'be_f101');
+    const what = document.querySelector('#images .what')!.textContent!;
+    expect(what.startsWith(`Its detections from confidence ${conf(r.accuracy.best_conf)} up (its best F1), on the unchanged images.`), what).toBe(true);
   });
 });
 

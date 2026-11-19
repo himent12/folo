@@ -4,7 +4,7 @@ use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
 use super::cells::bar_row;
-use super::format::{axis_name, axis_text, best_f1_conf, contestant_line, entry_frac, pct, prf_label};
+use super::format::{axis_name, axis_text, contestant_line, entry_frac, pct, prf_label};
 use crate::api::{Bench, BenchAxis, BenchEntryStatus, BenchReadiness, BenchResult, Label, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
@@ -122,7 +122,7 @@ impl FoloApp {
             self.bench.results.get(&(bench.to_string(), entry.to_string())).cloned().unwrap_or_default();
         let body = match result {
             Load::Ready(r) => {
-                let images = self.entry_images_panel(&t, &b, &e, best_f1_conf(&r.accuracy), window, cx);
+                let images = self.entry_images_panel(&t, &b, &e, &r.accuracy, window, cx);
                 div()
                     .flex()
                     .flex_col()

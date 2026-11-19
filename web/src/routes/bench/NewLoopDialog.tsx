@@ -74,6 +74,8 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const epochs = signal('30');
   const ownThreshold = signal(true);
   const minConf = signal('');
+  /** "Keep labels from a lower confidence" found no confidence to propose: the teacher's entry has no best F1. */
+  const unproposed = signal(false);
   const name = signal('');
   const touched = signal(false);
   const busy = signal(false);
@@ -108,6 +110,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
       epochs.set('30');
       ownThreshold.set(true);
       minConf.set('');
+      unproposed.set(false);
       name.set('');
       poolKind.set('dataset');
       split.set('train');
@@ -216,8 +219,9 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const f = found.peek();
     if (!f) return;
     const from = forecast.peek()?.threshold ?? null;
-    // Without a threshold, from its best-F1 confidence; without that either (nothing it found is right), from the floor.
-    minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round((f.bestConf ?? 0) * 100) / 100)).toFixed(2));
+    // Without a best-F1 confidence (F1 0 at every one) nothing is measured to propose from: the person sets one.
+    unproposed.set(f.bestConf === null);
+    if (f.bestConf !== null) minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round(f.bestConf * 100) / 100)).toFixed(2));
     ownThreshold.set(false);
     await tick();
     document.getElementById(`${uid}-conf`)?.focus();
@@ -499,7 +503,13 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
               label="Keep labels from confidence"
               for={`${uid}-conf`}
               error={showNow(minConf.get(), errs.get().conf)}
-              hint={needConf.get() ? 'Required for this teacher.' : undefined}
+              hint={
+                unproposed.get() && found.get()?.bestConf === null
+                  ? 'This teacher has no measured best confidence: set one yourself.'
+                  : needConf.get()
+                    ? 'Required for this teacher.'
+                    : undefined
+              }
             >
               <div class="narrow">
                 <Input id={`${uid}-conf`} bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!showNow(minConf.get(), errs.get().conf)} />

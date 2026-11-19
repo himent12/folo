@@ -103,7 +103,7 @@ export default function AccuracySection(props: AccuracySectionProps) {
             {!props.entry.scored
               ? 'Precision, recall and F1 of all its boxes (it gives no confidences), class means.'
               : bestF1Conf(a.get()) === null
-                ? 'No confidence gives a right detection: precision, recall and F1 are 0 at every one, so there is no best F1.'
+                ? 'F1 is 0 at every confidence, so there is no best-F1 confidence.'
                 : `Precision, recall and F1 ${atBestF1(a.get().best_conf)}, class means.`}
           </p>
 

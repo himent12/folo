@@ -67,8 +67,8 @@ pub fn grade_maps(
     let evaluation = score::evaluate(clean, classes, scored, seed);
     let robustness = score::robustness(evaluation.accuracy.map50_95, plan, runs);
     let total = score::score(&evaluation, robustness.as_ref(), complete);
-    // The images at its best-F1 confidence; when no confidence gives a right detection (F1 0 everywhere, `best_conf`
-    // is then the grid's top), every detection: what it got wrong is the story.
+    // The images at its best-F1 confidence; without one (F1 0 at every confidence, `best_conf` is then not a best F1),
+    // every detection. The confidence is kept with them (`images_conf`), so readers say what they hold.
     let conf = if evaluation.accuracy.f1 > 0.0 { evaluation.accuracy.best_conf } else { 0.0 };
     let images = clean
         .iter()
@@ -88,6 +88,7 @@ pub fn grade_maps(
             calibration: evaluation.calibration,
             localization: evaluation.localization,
             self_labeling: evaluation.self_labeling,
+            images_conf: Some(conf),
         },
     }
 }
@@ -103,28 +104,54 @@ mod tests {
         BenchDetection { class: 0, score, x1, y1: 0.0, x2: x1 + 10.0, y2: 10.0 }
     }
 
-    fn images(samples: &[Sample]) -> Vec<ImageOutcome> {
+    fn graded(samples: &[Sample]) -> Graded {
         let ids: Vec<String> = (0..samples.len()).map(|i| i.to_string()).collect();
         let plan = default_plan();
         let spec = Spec { classes: 1, scored: true, plan: &plan, seed: 0, complete: true };
-        grade_maps(samples, &ids, &[], &spec).images
+        grade_maps(samples, &ids, &[], &spec)
+    }
+
+    fn outcome(g: &Graded) -> (usize, u32, u32) {
+        (g.images[0].detections.len(), g.images[0].missed, g.images[0].wrong)
     }
 
     #[test]
-    fn images_hold_every_detection_when_none_is_right() {
+    fn images_hold_every_detection_without_a_best_f1_and_keep_where_they_were_taken() {
         // Two true boxes, three detections far from them: F1 is 0 at every confidence, so there is no best-F1
-        // threshold to show the images at (`best_conf` is the grid's top, 1): they show all three, wrong.
+        // confidence to take the images at (`best_conf` is the grid's top, 1): they hold all three, taken at 0.
         let truths = vec![BBox { class: 0, x1: 0.0, y1: 0.0, x2: 10.0, y2: 10.0 }; 2];
         let wrong = Sample {
             truths: truths.clone(),
             detections: vec![det(0.3, 50.0), det(0.2, 70.0), det(0.1, 90.0)],
         };
-        let im = images(std::slice::from_ref(&wrong));
-        assert_eq!((im[0].detections.len(), im[0].missed, im[0].wrong), (3, 2, 3));
+        let g = graded(std::slice::from_ref(&wrong));
+        assert_eq!((g.parts.accuracy.f1, g.parts.accuracy.best_conf), (0.0, 1.0));
+        assert_eq!((outcome(&g), g.parts.images_conf), ((3, 2, 3), Some(0.0)));
+
+        // 100 wrong ones above a right one: the scorer counts an image's top 100 per class, so F1 is 0 at every
+        // confidence too; the images hold all 101, the right one found.
+        let mut dets = vec![det(0.9, 50.0); 100];
+        dets.push(det(0.3, 0.0));
+        let g = graded(&[Sample { truths: truths[..1].to_vec(), detections: dets }]);
+        assert_eq!(g.parts.accuracy.f1, 0.0);
+        assert_eq!((outcome(&g), g.parts.images_conf), ((101, 0, 100), Some(0.0)));
 
         // One right detection at 0.6 and a wrong one at 0.3: the best F1 is at 0.6, and the images keep to it.
         let right = Sample { truths: truths[..1].to_vec(), detections: vec![det(0.6, 0.0), det(0.3, 50.0)] };
-        let im = images(&[right]);
-        assert_eq!((im[0].detections.len(), im[0].missed, im[0].wrong), (1, 0, 0));
+        let g = graded(&[right]);
+        assert_eq!((outcome(&g), g.parts.images_conf), ((1, 0, 0), Some(g.parts.accuracy.best_conf)));
+        assert!(g.parts.accuracy.best_conf > 0.0);
+    }
+
+    #[test]
+    fn an_entry_graded_before_images_conf_reads_as_taken_at_best_conf() {
+        // A file written before the field: the images were taken at `best_conf`, whatever F1 is.
+        let g = graded(&[Sample { truths: Vec::new(), detections: vec![det(0.3, 0.0)] }]);
+        let mut json = serde_json::to_value(&g.parts).unwrap();
+        assert_eq!(json["images_conf"], serde_json::json!(0.0));
+        json.as_object_mut().unwrap().remove("images_conf");
+        json["accuracy"]["best_conf"] = serde_json::json!(1.0);
+        let old: ResultParts = serde_json::from_value(json).unwrap();
+        assert_eq!((old.images_conf, old.images_conf()), (None, 1.0));
     }
 }

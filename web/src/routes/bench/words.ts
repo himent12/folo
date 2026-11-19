@@ -785,16 +785,24 @@ export function forecastText(f: LabelForecast, poolImages: number | null): { tit
 }
 
 /**
- * An entry's best-F1 confidence, or null when it has none: no confidence gives a right detection, so F1 is 0 at every
- * one and `best_conf` is only the grid's top, 1 (docs/BENCH.md, Accuracy).
+ * An entry's best-F1 confidence, or null when it has none: its F1 is 0 at every confidence (`best_conf` is then 1, or 0
+ * when no class has a true box; docs/BENCH.md, Accuracy).
  */
 export function bestF1Conf(a: Pick<BenchAccuracy, 'f1' | 'best_conf'>): number | null {
   return a.f1 > 0 ? a.best_conf : null;
 }
 
-/** What the Images section shows of a scored entry's detections: those from its best-F1 confidence up, else all. */
-export function imagesShownText(bestConf: number | null): string {
-  return bestConf !== null ? `Its detections from confidence ${conf(bestConf)} up (its best F1)` : 'Every detection it made (none is right at any confidence, so there is no best F1)';
+/**
+ * What the Images section shows of a scored entry's detections, from the confidence its images were taken at (`at`, the
+ * page's `conf`): its best-F1 confidence as before; 0, every detection (or that it made none, once every image is loaded
+ * and none has one); above 0 with no best F1, an older FOLO's grading, which kept only those from the grid's top.
+ */
+export function imagesShownText(at: number, bestConf: number | null, noneMade: boolean): string {
+  if (bestConf !== null && at === bestConf) return `Its detections from confidence ${conf(at)} up (its best F1), on the unchanged images.`;
+  if (at <= 0) return noneMade ? 'It made no detections on the unchanged images.' : 'Every detection it made, on the unchanged images.';
+  return bestConf !== null
+    ? `Its detections from confidence ${conf(at)} up, on the unchanged images.`
+    : `Its detections from confidence ${conf(at)} up, on the unchanged images: an older FOLO graded it, and running the benchmark again shows every detection.`;
 }
 
 /**

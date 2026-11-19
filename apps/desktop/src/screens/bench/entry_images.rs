@@ -7,7 +7,7 @@ use folo_ui::{
 };
 
 use super::format::images_shown;
-use crate::api::{Bench, BenchEntry};
+use crate::api::{Bench, BenchAccuracy, BenchEntry};
 use crate::app::{FoloApp, act};
 use crate::bench::ImageSort;
 use crate::controls::Btn;
@@ -18,14 +18,14 @@ use crate::ui::*;
 use crate::viz::{DrawBox, Fit};
 
 impl FoloApp {
-    /// An entry's images: the truth (dashed) and its detections at its best-F1 confidence (every one
-    /// without it: `None`), worst first or in the benchmark's order, a page at a time.
+    /// An entry's images: the truth (dashed) and its detections at the confidence they were taken at (its
+    /// best-F1 one, or every detection without one), worst first or in the benchmark's order, a page at a time.
     pub(super) fn entry_images_panel(
         &mut self,
         t: &Theme,
         b: &Bench,
         e: &BenchEntry,
-        best_conf: Option<f32>,
+        accuracy: &BenchAccuracy,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -164,7 +164,7 @@ impl FoloApp {
                 "{} of {} images · dashed: the truth · solid: its detections{}",
                 int(page.images.len() as u64),
                 int(page.total),
-                if e.scored { images_shown(best_conf) } else { String::new() },
+                if e.scored { images_shown(&page, accuracy) } else { String::new() },
             )))
             .when_some(more_error, |d, err| d.child(text(ty::SM, t.danger_text).child(err.message)))
             .when(more, |d| {

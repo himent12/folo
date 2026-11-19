@@ -1231,11 +1231,12 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   there is none; a contestant without confidences reaches the target only with at least 10 detections). `409 bench_entry_not_done` until the entry is
   `done`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/images?sort=order|worst&offset=0&limit=100` →
-  `{ "total", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at or
-  above the entry's best-F1 confidence (every detection when no confidence gives a right one: `accuracy.f1` 0; entries
-  graded before this rule kept only those at 1), and how many true boxes were `missed` and detections `wrong`. `worst`
-  puts the images with the most `missed + wrong` first (ties in the benchmark's order); any other `sort` is `400
-  invalid_query`. `409 bench_entry_not_done` as above.
+  `{ "total", "conf", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at
+  or above `conf`, and how many true boxes were `missed` and detections `wrong`. `conf` is the confidence they were
+  taken at: the entry's `accuracy.best_conf`, or 0 (every detection) when it has no best F1 (`accuracy.f1` 0); an entry
+  graded by an older FOLO took `best_conf` in either case (the `result` of its `entries/<id>.json` has no
+  `images_conf`). `worst` puts the images with the most `missed + wrong` first (ties in the benchmark's order); any
+  other `sort` is `400 invalid_query`. `409 bench_entry_not_done` as above.
 - `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry, and an open external
   one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
   then `stopped`. `409 bench_entry_not_active` when it has ended.
