@@ -9,6 +9,7 @@
 
 use folo_data::ImageFormat;
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
+use std::io::ErrorKind;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +34,17 @@ fn main() {
     };
     assert_eq!(cfg.train_count() as u64, train, "split rounding");
     let t = std::time::Instant::now();
-    let w = write_yolo(&cfg, std::path::Path::new(dir), ImageFormat::Jpeg(95)).expect("write dataset");
+    let w = match write_yolo(&cfg, std::path::Path::new(dir), ImageFormat::Jpeg(95)) {
+        Ok(w) => w,
+        // A folder already written (or another writer's): this example never writes over or deletes one.
+        Err(folo_data::DataError::Io { source, .. })
+            if matches!(source.kind(), ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty) =>
+        {
+            eprintln!("{dir} is not empty: pass another folder or delete it");
+            std::process::exit(1);
+        }
+        Err(e) => panic!("write dataset: {e}"),
+    };
     println!(
         "wrote {} train + {} val images ({} boxes) to {} in {:.1}s",
         w.splits[0],

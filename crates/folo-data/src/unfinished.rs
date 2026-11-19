@@ -30,10 +30,22 @@ impl Claim {
         &self.0
     }
 
-    /// Marks the folder complete: removes the marker, the writer's last step.
+    /// Marks the folder complete: removes the marker, the writer's last step. On Windows another program (a virus
+    /// scanner, the search indexer) may hold the new file open for a moment without sharing deletion, so a removal
+    /// refused that way is tried again for about half a second.
     pub fn finish(self) -> Result<()> {
         let marker = self.0.join(MARKER);
-        std::fs::remove_file(&marker).map_err(|e| {
+        let mut tries = 0;
+        let removed = loop {
+            match std::fs::remove_file(&marker) {
+                Err(e) if tries < 10 && is_held(&e) => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                done => break done,
+            }
+        };
+        removed.map_err(|e| {
             let m = format!(
                 "the dataset is complete, but {} could not be removed ({e}): delete that file",
                 shown(&marker)
@@ -73,6 +85,12 @@ pub fn claim(dir: &Path) -> Result<Claim> {
             Err(w.and(o).err().unwrap_or_else(|| in_use(ErrorKind::DirectoryNotEmpty)))
         }
     }
+}
+
+/// Whether a failed removal can be another program holding the file open for a moment (Windows: a sharing
+/// violation, error 32, or access denied while the file is pending deletion).
+fn is_held(e: &Error) -> bool {
+    e.kind() == ErrorKind::PermissionDenied || (cfg!(windows) && e.raw_os_error() == Some(32))
 }
 
 /// Fails with [`DataError::Unfinished`] when `dir` holds the marker.

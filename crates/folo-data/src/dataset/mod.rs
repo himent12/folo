@@ -389,10 +389,11 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
         Source::Coco { root, jsons } => {
             crate::unfinished::check(root)?;
             // By plain path, names not resolved: a writer starts in an empty folder, so all below a marked folder is
-            // its unfinished output (`annotations/x.json` and `ANNOTATIONS/x.json` alike).
+            // its unfinished output (`annotations/x.json` and `ANNOTATIONS/x.json` alike). The folder above is
+            // `dir/..`, which the file system resolves (`partial/../x.json` is beside `partial`, not in it).
             for dir in jsons.iter().filter_map(|(_, json)| json.parent()) {
                 crate::unfinished::check(dir)?;
-                dir.parent().map_or(Ok(()), crate::unfinished::check)?;
+                crate::unfinished::check(&dir.join(".."))?;
             }
         }
     }

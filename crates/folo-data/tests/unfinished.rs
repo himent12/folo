@@ -142,3 +142,17 @@ fn a_coco_annotation_file_of_a_marked_folder_is_refused() {
     #[cfg(windows)]
     assert_unfinished(&out.join("ANNOTATIONS/instances_train.json"));
 }
+
+/// A COCO file reached through `partial/..` is beside the marked `partial/`, not in it: it opens.
+#[test]
+fn a_coco_file_beside_a_marked_folder_opens() {
+    let t = TempDir::new("unfinished-coco-beside");
+    write_yolo(&small(6), &t.join("src"), ImageFormat::Png).unwrap();
+    let out = t.join("coco");
+    folo_data::convert::convert(&open(t.join("src")).unwrap(), &out, Format::Coco).unwrap();
+    std::fs::rename(out.join("annotations/instances_val.json"), out.join("instances_val.json")).unwrap();
+    write(&out.join("partial").join(MARKER), "");
+    let json = out.join("partial/../instances_val.json");
+    assert_eq!(open(&json).unwrap().split_sizes(), [0, 1, 0]);
+    assert_eq!(detect_format(&json, Format::Auto).unwrap(), Format::Coco);
+}
