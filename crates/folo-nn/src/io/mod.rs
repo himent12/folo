@@ -9,11 +9,14 @@
 //! - `export.rs`: weights files and export ([`save_weights`], [`write_export`]): Conv+BN fusion, optional `F16`.
 //! - `replace.rs`: [`rename_over`], the temporary-file-then-rename step of every atomic write, retried while
 //!   another program holds the target open on Windows.
+//! - `publish.rs`: [`publish_new`] / [`publish_free`], giving a finished temporary file ([`temp_path`]) a name only
+//!   while no file has it, in one step: exports and uploaded models, which never replace a file.
 
 mod checkpoint;
 mod export;
 mod file;
 mod meta;
+mod publish;
 mod replace;
 pub mod safetensors;
 
@@ -26,4 +29,5 @@ pub use file::{
     LoadOptions, LoadReport, ModelFile, Namespace, Purpose, SkipReason, Skipped, Source, is_class_output,
 };
 pub use meta::{FORMAT_VERSION, FileKind, FloatDType, Metadata, Metrics, ModelConfig, scale_row};
+pub use publish::{TEMP_PREFIX, publish_free, publish_new, temp_path};
 pub use replace::{RenameRetry, rename_over, rename_over_observed, rename_over_with};

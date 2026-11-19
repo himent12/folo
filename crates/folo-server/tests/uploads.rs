@@ -424,6 +424,21 @@ async fn models_upload_into_the_models_folder() {
     let done: Uploaded =
         ok(&app, bare("POST", &format!("/api/uploads/{}/complete", u.id)), StatusCode::CREATED).await;
     assert_eq!(done.model.unwrap().name, "pets_n_v2-2");
+    // A file that took the next name meanwhile keeps its bytes, and the upload moves on to `-4`.
+    let models = home.join("models");
+    std::fs::write(models.join("pets_n_v2-3.folo"), b"someone else's").unwrap();
+    let u = start(&app, json!({ "kind": "model", "name": "pets n/v2" })).await;
+    send_parts(&app, &u.id, &bytes, 32 << 20, 0).await;
+    let done: Uploaded =
+        ok(&app, bare("POST", &format!("/api/uploads/{}/complete", u.id)), StatusCode::CREATED).await;
+    assert_eq!(done.model.unwrap().name, "pets_n_v2-4");
+    assert_eq!(std::fs::read(models.join("pets_n_v2-3.folo")).unwrap(), b"someone else's");
+    // The upload is moved to its name in one step: no name is claimed with an empty file first.
+    for e in std::fs::read_dir(&models).unwrap() {
+        let e = e.unwrap();
+        assert!(e.metadata().unwrap().len() > 0, "{:?} is empty", e.file_name());
+    }
+    std::fs::remove_file(models.join("pets_n_v2-3.folo")).unwrap();
 
     // Not a .folo file: refused on completion, nothing listed, the session gone.
     let u = start(&app, json!({ "kind": "model", "name": "junk" })).await;

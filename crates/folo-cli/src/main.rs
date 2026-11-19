@@ -32,6 +32,7 @@ mod infer;
 mod label;
 mod mcp;
 mod output;
+mod output_file;
 mod quantize;
 mod serve;
 mod serve_lock;

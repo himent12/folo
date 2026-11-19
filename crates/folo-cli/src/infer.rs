@@ -17,6 +17,7 @@ use crate::cli::{ExportArgs, ExportFormatArg, PrecisionArg, PredictArgs, SplitAr
 use crate::draw::annotate;
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
+use crate::output_file::OutputFile;
 
 fn nn_error(command: &str, e: folo_nn::Error) -> CliError {
     engine_error(command, e.into())
@@ -572,7 +573,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
         ));
     }
-    let output = claim_output("export", &args.model, args.output.clone(), suffix, ext)?;
+    let output = OutputFile::new("export", &args.model, args.output.clone(), suffix, ext)?;
     let t = Instant::now();
     let source = if file.has_ema() { "ema" } else { "model" };
     let meta = file.metadata();
@@ -589,14 +590,10 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             // The source's other keys (folo.metrics, folo.created, unknown folo.* keys) travel along.
             metadata: meta.for_weights().to_map(),
         };
-        let written = onnx::export_file(&file, &opts).and_then(|x| x.write_to(&output).map(|()| x));
-        let x = match written {
-            Ok(x) => x,
-            Err(e) => {
-                let _ = std::fs::remove_file(&output); // only the file claimed above
-                return Err(engine_error("export", e));
-            }
-        };
+        let x = onnx::export_file(&file, &opts)
+            .and_then(|x| x.write_to(output.tmp()).map(|()| x))
+            .map_err(|e| engine_error("export", e))?;
+        let output = output.publish()?;
         let value = |v: &OnnxValue| {
             let shape: Vec<serde_json::Value> = v
                 .shape
@@ -642,17 +639,15 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         return Ok(());
     }
     let fused = args.format != ExportFormatArg::Weights;
-    let written = if fused {
-        file.export(&output, dtype)
+    if fused {
+        file.export(output.tmp(), dtype)
     } else {
         // The inference tensor set (EMA when present), unfused, written as a plain weights file.
         FoloModel::from_file(&file, folo_nn::io::Purpose::Inference)
-            .and_then(|(model, _)| model.save(&output))
-    };
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&output); // only the file claimed above
-        return Err(nn_error("export", e));
+            .and_then(|(model, _)| model.save(output.tmp()))
     }
+    .map_err(|e| nn_error("export", e))?;
+    let output = output.publish()?;
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     out.record(&json!({
         "path": folo_api::json::path(&output),
@@ -678,61 +673,6 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         bytes as f64 / 1e6
     ));
     Ok(())
-}
-
-/// The output file of `command` (export, quantize), claimed with `create_new`: `output`, or a free name next to
-/// `model` (`<stem><suffix>.<ext>`, then `-2`, `-3`, ...). Never overwrites: an existing `output` is `output_exists`.
-pub(crate) fn claim_output(
-    command: &str,
-    model: &Path,
-    output: Option<PathBuf>,
-    suffix: &str,
-    ext: &str,
-) -> Result<PathBuf, CliError> {
-    // Like MCP `export`: concurrent commands never share a file; the writer then replaces the empty claim
-    // atomically.
-    let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
-    let io = |p: &Path, e: std::io::Error| {
-        CliError::new(
-            ExitCode::Runtime,
-            "io_error",
-            format!("cannot create {}: {e}", folo_api::json::path(p)),
-        )
-    };
-    match output {
-        Some(o) => {
-            let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => a == b,
-            };
-            if same(&o, model) {
-                return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
-            }
-            match claim(&o) {
-                Ok(()) => Ok(o),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CliError::new(
-                    ExitCode::Runtime,
-                    "output_exists",
-                    format!("{} exists; {command} never overwrites", folo_api::json::path(&o)),
-                )
-                .hint("pass another --output, or leave it out for a free name next to --model")),
-                Err(e) => Err(io(&o, e)),
-            }
-        }
-        None => {
-            let stem = model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
-            let mut n = 1;
-            loop {
-                let tag = if n == 1 { String::new() } else { format!("-{n}") };
-                let p = model.with_file_name(format!("{stem}{suffix}{tag}.{ext}"));
-                match claim(&p) {
-                    Ok(()) => break Ok(p),
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                    Err(e) => return Err(io(&p, e)),
-                }
-            }
-        }
-    }
 }
 
 /// `predict`'s line for one image: "a.jpg: 2 boxes (cat 0.91, dog 0.40) 9.2 ms", "1 box", "0 boxes" without an empty

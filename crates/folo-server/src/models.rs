@@ -518,27 +518,29 @@ impl Models {
             ExportFormat::FoloF16 => ("-f16", "folo"),
             ExportFormat::Onnx => (spec.onnx.file_suffix(), "onnx"),
         };
-        // create_new claims the name, so two exports never share a file; the export then replaces it atomically.
-        let mut n = 1;
-        let out = loop {
+        // Written under a temporary name and moved to the first free name only once complete, in one step that
+        // fails when the name exists (folo_nn::io::publish_free): two exports never share or replace a file, and
+        // one that fails or is killed leaves no file under the name.
+        let name = |n: u32| {
             let tag = if n == 1 { String::new() } else { format!("-{n}") };
-            let p = dir.join(format!("{base}{suffix}{tag}.{ext}"));
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-                Ok(_) => break p,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                Err(e) => return Err(Error::internal(format!("creating {}: {e}", p.display()))),
-            }
+            dir.join(format!("{base}{suffix}{tag}.{ext}"))
         };
+        let creating = |e: std::io::Error| Error::internal(format!("creating {}: {e}", name(1).display()));
+        let tmp = folo_nn::io::temp_path(&dir).map_err(creating)?;
         let written = match format {
-            ExportFormat::FoloF16 => file.export(&out, FloatDType::F16).map_err(nn_error),
+            ExportFormat::FoloF16 => file.export(&tmp, FloatDType::F16).map_err(nn_error),
             ExportFormat::Onnx => {
-                onnx_export(&file, spec.onnx).and_then(|x| x.write_to(&out).map_err(engine_error))
+                onnx_export(&file, spec.onnx).and_then(|x| x.write_to(&tmp).map_err(engine_error))
+            }
+        }
+        .and_then(|()| folo_nn::io::publish_free(&tmp, name).map_err(creating));
+        let out = match written {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
             }
         };
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&out);
-            return Err(e);
-        }
         let bytes = std::fs::metadata(&out).map(|x| x.len()).unwrap_or(0);
         Ok(ExportResult { path: folo_api::json::path(&out), bytes })
     }
