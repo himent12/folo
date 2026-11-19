@@ -19,8 +19,8 @@ const sheets = () => [...document.head.querySelectorAll<HTMLLinkElement>('link[r
 
 describe('failed stylesheets', () => {
   let stop = () => {};
-  // happy-dom logs every stylesheet it does not load.
-  beforeEach(() => void vi.spyOn(console, 'error').mockImplementation(() => {}));
+  // happy-dom logs every stylesheet it does not load, on the console it was given before the test ran (Node's).
+  beforeEach(() => void vi.spyOn(process.stderr, 'write').mockImplementation(() => true));
   afterEach(() => {
     vi.restoreAllMocks();
     stop();
