@@ -75,6 +75,19 @@ pub(crate) fn needs_token() -> ApiError {
     )
 }
 
+/// FOLO's error JSON as an [`ApiError`], its words as sentences.
+pub(super) fn server_error(b: folo_api::ErrorBody) -> ApiError {
+    // `folo serve --token`: the server's words are for an HTTP client that can send one.
+    if b.error.code == "unauthorized" {
+        return needs_token();
+    }
+    ApiError {
+        code: b.error.code,
+        message: sentence(&b.error.message),
+        hint: b.error.hint.as_deref().map(sentence),
+    }
+}
+
 /// Percent-encode one path segment (ids are opaque strings).
 pub(super) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -163,11 +176,22 @@ impl HttpBackend {
         self.base.trim_start_matches("http://").trim_start_matches("https://").to_string()
     }
 
-    /// Something answered `/api/health` at the address, but not folo serve: a web page (another
-    /// server, a login or captive portal, or folo serve's own Studio page when a path follows the
-    /// port, "http://127.0.0.1:7878/subpath"), another JSON, or a 404. Retrying can't help; the
-    /// address is what to check, and with a path after the port, the address without it.
-    pub(super) fn not_folo(&self) -> ApiError {
+    /// The address as scheme, host and port, for the log: a pasted URL's path, query or user can hold a token.
+    pub(super) fn origin(&self) -> String {
+        let uri = self.base.parse::<ureq::http::Uri>().ok();
+        let (scheme, host) =
+            uri.as_ref().map_or(("", ""), |u| (u.scheme_str().unwrap_or(""), u.host().unwrap_or("")));
+        let port = uri.as_ref().and_then(|u| u.port_u16()).map(|p| format!(":{p}")).unwrap_or_default();
+        format!("{scheme}://{host}{port}")
+    }
+
+    /// `/api/health` answered `status` without FOLO's shape (see `health`): a web page (another
+    /// server, a sign-in page or a proxy's error page, or folo serve's own Studio page when a path
+    /// follows the port, "http://127.0.0.1:7878/subpath"), another JSON, or nothing. Retrying can't
+    /// help; the address is what to check, and with a path after the port, the address without it.
+    /// `why` (what didn't read) goes to the log.
+    pub(super) fn not_folo(&self, status: u16, why: &dyn std::fmt::Display) -> ApiError {
+        eprintln!("folo-desktop: {} answered HTTP {status}, not as a FOLO server: {why}", self.origin());
         let authority = self.base.find("://").map_or(0, |i| i + 3);
         let hint = match self.base[authority..].find('/') {
             Some(path) => format!(
@@ -177,17 +201,8 @@ impl HttpBackend {
             None => "Check the address: it should be folo serve's base address, like http://127.0.0.1:7878."
                 .into(),
         };
-        ApiError::new("not_folo", format!("{} answered, but not as a FOLO server", self.host()))
+        ApiError::new("not_folo", format!("{} answered HTTP {status}, but not as a FOLO server", self.host()))
             .with_hint(hint)
-    }
-
-    /// `/api/health`'s failure (`status`: its HTTP status). Every FOLO server answers it with its
-    /// health, also one started with `--token`, so an answer that doesn't read as one, or a 4xx, came
-    /// from something else at the address ([`Self::not_folo`]). Refused, timed out, 401 and 5xx keep
-    /// their own words.
-    pub(super) fn health_failed(&self, e: ApiError, status: u16) -> ApiError {
-        let client_error = (400..500).contains(&status) && e.code != "unauthorized";
-        if e.code == "bad_response" || client_error { self.not_folo() } else { e }
     }
 
     /// Turn a response into `T`, or the API's error body into an [`ApiError`].
@@ -199,13 +214,7 @@ impl HttpBackend {
         if status >= 400 {
             let body: Option<folo_api::ErrorBody> = json(resp.body_mut(), BODY_LIMIT).ok();
             return Err(match body {
-                // `folo serve --token`: the server's words are for an HTTP client that can send one.
-                Some(b) if b.error.code == "unauthorized" => needs_token(),
-                Some(b) => ApiError {
-                    code: b.error.code,
-                    message: sentence(&b.error.message),
-                    hint: b.error.hint.as_deref().map(sentence),
-                },
+                Some(b) => server_error(b),
                 None if status == 401 => needs_token(),
                 None => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
             });
@@ -214,26 +223,20 @@ impl HttpBackend {
             // Parsed from bytes, as every body is: one parser of `T`, not a second over a `&str`.
             return serde_json::from_slice(b"null").map_err(|e| ApiError::new("bad_response", e.to_string()));
         }
-        json(resp.body_mut(), 256 << 20).map_err(|e| self.body_failed(e))
+        json(resp.body_mut(), 256 << 20)
+            .map_err(|e| self.body_failed(e, "Unexpected response from folo serve: "))
     }
 
     /// A response body that didn't read. The link breaking under it (the server went away, a proxy
     /// cut it, a read timed out: a body shorter than it announced) is the server being out of reach,
     /// as a request that got no answer is, so reconnecting asks for it again; a body that arrived
-    /// whole but isn't what was asked for (not JSON, the wrong shape, too big) is a bad response,
-    /// said for a person: the parser's words ("json: expected value at line 1 column 1") go to the
-    /// log.
-    pub(super) fn body_failed(&self, e: ureq::Error) -> ApiError {
+    /// whole but isn't what was asked for (not JSON, the wrong shape, too big) is a bad response.
+    pub(super) fn body_failed(&self, e: ureq::Error, what: &str) -> ApiError {
         match e {
             ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => {
                 self.unreachable(&e)
             }
-            e => {
-                eprintln!("folo-desktop: an answer from {} didn't read: {e}", self.host());
-                ApiError::new("bad_response", "folo serve sent an answer FOLO Desktop can't read").with_hint(
-                    "They may be different versions: update FOLO Desktop and folo serve to the same release.",
-                )
-            }
+            e => ApiError::new("bad_response", format!("{what}{e}")),
         }
     }
 

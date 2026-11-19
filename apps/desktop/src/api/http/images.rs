@@ -52,8 +52,12 @@ impl HttpBackend {
                 .err()
                 .unwrap_or_else(|| ApiError::new("http_error", "image request failed")));
         }
-        let bytes =
-            resp.body_mut().with_config().limit(64 << 20).read_to_vec().map_err(|e| self.body_failed(e))?;
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(64 << 20)
+            .read_to_vec()
+            .map_err(|e| self.body_failed(e, ""))?;
         Ok(ImageData::Encoded(bytes))
     }
     /// [`Backend::bench_image`]'s answer.
@@ -84,8 +88,12 @@ impl HttpBackend {
                 .err()
                 .unwrap_or_else(|| ApiError::new("http_error", "benchmark image request failed")));
         }
-        let bytes =
-            resp.body_mut().with_config().limit(64 << 20).read_to_vec().map_err(|e| self.body_failed(e))?;
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(64 << 20)
+            .read_to_vec()
+            .map_err(|e| self.body_failed(e, ""))?;
         Ok(ImageData::Encoded(bytes))
     }
 }
