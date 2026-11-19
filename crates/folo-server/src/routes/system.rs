@@ -45,6 +45,7 @@ fn features(st: &AppState) -> Vec<String> {
         (labeling, folo_api::FEATURE_AGENT_LABELING),
         (labeling, folo_api::FEATURE_LABEL_IMAGE_FILTERS),
         (labeling, folo_api::FEATURE_LABEL_REVISIONS),
+        (labeling, folo_api::FEATURE_LABEL_IMAGE_PATH),
         (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
     ];
     always

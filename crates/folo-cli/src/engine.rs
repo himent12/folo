@@ -26,9 +26,13 @@ pub fn open_dataset_splits(
             .hint("pass a YOLO / COCO dataset folder or its data.yaml"));
     }
     let opts = folo_data::OpenOptions { format, ..folo_data::OpenOptions::default() };
-    let ds = folo_data::open_splits(path, &opts, splits).map_err(|e| {
-        CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string())
-            .hint("see docs/DATA.md for the supported layouts")
+    let ds = folo_data::open_splits(path, &opts, splits).map_err(|e| match e {
+        e @ folo_data::DataError::Unfinished(_) => {
+            CliError::new(ExitCode::Runtime, "dataset_unfinished", e.to_string())
+                .hint(folo_data::unfinished::HINT)
+        }
+        e => CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string())
+            .hint("see docs/DATA.md for the supported layouts"),
     })?;
     let named = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
     let abs = std::path::absolute(named).unwrap_or_else(|_| named.to_path_buf());

@@ -134,6 +134,17 @@ pub struct ResultParts {
     pub calibration: Option<BenchCalibration>,
     pub localization: BenchLocalization,
     pub self_labeling: BenchSelfLabeling,
+    /// The confidence the per-image outcomes were taken at: their detections are those at or above it. Absent in
+    /// entries graded before it was kept, which took them at `accuracy.best_conf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_conf: Option<f32>,
+}
+
+impl ResultParts {
+    /// The confidence the per-image outcomes were taken at, for entries graded before it was kept too.
+    pub fn images_conf(&self) -> f32 {
+        self.images_conf.unwrap_or(self.accuracy.best_conf)
+    }
 }
 
 /// One image of a finished entry (`GET …/entries/{id}/images` without the image itself).
@@ -141,7 +152,7 @@ pub struct ResultParts {
 pub struct ImageOutcome {
     /// The image's id.
     pub image: String,
-    /// The detections at or above the entry's best-F1 confidence, highest first.
+    /// The detections at or above the entry's `images_conf`, highest first.
     pub detections: Vec<BenchDetection>,
     pub missed: u32,
     pub wrong: u32,

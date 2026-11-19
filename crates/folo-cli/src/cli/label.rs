@@ -208,7 +208,7 @@ pub struct LabelViewArgs {
     pub job: String,
     /// The image's id [default: the next image to review].
     pub image: Option<String>,
-    /// Where to write the JPEG [default: <job>-<image>.jpg in the current folder].
+    /// Where to write the JPEG [default: <job>-<image>.jpg in the current folder]; never one of the job's images.
     #[arg(long, short)]
     pub output: Option<PathBuf>,
     /// Long side of the view in pixels (256 to 1568; never more than the image's own).

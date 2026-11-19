@@ -49,13 +49,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 
 | status | code | when |
 |---|---|---|
-| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
+| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `dataset_unfinished`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `label_boxes_changed`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; a box edit or review made on a revision of an image's boxes that is no longer theirs; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
+| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `label_boxes_changed`, `upload_conflict`, `output_exists`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; a box edit or review made on a revision of an image's boxes that is no longer theirs; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
@@ -80,7 +80,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
   web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below), `label_image_filters`
   (`reviewed` and `ids` on `GET /api/label/jobs/{id}/images`; older servers ignore them), `label_revisions`
-  (`expect` on `PUT /api/label/jobs/{id}/images/{image_id}` and `POST /api/label/jobs/{id}/review`), `uploads` (`/api/uploads`),
+  (`expect` on `PUT /api/label/jobs/{id}/images/{image_id}` and `POST /api/label/jobs/{id}/review`), `label_image_path`
+  (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
@@ -150,7 +151,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   detection uses: a `data.yaml`, a YAML with a `train:` line read to 64 KiB, `images/` + `labels/`, an
   `annotations/` JSON; only regular files are read, and nothing the `folo mcp --confine` read guard refuses), and
   nothing waits for them),
-  `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
+  `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes),
+  `dataset_unfinished` (the dataset's folder holds a `.folo-unfinished` file: a `folo dataset synth` / `convert`
+  is writing it or was stopped while writing it; delete the folder and run the command again, docs/DATA.md). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
   the same format) returns the existing dataset (still `201`) instead of a duplicate; its `name` is kept.
@@ -166,7 +169,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   train / val. `classes`: 1 to 8 distinct names; `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
   `hexagon` and `heart` get that shape, every other name the next shape no name has claimed. `400 invalid_body`
   when `name` is blank, `images` is outside `1..=100000`, `imgsz` outside `32..=4096`, or `classes` breaks those
-  rules (the message says which).
+  rules (the message says which). `409 output_exists` when another writer (such as `folo dataset synth`) took the
+  new folder first; that folder is left as it is.
 - `GET /api/datasets/{id}` → `Dataset` with `stats` and, in real mode, `revision`: an opaque string that changes
   whenever the dataset's files do (the fingerprint of its index, below), also when an edit leaves every other field as
   it was (a box moved within its image). A client holding the image list reads it again when `revision` differs from
@@ -349,7 +353,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `<model name>-decoded.onnx`, `half` `<model name>-f16.onnx`, both `-decoded-f16.onnx`, as `folo export` names
   them). In the model name, control characters and the characters a Windows file name cannot hold (`/ \ : < > " |
   ? *`) become `-`, and it is cut to 200 bytes. Names get `-2`, `-3`, ... when taken (exports never
-  overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
+  overwrite): the file is written in `exports/` as `.folo-<pid>-<n>.tmp` and moved to the first free name in one
+  step once complete, as `folo export` does (docs/CLI.md), so a stopped server leaves the name absent or complete.
+  A failed export removes its temporary files (best effort); a stopped server can leave `.folo-<pid>-<n>.tmp`
+  (empty, partial or complete) and the writer's own `.folo-<pid>-<n>.tmp.<pid>.<m>.tmp` there, which nothing reads
+  and which are safe to delete. Where the move is a hard link (macOS, Linux file systems without
+  `RENAME_NOREPLACE`), `.folo-<pid>-<n>.tmp` stays as a second name of the finished file when it cannot be removed.
+  `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
   it elsewhere, e.g. into the browser detector (docs/WASM.md), or its ONNX graph. Without `format` it is the file as
@@ -444,7 +454,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   none before the first epoch ends). `409 run_not_active` when the run already finished. A queued run stops at once
   (one that never started is better deleted: `DELETE /api/runs/{id}` below); a running one after its current batch (the epoch in
   progress is discarded; `weights/last.folo` is the last finished epoch's). `model_id` is set when at least one epoch
-  was validated. The final `status` event is sent once the run can be resumed or deleted.
+  was validated. The final `status` event is sent once the run can be resumed or deleted. A stop that comes after the
+  last batch (while the last epoch validates) is answered the same way but changes nothing: the run ends `completed`
+  with all its results, and the stop's log line says that this can happen.
 - `POST /api/runs/{id}/queue` body `{ "action": "top|up|down|bottom|start" }` or `{ "position": 1 }` → `Run` (with
   its new `queue_position`). Moves a run that waits in the training queue. The queue holds the runs that are
   `queued` and not yet taken by the worker, front first; `Run.queue_position` is a run's 1-based place in it (`1`
@@ -889,12 +901,17 @@ exported more than once.
   whitespace and one pair of matching quotes around it (Windows' "Copy as path"); a relative path is
   `400 invalid_body` (it is never read from the server's working directory), a blank one too. `404 path_not_found`
   for a missing folder. Images may be added while a run is active (they wait for the next run).
-- `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&reviewed=true|false&ids=a,b&offset=0&limit=100`
+- `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&reviewed=true|false&ids=a,b&path=/abs/file.jpg&offset=0&limit=100`
   → `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
   at 1000; `total` counts all matches before `offset` / `limit`; any other `status` or `reviewed` is
   `400 invalid_query`. `reviewed` keeps the images whose `reviewed` is that value (`status=labeled&reviewed=false`
   is what is left to review), `ids` (comma-separated) only those images (ids it does not know match nothing); both
-  need `label_image_filters` in `features`.
+  need `label_image_filters` in `features`. `path` (an absolute path on the server's machine; feature
+  `label_image_path`) keeps the image whose file is that file, however either path spells it (`..`, letter case on
+  Windows, a link to a folder; a second hard link under another name is not), and nothing when no file is there;
+  the path is only compared, never stored. `folo label view` asks it before it writes over a file. Paths are
+  compared as the server sees them: a server that reaches the photos under other paths than the caller (in a
+  container, on another machine) cannot recognise the caller's path of a photo.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
 - `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool, "expect"?: string }` → `LabelImage`:
   labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes
@@ -1247,10 +1264,12 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   there is none; a contestant without confidences reaches the target only with at least 10 detections). `409 bench_entry_not_done` until the entry is
   `done`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/images?sort=order|worst&offset=0&limit=100` →
-  `{ "total", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at or
-  above the entry's best-F1 confidence, and how many true boxes were `missed` and detections `wrong`. `worst`
-  puts the images with the most `missed + wrong` first (ties in the benchmark's order); any other `sort` is `400
-  invalid_query`. `409 bench_entry_not_done` as above.
+  `{ "total", "conf", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at
+  or above `conf`, and how many true boxes were `missed` and detections `wrong`. `conf` is the confidence they were
+  taken at: the entry's `accuracy.best_conf`, or 0 (every detection) when it has no best F1 (`accuracy.f1` 0); an entry
+  graded by an older FOLO took `best_conf` in either case (the `result` of its `entries/<id>.json` has no
+  `images_conf`). `worst` puts the images with the most `missed + wrong` first (ties in the benchmark's order); any
+  other `sort` is `400 invalid_query`. `409 bench_entry_not_done` as above.
 - `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry, and an open external
   one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
   then `stopped`. `409 bench_entry_not_active` when it has ended.

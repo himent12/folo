@@ -1,11 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, axisMetric, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, scoreDecimals, sentence, timeOfDay, usd, usdRange } from './format';
+import { unitTop } from './charts/domain';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
     expect(metric(0.74123)).toBe('0.741');
     expect(metric(null)).toBe('—');
     expect(pct(0.7412)).toBe('74.1%');
+  });
+  // #338: a legend score's decimals follow its axis's fitted top. Desktop's ui/format.rs has the same table.
+  it("writes a chart legend's score with the decimals of its axis top", () => {
+    const tops: [number, number][] = [
+      [1, 3], [0.5, 3], [0.05, 3], [0.01, 3], [0.005, 4], [0.001, 4], [0.00042, 5], [0.0001, 5], [0.000094, 5], [0.00001, 5], [0, 3],
+    ];
+    for (const [top, d] of tops) expect(scoreDecimals(top), String(top)).toBe(d);
+    // The issue: a one-epoch run on 0–0.00042 read "0.000" twice.
+    expect(axisMetric(0.00007, 0.00042)).toBe('0.00007');
+    expect(axisMetric(0.00039, 0.00042)).toBe('0.00039');
+    // On 0–0.001, two scores 44 % of the plot apart read apart.
+    expect(axisMetric(0.00051, 0.001)).toBe('0.0005');
+    expect(axisMetric(0.00094, 0.001)).toBe('0.0009');
+    // A full-scale chart keeps main's three decimals.
+    expect(axisMetric(0.00007, 1)).toBe('0.000');
+    expect(axisMetric(0.5, 1)).toBe('0.500');
+    // A top fitted to 0.0001 from 0.000094: five decimals, as in Desktop.
+    expect(axisMetric(0.000094, unitTop(0.000094))).toBe('0.00009');
+    expect(axisMetric(null)).toBe('—');
   });
   it('compacts counts', () => {
     expect(compact(940)).toBe('940');

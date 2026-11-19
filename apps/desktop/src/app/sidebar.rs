@@ -305,6 +305,10 @@ impl FoloApp {
             Load::Failed(e) if e.is_bad_address() => {
                 (t.danger_solid, "icons/circle-x.svg", "Not a server address".to_string())
             }
+            // Something answered there, so it isn't down: the address is what to check.
+            Load::Failed(e) if e.code == "not_folo" => {
+                (t.danger_solid, "icons/circle-x.svg", "Not a FOLO server".to_string())
+            }
             Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
             _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };

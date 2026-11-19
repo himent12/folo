@@ -227,11 +227,13 @@ impl Labeler {
     pub fn query(&self, id: &str, q: &LabelImageQuery) -> Result<LabelImagePage> {
         let (offset, limit) = (q.offset, q.limit);
         let job = self.job(id)?;
+        let at = q.path.as_deref().map(|p| images_at(&job, p)).transpose()?;
         let state = job.live()?;
         let matching = state.file.images.iter().filter(|r| {
             q.status.is_none_or(|s| s == state.status(r))
                 && q.reviewed.is_none_or(|v| v == state.reviewed(r))
                 && q.ids.as_ref().is_none_or(|ids| ids.contains(&r.id))
+                && at.as_ref().is_none_or(|ids| ids.contains(&r.id))
         });
         let (mut total, mut images) = (0u64, Vec::new());
         for record in matching {
@@ -433,6 +435,9 @@ pub struct LabelImageQuery {
     pub reviewed: Option<bool>,
     /// Only these image ids (in the job's order, not this list's).
     pub ids: Option<HashSet<String>>,
+    /// Only the image whose file is this file, however either path spells it (`..`, letter case on Windows, a link
+    /// to a folder); a path that does not exist on this machine is no image's.
+    pub path: Option<PathBuf>,
     /// Skip this many matching images.
     pub offset: u64,
     /// Return at most this many.
@@ -460,6 +465,19 @@ impl Source {
             let _ = std::fs::remove_file(tmp);
         }
     }
+}
+
+/// The ids of `job`'s images whose file is the file at `path` (an absolute path; both resolved, so any spelling of
+/// the same path matches; a second hard link under another name does not). The files are resolved without holding
+/// the job's lock.
+fn images_at(job: &Job, path: &Path) -> Result<HashSet<String>> {
+    let Some(path) = Some(path).filter(|p| p.is_absolute()).and_then(|p| std::fs::canonicalize(p).ok())
+    else {
+        return Ok(HashSet::new());
+    };
+    let files: Vec<_> = job.live()?.file.images.iter().map(|r| (r.id.clone(), job.image_path(r))).collect();
+    let same = |f: &Path| std::fs::canonicalize(f).is_ok_and(|f| f == path);
+    Ok(files.into_iter().filter(|(_, f)| same(f)).map(|(id, _)| id).collect())
 }
 
 /// Why a folder (or a file) added nothing: a file is not an image, a folder has none (and which other files it has).

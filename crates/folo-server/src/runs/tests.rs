@@ -152,6 +152,35 @@ fn lines_appended_at_once_stay_whole() {
     assert_eq!((whole, text.lines().count()), (2000, 2000));
 }
 
+/// A stop that lands after the trainer's last look at its flag (it reported `completed`, the run is not published
+/// yet) is accepted (`stopping`) but has nothing left to stop: the run is published `completed`, and the log's
+/// acknowledgment, its last line, says that this can happen (#333).
+#[test]
+fn a_stop_after_the_trainers_last_look_completes_the_run() {
+    let dir = TestDir::new("runs-stop-late");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"r"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    assert!(e.claim());
+    e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+    e.execute(|| {
+        e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
+        assert_eq!(runs.stop(e.id()).unwrap().status, RunStatus::Stopping);
+        Ended::Finished
+    });
+    assert_eq!(runs.snapshot(e.id()).unwrap().status, RunStatus::Completed);
+    let logs = runs.logs(e.id(), &LogsQuery::last(10)).unwrap();
+    assert_eq!(logs.lines.last().unwrap().message, STOP_REQUESTED, "{:?}", logs.lines);
+    runs.shutdown(None);
+}
+
 /// A stop that lands between a resume's restart and its enqueue (the run is `queued` but not in the queue yet,
 /// so it stops at once): the run stays stopped and out of the queue, and no worker starts for it.
 #[test]

@@ -13,6 +13,7 @@ use crate::engine::{engine_error, open_dataset};
 use crate::output::{CliError, ExitCode, Out};
 
 use super::progress::progress_sink;
+use super::stop::RunClaim;
 use super::{teacher_setting, train_data};
 
 pub(super) fn resume(
@@ -21,7 +22,7 @@ pub(super) fn resume(
     out: Out,
     stop: Arc<AtomicBool>,
     nb: Arc<AtomicU64>,
-) -> Result<(Trainer, PathBuf), CliError> {
+) -> Result<(Trainer, PathBuf, RunClaim), CliError> {
     if !ckpt.is_file() {
         return Err(CliError::new(
             ExitCode::NotFound,
@@ -102,6 +103,35 @@ pub(super) fn resume(
     };
     let (ds, _) = open_dataset(&data_arg, format)?;
     let data = train_data(&ds)?;
+    let claim = match std::fs::create_dir_all(&run_dir).and_then(|()| RunClaim::take(&run_dir)) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Err(CliError::new(
+                ExitCode::Runtime,
+                "run_active",
+                format!("another `folo train` is running the run in {}", folo_api::json::path(&run_dir)),
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let marker = run_dir.join(super::stop::RUN_MARKER);
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "usage",
+                format!(
+                    "{} is not a file FOLO wrote; `folo train` will not overwrite it",
+                    folo_api::json::path(&marker)
+                ),
+            )
+            .hint("move or rename that file, then resume again"));
+        }
+        Err(e) => {
+            return Err(CliError::new(
+                ExitCode::Runtime,
+                "io_error",
+                format!("cannot claim the run folder {}: {e}", folo_api::json::path(&run_dir)),
+            ));
+        }
+    };
     let epochs = stored.epochs;
     let opts = TrainOptions {
         run_dir: Some(run_dir.clone()),
@@ -117,7 +147,7 @@ pub(super) fn resume(
         data_format: Some(format),
         distill,
     };
-    Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(|e| engine_error("train", e))?, run_dir))
+    Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(|e| engine_error("train", e))?, run_dir, claim))
 }
 
 /// The resume override of distillation (docs/CLI.md, docs/MODEL.md §8.9): `None` (keep what the run stored) without

@@ -371,10 +371,11 @@ store, `predict` / `val` / `export` with a seeded model, issues errors-first and
 shared error codes, the `/epochs` resource, the cloud tools on the mock's connection and seeded cloud run, an
 `isError` case, a JSON-RPC error case, and a read-only-mode dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
 structured tool result is validated against the tool's `outputSchema`. `real_store_end_to_end` drives the **real**
-store (`--device cpu`, 64 px, a few seconds): a synthetic dataset, a 1-epoch run followed through its resource
-subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
-file by path (boxes returned, identical), the sample grid resource, `export`, then a second run stopped after
-its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
+store (`--device cpu`, 64 px, a few seconds): a synthetic dataset, a 1-epoch run trained until it completes,
+`list_models`, `val` on two splits, `predict` on a dataset image and the same file by path (boxes returned,
+identical), the sample grid resource, `export`, then a second, 200-epoch run followed through its resource
+subscription while it trains (a subscription sees only later changes, so it follows a run that keeps changing),
+stopped after its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
 `stopped` by the graceful shutdown. Further tests cover `--confine` (with `FOLO_DATASET_RECHECK_MS=0`, test
 support: the server looks at a dataset's files again on every request instead of after 5 s, so the test can edit a
 registered dataset to read outside the data dir and ask again at once) and proxy mode against `folo serve --mock`

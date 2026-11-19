@@ -122,13 +122,34 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   unless `decode: false`) and returns a `CheckReport` with one `CheckIssue { kind, file, line, message, fix }` per
   problem: `broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image` (errors: the loader
   skips the image), `clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image` (exact byte duplicates,
-  128-bit content hash), `other` (warnings) and `empty_image` (info). It never modifies files; `fix` says what a
-  cleanup would do. The YOLO line rules are the loader's (`dataset::labels::parse_line`), so the checker and the
-  loader cannot disagree. `folo dataset check` prints it (docs/CLI.md).
+  128-bit content hash), `other` (warnings) and `empty_image` (info). A YOLO label file no image reads is a
+  `missing_image` too when its folder is a label folder inside the dataset root that the loader pairs with a separate
+  folder still holding at least one image the dataset reads (`labels/train` with `images/train`), and no file of its
+  stem (any extension or case) is in those image folders; links to one folder count as one, `classes.txt` is not a
+  label. Other folders are not visited, so a label folder whose last image is gone, or a label whose image is a
+  dangling link, is not reported. It never
+  modifies files; `fix` says what a cleanup would do. The YOLO line rules are the loader's
+  (`dataset::labels::parse_line`), so the checker and the loader cannot disagree. `folo dataset check` prints it
+  (docs/CLI.md).
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
   (images copied unchanged, stems made unique per split, COCO category ids 1-based).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`.
+
+### Unfinished datasets
+Every writer (`synthetic::write_yolo`, `convert::convert`, the server's sample sets) starts with
+`unfinished::claim(dir)`: it creates `dir` when missing, then a `.folo-unfinished` file in it with `create_new`, then,
+holding that file, checks that nothing else is in the folder; the writer removes the file as its last step
+(`Claim::finish`), so a write stopped part way (killed, Ctrl+C, a crash) leaves it. The claim fails with a
+`DataError::Io` saying the folder "exists and is not an empty folder" and leaves the folder as it was: of kind
+`AlreadyExists` when the file was there (another writer's folder, running or stopped), `DirectoryNotEmpty` when
+other files are (it removes the file it created). Only one writer can hold a folder, and FOLO never clears or deletes
+a marked one. Every reader (`open`, `open_splits`, `detect_format`, `check::check`) refuses a dataset whose folder
+holds the file, found from where the dataset's files are (the folder, its `data.yaml` and the root that file's `path:`
+names, a COCO JSON's own folder and the one above it), with `DataError::Unfinished` (CLI `dataset_unfinished`, exit
+1; HTTP 400). A YAML elsewhere whose split paths point into a marked folder without a `path:` is not refused. To
+recover, delete the folder and run the command again. When only removing the file failed, the error says so: the
+dataset is complete and that one file is to be deleted.
 
 ## Packing
 `pack::pack(&loaded, &mut out)` writes an opened dataset, of any format and layout, as one tar stream into any

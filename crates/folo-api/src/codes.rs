@@ -52,6 +52,12 @@ pub const CODES: &[Code] = &[
         1,
         "a dataset that cannot be used (malformed data.yaml, no images, an empty split)",
     ),
+    c(
+        "dataset_unfinished",
+        400,
+        1,
+        "a dataset folder holding `.folo-unfinished`: `folo dataset synth` / `convert` is writing it or was stopped",
+    ),
     c("dataset_issues", 400, 1, "`folo dataset check` found errors or warnings (CLI)"),
     c(
         "bench_class_mismatch",
@@ -110,6 +116,12 @@ pub const CODES: &[Code] = &[
     c("run_active", 409, 1, "the run is still queued, running or stopping"),
     c("run_not_active", 409, 1, "stopping a run that already finished"),
     c(
+        "run_owned_by_server",
+        409,
+        1,
+        "`folo stop` on a FOLO server's run folder: stop it in Studio or with POST /api/runs/{id}/stop (CLI)",
+    ),
+    c(
         "dataset_in_use",
         409,
         1,
@@ -149,7 +161,7 @@ pub const CODES: &[Code] = &[
     c("bench_entry_in_loop", 409, 1, "deleting a benchmark entry that a running self-improvement loop uses"),
     c("bench_loop_active", 409, 1, "deleting a self-improvement loop that is still running"),
     c("bench_loop_not_active", 409, 1, "stopping a self-improvement loop that has ended"),
-    c("output_exists", 409, 1, "the output folder exists and is not empty (CLI)"),
+    c("output_exists", 409, 1, "the output folder exists and is not empty (CLI, Generate synthetic)"),
     c("upload_conflict", 409, 1, "an upload part out of order, or completing an upload that is not whole"),
     c(
         "connection_in_use",

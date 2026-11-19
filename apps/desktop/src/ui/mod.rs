@@ -23,8 +23,9 @@ pub use cloud::{
 };
 pub use format::{
     bytes, count_si, counted, device_label, display_path, f3, fmt_aug, fmt_conf, fmt_lr, fmt_scale,
-    gpu_label, int, latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural, pr_caption,
-    queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
+    fmt_score_on, gpu_label, int, latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural,
+    pr_caption, queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label,
+    waiting_text,
 };
 pub use legend::{best_legend, class_swatch, legend_value, line_swatch, swatch};
 pub use metric::{

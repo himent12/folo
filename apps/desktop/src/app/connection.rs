@@ -105,10 +105,12 @@ impl FoloApp {
         self.history_retry.clear();
         self.store.clear_pending();
         // Reads still out on the old server never answer here (`fetch` drops them): their tickets
-        // go (the numbers keep counting up, so none is handed out twice).
+        // go (the numbers keep counting up, so none is handed out twice). An Open image still on its
+        // way (its picker open) is the old server's too.
         self.ds_reads.clear();
         self.issue_reads.clear();
         self.play_loading = None;
+        self.play_open_seq += 1;
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The

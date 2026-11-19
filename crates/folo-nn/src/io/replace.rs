@@ -212,7 +212,10 @@ mod tests {
         std::fs::write(&tmp, b"new").unwrap();
         let mut held = Some(hold(&path));
         let mut retries = 0;
-        super::rename_over_observed(&tmp, &path, SHORT, &mut || {
+        // Only a hang uses up this budget: the reader lets go before the first wait. (`SHORT`'s 300 ms ran out on a
+        // busy machine before the second attempt.)
+        let patient = RenameRetry { budget: Duration::from_secs(60), ..SHORT };
+        super::rename_over_observed(&tmp, &path, patient, &mut || {
             retries += 1;
             held = None;
         })
@@ -235,9 +238,12 @@ mod tests {
         std::thread::spawn(move || {
             let _ = done.send(write_file_with(&p, Some(&meta("new")), &[], SHORT).map_err(|e| e.to_string()));
         });
-        // A watchdog far above the 300 ms budget: a loop that never gives up fails here rather than hanging.
-        let err =
-            result.recv_timeout(Duration::from_secs(30)).expect("the retry gave up within 30 s").unwrap_err();
+        // A watchdog far above the 300 ms budget: a loop that never gives up fails here rather than hanging. Only a
+        // hang gets here: a busy disk can take seconds to write and sync the temporary file before the first attempt.
+        let err = result
+            .recv_timeout(Duration::from_secs(300))
+            .expect("the retry gave up within 300 s")
+            .unwrap_err();
         assert!(t.elapsed() >= SHORT.budget, "gave up after {:?}", t.elapsed());
         assert!(err.contains("another program may hold it open") && err.contains("last.folo"), "{err}");
         drop(held);

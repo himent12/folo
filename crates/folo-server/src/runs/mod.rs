@@ -199,6 +199,13 @@ struct Queue {
     shutdown: bool,
 }
 
+/// The log line of a stop accepted while a run trains (`Runs::stop`). The stop is noticed after a batch, so one that
+/// comes after the last batch (while the last epoch validates) changes nothing, and the line must hold then too.
+pub const STOP_REQUESTED: &str = concat!(
+    "stop requested: the run stops after the batch it is on; ",
+    "if its last batch is already done, it finishes and ends completed"
+);
+
 /// The registry, the queue and the worker. See the module docs.
 pub struct Runs {
     dir: PathBuf,

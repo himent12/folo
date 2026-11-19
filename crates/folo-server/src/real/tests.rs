@@ -497,3 +497,23 @@ fn a_file_in_place_of_a_store_folder_is_said() {
         assert!(e.contains(&format!("keeps the folder {name}/")), "{e}");
     }
 }
+
+/// Issue #316: the new folder of a sample set that another writer took first (its marker there, or other files) is
+/// refused as `409 output_exists` and left as it is.
+#[test]
+fn a_sample_set_folder_another_writer_took_is_refused_and_kept() {
+    use folo_data::unfinished::MARKER;
+    let t = TestDir::new("real-generate-taken");
+    for (name, theirs) in [("marked", MARKER), ("filled", "data.yaml")] {
+        let dir = t.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(theirs), "theirs").unwrap();
+        let e = super::store::claim_generated(&dir).unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "output_exists"), "{name}");
+        assert!(e.body.message.contains("exists and is not an empty folder"), "{}", e.body.message);
+        assert_eq!(e.body.hint.is_some(), theirs == MARKER, "{name}");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [theirs]);
+        assert_eq!(std::fs::read_to_string(dir.join(theirs)).unwrap(), "theirs");
+    }
+}

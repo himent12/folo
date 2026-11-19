@@ -9,7 +9,7 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, effect, For, onWindow, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Bench, BenchEntry, BenchEntryImage } from '$lib/api/types';
+import type { Bench, BenchAccuracy, BenchEntry, BenchEntryImage } from '$lib/api/types';
 import { matchImage } from '$lib/bench/match';
 import { conf, num } from '$lib/format';
 import Button from '$lib/ui/Button';
@@ -20,7 +20,7 @@ import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
 import MatchView, { type Outcome } from './MatchView';
-import { imagesText } from '../words';
+import { bestF1Conf, imagesShownText, imagesText } from '../words';
 
 /** Images per page of the gallery: a page more each time, so 5000 images never load at once. */
 export const GALLERY_PAGE = 24;
@@ -28,7 +28,9 @@ export const GALLERY_PAGE = 24;
 export interface ImagesSectionProps {
   bench: Bench;
   entry: BenchEntry;
-  bestConf: number;
+  /** The entry's accuracy: its best F1 (./words bestF1Conf), and the confidence a server before the page's `conf` took
+   *  the images at (`best_conf`). */
+  accuracy: BenchAccuracy;
 }
 
 /** What a tile says under its image: what it found right, missed and got wrong, in words. */
@@ -48,6 +50,8 @@ export default function ImagesSection(props: ImagesSectionProps) {
   const sort = signal<'worst' | 'order'>('worst');
   const images = signal<BenchEntryImage[]>([]);
   const total = signal<number | null>(null);
+  /** The confidence the detections were taken at (the page's `conf`); null until the first page is in. */
+  const takenAt = signal<number | null>(null);
   const loading = signal(false);
   const error = signal<unknown>(undefined);
   const urls = signal<Record<string, string>>({});
@@ -66,6 +70,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
       if (my !== seq) return;
       images.set(reset ? page.images : [...images.peek(), ...page.images]);
       total.set(page.total);
+      takenAt.set(page.conf ?? props.accuracy.best_conf);
       for (const im of page.images) {
         const id = im.image.id;
         if (urls.peek()[id]) continue;
@@ -93,6 +98,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
     void hub.epoch;
     images.set([]);
     total.set(null);
+    takenAt.set(null);
     untrack(() => void load(true));
   });
 
@@ -163,6 +169,14 @@ export default function ImagesSection(props: ImagesSectionProps) {
       ),
     ].sort((a, b) => ORDER.indexOf(a.outcome) - ORDER.indexOf(b.outcome));
   });
+  /** What the gallery holds, said from the confidence it was taken at and what is loaded (./words imagesShownText). */
+  const shownText = () => {
+    if (!props.entry.scored) return 'Every box it gave, on the unchanged images.';
+    const at = takenAt.get();
+    if (at === null) return 'Its detections on the unchanged images.';
+    const all = images.get().length >= (total.get() ?? Infinity);
+    return imagesShownText(at, bestF1Conf(props.accuracy), all && images.get().every((im) => !im.detections.length));
+  };
   const name = (c: number) => props.bench.classes[c] ?? `class ${c}`;
   const shownCounts = computed(() => (shown.get() ? counts(shown.get()!) : { found: 0, missed: 0, wrong: 0, boxes: 0 }));
 
@@ -221,8 +235,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
       >
         <div class="head">
           <p class="what">
-            {props.entry.scored ? `Its detections from confidence ${conf(props.bestConf)} up (its best F1)` : 'Every box it gave'}, on the unchanged
-            images. {sort.get() === 'worst' ? 'The most missed and wrong first.' : 'In the benchmark’s order.'}
+            {shownText()} {sort.get() === 'worst' ? 'The most missed and wrong first.' : 'In the benchmark’s order.'}
           </p>
           <p class="legend">{legend()}</p>
         </div>

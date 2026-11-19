@@ -24,6 +24,7 @@ the determinism rules.
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
 | `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |
+| `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |
 | `src/stats.rs` | `DatasetStats`, the `stats` object of docs/API.md |
 | `src/guard.rs` | An optional process-wide read guard (`folo mcp --confine` installs one) |

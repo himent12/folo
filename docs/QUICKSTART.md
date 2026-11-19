@@ -55,6 +55,10 @@ is added (`--project` and `--name` override both parts). It contains:
 | `weights/last.folo` | the latest epoch's checkpoint, for `--resume` |
 | `metrics.jsonl` | every event of the run: each step's losses, each epoch's metrics, the logs |
 | `config.json`, `samples/` | the resolved settings, and validation predictions per epoch |
+| `folo-train.json`, `train.lock` | marks the folder as a `folo train` run, and is held by the training process (what `folo stop` checks) |
+
+On Windows, a copy or ZIP of a run that is still training must leave out `train.lock`: the training process holds it
+open.
 
 If you stop a run with Ctrl+C, it stops after the current batch and keeps the last finished epoch. Continue it,
 bit-exactly, with `folo train --resume runs/shapes-n/weights/last.folo`.

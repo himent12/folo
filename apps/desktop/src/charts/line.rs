@@ -34,6 +34,20 @@ fn clamp_in(v: Pixels, lo: Pixels, hi: Pixels) -> Pixels {
     v.min(hi).max(lo)
 }
 
+/// The domain `[x0, x1, y0, y1]` before padding: the data's extents (infinite with no point),
+/// with the caller's x range over them. An empty chart keeps that range (a run's planned epochs
+/// before its first metric) and falls back to 0–1 for what nothing gives.
+fn base_domain(data: [f32; 4], x_range: Option<(f32, f32)>) -> [f32; 4] {
+    let [mut x0, mut x1, mut y0, mut y1] = data;
+    if !y0.is_finite() {
+        (x0, x1, y0, y1) = (0.0, 1.0, 0.0, 1.0);
+    }
+    if let Some((a, b)) = x_range {
+        (x0, x1) = (a, b);
+    }
+    [x0, x1, y0, y1]
+}
+
 /// Dash patterns (on, off) in px.
 const DASHED: &[f32] = &[4., 3.];
 const DOTTED: &[f32] = &[1.5, 3.];
@@ -140,17 +154,8 @@ fn paint_line_chart(
         x1 = x1.max(e[1].0);
         y1 = y1.max(e[1].1);
     }
-    if let Some((a, b)) = spec.x_range {
-        x0 = a;
-        x1 = b;
-    }
-    let has_data = x0.is_finite() && y0.is_finite();
-    if !has_data {
-        x0 = 0.0;
-        x1 = 1.0;
-        y0 = 0.0;
-        y1 = 1.0;
-    }
+    let has_data = y0.is_finite();
+    [x0, x1, y0, y1] = base_domain([x0, x1, y0, y1], spec.x_range);
     // A 0–1 metric's fitted axis: its ticks thin out on a short plot, so the plot's height (before
     // the marker band, which takes at most the lanes given) decides how many it labels.
     let unit = spec.unit_max.map(|m| {
@@ -667,5 +672,24 @@ fn paint_line_chart(
         );
         paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
         paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base_domain;
+
+    const NONE: [f32; 4] = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
+
+    #[test]
+    fn an_empty_chart_keeps_its_planned_x_range() {
+        // A four-epoch run before its first metric: the axis ends at 4 from the first frame, the
+        // y axis an even 0–1.
+        assert_eq!(base_domain(NONE, Some((0., 4.))), [0., 4., 0., 1.]);
+        // Nothing planned: 0–1 both ways.
+        assert_eq!(base_domain(NONE, None), [0., 1., 0., 1.]);
+        // With data the range still wins over the data's x, and y stays the data's.
+        assert_eq!(base_domain([1., 2., 0.3, 0.6], Some((0., 4.))), [0., 4., 0.3, 0.6]);
+        assert_eq!(base_domain([1., 2., 0.3, 0.6], None), [1., 2., 0.3, 0.6]);
     }
 }

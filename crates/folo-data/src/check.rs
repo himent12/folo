@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::{Format, Split};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// What kind of problem a [`CheckIssue`] is.
@@ -32,7 +32,8 @@ pub enum CheckKind {
     DuplicateLabel,
     /// An image file that exists but cannot be read or decoded.
     CorruptImage,
-    /// An image named by an image list or COCO JSON that does not exist.
+    /// An image named by an image list or COCO JSON that does not exist, or a YOLO label file without its image in a
+    /// label folder paired with an image folder that still holds an image the dataset reads.
     MissingImage,
     /// An image whose bytes are identical to an earlier image's.
     DuplicateImage,
@@ -144,7 +145,7 @@ pub struct CheckReport {
     /// Images examined per split `[train, val, test]`. YOLO counts every image file (broken ones too); COCO counts
     /// the images the loader kept (dropped ones are `missing_image` / `broken_label` issues).
     pub splits: [usize; 3],
-    /// Every issue, grouped by image in dataset order.
+    /// Every issue, grouped by image in dataset order, then YOLO label files without an image.
     pub issues: Vec<CheckIssue>,
 }
 
@@ -219,9 +220,89 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
             c
         })
         .collect();
-    let classes = scan.names.unwrap_or_default();
     merge(&mut issues, images.iter().map(|(_, p)| p.as_path()), results, &scan.root);
+    issues.extend(orphan_labels(&scan));
+    let classes = scan.names.unwrap_or_default();
     Ok(CheckReport { format: Format::Yolo, root: scan.root, classes, splits, issues })
+}
+
+/// Label files whose image is gone: a `.txt` that no image of the dataset reads, in a label folder the loader pairs
+/// (by [`label_path_for`]) with a separate folder still holding at least one image the dataset reads (`labels/train`
+/// with `images/train`), whose stem matches no file in those image folders (any extension, any case). Two spellings
+/// of one folder (links) are one folder, and a file beside the label in its own folder is its image too. Only label
+/// folders inside the dataset root are visited (both canonical), and not one whose last image is gone; `classes.txt`
+/// holds class names. One listing per folder, sorted by path.
+fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
+    let fold = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
+    // Real label folder -> (its first spelling, its other image folders, whether one of their images is there, the
+    // stems images read).
+    type Folder = (PathBuf, BTreeSet<PathBuf>, bool, HashSet<String>);
+    let mut pairs: BTreeMap<PathBuf, Folder> = BTreeMap::new();
+    let mut real: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    // `.` first: a dataset named by a bare `data.yaml` has an empty root.
+    let Ok(root) = std::fs::canonicalize(Path::new(".").join(&scan.root)) else { return Vec::new() };
+    for image in scan.splits.values().flatten() {
+        let label = label_path_for(image);
+        let (Some(dir), Some(images)) = (label.parent(), image.parent()) else { continue };
+        let Some(key) = real
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| std::fs::canonicalize(dir).ok().filter(|k| k.starts_with(&root)))
+        else {
+            continue;
+        };
+        let (_, folders, held, stems) = pairs
+            .entry(key.clone())
+            .or_insert_with(|| (dir.to_path_buf(), BTreeSet::new(), false, HashSet::new()));
+        if dir != images {
+            folders.insert(images.to_path_buf());
+            *held = *held || image.is_file();
+        }
+        stems.extend(label.file_stem().map(fold));
+    }
+    let files = |dir: &Path| -> Vec<PathBuf> {
+        if crate::guard::check(dir).is_err() {
+            return Vec::new();
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        rd.filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+            .map(|e| e.path())
+            .collect()
+    };
+    let mut out = Vec::new();
+    for (dir, folders, held, mut stems) in pairs.into_values() {
+        if !held {
+            continue;
+        }
+        let (labels, beside): (Vec<_>, Vec<_>) = files(&dir)
+            .into_iter()
+            .partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")));
+        for f in folders.iter().map(|f| files(f)).chain([beside]) {
+            stems.extend(f.iter().filter_map(|p| p.file_stem()).map(fold));
+        }
+        let mut orphans: Vec<PathBuf> = labels
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| !n.eq_ignore_ascii_case("classes.txt")))
+            .filter(|p| p.file_stem().is_some_and(|s| !stems.contains(&fold(s))))
+            .collect();
+        orphans.sort();
+        let images =
+            folders.iter().map(|f| crate::paths::relative_to(f, &scan.root)).collect::<Vec<_>>().join(" or ");
+        for label in orphans {
+            let stem = label.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            out.push(CheckIssue::new(
+                CheckKind::MissingImage,
+                &label,
+                None,
+                format!("no image named {stem} in {images}, so training ignores this label file"),
+                Some(format!(
+                    "delete the label file, or put its image back in {images} (and in the split's image list, if it \
+                     has one)"
+                )),
+            ));
+        }
+    }
+    out
 }
 
 fn check_coco(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {

@@ -162,7 +162,7 @@ process: `step` records are throttled to about 10 per second (a slow run gets on
 records arrive after each validation. Most of the output is `step`s (in one test, 15 epochs of 50 batches made
 about 150 KB): pass `--json-events epoch` to leave them out (about 1 KB per epoch). To stop a run from the
 script, `folo stop <run_dir>` (or Ctrl+Break on Windows, Ctrl+C elsewhere) ends it after the current batch with
-`status: stopped`. Error codes are the same as MCP's (a `--device gpu:7` the machine lacks is
+`status: stopped` (`completed` when it comes after the last batch). Error codes are the same as MCP's (a `--device gpu:7` the machine lacks is
 `device_not_found`, a GPU out of memory `gpu_out_of_memory`), and JSON paths use `/` on every OS.
 
 ## 6. Run the same flow headless, then look at it in Studio

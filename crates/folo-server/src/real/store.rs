@@ -223,8 +223,15 @@ impl Store for RealStore {
         // Registration would refuse it (a registry not loaded at start): said before anything is generated.
         self.registry_loaded()?;
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
+        let claim = claim_generated(&dir)?;
         let t0 = Instant::now();
-        if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
+        // Only a folder this call claimed is removed: no other writer can have put a file in it.
+        if let Err(e) = folo_data::synthetic::write_yolo_with_progress(
+            &cfg,
+            claim,
+            folo_data::ImageFormat::Jpeg(90),
+            |_| {},
+        ) {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(data_error(e, &dir.to_string_lossy()));
         }
@@ -589,4 +596,19 @@ impl Store for RealStore {
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
     }
+}
+
+/// Claims `dir`, the new folder of a sample set ([`folo_data::unfinished::claim`]). Refused when another writer (such
+/// as `folo dataset synth` into this path) took it first: `409 output_exists`, the folder left as it is.
+pub(super) fn claim_generated(dir: &Path) -> Result<folo_data::unfinished::Claim> {
+    use std::io::ErrorKind;
+    folo_data::unfinished::claim(dir).map_err(|e| match e {
+        folo_data::DataError::Io { source, .. }
+            if matches!(source.kind(), ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty) =>
+        {
+            let e = Error::new(StatusCode::CONFLICT, "output_exists", source.to_string());
+            if source.kind() == ErrorKind::AlreadyExists { e.hint(folo_data::unfinished::HINT) } else { e }
+        }
+        e => data_error(e, &dir.to_string_lossy()),
+    })
 }

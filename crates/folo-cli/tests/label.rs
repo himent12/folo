@@ -218,6 +218,11 @@ fn label_review_and_export_in_this_process() {
     let jpeg = image::open(&out).unwrap();
     assert_eq!((jpeg.width(), jpeg.height()), (64, 48), "never upscaled");
     let rev = s(&view["image"]["revision"]).to_string();
+    // Never over an image of the job, however its path is spelled.
+    let source = std::fs::read(dir.join("p4.png")).unwrap();
+    let spelled = dir.join("..").join("photos").join(if cfg!(windows) { "P4.PNG" } else { "p4.png" });
+    assert_eq!(env.fails(&["view", &job, &a, "-o", spelled.to_str().unwrap()], 2), "usage");
+    assert_eq!(std::fs::read(dir.join("p4.png")).unwrap(), source);
 
     let edit = ["set", &job, &a, "--relabel", "1=person", "--add", "car,0,0,16,12", "--size", "32x24"];
     assert_eq!(env.fails(&edit, 2), "usage", "every edit needs --expect");
@@ -261,6 +266,8 @@ fn label_review_and_export_in_this_process() {
     assert_eq!(env.fails(&["view", &job, "nope"], 3), "image_not_found");
     assert_eq!(env.fails(&["view", &job, "--from", "0"], 2), "usage");
     assert_eq!(env.fails(&["images", &job, "--limit", "0"], 2), "usage");
+
+    view_keeps_the_photos(&env, &t, &[], None);
 }
 
 #[test]
@@ -309,6 +316,12 @@ fn label_through_a_folo_serve() {
 
     let page = env.ok(&[&["images", &job, "--limit", "1"], &srv[..]].concat());
     let a = s(&page["items"][0]["id"]).to_string();
+    // The server says whether the file is one of the job's images; it never says where they are.
+    let p4 = dir.join("p4.png");
+    let source = std::fs::read(&p4).unwrap();
+    assert_eq!(env.fails(&[&["view", &job, &a, "-o", p4.to_str().unwrap()], &srv[..]].concat(), 2), "usage");
+    assert_eq!(std::fs::read(&p4).unwrap(), source);
+    view_keeps_the_photos(&env, &t, &srv, Some(&warm));
     let boxes = env.ok(&[&["images", &job, "--limit", "1", "--boxes"], &srv[..]].concat());
     let seen = s(&boxes["items"][0]["revision"]).to_string();
     let set = env.ok(&[&["set", &job, &a, "--clear", "--expect", &seen], &srv[..]].concat());
@@ -335,4 +348,57 @@ fn label_through_a_folo_serve() {
         assert!(start.elapsed() < DEADLINE, "the run never ended: {st}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// `view -o` on a photo of a new job is refused (`usage`) and the photos keep their bytes: the second of two
+/// `photo.png` (stored as `photo-2.png`; through a server, after the first image is removed), with a trailing dot
+/// (Windows), a stem longer than a stored name. A file in another folder named like an image the job still has
+/// (`photo-2.png`) is replaced, twice in a row; a new file is written; a folder or a missing parent is `io_error`.
+/// `args` go after every command; `server` removes.
+fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&folo_client::Client>) {
+    let after = env.after.iter().cloned().chain(args.iter().map(|a| a.to_string())).collect();
+    let env = &Env { claude: env.claude.clone(), no_codex: env.no_codex.clone(), after };
+    let long = format!("{}.png", "a".repeat(115));
+    let photos =
+        [t.join("first").join("photo.png"), t.join("second").join("photo.png"), t.join("long").join(long)];
+    for p in &photos {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(64, 48, image::Rgb([9, 9, 9])).save(p).unwrap();
+    }
+    let job = s(&env.ok(&["create", "keep", "--classes", "car"])["job_id"]).to_string();
+    let paths: Vec<&str> = photos.iter().map(|p| p.to_str().unwrap()).collect();
+    env.ok(&[&["add", job.as_str()][..], &paths[..]].concat());
+    let page = env.ok(&["images", &job]);
+    let (id, file) = (|i: usize| s(&page["items"][i]["id"]), |i: usize| s(&page["items"][i]["file"]));
+    assert_eq!((file(0), file(1)), ("photo.png", "photo-2.png"));
+    if let Some(server) = server {
+        server.delete(&format!("/label/jobs/{job}/images/{}", id(0))).unwrap();
+    }
+    let view = ["view", job.as_str(), id(2), "-o"];
+    let before: Vec<_> = photos.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let mut refused = vec![paths[1].to_string(), paths[2].to_string()];
+    if cfg!(windows) {
+        refused.push(format!("{}.", paths[1]));
+    }
+    for p in &refused {
+        assert_eq!(env.fails(&[&view[..], &[p.as_str()]].concat(), 2), "usage", "{p}");
+    }
+    assert_eq!(photos.iter().map(|p| std::fs::read(p).unwrap()).collect::<Vec<_>>(), before);
+
+    let preview = t.join("previews").join("photo-2.png");
+    std::fs::create_dir_all(preview.parent().unwrap()).unwrap();
+    for _ in 0..2 {
+        std::fs::write(&preview, b"old").unwrap();
+        env.ok(&[&view[..], &[preview.to_str().unwrap()]].concat());
+        assert_eq!(&std::fs::read(&preview).unwrap()[..2], [0xff, 0xd8], "a JPEG");
+    }
+    let new = t.join("previews").join("new.jpg");
+    env.ok(&[&view[..], &[new.to_str().unwrap()]].concat());
+    assert!(new.is_file());
+    let folder = t.join("previews");
+    assert_eq!(env.fails(&[&view[..], &[folder.to_str().unwrap()]].concat(), 1), "io_error");
+    let missing = t.join("missing").join("x.jpg");
+    let e = env.error(&[&view[..], &[missing.to_str().unwrap()]].concat(), 1);
+    assert_eq!(s(&e["code"]), "io_error");
+    assert!(s(&e["message"]).contains("missing/x.jpg: "), "{e}");
 }

@@ -102,7 +102,7 @@ impl FoloApp {
                 Some("icons/image-up.svg"),
                 window,
                 cx,
-                act(|this, _, cx| this.pick_image(cx)),
+                act(|this, w, cx| this.pick_image(w, cx)),
             )
             .tooltip(crate::controls::tip("Run a model on an image", Some("Ctrl O")))
             .into_any_element()

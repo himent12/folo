@@ -65,7 +65,8 @@ impl Probes {
                 keys.insert(dir.to_path_buf(), k);
             }
         }
-        Probes { settings, listing, dirs, keys, now: SystemTime::now() }
+        let now = settings.now.unwrap_or_else(SystemTime::now);
+        Probes { settings, listing, dirs, keys, now }
     }
 
     /// What is at `path` (see [`Listing::stat`]).

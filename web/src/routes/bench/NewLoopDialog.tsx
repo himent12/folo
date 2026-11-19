@@ -32,7 +32,7 @@ import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Switch from '$lib/ui/Switch';
-import { forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
+import { bestF1Conf, forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
 
 export interface NewLoopDialogProps {
   open?: boolean;
@@ -74,6 +74,8 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const epochs = signal('30');
   const ownThreshold = signal(true);
   const minConf = signal('');
+  /** "Keep labels from a lower confidence" found no confidence to propose: the teacher's entry has no best F1. */
+  const unproposed = signal(false);
   const name = signal('');
   const touched = signal(false);
   const busy = signal(false);
@@ -108,6 +110,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
       epochs.set('30');
       ownThreshold.set(true);
       minConf.set('');
+      unproposed.set(false);
       name.set('');
       poolKind.set('dataset');
       split.set('train');
@@ -159,7 +162,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const teacherEntry = computed(() => props.entries.find((e) => ofTeacher(e) && !e.score?.partial));
   /** What the forecast reads: the complete entry, else a finished one on part of the benchmark (an estimate). */
   const readEntry = computed(() => teacherEntry.get() ?? props.entries.find(ofTeacher));
-  const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number } | null>(null);
+  const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number | null } | null>(null);
   // By id: the page hands down a new benchmark and new entries on every `bench` event and every load of the lists, and
   // a finished entry's result never changes.
   const benchId = computed(() => props.bench.id);
@@ -170,7 +173,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     if (!id) return;
     let gone = false;
     hub.api.benchResult(benchId.get(), id).then(
-      (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: r.accuracy.best_conf }),
+      (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: bestF1Conf(r.accuracy) }),
       () => {},
     );
     return () => (gone = true);
@@ -216,7 +219,9 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const f = found.peek();
     if (!f) return;
     const from = forecast.peek()?.threshold ?? null;
-    minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round(f.bestConf * 100) / 100)).toFixed(2));
+    // Without a best-F1 confidence (F1 0 at every one) nothing is measured to propose from: the person sets one.
+    unproposed.set(f.bestConf === null);
+    if (f.bestConf !== null) minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round(f.bestConf * 100) / 100)).toFixed(2));
     ownThreshold.set(false);
     await tick();
     document.getElementById(`${uid}-conf`)?.focus();
@@ -498,7 +503,13 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
               label="Keep labels from confidence"
               for={`${uid}-conf`}
               error={showNow(minConf.get(), errs.get().conf)}
-              hint={needConf.get() ? 'Required for this teacher.' : undefined}
+              hint={
+                unproposed.get() && found.get()?.bestConf === null
+                  ? 'This teacher has no measured best confidence: set one yourself.'
+                  : needConf.get()
+                    ? 'Required for this teacher.'
+                    : undefined
+              }
             >
               <div class="narrow">
                 <Input id={`${uid}-conf`} bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!showNow(minConf.get(), errs.get().conf)} />

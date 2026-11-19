@@ -78,6 +78,9 @@ pub(crate) struct Settings {
     pub min_files: usize,
     /// Whether folders may be listed at all (not with a read guard: every file is then checked on its own).
     pub list: bool,
+    /// The clock file stamps are checked against ([`Stamp::settled`]): `None` (outside tests) is the system clock
+    /// when the check is made.
+    pub now: Option<SystemTime>,
 }
 
 thread_local! {
@@ -97,7 +100,7 @@ impl Settings {
     /// The settings with the cache folder `dir`, and with a read guard installed when `guarded` (then nothing is
     /// cached or listed).
     fn new(dir: Option<PathBuf>, guarded: bool) -> Self {
-        Settings { dir: if guarded { None } else { dir }, min_files: MIN_FILES, list: !guarded }
+        Settings { dir: if guarded { None } else { dir }, min_files: MIN_FILES, list: !guarded, now: None }
     }
 }
 

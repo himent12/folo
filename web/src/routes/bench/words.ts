@@ -4,6 +4,7 @@
 
 import type {
   Bench,
+  BenchAccuracy,
   BenchAxis,
   BenchAxisScore,
   BenchCalibration,
@@ -233,7 +234,7 @@ export const CALIBRATION_NONE = 'calibration not measured';
 export function partialWhy(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 'plan'>): string {
   const f = coverageFacts(e, b)
     .filter((x) => !x.startsWith('knows') && x !== STALE_FACT)
-    .map((x) => (x === CALIBRATION_NONE ? 'calibration not measured (no detection reached confidence 0.1)' : x));
+    .map((x) => (x === CALIBRATION_NONE ? 'calibration not measured (no detection on the unchanged images reached confidence 0.1)' : x));
   return `Partial: ${f.join(', ')}. It compares only loosely with complete entries.`;
 }
 
@@ -403,7 +404,7 @@ export function axisWhyNot(axis: BenchAxis, e: Pick<BenchEntry, 'conditions' | '
       return e.contestant.kind === 'agent'
         ? 'Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate.'
         : 'Its predictions came without confidences.';
-    return 'No detection reached confidence 0.1.';
+    return 'No detection on the unchanged images reached confidence 0.1.';
   }
   return null;
 }
@@ -446,7 +447,7 @@ const QUOTE_MIN = 20;
 export function calibrationReading(c: Pick<BenchCalibration, 'ece' | 'bins'>): { tone: CalibrationTone; sentence: string } {
   const filled = c.bins.filter((b) => b.count > 0 && b.confidence !== null && b.precision !== null);
   const n = filled.reduce((s, b) => s + b.count, 0);
-  if (!n) return { tone: 'close', sentence: 'No detection reached confidence 0.1, so there is nothing to read.' };
+  if (!n) return { tone: 'close', sentence: 'No detection on the unchanged images reached confidence 0.1, so there is nothing to read.' };
   const gapOf = (b: BenchCalibrationBin) => b.confidence! - b.precision!;
   const meaningful = filled.filter((b) => b.count >= Math.max(QUOTE_MIN, 0.05 * n));
   const says = (b: BenchCalibrationBin) => `when it says ${num(b.confidence!, 2)}, it is right ${pct(b.precision!, 0)} of the time`;
@@ -781,6 +782,32 @@ export function forecastText(f: LabelForecast, poolImages: number | null): { tit
     text: `${at}${cost} ${f.stops ? `A loop stops when fewer than ${MIN_LABELED_IMAGES} pool images get a box.` : 'A student learns little from so few.'}`,
     remedy: f.from === 'chosen' ? 'A still lower confidence keeps more of its detections, fewer of them right.' : 'A lower confidence keeps more of its detections, fewer of them right.',
   };
+}
+
+/**
+ * An entry's best-F1 confidence, or null when it has none: its F1 is 0 at every confidence (`best_conf` is then 1, or 0
+ * when no class has a true box; docs/BENCH.md, Accuracy).
+ */
+export function bestF1Conf(a: Pick<BenchAccuracy, 'f1' | 'best_conf'>): number | null {
+  return a.f1 > 0 ? a.best_conf : null;
+}
+
+/**
+ * What the Images section shows of a scored entry's detections, from the confidence its images were taken at (`at`, the
+ * page's `conf`): its best-F1 confidence as before; 0, its detections at every confidence, said as the cutoff and not a
+ * total so it is true on a partly loaded gallery (or that it made none, once every image is loaded and none has one);
+ * above 0 with no best F1, an older FOLO's grading, which kept only those from the grid's top.
+ */
+export function imagesShownText(at: number, bestConf: number | null, noneMade: boolean): string {
+  if (bestConf !== null && at === bestConf) return `Its detections from confidence ${conf(at)} up (its best F1), on the unchanged images.`;
+  if (at <= 0) {
+    return noneMade
+      ? 'It made no detections on the unchanged images.'
+      : 'Its detections at every confidence (there is no best-F1 confidence), on the unchanged images.';
+  }
+  return bestConf !== null
+    ? `Its detections from confidence ${conf(at)} up, on the unchanged images.`
+    : `Its detections from confidence ${conf(at)} up, on the unchanged images: an older FOLO graded it, and running the benchmark again shows every detection.`;
 }
 
 /**

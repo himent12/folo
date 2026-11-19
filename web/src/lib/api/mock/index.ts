@@ -135,12 +135,12 @@ export class MockApi extends MockTrainingApi implements Api {
     return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, () => this.state.label.importPath(jobId, path, Date.now()), 500);
   }
 
-  updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage> {
-    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.updateImage(jobId, imageId, boxes, Date.now()));
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[], expect?: string): Promise<LabelImage> {
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.updateImage(jobId, imageId, boxes, Date.now(), expect));
   }
 
-  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean): Promise<LabelImage> {
-    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.reviewImage(jobId, imageId, reviewed, Date.now()));
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean, expect?: string): Promise<LabelImage> {
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.reviewImage(jobId, imageId, reviewed, Date.now(), expect));
   }
 
   deleteLabelImage(jobId: string, imageId: string): Promise<void> {

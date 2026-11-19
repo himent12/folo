@@ -86,6 +86,66 @@ fn synth_then_stats_and_a_clean_check() {
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
 }
 
+/// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, the
+/// same command run again says what to do and deletes nothing, and run again after deleting the folder it writes
+/// the whole dataset.
+#[test]
+fn synth_after_a_stopped_one() {
+    let t = TestDir::new("cli-synth-again");
+    let dir = t.join("NEW");
+    // What a synth stopped after its first image leaves.
+    for d in ["images/train", "labels/train"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(dir.join(folo_data::unfinished::MARKER), "").unwrap();
+    std::fs::write(dir.join("images/train/000000.jpg"), "half").unwrap();
+    let hint = |err: &serde_json::Value| {
+        err["hint"].as_str().unwrap().contains("delete the folder and run the command")
+    };
+    for cmd in ["stats", "check"] {
+        let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{err}");
+        assert!(hint(err), "{err}");
+    }
+    let synth = ["dataset", "synth", s(&dir), "--images", "8", "--imgsz", "32", "--json"];
+    let (code, stdout, _) = folo(&synth);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("output_exists")), "{err}");
+    assert!(hint(err), "{err}");
+    assert!(
+        dir.join("images/train/000000.jpg").is_file() && dir.join(folo_data::unfinished::MARKER).is_file()
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+    let (code, _, stderr) = folo(&synth);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!dir.join(folo_data::unfinished::MARKER).exists());
+    let (code, stdout, _) = folo(&["dataset", "stats", s(&dir), "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 6, "val": 2, "test": 0 }));
+}
+
+/// Output folders `main` wrote into: the current folder (`synth .`) and a 250-character name.
+#[test]
+fn synth_into_the_current_folder_and_a_long_name() {
+    let t = TestDir::new("cli-synth-here");
+    let here = t.join("here");
+    std::fs::create_dir(&here).unwrap();
+    let out = folo_cmd()
+        .args(["dataset", "synth", ".", "--images", "4", "--imgsz", "32", "--json"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(here.join("data.yaml").is_file() && !here.join(folo_data::unfinished::MARKER).exists());
+
+    let long = t.join("n".repeat(250));
+    let (code, stdout, _) = folo(&["dataset", "synth", s(&long), "--images", "4", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(long.join("data.yaml").is_file());
+}
+
 #[test]
 fn check_reports_each_issue_and_exits_1() {
     let t = TestDir::new("cli-check");
@@ -217,6 +277,35 @@ fn dataset_errors_use_stable_codes() {
     assert!(!out.exists(), "nothing is written on a usage error");
     let (code, _, _) = folo(&["dataset", "convert", s(&empty), s(&out)]);
     assert_eq!(code, 2, "--to is required");
+}
+
+#[test]
+fn check_finds_an_orphan_label_from_a_relative_root_and_absolute_list() {
+    let t = TestDir::new("cli-check-relative");
+    let dir = t.join("ds");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&dir), "--images", "4", "--imgsz", "64", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    // The train split is a list of absolute image paths, and the dataset is named relative to the current folder.
+    std::fs::create_dir(dir.join("set")).unwrap();
+    for sub in ["images", "labels"] {
+        std::fs::rename(dir.join(sub), dir.join("set").join(sub)).unwrap();
+    }
+    let list: String = std::fs::read_dir(dir.join("set/images/train"))
+        .unwrap()
+        .map(|e| format!("{}\n", e.unwrap().path().display()))
+        .collect();
+    std::fs::write(dir.join("train.txt"), list).unwrap();
+    let yaml = std::fs::read_to_string(dir.join("data.yaml")).unwrap();
+    let yaml =
+        yaml.replace("train: images/train", "train: train.txt").replace("val: images/", "val: set/images/");
+    std::fs::write(dir.join("data.yaml"), yaml).unwrap();
+    std::fs::write(dir.join("set/labels/train/gone.txt"), "0 0.5 0.5 0.2 0.2\n").unwrap();
+    let out = folo_cmd().args(["dataset", "check", "ds", "--json"]).current_dir(t.path()).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let issues = json_lines(&stdout)[0]["issues"].as_array().unwrap().clone();
+    let orphans: Vec<_> = issues.iter().filter(|i| i["kind"] == "missing_image").collect();
+    assert_eq!(orphans.len(), 1, "{issues:?}");
+    assert!(orphans[0]["file"].as_str().unwrap().ends_with("gone.txt"), "{issues:?}");
 }
 
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
