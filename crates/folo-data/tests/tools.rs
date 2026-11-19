@@ -135,9 +135,53 @@ fn check_never_calls_a_label_training_reads_an_orphan() {
         write(&mixed.join(format!("labels/train/{stem}.txt")), "0 0.5 0.5 0.3 0.3\n");
     }
     assert_eq!(orphans(&mixed), []);
+
+    // An image beside its label is its image, even when the dataset does not list it.
+    let beside = t.join("beside");
+    write(&beside.join("data.yaml"), "train: [images/train, labels/train/c.png]\nnames: [a]\n");
+    write_png(&beside.join("images/train/a.png"), 16, 16, [200, 0, 0]);
+    for stem in ["a", "b", "c"] {
+        write(&beside.join(format!("labels/train/{stem}.txt")), "0 0.5 0.5 0.3 0.3\n");
+    }
+    write_png(&beside.join("labels/train/b.png"), 16, 16, [0, 200, 0]);
+    write_png(&beside.join("labels/train/c.png"), 16, 16, [0, 0, 200]);
+    assert_eq!(orphans(&beside), []);
+
+    // A list naming only a missing image: its folder holds no image, so its label folder is not visited.
+    let gone = t.join("gone");
+    write(&gone.join("data.yaml"), "train: train.txt\nval: images/val\nnames: [a]\n");
+    write(&gone.join("train.txt"), "images/empty/gone.png\n");
+    std::fs::create_dir_all(gone.join("images/empty")).unwrap();
+    write(&gone.join("labels/empty/other.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write_png(&gone.join("images/val/v.png"), 16, 16, [200, 0, 0]);
+    let issues = orphans(&gone);
+    assert!(issues.iter().all(|i| !i.file.ends_with("other.txt")), "{issues:?}");
+    assert!(issues.iter().any(|i| i.file.ends_with("gone.png")), "{issues:?}");
 }
 
-/// Two links to one label folder are one folder: a label read through either is not an orphan.
+/// Makes `link` a junction to the folder `target`; Err with the reason when this file system cannot.
+#[cfg(windows)]
+fn link_folder(link: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    let o = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .args([link, target].map(|p| p.to_string_lossy().replace('/', "\\")))
+        .output()
+        .map_err(|e| e.to_string())?;
+    o.status.success().then_some(()).ok_or_else(|| {
+        format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+            .trim()
+            .to_string()
+    })
+}
+
+/// Makes `link` a symlink to the folder `target`; Err with the reason when this file system cannot.
+#[cfg(unix)]
+fn link_folder(link: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link).map_err(|e| e.to_string())
+}
+
+/// Two links to one label folder are one folder: a label read through either is not an orphan. A label folder
+/// linked to a folder outside the dataset is not visited.
 #[test]
 fn check_treats_linked_label_folders_as_one() {
     let t = TempDir::new("check-orphans-linked");
@@ -150,19 +194,25 @@ fn check_treats_linked_label_folders_as_one() {
     write(&ds.join("data.yaml"), "train: images/train\nval: images/val\nnames: [a]\n");
     std::fs::create_dir_all(ds.join("labels")).unwrap();
     for split in ["train", "val"] {
-        let (link, target) = (ds.join("labels").join(split), ds.join("shared"));
-        #[cfg(windows)]
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .args([&link, &target].map(|p| p.to_string_lossy().replace('/', "\\")))
-            .output()
-            .is_ok_and(|o| o.status.success());
-        #[cfg(unix)]
-        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
-        assert!(made, "cannot link {}", link.display());
+        if let Err(e) = link_folder(&ds.join("labels").join(split), &ds.join("shared")) {
+            eprintln!("skipped: cannot link a folder here: {e}");
+            return;
+        }
     }
     let report = check(&ds, &CheckOptions::default()).unwrap();
     assert_eq!(kinds(&report), [(CheckKind::MissingImage, "c.txt".to_string(), None)]);
+
+    let out = t.join("linked-out");
+    write(&t.join("archive/labels/train/a.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write(&t.join("archive/labels/train/b.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write_png(&out.join("images/train/a.png"), 16, 16, [200, 0, 0]);
+    std::fs::create_dir_all(out.join("labels")).unwrap();
+    if let Err(e) = link_folder(&out.join("labels/train"), &t.join("archive/labels/train")) {
+        eprintln!("skipped: cannot link a folder here: {e}");
+        return;
+    }
+    let report = check(&out, &CheckOptions::default()).unwrap();
+    assert!(report.issues.iter().all(|i| i.kind != CheckKind::MissingImage), "{:?}", report.issues);
 }
 
 #[test]

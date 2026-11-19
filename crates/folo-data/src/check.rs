@@ -229,29 +229,33 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
 /// Label files whose image is gone: a `.txt` that no image of the dataset reads, in a label folder the loader pairs
 /// (by [`label_path_for`]) with a separate folder still holding at least one image the dataset reads (`labels/train`
 /// with `images/train`), whose stem matches no file in those image folders (any extension, any case). Two spellings
-/// of one folder (links) are one folder. Only label folders inside the dataset root are visited, and not one whose
-/// last image is gone; `classes.txt` holds class names. One listing per folder, sorted by path.
+/// of one folder (links) are one folder, and a file beside the label in its own folder is its image too. Only label
+/// folders inside the dataset root are visited (both canonical), and not one whose last image is gone; `classes.txt`
+/// holds class names. One listing per folder, sorted by path.
 fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
     let fold = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
-    // Real label folder -> (its first spelling inside the root, its other image folders, the stems images read).
-    type Folder = (Option<PathBuf>, BTreeSet<PathBuf>, HashSet<String>);
+    // Real label folder -> (its first spelling, its other image folders, whether one of their images is there, the
+    // stems images read).
+    type Folder = (PathBuf, BTreeSet<PathBuf>, bool, HashSet<String>);
     let mut pairs: BTreeMap<PathBuf, Folder> = BTreeMap::new();
     let mut real: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
-    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    let root = abs(&scan.root);
+    // `.` first: a dataset named by a bare `data.yaml` has an empty root.
+    let Ok(root) = std::fs::canonicalize(Path::new(".").join(&scan.root)) else { return Vec::new() };
     for image in scan.splits.values().flatten() {
         let label = label_path_for(image);
         let (Some(dir), Some(images)) = (label.parent(), image.parent()) else { continue };
-        let Some(key) = real.entry(dir.to_path_buf()).or_insert_with(|| std::fs::canonicalize(dir).ok())
+        let Some(key) = real
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| std::fs::canonicalize(dir).ok().filter(|k| k.starts_with(&root)))
         else {
             continue;
         };
-        let (spelling, folders, stems) = pairs.entry(key.clone()).or_default();
-        if spelling.is_none() && abs(dir).starts_with(&root) {
-            *spelling = Some(dir.to_path_buf());
-        }
+        let (_, folders, held, stems) = pairs
+            .entry(key.clone())
+            .or_insert_with(|| (dir.to_path_buf(), BTreeSet::new(), false, HashSet::new()));
         if dir != images {
             folders.insert(images.to_path_buf());
+            *held = *held || image.is_file();
         }
         stems.extend(label.file_stem().map(fold));
     }
@@ -266,14 +270,18 @@ fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
             .collect()
     };
     let mut out = Vec::new();
-    for (dir, folders, mut stems) in pairs.into_values() {
-        let Some(dir) = dir.filter(|_| !folders.is_empty()) else { continue };
-        for f in &folders {
-            stems.extend(files(f).iter().filter_map(|p| p.file_stem()).map(fold));
+    for (dir, folders, held, mut stems) in pairs.into_values() {
+        if !held {
+            continue;
         }
-        let mut orphans: Vec<PathBuf> = files(&dir)
+        let (labels, beside): (Vec<_>, Vec<_>) = files(&dir)
             .into_iter()
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")))
+            .partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")));
+        for f in folders.iter().map(|f| files(f)).chain([beside]) {
+            stems.extend(f.iter().filter_map(|p| p.file_stem()).map(fold));
+        }
+        let mut orphans: Vec<PathBuf> = labels
+            .into_iter()
             .filter(|p| p.file_name().is_some_and(|n| !n.eq_ignore_ascii_case("classes.txt")))
             .filter(|p| p.file_stem().is_some_and(|s| !stems.contains(&fold(s))))
             .collect();
