@@ -189,6 +189,28 @@ describe('New run: bindings', () => {
     expect((await start()).seed).toBe(4294967296);
   });
 
+  // #354 review: a number field rounds what is typed before it is checked, so 9007199254740990.5 went out as …990.
+  // The seed is the text as typed (lib/seed, rule A): digits only.
+  it('refuses a seed that is not digits as typed, and sends nothing', async () => {
+    await open();
+    const adv = $<HTMLDetailsElement>('#sec-train details.advanced');
+    adv.open = true;
+    adv.dispatchEvent(new Event('toggle'));
+    flush();
+    const create = vi.spyOn(api, 'createRun');
+    for (const t of ['9007199254740990.5', '1e3', '5.0', '+5', '1,000', '']) {
+      type('input#seed', t);
+      expect($('#seed-error').textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+    }
+    type('input#seed', '9007199254740990.5');
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await tick();
+    expect(create).not.toHaveBeenCalled();
+    type('input#seed', ' 007 ');
+    expect(target.querySelector('#seed-error')).toBeNull();
+    expect((await start()).seed).toBe(7);
+  });
+
   it('says the learning rate is not used while the optimizer is Auto, which picks its own', async () => {
     await open();
     const hint = () => {

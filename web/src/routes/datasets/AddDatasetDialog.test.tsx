@@ -265,8 +265,11 @@ describe('AddDatasetDialog', () => {
       document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
       flushSync();
     };
-    submit('9007199254740993');
-    expect(field.querySelector('.msg.error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+    // Checked as typed (lib/seed, rule A): a number field rounded 9007199254740990.5 to …990 first (#354 review).
+    for (const t of ['9007199254740993', '9007199254740990.5', '1e3']) {
+      submit(t);
+      expect(field.querySelector('.msg.error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+    }
     expect(create).not.toHaveBeenCalled();
     submit('4294967296');
     await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());

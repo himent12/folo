@@ -544,8 +544,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // resuming a run named longer by an older version keeps its name), epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10, seed any u64.
 // A seed over 2^53 − 1 (9007199254740991) is exact here but not in a JavaScript client, whose JSON parser rounds it:
-// Studio takes 0 to 2^53 − 1 (also for a synthetic dataset), shows a run's larger seed as "Over 9,007,199,254,740,991"
-// and leaves it out of New run's copy of the run.
+// Studio takes 0 to 2^53 − 1, digits only as typed (also for a synthetic dataset), shows a run's larger seed as "Over
+// 9,007,199,254,740,991" and never sends or copies it: New run's copy of the run, Copy JSON and the queue's wait
+// estimate leave it out (web/src/lib/seed.ts).
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
 // Real mode maps TrainConfig onto the trainer's config (docs/MODEL.md §8.1): the other recipe keys keep their
 // defaults, and "auto" resolves to the GPU when a model can be placed on it, else the CPU.

@@ -5,6 +5,7 @@ import { render, type Rendered } from '../../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveTrain } from '$lib/api/mock/runs';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
+import { toast } from '$lib/ui/toast';
 import ConfigPanel, { type ConfigPanelProps } from './ConfigPanel';
 
 /** Port of `mount(ConfigPanel, { target, props })`; `unmount(c)` is `c.unmount()`. */
@@ -54,6 +55,22 @@ describe('ConfigPanel', () => {
   it('shows a seed as it is, and one too large to read exactly as the bound it is over', () => {
     expect(rows(null, { ...config, seed: 4294967296 })['Seed']?.textContent).toBe('4294967296');
     expect(rows(null, { ...config, seed: 2 ** 53 })['Seed']?.textContent).toBe('Over 9,007,199,254,740,991');
+  });
+
+  // #354 review: Copy JSON of a run with seed 18446744073709551615 gave 18446744073709552000, which the server refuses
+  // (422), as "the request the API takes". Rounded seeds never leave Studio (lib/seed, rule B): it is left out, said so.
+  it("leaves a seed it cannot copy exactly out of Copy JSON, and says so", async () => {
+    rows(null, { ...config, seed: 18446744073709551615 });
+    const write = vi.fn(async (_: string) => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    const show = vi.spyOn(toast, 'success');
+    [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => (b.getAttribute('aria-label') ?? b.textContent?.trim()) === 'Copy JSON')!.click();
+    await vi.waitFor(() => expect(show).toHaveBeenCalled());
+    const copied = JSON.parse(write.mock.calls[0]![0]) as Record<string, unknown>;
+    expect('seed' in copied).toBe(false);
+    expect(copied.epochs).toBe(100);
+    expect(show.mock.calls[0]![1]).toContain('Its seed is left out: it is over 9,007,199,254,740,991, more than Studio can copy exactly.');
+    show.mockRestore();
   });
 
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {

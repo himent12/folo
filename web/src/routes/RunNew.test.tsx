@@ -562,6 +562,32 @@ describe('New run from a link', () => {
     flushSync();
     expect(target.querySelector('#seed-error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
   });
+
+  // #354 review: Start was held, but the CLI command, "the same run from a terminal", copied without `--seed` (seed 0).
+  it('holds the CLI command while the seed is missing, as Start, and says why', async () => {
+    await fromSeed(2 ** 53);
+    const cli = () => target.querySelector('details.cli')!;
+    expect(cli().querySelector('button[aria-label^="Copy"]')).toBeNull();
+    expect(cli().querySelector('code')).toBeNull();
+    expect(cli().querySelector('.cli-note')?.textContent).toBe('Enter a seed first: the command needs one.');
+    const el = target.querySelector<HTMLInputElement>('input#seed')!;
+    el.value = '12';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(cli().querySelector('button[aria-label="Copy command"]')).not.toBeNull();
+    expect(cli().querySelector('code')?.textContent).toContain('--seed 12');
+  });
+
+  // #354 review: a reload (the draft) brought back the empty seed without the reason it is empty.
+  it("keeps the reason a copied run's seed was left out across a reload, until one is typed", async () => {
+    await fromSeed(2 ** 53);
+    unmount(c!);
+    c = undefined;
+    await open('?from=run_a2f0');
+    const why = "The copied run's seed is over 9,007,199,254,740,991, more than Studio holds exactly. Enter a seed.";
+    expect(target.querySelector<HTMLInputElement>('input#seed')!.value).toBe('');
+    expect(target.querySelector('#seed-error')?.textContent).toBe(why);
+  });
 });
 
 describe('New run: the draft', () => {

@@ -15,7 +15,7 @@ import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, t
 import { REF_CPU, REF_GPU } from '$lib/reference';
 import { hasFeature } from '$lib/throughput';
 import { href, router } from '$lib/router';
-import { serverCommand, trainCommand } from '$lib/trainCli';
+import { serverCommand } from '$lib/trainCli';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { watched } from '$lib/shell/runList';
 import Page from '$lib/shell/Page';
@@ -51,7 +51,7 @@ import TrainingSection from './runnew/TrainingSection';
 import AugmentSection from './runnew/AugmentSection';
 import ReviewList from './runnew/ReviewList';
 import EstimateFigures from './runnew/EstimateFigures';
-import CliCommand from './runnew/CliCommand';
+import CliCommand, { cliOf } from './runnew/CliCommand';
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
 
@@ -115,8 +115,8 @@ function RunNewForm() {
   /** The end-to-end head (TrainConfig.head `o2o`, docs/MODEL.md §6.6): predicts without NMS. */
   const e2e = signal(draft?.e2e ?? false);
   const lr0 = signal(draft ? (draft.lr0 as number) : 0.01);
-  const seed = signal(draft ? (draft.seed as number) : 0);
-  const seedCopy = copiedSeed(seed);
+  const seed = signal(draft?.seed ?? '0'); // as typed (lib/seed)
+  const seedCopy = copiedSeed(seed, draft?.seedOver ?? false);
   const weights = signal<string>(draft?.weights ?? 'none');
   const name = signal(draft?.name ?? '');
   const nameEdited = signal(draft?.nameEdited ?? false);
@@ -249,6 +249,7 @@ function RunNewForm() {
       e2e: e2e.get(),
       lr0: lr0.get(),
       seed: seed.get(),
+      seedOver: seedCopy.over(),
       weights: weights.get(),
       name: name.get(),
       nameEdited: nameEdited.get(),
@@ -551,26 +552,13 @@ function RunNewForm() {
     }
   }
 
-  // The same run from a terminal: the server's command where it builds one (only it knows its files), else Studio's,
-  // from the CLI's own mapping ($lib/trainCli). A fine-tune names the weights file by path; where the server does
-  // not report it, a placeholder and a note say what to fill in.
-  const ownCli = computed(() =>
-    trainCommand(
-      config.get(),
-      dataset.get()?.path ?? datasetId.get(),
-      models.data?.find((m) => m.id === weights.get()),
-    ),
+  // The same run from a terminal (runnew/CliCommand): the server's command for these settings, where it built one.
+  const cli = cliOf(
+    () => config.get(),
+    () => dataset.get()?.path ?? datasetId.get(),
+    () => models.data?.find((m) => m.id === weights.get()),
+    () => (served.get()?.key === estKey.get() ? serverCommand(served.get()!.est) : null),
   );
-  const servedCli = computed(() => {
-    const s = served.get();
-    return s?.key === estKey.get() ? serverCommand(s.est) : null;
-  });
-  const cliParts = computed(() => {
-    const s = servedCli.get();
-    return s ? s.split(/ (?=--)/) : ownCli.get().parts;
-  });
-  const cli = computed(() => servedCli.get() ?? ownCli.get().line);
-  const cliPlaceholder = computed(() => (servedCli.get() ? null : ownCli.get().placeholder));
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
@@ -846,7 +834,7 @@ function RunNewForm() {
                     </span>
                     <Why id="start-why" />
                   </div>
-                  <CliCommand cliParts={cliParts.get()} cli={cli.get()} cliPlaceholder={cliPlaceholder.get()} />
+                  <CliCommand cliParts={cli.parts.get()} cli={cli.line.get()} cliPlaceholder={cli.placeholder.get()} seedMissing={!!errors.get().seed} />
                 </div>
               </div>
             </Panel>

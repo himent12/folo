@@ -6,6 +6,7 @@ import { ApiError, type Api } from '$lib/api/client';
 import type { Arch, SystemInfo, TrainConfig } from '$lib/api/types';
 import { hasFeature } from '$lib/api/queue';
 import { referenceVram } from '$lib/reference';
+import { withoutInexactSeed } from '$lib/seed';
 
 export const OOM_CODE = 'gpu_out_of_memory';
 /** How lists name the cause instead of the driver text. */
@@ -118,7 +119,8 @@ export function vramForecaster(api: Pick<Api, 'estimateRun'>, system: SystemInfo
     if (c.device === 'cpu') return null;
     if (!served) return local(c);
     try {
-      const r = await api.estimateRun(c, signal);
+      // A failed run's seed over 2^53 − 1 arrived rounded: left out (lib/seed, rule B); memory does not depend on it.
+      const r = await api.estimateRun(withoutInexactSeed(c), signal);
       return r.est_peak_vram_bytes === null ? local(c) : { bytes: r.est_peak_vram_bytes, measured: r.vram_source === 'measured' };
     } catch {
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');

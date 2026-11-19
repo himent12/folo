@@ -8,6 +8,7 @@ import { settledEta } from '$lib/api/progress';
 import { hasFeature, withQueueMove } from '$lib/api/queue';
 import { Resource } from '$lib/api/resource';
 import type { QueueRequest, Run, SystemInfo } from '$lib/api/types';
+import { withoutInexactSeed } from '$lib/seed';
 import { timeRange } from '$lib/throughput';
 import { moveQueued, queueWait, type Length } from './queueActions';
 
@@ -46,7 +47,8 @@ export function queueState(src: QueueSource) {
   });
   const frontKey = computed(() => inFront.get().map((r) => r.id).join(' '));
   // Their lengths, from the server's estimate of each one's settings (servers with `run_estimate`): what makes "starts
-  // in about …" an estimate rather than a guess. One that cannot be estimated stays unknown, and the page says so.
+  // in about …" an estimate rather than a guess. One that cannot be estimated stays unknown, and the page says so. A
+  // seed over 2^53 − 1 arrived rounded and is left out (lib/seed, rule B): it does not change a run's length.
   const frontLengths = new Resource(async (s) => {
     const key = frontKey.get();
     const rs = untrack(() => inFront.get());
@@ -54,7 +56,7 @@ export function queueState(src: QueueSource) {
     if (!key || !hasFeature(system.data, 'run_estimate')) return { key, lengths: rs.map((): Length => null) };
     const lengths = await Promise.all(
       rs.map((r) =>
-        hub.api.estimateRun({ ...r.config, name: r.name }, s).then(
+        hub.api.estimateRun(withoutInexactSeed({ ...r.config, name: r.name }), s).then(
           (e): Length => ({ lo: e.est_total_s_low, hi: e.est_total_s_high }),
           (): Length => null,
         ),

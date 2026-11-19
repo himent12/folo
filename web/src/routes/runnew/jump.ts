@@ -89,7 +89,7 @@ export function formErrors(
   name: string,
   epochs: number,
   lr0: number,
-  seed: number,
+  seed: string,
   augment: Augment,
   dataset: ListedDataset | undefined,
   gone: string | null,
@@ -131,17 +131,19 @@ export function formErrors(
 }
 
 /**
- * The Seed field's copy of a run's seed (`?from=`). One over 2^53 − 1 arrived rounded by JSON parsing (lib/seed): another
- * seed, so it is never offered as the run's; the field is left empty and says why until a seed is typed.
+ * The Seed field's copy of a run's seed (`?from=`). One over 2^53 − 1 arrived rounded by JSON parsing (lib/seed, rule
+ * B): another seed, so it is never offered as the run's; the field is left empty and says why (`over`, kept in the
+ * draft) until a seed is typed.
  */
-export function copiedSeed(seed: Signal<number>) {
-  const over = signal(false);
+export function copiedSeed(seed: Signal<string>, wasOver: boolean) {
+  const over = signal(wasOver);
   effect(() => {
-    if (seed.get() !== null) over.set(false);
+    if (seed.get() !== '') over.set(false);
   });
   return {
+    over: () => over.get(),
     copy(v: number) {
-      seed.set(exactSeed(v) ? v : (null as unknown as number));
+      seed.set(exactSeed(v) ? String(v) : '');
       over.set(!exactSeed(v));
     },
     errors: (e: FormErrors): FormErrors => (over.get() ? { ...e, seed: COPIED_SEED_ERROR } : e),
