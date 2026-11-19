@@ -320,6 +320,9 @@ fn mcp_errors_stay_off_stdout_with_json() {
         (&["--json", "mcp", "--extra"], "--extra"),
         (&["mcp", "--extra", "--json"], "--extra"),
         (&["mcp", "--json", "--server"], "--server"),
+        // A root-level error before `mcp`.
+        (&["--json", "--json", "mcp"], "--json"),
+        (&["--json=true", "mcp", "--json"], "--json"),
     ] {
         let out = folo_cmd().args(args).stdin(Stdio::null()).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -327,9 +330,17 @@ fn mcp_errors_stay_off_stdout_with_json() {
         assert!(out.stdout.is_empty(), "{args:?}: stdout: {}", String::from_utf8_lossy(&out.stdout));
         assert!(stderr.contains(want), "{args:?}: {stderr}");
     }
-    let (code, stdout, _) = folo(&["--json", "serve", "--extra"]);
-    assert_eq!(code, 2);
-    assert_eq!(json_lines(&stdout)[0]["error"]["code"], "usage");
+    for args in [
+        &["--json", "serve", "--extra"][..],
+        &["--json", "--", "mcp"],
+        &["predict", "mcp", "--json", "--bad"],
+        &["mcpp", "--json"],
+        &["--json"],
+    ] {
+        let (code, stdout, _) = folo(args);
+        assert_eq!(code, 2, "{args:?}");
+        assert_eq!(json_lines(&stdout)[0]["error"]["code"], "usage", "{args:?}");
+    }
 }
 
 #[test]

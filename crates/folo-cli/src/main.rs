@@ -38,6 +38,7 @@ mod serve_lock;
 mod train;
 mod weights;
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use clap::CommandFactory;
@@ -89,13 +90,46 @@ fn parse() -> Result<Cli, clap::Error> {
     Ok(cli)
 }
 
-/// Whether a command line that did not parse runs `folo mcp`: clap parses it again, skipping what it cannot read,
-/// so the subcommand is found wherever the flags are.
-fn names_mcp(args: &[std::ffi::OsString]) -> bool {
-    Cli::command()
-        .ignore_errors(true)
-        .try_get_matches_from(args)
-        .is_ok_and(|m| m.subcommand_name() == Some("mcp"))
+/// Whether a command line that did not parse names `folo mcp`: its first subcommand token is exactly `mcp`
+/// ([`subcommand_token`]). Not clap's own recovery (`ignore_errors`), which stops at the first root-level error.
+fn names_mcp(args: &[OsString]) -> bool {
+    subcommand_token(&Cli::command(), args).is_some_and(|t| t == "mcp")
+}
+
+/// The argument that names the subcommand (`args[0]` is the program), whatever errors come before it: the first that
+/// is neither a root flag nor a root option's value. A root option (as `root` defines it) that takes a value and is
+/// not given one in its token (`--opt=v`, `-ov`) takes the next argument unless that starts with `-`, as clap does;
+/// anything else starting with `-` (a repeated, unknown or malformed flag) is skipped alone. `--` ends the scan with
+/// no subcommand: what follows it is a positional, and the root has none.
+fn subcommand_token<'a>(root: &clap::Command, args: &'a [OsString]) -> Option<&'a OsStr> {
+    let takes_value = |arg: Option<&clap::Arg>| arg.is_some_and(|a| a.get_action().takes_values());
+    let mut rest = args.iter().skip(1).peekable();
+    while let Some(token) = rest.next() {
+        let Some(s) = token.to_str() else { return Some(token) };
+        let wants_next = if s == "--" {
+            return None;
+        } else if let Some(long) = s.strip_prefix("--") {
+            !long.contains('=') && takes_value(root.get_arguments().find(|a| a.get_long() == Some(long)))
+        } else if let Some(shorts) = s.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // A cluster (`-ab`): the first short that takes a value takes the rest of the token, if any.
+            let mut chars = shorts.chars();
+            loop {
+                match chars.next() {
+                    None => break false,
+                    Some(c) if takes_value(root.get_arguments().find(|a| a.get_short() == Some(c))) => {
+                        break chars.as_str().is_empty();
+                    }
+                    Some(_) => {}
+                }
+            }
+        } else {
+            return Some(token);
+        };
+        if wants_next && rest.peek().is_some_and(|n| !n.to_string_lossy().starts_with('-')) {
+            rest.next();
+        }
+    }
+    None
 }
 
 /// Help and version go to stdout with exit 0; real parse errors are usage errors (exit 2).
@@ -203,6 +237,50 @@ mod tests {
     #[test]
     fn clap_tree_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// `names_mcp` over raw command lines: the first subcommand token decides, whatever error comes before it; a
+    /// line whose first subcommand token is not exactly `mcp` keeps the JSON usage record.
+    #[test]
+    fn names_mcp_reads_the_first_subcommand_token() {
+        let names = |root: &clap::Command, line: &str| {
+            let args: Vec<OsString> = line.split(' ').map(OsString::from).collect();
+            subcommand_token(root, &args).is_some_and(|t| t == "mcp")
+        };
+        for (line, want) in [
+            ("folo mcp --json --extra", true),
+            ("folo --json mcp --extra", true),
+            // Root-level errors before `mcp`: a repeated flag, a value for a flag, an unknown flag.
+            ("folo --json --json mcp", true),
+            ("folo --json=true mcp --json", true),
+            ("folo --bogus mcp --json", true),
+            ("folo -x mcp --json", true),
+            // `--` ends the options: `mcp` after it is a stray positional (clap's "unexpected argument").
+            ("folo --json -- mcp", false),
+            ("folo --json", false),
+            ("folo mcpp --json", false),
+            ("folo predict mcp --json --bad", false),
+            ("folo predict --conf mcp --json", false),
+            ("folo - mcp --json", false),
+        ] {
+            assert_eq!(names(&Cli::command(), line), want, "{line}");
+        }
+        // A root option that takes a value (the root has none today) is read from clap's definition of it.
+        let root = Cli::command().arg(clap::Arg::new("dir").long("dir").short('d'));
+        for (line, want) in [
+            ("folo --dir x mcp --json", true),
+            ("folo --dir=x mcp --json", true),
+            ("folo -dx mcp --json", true),
+            ("folo -d x mcp --json", true),
+            // Missing its value: clap does not take a flag as one.
+            ("folo --dir --json mcp", true),
+            ("folo -d --json mcp", true),
+            // A value equal to `mcp` is a value.
+            ("folo --dir mcp --json", false),
+            ("folo -d mcp --json", false),
+        ] {
+            assert_eq!(names(&root, line), want, "{line}");
+        }
     }
 
     #[test]
