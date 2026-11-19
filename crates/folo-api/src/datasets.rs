@@ -33,6 +33,10 @@ pub struct Dataset {
     /// Statistics; present on `GET /api/datasets/{id}`, omitted in lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<DatasetStats>,
+    /// Opaque; changes whenever the dataset's files do (a box moved in a label file too, which may leave
+    /// `stats` as they were). Beside `stats` from servers that track it, else omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 /// Dataset format. `auto` is only valid in requests.

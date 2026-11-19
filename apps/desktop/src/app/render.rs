@@ -57,6 +57,12 @@ impl Render for FoloApp {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
         }
+        // Back to the window (its labels edited in another app, say): what it shows is read again.
+        let active = window.is_window_active();
+        if active && !self.window_active {
+            self.recheck_shown_datasets();
+        }
+        self.window_active = active;
         self.narrow = window.viewport_size().width < px(1120.);
         self.shown_mode = if window.is_fullscreen() {
             crate::window_state::WindowMode::Fullscreen

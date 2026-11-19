@@ -529,6 +529,8 @@ pub struct FoloApp {
     pub restore_pending: bool,
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
+    /// The window was active at the last render: becoming active again reads its datasets again.
+    pub window_active: bool,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
     /// Closing the window would stop these runs (on the server this app started): asked first. Empty:
@@ -770,6 +772,7 @@ impl FoloApp {
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
+            window_active: true,
             confirm_stop: None,
             confirm_delete: None,
             confirm_close: None,

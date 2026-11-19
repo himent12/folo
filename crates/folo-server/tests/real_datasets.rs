@@ -225,6 +225,33 @@ async fn registry_and_index_cache_survive_restarts_and_track_changes() {
     assert!(leftovers.is_empty(), "atomic writes leave no temporary files");
 }
 
+/// Issue #346: a box moved in a label file, its class, size and count kept, leaves the stats as they were; the
+/// dataset's `revision` still changes, so a client holding its image list knows to read it again.
+#[tokio::test]
+async fn a_box_moved_in_place_changes_the_revision_not_the_stats() {
+    let t = TestDir::new("real-revision");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data, 4);
+    let label = data.join("labels/train/000000.txt");
+    std::fs::write(&label, "0 0.2500 0.5 0.2 0.2\n").unwrap();
+    let app = app(&home);
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
+    let uri = format!("/api/datasets/{}", ds.id);
+    let before: Dataset = ok(&app, get(&uri)).await;
+    assert!(before.revision.is_some(), "a real dataset has a revision");
+    assert_eq!(ok::<Dataset>(&app, get(&uri)).await.revision, before.revision, "unchanged files keep it");
+
+    std::fs::write(&label, "0 0.7500 0.5 0.2 0.2\n").unwrap();
+    let after: Dataset = ok(&app, get(&uri)).await;
+    let page: ImagePage = ok(&app, get(&format!("{uri}/images?limit=1"))).await;
+    assert!(page.images[0].boxes[0].x1 > 32.0, "re-indexed: {:?}", page.images[0].boxes);
+    assert_eq!(after.stats, before.stats, "the stats can't tell");
+    assert_ne!(after.revision, before.revision, "the revision does");
+    // Lists carry neither, as before.
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!((list.datasets[0].stats.as_ref(), list.datasets[0].revision.as_ref()), (None, None));
+}
+
 #[tokio::test]
 async fn coco_folders_and_registration_errors() {
     let t = TestDir::new("real-coco");

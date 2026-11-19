@@ -243,6 +243,7 @@ impl Store for MockStore {
             created: rfc3339(unix_now()),
             splits: index.splits,
             stats: None,
+            revision: None,
         };
         let entry = DatasetEntry::Disk(meta, Box::new(index));
         let out = entry.with_stats();

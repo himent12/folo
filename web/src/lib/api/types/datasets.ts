@@ -34,6 +34,8 @@ export interface Dataset {
   splits: Record<Split, number>;
   /** Present on GET /api/datasets/{id}. */
   stats?: DatasetStats;
+  /** Beside `stats` from a real server: changes whenever the dataset's files do, also when `stats` stay as they were. */
+  revision?: string;
 }
 
 export interface CreateDataset {

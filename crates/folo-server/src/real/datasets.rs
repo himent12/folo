@@ -112,6 +112,8 @@ impl RealStore {
             created: reg.created.clone(),
             splits: idx.map_or(reg.splits, |i| i.splits),
             stats: idx.map(|i| i.stats.clone()),
+            // The files' fingerprint: a label edited in place changes it, whatever it did to the stats.
+            revision: idx.map(|i| i.fingerprint.hash.clone()),
         }
     }
 

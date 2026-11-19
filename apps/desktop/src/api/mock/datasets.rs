@@ -98,6 +98,7 @@ impl DatasetFixture {
                 box_size_hist: Histogram { edges: size_edges, counts: size_counts },
                 boxes_per_image_hist: Histogram { edges: per_edges, counts: per_counts },
             }),
+            revision: None,
         };
         Self { ds, seed, max_objects, small, images }
     }

@@ -87,6 +87,21 @@ impl FoloApp {
         }
     }
 
+    /// The pages with dataset cards show each dataset as the server has it now: a folder moved away
+    /// (or put back), or files edited, since it was read show on the next visit, and when the
+    /// window is active again (Studio reads its dataset page again when it is focused).
+    pub(super) fn recheck_shown_datasets(&mut self) {
+        if matches!(self.route, Route::Overview | Route::Datasets | Route::Dataset(_)) {
+            self.ds_recheck = self
+                .store
+                .dataset
+                .iter()
+                .filter(|(_, l)| !l.is_loading())
+                .map(|(id, _)| id.clone())
+                .collect();
+        }
+    }
+
     fn after_navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Settings shows the throughput table and the cloud as the server has them now (also when
         // going back).
@@ -104,17 +119,7 @@ impl FoloApp {
             self.ds_class = None;
             self.ds_class_of = Some(d.clone());
         }
-        // The pages with dataset cards show each dataset's health as the server has it now: a
-        // folder moved away (or put back) since it was read says so on the next visit.
-        if matches!(self.route, Route::Overview | Route::Datasets | Route::Dataset(_)) {
-            self.ds_recheck = self
-                .store
-                .dataset
-                .iter()
-                .filter(|(_, l)| !l.is_loading())
-                .map(|(id, _)| id.clone())
-                .collect();
-        }
+        self.recheck_shown_datasets();
         self.page_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.chart_hover_on = None;

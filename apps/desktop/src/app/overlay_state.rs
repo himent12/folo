@@ -166,6 +166,10 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Its dataset read again: a label edited since (a box moved, the stats as they were) shows
+        // where it is now, here and in the grid behind.
+        self.ds_recheck.insert(dataset.clone());
+        self.ensure_dataset_record(&dataset, cx);
         self.inspector = Some(Inspector {
             dataset,
             index,
