@@ -24,8 +24,8 @@ pub(crate) struct OutputFile {
 impl OutputFile {
     /// The output of `command`: `output`, or a free name next to `model` (`<stem><suffix>.<ext>`, then `-2`,
     /// `-3`, ...). Checked before any work: an existing `output` is `output_exists` (and again at
-    /// [`OutputFile::publish`] when another command took the name meanwhile), and a folder that cannot take the
-    /// file is `io_error`, both naming the output.
+    /// [`OutputFile::publish`] when another command took the name meanwhile), an existing folder is what `create_new`
+    /// says of it, and a folder that cannot take the file is `io_error`, all naming the output.
     pub(crate) fn new(
         command: &'static str,
         model: &Path,
@@ -42,11 +42,13 @@ impl OutputFile {
                 return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
             }
             match std::fs::symlink_metadata(o) {
-                // A folder is not a file that exists: what opening it for writing says (access denied, is a
-                // directory).
+                // A folder: what main's `create_new` said (`output_exists` on Unix, access denied on Windows).
                 Ok(m) if m.is_dir() => {
-                    let e = std::fs::OpenOptions::new().write(true).open(o).err();
-                    return Err(io_error(o, e.unwrap_or_else(|| std::io::ErrorKind::IsADirectory.into())));
+                    return Err(match std::fs::OpenOptions::new().write(true).create_new(true).open(o) {
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => exists(command, o),
+                        Err(e) => io_error(o, e),
+                        Ok(_) => io_error(o, std::io::ErrorKind::IsADirectory.into()),
+                    });
                 }
                 Ok(_) => return Err(exists(command, o)),
                 Err(_) => {}
@@ -62,11 +64,19 @@ impl OutputFile {
         };
         let first = file.name(1);
         let dir = first.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        file.tmp = folo_nn::io::temp_path(dir).map_err(|e| io_error(&first, e))?;
-        Ok(file)
+        let first_name = first.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        loop {
+            let tmp = folo_nn::io::temp_path(dir).map_err(|e| io_error(&first, e))?;
+            // `--output .folo-<pid>-<n>.tmp` is not the temporary file too: the next temporary name is taken.
+            if tmp.file_name().map(|n| n.to_string_lossy().to_lowercase()) != first_name {
+                file.tmp = tmp;
+                return Ok(file);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 
-    /// The temporary file to write the output to (in the output's folder; the writer creates it).
+    /// The temporary file to write the output to (in the output's folder; created empty, the writer writes over it).
     pub(crate) fn tmp(&self) -> &Path {
         &self.tmp
     }
@@ -160,8 +170,8 @@ mod tests {
                 stale.iter().all(|n| n == "best.folo" || (n.starts_with(".folo-") && n.ends_with(".tmp")))
             );
         }
-        // What stays is only temporary files: none at all from the first step, then at most one per run.
-        assert_eq!(names(&dir).iter().filter(|n| n.ends_with(".tmp")).count(), 2, "{:?}", names(&dir));
+        // What stays is only temporary files: at most one per killed run (the first one's empty, its name reserved).
+        assert_eq!(names(&dir).iter().filter(|n| n.ends_with(".tmp")).count(), 3, "{:?}", names(&dir));
         // A retry of a killed export is not blocked by its leftovers.
         std::fs::remove_file(&out).unwrap();
         let retry = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
@@ -208,17 +218,42 @@ mod tests {
     }
 
     #[test]
+    fn an_output_named_like_the_next_temporary_file_is_not_written_through_it() {
+        let dir = TestDir::new("cli-output-tmp-name");
+        let model = dir.join("best.folo");
+        std::fs::write(&model, b"model").unwrap();
+        // `--output` is the temporary name this process takes next (unless another test takes it first).
+        let probe = folo_nn::io::temp_path(dir.path()).unwrap();
+        std::fs::remove_file(&probe).unwrap();
+        let n: u64 =
+            probe.to_string_lossy().rsplit('-').next().unwrap().trim_end_matches(".tmp").parse().unwrap();
+        let out = dir.join(format!(".folo-{}-{}.tmp", std::process::id(), n + 1));
+        let file = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
+        assert_ne!(file.tmp(), out);
+        std::fs::write(file.tmp(), b"done").unwrap();
+        assert_eq!(file.publish().unwrap(), out);
+        assert_eq!(std::fs::read(&out).unwrap(), b"done");
+        assert_eq!(names(&dir).len(), 2, "{:?}", names(&dir));
+    }
+
+    #[test]
     fn errors_name_the_output_as_before() {
         let dir = TestDir::new("cli-output-errors");
         let model = dir.join("best.folo");
         std::fs::write(&model, b"model").unwrap();
-        // An existing folder is io_error, as main's `create_new` said (not output_exists).
+        // An existing folder is what main's `create_new` said: EEXIST (output_exists) on Unix, access denied
+        // (io_error) on Windows.
         let folder = dir.join("folder");
         std::fs::create_dir(&folder).unwrap();
         let e = OutputFile::new("export", &model, Some(folder.clone()), "", "onnx").err().unwrap();
         let p = folo_api::json::path(&folder);
-        assert_eq!(e.code, "io_error");
-        assert!(e.message.starts_with(&format!("cannot create {p}: ")), "{}", e.message);
+        let (code, start) = if cfg!(windows) {
+            ("io_error", format!("cannot create {p}: "))
+        } else {
+            ("output_exists", format!("{p} exists"))
+        };
+        assert_eq!(e.code, code);
+        assert!(e.message.starts_with(&start), "{}", e.message);
         // A missing folder: io_error naming the output, not a temporary file.
         let missing = dir.join("nope").join("x.onnx");
         let e = OutputFile::new("export", &model, Some(missing.clone()), "", "onnx").err().unwrap();

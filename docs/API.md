@@ -346,8 +346,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   them). In the model name, control characters and the characters a Windows file name cannot hold (`/ \ : < > " |
   ? *`) become `-`, and it is cut to 200 bytes. Names get `-2`, `-3`, ... when taken (exports never
   overwrite): the file is written in `exports/` as `.folo-<pid>-<n>.tmp` and moved to the first free name in one
-  step once complete, as `folo export` does (docs/CLI.md), so a stopped server leaves the name absent or complete
-  and at most such a temporary file, which nothing reads and which is safe to delete. `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
+  step once complete, as `folo export` does (docs/CLI.md), so a stopped server leaves the name absent or complete.
+  A failed export removes its temporary files (best effort); a stopped server can leave `.folo-<pid>-<n>.tmp`
+  (empty, partial or complete) and the writer's own `.folo-<pid>-<n>.tmp.<pid>.<m>.tmp` there, which nothing reads
+  and which are safe to delete. Where the move is a hard link (macOS, Linux file systems without
+  `RENAME_NOREPLACE`), `.folo-<pid>-<n>.tmp` stays as a second name of the finished file when it cannot be removed.
+  `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
   it elsewhere, e.g. into the browser detector (docs/WASM.md), or its ONNX graph. Without `format` it is the file as

@@ -5,7 +5,7 @@
 //! step of the file system that fails when the name exists: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on
 //! Windows, `renameat2` with `RENAME_NOREPLACE` on Linux. Nothing exists under the name until the file is complete,
 //! so a writer that fails or is killed leaves the name free (or, killed after the move, the complete file); a killed
-//! writer may leave its temporary file behind, which nothing reads. Where that move does not exist (a Linux file
+//! writer may leave its temporary file behind (empty, partial or complete), which nothing reads. Where that move does not exist (a Linux file
 //! system without `RENAME_NOREPLACE`, macOS) a hard link is made instead, which is refused just the same when the
 //! name exists, and the temporary name is then removed. A file system that refuses both is an `Unsupported` error:
 //! the name is never claimed first and replaced afterwards.
@@ -18,8 +18,10 @@ pub const TEMP_PREFIX: &str = ".folo-";
 
 /// A temporary name in `dir` for a file to [`publish_new`] there: `.folo-<pid>-<n>.tmp`, at most 41 characters
 /// whatever the final name, so a final name as long as a file system allows (255) still works, and it ends in
-/// `.tmp` like every temporary file FOLO's folder scans skip. The file is created, so that a missing or read-only
-/// folder fails here, before any work, and removed again: the writer creates it.
+/// `.tmp` like every temporary file FOLO's folder scans skip. The file is created empty and left there for the writer
+/// to write over: the name stays reserved, so another process with the same pid (another container sharing the
+/// folder) never picks it too, and a missing or read-only folder fails here, before any work. The caller removes it
+/// when it does not publish it.
 pub fn temp_path(dir: &Path) -> io::Result<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -27,11 +29,8 @@ pub fn temp_path(dir: &Path) -> io::Result<PathBuf> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!("{TEMP_PREFIX}{}-{n}.tmp", std::process::id()));
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => {
-                std::fs::remove_file(&path)?;
-                return Ok(path);
-            }
-            // A dead process's leftover with the same pid.
+            Ok(_) => return Ok(path),
+            // Another process's with the same pid, or a dead one's leftover.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -61,7 +60,7 @@ pub fn publish_free(tmp: &Path, mut name: impl FnMut(u32) -> PathBuf) -> io::Res
 #[cfg(windows)]
 fn move_new(from: &Path, to: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-    let (from, to) = (wide(from), wide(to));
+    let (from, to) = (wide(from)?, wide(to)?);
     // No flags: not MOVEFILE_REPLACE_EXISTING (an existing `to` is ERROR_ALREADY_EXISTS), not MOVEFILE_COPY_ALLOWED
     // (a rename, never a copy and a delete).
     // SAFETY: both are NUL-terminated UTF-16 strings that live until the call returns; the result is checked.
@@ -74,12 +73,16 @@ fn move_new(from: &Path, to: &Path) -> io::Result<()> {
 
 /// `p` as a NUL-terminated verbatim (`\\?\`) path, as `std::fs` passes long paths: `MoveFileExW` otherwise stops at
 /// 260 characters. `std::path::absolute` first resolves `.`, `..` and `/` and drops trailing dots and spaces, as
-/// Windows does for every other path.
+/// Windows does for every other path; its error is returned. A NUL inside the path is `InvalidInput`, as in
+/// `std::fs`.
 #[cfg(windows)]
-fn wide(p: &Path) -> Vec<u16> {
+fn wide(p: &Path) -> io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Prefix};
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let abs = std::path::absolute(p)?;
+    if abs.as_os_str().encode_wide().any(|c| c == 0) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the path holds a NUL character"));
+    }
     let (prefix, skip) = match abs.components().next() {
         Some(Component::Prefix(x)) => match x.kind() {
             Prefix::Disk(_) => (r"\\?\", 0),
@@ -90,7 +93,7 @@ fn wide(p: &Path) -> Vec<u16> {
         },
         _ => ("", 0),
     };
-    prefix.encode_utf16().chain(abs.as_os_str().encode_wide().skip(skip)).chain(Some(0)).collect()
+    Ok(prefix.encode_utf16().chain(abs.as_os_str().encode_wide().skip(skip)).chain(Some(0)).collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -116,9 +119,10 @@ fn move_new(from: &Path, to: &Path) -> io::Result<()> {
         return Ok(());
     }
     let e = io::Error::last_os_error();
-    match e.raw_os_error() {
-        // EINVAL, ENOSYS, EOPNOTSUPP: no RENAME_NOREPLACE on this file system or kernel.
-        Some(22 | 38 | 95) => link_new(from, to),
+    match e.kind() {
+        // No RENAME_NOREPLACE on this file system or kernel: EINVAL (what a file system without it answers), ENOSYS
+        // and the other answers std calls `Unsupported`.
+        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput => link_new(from, to),
         _ => Err(e),
     }
 }
@@ -142,8 +146,11 @@ fn link_new(from: &Path, to: &Path) -> io::Result<()> {
             let _ = std::fs::remove_file(from);
             Ok(())
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
-        Err(e) => Err(unsupported(to, e)),
+        // No hard links on this file system.
+        Err(e) if matches!(e.kind(), io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied) => {
+            Err(unsupported(to, e))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -180,7 +187,8 @@ mod tests {
         let dir = TestDir::new("nn-publish-free");
         let path = dir.join("m.onnx");
         let tmp = super::temp_path(dir.path()).unwrap();
-        assert!(!tmp.exists(), "the temporary file is left for the writer to create");
+        // The name stays reserved: an empty file the writer writes over.
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"");
         std::fs::write(&tmp, b"new").unwrap();
         // A file that appeared under the name just before the move keeps its bytes.
         std::fs::write(&path, b"old").unwrap();
