@@ -890,7 +890,9 @@ exported more than once.
   need `label_image_filters` in `features`. `path` (an absolute path on the server's machine; feature
   `label_image_path`) keeps the image whose file is that file, however either path spells it (`..`, letter case on
   Windows, a link to a folder; a second hard link under another name is not), and nothing when no file is there;
-  the path is only compared, never stored. `folo label view` asks it before it writes over a file.
+  the path is only compared, never stored. `folo label view` asks it before it writes over a file. Paths are
+  compared as the server sees them: a server that reaches the photos under other paths than the caller (in a
+  container, on another machine) cannot recognise the caller's path of a photo.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
 - `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool, "expect"?: string }` → `LabelImage`:
   labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes

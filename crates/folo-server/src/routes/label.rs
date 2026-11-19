@@ -131,6 +131,10 @@ pub(super) async fn label_images(
         offset: p.offset,
         limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
     };
+    if q.path.is_some() {
+        // Resolving `path` and every image's file touches the disk.
+        return Ok(Json(blocking(&st, move |s| s.labeler()?.query(&id, &q)).await?));
+    }
     Ok(Json(st.store.labeler()?.query(&id, &q)?))
 }
 

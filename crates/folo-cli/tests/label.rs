@@ -352,8 +352,9 @@ fn label_through_a_folo_serve() {
 
 /// `view -o` on a photo of a new job is refused (`usage`) and the photos keep their bytes: the second of two
 /// `photo.png` (stored as `photo-2.png`; through a server, after the first image is removed), with a trailing dot
-/// (Windows), a stem longer than a stored name. A file named like one in another folder is replaced, each time; a
-/// new file is written; a folder or a missing parent is `io_error`. `args` go after every command; `server` removes.
+/// (Windows), a stem longer than a stored name. A file in another folder named like an image the job still has
+/// (`photo-2.png`) is replaced, twice in a row; a new file is written; a folder or a missing parent is `io_error`.
+/// `args` go after every command; `server` removes.
 fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&folo_client::Client>) {
     let after = env.after.iter().cloned().chain(args.iter().map(|a| a.to_string())).collect();
     let env = &Env { claude: env.claude.clone(), no_codex: env.no_codex.clone(), after };
@@ -384,7 +385,7 @@ fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&fol
     }
     assert_eq!(photos.iter().map(|p| std::fs::read(p).unwrap()).collect::<Vec<_>>(), before);
 
-    let preview = t.join("previews").join("photo.jpg");
+    let preview = t.join("previews").join("photo-2.png");
     std::fs::create_dir_all(preview.parent().unwrap()).unwrap();
     for _ in 0..2 {
         std::fs::write(&preview, b"old").unwrap();
