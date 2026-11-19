@@ -247,9 +247,9 @@ export default function LabelJobs() {
                               <td>
                                 <StatusBadge plain state={st()} />
                               </td>
-                              <td class="hide-md">
+                              <td class="hide-md agent-cell">
                                 {j().run ? (
-                                  <Meta line>
+                                  <Meta line title={runAgent(j().run!, agents.data)[1]}>
                                     <span>{runAgent(j().run!, agents.data)[0]}</span>
                                     <span>{runAgent(j().run!, agents.data)[1]}</span>
                                   </Meta>
@@ -339,7 +339,10 @@ css`
   .scroll {
     overflow-x: auto;
   }
-  .name-cell {
+  /* The name, and the agent's line with a long model id (a Bedrock profile's ARN), cut themselves inside their
+     columns (whole in their tooltips) instead of widening the table. */
+  .name-cell,
+  .agent-cell {
     max-width: 0;
   }
   .name {

@@ -58,8 +58,14 @@ server started with `--token`, whose health is open but whose runs list answers 
 passed; a copy of it also goes out with the health, a round trip less on a remote server, and its answer is used only
 when it is a FOLO server's (401: the wall; 200: none). Anything else (another status, no answer, or none within
 `TOKEN_GRACE`, 250 ms, of the health's) is set aside and the check after the health decides, as it always did: the
-table in `#reachServer`. So `npm run dev` without a server shows that offline state: start `folo serve`, or open
-`http://localhost:5173/?mock=1`.
+table in `#reachServer`. A server that starts refusing Studio while it is open (a proxy that sent the token stops)
+is said in the same words, kept apart from whether it answers at all (`src/lib/api/reach.ts`, unchanged by it):
+`src/lib/api/access.ts` changes only on the token check's own answer (401 or 403: refused; 2xx: let in; anything else:
+no change). A 401 or 403 on any `/api/` request only asks for that check (one at a time, and one more when the
+refused request went out after the check out had started), and while refused the check repeats until Studio is let in
+again, which brings it back by itself. Settings › Connection › Test asks both as well: no answer, a refusal (red), a
+token check that cannot tell (neither red nor green), or a server Studio can use (green). So `npm run dev` without a
+server shows that offline state: start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 ## Where things are
 

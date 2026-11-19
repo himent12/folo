@@ -11,8 +11,9 @@
 import { computed, signal } from 'fw';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
+import { Access } from './access';
 import { ApiError, HttpApi, type Api } from './client';
-import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
+import { accessCheck, earlyTokenWall, isHealth, NOT_FOLO, refusal, refusedWords, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -110,6 +111,7 @@ class Hub {
   #shared = computed(() => shareApi(this.#api.get()));
   #epoch = signal(0);
   #reach = new Reach();
+  #access = new Access();
 
   get mode(): Mode {
     return this.#mode.get();
@@ -138,22 +140,26 @@ class Hub {
   }
   /**
    * The server in use stopped answering (./reach: a failed request or a dropped stream, confirmed by a health probe,
-   * which repeats until it answers again), or has not answered a connect yet (slow or not there; the connect keeps
-   * asking), or the demo's `?scenario=error`. Live data on screen is then a last known state, not the current one.
+   * which repeats until it answers again), or stopped letting Studio in (./access: a token check answered 401 or 403;
+   * it repeats until it answers 2xx), or has not answered a connect yet (slow or not there; the connect keeps asking),
+   * or the demo's `?scenario=error`. Live data on screen is then a last known state, not the current one.
    */
   get offline(): boolean {
-    return scenario === 'error' || this.#unreachable.get() || this.#reach.offline;
+    return scenario === 'error' || this.#unreachable.get() || this.#reach.offline || this.#access.refusal !== null;
   }
   /**
-   * While connecting: what the address answered when it answered but not as a usable FOLO server (not its health
-   * payload, a sign-in wall), in words for the user; null when nothing answered. Offline meanwhile, and still asking.
+   * While offline: what the address answered when it answered but not as a usable FOLO server (not its health payload,
+   * a sign-in wall), in words for the user, as a connect finds it or as the server in use starts refusing Studio
+   * (./access, said in the connect's words unless the server does not answer at all); null when nothing answered.
    */
   get refused(): string | null {
-    return this.#refused.get();
+    const refusal = this.#reach.offline ? null : this.#access.refusal;
+    return this.#refused.get() ?? (refusal ? refusedWords(refusal) : null);
   }
-  /** Bumps each time the server answers again after an outage: Resources in error or holding data refetch. */
+  /** Bumps each time the server answers again after an outage, or lets Studio in again: Resources in error or holding
+   * data refetch. */
   get back(): number {
-    return this.#reach.back;
+    return this.#reach.back + this.#access.back;
   }
   /** Bumps on every (re)connect so data views refetch. */
   get epoch(): number {
@@ -192,11 +198,12 @@ class Hub {
     this.#unreachable.set(false);
     this.#refused.set(null);
     this.#reach.reset(null);
+    this.#access.reset(null);
     if (forcedMock) {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
     }
-    const http = new HttpApi(prefs.serverUrl, this.#reach);
+    const http = new HttpApi(prefs.serverUrl, this.#reach, this.#access);
     await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, settled));
   }
 
@@ -261,6 +268,7 @@ class Hub {
               if (!(e instanceof ApiError) || e.status === 0) throw e;
             }),
           );
+          this.#access.reset((s) => accessCheck(http.base, s));
           this.version = h.version;
           this.reason = null;
           this.#unreachable.set(false);
