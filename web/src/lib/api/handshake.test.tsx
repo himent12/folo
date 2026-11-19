@@ -10,7 +10,7 @@ import ConnectionPanel from '../../routes/settings/ConnectionPanel';
 import { render } from '../../../framework/testing';
 import { ApiError } from './client';
 import { isHealth, NOT_FOLO, refusal, TOKEN_WALL } from './handshake';
-import { hub, TOKEN_GRACE } from './index';
+import { CONNECT_TIMEOUT, hub, TOKEN_GRACE } from './index';
 import { PROBE_DELAYS } from './reach';
 
 const healthy = () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
@@ -40,6 +40,7 @@ describe('the first handshake with an address that answers', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -47,12 +48,18 @@ describe('the first handshake with an address that answers', () => {
 
   /**
    * Starts a connect with `answers` for the health checks in turn (the last one repeats), and `runs` for the token check
-   * (`HEAD /api/runs`, in turn; nothing answers it by default); what the shell says, and the requests made.
+   * (`HEAD /api/runs`, in turn; nothing answers it by default); what the shell says, and the requests made: token checks
+   * cancelled while still waiting for their answer, and requests (either kind) whose signal aborted after they had
+   * answered (`abortedAfter`: the browser shows those as cancelled too).
    */
   function start(answers: Answer[], runs: Answer[] = []) {
     let health = 0;
     let wall = 0;
     let pending = 0;
+    let cancelled = 0;
+    let abortedAfter = 0;
+    const afterAnswer = (signal: AbortSignal | null | undefined) =>
+      signal?.addEventListener('abort', () => abortedAfter++, { once: true });
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       if (url.endsWith('/api/runs') && init?.method === 'HEAD') {
         wall++;
@@ -64,17 +71,38 @@ describe('the first handshake with an address that answers', () => {
           return await new Promise<Response>((ok, no) => {
             const signal = init?.signal;
             if (signal?.aborted) return no(signal.reason as Error);
-            signal?.addEventListener('abort', () => no(signal.reason as Error), { once: true });
+            let out = true;
+            const abort = () => {
+              cancelled++;
+              no(signal!.reason as Error);
+            };
+            signal?.addEventListener('abort', abort, { once: true });
+            const settle = () => {
+              out = false;
+              signal?.removeEventListener('abort', abort);
+              afterAnswer(signal);
+            };
             Promise.resolve()
               .then(() => answer(init))
-              .then(ok, no);
+              .then(
+                (r) => {
+                  if (out) settle();
+                  ok(r);
+                },
+                (e: unknown) => {
+                  if (out) settle();
+                  no(e);
+                },
+              );
           });
         } finally {
           pending--;
         }
       }
       if (!url.endsWith('/api/health')) throw new TypeError('Failed to fetch');
-      return answers[Math.min(health++, answers.length - 1)]!(init);
+      const r = await answers[Math.min(health++, answers.length - 1)]!(init);
+      afterAnswer(init?.signal);
+      return r;
     });
     const shell = document.createElement('div');
     const view = render(
@@ -99,7 +127,16 @@ describe('the first handshake with an address that answers', () => {
         settings: `${shell.querySelector('.s-title')!.textContent!.trim()} | ${shell.querySelector('.s-desc')!.textContent!.trim()}`,
       };
     };
-    return { said, done, checks: () => health, heads: () => wall, pending: () => pending, unmount: () => view.unmount() };
+    return {
+      said,
+      done,
+      checks: () => health,
+      heads: () => wall,
+      pending: () => pending,
+      cancelled: () => cancelled,
+      abortedAfter: () => abortedAfter,
+      unmount: () => view.unmount(),
+    };
   }
 
   /** `start`, once the connect has settled. */
@@ -249,8 +286,9 @@ describe('the first handshake with an address that answers', () => {
           await vi.advanceTimersByTimeAsync(HEALTH + TOKEN_GRACE + SEQ);
           await c.done;
           expect(end(c)).toEqual(ends[truth]);
-          // Used: that answer alone. Not used: asked again after the health, as `main` asks it.
-          expect([c.heads(), c.pending()]).toEqual([used ? 1 : 2, 0]);
+          // Used: that answer alone. Not used: asked again after the health, as `main` asks it. Nothing that has
+          // answered is cancelled afterwards.
+          expect([c.heads(), c.pending(), c.abortedAfter()]).toEqual([used ? 1 : 2, 0, 0]);
           c.unmount();
         });
       }
@@ -268,10 +306,66 @@ describe('the first handshake with an address that answers', () => {
       await vi.advanceTimersByTimeAsync(SEQ);
       await c.done;
       expect(end(c)).toEqual(ends[truth]);
-      expect(c.pending()).toBe(0);
+      // The early check was cancelled while out; the check whose answer was used was not cancelled after it.
+      expect([c.pending(), c.cancelled(), c.abortedAfter()]).toEqual([0, 1, 0]);
       c.unmount();
     });
   }
+
+  for (const truth of ['wall', 'open'] as const) {
+    it(`leaves an early token check that answered alone, the server ${truth === 'wall' ? 'walled' : 'open'}`, async () => {
+      // Used (before the health), and not used (a 403 within the grace): neither is cancelled once it has answered.
+      for (const early of [after(BEFORE, truth === 'wall' ? walls : opens), after(AFTER, status(403))]) {
+        const c = start([after(HEALTH, healthy)], [early, after(SEQ, truth === 'wall' ? walls : opens)]);
+        await vi.advanceTimersByTimeAsync(HEALTH + TOKEN_GRACE + SEQ);
+        await c.done;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(end(c)).toEqual(ends[truth]);
+        expect([c.pending(), c.cancelled(), c.abortedAfter()]).toEqual([0, 0, 0]);
+        c.unmount();
+      }
+    });
+  }
+
+  // The connect's timeout: the check after the health must get the time it had in `main` (what was left of
+  // CONNECT_TIMEOUT when the health answered), however long the wait for the early check took. AbortSignal.timeout runs
+  // on the fake clock here.
+  describe('at the connect timeout', () => {
+    beforeEach(() => {
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        const c = new AbortController();
+        setTimeout(() => c.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms);
+        return c.signal;
+      });
+    });
+    const offline = { mode: 'connecting', label: 'Server offline', notice: "Can't reach folo serve. Retrying…", refused: null, offline: true };
+    // [the health answers this long before the timeout, the check after the health answers this long after it goes
+    // out]: the grace runs past the timeout; the grace ends before it but takes some of the check's time.
+    for (const [before, seq] of [
+      [100, 40],
+      [300, 150],
+    ] as const) {
+      for (const truth of ['wall', 'open'] as const) {
+        it(`health ${before} ms before the timeout, the early token check stalled, the check after the health in ${seq} ms, the server ${truth === 'wall' ? 'walled' : 'open'}: as the check after the health alone`, async () => {
+          const c = start([after(CONNECT_TIMEOUT - before, healthy)], [hang, after(seq, truth === 'wall' ? walls : opens)]);
+          await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT - before + TOKEN_GRACE + seq);
+          await c.done;
+          expect(end(c)).toEqual(ends[truth]);
+          expect([c.heads(), c.pending()]).toEqual([2, 0]);
+          c.unmount();
+        });
+      }
+    }
+    it('a check after the health that takes longer than it had with `main` still times out', async () => {
+      // `main`: the check goes out 100 ms before the timeout and has no answer within them; here too.
+      const c = start([after(CONNECT_TIMEOUT - 100, healthy)], [hang, after(150, opens)]);
+      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT + TOKEN_GRACE + 150);
+      await c.done;
+      expect(end(c)).toEqual(offline);
+      expect([c.heads(), c.pending()]).toEqual([2, 0]);
+      c.unmount();
+    });
+  });
 
   for (const [what, runs] of [
     ['before', [walls]],

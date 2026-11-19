@@ -173,6 +173,8 @@ const baseLabel = ref ? `\`${ref}\` (built from its web/)` : baselineDist ? `\`$
 const servers = [];
 /** Each app's server. @type {Record<App, string>} */
 const bases = /** @type {any} */ ({});
+/** With --served: every URL a page of the run requested, checked against the builds on disk once the run is over. @type {Set<string>} */
+const loadedUrls = new Set();
 /** Set when a server exits during the run: every later sample fails with it (never measured against a dead server). */
 let serverDied = '';
 /** How long `folo serve` may take to say it listens. */
@@ -331,6 +333,7 @@ async function open(/** @type {string} */ sel, cache = false) {
   await cdp.send('Performance.enable');
   await cdp.send('HeapProfiler.enable');
   await page.addInitScript(instrument, sel);
+  if (served) cdp.on('Network.requestWillBeSent', (e) => void loadedUrls.add(e.request.url));
   const wire = wireOf(cdp);
   return { context, page, cdp, wire };
 }
@@ -451,10 +454,12 @@ async function warm(/** @type {App} */ app, /** @type {Screen} */ screen) {
     wire.reset();
     await page.goto(url(app, screen.path), { waitUntil: 'commit' });
     await waitReady(page);
+    const start = (await metrics(cdp)).NavigationStart;
     const at = await readyAt(page, cdp);
     // Events up to the mark that CDP has not delivered yet: they are cut by their own time, so waiting costs nothing.
     await page.waitForTimeout(250);
-    const got = wire.upTo(at);
+    // From this navigation's start: an event of the first load that CDP delivered after the reset is not this load's.
+    const got = wire.upTo(at, start);
     const t = await page.evaluate(() => ({
       ready: /** @type {any} */ (window).__perf.ready,
       fcp: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
@@ -697,6 +702,12 @@ try {
       }
     }
   }
+  // --served: every asset any page of the run loaded from a served build is in that build on disk.
+  for (const u of loadedUrls)
+    for (const a of apps) {
+      const p = u.startsWith(`${bases[a]}/`) ? new URL(u).pathname : '';
+      if (p.startsWith('/assets/') && !existsSync(join(dists[a], p.slice(1)))) throw new Error(`--served ${a}=${bases[a]} loaded ${p}, which is not in the build ${dists[a]}`);
+    }
 } finally {
   await browser?.close();
   for (const s of servers) await s.close();

@@ -215,11 +215,13 @@ class Hub {
     try {
       for (let i = 0; ; i++) {
         const slow = setTimeout(() => unreachable(), SLOW_CONNECT);
-        // This check's own requests: the one still out when it ends (a token check the health made moot) is cancelled
-        // before the next check, never left holding one of the browser's connections to the server.
-        const mine = new AbortController();
+        // This check's early token check: still out when the check ends (the health made it moot, or its answer came too
+        // late), it is cancelled before the next check, never left holding one of the browser's connections to the
+        // server; one that has answered is left alone (`cancel` aborts only a request still waiting for its answer).
+        let early: ReturnType<typeof earlyTokenWall> | null = null;
         try {
-          const check = AbortSignal.any([abort, mine.signal, AbortSignal.timeout(CONNECT_TIMEOUT)]);
+          const started = performance.now();
+          const check = AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]);
           // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use: the token
           // check, `HEAD /api/runs`, asked once the health has said this is a FOLO server (`tokenWall`). A copy of it
           // goes out with the health (`earlyTokenWall`: a round trip less before the first data on a remote server),
@@ -229,22 +231,25 @@ class Hub {
           //   -------------------------------------------------|--------------------------------------------------
           //   answered 401                                     | the token wall
           //   answered 200 (NO_WALL)                           | no wall
-          //   answered anything else (403, 404, 500, 502-504)  | cancelled; `tokenWall` after the health, as before
+          //   answered anything else (403, 404, 500, 502-504)  | not used; `tokenWall` after the health, as before
           //   got no HTTP answer (refused, reset)              | `tokenWall` after the health, as before
           //   no answer yet TOKEN_GRACE ms after the health's  | cancelled; `tokenWall` after the health, as before
           //
           // Anything else may be a gateway or the dev proxy answering for a server that is not up yet, so it says
-          // nothing about the server; the check after the health is the one that always went out, with the same
-          // timeout (`check`). A decision comes at most TOKEN_GRACE ms later than with that check alone.
-          const early = earlyTokenWall(http.base, check);
+          // nothing about the server; the check after the health is the one that always went out. It gets the time it
+          // had there: what was left of CONNECT_TIMEOUT when the health answered, counted from when it goes out, so
+          // the wait for the early answer never takes its time (a health that answers just before the timeout). A
+          // decision comes at most TOKEN_GRACE ms later than with that check alone.
+          early = earlyTokenWall(http.base, check);
           const h: unknown = await http.health(check);
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
+          const left = Math.max(0, CONNECT_TIMEOUT - (performance.now() - started));
           let walled = await within(early.answer, TOKEN_GRACE);
           if (attempt !== this.#attempt) return;
           if (walled === null) {
             early.cancel();
-            walled = await tokenWall(http.base, check);
+            walled = await tokenWall(http.base, AbortSignal.any([abort, AbortSignal.timeout(left)]));
           }
           if (walled) throw new ApiError(401, 'token_wall', TOKEN_WALL);
           if (attempt !== this.#attempt) return;
@@ -269,7 +274,7 @@ class Hub {
           unreachable(refusal(e));
         } finally {
           clearTimeout(slow);
-          mine.abort();
+          early?.cancel();
         }
         if (attempt !== this.#attempt) return;
         await new Promise((next) => setTimeout(next, PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]));

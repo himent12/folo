@@ -11,15 +11,17 @@ export const isStream = (/** @type {string} */ u) => {
   }
 };
 
-/** @typedef {{ id: string, ts: number, url: string, kind: 'sent' | 'bytes', n: number }} WireEvent */
+/** @typedef {{ id: string, hop: number, ts: number, url: string, kind: 'sent' | 'bytes', n: number }} WireEvent */
 /**
  * @typedef {object} Wire
- * @property {Set<string>} cached requests the cache answered (never on the network)
+ * @property {Set<string>} cached the hops the cache answered (never on the network), as `<request id>#<hop>`: a redirect's
+ *   hops share the request's id, and one can come from the network and the next from the cache
  * @property {WireEvent[]} events every request sent and every byte received, in order
  * @property {Map<string, string>} inflight requests not finished (id → URL)
  * @property {Set<string>} streams requests that are event streams
  * @property {number} last when (`now()`) a request that is not a stream last sent or received anything
- * @property {(t: number) => { bytes: number, requests: number, urls: string[] }} upTo what went over the network by `t`
+ * @property {(t: number, from?: number) => { bytes: number, requests: number, urls: string[] }} upTo what went over the
+ *   network by `t` (and from `from`: an event of the document before, delivered late, is not this one's)
  * @property {() => void} reset forgets what came before (a new document)
  */
 
@@ -41,12 +43,12 @@ export function wireOf(cdp, now = Date.now) {
     inflight: new Map(),
     streams: new Set(),
     last: now(),
-    upTo(t) {
+    upTo(t, from = -Infinity) {
       let bytes = 0;
       /** @type {string[]} */
       const urls = [];
       for (const e of this.events) {
-        if (e.ts > t || this.cached.has(e.id)) continue;
+        if (e.ts > t || e.ts < from || this.cached.has(`${e.id}#${e.hop}`)) continue;
         if (e.kind === 'sent') urls.push(e.url);
         else bytes += e.n;
       }
@@ -59,27 +61,36 @@ export function wireOf(cdp, now = Date.now) {
   };
   /** @type {Map<string, string>} */
   const urlOf = new Map();
+  /** The hop each request is on (0, then one more for each redirect). */
+  /** @type {Map<string, number>} */
+  const hopOf = new Map();
+  const hopKey = (/** @type {string} */ id) => `${id}#${hopOf.get(id) ?? 0}`;
   const touch = (/** @type {string} */ id) => {
     const u = urlOf.get(id);
     if (u === undefined || !(wire.streams.has(id) || isStream(u))) wire.last = now();
   };
   const push = (/** @type {string} */ id, /** @type {number} */ ts, /** @type {'sent' | 'bytes'} */ kind, /** @type {number} */ n) =>
-    wire.events.push({ id, ts, url: urlOf.get(id) ?? '', kind, n });
+    wire.events.push({ id, hop: hopOf.get(id) ?? 0, ts, url: urlOf.get(id) ?? '', kind, n });
   cdp.on('Network.requestWillBeSent', (e) => {
     if (!/^https?:/.test(e.request.url)) return;
     // A redirect: the hop's response (headers and body) came in, and the next hop goes out under the same id.
-    if (e.redirectResponse) push(e.requestId, e.timestamp, 'bytes', e.redirectResponse.encodedDataLength ?? 0);
+    if (e.redirectResponse) {
+      const r = e.redirectResponse;
+      if (r.fromDiskCache || r.fromPrefetchCache || r.fromServiceWorker) wire.cached.add(hopKey(e.requestId));
+      push(e.requestId, e.timestamp, 'bytes', r.encodedDataLength ?? 0);
+      hopOf.set(e.requestId, (hopOf.get(e.requestId) ?? 0) + 1);
+    }
     urlOf.set(e.requestId, e.request.url);
     wire.inflight.set(e.requestId, e.request.url);
     touch(e.requestId);
     push(e.requestId, e.timestamp, 'sent', 1);
   });
-  cdp.on('Network.requestServedFromCache', (e) => void wire.cached.add(e.requestId));
+  cdp.on('Network.requestServedFromCache', (e) => void wire.cached.add(hopKey(e.requestId)));
   // The response's headers: what had been received of the request by then.
   cdp.on('Network.responseReceived', (e) => {
     if (!urlOf.has(e.requestId)) return;
     if (/event-stream/.test(e.response.mimeType)) wire.streams.add(e.requestId);
-    if (e.response.fromDiskCache || e.response.fromPrefetchCache || e.response.fromServiceWorker) wire.cached.add(e.requestId);
+    if (e.response.fromDiskCache || e.response.fromPrefetchCache || e.response.fromServiceWorker) wire.cached.add(hopKey(e.requestId));
     touch(e.requestId);
     push(e.requestId, e.timestamp, 'bytes', e.response.encodedDataLength ?? 0);
   });

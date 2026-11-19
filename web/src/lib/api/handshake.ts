@@ -42,15 +42,28 @@ export const NO_WALL = 200;
 /**
  * The token check sent together with the health check (see `Hub`'s connect for when its answer is used). `answer`:
  * true for `401` (the token wall), false for `NO_WALL`, null for anything else: any other status, no HTTP answer, or
- * cancelled. `cancel` aborts the request (when it is still out).
+ * cancelled. `cancel` aborts the request while it is still waiting for its answer, and does nothing once it has one
+ * (or failed): aborting a request that has answered only shows it as cancelled in the browser's network log.
  */
 export function earlyTokenWall(base: string, signal: AbortSignal): { answer: Promise<boolean | null>; cancel: () => void } {
   const mine = new AbortController();
+  let out = true;
   const answer = fetch(`${base}/api/runs`, { method: 'HEAD', signal: AbortSignal.any([signal, mine.signal]) }).then(
-    (r) => (r.status === 401 ? true : r.status === NO_WALL ? false : null),
-    () => null,
+    (r) => {
+      out = false;
+      return r.status === 401 ? true : r.status === NO_WALL ? false : null;
+    },
+    () => {
+      out = false;
+      return null;
+    },
   );
-  return { answer, cancel: () => mine.abort() };
+  return {
+    answer,
+    cancel: () => {
+      if (out) mine.abort();
+    },
+  };
 }
 
 /**

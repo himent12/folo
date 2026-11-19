@@ -59,6 +59,38 @@ describe('what went over the network by a moment', () => {
     expect(got.bytes).toBe(2965 + 300 + 1000 + 250 + 200 + 100 + 50);
     expect(w.upTo(3).bytes).toBe(got.bytes + 500 + 99);
   });
+
+  it('counts a redirect hop that went over the network when the cache answers the next one', () => {
+    const { cdp } = fake();
+    const w = wireOf(cdp);
+    const emit = (/** @type {string} */ name, /** @type {any} */ e) => cdp.emit(`Network.${name}`, e);
+    // A 302 from the network, then the final response from the disk cache, under the same request id.
+    emit('requestWillBeSent', sent('r', 1.0, 'http://x/a'));
+    emit('requestWillBeSent', sent('r', 1.1, 'http://x/b', { encodedDataLength: 180 }));
+    emit('requestServedFromCache', { requestId: 'r' });
+    emit('responseReceived', { requestId: 'r', timestamp: 1.2, response: { mimeType: 'text/javascript', encodedDataLength: 0, fromDiskCache: true } });
+    emit('loadingFinished', { requestId: 'r', timestamp: 1.3, encodedDataLength: 0 });
+    expect(w.upTo(2)).toEqual({ bytes: 180, requests: 1, urls: ['http://x/a'] });
+    // And the other way round: a cached redirect, then the final hop from the network.
+    emit('requestWillBeSent', sent('s', 1.0, 'http://x/c'));
+    emit('requestWillBeSent', sent('s', 1.1, 'http://x/d', /** @type {any} */ ({ encodedDataLength: 0, fromDiskCache: true })));
+    emit('responseReceived', response('s', 1.2, 120));
+    emit('loadingFinished', { requestId: 's', timestamp: 1.3, encodedDataLength: 120 });
+    expect(w.upTo(2)).toEqual({ bytes: 180 + 120, requests: 2, urls: ['http://x/a', 'http://x/d'] });
+  });
+
+  it('leaves out what came before a moment (a document before, its events delivered late)', () => {
+    const { cdp } = fake();
+    const w = wireOf(cdp);
+    const emit = (/** @type {string} */ name, /** @type {any} */ e) => cdp.emit(`Network.${name}`, e);
+    w.reset();
+    // Delivered after the reset, but of the load before (navigation of this one at 5.0).
+    emit('requestWillBeSent', sent('old', 4.0));
+    emit('responseReceived', response('old', 4.1, 700));
+    emit('requestWillBeSent', sent('doc', 5.1));
+    emit('responseReceived', response('doc', 5.2, 300, 'text/html'));
+    expect(w.upTo(6, 5.0)).toEqual({ bytes: 300, requests: 1, urls: ['http://x/doc'] });
+  });
 });
 
 describe('the warm-up waits for the network to go quiet', () => {
