@@ -199,7 +199,8 @@ impl Labels {
         offset: u64,
         limit: u64,
     ) -> Result<(Vec<LabelImageSummary>, u64), Error> {
-        let q = LabelImageQuery { status, reviewed, ids: None, offset, limit: limit.min(PAGE) };
+        let limit = limit.min(PAGE);
+        let q = LabelImageQuery { status, reviewed, offset, limit, ..LabelImageQuery::default() };
         let page = self.images(id, &q)?;
         Ok((page.images.iter().map(|i| compact::image_summary(i, include_boxes)).collect(), page.total))
     }

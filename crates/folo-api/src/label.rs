@@ -17,6 +17,10 @@ pub const FEATURE_LABEL_IMAGE_FILTERS: &str = "label_image_filters";
 /// marks many images in one save.
 pub const FEATURE_LABEL_REVISIONS: &str = "label_revisions";
 
+/// [`SystemResponse::features`](crate::SystemResponse::features): `GET /api/label/jobs/{id}/images` takes the
+/// `path` filter (an older server ignores it and answers with every image).
+pub const FEATURE_LABEL_IMAGE_PATH: &str = "label_image_path";
+
 /// The revision of an image's boxes: their count and a hash of their classes and exact pixel values, e.g.
 /// `"3-9f2c41d0"`. Any change to the boxes changes it (with overwhelming odds), so a client can send back the
 /// revision it saw (`UpdateLabelImage::expect`) and the server refuses a change made on stale boxes.

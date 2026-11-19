@@ -80,7 +80,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
   web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below), `label_image_filters`
   (`reviewed` and `ids` on `GET /api/label/jobs/{id}/images`; older servers ignore them), `label_revisions`
-  (`expect` on `PUT /api/label/jobs/{id}/images/{image_id}` and `POST /api/label/jobs/{id}/review`), `uploads` (`/api/uploads`),
+  (`expect` on `PUT /api/label/jobs/{id}/images/{image_id}` and `POST /api/label/jobs/{id}/review`), `label_image_path`
+  (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
@@ -888,12 +889,17 @@ exported more than once.
   whitespace and one pair of matching quotes around it (Windows' "Copy as path"); a relative path is
   `400 invalid_body` (it is never read from the server's working directory), a blank one too. `404 path_not_found`
   for a missing folder. Images may be added while a run is active (they wait for the next run).
-- `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&reviewed=true|false&ids=a,b&offset=0&limit=100`
+- `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&reviewed=true|false&ids=a,b&path=/abs/file.jpg&offset=0&limit=100`
   → `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
   at 1000; `total` counts all matches before `offset` / `limit`; any other `status` or `reviewed` is
   `400 invalid_query`. `reviewed` keeps the images whose `reviewed` is that value (`status=labeled&reviewed=false`
   is what is left to review), `ids` (comma-separated) only those images (ids it does not know match nothing); both
-  need `label_image_filters` in `features`.
+  need `label_image_filters` in `features`. `path` (an absolute path on the server's machine; feature
+  `label_image_path`) keeps the image whose file is that file, however either path spells it (`..`, letter case on
+  Windows, a link to a folder; a second hard link under another name is not), and nothing when no file is there;
+  the path is only compared, never stored. `folo label view` asks it before it writes over a file. Paths are
+  compared as the server sees them: a server that reaches the photos under other paths than the caller (in a
+  container, on another machine) cannot recognise the caller's path of a photo.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
 - `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool, "expect"?: string }` → `LabelImage`:
   labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes

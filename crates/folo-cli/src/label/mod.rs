@@ -22,7 +22,7 @@ use folo_mcp::label::hints::{self, Front};
 use folo_mcp::label::{BoxEdit, Labels, looks_absolute};
 use folo_mcp::proxy::HttpStore;
 use folo_mcp::types::{LabelImageViewResult, LabelRunStarted, PxBox};
-use folo_server::label::Labeler;
+use folo_server::label::{LabelImageQuery, Labeler};
 use folo_server::{RealStore, Store};
 use serde_json::json;
 
@@ -354,6 +354,10 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     };
     let path =
         a.output.unwrap_or_else(|| PathBuf::from(format!("{}-{}.jpg", safe(&r.job_id), safe(&image.id))));
+    // A file that exists may be one of the job's images (a new one never is): the job's own rule says.
+    if let Ok(at) = std::fs::canonicalize(&path) {
+        keep_job_image(&s.labels, &r.job_id, &path, at)?;
+    }
     std::fs::write(&path, &jpeg).map_err(|e| {
         CliError::new(ExitCode::Runtime, "io_error", format!("writing {}: {e}", folo_api::json::path(&path)))
     })?;
@@ -364,6 +368,23 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     out.human(text.replace("view again with from: ", "add --from "));
     out.human(format!("wrote {}", folo_api::json::path(&path)));
     Ok(())
+}
+
+/// `usage` when `at` (the existing file `path`, resolved) is the file of an image of job `job`, or when a server
+/// too old to say is asked: a view never replaces an image.
+fn keep_job_image(labels: &Labels, job: &str, path: &Path, at: PathBuf) -> Result<(), CliError> {
+    let q = LabelImageQuery { path: Some(at), limit: 1, ..LabelImageQuery::default() };
+    let why = match labels.images(job, &q) {
+        Ok(page) => match page.images.first() {
+            Some(image) => format!("is image {} of job {job}", image.file),
+            None => return Ok(()),
+        },
+        Err(e) if e.body.code == "not_implemented" => format!("exists and {}", e.body.message),
+        Err(e) => return Err(api_error(e)),
+    };
+    let message = format!("{} {why}; a view never replaces an image of the job", folo_api::json::path(path));
+    Err(CliError::new(ExitCode::Usage, "usage", message)
+        .hint("pass -o a new file, or one that is not an image of the job"))
 }
 
 /// `s` with only `A-Z a-z 0-9 - _` (a file name made from ids).
