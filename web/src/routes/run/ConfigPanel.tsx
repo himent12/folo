@@ -12,6 +12,7 @@ import { computed, css, For, MediaQuery } from 'fw';
 import { media } from '$lib/design/tokens';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { FROM_SCRATCH, type Origin } from '$lib/lineage';
+import { exactSeed, OVER_SEED, SEED_LEFT_OUT, withoutInexactSeed } from '$lib/seed';
 import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Lineage from '$lib/ui/Lineage';
@@ -93,7 +94,8 @@ export default function ConfigPanel(props: ConfigPanelProps) {
       ['Precision', precisionSetting(config)],
       ['Head', headSetting(config)],
       ['Weights', config.weights ? id(config.weights) : plain(FROM_SCRATCH)],
-      ['Seed', plain(String(config.seed))],
+      // Over 2^53 − 1 the seed arrived rounded (lib/seed): the bound it is over, never another seed.
+      ['Seed', exactSeed(config.seed) ? plain(String(config.seed)) : { value: OVER_SEED, about: 'Too large for a browser to show exactly.' }],
     ];
   });
   const aug = computed<Row[]>(() => {
@@ -111,8 +113,10 @@ export default function ConfigPanel(props: ConfigPanelProps) {
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(JSON.stringify(props.config, null, 2));
-      toast.success('Config copied', 'The request as POST /api/runs and MCP train take it.');
+      // A seed over 2^53 − 1 arrived rounded: left out, and said so (lib/seed, rule B), never copied as another seed.
+      await navigator.clipboard.writeText(JSON.stringify(withoutInexactSeed(props.config), null, 2));
+      const why = exactSeed(props.config.seed) ? '' : ` ${SEED_LEFT_OUT}`;
+      toast.success('Config copied', `The request as POST /api/runs and MCP train take it.${why}`);
     } catch (e) {
       toast.error(e, 'Could not copy');
     }

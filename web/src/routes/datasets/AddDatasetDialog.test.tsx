@@ -252,6 +252,30 @@ describe('AddDatasetDialog', () => {
     expect(toast.items[0]).toMatchObject({ title: 'Dataset registered', detail: 'bccd · all 72 images are in the test split, none to train on' });
   });
 
+  // Sweep 4 #330: the seed had no upper bound, so one past 2^53 − 1 went out as another seed (the browser's rounding).
+  it('generates with any seed a browser holds exactly, and names the limit past it', async () => {
+    const create = vi.spyOn(hub.api, 'createSyntheticDataset');
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+    flushSync();
+    const field = [...document.querySelectorAll('.field')].find((f) => f.querySelector('label')?.textContent === 'Seed')!;
+    const input = field.querySelector<HTMLInputElement>('input')!;
+    const submit = (v: string) => {
+      input.value = v;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      flushSync();
+    };
+    // Checked as typed (lib/seed, rule A): a number field rounded 9007199254740990.5 to …990 first (#354 review).
+    for (const t of ['9007199254740993', '9007199254740990.5', '1e3']) {
+      submit(t);
+      expect(field.querySelector('.msg.error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+    }
+    expect(create).not.toHaveBeenCalled();
+    submit('4294967296');
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0]![0].seed).toBe(4294967296);
+  });
+
   it('takes as many classes as the generator has shapes (8), and says so', () => {
     c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
     flushSync();
