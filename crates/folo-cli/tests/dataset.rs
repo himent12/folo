@@ -219,6 +219,35 @@ fn dataset_errors_use_stable_codes() {
     assert_eq!(code, 2, "--to is required");
 }
 
+#[test]
+fn check_finds_an_orphan_label_from_a_relative_root_and_absolute_list() {
+    let t = TestDir::new("cli-check-relative");
+    let dir = t.join("ds");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&dir), "--images", "4", "--imgsz", "64", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    // The train split is a list of absolute image paths, and the dataset is named relative to the current folder.
+    std::fs::create_dir(dir.join("set")).unwrap();
+    for sub in ["images", "labels"] {
+        std::fs::rename(dir.join(sub), dir.join("set").join(sub)).unwrap();
+    }
+    let list: String = std::fs::read_dir(dir.join("set/images/train"))
+        .unwrap()
+        .map(|e| format!("{}\n", e.unwrap().path().display()))
+        .collect();
+    std::fs::write(dir.join("train.txt"), list).unwrap();
+    let yaml = std::fs::read_to_string(dir.join("data.yaml")).unwrap();
+    let yaml =
+        yaml.replace("train: images/train", "train: train.txt").replace("val: images/", "val: set/images/");
+    std::fs::write(dir.join("data.yaml"), yaml).unwrap();
+    std::fs::write(dir.join("set/labels/train/gone.txt"), "0 0.5 0.5 0.2 0.2\n").unwrap();
+    let out = folo_cmd().args(["dataset", "check", "ds", "--json"]).current_dir(t.path()).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let issues = json_lines(&stdout)[0]["issues"].as_array().unwrap().clone();
+    let orphans: Vec<_> = issues.iter().filter(|i| i["kind"] == "missing_image").collect();
+    assert_eq!(orphans.len(), 1, "{issues:?}");
+    assert!(orphans[0]["file"].as_str().unwrap().ends_with("gone.txt"), "{issues:?}");
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));

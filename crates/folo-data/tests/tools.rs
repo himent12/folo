@@ -77,15 +77,21 @@ fn check_finds_label_files_whose_image_is_gone() {
     write(&ds.join("labels/train/raw.txt"), "0 0.5 0.5 0.3 0.3\n");
     write_png(&ds.join("images/train/Upper.png"), 16, 16, [0, 200, 0]);
     write(&ds.join("labels/train/upper.txt"), "0 0.5 0.5 0.3 0.3\n");
-    // A split whose last image is gone.
+    // A split whose last image is gone is not visited (a known limit: no image pairs its label folder any more).
     std::fs::create_dir_all(ds.join("images/val")).unwrap();
     write(&ds.join("labels/val/gone.txt"), "0 0.5 0.5 0.3 0.3\n");
     let report = check(&ds, &CheckOptions::default()).unwrap();
     let orphans: Vec<_> = report.issues.iter().filter(|i| i.kind == CheckKind::MissingImage).collect();
     let names: Vec<_> = orphans.iter().map(|i| i.file.file_name().unwrap().to_string_lossy()).collect();
-    assert_eq!(names, ["missing-photo.txt", "gone.txt"], "{:?}", report.issues);
+    assert_eq!(names, ["missing-photo.txt"], "{:?}", report.issues);
     assert!(orphans[0].message.contains("missing-photo in images/train"), "{}", orphans[0].message);
-    assert_eq!(orphans[1].fix.as_deref(), Some("delete the label file, or add its image to images/val"));
+    assert_eq!(
+        orphans[0].fix.as_deref(),
+        Some(
+            "delete the label file, or put its image back in images/train (and in the split's image list, if it has \
+             one)"
+        )
+    );
     assert!(!report.is_clean());
 
     // A split given as a list names only some images; labels of the others still have their image.
@@ -100,6 +106,62 @@ fn check_finds_label_files_whose_image_is_gone() {
     assert!(report.is_clean(), "{:?}", report.issues);
     write(&listed.join("labels/c.txt"), "0 0.5 0.5 0.3 0.3\n");
     let report = check(&listed, &CheckOptions::default()).unwrap();
+    assert_eq!(kinds(&report), [(CheckKind::MissingImage, "c.txt".to_string(), None)]);
+}
+
+/// Label files the dataset reads, or that sit in folders it does not read, are never orphans.
+#[test]
+fn check_never_calls_a_label_training_reads_an_orphan() {
+    let t = TempDir::new("check-orphans-clean");
+    let orphans = |ds: &std::path::Path| {
+        let report = check(ds, &CheckOptions::default()).unwrap();
+        report.issues.into_iter().filter(|i| i.kind == CheckKind::MissingImage).collect::<Vec<_>>()
+    };
+    // data.yaml reads `curated/`; an empty `images/train` next to archived labels is not part of the dataset.
+    let curated = t.join("curated");
+    write(&curated.join("data.yaml"), "train: curated/images\nnames: [a]\n");
+    write_png(&curated.join("curated/images/a.png"), 16, 16, [200, 0, 0]);
+    write(&curated.join("curated/labels/a.txt"), "0 0.5 0.5 0.3 0.3\n");
+    std::fs::create_dir_all(curated.join("images/train")).unwrap();
+    write(&curated.join("labels/train/old.txt"), "0 0.5 0.5 0.3 0.3\n");
+    assert_eq!(orphans(&curated), []);
+
+    // An image inside the label folder reads its label there too.
+    let mixed = t.join("mixed");
+    write(&mixed.join("data.yaml"), "train: [images/train, labels/train]\nnames: [a]\n");
+    write_png(&mixed.join("images/train/a.png"), 16, 16, [200, 0, 0]);
+    write_png(&mixed.join("labels/train/b.png"), 16, 16, [0, 200, 0]);
+    for stem in ["a", "b"] {
+        write(&mixed.join(format!("labels/train/{stem}.txt")), "0 0.5 0.5 0.3 0.3\n");
+    }
+    assert_eq!(orphans(&mixed), []);
+}
+
+/// Two links to one label folder are one folder: a label read through either is not an orphan.
+#[test]
+fn check_treats_linked_label_folders_as_one() {
+    let t = TempDir::new("check-orphans-linked");
+    let ds = t.join("ds");
+    write(&ds.join("shared/a.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write(&ds.join("shared/b.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write(&ds.join("shared/c.txt"), "0 0.5 0.5 0.3 0.3\n");
+    write_png(&ds.join("images/train/a.png"), 16, 16, [200, 0, 0]);
+    write_png(&ds.join("images/val/b.png"), 16, 16, [0, 200, 0]);
+    write(&ds.join("data.yaml"), "train: images/train\nval: images/val\nnames: [a]\n");
+    std::fs::create_dir_all(ds.join("labels")).unwrap();
+    for split in ["train", "val"] {
+        let (link, target) = (ds.join("labels").join(split), ds.join("shared"));
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .args([&link, &target].map(|p| p.to_string_lossy().replace('/', "\\")))
+            .output()
+            .is_ok_and(|o| o.status.success());
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        assert!(made, "cannot link {}", link.display());
+    }
+    let report = check(&ds, &CheckOptions::default()).unwrap();
     assert_eq!(kinds(&report), [(CheckKind::MissingImage, "c.txt".to_string(), None)]);
 }
 
