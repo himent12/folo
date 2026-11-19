@@ -420,10 +420,15 @@ impl FoloApp {
     }
 
     /// An Open image or a drop accepted on the current page: a new ticket (older requests are dropped
-    /// from now on), and the page's model ([`Self::model_in_context`]).
+    /// from now on), and the page's model ([`Self::model_in_context`]) with the name it goes by now.
     pub(super) fn open_request(&mut self) -> OpenRequest {
         self.play_open_seq += 1;
-        OpenRequest { ticket: self.play_open_seq, model: self.model_in_context(&self.route) }
+        let model = self.model_in_context(&self.route).map(|id| {
+            let name =
+                self.store.model(&id).map(|m| &m.name).or(self.deleted.get(&id)).unwrap_or(&id).clone();
+            (id, name)
+        });
+        OpenRequest { ticket: self.play_open_seq, model }
     }
 
     /// The image file of request `req` (picked, or dropped on the window), read and decoded off the UI
@@ -487,17 +492,17 @@ impl FoloApp {
             Ok(image) => image,
             Err(e) => return self.toast(Tone::Danger, e.message.clone(), e.hint.map(Into::into), cx),
         };
-        if let Some(id) = &req.model
+        if let Some((id, name)) = &req.model
             && self.store.models.ready().is_some_and(|m| !m.iter().any(|m| m.id == *id))
         {
-            let body = format!("Model {} is no longer available.", self.deleted.get(id).unwrap_or(id));
+            let body = format!("Model {name} is no longer available.");
             return self.toast(Tone::Neutral, "The image was not opened", Some(body.into()), cx);
         }
         if let Some(why) = self.open_image_blocked() {
             return self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
         }
         self.navigate(Route::Playground, window, cx);
-        if let Some(id) = req.model {
+        if let Some((id, _)) = req.model {
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
         }
@@ -522,11 +527,11 @@ impl FoloApp {
 
 /// One Open image or dropped file, from when it is accepted to when its image is applied
 /// ([`FoloApp::open_answered`]): its ticket (an answer for an older request, or one from before a
-/// backend change, is dropped) and the model of the page it was asked on, applied with the image or
-/// not at all (`None`: the Playground keeps its own).
+/// backend change, is dropped) and the model of the page it was asked on (its id and name), applied
+/// with the image or not at all (`None`: the Playground keeps its own).
 pub(super) struct OpenRequest {
     ticket: u64,
-    model: Option<String>,
+    model: Option<(String, String)>,
 }
 
 #[cfg(test)]

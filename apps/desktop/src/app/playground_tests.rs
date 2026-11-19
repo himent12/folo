@@ -356,9 +356,9 @@ fn an_image_for_a_page_model_no_longer_available_is_not_opened() {
     app.platform().answer_prompts(Some(vec![file.path().to_path_buf()]));
     let (current, other) = stage_an_image(&mut app, window);
     let page = super::Route::Model(other.clone());
-    let before = drive(&mut app, window, |this, w, cx| {
+    let (before, name) = drive(&mut app, window, |this, w, cx| {
         this.navigate(page.clone(), w, cx);
-        playground(this)
+        (playground(this), this.store.model(&other).unwrap().name.clone())
     });
     // The picker opens; the model goes before it answers.
     drive(&mut app, window, |this, w, cx| {
@@ -368,7 +368,7 @@ fn an_image_for_a_page_model_no_longer_available_is_not_opened() {
     drive(&mut app, window, |this, _, _| {
         assert_eq!(playground(this), before, "the Playground is left as it was");
         assert_eq!(this.route, page, "and not shown");
-        let body = format!("Model {other} is no longer available.");
+        let body = format!("Model {name} is no longer available.");
         assert_eq!(last_toast(this), ("The image was not opened".into(), body));
     });
 
