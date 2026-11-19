@@ -419,3 +419,33 @@ fn a_failed_list_asked_again_shows_the_newer_error() {
         );
     });
 }
+
+/// Retry while the refresh's ask of a failed list is still out: that older answer is dropped, so it
+/// neither stops the request asked for now nor replaces its answer (here the list, landing after the
+/// newer error).
+#[test]
+fn a_retry_drops_the_answer_the_refresh_still_has_out() {
+    use crate::store::Load;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let held = api.hold("datasets");
+    start(&mut app, window, 1, |this, _, cx| {
+        this.store.datasets =
+            Load::Failed(crate::api::ApiError::new("internal", "datasets.json is malformed"));
+        this.refresh_lists(cx);
+    });
+    held.wait_held();
+    // Retry (as the next render does it), on a server that fails now: its error comes back first.
+    start(&mut app, window, 1, |this, _, cx| {
+        this.store.api = Arc::new(MockBackend::new(4200, true).failing());
+        this.retry_all(cx);
+        this.ensure_core(cx);
+    });
+    assert!(held.is_held());
+    held.release();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        let shown = this.store.datasets.error().map(|e| e.code.clone());
+        assert_eq!(shown.as_deref(), Some("server_unreachable"), "{:?}", this.store.datasets);
+    });
+}

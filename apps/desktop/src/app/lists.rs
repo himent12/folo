@@ -69,9 +69,11 @@ impl ListTickets {
         }
     }
 
-    /// The server changed: retries still out on the old one never answer here.
-    pub fn forget_retries(&mut self) {
-        self.retrying = [0; 3];
+    /// `list` is asked for again from scratch (Retry, a server switch): every answer still out is
+    /// dropped, a retry among them too, so the new request goes out at once and only its answer counts.
+    pub fn restart(&mut self, list: List) {
+        self.changed(list);
+        self.retrying[list as usize] = 0;
     }
 }
 
@@ -89,6 +91,13 @@ impl FoloApp {
     pub(super) fn retry_list(&mut self, list: List, cx: &mut Context<Self>) {
         if let Some(ticket) = self.list_tickets.retry(list) {
             self.fetch_list_as(list, ticket, cx);
+        }
+    }
+
+    /// Retry: the three lists are asked for again from scratch ([`ListTickets::restart`]).
+    pub fn restart_lists(&mut self) {
+        for list in [List::Datasets, List::Models, List::Runs] {
+            self.list_tickets.restart(list);
         }
     }
 

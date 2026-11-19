@@ -84,6 +84,8 @@ impl FoloApp {
 
     /// Fetch the model list again after it failed (nothing else retries a failed load).
     pub fn retry_models(&mut self, cx: &mut Context<Self>) {
+        // An answer still out (the refresh's) would undo the request asked for now.
+        self.list_tickets.restart(List::Models);
         self.store.models = Load::Idle;
         self.ensure_core(cx);
         cx.notify();
