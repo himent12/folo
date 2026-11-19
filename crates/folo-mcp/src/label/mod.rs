@@ -116,11 +116,16 @@ impl Labels {
 
     /// `GET /api/label/jobs/{id}/images` (the server caps `limit` at 1000). The `reviewed` and `ids` filters need
     /// a server that lists `label_image_filters`; an older one (which would ignore them) is read page by page and
-    /// they are applied here.
+    /// they are applied here. The `path` filter needs a server that lists `label_image_path`: `not_implemented`
+    /// without it.
     pub fn images(&self, id: &str, q: &LabelImageQuery) -> Result<LabelImagePage, Error> {
         match self.via()? {
             Via::Here(l) => l.query(id, q),
             Via::Http(h) => {
+                if q.path.is_some() && !h.has_feature(folo_api::FEATURE_LABEL_IMAGE_PATH)? {
+                    let e = format!("the folo serve at {} is too old to find an image by its path", h.base());
+                    return Err(Error::new(http::StatusCode::NOT_IMPLEMENTED, "not_implemented", e));
+                }
                 let filtered = q.reviewed.is_some() || q.ids.is_some();
                 if filtered && !h.has_feature(folo_api::FEATURE_LABEL_IMAGE_FILTERS)? {
                     return filter_here(h, id, q);
@@ -132,6 +137,9 @@ impl Labels {
                 if let Some(ids) = &q.ids {
                     let ids: Vec<String> = ids.iter().map(|i| encode(i)).collect();
                     path.push_str(&format!("&ids={}", ids.join(",")));
+                }
+                if let Some(p) = &q.path {
+                    path.push_str(&format!("&path={}", encode(&wire_path(p))));
                 }
                 get(h, &path)
             }

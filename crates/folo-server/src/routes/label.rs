@@ -102,6 +102,8 @@ pub(super) struct LabelImagesParams {
     reviewed: Option<bool>,
     /// Comma-separated image ids.
     ids: Option<String>,
+    /// An absolute path on the server's machine (only compared, never stored).
+    path: Option<String>,
     #[serde(default)]
     offset: u64,
     limit: Option<u64>,
@@ -125,6 +127,7 @@ pub(super) async fn label_images(
         status,
         reviewed: p.reviewed,
         ids,
+        path: p.path.map(std::path::PathBuf::from),
         offset: p.offset,
         limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
     };
