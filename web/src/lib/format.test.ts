@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, axisMetric, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
     expect(metric(0.74123)).toBe('0.741');
     expect(metric(null)).toBe('—');
     expect(pct(0.7412)).toBe('74.1%');
+  });
+  it("writes a chart legend's score at its axis's precision, never a small score as zero (#338)", () => {
+    // A one-epoch run on an axis zoomed to 0–0.00042 (5 decimals): both scores read "0.000" before.
+    expect(axisMetric(0.0003877259, 5)).toBe('0.00039');
+    expect(axisMetric(0.00006799426, 5)).toBe('0.00007');
+    expect(axisMetric(0.00000123, 5)).toBe('0.0000012');
+    expect(axisMetric(0.74123, 2)).toBe('0.741');
+    expect(axisMetric(0.00412, 4)).toBe('0.0041');
+    expect(axisMetric(0.0002)).toBe('0.00020');
+    expect(axisMetric(null)).toBe('—');
   });
   it('compacts counts', () => {
     expect(compact(940)).toBe('940');

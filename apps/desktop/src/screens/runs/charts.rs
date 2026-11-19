@@ -230,10 +230,13 @@ impl FoloApp {
         lr.y_ticks = 3;
 
         // Legend values: at the cursor on their own chart, else the latest point.
-        let v = |id: &str, pts: &[(f32, f32)], fmt: fn(f32) -> String| {
+        let v = |id: &str, pts: &[(f32, f32)], fmt: &dyn Fn(f32) -> String| {
             crate::charts::value_at(pts, hover_of(id), 0., total).map(fmt)
         };
-        let f3v: fn(f32) -> String = |x| format!("{x:.3}");
+        let f3v = &|x: f32| format!("{x:.3}");
+        // A score at its axis's precision: a zoomed-in axis can need more than three decimals.
+        let map_v = &|x: f32| fmt_score_on(x, map_max);
+        let pr_v = &|x: f32| fmt_score_on(x, pr_max);
         // Loss parts are toggles; their values are the smoothed curve's, like the lines.
         let mut legend = Vec::new();
         let shown = self.loss_parts.iter().filter(|b| **b).count();
@@ -317,14 +320,20 @@ impl FoloApp {
             .child(loss_help)
             .into_any_element();
         let mut map_items = vec![
-            crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v("run-map", &d.map50_95, f3v))
-                .into_any_element(),
-            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v("run-map", &d.map50, f3v))
+            crate::ui::legend_value(
+                &t,
+                "mAP50-95",
+                t.chart_series[0],
+                false,
+                v("run-map", &d.map50_95, map_v),
+            )
+            .into_any_element(),
+            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v("run-map", &d.map50, map_v))
                 .into_any_element(),
         ];
         if let Some(b) = &r.best {
             map_items.push(
-                crate::ui::best_legend(&t, format!("{} @ {}", f3(b.map50_95), b.epoch)).into_any_element(),
+                crate::ui::best_legend(&t, format!("{} @ {}", map_v(b.map50_95), b.epoch)).into_any_element(),
             );
         }
         let map_legend = div().flex().items_center().gap(px(12.)).children(map_items).into_any_element();
@@ -337,14 +346,14 @@ impl FoloApp {
                 "precision",
                 t.chart_series[2],
                 false,
-                v("run-pr", &d.precision, f3v),
+                v("run-pr", &d.precision, pr_v),
             ))
             .child(crate::ui::legend_value(
                 &t,
                 "recall",
                 t.chart_series[3],
                 true,
-                v("run-pr", &d.recall, f3v),
+                v("run-pr", &d.recall, pr_v),
             ))
             .into_any_element();
         // The axis's power of ten ("× 10⁻³", in the caption, once); the legend value in normalised

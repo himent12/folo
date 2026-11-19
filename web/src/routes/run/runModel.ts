@@ -19,7 +19,7 @@ import type { Pt } from '$lib/charts/downsample';
 import { runHorizon } from '$lib/charts/horizon';
 import type { Future, Marker, Series, XMark } from '$lib/charts/LineChart';
 import { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions';
-import { eta, metric } from '$lib/format';
+import { axisMetric, eta } from '$lib/format';
 import { EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
 import { failedEpoch } from './failure';
 import { mosaicOffText, stepEpoch, epochsDone } from './readings';
@@ -350,10 +350,11 @@ export class RunModel {
     const b = this.run().best;
     return b ? [{ x: b.epoch, y: b.map50_95, label: 'best', quiet: true, pulse: this.pulse.get(), focus: this.focus.get() }] : [];
   });
-  readonly bestLegend = computed(() => {
+  /** At the mAP chart's axis precision (`decimals`, lib/format `axisMetric`), as its series' values. */
+  bestLegend(decimals?: number): string | undefined {
     const b = this.run().best;
-    return b && b.map50_95 !== 0 ? `${metric(b.map50_95)} @ ${b.epoch}` : undefined;
-  });
+    return b && b.map50_95 !== 0 ? `${axisMetric(b.map50_95, decimals)} @ ${b.epoch}` : undefined;
+  }
 
   // ---- the words of the readings ----
   /** What the view holds of an ended run's results (issue #327, progress `heldResults`). */

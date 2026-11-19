@@ -83,14 +83,14 @@ impl FoloApp {
                 // Epochs are whole numbers ("5", not "5.0").
                 map.x_fmt = |v| format!("{v:.0}");
                 // From 0 to a little over the highest value (charts::domain), as on the run page.
-                map.unit_max = Some(
-                    d.map50
-                        .iter()
-                        .chain(d.map50_95.iter())
-                        .map(|p| p.1)
-                        .filter(|v| v.is_finite())
-                        .fold(0., f32::max),
-                );
+                let map_max = d
+                    .map50
+                    .iter()
+                    .chain(d.map50_95.iter())
+                    .map(|p| p.1)
+                    .filter(|v| v.is_finite())
+                    .fold(0., f32::max);
+                map.unit_max = Some(map_max);
                 // One annotation lane above the plot, as on the run dashboard's charts: the ETA sits
                 // there, not inside the data. The card grows by the lane; short windows take it out
                 // of the plot instead, so Recent runs keeps its rows.
@@ -107,7 +107,7 @@ impl FoloApp {
                 ));
                 map.best = best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
                 let v = |pts: &[(f32, f32)]| {
-                    crate::charts::value_at(pts, hover, 0., total).map(|x| format!("{x:.3}"))
+                    crate::charts::value_at(pts, hover, 0., total).map(|x| fmt_score_on(x, map_max))
                 };
                 let legend_el = div()
                     .flex()
@@ -116,10 +116,12 @@ impl FoloApp {
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
                     .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50)))
                     // The best ring on the chart, keyed as on the run dashboard.
-                    .children(
-                        best.as_ref()
-                            .map(|b| crate::ui::best_legend(&t, format!("{} @ {}", f3(b.map50_95), b.epoch))),
-                    )
+                    .children(best.as_ref().map(|b| {
+                        crate::ui::best_legend(
+                            &t,
+                            format!("{} @ {}", fmt_score_on(b.map50_95, map_max), b.epoch),
+                        )
+                    }))
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
                 // at the latest validated epoch.

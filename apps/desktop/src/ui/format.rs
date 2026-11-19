@@ -287,6 +287,19 @@ pub fn f3(v: f32) -> String {
     format!("{v:.3}")
 }
 
+/// A 0–1 score in the legend of a chart whose axis is fitted to `axis_max` (charts::domain), as
+/// Studio's `axisMetric` writes it: three decimals, or the axis labels' when a zoomed axis has more
+/// (on 0–0.00042, "0.00039", not "0.000"), and two significant figures for a nonzero score still
+/// under the last digit, so a small score never reads as zero.
+pub fn fmt_score_on(v: f32, axis_max: f32) -> String {
+    let mut d = crate::charts::domain::unit_domain(axis_max, 0.).decimals.max(3);
+    let a = v.abs() as f64;
+    if a > 0. && a < 0.5 * 10f64.powi(-(d as i32)) {
+        d = (1 - a.log10().floor() as i32) as usize;
+    }
+    format!("{v:.d$}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +319,23 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    /// #338: a one-epoch run's mAP50 0.000388 and mAP50-95 0.000068, on an axis zoomed to
+    /// 0–0.00042, both read "0.000" in the legend.
+    #[test]
+    fn a_zoomed_legend_reads_small_scores_apart() {
+        let max = 0.000_387_725_9;
+        assert_eq!(fmt_score_on(max, max), "0.00039");
+        assert_eq!(fmt_score_on(0.000_067_994_26, max), "0.00007");
+        // Under the axis's last digit: two significant figures, never zero.
+        assert_eq!(fmt_score_on(0.000_001_23, max), "0.0000012");
+        assert_eq!(fmt_score_on(0., max), "0.00000");
+        // A full-scale or lightly zoomed axis keeps three decimals; a finer one its own.
+        assert_eq!(fmt_score_on(0.741_23, 0.8), "0.741");
+        assert_eq!(fmt_score_on(0.051_2, 0.06), "0.051");
+        assert_eq!(fmt_score_on(0.004_12, 0.004_9), "0.0041");
+        assert_eq!(fmt_score_on(0.000_2, 0.6), "0.00020");
     }
 
     #[test]

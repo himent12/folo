@@ -21,6 +21,18 @@ export function metric(x: number | null | undefined): string {
   return num(x, 3);
 }
 
+/**
+ * A 0–1 score in the legend of a chart whose axis labels take `decimals` (lib/charts/domain): three decimals, or the
+ * axis's when a zoomed axis has more (on 0–0.00042, "0.00039", not "0.000"), and two significant figures for a nonzero
+ * score still under the last digit, so a small score never reads as zero (issue #338; Desktop's `fmt_score_on`).
+ */
+export function axisMetric(x: number | null | undefined, decimals = 3): string {
+  if (!ok(x)) return '—';
+  const a = Math.abs(x);
+  const d = Math.max(3, decimals);
+  return nf(a > 0 && a < 0.5 * 10 ** -d ? 1 - Math.floor(Math.log10(a)) : d).format(x);
+}
+
 /** 0.7412 → "74.1%". */
 export function pct(x: number | null | undefined, digits = 1): string {
   return ok(x) ? `${nf(digits).format(x * 100)}%` : '—';
