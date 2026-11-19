@@ -216,8 +216,8 @@ describe('the first handshake with an address that answers', () => {
   });
 
   // #324: what the server can do comes from a health answer of this connection: the handshake's, and after an outage the
-  // one the probe that finds it back gets (a server restarted with other features), with no request of its own.
-  it("keeps the features its health lists, forgets them in an outage, and takes the probe's when it is back", async () => {
+  // one the hub asks once the probe finds it back (a server restarted with other features), and no more.
+  it('keeps the features its health lists, forgets them in an outage, and asks them again when it is back', async () => {
     const listing = (features: string[]) => () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false, features });
     const down = () => Promise.reject(new TypeError('Failed to fetch'));
     const c = await connectTo([listing(['queue_control', 'agent_labeling']), down, listing(['queue_control'])]);
@@ -226,9 +226,9 @@ describe('the first handshake with an address that answers', () => {
     expect(await hub.suspect()).toBe(false);
     expect([hub.offline, hub.features, hub.lacks('agent_labeling')]).toEqual([true, null, false]);
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
-    expect([hub.offline, hub.features, hub.lacks('agent_labeling'), c.checks()]).toEqual([false, ['queue_control'], true, 3]);
+    expect([hub.offline, hub.features, hub.lacks('agent_labeling'), c.checks()]).toEqual([false, ['queue_control'], true, 4]);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(c.checks()).toBe(3);
+    expect(c.checks()).toBe(4);
     c.unmount();
   });
 

@@ -122,10 +122,52 @@ describe('hub.features over an outage', () => {
     await old;
     await vi.advanceTimersByTimeAsync(0);
     expect([hub.offline, hub.features]).toEqual([true, null]);
-    // The address in use comes back: the probe says so, with its features.
+    // The address in use comes back: the probe says so, and the hub asks its features.
     b.up = true;
     b.features = MOCK;
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
     expect([hub.offline, hub.features]).toEqual([false, MOCK]);
+  });
+
+  // Review of #341, round 3: the probe only says whether the server answers, as on main; what it can do comes from the
+  // hub's own ask once it is back.
+  it("round 3, finding 1: a probe's late answer after the hub's ask has set the features changes nothing", async () => {
+    const net = servers();
+    const s = net.at('');
+    s.features = MOCK;
+    await hub.connect();
+    s.up = false;
+    await outage();
+    // Back as a plain server; the probe's health is held (the `--mock` server's answer, still on its way).
+    s.up = true;
+    s.features = REAL;
+    const probe = held();
+    s.next.push(() => probe.r);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(hub.offline).toBe(true);
+    // An ordinary request reconnects; the hub's ask hears labeling is there.
+    await hub.api.datasets();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.features, hub.lacks('agent_labeling')]).toEqual([false, REAL, false]);
+    probe.answer(health(MOCK));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect([hub.offline, hub.features, hub.lacks('agent_labeling')]).toEqual([false, REAL, false]);
+  });
+
+  it("round 3, finding 2: back when the probe's headers come in, its body still held (as on main)", async () => {
+    const net = servers();
+    const s = net.at('');
+    await hub.connect();
+    s.up = false;
+    await outage();
+    s.up = true;
+    let end!: () => void;
+    const body = new ReadableStream<Uint8Array>({ start: (c) => void (end = () => (c.enqueue(new TextEncoder().encode('{}')), c.close())) });
+    s.next.push(() => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect([hub.offline, hub.features]).toEqual([false, REAL]);
+    end();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.features]).toEqual([false, REAL]);
   });
 });
