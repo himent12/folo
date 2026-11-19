@@ -23,7 +23,8 @@ import { effect, ReactiveSet, signal, untrack } from 'fw';
 import { AppendLog } from './appendLog';
 import { ApiError } from './client';
 import { hub } from './index';
-import type { Epoch, LogLine, Run, RunCloud, RunLogs, Step } from './types';
+import { heldResults, type HeldResults } from './progress';
+import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, Step } from './types';
 
 /** Log lines a live view keeps (the latest). */
 export const MAX_LOGS = 2000;
@@ -107,6 +108,8 @@ export class LiveRun {
   #loading = signal(true);
   #connection = signal<'idle' | 'open' | 'reconnecting'>('idle');
   #lost = signal<number | null>(null);
+  #server = signal<Run | undefined>(undefined);
+  #short = signal(0);
   #waiting = signal<number | null>(null);
   #version = signal(0);
 
@@ -144,6 +147,23 @@ export class LiveRun {
   }
   set lost(v: number | null) {
     this.#lost.set(v);
+  }
+  /**
+   * The run as the server's latest applied snapshot has it, uncorrected by events: once it says the run ended, how many
+   * epochs the run validated (progress `epochsValidated`). A view holding fewer has the rest on their way (issue #327).
+   */
+  get server(): Run | undefined {
+    return this.#server.get();
+  }
+  /** Complete history answers in a row that came back short of what the ended snapshot says the run validated. */
+  get shortAnswers(): number {
+    return this.#short.get();
+  }
+  /** What the view holds of an ended run's results (progress `heldResults`): pending, final, or a short history. */
+  get results(): HeldResults | undefined {
+    void this.#version.get();
+    const s = this.#server.get() ?? this.run;
+    return s && heldResults(s, this.epochs[this.epochs.length - 1]?.epoch ?? 0, this.#short.get());
   }
   /** How many runs wait in the training queue, this one included, from its latest `queue` event (null: none yet). */
   get waiting(): number | null {
@@ -225,6 +245,8 @@ export class LiveRun {
       void this.#retry.get();
       const api = hub.api;
       let closed = false;
+      // Every request this view makes ends with it (and with the run's deletion): nothing of it answers later.
+      const view = new AbortController();
       this.#lastStatus = null;
       this.#lastQueue = null;
       this.#lastCloud = null;
@@ -234,6 +256,8 @@ export class LiveRun {
       untrack(() => {
         this.lost = null;
         this.waiting = null;
+        this.#server.set(undefined);
+        this.#short.set(0);
         this.loading = true;
         this.error = undefined;
         this.run = undefined;
@@ -252,28 +276,32 @@ export class LiveRun {
       let snapApplied = 0;
       const snapshot = (): Promise<{ run: Run; claim: () => boolean }> => {
         const my = ++snapIssued;
-        return api.run(runId).then((run) => ({
+        return api.run(runId, view.signal).then((run) => ({
           run,
           claim: () => {
             if (my < snapApplied) return false;
             snapApplied = my;
+            this.#server.set(run);
             return true;
           },
         }));
       };
 
-      // History responses can arrive out of order too: one older than the last applied is dropped.
+      // History responses can arrive out of order too: one older than the last applied is dropped. A failure applies
+      // only to the latest request (an older one's is moot: the latest decides), and resolves false otherwise. Resolves
+      // true when the run ended and the server says it validated epochs the view does not hold yet: ask again.
       let loadIssued = 0;
       let loadApplied = 0;
-      const load = async () => {
+      let logsApplied = 0;
+      const load = async (): Promise<boolean> => {
         const seq = this.#statusSeq;
         const queueSeq = this.#queueSeq;
         const cloudSeq = this.#cloudSeq;
         const gen = this.#gen;
         const my = ++loadIssued;
-        // Older servers have no /logs; the live stream still fills the view.
+        // The log is a request of its own, applied when it comes: the metrics never wait for it, and it shows while
+        // they failed (their panel says so, with Retry). Older servers have no /logs; the stream still fills the view.
         const asked = this.#streamedLogs;
-        const logsLoad = api.runLogs(runId, MAX_LOGS).catch((): RunLogs => ({ lines: [] }));
         const held = (l: RunLogs) => {
           // The server's count is as of its answer: the lines streamed in since it was asked for (the last ones held,
           // in the order they arrived, whatever their times: a cloud worker's lines keep theirs) and not in its answer
@@ -285,31 +313,41 @@ export class LiveRun {
           this.logs = mergeLogs(l.lines, this.logs);
           if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
         };
-        const metricsLoad = api.runMetrics(runId);
-        // The log is a request of its own: it shows while the metrics failed (their panel says so, with Retry).
-        metricsLoad.catch(() =>
-          logsLoad.then((l) => {
-            if (closed || my < loadApplied || gen !== this.#gen) return;
+        api.runLogs(runId, MAX_LOGS, view.signal).then(
+          (l) => {
+            if (closed || my < logsApplied || gen !== this.#gen) return;
+            logsApplied = my;
             held(l);
             this.#bump();
-          }),
+          },
+          () => {},
         );
-        const [snap, metrics, logs] = await Promise.all([snapshot(), metricsLoad, logsLoad]);
-        if (closed) return;
-        if (my < loadApplied) return;
+        let snap: { run: Run; claim: () => boolean }, metrics: RunMetrics;
+        try {
+          [snap, metrics] = await Promise.all([snapshot(), api.runMetrics(runId, view.signal)]);
+        } catch (e) {
+          if (my !== loadIssued) return false;
+          throw e;
+        }
+        if (closed || my < loadApplied) return false;
         // Requested before a resume rewound the view (or before its replay ended): it may hold the interrupted
         // attempt. Ask again.
-        if (gen !== this.#gen) return sync();
+        if (gen !== this.#gen) return (sync(), false);
         loadApplied = my;
-        // Final only if the server said so in this same response (its snapshot), not because the run ended since.
-        const final = !ACTIVE.includes(snap.run.status);
+        // Final only if the server said so in this same response (its snapshot), not because the run ended since, and
+        // only if it holds every epoch that snapshot says the run validated: /run and /metrics are read independently,
+        // so the history may predate the last validation of a run the snapshot already calls ended.
+        // Answered short of an ended snapshot `SHORT_ANSWERS` times in a row, the history is all there is: final too.
+        const answered = metrics.epochs[metrics.epochs.length - 1]?.epoch ?? 0;
+        const ended = !ACTIVE.includes(snap.run.status);
+        this.#short.set((n) => (ended && heldResults(snap.run, answered, 0).pending ? n + 1 : 0));
+        const final = ended && !heldResults(snap.run, answered, this.#short.get()).pending;
         this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq, queueSeq, cloudSeq, final);
         // Still replaying a resumed run: ask again shortly, until its new steps have replaced the old ones.
         if (this.#replay && this.run && ACTIVE.includes(this.run.status)) {
           clearTimeout(replayTimer);
           replayTimer = setTimeout(() => sync(), 3000);
         }
-        held(logs);
         this.loading = false;
         // A history that failed before (the panels said so) is in now.
         this.error = undefined;
@@ -317,7 +355,9 @@ export class LiveRun {
         this.#heard = Date.now();
         // Still down (a retry of the load got through): the view is last known as of now.
         if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? this.#heard : null;
-        this.#bump();
+        // Published with the run it came with, not a frame later: a finished run never shows without its epochs.
+        this.#publish();
+        return this.#pending();
       };
 
       // Re-synchronising history (on open / reconnect) must not silently give up: a gap would stay forever.
@@ -332,6 +372,7 @@ export class LiveRun {
       const gone = (e: unknown): boolean => {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
+        view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         clearTimeout(replayTimer);
@@ -344,6 +385,8 @@ export class LiveRun {
         this.#streamedTail = [];
         this.lost = null;
         this.waiting = null;
+        this.#server.set(undefined);
+        this.#short.set(0);
         this.connection = 'idle';
         this.loading = false;
         this.error = e;
@@ -356,7 +399,7 @@ export class LiveRun {
       const check = () => {
         if (checking || closed) return;
         checking = true;
-        api.run(runId).then(
+        api.run(runId, view.signal).then(
           () => void (checking = false),
           (e) => {
             checking = false;
@@ -367,10 +410,25 @@ export class LiveRun {
 
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
-        load().catch((e) => {
-          if (closed || gone(e)) return;
-          syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
-        });
+        // `owed`: only if, by then, the epochs are still on their way (a load in between may have settled it).
+        const later = (owed = false) => {
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(() => void ((!owed || this.#pending()) && sync(attempt + 1)), Math.min(15_000, 1000 * 2 ** attempt));
+        };
+        load().then(
+          // The server says the run validated epochs this history did not hold yet (read before they landed): again.
+          (owed) => void (owed && !closed && later(true)),
+          (e) => {
+            if (closed || gone(e)) return;
+            // Nothing loaded yet, or the ended run's validated epochs are still to come: the panels say so, with Retry,
+            // as for a failed first load, rather than wait in silence (the retries go on).
+            if (this.loading || this.#pending()) {
+              this.error = e;
+              this.loading = false;
+            }
+            later();
+          },
+        );
       };
 
       // Subscribe first: events that arrive while history loads are kept and merged, not lost.
@@ -415,7 +473,7 @@ export class LiveRun {
           // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.
           if (status === 'running' && this.run && this.run.resolved == null && !resolvedAsked) {
             resolvedAsked = true;
-            api.run(runId).then(
+            api.run(runId, view.signal).then(
               (r) => {
                 if (closed || !this.run || !r.resolved) return void (resolvedAsked = false);
                 this.run = { ...this.run, resolved: r.resolved };
@@ -429,6 +487,8 @@ export class LiveRun {
             // (/run and /metrics are read independently): invalidate them and fetch the final one, every time.
             this.#replay = null;
             this.#gen++;
+            // The epochs the stream delivered are published with the end, not a frame later.
+            this.#publish();
             sync();
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
             const seq = this.#statusSeq;
@@ -467,7 +527,7 @@ export class LiveRun {
           // it, ask once more (only that field is taken; progress needs it).
           if (this.run?.steps_per_epoch === 0 && s.steps_per_epoch === undefined && !speAsked) {
             speAsked = true;
-            api.run(runId).then(
+            api.run(runId, view.signal).then(
               (r) => {
                 if (closed || !this.run || r.steps_per_epoch <= 0) return void (speAsked = false);
                 this.run = { ...this.run, steps_per_epoch: r.steps_per_epoch };
@@ -532,14 +592,18 @@ export class LiveRun {
         },
       });
 
-      load().catch((e) => {
-        if (closed) return;
-        this.error = e;
-        this.loading = false;
-      });
+      load().then(
+        (owed) => void (owed && !closed && (syncTimer = setTimeout(() => void (this.#pending() && sync(1)), 1000))),
+        (e) => {
+          if (closed) return;
+          this.error = e;
+          this.loading = false;
+        },
+      );
 
       return () => {
         closed = true;
+        view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         clearTimeout(replayTimer);
@@ -565,6 +629,7 @@ export class LiveRun {
     const queueSeq = this.#queueSeq;
     const cloudSeq = this.#cloudSeq;
     const r = await call();
+    this.#server.set(r);
     if (this.#statusSeq === seq && this.run && !ACTIVE.includes(this.run.status)) this.#rewind();
     // Progress comes from the rewind and the stream (the response may still carry the interrupted step count); the
     // status from the response unless an event already reported a newer one.
@@ -586,6 +651,11 @@ export class LiveRun {
     const kept = this.steps[this.steps.length - 1]?.step ?? 0;
     if (this.run) this.run = { ...this.run, step: kept, epoch: done };
     this.#bump();
+  }
+
+  /** The run ended and the epochs it validated are still on their way to this view (progress `heldResults`). */
+  #pending(): boolean {
+    return !!this.run && !ACTIVE.includes(this.run.status) && !!untrack(() => this.results?.pending);
   }
 
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
@@ -629,6 +699,13 @@ export class LiveRun {
   /** A snapshot's cloud state, corrected: a `cloud` event that arrived after the request was sent is newer. */
   #clouded(run: Run, cloudSeqAtStart: number): Run {
     return this.#cloudSeq !== cloudSeqAtStart && this.#lastCloud ? { ...run, cloud: this.#lastCloud } : run;
+  }
+
+  /** Publishes now rather than at the next frame (`#bump`): for what must be read together with the run's status. */
+  #publish() {
+    if (this.#raf) cancelAnimationFrame(this.#raf);
+    this.#raf = 0;
+    this.#version.set((v) => v + 1);
   }
 
   #bump() {

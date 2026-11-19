@@ -145,6 +145,12 @@ export default function Run() {
     get version() {
       return live.version;
     },
+    get server() {
+      return live.server;
+    },
+    get shortAnswers() {
+      return live.shortAnswers;
+    },
   });
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
@@ -539,6 +545,11 @@ export default function Run() {
                 {splitNotice.get()!.why}
               </Callout>
             ) : null}
+            {model.shortNote.get() && !waitingLayout.get() ? (
+              <Callout tone="warning" icon={TriangleAlert} title={model.shortNote.get()!.title} role="note" label="Run history">
+                {model.shortNote.get()!.why}
+              </Callout>
+            ) : null}
 
             {waitingLayout.get() ? (
               // Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
@@ -634,13 +645,22 @@ export default function Run() {
                           classes={classes.get()}
                           datasetGone={datasetGone.get()}
                           epochsDone={epochsDone.get()}
-                          ended={!!status.get() && !active.get()}
+                          ended={model.unvalidated.get()}
+                          pending={model.pending.get()}
                           title={`${scoresTitle(evalOn.get())} samples`}
                           unavailable={historyError.get() !== undefined}
                         />
                       </div>
                       <div class="part" data-part="classes">
-                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} ended={!!status.get() && !active.get()} />
+                        <PerClass
+                          classes={classes.get()}
+                          epochs={live.epochs}
+                          version={live.version}
+                          loading={live.loading || model.pending.get()}
+                          compact
+                          unavailable={historyError.get() !== undefined}
+                          ended={model.unvalidated.get()}
+                        />
                       </div>
                     </>
                   ) : null}
