@@ -25,11 +25,11 @@ afterEach(() => {
 const made = () => target.querySelector('[data-made]');
 const link = () => made()?.querySelector('a[href^="#/datasets/"]');
 
-/** The job page of `lb_51d0` on `api`, once its header names the dataset the job made. */
-async function open(api: MockApi, until: () => boolean) {
+/** The job page of `job` (`lb_51d0`) on `api`, once `until` holds. */
+async function open(api: MockApi, until: () => boolean, job = 'lb_51d0') {
   hub.api = api;
   hub.mode = 'mock';
-  router.route = parse('#/datasets/label/lb_51d0');
+  router.route = parse(`#/datasets/label/${job}`);
   target = document.createElement('div');
   document.body.appendChild(target);
   c = render(() => <LabelJob />, target);
@@ -87,6 +87,49 @@ describe('a labeling job whose dataset was removed', () => {
       { timeout: 4000, interval: 10 },
     );
     expect(link()).toBeNull();
+  });
+
+  // Review of #335, round 3: the poll that lacked the removed dataset was requested after the page knew its id, so it
+  // settles it alone; the page read the list once more to confirm, kept the link meanwhile, and for good when that failed.
+  it('stops linking after one poll without the dataset, and a failed read after it changes nothing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = new MockApi('normal', 0);
+    const ds = await api.createLabelDataset('lb_51d0', {});
+    const real = api.datasets.bind(api);
+    let good = Infinity;
+    const reads = vi.spyOn(api, 'datasets').mockImplementation(async () => {
+      if (reads.mock.calls.length > good) throw new ApiError(503, 'unavailable', 'The server is busy.');
+      return real();
+    });
+    await open(api, () => !!link());
+    await api.deleteDataset(ds.id);
+    good = reads.mock.calls.length + 1; // the next poll answers (without the dataset); every read after it fails
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.waitFor(
+      () => {
+        flushSync();
+        if (!made()?.textContent?.includes('removed')) throw new Error('still linked');
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(reads).toHaveBeenCalledTimes(good);
+    await vi.advanceTimersByTimeAsync(5000); // a poll that fails
+    expect(reads.mock.calls.length).toBeGreaterThan(good);
+    flushSync();
+    expect(made()?.textContent).toBe('made a dataset, since removed from FOLO');
+    expect(link()).toBeNull();
+  });
+
+  // Review of #335, round 3: a job that is not there names no dataset, yet its "not found" page read the list every 5 s.
+  it('reads the datasets list at most once for a job that is not found', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = new MockApi('normal', 0);
+    const reads = vi.spyOn(api, 'datasets');
+    await open(api, () => !!target.textContent?.includes('Labeling job not found'), 'lb_gone');
+    const atLoad = reads.mock.calls.length;
+    expect(atLoad).toBeLessThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(reads).toHaveBeenCalledTimes(atLoad);
   });
 
   it('never calls a dataset made in another tab removed: the list is read again for it', async () => {

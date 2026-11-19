@@ -44,8 +44,10 @@ describe('datasetPresence', () => {
   afterEach(() => vi.useRealTimers());
 
   it('is unknown while the first read is delayed, then registered by it; removed only by a read sent after', async () => {
-    const t = setup(['ds_a', 'ds_b']);
+    const t = setup([]);
     await settle();
+    // The page learns its ids while the first read is on its way (it was sent alongside what names them).
+    t.ids.set(['ds_a', 'ds_b']);
     expect(t.at('ds_a')).toBe('unknown');
     expect(t.at('ds_b')).toBe('unknown');
     expect(t.calls).toHaveLength(1);
@@ -100,13 +102,12 @@ describe('datasetPresence', () => {
     expect(t.at('ds_a')).toBe('registered');
     await vi.advanceTimersByTimeAsync(5000);
     expect(t.at('ds_a')).toBe('registered'); // no flicker while the poll is in flight
+    const polls = t.calls.length;
     t.last().resolve([]);
     await settle();
-    // Read once more for it (the first list may have been requested before the page learned the id), then removed.
-    expect(t.at('ds_a')).toBe('registered');
-    t.last().resolve([]);
-    await settle();
+    // Review of #335, round 3: the poll was requested after the page learned the id, so its answer settles it alone.
     expect(t.at('ds_a')).toBe('removed');
+    expect(t.calls).toHaveLength(polls);
     t.stop();
   });
 

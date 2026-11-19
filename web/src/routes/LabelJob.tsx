@@ -192,9 +192,9 @@ export default function LabelJob() {
   // The dataset made from the job, by the id the job keeps (also once it was removed from FOLO): linked only while it is
   // registered, "since removed" once it is known removed, and neither while that is not known (./overview/newDatasets).
   // The list is read (every 5 s: one removed while the page is open stops linking) while the job loads and once it made a
-  // dataset, never for a job that made none.
+  // dataset, never for a job that made none nor while the page shows an error (a job not found names none).
   const madeId = computed(() => job.get()?.dataset_id ?? null);
-  const datasets = datasetsFor(() => (job.get() ? [madeId.get()] : undefined));
+  const datasets = datasetsFor(() => (live.error ? [] : job.get() ? [madeId.get()] : undefined));
   const presence = datasetPresence(datasets, () => [madeId.get()]);
   const madeDataset = computed(() => {
     const dsId = madeId.get();

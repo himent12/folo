@@ -66,8 +66,9 @@ export function datasetsFor(ids: () => readonly (string | null | undefined)[] | 
  * this rule, and never later; the only difference is that an id a successful read of the list says is absent is shown
  * as removed. So:
  * - `registered`: a successful answer has the id, whenever it was requested (the first one too: nothing more is read);
- * - `removed`: a successful answer requested after the page learned the id does not have it (one requested before may
- *   predate a dataset made since, in another tab: the list is read once more for an id it lacks);
+ * - `removed`: a successful answer requested after the page learned the id does not have it (a poll's alone is enough;
+ *   one requested before may predate a dataset made since, in another tab: the list is read once more for an id it
+ *   lacks that the page learned while that read was on its way);
  * - `unknown`: neither yet; the page shows what it showed before the rule.
  * A failed read changes nothing: only a successful answer moves an id, either way. The list's poll keeps it current.
  */
@@ -78,12 +79,18 @@ export function datasetPresence(
   const key = (id: string) => `${hub.server} ${id}`;
   /** The ids (by `key`) the list was read again for: the page learned them while the list lacked them. */
   const asked = new Set<string>();
-  /** Those whose read is back: every answer from then on was requested after the page learned them. */
-  const ready = signal<ReadonlySet<string>>(new Set());
+  /** The ids (by `key`) the page knew when the read on its way, or the last one, was requested. */
+  let sent: ReadonlySet<string> = new Set();
+  let reading = false;
   const known = signal<ReadonlyMap<string, DatasetPresence>>(new Map());
   effect(() => {
     // An answer is on its way: what the last ones settled stands until it lands.
-    if (datasets.loading || datasets.refreshing) return;
+    if (datasets.loading || datasets.refreshing) {
+      if (!reading) sent = new Set((ids() ?? []).filter((id): id is string => !!id).map(key));
+      reading = true;
+      return;
+    }
+    reading = false;
     const failed = datasets.error !== undefined || datasets.stale !== undefined;
     const list = failed ? null : datasets.data;
     if (!list && !failed) return; // nothing read (`datasetsFor` while the page names no dataset)
@@ -95,15 +102,15 @@ export function datasetPresence(
       if (!id) continue;
       const k = key(id);
       if (list && have.has(id)) next.set(k, 'registered');
-      else if (ready.get().has(k)) {
+      else if (sent.has(k)) {
         if (list) next.set(k, 'removed');
       } else if (!asked.has(k)) fresh.push(k);
     }
     if ([...next].some(([k, p]) => was.get(k) !== p)) known.set(next);
     if (!fresh.length) return;
     for (const k of fresh) asked.add(k);
-    // A later read (a poll) supersedes this one; it was requested later still.
-    untrack(() => void datasets.refresh().finally(() => ready.set(new Set([...ready.peek(), ...fresh]))));
+    // Requested now, so its answer (or a later poll's, which supersedes it) settles them.
+    untrack(() => void datasets.refresh());
   });
   return (id) => (id ? (known.get().get(key(id)) ?? 'unknown') : 'unknown');
 }

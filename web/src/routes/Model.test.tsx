@@ -211,6 +211,21 @@ describe('Model: no dataset named', () => {
       vi.useRealTimers();
     }
   });
+
+  // Review of #335, round 3: a model that is not there names no dataset; its error page reads no datasets list.
+  it('reads no datasets list for a model that is not found', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const reads = vi.spyOn(hub.api as MockApi, 'datasets');
+      router.route = parse('#/models/m_gone');
+      c = mount(Model, { target });
+      await until(() => target.textContent?.includes('Model not found'), 'the error');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(reads).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // s4-models-1 (and its reviews): "Trained for" says the epochs the run finished, never the planned count: a completed

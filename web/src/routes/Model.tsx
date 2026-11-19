@@ -137,7 +137,8 @@ export default function Model() {
   });
   // The datasets the page links to (the run's, the evaluation's) stop linking once removed: the list is read every 5 s,
   // apart from the models, while the page names one, so one removed while the page is open unlinks (./overview/newDatasets).
-  const named = () => [context.data?.dataset?.id, source.get().datasetId];
+  // Its error page (a model not found, or gone) names none.
+  const named = () => ((model.error && !model.data) || gone.get() ? [] : [context.data?.dataset?.id, source.get().datasetId]);
   const presence = datasetPresence(datasetsFor(named), named);
   const removed = (dsId: string | null | undefined) => presence(dsId) === 'removed';
   /** Said once on the page, under the headline metrics, when the numbers are not on the validation split. */
