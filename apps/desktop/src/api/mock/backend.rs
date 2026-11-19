@@ -144,6 +144,7 @@ impl Backend for MockBackend {
     }
 
     fn images(&self, id: &str, q: &ImageQuery) -> ApiResult<ImagePage> {
+        self.image_lists.lock().unwrap().push((id.to_string(), q.clone()));
         self.check()?;
         {
             let mut fail = self.fail_images_from.lock().unwrap();

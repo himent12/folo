@@ -186,6 +186,7 @@ impl FoloApp {
         s.runs = Load::Idle;
         s.dataset.clear();
         s.images.clear();
+        s.previews.clear();
         s.evals.clear();
         // Per-dataset issue counts too: ids repeat across servers, and a fetch dropped by a
         // backend switch would otherwise stay Loading.

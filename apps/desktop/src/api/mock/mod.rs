@@ -58,6 +58,8 @@ pub struct MockBackend {
     holds: Mutex<Vec<(&'static str, Arc<hold::Gate>)>>,
     /// An image-list call from this offset on fails once ([`MockBackend::fail_images_once_from`]).
     fail_images_from: Mutex<Option<u32>>,
+    /// Every image-list call made, in order ([`MockBackend::image_lists`]).
+    image_lists: Mutex<Vec<(String, ImageQuery)>>,
     /// Every image's pixels fail while set, as a cut-off answer would ([`MockBackend::fail_pixels`]).
     fail_pixels: std::sync::atomic::AtomicBool,
     /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
@@ -212,6 +214,12 @@ impl MockBackend {
     #[cfg(test)]
     pub fn fail_images_once_from(&self, offset: u32) {
         *self.fail_images_from.lock().unwrap() = Some(offset);
+    }
+
+    /// The image-list calls made so far (dataset id and query), oldest first.
+    #[cfg(test)]
+    pub fn image_lists(&self) -> Vec<(String, ImageQuery)> {
+        self.image_lists.lock().unwrap().clone()
     }
 
     /// From now on (`true`) or no longer, every image's pixels (dataset and benchmark ones, either

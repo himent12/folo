@@ -26,6 +26,7 @@ mod playground;
 #[cfg(test)]
 mod playground_tests;
 mod preferences;
+mod previews;
 mod render;
 #[cfg(test)]
 mod run_charts_tests;
@@ -357,6 +358,8 @@ pub struct FoloApp {
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
     pub images_seq: u64,
+    /// Each card preview's latest read (a number from `images_seq`): an older one is dropped.
+    pub preview_reads: HashMap<String, u64>,
     /// Datasets read before, read again (in place) the next time a card or their page shows them:
     /// a folder moved away or put back since says so ([`FoloApp::ensure_dataset`]).
     pub ds_recheck: std::collections::HashSet<String>,
@@ -669,6 +672,7 @@ impl FoloApp {
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
             images_seq: 0,
+            preview_reads: HashMap::new(),
             ds_recheck: Default::default(),
             ds_reads: HashMap::new(),
             ds_read_seq: 0,

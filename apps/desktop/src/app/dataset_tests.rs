@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use super::ServerMode;
 use super::data::IMAGE_PAGE;
+use super::previews::{CARD_WHOLE_LIST, PREVIEW_PAGE};
 use super::tests::{drive, open_with};
+use super::{Route, ServerMode};
 use crate::api::mock::MockBackend;
-use crate::api::{Split, SplitsExt};
+use crate::api::{ImageQuery, Split, SplitsExt};
 use crate::ui::Tone;
 
 #[test]
@@ -142,6 +143,56 @@ fn a_sample_past_the_first_page_opens_on_itself() {
         let i = this.inspector.as_ref().expect("open");
         assert!(i.want.is_none());
         assert_eq!(this.filtered_image("ds_8f2c", i.index).map(|m| m.id.clone()), Some(want.clone()));
+    });
+}
+
+/// Issue #345: the Datasets index read every page of a COCO-sized dataset's image list (124
+/// requests, 70 MB) for a card that shows four of its images. A large dataset's card reads one small
+/// page; opening it reads the whole list, which the index then keeps and doesn't read again.
+#[test]
+fn a_large_dataset_card_reads_only_its_first_images() {
+    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
+    let (mut app, window) = open_with(api.clone());
+    let asked = |id: &str| -> Vec<ImageQuery> {
+        api.image_lists().into_iter().filter(|(d, _)| d == id).map(|(_, q)| q).collect()
+    };
+    let held = |this: &super::FoloApp, id: &str| {
+        this.store.images.get(id).and_then(|l| l.ready()).map(|v| v.len() as u64)
+    };
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
+    drawn_keys(&mut app, window);
+    let preview = ImageQuery { limit: PREVIEW_PAGE, ..Default::default() };
+    assert_eq!(asked("ds_8f2c"), vec![preview.clone()], "one small page for the card");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.card_images("ds_8f2c", 4).len(), 4, "the card has its four images");
+        assert_eq!(held(this, "ds_8f2c"), None, "and no image list");
+        // A small dataset's card reads its whole list in its one request: its page opens full.
+        let small = this.store.dataset_summary("ds_c07a").map(|d| d.splits.total()).expect("listed");
+        assert!(small <= CARD_WHOLE_LIST);
+        assert_eq!(held(this, "ds_c07a"), Some(small));
+    });
+    assert_eq!(asked("ds_c07a").len(), 1);
+
+    // Opened: every image, from the first on.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset("ds_8f2c".into()), w, cx));
+    drawn_keys(&mut app, window);
+    let total = drive(&mut app, window, |this, _, _| {
+        let total = this.store.dataset_summary("ds_8f2c").map(|d| d.splits.total()).expect("listed");
+        assert_eq!(held(this, "ds_8f2c"), Some(total), "the grid lists every image");
+        assert!(!this.images_pending("ds_8f2c"));
+        total
+    });
+    let pages = total.div_ceil(u64::from(IMAGE_PAGE)) as usize;
+    assert_eq!(asked("ds_8f2c").len(), 1 + pages);
+    assert_eq!(asked("ds_8f2c")[1].offset, 0);
+
+    // Back on the index: the full list is kept and serves the card; nothing is read again.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
+    drawn_keys(&mut app, window);
+    assert_eq!(asked("ds_8f2c").len(), 1 + pages, "no image list read again");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(held(this, "ds_8f2c"), Some(total));
+        assert_eq!(this.card_images("ds_8f2c", 4).len(), 4);
     });
 }
 

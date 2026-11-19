@@ -84,6 +84,9 @@ pub struct Store {
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
     pub images: HashMap<String, Load<Vec<ImageInfo>>>,
+    /// A dataset card's first images, for a dataset whose full list isn't read
+    /// (`FoloApp::ensure_dataset_card`).
+    pub previews: HashMap<String, Load<Vec<ImageInfo>>>,
     pub models: Load<Vec<Model>>,
     pub evals: HashMap<String, Load<ModelEval>>,
     /// Per dataset, its issue counts by severity (fetched when it has broken labels).
@@ -123,6 +126,7 @@ impl Store {
             datasets: Load::Idle,
             dataset: HashMap::new(),
             images: HashMap::new(),
+            previews: HashMap::new(),
             models: Load::Idle,
             evals: HashMap::new(),
             issues: HashMap::new(),
