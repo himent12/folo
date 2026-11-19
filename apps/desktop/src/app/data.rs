@@ -324,6 +324,11 @@ impl FoloApp {
                             if e.code == "dataset_not_found"
                                 || crate::screens::dataset_problem(&e).is_some() =>
                         {
+                            // The same under an open inspector: its record and list stay until it closes.
+                            if this.inspecting(&b) {
+                                this.ds_recheck.insert(b);
+                                return;
+                            }
                             this.store.dataset.insert(b, Load::Failed(e));
                         }
                         Err(_) => {}

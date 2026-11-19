@@ -131,6 +131,43 @@ fn a_read_on_its_way_when_the_inspector_opens_leaves_its_list_alone() {
     assert_eq!(drive(&mut app, window, |this, _, _| shown(this)).0, Some(now), "read again once it closed");
 }
 
+/// Review of #379: the folder moved away while a read was out, an inspector opened before its
+/// answer: the error replaced the record under it and nothing read the dataset once it closed.
+#[test]
+fn an_error_answer_under_an_inspector_waits_for_it_to_close() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = on_its_page(api.clone());
+    api.break_dataset(ID, "path_not_found", "moved away");
+    let read = api.hold("dataset");
+    away_and_back(&mut app);
+    app.frame(window.into());
+    app.run_until_held(1);
+    // (Plain updates while it is held: `drive` waits for every call.)
+    app.update(|cx| window.update(cx, |this, w, cx| this.open_inspector(ID.into(), 700, w, cx)).unwrap());
+    drop(read);
+    app.run_until_idle();
+    let (first, second) = (api.hold("dataset"), api.hold("dataset"));
+    frames_holding_one(&mut app, window);
+    assert!(!reading(&mut app, window) && !first.is_held(), "no read while the inspector is open");
+    app.update(|cx| {
+        window.update(cx, |this, _, _| {
+            assert!(this.store.dataset.get(ID).is_some_and(|l| l.ready().is_some()), "the record stays");
+            assert!(this.ds_recheck.contains(ID), "the read waits");
+        })
+    })
+    .unwrap();
+    app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
+    app.run_until_held(1);
+    first.wait_held();
+    frames_holding_one(&mut app, window);
+    assert!(reading(&mut app, window) && !second.is_held(), "one read once it closed");
+    drop((first, second));
+    app.run_until_idle();
+    let failed =
+        drive(&mut app, window, |this, _, _| this.store.dataset.get(ID).and_then(|l| l.error()).cloned());
+    assert_eq!(failed.map(|e| e.code), Some("path_not_found".into()), "its answer shown once closed");
+}
+
 /// Review of #379: a run's sample inspector stayed on an empty scrim when a read of its dataset
 /// dropped the list (nothing on the run page asks for it again).
 #[test]
@@ -143,7 +180,11 @@ fn a_run_sample_inspector_keeps_its_image_through_a_read_again() {
         let image = this.store.images.get(ID).and_then(|l| l.ready()).expect("listed")[5].id.clone();
         (held_from_before(this), image)
     });
-    drive(&mut app, window, |this, w, cx| this.open_sample(ID.into(), image, "run_52e8".into(), w, cx));
+    drive(&mut app, window, |this, w, cx| {
+        this.open_sample(ID.into(), image, "run_52e8".into(), w, cx);
+        // Installed before it asks for the dataset: the latched read still waits, none went out.
+        assert!(this.ds_recheck.contains(ID) && !this.ds_reads.contains_key(ID), "no read under it");
+    });
     frames(&mut app, window);
     drive(&mut app, window, |this, _, _| {
         let i = this.inspector.as_ref().expect("still open");
