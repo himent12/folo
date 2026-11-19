@@ -1,5 +1,6 @@
 //! Stopping a run: `folo stop` and its stop file, and Ctrl+C.
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,11 +11,14 @@ use crate::output::{CliError, ExitCode, Out};
 
 use super::STOP_FILE;
 
-/// Polls `<run_dir>/stop` (written by `folo stop`) every 200 ms and raises `stop` when it appears. A stop file
-/// left from an earlier process is removed first.
-pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>) {
+/// Polls `<run_dir>/stop` (written by `folo stop`) every 200 ms and raises `stop` when it appears. With
+/// `clear_stale` (a resumed run), a stop file left from an earlier process is removed first; a new run's folder is
+/// its own from the start, so a stop file there was asked for this run while it set up.
+pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>, clear_stale: bool) {
     let file = run_dir.join(STOP_FILE);
-    let _ = std::fs::remove_file(&file);
+    if clear_stale {
+        let _ = std::fs::remove_file(&file);
+    }
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             if file.exists() {
@@ -40,12 +44,30 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
         let msg = format!("{} does not exist", folo_api::json::path(run_dir));
         return Err(not_a_run("path_not_found", ExitCode::NotFound, msg));
     }
-    if !run_dir.join("config.json").is_file() && !run_dir.join("weights").is_dir() {
-        let msg = format!("{} is not a run folder (it has no config.json)", folo_api::json::path(run_dir));
+    // The trainer makes `weights/` and opens `metrics.jsonl` together, before it watches for the stop file.
+    let log = run_dir.join("metrics.jsonl");
+    if !log.is_file() || !run_dir.join("weights").is_dir() {
+        let msg = format!(
+            "{} is not a run folder (it has no metrics.jsonl and weights/)",
+            folo_api::json::path(run_dir)
+        );
         return Err(not_a_run("run_not_found", ExitCode::NotFound, msg));
     }
+    if let Some(status) = final_status(&log) {
+        let msg = format!(
+            "the run in {} already ended (status `{status}`); there is nothing to stop",
+            folo_api::json::path(run_dir)
+        );
+        return Err(CliError::new(ExitCode::Runtime, "run_not_active", msg));
+    }
+    // A stop file already there is a request not yet seen: leave it as it is.
     let file = run_dir.join(STOP_FILE);
-    std::fs::write(&file, b"stop\n").map_err(|e| {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+        Ok(mut f) => f.write_all(b"stop\n"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && file.is_file() => Ok(()),
+        Err(e) => Err(e),
+    }
+    .map_err(|e| {
         CliError::new(
             ExitCode::Runtime,
             "io_error",
@@ -62,6 +84,26 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
         folo_api::json::path(run_dir)
     ));
     Ok(())
+}
+
+/// The status a run's `metrics.jsonl` ends with when the run ended (`completed`, `stopped`, `failed`): its last
+/// line. `None` while it trains (or after a crash, which writes no final status). Only the tail is read.
+fn final_status(log: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    let mut f = std::fs::File::open(log).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let last: serde_json::Value =
+        serde_json::from_str(text.lines().rev().find(|l| !l.trim().is_empty())?).ok()?;
+    if last["event"] != "status" {
+        return None;
+    }
+    let status: folo_api::RunStatus = serde_json::from_value(last["status"].clone()).ok()?;
+    (!status.is_active()).then(|| last["status"].as_str().unwrap_or_default().to_string())
 }
 
 /// First Ctrl+C (on Windows also Ctrl+Break, which is what a script can send to a child started in its own

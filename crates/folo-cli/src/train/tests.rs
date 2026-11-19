@@ -205,6 +205,46 @@ fn concurrent_runs_reserve_distinct_folders() {
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// `folo stop` writes the stop file only into a run folder whose run has not ended, and never over a file there.
+#[test]
+fn stop_asks_only_runs_that_train() {
+    let out = crate::output::Out { json: false };
+    let root = TestDir::new("stop");
+    let code = |dir: &std::path::Path| super::request_stop(dir, out).err().map(|e| e.code);
+    // A folder with a config.json of something else keeps every byte.
+    let other = root.join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("config.json"), r#"{"app":"unrelated settings"}"#).unwrap();
+    std::fs::write(other.join("stop"), b"keep these bytes").unwrap();
+    assert_eq!(code(&other).as_deref(), Some("run_not_found"));
+    assert_eq!(std::fs::read(other.join("stop")).unwrap(), b"keep these bytes");
+    // A run that has only just started (the trainer made weights/ and metrics.jsonl, nothing written yet).
+    let run = root.join("run");
+    std::fs::create_dir_all(run.join("weights")).unwrap();
+    std::fs::write(run.join("metrics.jsonl"), "").unwrap();
+    assert_eq!(code(&run), None);
+    assert_eq!(std::fs::read(run.join("stop")).unwrap(), b"stop\n");
+    // Asked again before the trainer saw it: the file there stays.
+    std::fs::write(run.join("stop"), b"pending").unwrap();
+    assert_eq!(code(&run), None);
+    assert_eq!(std::fs::read(run.join("stop")).unwrap(), b"pending");
+    std::fs::remove_file(run.join("stop")).unwrap();
+    // Training, then ended.
+    let status = |s: &str| {
+        format!(r#"{{"event":"status","status":"{s}","error":null,"steps_per_epoch":2,"epochs":1}}"#)
+    };
+    std::fs::write(run.join("metrics.jsonl"), status("running") + "\n").unwrap();
+    assert_eq!(code(&run), None);
+    std::fs::remove_file(run.join("stop")).unwrap();
+    for end in ["completed", "stopped", "failed"] {
+        std::fs::write(run.join("metrics.jsonl"), format!("{}\n{}\n", status("running"), status(end)))
+            .unwrap();
+        assert_eq!(code(&run).as_deref(), Some("run_not_active"), "{end}");
+        assert!(!run.join("stop").exists(), "{end}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The server's `folo train` command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) parses with the real
 /// arguments, and maps to the trainer config the server builds from the same `TrainConfig` (`from_api`).
 #[test]

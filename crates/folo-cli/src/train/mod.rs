@@ -57,7 +57,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
         Some(ckpt) => resume(&args, ckpt, out, stop.clone(), nb.clone())?,
         None => start(&args, out, stop.clone(), nb.clone())?,
     };
-    watch_stop_file(&run_dir, stop);
+    watch_stop_file(&run_dir, stop, !fresh);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
     if !out.json {
         out.human(format!("Run folder: {}", folo_api::json::path(&run_dir)));

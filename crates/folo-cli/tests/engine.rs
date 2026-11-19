@@ -583,6 +583,10 @@ fn stop_resume_and_epoch_only_records() {
     let finished = done["epochs_completed"].as_u64().unwrap();
     assert!(finished >= 1, "{done}");
     assert!(!run.join("stop").exists(), "the stop file is consumed");
+    // The run ended: nothing to stop.
+    let (code, lines, _) = folo(&["stop", "--json", s(&run)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("run_not_active")));
+    assert!(!run.join("stop").exists());
     // folo stop on something that is not a run.
     let (code, lines, _) = folo(&["stop", "--json", s(&data)]);
     assert_eq!((code, lines[0]["error"]["code"].as_str()), (3, Some("run_not_found")));
