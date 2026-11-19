@@ -350,7 +350,7 @@ export default function Leaderboard(props: LeaderboardProps) {
                             ) : e().contestant.kind === 'external' && done() ? (
                               <NoValue label="not measured for an external model" />
                             ) : (
-                              <NoValue label="not yet" />
+                              <NoValue label={isEntryActive(e()) ? 'not yet' : 'unavailable'} />
                             )}
                           </td>
                           <td class="act" onclick={(ev) => ev.stopPropagation()}>

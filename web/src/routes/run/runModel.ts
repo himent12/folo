@@ -12,7 +12,7 @@
 import { computed, effect, signal, untrack } from 'fw';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
+import { etaSettled, heldResults, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
 import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
 import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
 import type { Pt } from '$lib/charts/downsample';
@@ -37,6 +37,10 @@ export interface RunSource {
   /** The run's finished epochs (`live.epochsLog`). */
   readonly epochs: AppendLog<Epoch>;
   readonly version: number;
+  /** The run as the server's latest snapshot has it (`live.server`): how many epochs an ended run validated. */
+  readonly server?: Run;
+  /** History answers in a row short of that snapshot (`live.shortAnswers`): at `SHORT_ANSWERS`, all there is. */
+  readonly shortAnswers?: number;
 }
 
 type EpochField = 'map50_95' | 'map50' | 'precision' | 'recall';
@@ -68,6 +72,9 @@ function extentOf(series: Series[], log = false): [number, number] | null {
 
 export class RunModel {
   readonly run: () => Run;
+  /** The run as the server's latest snapshot has it, else as the view has it: what an ended run validated. */
+  private readonly server: () => Run;
+  private readonly shortAnswers: () => number;
   readonly live = computed(() => ACTIVE.includes(this.run().status));
   readonly progress = computed(() => runProgress(this.run()));
   readonly elapsed = computed(() => trainingSeconds(this.run()));
@@ -109,6 +116,8 @@ export class RunModel {
 
   constructor(src: RunSource) {
     this.run = () => src.run!;
+    this.server = () => src.server ?? src.run!;
+    this.shortAnswers = () => src.shortAnswers ?? 0;
     this.stepData = new StepSeries(untrack(() => src.steps));
     this.epochData = new EpochSeries(untrack(() => src.epochs));
     const stepsRev = computed(() => {
@@ -347,11 +356,33 @@ export class RunModel {
   });
 
   // ---- the words of the readings ----
+  /** What the view holds of an ended run's results (issue #327, progress `heldResults`). */
+  readonly results = computed(() => heldResults(this.server(), this.lastEpoch.get()?.epoch ?? 0, this.shortAnswers()));
   /**
-   * It ended (stopped, failed) after training steps but before its first validation: the per-epoch readings will never
-   * come, so they say so instead of "after the first epoch" and "Waiting for the first validation…".
+   * It ended, and the server says it validated a later epoch than the last the view holds: the rest are on their way.
+   * The per-epoch readings hold their place as loading, call nothing final, and say neither "Waiting for the first
+   * validation…" nor that it never validated.
    */
-  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get());
+  readonly pending = computed(() => !this.live.get() && this.results.get().pending);
+  /** An ended snapshot confirms the last epoch held is the run's last validated one: its reading may say "final". */
+  readonly final = computed(() => !this.live.get() && this.results.get().final);
+  /** Its history came back short of what the run validated, for good (its metrics file missed epochs): the page's note. */
+  readonly shortNote = computed(() => {
+    const r = this.results.get();
+    if (this.live.get() || !r.short) return null;
+    const held = this.lastEpoch.get()?.epoch ?? 0;
+    const v = r.validated!;
+    return {
+      title: held + 1 === v ? `Epoch ${v} is missing from its history` : `Epochs ${held + 1}–${v} are missing from its history`,
+      why: `The run's record names ${v} validated epochs; its history ${held ? `ends at epoch ${held}` : 'has none'}. The readings show what was recorded.`,
+    };
+  });
+  /**
+   * It ended (stopped, failed) after training steps but before its first validation, as the server's snapshot says:
+   * the per-epoch readings will never come, so they say so instead of "after the first epoch" and "Waiting for the
+   * first validation…".
+   */
+  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get() && this.results.get().validated === 0);
   readonly firstEpoch = computed(() => (this.unvalidated.get() ? 'not validated' : 'after the first epoch'));
   /** "Latest · ep 37", the per-epoch legends' note; per-step readings name the epoch the last step is in. */
   readonly latestEp = computed(() => (this.lastEpoch.get() ? `Latest · ep ${this.lastEpoch.get()!.epoch}` : undefined));

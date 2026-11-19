@@ -517,6 +517,27 @@ describe('the labeling editor: reviewing', () => {
     expect(key('Enter', {}, inEditor('Discard')!).defaultPrevented).toBe(false);
     expect(router.route.query.get('image')).toBe('5');
   });
+
+  // #317 review: a labeled image whose last agent call failed keeps its labels and review; reopened, the editor
+  // still says why the call failed, beside its labels' state.
+  it('says why the last ask failed on a labeled image that kept its labels, and nothing on one without an error', async () => {
+    const list = hub.api.labelImages.bind(hub.api);
+    vi.spyOn(hub.api, 'labelImages').mockImplementation(async (...a) => {
+      const page = await list(...a);
+      return { ...page, images: page.images.map((i) => (i.id === '5' ? { ...i, error: 'the reply has no JSON object' } : i)) };
+    });
+    const description = () => editor()!.querySelector('header p')?.textContent ?? '';
+    await openEditor('5', 'lb_51d0');
+    expect(description()).toMatch(/reviewed\. Last ask failed: the reply has no JSON object$/);
+    expect(footer()).toMatch(/^Reviewed\./);
+    key('j');
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('6');
+      expect(description()).toMatch(/reviewed$/);
+    });
+    expect(description()).not.toMatch(/Last ask failed/);
+  });
 });
 
 describe('the labeling editor: saving from the keyboard (v-models-label N3)', () => {

@@ -47,6 +47,7 @@ export interface LabelCounts {
   images: number;
   pending: number;
   labeled: number;
+  /** Images whose status is `failed` (a labeled image whose call fails stays labeled, with an `error`). */
   failed: number;
   boxes: number;
 }
@@ -80,6 +81,7 @@ export interface LabelRun {
   finished: Time | null;
   total: number;
   done: number;
+  /** Images whose call failed in this run, labeled ones that kept their labels too (unlike `counts.failed`). */
   failed: number;
   /** null while the run is active. */
   outcome: LabelOutcome | null;
@@ -124,7 +126,7 @@ export interface LabelImage {
   boxes: Box[];
   /** null until labeled. */
   source: LabelSource | null;
-  /** Why the last agent call for it failed (`status: failed`). */
+  /** Why the last agent call for it failed: a `failed` image, or a `labeled` one that keeps the labels (and review) it had. */
   error: string | null;
   /**
    * A person checked its labels (saved boxes drawn by hand, or marked them right); only a `labeled` image is. An

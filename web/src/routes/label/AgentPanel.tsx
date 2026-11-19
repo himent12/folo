@@ -1,8 +1,8 @@
 /**
  * The job page's rail: first the run, "Label N images" while some have no labels (naming the agent, model and effort
- * it will use), live progress with Stop while an agent works, and how the last run ended (a failed one with its cause,
- * the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told (the
- * instructions, the classes). The instructions cannot be typed in while a run starts: what is saved then is what
+ * it will use), live progress with Stop while an agent works, and how the last run ended and what it used (a failed one
+ * with its cause, the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told
+ * (the instructions, the classes). The instructions cannot be typed in while a run starts: what is saved then is what
  * the agent gets.
  */
 import CircleAlert from '$icons/circle-alert';
@@ -10,7 +10,7 @@ import Pencil from '$icons/pencil';
 import RotateCw from '$icons/rotate-cw';
 import Sparkles from '$icons/sparkles';
 import Square from '$icons/square';
-import { bindable, computed, createUniqueId, css, effect, For, Index, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, Index, signal } from 'fw';
 import type { LabelAgent, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import { count, duration, num, sentence } from '$lib/format';
@@ -29,6 +29,7 @@ import Callout from '../run/Callout';
 import AgentFields from './AgentFields';
 import type { AgentChoice } from './agentChoice';
 import LastRun from './LastRun';
+import ModelId from './ModelId';
 import { images, modelLabel, runAgent, toLabel } from './words';
 
 export interface AgentPanelProps {
@@ -59,6 +60,7 @@ export default function AgentPanel(props: AgentPanelProps) {
   const uid = createUniqueId();
   const running = computed(() => props.job.status !== 'idle');
   const run = computed(() => props.job.run);
+  const who = computed((): [string, string] => (run.get() ? runAgent(run.get()!, props.agents) : ['', '']));
   const failed = computed(() => !running.get() && run.get()?.outcome === 'failed');
   const n = computed(() => toLabel(props.job));
   const agent = computed(() => props.choice.agent);
@@ -116,7 +118,8 @@ export default function AgentPanel(props: AgentPanelProps) {
               ) : null}
               <p class="p-meta">
                 <Meta>
-                  <For each={runAgent(run.get()!, props.agents)}>{(f) => <span>{f()}</span>}</For>
+                  <span>{who.get()[0]}</span>
+                  <ModelId id={who.get()[1]} />
                   <span>{run.get()!.effort} effort</span>
                   {run.get()!.fast ? <span>fast</span> : null}
                 </Meta>
@@ -181,7 +184,8 @@ export default function AgentPanel(props: AgentPanelProps) {
               </>
             )}
             {props.startError ? <ErrorState error={props.startError} title="Could not start the agent" compact /> : null}
-            {run.get() && !failed.get() ? <LastRun job={props.job} run={run.get()!} agents={props.agents} /> : null}
+            {/* A failed run too: the calls it made before it stopped were paid for, and that counts in whether to try again. */}
+            {run.get() ? <LastRun job={props.job} run={run.get()!} agents={props.agents} /> : null}
           </>
         )}
       </div>
@@ -287,8 +291,10 @@ css`
     height: 8px;
     border-radius: 2px;
   }
+  /* One column no wider than the rail: a long model id wraps (ModelId) instead of widening the panel and the page. */
   .progress {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
   .p-head {

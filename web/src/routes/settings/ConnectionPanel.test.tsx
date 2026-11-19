@@ -86,6 +86,40 @@ describe('ConnectionPanel', () => {
     target.remove();
   });
 
+  it('is green only when the token check lets Studio in: refused is red, a check that cannot tell is neither (#323)', async () => {
+    // The health is open; the token check (HEAD /api/runs) answers `head`: `folo serve --token` (401), a proxy whose
+    // session expired (403), one that resets the connection, then a server Studio can use.
+    let head: number | 'reset' = 401;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!(url.endsWith('/api/runs') && init?.method === 'HEAD')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      if (head === 'reset') throw new TypeError('Failed to fetch');
+      return new Response(null, { status: head });
+    });
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <ConnectionPanel />, target);
+    flush();
+    const testIt = async (expected: string) => {
+      [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('Test'))!.click();
+      await vi.waitFor(() => {
+        flush();
+        expect(target.querySelector('.test')?.textContent).toContain(expected);
+      });
+      return target.querySelector('.test')!.classList.contains('ok');
+    };
+    expect(await testIt("This server needs a token (folo serve --token), which Studio can't send.")).toBe(false);
+    head = 403;
+    expect(await testIt('This server refuses access (403).')).toBe(false);
+    head = 'reset';
+    expect(await testIt('Reachable: folo serve 0.1.0, but access could not be confirmed.')).toBe(false);
+    head = 404;
+    expect(await testIt('but access could not be confirmed.')).toBe(false);
+    head = 200;
+    expect(await testIt('Reachable: folo serve 0.1.0')).toBe(true);
+    c.unmount();
+    target.remove();
+  });
+
   it('offers demo data while no server answers, as a choice that reloads with ?mock=1 (v-shell N1)', async () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('Failed to fetch');
