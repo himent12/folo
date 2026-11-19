@@ -211,10 +211,14 @@ export interface Api {
   addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded>;
   /** Adds the images of a folder (or one image file) on the server's machine, read in place. */
   importLabelImages(jobId: string, path: string): Promise<LabelImagesAdded>;
-  /** Labels drawn by hand: they replace the image's boxes and it becomes `labeled` by `manual` (none: a background image). */
-  updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage>;
-  /** Marks a labeled image's labels as checked by a person (or not), leaving its boxes as they are. */
-  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean): Promise<LabelImage>;
+  /**
+   * Labels drawn by hand: they replace the image's boxes and it becomes `labeled` by `manual` (none: a background image).
+   * `expect`: the revision (lib/label `boxRevision`) of the boxes the edit was made on; `409 label_boxes_changed` once
+   * the image has others (an older server ignores it).
+   */
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[], expect?: string): Promise<LabelImage>;
+  /** Marks a labeled image's labels as checked by a person (or not), leaving its boxes as they are; `expect` as above. */
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean, expect?: string): Promise<LabelImage>;
   deleteLabelImage(jobId: string, imageId: string): Promise<void>;
   startLabeling(jobId: string, body: StartLabeling): Promise<LabelJob>;
   stopLabeling(jobId: string): Promise<LabelJob>;
@@ -515,7 +519,7 @@ export class HttpApi implements Api {
   labelImages(jobId: string, q: LabelImagesQuery = {}, signal?: AbortSignal) {
     // A page without its images, or without the `total` that bounds the paging, would stop LiveLabelJob's paging
     // early and show a truncated job as whole (review round 2).
-    return this.#envelope<LabelImagePage>(`/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, offset: q.offset, limit: q.limit })}`, 'images', true, signal);
+    return this.#envelope<LabelImagePage>(`/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, ids: q.ids?.join(','), offset: q.offset, limit: q.limit })}`, 'images', true, signal);
   }
   async addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void) {
     const send = (chunk: File[]) => {
@@ -528,11 +532,11 @@ export class HttpApi implements Api {
   importLabelImages(jobId: string, path: string) {
     return this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, { path });
   }
-  updateLabelImage(jobId: string, imageId: string, boxes: Box[]) {
-    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { boxes });
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[], expect?: string) {
+    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { boxes, expect });
   }
-  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean) {
-    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { reviewed });
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean, expect?: string) {
+    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { reviewed, expect });
   }
   deleteLabelImage(jobId: string, imageId: string) {
     return this.#req<void>('DELETE', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`);

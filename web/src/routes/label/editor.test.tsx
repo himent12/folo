@@ -4,9 +4,11 @@
 // topmost dialog, the keyboard's way to add, move and resize a box, and "Ask the agent again" following its run.
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Box, LabelImage } from '$lib/api/types';
+import { boxRevision } from '$lib/label';
 import { parse, router } from '$lib/router';
 import { tabHistory } from '$lib/tabHistory.testing';
 import { toast } from '$lib/ui/toast';
@@ -537,6 +539,165 @@ describe('the labeling editor: reviewing', () => {
       expect(description()).toMatch(/reviewed$/);
     });
     expect(description()).not.toMatch(/Last ask failed/);
+  });
+});
+
+describe('the labeling editor: boxes changed elsewhere while a click was on its way (sweep 4 #318)', () => {
+  /** Holds the editor's next call of `method` until `go()`; the others (another client's) go through. */
+  function hold<K extends 'reviewLabelImage' | 'updateLabelImage'>(method: K) {
+    const gate = deferred<void>();
+    const real = hub.api[method].bind(hub.api) as (...a: unknown[]) => Promise<LabelImage>;
+    const spy = vi.spyOn(hub.api, method).mockImplementation(((...a: unknown[]) => gate.promise.then(() => real(...a))) as never);
+    return { real, spy, go: () => gate.resolve() };
+  }
+  const status = () => editor()!.querySelector('[role="status"]')?.textContent ?? '';
+
+  it('refuses "Looks right" once the boxes it was clicked on were replaced, and shows the new ones to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    const shown = boxCount();
+    expect(shown).toBeGreaterThan(0);
+    const review = hold('reviewLabelImage');
+    click(inEditor('Looks right'));
+    // Meanwhile the CLI clears the boxes and takes the review back (folo label set --clear, folo label review --undo).
+    await hub.api.updateLabelImage('lb_51d0', '23', []);
+    await review.real('lb_51d0', '23', false);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(boxCount()).toBe(0);
+    });
+    review.go();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(status()).toMatch(/Changed elsewhere/);
+    });
+    expect(review.spy.mock.calls[0]![3]).toMatch(new RegExp(`^${shown}-`));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 23 });
+    expect(page.images[22]).toMatchObject({ id: '23', boxes: [], reviewed: false });
+    // Still on this image, its new labels to look at.
+    expect(router.route.query.get('image')).toBe('23');
+    expect(inEditor('Looks right')).toBeDefined();
+  });
+
+  it('refuses a save once another client saved other boxes, and keeps the edits over those', async () => {
+    await openEditor('1');
+    const save = hold('updateLabelImage');
+    click(inEditor('Add box'));
+    click(inEditor('Save'));
+    const theirs = [
+      { class: 0, x1: 1, y1: 1, x2: 20, y2: 20 },
+      { class: 1, x1: 30, y1: 30, x2: 60, y2: 60 },
+    ];
+    await save.real('lb_7c21', '1', theirs);
+    save.go();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(status()).toMatch(/Changed elsewhere while you edited/);
+    });
+    expect((await hub.api.labelImages('lb_7c21', { limit: 1 })).images[0]!.boxes).toEqual(theirs);
+    expect(boxCount()).toBe(1);
+    expect(footer()).toMatch(/Unsaved changes/);
+    // Discard goes back to their boxes, not to the ones this editor opened with.
+    click(inEditor('Discard'));
+    expect(boxCount()).toBe(2);
+  });
+
+  // #334 review: the job's stream, its image events held back from `hold()` until `release()`; `send` tells one now.
+  function stream() {
+    const real = hub.api.labelEvents.bind(hub.api);
+    let held: LabelImage[] | null = null;
+    let tell: ((img: LabelImage) => void) | undefined;
+    vi.spyOn(hub.api, 'labelEvents').mockImplementation((id, h) => {
+      tell = h.image;
+      return real(id, { ...h, image: (img) => (held ? held.push(img) : tell?.(img)) });
+    });
+    return {
+      hold: () => (held = []),
+      release: () => {
+        const due = held ?? [];
+        held = null;
+        due.forEach((img) => tell?.(img));
+      },
+      send: (img: LabelImage) => tell?.(img),
+    };
+  }
+  /** Holds the editor's load of image `id` alone (after a refused mark) until `go()`, or fails it with `fail()`. */
+  function holdLoad() {
+    const gate = deferred<boolean>();
+    const list = hub.api.labelImages.bind(hub.api);
+    const spy = vi.spyOn(hub.api, 'labelImages').mockImplementation((...a) =>
+      a[1]?.ids ? gate.promise.then((ok) => (ok ? list(...a) : Promise.reject(new Error('down')))) : list(...a),
+    );
+    return { spy, go: () => gate.resolve(true), fail: () => gate.resolve(false) };
+  }
+  /** Image 23 of the reviewed job open, its boxes cleared and its review taken back by the CLI, the stream not told yet. */
+  async function clearedUntold() {
+    const events = stream();
+    await openEditor('23', 'lb_51d0');
+    const shown = boxCount();
+    expect(shown).toBeGreaterThan(0);
+    events.hold();
+    await hub.api.updateLabelImage('lb_51d0', '23', []);
+    await hub.api.reviewLabelImage('lb_51d0', '23', false);
+    return { events, shown };
+  }
+
+  it('after a refused "Looks right" the stream has not explained, loads the new boxes before asking to look again', async () => {
+    const { events, shown } = await clearedUntold();
+    const load = holdLoad();
+    click(inEditor('Looks right'));
+    await vi.waitFor(() => expect(load.spy).toHaveBeenCalledWith('lb_51d0', { ids: ['23'] }));
+    flushSync();
+    // Refused, but not yet asking for a look at boxes it has not loaded.
+    expect(status()).not.toMatch(/Changed elsewhere/);
+    expect(boxCount()).toBe(shown);
+    load.go();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(status()).toMatch(/Changed elsewhere.*Check the labels shown now/);
+    });
+    expect(boxCount()).toBe(0);
+    expect(router.route.query.get('image')).toBe('23');
+    // The stream's news, late, changes nothing more.
+    events.release();
+    flushSync();
+    expect(boxCount()).toBe(0);
+    expect(inEditor('Looks right')).toBeDefined();
+  });
+
+  it('says the new boxes could not be loaded, never that the ones shown are current, when that load fails', async () => {
+    const { shown } = await clearedUntold();
+    holdLoad().fail();
+    click(inEditor('Looks right'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.querySelector('[role="alert"]')?.textContent).toMatch(/Changed elsewhere.*could not be loaded/);
+    });
+    expect(editor()!.textContent).not.toMatch(/shown now/);
+    expect(boxCount()).toBe(shown);
+  });
+
+  it('marks boxes saved again as another revision that looks the same here (0 as -0) with that newest revision', async () => {
+    const events = stream();
+    await openEditor('23', 'lb_51d0');
+    const img = (await hub.api.labelImages('lb_51d0', { ids: ['23'] })).images[0]!;
+    const zero = { ...img, boxes: img.boxes.map((b, i) => (i ? b : { ...b, x1: 0 })) };
+    const negZero = { ...zero, boxes: zero.boxes.map((b, i) => (i ? b : { ...b, x1: -0 })) };
+    expect(boxRevision(negZero.boxes)).not.toBe(boxRevision(zero.boxes));
+    events.send(zero);
+    flushSync();
+    events.send(negZero);
+    flushSync();
+    // The server has the -0 boxes now and takes a mark made on their revision only.
+    const review = vi.spyOn(hub.api, 'reviewLabelImage').mockImplementation(async (_job, _id, reviewed, expect) => {
+      if (expect !== boxRevision(negZero.boxes)) throw new ApiError(409, 'label_boxes_changed', 'other boxes');
+      return { ...negZero, reviewed };
+    });
+    click(inEditor('Looks right'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).not.toBe('23');
+    });
+    expect(review).toHaveBeenCalledTimes(1);
   });
 });
 

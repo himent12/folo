@@ -1,7 +1,7 @@
 // Agent labeling's rules (docs/API.md, Agent labeling), shared by the forms that check what a person typed and the
 // in-browser mock that answers as the server would.
 
-import type { LabelAgentId } from './api/types';
+import type { Box, LabelAgentId } from './api/types';
 
 /** The feature a server lists in `/api/system` when it has the `/api/label` endpoints. */
 export const LABEL_FEATURE = 'agent_labeling';
@@ -66,4 +66,20 @@ export function classChangeError(prev: readonly string[], next: readonly string[
   if (!hasBoxes) return null;
   if (next.length < prev.length) return 'Labels refer to classes by their place in the list, so classes can be renamed or added, not removed.';
   return null;
+}
+
+/**
+ * The revision of an image's boxes, `"<count>-<hash>"` (`folo_api::label_box_revision`): FNV-1a 32 over each box's
+ * class (u32) and x1, y1, x2, y2 (f32 bits), little-endian. Sent as `expect` with a change made on these boxes, so
+ * the server refuses it (`409 label_boxes_changed`) once they are other boxes.
+ */
+export function boxRevision(boxes: readonly Box[]): string {
+  const bytes = new DataView(new ArrayBuffer(20));
+  let h = 0x811c9dc5;
+  for (const b of boxes) {
+    bytes.setUint32(0, b.class, true);
+    [b.x1, b.y1, b.x2, b.y2].forEach((v, i) => bytes.setFloat32(4 + 4 * i, v, true));
+    for (let i = 0; i < 20; i++) h = Math.imul(h ^ bytes.getUint8(i), 0x01000193) >>> 0;
+  }
+  return `${boxes.length}-${h.toString(16).padStart(8, '0')}`;
 }
