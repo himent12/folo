@@ -49,11 +49,14 @@ use cli::{Cli, Command};
 use output::{CliError, ExitCode, Out};
 
 fn main() -> std::process::ExitCode {
-    let json = std::env::args_os().skip(1).any(|a| a == "--json");
-    let out = Out { json };
     let cli = match parse() {
         Ok(cli) => cli,
-        Err(e) => return usage_error(out, e),
+        Err(e) => {
+            // `folo mcp`'s stdout is the protocol's also when its arguments do not parse.
+            let args: Vec<_> = std::env::args_os().collect();
+            let json = args.iter().skip(1).any(|a| a == "--json") && !names_mcp(&args);
+            return usage_error(Out { json }, e);
+        }
     };
     // `folo mcp`'s stdout belongs to the protocol, also with --json: its errors go to stderr only.
     let out = Out { json: cli.json && !matches!(cli.command, Command::Mcp(_)) };
@@ -84,6 +87,15 @@ fn parse() -> Result<Cli, clap::Error> {
             .collect();
     }
     Ok(cli)
+}
+
+/// Whether a command line that did not parse runs `folo mcp`: clap parses it again, skipping what it cannot read,
+/// so the subcommand is found wherever the flags are.
+fn names_mcp(args: &[std::ffi::OsString]) -> bool {
+    Cli::command()
+        .ignore_errors(true)
+        .try_get_matches_from(args)
+        .is_ok_and(|m| m.subcommand_name() == Some("mcp"))
 }
 
 /// Help and version go to stdout with exit 0; real parse errors are usage errors (exit 2).

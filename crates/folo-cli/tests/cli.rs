@@ -310,18 +310,26 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
 }
 
 /// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
-/// stderr, not an error envelope on stdout.
+/// stderr, not an error envelope on stdout. So is a usage error clap reports, wherever `--json` is; other commands
+/// keep their JSON usage error.
 #[test]
 fn mcp_errors_stay_off_stdout_with_json() {
-    let out = folo_cmd()
-        .args(["mcp", "--json", "--server", "ftp://example.com"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
-    assert!(stderr.contains("--server"), "{stderr}");
+    for (args, want) in [
+        (&["mcp", "--json", "--server", "ftp://example.com"][..], "--server"),
+        (&["mcp", "--json", "--extra"], "--extra"),
+        (&["--json", "mcp", "--extra"], "--extra"),
+        (&["mcp", "--extra", "--json"], "--extra"),
+        (&["mcp", "--json", "--server"], "--server"),
+    ] {
+        let out = folo_cmd().args(args).stdin(Stdio::null()).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: stdout: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(stderr.contains(want), "{args:?}: {stderr}");
+    }
+    let (code, stdout, _) = folo(&["--json", "serve", "--extra"]);
+    assert_eq!(code, 2);
+    assert_eq!(json_lines(&stdout)[0]["error"]["code"], "usage");
 }
 
 #[test]
