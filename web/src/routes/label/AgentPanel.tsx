@@ -1,8 +1,8 @@
 /**
  * The job page's rail: first the run, "Label N images" while some have no labels (naming the agent, model and effort
- * it will use), live progress with Stop while an agent works, and how the last run ended (a failed one with its cause,
- * the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told (the
- * instructions, the classes). The instructions cannot be typed in while a run starts: what is saved then is what
+ * it will use), live progress with Stop while an agent works, and how the last run ended and what it used (a failed one
+ * with its cause, the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told
+ * (the instructions, the classes). The instructions cannot be typed in while a run starts: what is saved then is what
  * the agent gets.
  */
 import CircleAlert from '$icons/circle-alert';
@@ -181,7 +181,8 @@ export default function AgentPanel(props: AgentPanelProps) {
               </>
             )}
             {props.startError ? <ErrorState error={props.startError} title="Could not start the agent" compact /> : null}
-            {run.get() && !failed.get() ? <LastRun job={props.job} run={run.get()!} agents={props.agents} /> : null}
+            {/* A failed run too: the calls it made before it stopped were paid for, and that counts in whether to try again. */}
+            {run.get() ? <LastRun job={props.job} run={run.get()!} agents={props.agents} /> : null}
           </>
         )}
       </div>
