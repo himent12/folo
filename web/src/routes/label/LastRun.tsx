@@ -6,6 +6,7 @@ import { computed, css, For } from 'fw';
 import type { LabelAgent, LabelJob, LabelRun } from '$lib/api/types';
 import { ago, num } from '$lib/format';
 import Meta from '$lib/ui/Meta';
+import ModelId from './ModelId';
 import { OUTCOME, runAgent, usageFacts } from './words';
 
 export interface LastRunProps {
@@ -28,11 +29,7 @@ export default function LastRun(props: LastRunProps) {
           <span>{num(props.run.done)} labeled</span>
           {props.run.failed ? <span>{num(props.run.failed)} failed</span> : null}
           <span>{who.get()[0]}</span>
-          {/* A model id the agent does not list (a Bedrock profile's ARN) can be wider than the rail: the one item that
-              may cut itself (ui/Meta), whole in its tooltip. */}
-          <span class="truncate" title={who.get()[1]}>
-            {who.get()[1]}
-          </span>
+          <ModelId id={who.get()[1]} />
           {props.run.finished ? <span>{ago(props.run.finished)}</span> : null}
         </Meta>
       </p>
@@ -57,7 +54,7 @@ export default function LastRun(props: LastRunProps) {
 }
 
 css`
-  /* One column no wider than the rail: a long model id cuts itself instead of widening the panel and the page. */
+  /* One column no wider than the rail: a long model id wraps (ModelId) instead of widening the panel and the page. */
   .last {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

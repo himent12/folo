@@ -71,7 +71,8 @@ describe('AgentPanel after a failed run', () => {
 });
 
 // A model id the agent does not list, as `start` takes it (up to 100 characters): one unbreakable item that widened
-// the rail, and the page to 626 px at 390 (#322 review). It cuts itself in a column no wider than the rail.
+// the rail, and the page to 626 px at 390 (#322 review). The job page is where a person reads which model ran, so the id
+// stays whole there (no ellipsis, no tooltip that Tab and touch never show) and wraps in a column no wider than the rail.
 const ARN = 'arn:aws:bedrock:us-west-2:123456789012:inference-profile/us.anthropic.claude-sonnet-4-20250514-v1:0';
 const runs: [string, (job: LabelJob) => LabelJob][] = [
   ['failed', (job) => ({ ...job, run: { ...job.run!, model: ARN } })],
@@ -81,22 +82,27 @@ const runs: [string, (job: LabelJob) => LabelJob][] = [
 
 describe('AgentPanel with a long model id', () => {
   for (const [state, edit] of runs) {
-    it(`cuts it in the ${state} run's line, whole in its tooltip`, async () => {
+    it(`shows it whole in the ${state} run's line, an item that wraps`, async () => {
       const { target, view } = await panel(edit);
       const item = [...target.querySelectorAll<HTMLElement>('.ui-meta > *')].find((e) => e.textContent?.trim() === ARN);
-      expect(item?.classList.contains('truncate')).toBe(true);
-      expect(item?.getAttribute('title')).toBe(ARN);
+      expect(item?.classList.contains('model')).toBe(true);
+      // Not cut, and not left to a tooltip: no ellipsis or title on it, inside it or around it.
+      expect(item?.closest('.truncate, [title]')).toBe(null);
+      expect(item?.querySelector('.truncate, [title]')).toBe(null);
       view.unmount();
     });
   }
 
-  it("keeps each line's column, and the jobs list's Agent cell, no wider than their box", () => {
-    // The rules themselves (happy-dom lays nothing out): a grid column `minmax(0, 1fr)`, a table cell `max-width: 0`.
+  it("wraps the id in each line's column, no wider than the rail; the jobs list's Agent cell stays capped", () => {
+    // The rules themselves (happy-dom lays nothing out): the id wraps anywhere, each line is one `minmax(0, 1fr)` grid
+    // column, and the jobs list (a summary row, the whole id a click away on the job page) keeps `max-width: 0`.
     const rule = (file: string, selector: string) => {
       const src = readFileSync(resolve(process.cwd(), file), 'utf8');
       const at = src.indexOf(`\n  ${selector} {`);
       return at < 0 ? '' : src.slice(at, src.indexOf('}', at));
     };
+    expect(rule('src/routes/label/ModelId.tsx', ':global(.ui-meta) > .model')).toContain('white-space: normal');
+    expect(rule('src/routes/label/ModelId.tsx', '.model > span')).toMatch(/min-width: 0;\s+overflow-wrap: anywhere/);
     expect(rule('src/routes/label/LastRun.tsx', '.last')).toContain('grid-template-columns: minmax(0, 1fr)');
     expect(rule('src/routes/label/AgentPanel.tsx', '.progress')).toContain('grid-template-columns: minmax(0, 1fr)');
     expect(rule('src/routes/LabelJobs.tsx', '.name-cell,\n  .agent-cell')).toContain('max-width: 0');

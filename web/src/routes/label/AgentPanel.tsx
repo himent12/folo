@@ -29,6 +29,7 @@ import Callout from '../run/Callout';
 import AgentFields from './AgentFields';
 import type { AgentChoice } from './agentChoice';
 import LastRun from './LastRun';
+import ModelId from './ModelId';
 import { images, modelLabel, runAgent, toLabel } from './words';
 
 export interface AgentPanelProps {
@@ -59,7 +60,7 @@ export default function AgentPanel(props: AgentPanelProps) {
   const uid = createUniqueId();
   const running = computed(() => props.job.status !== 'idle');
   const run = computed(() => props.job.run);
-  const who = computed(() => (run.get() ? runAgent(run.get()!, props.agents) : ['', '']));
+  const who = computed((): [string, string] => (run.get() ? runAgent(run.get()!, props.agents) : ['', '']));
   const failed = computed(() => !running.get() && run.get()?.outcome === 'failed');
   const n = computed(() => toLabel(props.job));
   const agent = computed(() => props.choice.agent);
@@ -118,10 +119,7 @@ export default function AgentPanel(props: AgentPanelProps) {
               <p class="p-meta">
                 <Meta>
                   <span>{who.get()[0]}</span>
-                  {/* A free-text model id, the one item that may cut itself (ui/Meta, LastRun), whole in its tooltip. */}
-                  <span class="truncate" title={who.get()[1]}>
-                    {who.get()[1]}
-                  </span>
+                  <ModelId id={who.get()[1]} />
                   <span>{run.get()!.effort} effort</span>
                   {run.get()!.fast ? <span>fast</span> : null}
                 </Meta>
@@ -293,7 +291,7 @@ css`
     height: 8px;
     border-radius: 2px;
   }
-  /* One column no wider than the rail: a long model id cuts itself instead of widening the panel and the page. */
+  /* One column no wider than the rail: a long model id wraps (ModelId) instead of widening the panel and the page. */
   .progress {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
