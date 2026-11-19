@@ -280,39 +280,26 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
 }
 
 /// Every image under `sources` (folders recursively, in name order), with its path relative to the folder it was
-/// found in (just the file name for a file source). The folder `save` (`predict --save`) is left out wherever a source
-/// folder holds it, compared by canonical path, so its earlier annotated copies are never read as inputs; a source
-/// folder that is `save` itself is a usage error.
-fn collect_images(sources: &[PathBuf], save: Option<&Path>) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
-    fn walk(dir: &Path, save: Option<&Path>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// found in (just the file name for a file source).
+fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let mut entries: Vec<PathBuf> =
             std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                if save.is_none_or(|s| std::fs::canonicalize(&p).ok().as_deref() != Some(s)) {
-                    walk(&p, save, out)?;
-                }
+                walk(&p, out)?;
             } else if folo_data::is_image_path(&p) {
                 out.push(p);
             }
         }
         Ok(())
     }
-    let save = save.and_then(|d| std::fs::canonicalize(d).ok());
     let mut out = Vec::new();
     for s in sources {
         if s.is_dir() {
-            if save.is_some() && std::fs::canonicalize(s).ok() == save {
-                return Err(CliError::new(
-                    ExitCode::Usage,
-                    "usage",
-                    format!("--save is the source folder {}", folo_api::json::path(s)),
-                )
-                .hint("pass a --save folder outside the source folders"));
-            }
             let mut found = Vec::new();
-            walk(s, save.as_deref(), &mut found).map_err(|e| {
+            walk(s, &mut found).map_err(|e| {
                 CliError::new(
                     ExitCode::Runtime,
                     "io_error",
@@ -394,8 +381,37 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// `predict --save DIR` must lie outside every source folder and hold no source, else the annotated copies are read
+/// as images on the next run (or replace a source). Canonical paths are compared; a `DIR` that does not exist yet
+/// is its nearest existing ancestor's canonical path plus the rest, so the first run gets the same answer.
+fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), CliError> {
+    let Some(save) = save else { return Ok(()) };
+    let abs = std::path::absolute(save).unwrap_or_else(|_| save.to_path_buf());
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let Some(dir) = abs.ancestors().find_map(|a| Some(canon(a)?.join(abs.strip_prefix(a).ok()?))) else {
+        return Ok(());
+    };
+    for s in sources {
+        let Some(src) = canon(s) else { continue };
+        let (sp, sv) = (folo_api::json::path(s), folo_api::json::path(save));
+        let message = if src.is_dir() && dir.starts_with(&src) {
+            let rel = if dir == src { "is" } else { "is inside" };
+            format!("--save {sv} {rel} the input folder {sp}: the next run would read the copies as images")
+        } else if src.starts_with(&dir) {
+            format!("the input {sp} is inside the --save folder {sv}: the copies could replace it")
+        } else {
+            continue;
+        };
+        return Err(
+            CliError::new(ExitCode::Usage, "usage", message).hint("save to a folder outside the inputs")
+        );
+    }
+    Ok(())
+}
+
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
+    check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model(
         "predict",
@@ -405,7 +421,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         args.tensor_cores,
         &shape,
     )?;
-    let images = collect_images(&args.sources, args.save.as_deref())?;
+    let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
         conf: args.conf,

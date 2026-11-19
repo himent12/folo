@@ -10,8 +10,6 @@ use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
-mod save;
-
 /// Runs `folo` with `args`; engine commands get `--device cpu` (their `auto` would pick a GPU when there is one).
 fn folo(args: &[&str]) -> (i32, Vec<Value>, String) {
     folo_with(args, None)
@@ -223,6 +221,27 @@ fn train_val_predict_export_with_json() {
         let decimals = v.to_string().split_once('.').map_or(0, |(_, d)| d.len());
         assert!(v.as_f64().unwrap() >= 0.0 && decimals <= 4, "{k}: {v}");
     }
+    // --save never overwrites a source, and same-named sources get distinct outputs.
+    let (code, lines, _) =
+        folo(&["predict", "--json", "--model", s(&best), s(&images), "--save", s(&images)]);
+    assert_eq!(code, 2);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "usage");
+    let other = root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(images.join("000008.png"), other.join("000008.png")).unwrap();
+    let both = root.join("pred2");
+    let (code, _, stderr) = folo(&[
+        "predict",
+        "--json",
+        "--model",
+        s(&best),
+        s(&images.join("000008.png")),
+        s(&other),
+        "--save",
+        s(&both),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(both.join("000008.png").is_file() && both.join("000008_2.png").is_file());
     let (code, lines, _) = folo(&["val", "--json", "--model", s(&best), "--data", s(data), "--conf", "2"]);
     assert_eq!(code, 2);
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config");
@@ -330,6 +349,32 @@ fn train_val_predict_export_with_json() {
     let (code, lines, _) = folo(&["export", "--json", "--model", s(&best), "--output", s(&rel)]);
     assert_eq!(code, 2);
     assert_eq!(lines.last().unwrap()["error"]["code"], "usage");
+    // A --save destination hard-linked to a source is replaced, never written through.
+    let linked = root.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::copy(images.join("000009.png"), src.join("h.png")).unwrap();
+    std::fs::hard_link(src.join("h.png"), linked.join("h.png")).unwrap();
+    let before = std::fs::read(src.join("h.png")).unwrap();
+    let (code, _, stderr) = folo(&["predict", "--json", "--model", s(&best), s(&src), "--save", s(&linked)]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(std::fs::read(src.join("h.png")).unwrap(), before, "the source stays byte-identical");
+    // Same-named sources that differ only in case get distinct outputs too.
+    let upper = root.join("upper");
+    std::fs::create_dir_all(&upper).unwrap();
+    std::fs::copy(images.join("000009.png"), upper.join("A.png")).unwrap();
+    let lower = root.join("lower");
+    std::fs::create_dir_all(&lower).unwrap();
+    std::fs::copy(images.join("000009.png"), lower.join("a.png")).unwrap();
+    let cased = root.join("pred3");
+    let (code, lines, stderr) =
+        folo(&["predict", "--json", "--model", s(&best), s(&upper), s(&lower), "--save", s(&cased)]);
+    assert_eq!(code, 0, "{stderr}");
+    let saved: Vec<String> =
+        lines.iter().filter_map(|l| l["saved"].as_str().map(str::to_lowercase)).collect();
+    assert_eq!(saved.len(), 2);
+    assert_ne!(saved[0], saved[1]);
 
     // a negative number reaches the range check (not a clap parse error).
     let (code, lines, _) =

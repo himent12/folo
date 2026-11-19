@@ -200,6 +200,56 @@ fn usage_errors_name_the_missing_argument() {
     }
 }
 
+/// `predict --save` overlapping a source (inside it at any depth, before or after it exists, or holding one) is a
+/// usage error before the model is opened, whatever the spelling, and writes nothing (issue #313: the second run
+/// read the first run's copies as images).
+#[test]
+fn predict_save_overlapping_a_source_is_a_usage_error() {
+    let dir = TestDir::new("cli-predict-save");
+    std::fs::create_dir_all(dir.join("photos/out")).unwrap();
+    std::fs::create_dir_all(dir.join("photos/sub")).unwrap();
+    std::fs::write(dir.join("photos/a.jpg"), b"x").unwrap();
+    let listing = |p: &str| -> Vec<_> {
+        std::fs::read_dir(dir.join(p)).unwrap().map(|e| e.unwrap().file_name()).collect()
+    };
+    let before = (listing("."), listing("photos"));
+    let absolute = dir.join("photos/annotated");
+    let mut refused = vec![
+        ("photos", "photos/annotated"),
+        ("photos", "photos/out"),
+        ("photos", "photos/sub/deep/new"),
+        ("photos", "photos"),
+        ("photos", "./photos/annotated"),
+        ("photos", "photos/sub/../annotated"),
+        ("photos", absolute.to_str().unwrap()),
+        ("photos/sub", "photos"),
+        ("photos/a.jpg", "photos"),
+    ];
+    if cfg!(windows) {
+        refused.push(("photos", "PHOTOS/annotated"));
+    }
+    let predict = |src: &str, save: &str| {
+        let out = folo_cmd()
+            .current_dir(&dir)
+            .args(["predict", "--json", "--model", "none.folo", src, "--save", save])
+            .output()
+            .unwrap();
+        (out.status.code().unwrap(), json_lines(&String::from_utf8(out.stdout).unwrap()).pop().unwrap())
+    };
+    for (src, save) in refused {
+        let (code, last) = predict(src, save);
+        assert_eq!(code, 2, "{src} --save {save}: {last}");
+        assert_eq!(last["error"]["code"], "usage", "{src} --save {save}: {last}");
+        assert!(last["error"]["message"].as_str().unwrap().contains("--save"), "{last}");
+    }
+    assert_eq!((listing("."), listing("photos")), before, "a refused run creates nothing");
+    // Outside the sources (also a sibling sharing the name's start) this check passes: the missing model stops it.
+    for save in ["annotated", "photos-annotated"] {
+        let (code, last) = predict("photos", save);
+        assert_eq!((code, &last["error"]["code"]), (3, &"model_not_found".into()), "--save {save}: {last}");
+    }
+}
+
 /// A `--data-dir` that is a file is a usage error up front: `serve` reported `listening` and `mcp` and `cloud` ran,
 /// and every write then failed with `internal` ("creating a folder in <file>/datasets").
 #[test]

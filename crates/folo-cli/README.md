@@ -103,7 +103,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/cli.rs` | Global conventions: JSON lines on stdout, stable exit codes |
 | `tests/cli_values.rs` | Multi-value flags in every documented form |
 | `tests/studio_cli.rs` | Studio's "CLI command" strings (`web/src/lib/trainCli.fixtures.json`) parse with the real tree |
-| `tests/engine/` | `train`, `val`, `predict`, `export` and the weights plumbing end to end on a tiny synthetic dataset (`main.rs`); `save.rs`: `predict --save` never replaces or re-reads a source image |
+| `tests/engine.rs` | `train`, `val`, `predict`, `export` and the weights plumbing end to end on a tiny synthetic dataset |
 | `tests/dataset.rs` | `dataset synth \| stats \| check \| convert` end to end |
 | `tests/weights.rs` | `weights pull` against a release server on loopback, and the `gh` fallback |
 | `tests/cloud.rs` | `folo cloud` against a `folo serve --token` child as a `remote` connection |
@@ -113,7 +113,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/onnx.rs` | ONNX export parity against onnxruntime (see below) |
 | `tests/mcp/` | `folo mcp` over raw JSON-RPC: `main.rs` (the binary), `harness.rs` (client, schema checks, `ALL_TOOLS`), `protocol.rs`, `real_store.rs`, `proxy.rs`, `confine.rs` |
 
-- No test needs a GPU: `tests/engine/` passes `--device cpu` to the engine commands.
+- No test needs a GPU: `tests/engine.rs` passes `--device cpu` to the engine commands.
 - `tests/onnx.rs` needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, else the venv at
   `FOLO_ONNX_VENV`). Without one it prints why and passes, unless `FOLO_ONNX_REQUIRED=1`, which CI's `rust (linux)`
   job sets.
