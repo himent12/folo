@@ -280,26 +280,39 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
 }
 
 /// Every image under `sources` (folders recursively, in name order), with its path relative to the folder it was
-/// found in (just the file name for a file source).
-fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// found in (just the file name for a file source). The folder `save` (`predict --save`) is left out wherever a source
+/// folder holds it, compared by canonical path, so its earlier annotated copies are never read as inputs; a source
+/// folder that is `save` itself is a usage error.
+fn collect_images(sources: &[PathBuf], save: Option<&Path>) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
+    fn walk(dir: &Path, save: Option<&Path>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let mut entries: Vec<PathBuf> =
             std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                walk(&p, out)?;
+                if save.is_none_or(|s| std::fs::canonicalize(&p).ok().as_deref() != Some(s)) {
+                    walk(&p, save, out)?;
+                }
             } else if folo_data::is_image_path(&p) {
                 out.push(p);
             }
         }
         Ok(())
     }
+    let save = save.and_then(|d| std::fs::canonicalize(d).ok());
     let mut out = Vec::new();
     for s in sources {
         if s.is_dir() {
+            if save.is_some() && std::fs::canonicalize(s).ok() == save {
+                return Err(CliError::new(
+                    ExitCode::Usage,
+                    "usage",
+                    format!("--save is the source folder {}", folo_api::json::path(s)),
+                )
+                .hint("pass a --save folder outside the source folders"));
+            }
             let mut found = Vec::new();
-            walk(s, &mut found).map_err(|e| {
+            walk(s, save.as_deref(), &mut found).map_err(|e| {
                 CliError::new(
                     ExitCode::Runtime,
                     "io_error",
@@ -392,7 +405,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         args.tensor_cores,
         &shape,
     )?;
-    let images = collect_images(&args.sources)?;
+    let images = collect_images(&args.sources, args.save.as_deref())?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
         conf: args.conf,
