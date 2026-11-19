@@ -136,7 +136,7 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
         .ok()
         .filter(|r| r.status().is_success())
         // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
-        .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok())
+        .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok"))
 }
 
 /// Whether a call failed on its connection: it could not connect in time, or the connection was refused,

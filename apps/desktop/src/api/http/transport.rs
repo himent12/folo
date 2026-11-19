@@ -75,6 +75,27 @@ pub(crate) fn needs_token() -> ApiError {
     )
 }
 
+/// A 4xx or 5xx answer without FOLO's error JSON (none, or not whole).
+pub(super) fn status_error(status: u16) -> ApiError {
+    match status {
+        401 => needs_token(),
+        _ => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
+    }
+}
+
+/// FOLO's error JSON as an [`ApiError`], its words as sentences.
+pub(super) fn server_error(b: folo_api::ErrorBody) -> ApiError {
+    // `folo serve --token`: the server's words are for an HTTP client that can send one.
+    if b.error.code == "unauthorized" {
+        return needs_token();
+    }
+    ApiError {
+        code: b.error.code,
+        message: sentence(&b.error.message),
+        hint: b.error.hint.as_deref().map(sentence),
+    }
+}
+
 /// Percent-encode one path segment (ids are opaque strings).
 pub(super) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -163,6 +184,40 @@ impl HttpBackend {
         self.base.trim_start_matches("http://").trim_start_matches("https://").to_string()
     }
 
+    /// The address as scheme, host and port, for the log: a pasted URL's path, query or user can hold a token.
+    pub(super) fn origin(&self) -> String {
+        let uri = self.base.parse::<ureq::http::Uri>().ok();
+        let (scheme, host) =
+            uri.as_ref().map_or(("", ""), |u| (u.scheme_str().unwrap_or(""), u.host().unwrap_or("")));
+        let port = uri.as_ref().and_then(|u| u.port_u16()).map(|p| format!(":{p}")).unwrap_or_default();
+        format!("{scheme}://{host}{port}")
+    }
+
+    /// `/api/health` answered `status` without FOLO's shape (see `health`): a web page (another
+    /// server, a sign-in page or a proxy's error page, or folo serve's own Studio page when a path
+    /// follows the port, "http://127.0.0.1:7878/subpath"), another JSON, or nothing. Retrying can't
+    /// help; the address is what to check, and with a path after the port, the address without it.
+    pub(super) fn not_folo(&self, status: u16) -> ApiError {
+        eprintln!("{}", self.not_folo_log(status));
+        let authority = self.base.find("://").map_or(0, |i| i + 3);
+        let hint = match self.base[authority..].find('/') {
+            Some(path) => format!(
+                "Check the address: folo serve answers at its base address. Try {}.",
+                &self.base[..authority + path]
+            ),
+            None => "Check the address: it should be folo serve's base address, like http://127.0.0.1:7878."
+                .into(),
+        };
+        ApiError::new("not_folo", format!("{} answered HTTP {status}, but not as a FOLO server", self.host()))
+            .with_hint(hint)
+    }
+
+    /// [`Self::not_folo`]'s log line: the origin, the status and a fixed reason. Nothing of the
+    /// answer: a proxy's error page or JSON can quote the request, a pasted `?token=` with it.
+    pub(super) fn not_folo_log(&self, status: u16) -> String {
+        format!("folo-desktop: {} answered HTTP {status}, not as a FOLO server", self.origin())
+    }
+
     /// Turn a response into `T`, or the API's error body into an [`ApiError`].
     pub(super) fn decode<T: DeserializeOwned>(
         &self,
@@ -172,15 +227,8 @@ impl HttpBackend {
         if status >= 400 {
             let body: Option<folo_api::ErrorBody> = json(resp.body_mut(), BODY_LIMIT).ok();
             return Err(match body {
-                // `folo serve --token`: the server's words are for an HTTP client that can send one.
-                Some(b) if b.error.code == "unauthorized" => needs_token(),
-                Some(b) => ApiError {
-                    code: b.error.code,
-                    message: sentence(&b.error.message),
-                    hint: b.error.hint.as_deref().map(sentence),
-                },
-                None if status == 401 => needs_token(),
-                None => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
+                Some(b) => server_error(b),
+                None => status_error(status),
             });
         }
         if status == 204 {

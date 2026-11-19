@@ -18,7 +18,7 @@ pub use server::{ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_ser
 pub(crate) use transport::address_ok;
 #[cfg(test)]
 pub(crate) use transport::needs_token;
-use transport::{agent, seg, stream_agent};
+use transport::{BODY_LIMIT, agent, json, seg, server_error, status_error, stream_agent};
 
 /// How long an event stream may take to send its response headers.
 const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
@@ -79,7 +79,30 @@ impl Backend for HttpBackend {
     }
 
     fn health(&self) -> ApiResult<Health> {
-        self.get("/health")
+        let mut resp = self.agent.get(&self.url("/health")).call().map_err(|e| self.unreachable(&e))?;
+        let status = resp.status().as_u16();
+        // An answer is folo serve's exactly when its body has FOLO's shape: on a 2xx a healthy health
+        // (`status: "ok"`, as Studio's `isHealth`), on any other status its error JSON. Such an answer
+        // reads as every call's; anything else came from something else at the address (#349).
+        let body = match resp.status().is_success() {
+            true => json::<Health>(resp.body_mut(), BODY_LIMIT).map(Ok),
+            false => json::<folo_api::ErrorBody>(resp.body_mut(), BODY_LIMIT).map(Err),
+        };
+        match body {
+            Ok(Ok(h)) if h.status == "ok" => Ok(h),
+            Ok(Ok(_)) => Err(self.not_folo(status)),
+            Ok(Err(b)) => Err(server_error(b)),
+            // A body cut off midway was never read whole, so it has no shape to judge: as on any call.
+            Err(ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed)
+                if status >= 400 =>
+            {
+                Err(status_error(status))
+            }
+            Err(e @ (ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed)) => {
+                Err(self.body_failed(e, ""))
+            }
+            Err(_) => Err(self.not_folo(status)),
+        }
     }
 
     fn system(&self) -> ApiResult<SystemResponse> {
@@ -574,8 +597,103 @@ FOLO"
             json("200 OK", "[{\"id\":"),
         ]);
         let api = HttpBackend::new(&url);
-        let codes: Vec<String> = (0..3).map(|_| api.datasets().unwrap_err().code).collect();
+        let errors: Vec<ApiError> = (0..3).map(|_| api.datasets().unwrap_err()).collect();
+        let codes: Vec<&str> = errors.iter().map(|e| e.code.as_str()).collect();
         assert_eq!(codes, ["server_unreachable", "bad_response", "bad_response"]);
+        // Only the health check says "not a FOLO server" (#349): a call other than health keeps its words.
+        assert!(
+            errors[1].message.starts_with("Unexpected response from folo serve: ")
+                && errors[1].hint.is_none()
+        );
+    }
+
+    /// #349: an address with a path after the port ("http://127.0.0.1:7878/subpath") reached folo
+    /// serve's Studio page, and Settings said "Unexpected response from folo serve: json: expected
+    /// value at line 1 column 1". An answer to the health check is folo serve's exactly when its body
+    /// has FOLO's shape, whatever its status: one that hasn't (a web page, another JSON, an unhealthy
+    /// health) says so with its status and the address to check; one that has reads as on any call.
+    #[test]
+    fn an_address_that_answers_but_not_as_folo_serve_says_so() {
+        let page = |status: &str| {
+            let body = "<!doctype html><title>FOLO Studio</title>";
+            format!(
+                "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        };
+        let health =
+            |status: &str| format!(r#"{{ "status": "{status}", "version": "0.1.0", "mock": false }}"#);
+        let forbidden = r#"{ "error": { "code": "forbidden_host", "message": "this server listens on loopback",
+            "hint": "reach it as localhost or 127.0.0.1" } }"#;
+        // Headers, then the link cut inside the body: announces 100 bytes, sends 8.
+        let cut = |status: &str| {
+            format!("HTTP/1.1 {status}\r\ncontent-length: 100\r\nconnection: close\r\n\r\n{{\"error\"")
+                .into_bytes()
+        };
+        let (url, requests) = canned_server(vec![
+            page("200 OK"),
+            json("200 OK", r#"{ "ok": true }"#),
+            page("404 Not Found"),
+            json("200 OK", &health("ok")),
+            json("200 OK", &health("down")),
+            page("403 Forbidden"),
+            page("500 Internal Server Error"),
+            json("403 Forbidden", forbidden),
+            json("401 Unauthorized", r#"{ "error": { "code": "unauthorized", "message": "no token" } }"#),
+            json("500 Internal Server Error", r#"{ "error": { "code": "internal", "message": "boom" } }"#),
+            cut("403 Forbidden"),
+            cut("401 Unauthorized"),
+            cut("200 OK"),
+        ]);
+        let typed = format!("{url}/subpath/");
+        let api = HttpBackend::new(&typed);
+        for status in [200, 200, 404] {
+            let e = api.health().unwrap_err();
+            assert_eq!(e.code, "not_folo");
+            assert_eq!(
+                e.message,
+                format!("{} answered HTTP {status}, but not as a FOLO server", api.describe())
+            );
+            // The address to try instead: the one without the path.
+            assert!(e.hint.unwrap().ends_with(&format!("Try {url}.")));
+            assert!(requests.recv().unwrap().starts_with("GET /subpath/api/health "));
+        }
+        let api = HttpBackend::new(&url);
+        assert_eq!(api.health().unwrap().version, "0.1.0");
+        // An unhealthy health, a sign-in page's 403 and a proxy's 500 page: not FOLO's answers.
+        for status in [200, 403, 500] {
+            let e = api.health().unwrap_err();
+            assert_eq!(
+                e.message,
+                format!("{} answered HTTP {status}, but not as a FOLO server", api.describe())
+            );
+            // No path to drop: what a base address looks like.
+            assert!(e.hint.unwrap().ends_with("base address, like http://127.0.0.1:7878."));
+        }
+        // FOLO's own refusals keep their words: the server's explanation and fix, the token message.
+        let e = api.health().unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("forbidden_host", "This server listens on loopback.")
+        );
+        assert_eq!(e.hint.as_deref(), Some("Reach it as localhost or 127.0.0.1."));
+        assert_eq!(api.health().unwrap_err(), needs_token());
+        assert_eq!(api.health().unwrap_err().code, "internal");
+        // A body cut off midway has no shape to judge: what any call says (main's words).
+        let e = api.health().unwrap_err();
+        assert_eq!((e.code.as_str(), e.message.as_str()), ("http_error", "folo serve answered HTTP 403"));
+        assert_eq!(api.health().unwrap_err(), needs_token());
+        assert_eq!(api.health().unwrap_err().code, "server_unreachable");
+        let addr = url.trim_start_matches("http://");
+        let shouted = HttpBackend::new(&format!("HTTP://{addr}/x"));
+        assert!(shouted.not_folo(200).hint.unwrap().ends_with(&format!("Try HTTP://{addr}.")));
+        // The log names scheme, host and port, the status and a fixed reason: a pasted URL's user,
+        // path or query can hold a token, and an answer's body can quote them.
+        assert_eq!(
+            HttpBackend::new("http://me:pw@127.0.0.1:7865/x?token=s").not_folo_log(403),
+            "folo-desktop: http://127.0.0.1:7865 answered HTTP 403, not as a FOLO server"
+        );
     }
 
     #[test]
@@ -643,6 +761,10 @@ connection: close
                 .to_vec(),
         ]);
         assert!(!probe(&page));
+        // Nor an unhealthy health: the app starts its own server only where nothing healthy answers.
+        let (down, _r) =
+            canned_server(vec![json("200 OK", r#"{ "status": "down", "version": "0.1.0", "mock": false }"#)]);
+        assert!(!probe(&down));
         let api = HttpBackend::new(&url);
         for e in [api.system().unwrap_err(), api.datasets().unwrap_err()] {
             assert_eq!((e.code.as_str(), e.message.as_str()), ("unauthorized", "This server needs a token"));
