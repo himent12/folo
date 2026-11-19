@@ -531,6 +531,7 @@ export default function Run() {
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
               datasetName={datasetName.get()}
+              datasetGone={datasetGone.get()}
               system={system.data ?? (system.error ? null : undefined)}
             />
 

@@ -173,6 +173,20 @@ describe('Outcome', () => {
     target.remove();
   });
 
+  // Sweep 4 (#319): a run whose dataset was removed from FOLO since it failed offers no Check dataset ("Dataset not found").
+  it('offers no Check dataset once the dataset was removed', () => {
+    const run = { ...failed('io error at D:/x.jpg: not found'), error_code: 'data_error', best: null };
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy', datasetGone: true } });
+    flushSync();
+    const acts = [...target.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
+    expect(acts.map((b) => b.textContent?.trim())).toEqual(['Start again', 'Details']);
+    expect(target.querySelector('a[href^="#/datasets/"]')).toBeNull();
+    unmount(c);
+    target.remove();
+  });
+
   const SHORT =
     'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
   const WARMUP = "warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";

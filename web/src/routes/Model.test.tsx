@@ -58,6 +58,11 @@ describe('Model: what was evaluated', () => {
     await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
     expect(target.querySelector('[role="note"][aria-label="Evaluation split"]')).toBeNull();
     expect(text('#pr-title .meta')).toBe('fasteners · validation split · IoU 0.5');
+    // The run's dataset is registered: Evaluated on links it.
+    const runDs = (await hub.api.run((await hub.api.model('m_fast_n')).run_id!)).config.dataset_id;
+    const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
+    await until(() => dd?.querySelector('a'), 'the link');
+    expect(dd?.querySelector('a')?.getAttribute('href')).toBe(`#/datasets/${runDs}`);
     // The matrix's header and notes name its own thresholds: the KPIs above are at another operating point.
     expect(text('#cm-title .meta')).toContain('conf 0.25 · IoU 0.45');
     expect(text('#cm .cm-notes')).toContain('conf 0.25, IoU 0.45');
@@ -114,6 +119,24 @@ describe('Model: what was evaluated', () => {
     expect(text('#pr .foot')).not.toContain('validation');
     expect(text('#cm .cm-notes')).toContain('does not report');
     expect(text('#cm .cm-notes')).not.toContain('conf 0.25');
+  });
+
+  // Sweep 4 (#319): /eval names a run's removed dataset by the id it had; Evaluated on named it with a link that opened
+  // "Dataset not found".
+  it("names a run's removed dataset without linking to it", async () => {
+    const api = hub.api as MockApi;
+    const real = api.modelEval.bind(api);
+    api.modelEval = async (id: string) => ({ ...(await real(id)), dataset_id: 'ds_gone', dataset_name: 'fasteners-old' });
+    api.dataset = async () => {
+      throw new ApiError(404, 'dataset_not_found', 'No dataset with id ds_gone.');
+    };
+    await open('m_fast_n');
+    const dd = await until(
+      () => [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd'),
+      'Evaluated on',
+    );
+    await until(() => dd.textContent?.includes('fasteners-old'), 'the evaluated dataset');
+    expect(dd.querySelector('a')).toBeNull();
   });
 });
 

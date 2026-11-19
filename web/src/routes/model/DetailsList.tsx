@@ -64,6 +64,9 @@ export default function DetailsList(props: DetailsListProps) {
   const m = () => props.m;
   const done = () => props.context.data?.epochs ?? null;
   const src = () => props.source;
+  // A run's model is evaluated on the run's dataset, which /eval still names by its id once it was removed from FOLO
+  // (docs/API.md): linked only while the run's dataset is registered (the context read it), never to "Dataset not found".
+  const evalLinked = () => !m().run_id || (!!src().datasetId && props.context.data?.dataset?.id === src().datasetId);
   const h = () => here.get()!;
 
   // Three columns of label / value rows (as Desktop's Details): what the model is, how it was trained and stored,
@@ -195,7 +198,7 @@ export default function DetailsList(props: DetailsListProps) {
           <dd class="evald">
             {props.unevaluated ? (
               <span class="muted">Not evaluated: no registered dataset has its classes</span>
-            ) : src().datasetName && src().datasetId ? (
+            ) : src().datasetName && src().datasetId && evalLinked() ? (
               <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
                 {src().datasetName}
               </a>

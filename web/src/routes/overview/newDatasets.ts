@@ -1,30 +1,30 @@
 // Overview reads the datasets once: each one is read for its class balance (lib/api/datasetReads), too many requests to
 // poll. A run on a dataset made since (a loop's student trains on the dataset the loop just wrote; a dataset made in
-// another tab) would then read "<name> (removed)" (lib/runDataset), and the Datasets panel would never list it.
+// another tab) would then read "<name> (removed)" (lib/runDataset), and the Datasets panel would never list it. The
+// Runs list and a labeling job's page (its "made" dataset) follow new datasets the same way.
 
 import { effect, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Run } from '$lib/api/types';
 
 /**
- * Reads `datasets` again when a run of `runs` names a dataset the list does not have: once per dataset (one that was
- * really removed is asked about once, not on every poll). Returns whether a dataset is being looked up, so its runs show
- * the name they recorded meanwhile instead of calling it removed.
+ * Reads `datasets` again when `ids` (the datasets the page names: its runs', a job's) has one the list does not have:
+ * once per dataset (one that was really removed is asked about once, not on every poll). Returns whether a dataset is
+ * being looked up, so the page shows what it knew meanwhile instead of calling it removed.
  */
 export function followNewDatasets(
   datasets: { readonly data: readonly { id: string }[] | undefined; refresh(): Promise<void> },
-  runs: () => readonly Pick<Run, 'config'>[] | undefined,
+  ids: () => readonly string[] | undefined,
 ): (id: string) => boolean {
   /** `<server> <dataset id>` of every dataset looked up already. */
   const asked = new Set<string>();
   const checking = signal<ReadonlySet<string>>(new Set());
   effect(() => {
     const list = datasets.data;
-    const rs = runs();
-    if (!list || !rs) return;
+    const want = ids();
+    if (!list || !want) return;
     const have = new Set(list.map((d) => d.id));
     const server = hub.server;
-    const fresh = [...new Set(rs.map((r) => r.config.dataset_id))].filter((id) => !have.has(id) && !asked.has(`${server} ${id}`));
+    const fresh = [...new Set(want)].filter((id) => !have.has(id) && !asked.has(`${server} ${id}`));
     if (!fresh.length) return;
     for (const id of fresh) asked.add(`${server} ${id}`);
     untrack(() => {
