@@ -19,7 +19,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 | `src/sched.rs` | `LrSchedule`: warmup, then linear or cosine decay (MODEL.md §8.4, `folo.sched` in FORMAT.md) |
 | `src/ema.rs` | `ModelEma` (MODEL.md §8.5) |
 | `src/amp.rs` | `GradScaler`, dynamic loss scaling for mixed-precision training (`folo.amp` in FORMAT.md) |
-| `src/io/` | `.folo` files: `safetensors.rs` (the container), `meta.rs` (`__metadata__`, `ModelConfig`, `scale_row`), `file.rs` (`ModelFile`, loading rules), `checkpoint.rs` (training state), `export.rs` (Conv+BN fusion, `F16` export) |
+| `src/io/` | `.folo` files: `safetensors.rs` (the container), `meta.rs` (`__metadata__`, `ModelConfig`, `scale_row`), `file.rs` (`ModelFile`, loading rules), `checkpoint.rs` (training state), `export.rs` (Conv+BN fusion, `F16` export), `replace.rs` (`rename_over`), `publish.rs` (`publish_new`: a finished file moved to a name only while it is free) |
 | `src/error.rs` | `Error` and `Result` |
 | `tests/modules.rs` | Layers and `Module`: names, modes, gradient checks, hand-computed BatchNorm values, fusion |
 | `tests/optim.rs` | Optimizers, groups, accumulation, clipping, schedule application and EMA against hand-computed values |

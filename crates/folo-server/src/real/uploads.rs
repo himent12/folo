@@ -59,21 +59,14 @@ impl RealStore {
         std::fs::create_dir_all(&dir).map_err(|e| Error::io(format!("creating {}: {e}", dir.display())))?;
         let name = weights_file_name(done.name(), WeightsFormat::Stored);
         let stem = name.trim_end_matches(".folo");
-        // create_new claims the name, so two uploads never share a file; the upload then replaces it atomically.
-        let mut n = 1;
-        let path = loop {
+        // Moved to the first free name in one step that fails when the name exists (folo_nn::io::publish_free):
+        // two uploads never share or replace a file, and a server stopped meanwhile leaves no file under the name.
+        let name = |n: u32| {
             let tag = if n == 1 { String::new() } else { format!("-{n}") };
-            let p = dir.join(format!("{stem}{tag}.folo"));
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-                Ok(_) => break p,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                Err(e) => return Err(Error::io(format!("creating {}: {e}", p.display()))),
-            }
+            dir.join(format!("{stem}{tag}.folo"))
         };
-        if let Err(e) = std::fs::rename(&file, &path) {
-            let _ = std::fs::remove_file(&path);
-            return Err(Error::io(format!("moving {} to {}: {e}", file.display(), path.display())));
-        }
+        let path = folo_nn::io::publish_free(&file, name)
+            .map_err(|e| Error::io(format!("moving {} to {}: {e}", file.display(), name(1).display())))?;
         self.model(&file_model_id(&path)).map(|m| m.model)
     }
 }

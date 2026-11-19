@@ -19,6 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# MoveFileExW for io::publish_new (a rename that never replaces a file; std's rename always replaces).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 folo-test-support.workspace = true
 # GPU tests (tests/gpu/) and benchmarks; they skip when there is no adapter.

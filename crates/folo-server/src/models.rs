@@ -518,24 +518,22 @@ impl Models {
             ExportFormat::FoloF16 => ("-f16", "folo"),
             ExportFormat::Onnx => (spec.onnx.file_suffix(), "onnx"),
         };
-        // Written under a temporary name and given the first free name only once complete, atomically: two
-        // exports never share or replace a file, and one that fails or is killed leaves no file under the name.
+        // Written under a temporary name and moved to the first free name only once complete, in one step that
+        // fails when the name exists (folo_nn::io::publish_free): two exports never share or replace a file, and
+        // one that fails or is killed leaves no file under the name.
         let name = |n: u32| {
             let tag = if n == 1 { String::new() } else { format!("-{n}") };
             dir.join(format!("{base}{suffix}{tag}.{ext}"))
         };
-        let (tmp, _) = folo_nn::io::safetensors::create_temp_beside(&name(1))
-            .map_err(|e| Error::internal(format!("creating the export: {e}")))?;
+        let creating = |e: std::io::Error| Error::internal(format!("creating {}: {e}", name(1).display()));
+        let tmp = folo_nn::io::temp_path(&dir).map_err(creating)?;
         let written = match format {
             ExportFormat::FoloF16 => file.export(&tmp, FloatDType::F16).map_err(nn_error),
             ExportFormat::Onnx => {
                 onnx_export(&file, spec.onnx).and_then(|x| x.write_to(&tmp).map_err(engine_error))
             }
         }
-        .and_then(|()| {
-            folo_nn::io::publish_free(&tmp, name)
-                .map_err(|e| Error::internal(format!("publishing {}: {e}", tmp.display())))
-        });
+        .and_then(|()| folo_nn::io::publish_free(&tmp, name).map_err(creating));
         let out = match written {
             Ok(out) => out,
             Err(e) => {

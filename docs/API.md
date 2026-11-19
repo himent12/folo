@@ -345,7 +345,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `<model name>-decoded.onnx`, `half` `<model name>-f16.onnx`, both `-decoded-f16.onnx`, as `folo export` names
   them). In the model name, control characters and the characters a Windows file name cannot hold (`/ \ : < > " |
   ? *`) become `-`, and it is cut to 200 bytes. Names get `-2`, `-3`, ... when taken (exports never
-  overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
+  overwrite): the file is written in `exports/` as `.folo-<pid>-<n>.tmp` and moved to the first free name in one
+  step once complete, as `folo export` does (docs/CLI.md), so a stopped server leaves the name absent or complete
+  and at most such a temporary file, which nothing reads and which is safe to delete. `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
   it elsewhere, e.g. into the browser detector (docs/WASM.md), or its ONNX graph. Without `format` it is the file as
