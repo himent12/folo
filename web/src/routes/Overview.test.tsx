@@ -76,6 +76,16 @@ describe('Overview', () => {
     expect(text).not.toContain('Queued');
   });
 
+  it('never says there are no runs while the only run is training (issue #328)', async () => {
+    const run = (await idleRuns()).find((r) => r.status === 'completed')!;
+    watched.runs = [{ ...run, status: 'running' }];
+    open(new MockApi('loading'));
+    await training((t) => t.includes(run.name), 'the run');
+    const recent = target.querySelector('#recent-runs')!.textContent ?? '';
+    expect(recent).not.toContain('No runs yet');
+    expect(recent).toContain('No other runs');
+  });
+
   it('loads in the shape of the common state, not of a training run', () => {
     open(new MockApi('loading'));
     const slot = target.querySelector('.live')!;
