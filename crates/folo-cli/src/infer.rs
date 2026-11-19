@@ -381,8 +381,51 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// `predict --save DIR` must lie outside every source folder and hold no source, else the annotated copies are read
+/// as images on the next run (or replace a source). Canonical paths are compared; a `DIR` that does not exist yet
+/// is its nearest existing ancestor's canonical path plus the rest, so the first run gets the same answer. A source
+/// that does not exist is left to `collect_images` (after the model, as before), so its `path_not_found` stays.
+fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), CliError> {
+    let Some(save) = save else { return Ok(()) };
+    if sources.iter().any(|s| !s.exists()) {
+        return Ok(());
+    }
+    // `.` and `..` are folded by components before any link is followed (the accepted approximation: a `..` after a
+    // link goes back up the spelling, not the target), so the missing rest appended below holds no `..`.
+    let mut abs = PathBuf::new();
+    for c in std::path::absolute(save).unwrap_or_else(|_| save.to_path_buf()).components() {
+        match c {
+            std::path::Component::CurDir => {}
+            // `pop` stops at the root.
+            std::path::Component::ParentDir => _ = abs.pop(),
+            c => abs.push(c),
+        }
+    }
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let Some(dir) = abs.ancestors().find_map(|a| Some(canon(a)?.join(abs.strip_prefix(a).ok()?))) else {
+        return Ok(());
+    };
+    for s in sources {
+        let Some(src) = canon(s) else { continue };
+        let (sp, sv) = (folo_api::json::path(s), folo_api::json::path(save));
+        let message = if src.is_dir() && dir.starts_with(&src) {
+            let rel = if dir == src { "is" } else { "is inside" };
+            format!("--save {sv} {rel} the input folder {sp}: the next run would read the copies as images")
+        } else if src.starts_with(&dir) {
+            format!("the input {sp} is inside the --save folder {sv}: the copies could replace it")
+        } else {
+            continue;
+        };
+        return Err(
+            CliError::new(ExitCode::Usage, "usage", message).hint("save to a folder outside the inputs")
+        );
+    }
+    Ok(())
+}
+
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
+    check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model(
         "predict",
