@@ -18,7 +18,7 @@ pub use server::{ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_ser
 pub(crate) use transport::address_ok;
 #[cfg(test)]
 pub(crate) use transport::needs_token;
-use transport::{BODY_LIMIT, agent, json, seg, server_error, stream_agent};
+use transport::{BODY_LIMIT, agent, json, seg, server_error, status_error, stream_agent};
 
 /// How long an event stream may take to send its response headers.
 const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
@@ -90,12 +90,18 @@ impl Backend for HttpBackend {
         };
         match body {
             Ok(Ok(h)) if h.status == "ok" => Ok(h),
-            Ok(Ok(h)) => Err(self.not_folo(status, &format!("status {:?}", h.status))),
+            Ok(Ok(_)) => Err(self.not_folo(status)),
             Ok(Err(b)) => Err(server_error(b)),
+            // A body cut off midway was never read whole, so it has no shape to judge: as on any call.
+            Err(ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed)
+                if status >= 400 =>
+            {
+                Err(status_error(status))
+            }
             Err(e @ (ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed)) => {
                 Err(self.body_failed(e, ""))
             }
-            Err(e) => Err(self.not_folo(status, &e)),
+            Err(_) => Err(self.not_folo(status)),
         }
     }
 
@@ -620,6 +626,11 @@ FOLO"
             |status: &str| format!(r#"{{ "status": "{status}", "version": "0.1.0", "mock": false }}"#);
         let forbidden = r#"{ "error": { "code": "forbidden_host", "message": "this server listens on loopback",
             "hint": "reach it as localhost or 127.0.0.1" } }"#;
+        // Headers, then the link cut inside the body: announces 100 bytes, sends 8.
+        let cut = |status: &str| {
+            format!("HTTP/1.1 {status}\r\ncontent-length: 100\r\nconnection: close\r\n\r\n{{\"error\"")
+                .into_bytes()
+        };
         let (url, requests) = canned_server(vec![
             page("200 OK"),
             json("200 OK", r#"{ "ok": true }"#),
@@ -631,6 +642,9 @@ FOLO"
             json("403 Forbidden", forbidden),
             json("401 Unauthorized", r#"{ "error": { "code": "unauthorized", "message": "no token" } }"#),
             json("500 Internal Server Error", r#"{ "error": { "code": "internal", "message": "boom" } }"#),
+            cut("403 Forbidden"),
+            cut("401 Unauthorized"),
+            cut("200 OK"),
         ]);
         let typed = format!("{url}/subpath/");
         let api = HttpBackend::new(&typed);
@@ -666,13 +680,19 @@ FOLO"
         assert_eq!(e.hint.as_deref(), Some("Reach it as localhost or 127.0.0.1."));
         assert_eq!(api.health().unwrap_err(), needs_token());
         assert_eq!(api.health().unwrap_err().code, "internal");
+        // A body cut off midway has no shape to judge: what any call says (main's words).
+        let e = api.health().unwrap_err();
+        assert_eq!((e.code.as_str(), e.message.as_str()), ("http_error", "folo serve answered HTTP 403"));
+        assert_eq!(api.health().unwrap_err(), needs_token());
+        assert_eq!(api.health().unwrap_err().code, "server_unreachable");
         let addr = url.trim_start_matches("http://");
         let shouted = HttpBackend::new(&format!("HTTP://{addr}/x"));
-        assert!(shouted.not_folo(200, &"").hint.unwrap().ends_with(&format!("Try HTTP://{addr}.")));
-        // The log names scheme, host and port only: a pasted URL's user, path or query can hold a token.
+        assert!(shouted.not_folo(200).hint.unwrap().ends_with(&format!("Try HTTP://{addr}.")));
+        // The log names scheme, host and port, the status and a fixed reason: a pasted URL's user,
+        // path or query can hold a token, and an answer's body can quote them.
         assert_eq!(
-            HttpBackend::new("http://me:pw@127.0.0.1:7865/x?token=s").origin(),
-            "http://127.0.0.1:7865"
+            HttpBackend::new("http://me:pw@127.0.0.1:7865/x?token=s").not_folo_log(403),
+            "folo-desktop: http://127.0.0.1:7865 answered HTTP 403, not as a FOLO server"
         );
     }
 
@@ -741,6 +761,10 @@ connection: close
                 .to_vec(),
         ]);
         assert!(!probe(&page));
+        // Nor an unhealthy health: the app starts its own server only where nothing healthy answers.
+        let (down, _r) =
+            canned_server(vec![json("200 OK", r#"{ "status": "down", "version": "0.1.0", "mock": false }"#)]);
+        assert!(!probe(&down));
         let api = HttpBackend::new(&url);
         for e in [api.system().unwrap_err(), api.datasets().unwrap_err()] {
             assert_eq!((e.code.as_str(), e.message.as_str()), ("unauthorized", "This server needs a token"));

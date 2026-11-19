@@ -75,6 +75,14 @@ pub(crate) fn needs_token() -> ApiError {
     )
 }
 
+/// A 4xx or 5xx answer without FOLO's error JSON (none, or not whole).
+pub(super) fn status_error(status: u16) -> ApiError {
+    match status {
+        401 => needs_token(),
+        _ => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
+    }
+}
+
 /// FOLO's error JSON as an [`ApiError`], its words as sentences.
 pub(super) fn server_error(b: folo_api::ErrorBody) -> ApiError {
     // `folo serve --token`: the server's words are for an HTTP client that can send one.
@@ -189,9 +197,8 @@ impl HttpBackend {
     /// server, a sign-in page or a proxy's error page, or folo serve's own Studio page when a path
     /// follows the port, "http://127.0.0.1:7878/subpath"), another JSON, or nothing. Retrying can't
     /// help; the address is what to check, and with a path after the port, the address without it.
-    /// `why` (what didn't read) goes to the log.
-    pub(super) fn not_folo(&self, status: u16, why: &dyn std::fmt::Display) -> ApiError {
-        eprintln!("folo-desktop: {} answered HTTP {status}, not as a FOLO server: {why}", self.origin());
+    pub(super) fn not_folo(&self, status: u16) -> ApiError {
+        eprintln!("{}", self.not_folo_log(status));
         let authority = self.base.find("://").map_or(0, |i| i + 3);
         let hint = match self.base[authority..].find('/') {
             Some(path) => format!(
@@ -205,6 +212,12 @@ impl HttpBackend {
             .with_hint(hint)
     }
 
+    /// [`Self::not_folo`]'s log line: the origin, the status and a fixed reason. Nothing of the
+    /// answer: a proxy's error page or JSON can quote the request, a pasted `?token=` with it.
+    pub(super) fn not_folo_log(&self, status: u16) -> String {
+        format!("folo-desktop: {} answered HTTP {status}, not as a FOLO server", self.origin())
+    }
+
     /// Turn a response into `T`, or the API's error body into an [`ApiError`].
     pub(super) fn decode<T: DeserializeOwned>(
         &self,
@@ -215,8 +228,7 @@ impl HttpBackend {
             let body: Option<folo_api::ErrorBody> = json(resp.body_mut(), BODY_LIMIT).ok();
             return Err(match body {
                 Some(b) => server_error(b),
-                None if status == 401 => needs_token(),
-                None => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
+                None => status_error(status),
             });
         }
         if status == 204 {
