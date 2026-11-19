@@ -238,6 +238,7 @@ impl Render for FoloApp {
                     this.play_file(p, cx);
                 }
             }))
+            .child(Self::press_tracker(cx))
             .child(sidebar)
             .child(
                 div()

@@ -381,6 +381,7 @@ impl FoloApp {
                     .id("palette-box")
                     .w(px(640.))
                     .occlude()
+                    .capture_any_mouse_down(Self::guard_presses(cx))
                     .flex()
                     .flex_col()
                     .rounded(px(radius::XL))
