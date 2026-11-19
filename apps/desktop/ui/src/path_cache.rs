@@ -11,13 +11,39 @@ use std::hash::{BuildHasher, Hasher};
 
 use crate::{BuiltPath, Pixels, Point};
 
-/// Bytes the cache may hold (keys, triangles and its table): a few hundred chart lines.
+/// Bytes the cache may hold after any call: its keys, its triangles and its table at the size the table
+/// has allocated (not only its entries). A few hundred chart lines.
 const BUDGET: usize = 8 << 20;
 /// What a cache over [`BUDGET`] is cut down to, the least recently used first, in one pass: the next
 /// inserts then fit without another.
 const LOW_WATER: usize = BUDGET / 4 * 3;
 /// A path whose entry alone is bigger is never kept.
 const MAX_ENTRY: usize = BUDGET / 8;
+
+/// One slot of the table: the hash and the entry, and the slot's control byte.
+const SLOT: usize = std::mem::size_of::<(u64, Entry)>() + 1;
+
+/// The bytes of the table a `HashMap` of entries allocates to hold `n` of them: the size of its table when
+/// `capacity()` is `n`, and after `shrink_to_fit` with `n` entries. Std's table (hashbrown) has a power of
+/// two of slots (at least 4), at most seven in eight of them used, and one group of control bytes (16)
+/// beyond them; a table that grows doubles.
+fn table_bytes(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let slots = match n {
+        0..4 => 4,
+        4..8 => 8,
+        _ => (n * 8 / 7).next_power_of_two(),
+    };
+    slots * SLOT + 16
+}
+
+/// The bytes an entry for a key of `key_words` and a path of `points` allocates (its key and its
+/// triangles, without spare capacity).
+fn entry_bytes(key_words: usize, points: usize) -> usize {
+    key_words * std::mem::size_of::<u32>() + points * std::mem::size_of::<Point<Pixels>>()
+}
 
 struct Entry {
     /// The key, without spare capacity.
@@ -28,13 +54,9 @@ struct Entry {
 }
 
 impl Entry {
-    /// What this entry holds: its key's and triangles' allocations and its slot in the table (with the
-    /// table's control byte).
+    /// What this entry allocates: its key and its triangles (its slot is the table's).
     fn bytes(&self) -> usize {
-        std::mem::size_of_val(&*self.key)
-            + self.path.triangles.capacity() * std::mem::size_of::<Point<Pixels>>()
-            + std::mem::size_of::<(u64, Entry)>()
-            + 1
+        entry_bytes(self.key.len(), self.path.triangles.capacity())
     }
 }
 
@@ -42,7 +64,8 @@ impl Entry {
 #[derive(Default)]
 pub(crate) struct PathCache {
     entries: HashMap<u64, Entry>,
-    bytes: usize,
+    /// What the entries allocate (keys and triangles); the table is counted by its capacity.
+    heap: usize,
     clock: u64,
     hits: u64,
     /// Times the cache went over [`BUDGET`] and was cut down.
@@ -83,6 +106,11 @@ impl Hasher for WordHasher {
 }
 
 impl PathCache {
+    /// What the cache holds: its entries' keys and triangles, and its table at its allocated size.
+    fn bytes(&self) -> usize {
+        self.heap + table_bytes(self.entries.capacity())
+    }
+
     /// The path built from `key` before, if it is still here.
     fn get(&mut self, key: &[u32]) -> Option<BuiltPath<Pixels>> {
         self.clock += 1;
@@ -94,36 +122,42 @@ impl PathCache {
 
     /// Keeps `path` as what `key` builds, dropping the least recently used paths beyond the budget.
     fn insert(&mut self, key: Vec<u32>, path: &BuiltPath<Pixels>) {
-        // A clone's triangles have no spare capacity; the key is cut to its length.
-        let entry = Entry { key: key.into_boxed_slice(), path: path.clone(), last_used: self.clock + 1 };
-        let bytes = entry.bytes();
-        if bytes > MAX_ENTRY {
+        // Measured before anything is copied: a path too big to keep costs no copy.
+        let bytes = entry_bytes(key.len(), path.triangles.len());
+        if bytes + SLOT > MAX_ENTRY {
             return;
         }
         self.clock += 1;
+        // A clone's triangles have no spare capacity; the key is cut to its length.
+        let entry = Entry { key: key.into_boxed_slice(), path: path.clone(), last_used: self.clock };
         if let Some(old) = self.entries.insert(hash(&entry.key), entry) {
-            self.bytes -= old.bytes();
+            self.heap -= old.bytes();
         }
-        self.bytes += bytes;
-        if self.bytes > BUDGET {
+        self.heap += bytes;
+        if self.bytes() > BUDGET {
             self.evict();
         }
     }
 
-    /// Drops the least recently used paths until the cache is down to [`LOW_WATER`]: one sort of the
-    /// entries by age, however many go.
+    /// Drops the least recently used paths until the cache, its table cut to what is left, is down to
+    /// [`LOW_WATER`]: one sort of the entries by age, however many go. The table keeps its size when
+    /// entries go, so it is then rebuilt for the rest (a table grown for many tiny paths was most of what
+    /// the cache held).
     fn evict(&mut self) {
         self.evictions += 1;
         let mut by_age: Vec<(u64, u64)> = self.entries.iter().map(|(&h, e)| (e.last_used, h)).collect();
         by_age.sort_unstable();
+        let mut left = self.entries.len();
         for (_, h) in by_age {
-            if self.bytes <= LOW_WATER {
+            if self.heap + table_bytes(left) <= LOW_WATER {
                 break;
             }
             if let Some(old) = self.entries.remove(&h) {
-                self.bytes -= old.bytes();
+                self.heap -= old.bytes();
+                left -= 1;
             }
         }
+        self.entries.shrink_to_fit();
     }
 }
 
@@ -144,13 +178,86 @@ pub(crate) fn cached<E>(
 /// This thread's cache: (entries, bytes, hits so far). For tests.
 #[cfg(test)]
 pub(crate) fn stats() -> (usize, usize, u64) {
-    CACHE.with_borrow(|c| (c.entries.len(), c.bytes, c.hits))
+    CACHE.with_borrow(|c| (c.entries.len(), c.bytes(), c.hits))
 }
 
 /// Empties this thread's cache. For tests.
 #[cfg(test)]
 pub(crate) fn clear() {
     CACHE.with_borrow_mut(|c| *c = PathCache::default());
+}
+
+/// The allocator of this crate's unit tests: the system's, counting per thread the bytes allocated and not
+/// freed (the sizes asked for), so a test can measure what a structure it built holds.
+#[cfg(test)]
+pub(crate) mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bytes this thread allocated and has not freed.
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        /// The most `LIVE` was since [`reset_peak`].
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+
+    fn add(bytes: isize) {
+        // `try_with`: an allocation while the thread's locals are being torn down goes uncounted.
+        let _ = LIVE.try_with(|live| {
+            live.set(live.get() + bytes);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(live.get())));
+        });
+    }
+
+    /// This thread's live bytes.
+    pub fn live() -> isize {
+        LIVE.with(Cell::get)
+    }
+
+    /// This thread's most live bytes since [`reset_peak`].
+    pub fn peak() -> isize {
+        PEAK.with(Cell::get)
+    }
+
+    /// Starts this thread's peak again from its live bytes.
+    pub fn reset_peak() {
+        PEAK.with(|peak| peak.set(live()));
+    }
+
+    struct Counting;
+
+    #[global_allocator]
+    static ALLOC: Counting = Counting;
+
+    // SAFETY: every method forwards to `System` with the caller's arguments unchanged; the counters are
+    // const-initialised thread locals without destructors, which allocate nothing.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            add(layout.size() as isize);
+            // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract, which `System` shares.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            add(layout.size() as isize);
+            // SAFETY: as `alloc`.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            add(-(layout.size() as isize));
+            // SAFETY: `ptr` came from this allocator, so from `System`, with `layout`.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // The new block is counted before the old one goes, as both may be held during the copy.
+            add(new_size as isize);
+            add(-(layout.size() as isize));
+            // SAFETY: as `dealloc`, and the caller upholds `realloc`'s size contract.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -226,14 +333,19 @@ mod tests {
         assert_eq!(stats().2, hits);
     }
 
-    /// A path of one triangle, as the cache holds it.
-    fn tiny(i: u32) -> BuiltPath<Pixels> {
+    /// A path of `n` triangles at `i`, as the cache holds it.
+    fn triangles(i: u32, n: usize) -> BuiltPath<Pixels> {
         let p = point(px(i as f32), px(0.));
-        BuiltPath { triangles: vec![p, p, p], bounds: Default::default() }
+        BuiltPath { triangles: vec![p; 3 * n], bounds: Default::default() }
     }
 
-    /// What the cache charges is what it holds: a key with spare capacity (as `PathBuilder::key` may make
-    /// one) is kept and counted at its length, the triangles at their capacity.
+    /// A path of one triangle.
+    fn tiny(i: u32) -> BuiltPath<Pixels> {
+        triangles(i, 1)
+    }
+
+    /// What the cache counts is what it holds: a key with spare capacity (as `PathBuilder::key` may make
+    /// one) is kept and counted at its length, the triangles at their capacity, the table at its size.
     #[test]
     fn the_cache_counts_what_it_holds() {
         let mut c = PathCache::default();
@@ -245,30 +357,67 @@ mod tests {
         let e = c.entries.values().next().unwrap();
         assert_eq!(std::mem::size_of_val(&*e.key), 12, "no spare capacity is kept");
         assert_eq!(e.path.triangles.capacity(), 3);
-        assert_eq!(c.bytes, e.bytes());
-        assert!(c.bytes < 1000, "{} bytes", c.bytes);
+        assert_eq!(c.heap, e.bytes());
+        assert_eq!(c.bytes(), e.bytes() + table_bytes(c.entries.capacity()));
+        assert!(c.bytes() < 1000, "{} bytes", c.bytes());
     }
 
-    /// One big path into a cache full of tiny ones drops all it must in one pass (a scan of the whole
+    /// Measured by the allocator: filled with many tiny paths (where the table is most of what the cache
+    /// holds) and cut down again and again, the cache never allocates more than it counts, nor more than
+    /// [`BUDGET`]; its count is no more than a little over what it allocated.
+    #[test]
+    fn the_cache_allocates_no_more_than_its_budget() {
+        let base = counting::live();
+        let mut c = PathCache::default();
+        let mut most = 0;
+        for i in 0..300_000 {
+            c.insert(vec![i], &tiny(i));
+            let held = (counting::live() - base) as usize;
+            assert!(held <= c.bytes(), "{held} bytes allocated, {} counted, after {i}", c.bytes());
+            assert!(c.bytes() <= BUDGET, "{} bytes after {i}", c.bytes());
+            assert!(c.bytes() - held <= 64, "{held} bytes allocated, {} counted, after {i}", c.bytes());
+            most = most.max(held);
+        }
+        assert!(c.evictions >= 2, "{} evictions", c.evictions);
+        assert!(most > BUDGET / 2, "the budget was used: {most} bytes at most");
+        drop(c);
+        assert_eq!(counting::live(), base, "all of it freed");
+    }
+
+    /// A path over the per-entry limit is turned away before it is copied: it costs no copy of its
+    /// triangles, however big.
+    #[test]
+    fn a_path_too_big_to_keep_is_not_copied() {
+        let mut c = PathCache::default();
+        let big = triangles(1, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>());
+        let key = vec![7];
+        let before = counting::live();
+        counting::reset_peak();
+        c.insert(key, &big);
+        assert!(c.entries.is_empty());
+        let peak = (counting::peak() - before) as usize;
+        assert!(peak < 1024, "{peak} bytes allocated on the way");
+    }
+
+    /// One big path into a cache full of small ones drops all it must in one pass (a scan of the whole
     /// map per dropped entry made that thousands of scans in one frame), oldest first.
     #[test]
     fn a_big_path_into_a_full_cache_evicts_in_one_pass() {
         let mut c = PathCache::default();
         let mut i = 0;
-        while c.bytes + 200 < BUDGET {
-            c.insert(vec![i], &tiny(i));
+        while c.bytes() + 4096 < BUDGET {
+            c.insert(vec![i], &triangles(i, 100));
             i += 1;
         }
-        let tiny_count = i;
+        let small_count = i;
         assert_eq!(c.evictions, 0);
-        let mut big = tiny(0);
-        big.triangles = vec![point(px(1.), px(1.)); MAX_ENTRY / std::mem::size_of::<Point<Pixels>>() / 2];
+        let big = triangles(0, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>() / 6);
         c.insert(vec![u32::MAX], &big);
         assert_eq!(c.evictions, 1, "one pass");
-        assert!(c.bytes <= LOW_WATER, "{} bytes", c.bytes);
-        assert_eq!(c.bytes, c.entries.values().map(Entry::bytes).sum::<usize>());
+        assert!(c.bytes() <= LOW_WATER, "{} bytes", c.bytes());
+        assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
         // The newest are kept, the oldest gone.
-        assert!(c.get(&[u32::MAX]).is_some() && c.get(&[tiny_count - 1]).is_some());
+        assert!(c.get(&[u32::MAX]).is_some() && c.get(&[small_count - 1]).is_some());
         assert!(c.get(&[0]).is_none());
     }
 

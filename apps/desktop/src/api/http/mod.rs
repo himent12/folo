@@ -647,7 +647,16 @@ connection: close
     #[test]
     fn a_server_behind_a_proxy_is_found_although_its_port_is_closed_here() {
         use std::io::{BufRead, BufReader, Write};
-        // A closed loopback port: bound for a moment and let go.
+        // A closed loopback port, held through both checks: on Windows a socket bound there that never
+        // listens, so no other process can take the port meanwhile. Elsewhere (no refused-at-once check,
+        // and std can't bind without listening) a port bound for a moment and let go.
+        #[cfg(windows)]
+        let (_held, closed) = {
+            let held = super::refused::closed::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+            let port = held.port;
+            (held, std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+        };
+        #[cfg(not(windows))]
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         // The proxy: takes the CONNECT to that port and answers the health check through the tunnel.
         let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

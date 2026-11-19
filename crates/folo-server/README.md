@@ -30,7 +30,7 @@ it.
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |
 | `src/probe.rs` | `POST /api/system/benchmark`: a short training and inference probe |
 | `src/cli.rs` | The `folo train` command of a run (`GET /api/runs/{id}/cli`) |
-| `src/system.rs`, `src/stats.rs`, `src/raster.rs`, `src/util.rs` | Host CPU and memory (the CPU counters are set up on a thread of their own, so `serve` listens without waiting ~150 ms for them; the first `/api/system` prepares its slow parts once per server, side by side, its first CPU reading after sysinfo's minimum interval), dataset statistics, the mock's rasteriser, small helpers |
+| `src/system.rs`, `src/stats.rs`, `src/raster.rs`, `src/util.rs` | Host CPU and memory (the CPU counters are set up on a thread of their own, so `serve` listens without waiting ~150 ms for them; the first `/api/system` starts a preparation of its slow parts, side by side, that the server owns and every request waits for, so a request that goes away cancels nothing; no CPU reading is measured over less than sysinfo's minimum interval: one asked sooner gives the last again), dataset statistics, the mock's rasteriser, small helpers |
 | `build.rs` | With `embed-web`: writes the table of the built Studio's files (`web/dist` or `$FOLO_WEB_DIST`) |
 | `tests/` | Integration tests (see below) |
 

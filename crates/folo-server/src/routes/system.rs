@@ -6,6 +6,10 @@ use folo_api::{
     API_VERSION, BenchmarkReport, BenchmarkRequest, Health, SystemInfo, SystemResponse, ThroughputTable,
 };
 
+use std::sync::Arc;
+
+use tokio::sync::watch;
+
 use crate::AppState;
 use crate::error::{ApiJson, Error, Result};
 
@@ -53,7 +57,8 @@ fn features(st: &AppState) -> Vec<String> {
 }
 
 pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
-    st.system_ready.get_or_try_init(|| prepare_system(&st)).await?;
+    let prepare = st.clone();
+    st.system_ready.ready(move || prepare_system(prepare)).await?;
     let probe = st.probe.clone();
     let store = st.store.clone();
     // Quick once prepared: a CPU and memory reading and what the preparation keeps. `gpus` comes after the device
@@ -75,16 +80,71 @@ pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResp
 }
 
 /// The slow parts of the first `/api/system`, side by side, each a blocking task of its own: creating the GPU device
-/// (`capabilities`), enumerating the adapters, and the CPU counters' set-up and first interval. Run once per server
-/// ([`AppState`]'s `system_ready`); requests that arrive meanwhile wait on the same run without holding a blocking
-/// thread. A part that panicked fails this request and leaves the preparation to the next.
-async fn prepare_system(st: &AppState) -> Result<()> {
+/// (`capabilities`), enumerating the adapters, and the CPU counters' set-up and first interval. Run by
+/// [`Preparation`] ([`AppState`]'s `system_ready`). Ends only once all three have ended; a part that panicked fails
+/// it.
+async fn prepare_system(st: AppState) -> Result<()> {
     let (store, adapters_store, probe) = (st.store.clone(), st.store.clone(), st.probe.clone());
     let device = tokio::task::spawn_blocking(move || drop(store.capabilities()));
     let adapters = tokio::task::spawn_blocking(move || adapters_store.prepare_gpus());
     let counters = tokio::task::spawn_blocking(move || probe.warm_up());
     let (device, adapters, counters) = tokio::join!(device, adapters, counters);
     device.and(adapters).and(counters).map_err(|e| Error::internal(format!("task failed: {e}")))
+}
+
+/// `/api/system`'s one-time preparation, owned by the server rather than by the request that started it. The first
+/// request starts it as a task of its own; every request until it ends waits for its one result, without holding a
+/// blocking thread. A request that goes away meanwhile (its client disconnected) changes nothing: the task goes on,
+/// and the next request waits for the same run. After a run that failed (and so ended, with all its jobs), the next
+/// request starts another; after one that succeeded, requests wait for nothing.
+#[derive(Default)]
+pub(crate) struct Preparation(std::sync::Mutex<Prepared>);
+
+/// Where [`Preparation`] is.
+#[derive(Default)]
+enum Prepared {
+    /// Not run yet, or the last run failed.
+    #[default]
+    Not,
+    /// Running: its result arrives here.
+    Running(watch::Receiver<Option<Result<()>>>),
+    Done,
+}
+
+impl Preparation {
+    /// Waits until the preparation succeeded, starting it with `start` when it isn't running and hasn't succeeded;
+    /// the error of the run waited for, if it failed. A caller that stops waiting leaves the run going.
+    pub(crate) async fn ready<F>(self: &Arc<Self>, start: impl FnOnce() -> F) -> Result<()>
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        let mut result = {
+            let mut prepared = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            match &*prepared {
+                Prepared::Done => return Ok(()),
+                // A run whose task went without a result (the runtime shutting down) is no run.
+                Prepared::Running(result) if result.has_changed().is_ok() => result.clone(),
+                _ => {
+                    let (tx, result) = watch::channel(None);
+                    let run = start();
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        let outcome = run.await;
+                        *this.0.lock().unwrap_or_else(|e| e.into_inner()) =
+                            if outcome.is_ok() { Prepared::Done } else { Prepared::Not };
+                        tx.send_replace(Some(outcome));
+                    });
+                    *prepared = Prepared::Running(result.clone());
+                    result
+                }
+            }
+        };
+        let outcome = result
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| Error::internal("the system preparation stopped without a result"))?;
+        outcome.clone().unwrap_or(Ok(()))
+    }
 }
 
 pub(super) async fn throughput(State(st): State<AppState>) -> Result<Json<ThroughputTable>> {
@@ -100,13 +160,34 @@ pub(super) async fn benchmark(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use super::*;
 
-    /// A burst of first `/api/system` calls shares one preparation, and nothing waits on a blocking thread for
-    /// another blocking job: with a single blocking thread every call still answers. Later calls prepare nothing.
+    fn state() -> AppState {
+        AppState {
+            store: Arc::new(crate::MockStore::new()),
+            probe: Arc::new(crate::system::SystemProbe::default()),
+            system_ready: Arc::default(),
+            shutdown: Arc::new(tokio::sync::watch::channel(false).0),
+            web_wasm: false,
+        }
+    }
+
+    /// Waits (polling, up to a generous limit for a loaded machine) until `st`'s preparations started `n`
+    /// warm-ups of the CPU counters.
+    async fn warm_ups_reach(st: &AppState, n: usize) {
+        let t = std::time::Instant::now();
+        while st.probe.warm_ups.load(Ordering::SeqCst) < n {
+            assert!(t.elapsed() < Duration::from_secs(30), "no warm-up started");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// A burst of first `/api/system` calls, all in flight at once, shares one preparation, and nothing waits on a
+    /// blocking thread for another blocking job: with a single blocking thread every call still answers. Later
+    /// calls prepare nothing.
     #[test]
     fn first_calls_share_one_preparation_and_hold_no_blocking_thread_while_waiting() {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -115,16 +196,19 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let st = AppState {
-            store: Arc::new(crate::MockStore::new()),
-            probe: Arc::new(crate::system::SystemProbe::default()),
-            system_ready: Arc::default(),
-            shutdown: Arc::new(tokio::sync::watch::channel(false).0),
-            web_wasm: false,
-        };
+        let st = state();
         rt.block_on(async {
-            let burst = (0..16).map(|_| tokio::spawn(system(State(st.clone()))));
-            let answers = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            // The preparation can't finish while the test holds the gate: every call is started meanwhile.
+            let gate = st.probe.gate.close();
+            let burst: Vec<_> = (0..16).map(|_| tokio::spawn(system(State(st.clone())))).collect();
+            warm_ups_reach(&st, 1).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                burst.iter().all(|call| !call.is_finished()),
+                "a call answered before the preparation ended"
+            );
+            drop(gate);
+            let answers = tokio::time::timeout(Duration::from_secs(30), async {
                 let mut answers = Vec::new();
                 for call in burst {
                     answers.push(call.await.unwrap());
@@ -137,11 +221,54 @@ mod tests {
                 let Json(r) = a.unwrap_or_else(|e| panic!("{e:?}"));
                 assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
             }
-            assert_eq!(st.probe.warm_ups.load(Ordering::Relaxed), 1);
+            assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1);
             for _ in 0..3 {
                 assert!(system(State(st.clone())).await.is_ok());
             }
-            assert_eq!(st.probe.warm_ups.load(Ordering::Relaxed), 1, "prepared once");
+            assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "prepared once");
         });
+    }
+
+    /// The first request goes away (its client disconnected) while the preparation's jobs run: the next request
+    /// waits for those jobs instead of starting three more beside them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_first_call_leaves_its_preparation_to_the_next() {
+        let st = state();
+        let gate = st.probe.gate.close();
+        let first = tokio::spawn(system(State(st.clone())));
+        warm_ups_reach(&st, 1).await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second = tokio::spawn(system(State(st.clone())));
+        // Time for a second preparation to start, were there one.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "a second preparation started");
+        drop(gate);
+        let Json(r) = second.await.unwrap().unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
+        assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "prepared once");
+    }
+
+    /// A run that failed fails every request waiting for it, and the next request starts another; once one
+    /// succeeded, nothing is started again.
+    #[tokio::test]
+    async fn a_failed_preparation_is_run_again_and_a_successful_one_is_not() {
+        let prep = Arc::new(Preparation::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let run = |ok: bool| {
+            let runs = runs.clone();
+            move || async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                if ok { Ok(()) } else { Err(Error::internal("failed on purpose")) }
+            }
+        };
+        let (a, b) = tokio::join!(prep.ready(run(false)), prep.ready(run(true)));
+        assert!(a.is_err() && b.is_err(), "both waited for the one run, which failed");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert!(prep.ready(run(true)).await.is_ok());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert!(prep.ready(run(false)).await.is_ok(), "done: not run again");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 }
