@@ -156,7 +156,7 @@ the remembered theme, else dark).
 
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
-Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
+Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image (in Playground, with the model of the model or run page it was pressed on) · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
 `Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Esc` close (a dialog, an inline form, a delete waiting
 for its second click) or go up · `Ctrl Enter` submit the open dialog or form · `Tab` / arrows move focus ·
 `F6` next region. Text fields: `Home` / `End`, `Ctrl ←/→` word, `Ctrl Backspace` / `Ctrl Delete` delete a word,

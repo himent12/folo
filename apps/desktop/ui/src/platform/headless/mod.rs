@@ -112,6 +112,12 @@ impl HeadlessPlatform {
         }
     }
 
+    /// What the next file prompts answer: the paths picked, or `None` for a cancelled prompt (the
+    /// default).
+    pub fn answer_prompts(&self, answer: Option<Vec<PathBuf>>) {
+        *self.prompt_answer.borrow_mut() = answer;
+    }
+
     /// Each window's frame appearance as the app last set it (`set_frame_appearance`; `None`:
     /// following the system), in the order the windows were opened.
     pub fn frame_appearances(&self) -> Vec<Option<WindowAppearance>> {

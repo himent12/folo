@@ -112,9 +112,9 @@ impl Render for FoloApp {
                     this.back(w, cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &OpenImage, _, cx| {
+            .on_action(cx.listener(|this, _: &OpenImage, w, cx| {
                 if !this.modal_open() {
-                    this.pick_image(cx)
+                    this.pick_image(w, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &Submit, w, cx| {
@@ -234,8 +234,8 @@ impl Render for FoloApp {
                     return;
                 }
                 if let Some(p) = paths.paths().first().cloned() {
-                    this.navigate(Route::Playground, w, cx);
-                    this.play_file(p, cx);
+                    let from = this.route.clone();
+                    this.open_play_file(p, &from, w, cx);
                 }
             }))
             .child(sidebar)

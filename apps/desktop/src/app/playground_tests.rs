@@ -1,7 +1,9 @@
 //! The Playground against the demo data: which samples it offers, what a local run sends, and how it
-//! comes back after losing the server.
+//! comes back after losing the server, and how an image opened from another page gets there.
 
 use std::sync::Arc;
+
+use folo_ui::{FileDropEvent, PlatformInput, point, px};
 
 use super::PlayImage;
 use super::tests::{drive, open};
@@ -218,4 +220,115 @@ fn an_outage_only_the_prediction_saw_is_recovered_too() {
         assert!(!this.store.unreachable());
         assert!(this.play_pred.ready().is_some(), "the boxes are back without a Retry");
     });
+}
+
+/// A small PNG on disk, for the file prompt to answer with.
+fn png_file(tag: &str) -> folo_test_support::TestFile {
+    let file = folo_test_support::TestFile::new(tag, "cells.png");
+    image::RgbImage::new(8, 8).save(file.path()).unwrap();
+    file
+}
+
+/// s4 #336: Open image on a model's page runs that model, as its Try in Playground does, and Back returns
+/// to that page; on a finished run's page it runs the run's model; elsewhere the Playground keeps its own.
+#[test]
+fn open_image_runs_the_model_of_the_page_it_was_asked_on_and_back_returns_there() {
+    let (mut app, window) = open();
+    let file = png_file("desktop-open-image");
+    app.platform().answer_prompts(Some(vec![file.path().to_path_buf()]));
+    let (current, other) = drive(&mut app, window, |this, _, _| {
+        let current = this.play_model.clone().expect("the best model is picked");
+        let other = this.store.models.ready().unwrap().iter().find(|m| m.id != current).unwrap().id.clone();
+        (current, other)
+    });
+    let page = super::Route::Model(other.clone());
+    drive(&mut app, window, |this, w, cx| this.navigate(page.clone(), w, cx));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, super::Route::Playground);
+        assert_eq!(this.play_model.as_ref(), Some(&other), "the page's model, not {current}");
+        assert_eq!(this.play_image.as_ref().map(|i| i.name.to_string()).as_deref(), Some("cells.png"));
+        let ran = this.play_pred_for.as_ref().map(|(_, m)| m);
+        assert_eq!(ran, Some(&other), "the prediction is the page's model's");
+    });
+    drive(&mut app, window, |this, w, cx| this.back(w, cx));
+    drive(&mut app, window, |this, _, _| assert_eq!(this.route, page, "Back returns to the model"));
+
+    // A finished run's page: its model (the run page's Try in Playground).
+    let (run, of_run) = drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| {
+            r.status == crate::api::RunStatus::Completed && r.model_id.as_ref().is_some_and(|m| *m != other)
+        });
+        let r = r.expect("a finished run with another model");
+        (r.id.clone(), r.model_id.clone().unwrap())
+    });
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Run(run.clone()), w, cx));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, super::Route::Playground);
+        assert_eq!(this.play_model.as_ref(), Some(&of_run));
+    });
+    drive(&mut app, window, |this, w, cx| this.back(w, cx));
+    drive(&mut app, window, |this, _, _| assert_eq!(this.route, super::Route::Run(run.clone())));
+
+    // Any other page (and Playground itself) keeps the Playground's choice.
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Overview, w, cx));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, super::Route::Playground);
+        assert_eq!(this.play_model.as_ref(), Some(&of_run), "the Overview has no model of its own");
+    });
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| assert_eq!(this.play_model.as_ref(), Some(&of_run)));
+}
+
+/// s4 #336: a cancelled picker changes nothing: no page change, no model switch, no history.
+#[test]
+fn a_cancelled_open_image_changes_nothing() {
+    let (mut app, window) = open();
+    let (current, other) = drive(&mut app, window, |this, _, _| {
+        let current = this.play_model.clone().expect("the best model is picked");
+        let other = this.store.models.ready().unwrap().iter().find(|m| m.id != current).unwrap().id.clone();
+        (current, other)
+    });
+    let page = super::Route::Model(other);
+    drive(&mut app, window, |this, w, cx| this.navigate(page.clone(), w, cx));
+    let history = drive(&mut app, window, |this, _, _| this.history.len());
+    app.platform().answer_prompts(None);
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, page);
+        assert_eq!(this.play_model.as_ref(), Some(&current));
+        assert_eq!(this.history.len(), history);
+        assert!(this.play_image.is_none());
+    });
+}
+
+/// s4 #336: a file dropped on a model's page opens the same way as Open image.
+#[test]
+fn an_image_dropped_on_a_model_page_runs_that_model() {
+    let (mut app, window) = open();
+    let file = png_file("desktop-drop-image");
+    let other = drive(&mut app, window, |this, _, _| {
+        let current = this.play_model.clone().expect("the best model is picked");
+        this.store.models.ready().unwrap().iter().find(|m| m.id != current).unwrap().id.clone()
+    });
+    let page = super::Route::Model(other.clone());
+    drive(&mut app, window, |this, w, cx| this.navigate(page.clone(), w, cx));
+    app.frame(window.into());
+    let at = point(px(640.), px(400.));
+    let paths = folo_ui::ExternalPaths::new(vec![file.path().to_path_buf()]);
+    app.simulate_input(
+        window.into(),
+        PlatformInput::FileDrop(FileDropEvent::Entered { position: at, paths }),
+    );
+    app.simulate_input(window.into(), PlatformInput::FileDrop(FileDropEvent::Submit { position: at }));
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, super::Route::Playground);
+        assert_eq!(this.play_model.as_ref(), Some(&other));
+        assert_eq!(this.play_pred_for.as_ref().map(|(_, m)| m), Some(&other));
+    });
+    drive(&mut app, window, |this, w, cx| this.back(w, cx));
+    drive(&mut app, window, |this, _, _| assert_eq!(this.route, page));
 }

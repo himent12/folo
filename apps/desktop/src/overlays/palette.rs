@@ -100,7 +100,7 @@ impl FoloApp {
             title: "Open image in Playground".into(),
             detail: String::new(),
             keys: &["Ctrl", "O"],
-            action: act(|this, _, cx| this.pick_image(cx)),
+            action: act(|this, w, cx| this.pick_image(w, cx)),
         });
         let dark = self.mode == crate::theme::Mode::Dark;
         items.push(PaletteItem {

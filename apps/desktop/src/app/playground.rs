@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use folo_ui::{Context, SharedString};
+use folo_ui::{Context, SharedString, Window};
 
 use crate::api::*;
 use crate::store::*;
@@ -430,12 +430,16 @@ impl FoloApp {
         }
     }
 
-    pub fn pick_image(&mut self, cx: &mut Context<Self>) {
+    /// Open image (the button, Ctrl+O, the palette): the picker, then [`Self::open_play_file`] with the
+    /// page it was asked for on. A cancelled picker changes nothing.
+    pub fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The shortcut and palette obey the button's rule, and say why.
         if let Some(why) = self.open_image_blocked() {
             self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
             return;
         }
+        let from = self.route.clone();
+        let handle = window.window_handle();
         let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
             directories: false,
@@ -444,14 +448,53 @@ impl FoloApp {
         });
         cx.spawn(async move |this, cx| {
             if let Some(p) = super::actions::picked(&this, rx.await, cx) {
-                this.update(cx, |this, cx| {
-                    this.route = Route::Playground;
-                    this.play_file(p, cx);
-                })
-                .ok();
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.open_play_file(p, &from, window, cx))
+                    })
+                    .ok();
             }
         })
         .detach();
+    }
+
+    /// An image file into the Playground (picked, or dropped on the window) from page `from`: there
+    /// through navigation, so Back returns to `from`, running the model of `from` when it has one
+    /// ([`Self::model_in_context`]), else the Playground's own choice.
+    pub(super) fn open_play_file(
+        &mut self,
+        path: std::path::PathBuf,
+        from: &Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Also after a picker that opened while models were there, if they've gone since: nothing moves.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
+        let model = self.model_in_context(from);
+        self.navigate(Route::Playground, window, cx);
+        if let Some(id) = model.filter(|id| self.play_model.as_ref() != Some(id)) {
+            self.pick_play_model(id, cx);
+        }
+        self.play_file(path, cx);
+    }
+
+    /// The model page `route` is about, as its Try in Playground picks it: a model's page, that model;
+    /// a finished (or stopped) run's page, its model. Other pages have none.
+    pub(super) fn model_in_context(&self, route: &Route) -> Option<String> {
+        let id = match route {
+            Route::Model(id) => id.clone(),
+            Route::Run(id) => self
+                .store
+                .run(id)
+                .filter(|r| matches!(r.status, RunStatus::Completed | RunStatus::Stopped))?
+                .model_id
+                .clone()?,
+            _ => return None,
+        };
+        self.store.model(&id).map(|m| m.id.clone())
     }
 }
 
