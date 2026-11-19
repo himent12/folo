@@ -4,7 +4,9 @@ use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
 use super::cells::bar_row;
-use super::format::{axis_name, axis_text, contestant_line, entry_frac, pct, prf_label};
+use super::format::{
+    axis_name, axis_text, calibration_none, calibration_why_not, contestant_line, entry_frac, pct, prf_label,
+};
 use crate::api::{Bench, BenchAxis, BenchEntryStatus, BenchReadiness, BenchResult, Label, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
@@ -189,9 +191,10 @@ impl FoloApp {
                     BenchReadiness::Partial => "partly ready".into(),
                     BenchReadiness::NotReady => "not ready".into(),
                 },
-                BenchAxis::Calibration => {
-                    r.calibration.as_ref().map_or("no confidences".into(), |c| format!("ECE {}", f3(c.ece)))
-                }
+                BenchAxis::Calibration => r
+                    .calibration
+                    .as_ref()
+                    .map_or(calibration_none(e).into(), |c| format!("ECE {}", f3(c.ece))),
                 BenchAxis::Localization => r
                     .localization
                     .mean_iou
@@ -400,7 +403,7 @@ impl FoloApp {
         // Calibration and localization.
         let calib = panel(&t).flex_1().min_w(px(320.)).child(panel_header(&t, "Calibration").child(
             text(ty::SM, t.text_tertiary).child(
-                r.calibration.as_ref().map_or("no confidences to check".to_string(), |c| {
+                r.calibration.as_ref().map_or(calibration_none(e).to_string(), |c| {
                     format!("ECE {} over {} detections", f3(c.ece), int(c.detections))
                 }),
             ),
@@ -417,7 +420,7 @@ impl FoloApp {
                 )
             })))
             .child(div().px(px(16.)).pb(px(10.)).child(text(ty::SM, t.text_tertiary).child("Share right per confidence band: a trustworthy model is right about as often as it is sure."))),
-            None => calib.child(div().px(px(16.)).py(px(12.)).child(text(ty::SM, t.text_tertiary).child("Without confidences (or none from 0.1 up), calibration is left out of the score."))),
+            None => calib.child(div().px(px(16.)).py(px(12.)).child(text(ty::SM, t.text_tertiary).child(format!("{} Calibration is left out of the score.", calibration_why_not(e))))),
         };
         let loc = &r.localization;
         let peak = loc.histogram.iter().copied().max().unwrap_or(0).max(1);
