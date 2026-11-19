@@ -38,7 +38,8 @@ images you may not share with them.
    and reviewed (Enter saves and opens the next image to review, Ctrl+S or ⌘S saves and stays; its tile then says
    Edited and Reviewed). When the agent's boxes are right, **Looks right** (Enter) marks them reviewed and opens the next
    image to review; the To review and Reviewed filters and the count in the header show how far you are. If the agent got an image wrong in a way you can describe, ask it again with a note ("the boxes are too
-   loose", "that is a van, not a truck"). Failed images wait for the next run.
+   loose", "that is a van, not a truck"). If the agent cannot answer, the image keeps the boxes it had, reviewed or
+   not, and the editor says why. Failed images wait for the next run.
 5. **Create dataset.** The labeled images become a YOLO dataset under the server's data dir, split into train and
    val, registered and ready for a training run. Images without labels are left out; a labeled image without
    boxes is kept as a background image. The job stays, so you can add images, label them and export again.

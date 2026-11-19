@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 
 use folo_server::label::agent::BUSY;
 
-use super::harness::{Step, boxes_reply, err, fixture, get, idle, images, job_with_images, ok, paid, post};
+use super::harness::{
+    Step, boxes_reply, err, fixture, get, idle, images, job_with_images, ok, paid, post, put,
+};
 
 #[tokio::test]
 async fn replies_that_cannot_be_read_fail_their_images_only() {
@@ -247,6 +249,60 @@ async fn an_image_whose_every_box_was_dropped_fails_instead_of_looking_empty() {
     let error = page.images[0].error.as_deref().unwrap();
     assert!(error.starts_with("the one box the agent gave this image was dropped"), "{error}");
     assert_eq!((page.images[1].status, page.images[1].error.as_deref()), (LabelImageStatus::Labeled, None));
+}
+
+/// Asking again about labeled images and getting no usable answer leaves their labels as they were, review and
+/// dataset included; only the error says what happened (#317). An image that had no labels fails as before.
+#[tokio::test]
+async fn a_failed_relabel_keeps_the_labels_and_their_review() {
+    let t = TestDir::new("label-failed-relabel");
+    let garbage = || Step::Reply("Sure! Here are the boxes you asked for.".into());
+    let f = fixture(&t.join("home"), vec![garbage(), garbage(), Step::Timeout]);
+    let app = &f.app;
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let ids: Vec<String> = images(app, &job.id, "").await.images.into_iter().map(|i| i.id).collect();
+    let saved = json!({ "boxes": [{ "class": 1, "x1": 10, "y1": 10, "x2": 90, "y2": 60 }] });
+    for id in &ids[..2] {
+        ok::<LabelImage>(app, put(&format!("{uri}/images/{id}"), saved.clone())).await;
+    }
+
+    // Garbage twice for a reviewed image and an unlabeled one, then a timeout for the reviewed one alone.
+    let body = json!({ "agent": "claude", "image_ids": [ids[0], ids[2]], "batch": 2 });
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), body)).await;
+    idle(app, &job.id).await;
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude", "image_ids": [ids[0]] })))
+        .await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.done, run.failed), (Some(LabelOutcome::Completed), 0, 1));
+    assert_eq!(done.counts, LabelCounts { images: 3, pending: 0, labeled: 2, failed: 1, boxes: 2 });
+    let page = images(app, &job.id, "").await.images;
+    let kept = &page[0];
+    assert_eq!(
+        (kept.status, kept.source, kept.reviewed, kept.boxes.len()),
+        (LabelImageStatus::Labeled, Some(LabelSource::Manual), true, 1)
+    );
+    assert!(kept.error.as_deref().unwrap().starts_with("Claude Code did not answer"), "{:?}", kept.error);
+    assert_eq!(
+        (page[2].status, page[2].error.as_deref()),
+        (LabelImageStatus::Failed, Some("the reply has no JSON object"))
+    );
+    assert_eq!(images(app, &job.id, "?status=labeled&reviewed=true").await.total, 2);
+
+    // Both reviewed images go into the dataset.
+    let ds: Dataset = ok(app, post(&format!("{uri}/dataset"), json!({ "val_fraction": 0 }))).await;
+    assert_eq!(ds.splits, Splits { train: 2, val: 0, test: 0 });
+
+    // An answer that does come replaces the boxes and clears the error, as always.
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude", "image_ids": [ids[0]] })))
+        .await;
+    idle(app, &job.id).await;
+    let again = &images(app, &job.id, "").await.images[0];
+    assert_eq!(
+        (again.source, again.reviewed, again.error.as_deref()),
+        (Some(LabelSource::Agent), false, None)
+    );
 }
 
 #[tokio::test]
