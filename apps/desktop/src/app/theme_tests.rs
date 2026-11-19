@@ -205,3 +205,83 @@ fn re_picking_a_slots_theme_does_nothing_by_pointer_or_keys() {
     click_option(&mut app, window, "set-light-theme", 1);
     assert_eq!(state(&mut app, window), midnight);
 }
+
+/// The app on Settings at `width` (tall enough for the whole page) with the custom themes in
+/// `folder`, its glyphs painted.
+fn settings_at(width: f32, folder: &std::path::Path) -> (HeadlessApp, WindowHandle<FoloApp>) {
+    use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
+    let window_size = size(px(width), px(3200.));
+    let mut app = HeadlessApp::new(HeadlessOptions { size: window_size, ..Default::default() });
+    let window = app.update(|cx| {
+        cx.set_global(crate::theme::Theme::new(Mode::Dark));
+        let bounds = Bounds::new(point(px(0.), px(0.)), window_size);
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
+        cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+            .expect("open window")
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    let folder = folder.to_path_buf();
+    drive(&mut app, window, move |this, w, cx| {
+        this.themes = Catalog::load(&folder);
+        this.navigate(Route::Settings, w, cx);
+    });
+    (app, window)
+}
+
+/// The glyphs painted wholly inside their clip, in the danger and the secondary ink.
+fn visible_glyphs(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> (usize, usize) {
+    drawn_keys(app, window);
+    let t = drive(app, window, |_, _, cx| theme(cx));
+    let mut n = (0, 0);
+    for p in &app.scene(window.into()).primitives {
+        if let folo_ui::Primitive::MonoSprite(s) = p
+            && s.kind == folo_ui::SpriteKind::Glyph
+            && s.bounds.is_contained_within(&s.clip)
+        {
+            n.0 += usize::from(s.color == t.danger_text);
+            n.1 += usize::from(s.color == t.text_secondary);
+        }
+    }
+    n
+}
+
+/// #352: a failed file's name too long for its row pushed the reason past the panel's edge, where
+/// it was clipped. At the narrowest window and at 1280, a long name with no spaces and one with
+/// spaces each paint whole, and so does each reason.
+#[test]
+fn a_failed_file_with_a_long_name_shows_the_whole_name_and_reason() {
+    let dir = TestDir::new("desktop-theme-long-name");
+    // Two folders whose shown paths (in the names' ink) are as long.
+    let folder = dir.path().join("a").join("themes");
+    let empty = dir.path().join("b").join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let solid = format!("broken-theme-{}case.json", "filename-".repeat(17));
+    let spaced = format!("broken theme {}case.json", "file name ".repeat(12));
+    std::fs::write(
+        folder.join(&solid),
+        r#"{"folo_theme": 1, "id": "long-theme-file", "name": "Broken", "mode": "chartreuse"}"#,
+    )
+    .unwrap();
+    std::fs::write(folder.join(&spaced), r#"{"folo_theme": 2, "id": "spaced", "name": "S", "mode": "dark"}"#)
+        .unwrap();
+    let ink = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+    for width in [960., 1280.] {
+        let (mut app, window) = settings_at(width, &folder);
+        let failed = drive(&mut app, window, |this, _, _| this.themes.failed.clone());
+        assert_eq!(failed.len(), 2, "{failed:?}");
+        let reasons: usize = failed.iter().map(|f| ink(f.error.trim_start_matches("(file): "))).sum();
+        let names: usize = failed.iter().map(|f| ink(&f.file)).sum();
+        assert_eq!(names, ink(&solid) + ink(&spaced));
+        let with = visible_glyphs(&mut app, window);
+        // The same page without the failed files: what the rest of it paints in those inks.
+        drive(&mut app, window, |this, _, cx| {
+            this.themes = Catalog::load(&empty);
+            cx.notify();
+        });
+        let without = visible_glyphs(&mut app, window);
+        assert_eq!(with.0 - without.0, reasons, "every reason's glyph shows at {width}");
+        assert_eq!(with.1 - without.1, names, "every name's glyph shows at {width}");
+    }
+}
