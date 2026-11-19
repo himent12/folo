@@ -12,7 +12,7 @@
 // shows an error with Retry, and its screen as soon as any later try brings the chunk in.
 
 import { signal, untrack, type Component, type Signal } from 'fw';
-import { refetchFailedStyles } from '$lib/failedStyles';
+import { retryFailedStyles } from '$lib/failedStyles';
 import { parse, type RouteName } from '$lib/router';
 
 /** Every route but not-found (App renders that one itself), and the file under src/routes/ (no extension) for it. */
@@ -127,12 +127,18 @@ export class Screens {
 const files = import.meta.glob<ScreenModule>(['./routes/*.tsx', '!./routes/*.test.tsx', '!./routes/*.testing.tsx', '!./routes/NotFound.tsx']);
 
 /**
- * The app's screens. A stylesheet that failed to load earlier is loaded again first (lib/failedStyles: the bundler's
- * preload helper never asks for a file twice), so a screen never shows without one.
+ * The app's screens. Each load first asks again for the stylesheets that failed to load earlier (lib/failedStyles: the
+ * bundler's preload helper never asks for a file twice), without waiting for them: the chunk loads as it would anyway.
  */
 export const screens = new Screens((name) => {
   const load = files[`./routes/${ROUTES[name]}.tsx`];
-  return load && (() => refetchFailedStyles().then(load));
+  return (
+    load &&
+    (() => {
+      void retryFailedStyles();
+      return load();
+    })
+  );
 });
 
 /** Loads a route's chunk (see `Screens.preload`). */

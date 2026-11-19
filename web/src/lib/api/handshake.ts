@@ -36,18 +36,21 @@ export async function tokenWall(base: string, signal: AbortSignal): Promise<bool
   }
 }
 
+/** What `HEAD /api/runs` answers on a FOLO server that wants no token (axum answers HEAD as GET, without the body). */
+export const NO_WALL = 200;
+
 /**
- * The token check sent together with the health check, before the health has said this is a FOLO server: true or false
- * when the server answered it (`401`: the token wall), null when it got no HTTP answer (sent before the server was up, a
- * reset connection, cancelled). Null is no answer at all, so the caller asks `tokenWall` again once the health has
- * passed, as when the check went out after it.
+ * The token check sent together with the health check (see `Hub`'s connect for when its answer is used). `answer`:
+ * true for `401` (the token wall), false for `NO_WALL`, null for anything else: any other status, no HTTP answer, or
+ * cancelled. `cancel` aborts the request (when it is still out).
  */
-export async function earlyTokenWall(base: string, signal: AbortSignal): Promise<boolean | null> {
-  try {
-    return (await fetch(`${base}/api/runs`, { method: 'HEAD', signal })).status === 401;
-  } catch {
-    return null;
-  }
+export function earlyTokenWall(base: string, signal: AbortSignal): { answer: Promise<boolean | null>; cancel: () => void } {
+  const mine = new AbortController();
+  const answer = fetch(`${base}/api/runs`, { method: 'HEAD', signal: AbortSignal.any([signal, mine.signal]) }).then(
+    (r) => (r.status === 401 ? true : r.status === NO_WALL ? false : null),
+    () => null,
+  );
+  return { answer, cancel: () => mine.abort() };
 }
 
 /**

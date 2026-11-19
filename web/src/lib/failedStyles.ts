@@ -1,62 +1,69 @@
-// Stylesheets of lazy chunks that failed to load (a dropped connection, a server restarting) are fetched again before
-// the next chunk load, so Retry on a screen that could not load, the next screen that needs the same stylesheet and
-// the demo's mock module all get their styles without a reload.
+// Stylesheets of lazy chunks that failed to load (a dropped connection, a server restarting) are asked for again when
+// the next screen or the demo's mock module loads: best effort, never in the way.
 //
-// Why the app does it: the bundler's preload helper (Vite's, in the built entry) adds a `<link rel=stylesheet>` for
-// every stylesheet a lazy chunk needs and waits for it, but remembers every file it has asked for once that request
-// settles, failed or not, and never asks for it again in this page. A stylesheet that failed once stayed missing: the
-// screen showed unstyled, and with the shared stylesheet (vite.config.ts) every later screen too. A failed link applies
-// nothing, so taking it out changes no pixel.
+// Why: the bundler's preload helper (Vite's, in the built entry) adds a `<link rel=stylesheet>` for every stylesheet a
+// lazy chunk needs and waits for it, but remembers every file it has asked for once that request settles, failed or not,
+// and never asks for it again in this page. On its own, a stylesheet that failed once stays missing until a reload:
+// Retry shows the screen without it (the helper skips it), and so does every later screen that needs it.
+//
+// The rules:
+// - The failed link stays where the helper put it (a failed link applies nothing). A retry is a copy of that link,
+//   every attribute included, put in its place: the stylesheets keep the order a clean load gives them, so rules of
+//   equal specificity resolve as they would have.
+// - Nobody waits for a retry: the screen or the mock loads exactly as it would without this module, and the stylesheet
+//   applies when it arrives. A retry that fails leaves its copy where the link was and is tried again next time.
 
-/** The stylesheets (absolute URLs) whose last load failed and that no load has brought in since. */
-const failed = new Set<string>();
-/** A refetch of each, while one is out. */
-const refetching = new Map<string, Promise<void>>();
+/** The link of each stylesheet whose last load failed (by URL), until a load of it succeeds. */
+const failed = new Map<string, HTMLLinkElement>();
+/** The retry of each, while one is out. */
+const retrying = new Map<string, Promise<void>>();
+
+const isSheet = (el: EventTarget | null): el is HTMLLinkElement =>
+  el instanceof HTMLLinkElement && el.rel === 'stylesheet' && !!el.href;
 
 /** Starts watching `doc` for stylesheet links whose load fails (once per document). Returns a stop function (tests). */
 export function watchFailedStyles(doc: Document = document): () => void {
+  // `error` and `load` do not bubble: caught on their way down.
   const onError = (e: Event) => {
-    const el = e.target;
-    if (!(el instanceof HTMLLinkElement) || el.rel !== 'stylesheet' || !el.href) return;
-    failed.add(el.href);
-    // The preload helper listens on the link itself and still hears this error after the link has left.
-    el.remove();
+    if (isSheet(e.target)) failed.set(e.target.href, e.target);
   };
-  // `error` does not bubble: caught on its way down.
+  const onLoad = (e: Event) => {
+    if (isSheet(e.target)) failed.delete(e.target.href);
+  };
   doc.addEventListener('error', onError, true);
+  doc.addEventListener('load', onLoad, true);
   return () => {
     doc.removeEventListener('error', onError, true);
+    doc.removeEventListener('load', onLoad, true);
     failed.clear();
-    refetching.clear();
+    retrying.clear();
   };
 }
 
 /**
- * Loads again every stylesheet whose load failed; resolves once all have loaded, rejects when one fails again (it stays
- * on the list for the next try). Called before a lazy chunk is imported (src/routes.ts, the mock in lib/api).
+ * Asks again for every stylesheet whose last load failed, each in the place of its failed link and with its
+ * attributes. Never rejects; resolves once each retry has loaded or failed (tests). Callers start it and do not wait:
+ * `src/routes.ts` before a screen's chunk, `lib/api` before the mock's.
  */
-export function refetchFailedStyles(doc: Document = document): Promise<void> {
+export function retryFailedStyles(): Promise<void> {
   if (!failed.size) return Promise.resolve();
   return Promise.all(
-    [...failed].map((href) => {
-      let p = refetching.get(href);
-      if (!p) {
-        p = new Promise<void>((ok, no) => {
-          const link = doc.createElement('link');
-          link.rel = 'stylesheet';
-          // As the preload helper links them (the same request, the same cache entry).
-          link.crossOrigin = '';
-          link.href = href;
-          link.addEventListener('load', () => {
-            failed.delete(href);
-            ok();
-          });
-          // watchFailedStyles removes it and keeps the file on the list.
-          link.addEventListener('error', () => no(new Error(`Unable to load the stylesheet ${href}`)));
-          doc.head.appendChild(link);
-        }).finally(() => refetching.delete(href));
-        refetching.set(href, p);
+    [...failed].map(([href, dead]) => {
+      let p = retrying.get(href);
+      if (p) return p;
+      // Taken out by something else: there is no place left to put it back in.
+      if (!dead.isConnected) {
+        failed.delete(href);
+        return Promise.resolve();
       }
+      p = new Promise<void>((done) => {
+        const link = dead.cloneNode(false) as HTMLLinkElement;
+        // watchFailedStyles hears the outcome first (capture): a failure puts this link on the list in place of `dead`.
+        link.addEventListener('load', () => done(), { once: true });
+        link.addEventListener('error', () => done(), { once: true });
+        dead.replaceWith(link);
+      }).finally(() => retrying.delete(href));
+      retrying.set(href, p);
       return p;
     }),
   ).then(() => {});

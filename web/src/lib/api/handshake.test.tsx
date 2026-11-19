@@ -10,7 +10,7 @@ import ConnectionPanel from '../../routes/settings/ConnectionPanel';
 import { render } from '../../../framework/testing';
 import { ApiError } from './client';
 import { isHealth, NOT_FOLO, refusal, TOKEN_WALL } from './handshake';
-import { hub } from './index';
+import { hub, TOKEN_GRACE } from './index';
 import { PROBE_DELAYS } from './reach';
 
 const healthy = () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
@@ -57,9 +57,18 @@ describe('the first handshake with an address that answers', () => {
       if (url.endsWith('/api/runs') && init?.method === 'HEAD') {
         wall++;
         if (!runs.length) throw new TypeError('Failed to fetch');
+        const answer = runs[Math.min(wall - 1, runs.length - 1)]!;
         pending++;
         try {
-          return await runs[Math.min(wall - 1, runs.length - 1)]!(init);
+          // As a real request: a cancelled one fails at once, whatever was coming.
+          return await new Promise<Response>((ok, no) => {
+            const signal = init?.signal;
+            if (signal?.aborted) return no(signal.reason as Error);
+            signal?.addEventListener('abort', () => no(signal.reason as Error), { once: true });
+            Promise.resolve()
+              .then(() => answer(init))
+              .then(ok, no);
+          });
         } finally {
           pending--;
         }
@@ -197,41 +206,69 @@ describe('the first handshake with an address that answers', () => {
   const opens = () => new Response(null, { status: 200 });
   const notFolo = () => Response.json({ service: 'other' });
 
-  for (const [what, early] of [
-    ['fails at once (a reset connection)', resetAfter(0)],
-    ['fails after the health answered', resetAfter(1200)],
-  ] as const) {
-    it(`asks the token check again when the early one ${what}, and still finds the wall`, async () => {
-      const c = start([after(800, healthy)], [early, walls]);
-      await vi.advanceTimersByTimeAsync(1200);
-      await c.done;
-      expect(c.said()).toMatchObject({ mode: 'connecting', label: 'Not connected', notice: `${TOKEN_WALL} Retrying…` });
-      expect([hub.refused, hub.offline, c.heads(), c.pending()]).toEqual([TOKEN_WALL, true, 2, 0]);
-      c.unmount();
-    });
+  // The token check goes out with the health check too (index.ts, #reachServer's table): whatever that early check gets,
+  // and whenever, Studio must end where the check after the health alone took it (`main`), and leave nothing in flight.
+  // Health answers at HEALTH ms; the early check before it (BEFORE) or after it within the grace (AFTER); the check after
+  // the health, when it is asked, answers SEQ ms after it goes out with what the server says (`truth`).
+  const HEALTH = 800;
+  const BEFORE = 100;
+  const AFTER = HEALTH + TOKEN_GRACE / 2;
+  const SEQ = 100;
+  const status = (code: number, body: string | null = null) => () => new Response(body, { status: code });
+  /** What the early check gets, and whether its answer is used (what a FOLO server answers: 401 or 200). */
+  const outcomes: [string, (at: number) => Answer, 'wall' | 'open' | null][] = [
+    ['401', (at) => after(at, walls), 'wall'],
+    ['200', (at) => after(at, opens), 'open'],
+    ['403', (at) => after(at, status(403)), null],
+    ['404', (at) => after(at, status(404, 'not found')), null],
+    ['an empty 500 (the dev proxy)', (at) => after(at, status(500)), null],
+    ['a 500 with a body', (at) => after(at, () => Response.json({ error: { code: 'internal', message: 'x', hint: null } }, { status: 500 })), null],
+    ['502', (at) => after(at, status(502)), null],
+    ['503', (at) => after(at, status(503)), null],
+    ['504', (at) => after(at, status(504)), null],
+    ['a reset connection', (at) => resetAfter(at), null],
+  ];
+  const ends = {
+    wall: { mode: 'connecting', label: 'Not connected', notice: `${TOKEN_WALL} Retrying…`, refused: TOKEN_WALL, offline: true },
+    open: { mode: 'live', label: 'Connected', notice: '', refused: null, offline: false },
+  } as const;
+  const end = (c: ReturnType<typeof start>) => {
+    const s = c.said();
+    return { mode: s.mode, label: s.label, notice: s.notice, refused: hub.refused, offline: hub.offline };
+  };
 
-    it(`asks the token check again when the early one ${what}, and goes live without a wall`, async () => {
-      const c = start([after(800, healthy)], [early, opens]);
-      await vi.advanceTimersByTimeAsync(1200);
-      await c.done;
-      expect([c.said().mode, c.said().label, hub.refused, hub.offline, c.heads()]).toEqual(['live', 'Connected', null, false, 2]);
-      c.unmount();
-    });
+  for (const [what, early, used] of outcomes) {
+    for (const [when, at] of [
+      ['before', BEFORE],
+      ['after', AFTER],
+    ] as const) {
+      for (const truth of used ? [used] : (['wall', 'open'] as const)) {
+        it(`early token check: ${what} ${when} the health, the server ${truth === 'wall' ? 'walled' : 'open'}: as the check after the health alone`, async () => {
+          const c = start([after(HEALTH, healthy)], [early(at), after(SEQ, truth === 'wall' ? walls : opens)]);
+          // Never later than the check after the health alone (HEALTH + SEQ) plus the grace.
+          await vi.advanceTimersByTimeAsync(HEALTH + TOKEN_GRACE + SEQ);
+          await c.done;
+          expect(end(c)).toEqual(ends[truth]);
+          // Used: that answer alone. Not used: asked again after the health, as `main` asks it.
+          expect([c.heads(), c.pending()]).toEqual([used ? 1 : 2, 0]);
+          c.unmount();
+        });
+      }
+    }
   }
 
-  for (const [what, answer, said] of [
-    ['the wall', walls, { mode: 'connecting', label: 'Not connected', notice: `${TOKEN_WALL} Retrying…` }],
-    ['no wall', opens, { mode: 'live', label: 'Connected', notice: '' }],
-  ] as const) {
-    it(`waits for a token check that answers after the health, and reads ${what} from it`, async () => {
-      const c = start([healthy], [after(300, answer)]);
-      await vi.advanceTimersByTimeAsync(299);
-      // The health has answered; the token check has not: not live yet.
-      expect([hub.mode, hub.refused, c.heads()]).toEqual(['connecting', null, 1]);
+  for (const truth of ['wall', 'open'] as const) {
+    it(`early token check that hangs, the server ${truth === 'wall' ? 'walled' : 'open'}: cancelled after the grace, asked again`, async () => {
+      const c = start([after(HEALTH, healthy)], [hang, after(SEQ, truth === 'wall' ? walls : opens)]);
+      await vi.advanceTimersByTimeAsync(HEALTH + TOKEN_GRACE - 1);
+      // The health has answered; the grace is not over: still waiting on the early check, nothing said yet.
+      expect([hub.mode, hub.offline, c.heads(), c.pending()]).toEqual(['connecting', false, 1, 1]);
       await vi.advanceTimersByTimeAsync(1);
+      expect([c.heads(), c.pending()]).toEqual([2, 1]);
+      await vi.advanceTimersByTimeAsync(SEQ);
       await c.done;
-      expect(c.said()).toMatchObject(said);
-      expect(c.heads()).toBe(1);
+      expect(end(c)).toEqual(ends[truth]);
+      expect(c.pending()).toBe(0);
       c.unmount();
     });
   }

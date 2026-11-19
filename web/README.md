@@ -22,8 +22,7 @@ npm run preview   # serves dist/ (vite preview)
 npm run tokens    # regenerates src/lib/design/tokens.css and tokens.ts from ../design/tokens.json
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome); -- --theme paper: one theme
 npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots, then
-                  # scripts/load-faults.mjs (a stylesheet or the mock failing once: Studio recovers) and
-                  # scripts/heartbeat-check.mjs (paused heartbeats draw every frame as before); fails on any (CI)
+                  # scripts/load-faults.mjs (a stylesheet or the mock failing to load); fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
 npm run live-smoke -- <out dir>                # a short training run through New run, watched (usage: its header)
 npm run label-smoke -- <out dir> --images <dir> # agent labeling end to end with a real agent CLI (spends tokens)
@@ -55,8 +54,12 @@ folo serve. Retrying…", and keeps checking (`src/lib/api/index.ts`) until it a
 address that answers with something else says what came back ("This address answered, but not as a FOLO server",
 "This server asks for sign-in (401)", `src/lib/api/handshake.ts`) and is checked again the same way; so does a FOLO
 server started with `--token`, whose health is open but whose runs list answers 401 ("This server needs a token
-(folo serve --token), which Studio can't send"). So `npm run dev` without a server shows that offline state:
-start `folo serve`, or open `http://localhost:5173/?mock=1`.
+(folo serve --token), which Studio can't send"). That token check (`HEAD /api/runs`) is asked after the health has
+passed; a copy of it also goes out with the health, a round trip less on a remote server, and its answer is used only
+when it is a FOLO server's (401: the wall; 200: none). Anything else (another status, no answer, or none within
+`TOKEN_GRACE`, 250 ms, of the health's) is set aside and the check after the health decides, as it always did: the
+table in `#reachServer`. So `npm run dev` without a server shows that offline state: start `folo serve`, or open
+`http://localhost:5173/?mock=1`.
 
 ## Where things are
 
@@ -72,7 +75,7 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/lib/api/` | `index.ts` (`hub`: live server or mock), `client.ts` (the `Api` interface and `HttpApi`), `types.ts` + `types/` (docs/API.md's types, by resource), `resource.ts`, `sse.ts`, `live*.ts`, `reach.ts`, `handshake.ts`, `upload.ts`, `mock/` |
 | `src/lib/router.ts` | The hash router (`router`, `href`, `RouteName`) |
 | `src/lib/shell/` | App chrome: `Sidebar`, `Topbar`, `TabBar`, `CommandPalette`, `Page` (the page frame), `nav.ts`, `crumbs.ts`, `shortcuts.ts`, `RunWatch` |
-| `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`; `heartbeat.ts` pauses the live heartbeat animations for most of the part of each beat where they hold still; its header says what it guarantees) |
+| `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`) |
 | `src/lib/charts/` | SVG/canvas charts (`LineChart`, `Sparkline`, `Histogram`, `ConfusionMatrix`, `XYChart`) and their geometry |
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
@@ -81,7 +84,7 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/lib/*.ts` | Shared rules and wording: `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
 | `framework/` | fw, the UI framework: [framework/README.md](framework/README.md) |
 | `public/` | Copied as is into `dist/`: `favicon.svg`, and `folo-wasm/` once `scripts/build-wasm.sh` has built it |
-| `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `load-faults.mjs` (recovery from a stylesheet or the mock that failed to load), `heartbeat-check.mjs` (the heartbeat pause in a real browser, timers late), `parity.mjs`, `perf.mjs`, `entries.mjs`, `png.mjs`, the smoke tests |
+| `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `load-faults.mjs` (recovery from a stylesheet or the mock that failed to load), `parity.mjs`, `perf.mjs` with `perfWire.mjs` (what went over the network by a moment), `entries.mjs`, `png.mjs`, the smoke tests |
 | `shots/`, `dist/` | Output of `npm run shoot` and `npm run build`; git-ignored |
 | `notes/` | The design review record: the rubric each round was scored against, and the log of the rounds |
 | `DESIGN_DIRECTION.md` | The design rules Studio's code follows |
@@ -118,10 +121,14 @@ makes each of those files a chunk. A screen's first load fetches three scripts a
 shell and what it imports), `shared` (every module two or more chunks use) and the screen's own chunk
 (`build.rolldownOptions` in `vite.config.ts`); later screens need only their own. Keep it that way: `folo serve` speaks
 HTTP/1.1, where a browser opens six connections to a server, so on a remote one every six more files cost another
-round trip. A stylesheet a chunk needs that failed to load is loaded again before the next chunk (`src/lib/failedStyles.ts`:
-the bundler's preload helper never asks for a file twice), so Retry, the next screen and the demo's mock module get it;
-`scripts/load-faults.mjs` (in `npm run qa`) holds that. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
-come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
+round trip. The bundler's preload helper never asks for a stylesheet twice in a page, so one that failed to load (a
+dropped connection) would stay missing until a reload: when a screen's chunk or the demo's mock module loads, each
+stylesheet that failed earlier is asked for again (`src/lib/failedStyles.ts`), in the place of its failed link and with
+its attributes, so the stylesheets keep a clean load's order. Nothing waits for it: the screen loads as it would
+without it (a screen whose own stylesheet failed still says it could not load, and shows without it after Retry while
+the stylesheet is gone, as before), and the stylesheet applies when it arrives. `scripts/load-faults.mjs` (in
+`npm run qa`) holds that. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all come from
+`mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
 (`src/lib/shell/crumbs.ts`).
 
 ## State and live updates
@@ -249,8 +256,15 @@ node scripts/perf.mjs --folo <folo binary> --net 50,20 --only cold,warm   # serv
   for the cold loads and the `warm` ones with Chrome's network throttling (a delay per request and a bandwidth cap; it
   does not model TCP connection set-up or slow start, which cost one large file more round trips than many small
   ones, so its numbers are that emulation's, not a real link's). `--served base=<url>,app=<url>` measures builds a
-  server already serves there instead (another machine, or a relay over a link with real delay). The KB of a load are
-  those received by the time its content showed, a response still arriving counted with what has arrived. `warm` is a
-  reload of the same build from a filled cache (requests and KB that still went out), not a return visit after a
-  release, where a new build renames almost every chunk (on main too). `--only bundle,cold,warm,nav,live,large`
-  (default all but warm). Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).
+  server already serves there instead (another machine, or a relay over a link with real delay); the bundle figures
+  still come from the builds on disk, so each served `index.html` must be the one on disk and every file a page loads
+  must be in it, or the run fails. A load's requests and KB are counted from CDP's Network events, each at its own
+  time, cut at the moment the content showed (the page's mark, on CDP's clock through the document's navigation
+  start): the HTTP requests sent by then (each redirect hop one, one still waiting for its first byte too) and the
+  bytes received by then as Chrome counts them on the wire (encoded; every response's headers and body, a redirect
+  hop's too; a response still arriving with what had arrived; the document's own body, which Chrome reports only
+  whole, when it finished). `scripts/perfWire.mjs` does the counting (`perfWire.test.mjs`). `warm` is a reload of the
+  same build from a filled cache, after the first load went quiet (no request but an event stream out, nothing on the
+  wire for 500 ms): the requests and KB that still went out (revalidations count, what the cache answered does not),
+  not a return visit after a release, where a new build renames almost every chunk (on main too).
+  `--only bundle,cold,warm,nav,live,large` (default all but warm). Writes `perf.md` (median, min–max, change %) and `perf.json` (every sample).

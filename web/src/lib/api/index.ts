@@ -9,7 +9,7 @@
 // is slow or not there is offline, never demo data). Screens read `hub.api` and never care which one it is.
 
 import { computed, signal } from 'fw';
-import { refetchFailedStyles } from '$lib/failedStyles';
+import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
 import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
@@ -25,6 +25,35 @@ export const SLOW_CONNECT = 2500;
 /** A connect's health check that takes longer than this counts as no answer and is asked again (PROBE_DELAYS). */
 export const CONNECT_TIMEOUT = 10_000;
 
+/**
+ * How long a connect waits, once the health has passed, for the token check sent with it before it asks the check
+ * again after the health (#reachServer's table): the most a decision can come later than with that check alone. The
+ * token check's answer came at most 122 ms after the health's over 140 cold loads (`folo serve --mock`; on the same
+ * machine at most 30 ms, under Chrome's network throttling at 50 ms / 20 Mbit/s 122 ms, over a delayed link 0.5 ms):
+ * about twice that.
+ */
+export const TOKEN_GRACE = 250;
+
+/** `p`'s value, or null when it has not settled within `ms`. */
+function within<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<null>((none) => (timer = setTimeout(() => none(null), ms)))]).finally(() => clearTimeout(timer));
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts (its timer cleared). */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((next) => {
+    if (signal.aborted) return next();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      next();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
+  });
+}
+
 const params = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
 const forcedMock = params.get('mock') === '1';
 const scenario = (params.get('scenario') ?? 'normal') as Scenario;
@@ -33,19 +62,23 @@ type MockModule = typeof import('./mock');
 let mockModule: MockModule | null = null;
 let mockLoad: Promise<MockModule> | null = null;
 /**
- * The mock's module, loaded once (its own chunk); a load that failed (a dropped connection) is tried again next time,
- * with any stylesheet that failed to load (lib/failedStyles).
+ * The mock's module, loaded once (its own chunk); a load that failed (a dropped connection) is tried again next time.
+ * Like a screen's load, it first asks again for the stylesheets that failed to load (lib/failedStyles), not waiting.
  */
 function loadMock(): Promise<MockModule> {
-  mockLoad ??= (async () => {
-    try {
-      await refetchFailedStyles();
-      return (mockModule = await import('./mock'));
-    } catch (e) {
-      mockLoad = null;
-      throw e;
-    }
-  })();
+  if (!mockLoad) {
+    void retryFailedStyles();
+    // The import on its own: written `import(...).then(...)`, the bundler puts the handlers inside its preload helper,
+    // which a failed stylesheet fails before they run, and the failed load was never forgotten.
+    const load = import('./mock');
+    mockLoad = load.then(
+      (m) => (mockModule = m),
+      (e: unknown) => {
+        mockLoad = null;
+        throw e;
+      },
+    );
+  }
   return mockLoad;
 }
 // Forced: start fetching it while the rest of the app loads.
@@ -160,7 +193,7 @@ class Hub {
     this.#refused.set(null);
     this.#reach.reset(null);
     if (forcedMock) {
-      await new Promise<void>((settled) => void this.#useMock('forced', attempt, settled));
+      await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
     }
     const http = new HttpApi(prefs.serverUrl, this.#reach);
@@ -187,17 +220,32 @@ class Hub {
         const mine = new AbortController();
         try {
           const check = AbortSignal.any([abort, mine.signal, AbortSignal.timeout(CONNECT_TIMEOUT)]);
-          // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use. The token
-          // check is asked together with the health, not after it (a round trip less before the first data on a
-          // remote server); its answer counts only once the health says this is a FOLO server, and when it got no
-          // HTTP answer (sent before the server was up, a reset connection) it is asked again then, as it was after it.
+          // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use: the token
+          // check, `HEAD /api/runs`, asked once the health has said this is a FOLO server (`tokenWall`). A copy of it
+          // goes out with the health (`earlyTokenWall`: a round trip less before the first data on a remote server),
+          // and its answer is used only when it is what the check after the health concludes from a FOLO server:
+          //
+          //   the early check, once the health has passed      | the decision
+          //   -------------------------------------------------|--------------------------------------------------
+          //   answered 401                                     | the token wall
+          //   answered 200 (NO_WALL)                           | no wall
+          //   answered anything else (403, 404, 500, 502-504)  | cancelled; `tokenWall` after the health, as before
+          //   got no HTTP answer (refused, reset)              | `tokenWall` after the health, as before
+          //   no answer yet TOKEN_GRACE ms after the health's  | cancelled; `tokenWall` after the health, as before
+          //
+          // Anything else may be a gateway or the dev proxy answering for a server that is not up yet, so it says
+          // nothing about the server; the check after the health is the one that always went out, with the same
+          // timeout (`check`). A decision comes at most TOKEN_GRACE ms later than with that check alone.
           const early = earlyTokenWall(http.base, check);
           const h: unknown = await http.health(check);
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
-          let walled = await early;
+          let walled = await within(early.answer, TOKEN_GRACE);
           if (attempt !== this.#attempt) return;
-          walled ??= await tokenWall(http.base, check);
+          if (walled === null) {
+            early.cancel();
+            walled = await tokenWall(http.base, check);
+          }
           if (walled) throw new ApiError(401, 'token_wall', TOKEN_WALL);
           if (attempt !== this.#attempt) return;
           this.api = http;
@@ -234,9 +282,10 @@ class Hub {
 
   /**
    * Switches to the mock: at once when its module is loaded (as the Svelte hub does), else once it is. Its module comes
-   * from the server like any chunk: while it cannot be loaded, Studio is offline and tries again (PROBE_DELAYS).
+   * from the server like any chunk: while it cannot be loaded, Studio is offline and tries again (PROBE_DELAYS); a newer
+   * connect (`abort`) cancels the wait before the next try.
    */
-  async #useMock(reason: 'forced', attempt: number, settled: () => void) {
+  async #useMock(reason: 'forced', attempt: number, abort: AbortSignal, settled: () => void) {
     try {
       let m = mockModule;
       for (let i = 0; !m; i++) {
@@ -246,7 +295,7 @@ class Hub {
           if (attempt !== this.#attempt) return;
           this.#unreachable.set(true);
           settled();
-          await new Promise((next) => setTimeout(next, PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]));
+          await pause(PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]!, abort);
         }
         if (attempt !== this.#attempt) return;
       }

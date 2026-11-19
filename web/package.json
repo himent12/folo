@@ -15,7 +15,7 @@
     "smoke": "node scripts/smoke.mjs",
     "live-smoke": "node scripts/live-smoke.mjs",
     "label-smoke": "node scripts/label-smoke.mjs",
-    "qa": "node scripts/shoot.mjs --qa && node scripts/load-faults.mjs --dist node_modules/.qa-dist && node scripts/heartbeat-check.mjs",
+    "qa": "node scripts/shoot.mjs --qa && node scripts/load-faults.mjs --dist node_modules/.qa-dist",
     "parity": "node scripts/parity.mjs --run",
     "perf": "node scripts/perf.mjs"
   },

@@ -13,13 +13,16 @@
 // - cold: each main screen loaded in a fresh context with the cache off (--runs times): first contentful paint, the
 //   screen's content present (its selector, plus one frame), CDP Performance.getMetrics' ScriptDuration, TaskDuration,
 //   LayoutDuration and RecalcStyleDuration at that point, long tasks, JS heap after a forced GC, DOM elements, nodes,
-//   event listeners, requests, and what went over the network by the time the content showed: requests and KB received
-//   (encoded, headers included; a response still arriving, such as an event stream or an image, with what has arrived).
+//   event listeners, and what went over the network by the time the content showed (the mark's own time, from CDP's
+//   Network events, each with its time; what came after never counts): the HTTP requests sent by then (a redirect hop
+//   is a request; one still waiting for its first byte counts) and the KB received by then as Chrome counts them on the
+//   wire (encoded; headers, redirect hops and a response still arriving included, the latter with what had arrived).
 //   Settings' content is its own panel and a connected footer (its panel shows while "Connecting…").
-// - warm: each main screen loaded again in a context whose cache the same screen's load filled (it waits until every
-//   request but an event stream has finished): content shown, requests that went to the network (revalidations
-//   included), KB received. A reload of the same build, not a return visit after a release: a new build renames almost
-//   every chunk (on main too), and those are fetched again.
+// - warm: each main screen loaded again in a context whose cache the same screen's load filled (it first waits until
+//   no request but an event stream is out and nothing went over the network for 500 ms): content shown, and the
+//   requests sent and KB received by then as for cold, without what the cache answered (revalidations count). A reload
+//   of the same build, not a return visit after a release: a new build renames almost every chunk (on main too), and
+//   those are fetched again.
 // - nav: from a loaded Overview, `--cycles` hash navigations through every main screen (each timed in the page, from
 //   the hash change to the content's selector plus one frame); heap after GC after the first cycle and at the end
 //   (the leak indicator), nodes and listeners at the end.
@@ -41,7 +44,8 @@
 // connection set-up or slow start, which cost one large file more round trips than many small ones: its numbers are
 // that emulation's, not a real link's. --served base=<url>,app=<url> measures builds a server already serves at those
 // addresses (data from those servers): another machine, or a relay over a link with real delay (a Linux veth pair
-// under `tc netem`), instead of --net's emulation.
+// under `tc netem`), instead of --net's emulation. The bundle figures still come from the builds on disk: each served
+// index.html must be the one on disk (the same build) and every file a page loads must be in it, else the run fails.
 // Output: perf.json (every sample) and perf.md, in --out (default D:/folo-build/ui-fast-runtime/perf/<timestamp>).
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
@@ -52,6 +56,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brotliCompressSync, constants as zc, gzipSync } from 'node:zlib';
 import { buildApps } from './entries.mjs';
+import { settleRequests, wireOf } from './perfWire.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -216,6 +221,11 @@ async function startServers() {
     for (const a of apps) {
       if (!served[a]) throw new Error(`--served names no server for ${a}`);
       bases[a] = served[a];
+      // The bundle figures come from the build on disk: it must be the one served. index.html names the entry's files by
+      // their content hashes, and the entry every other chunk by its own, so the same index.html is the same build.
+      const html = await (await fetch(`${served[a]}/`)).text();
+      if (html !== readFileSync(join(dists[a], 'index.html'), 'utf8'))
+        throw new Error(`--served ${a}=${served[a]} serves another build than ${dists[a]} (its index.html differs)`);
     }
     api = served[apps[0]];
     return;
@@ -308,11 +318,8 @@ async function afterGc(/** @type {import('playwright-core').CDPSession} */ cdp) 
 }
 
 /**
- * A fresh context and page with CDP, the cache off (`cache`: on), --net's network, and the page instrumented for `sel`.
- * `wire` follows what goes over the network (a revalidation too, never what the cache answered): `received()` is the
- * bytes and requests so far, a response still arriving counted with what has arrived of it (an event stream, an image
- * still loading), so a build whose content shows sooner is never credited with bytes it simply had not received yet;
- * `inflight` the requests not finished, `streams` those that are event streams (they never finish).
+ * A fresh context and page with CDP, the cache off (`cache`: on), --net's network, and the page instrumented for `sel`;
+ * `wire` follows what goes over the network (./perfWire.mjs).
  */
 async function open(/** @type {string} */ sel, cache = false) {
   const context = await browser.newContext(VIEW);
@@ -324,67 +331,17 @@ async function open(/** @type {string} */ sel, cache = false) {
   await cdp.send('Performance.enable');
   await cdp.send('HeapProfiler.enable');
   await page.addInitScript(instrument, sel);
-  /** @type {string[]} */
-  const requests = [];
-  page.on('request', (r) => requests.push(r.url()));
-  const wire = {
-    /** @type {Set<string>} */ cached: new Set(),
-    /** Bytes of a response so far (its body as it arrives). @type {Map<string, number>} */ got: new Map(),
-    /** Bytes of a finished response (headers included). @type {Map<string, number>} */ fin: new Map(),
-    /** @type {Map<string, string>} */ inflight: new Map(),
-    /** @type {Set<string>} */ streams: new Set(),
-    /** Bytes and requests received over the network so far. */
-    received() {
-      let bytes = 0;
-      let requests = 0;
-      for (const id of new Set([...this.got.keys(), ...this.fin.keys()])) {
-        if (this.cached.has(id)) continue;
-        const b = this.fin.get(id) ?? this.got.get(id) ?? 0;
-        if (!b) continue;
-        bytes += b;
-        requests++;
-      }
-      return { bytes, requests };
-    },
-    reset() {
-      this.cached.clear();
-      this.got.clear();
-      this.fin.clear();
-    },
-  };
-  cdp.on('Network.requestWillBeSent', (/** @type {{ requestId: string, request: { url: string } }} */ e) => void wire.inflight.set(e.requestId, e.request.url));
-  cdp.on('Network.requestServedFromCache', (/** @type {{ requestId: string }} */ e) => void wire.cached.add(e.requestId));
-  cdp.on('Network.responseReceived', (/** @type {{ requestId: string, response: { mimeType: string } }} */ e) => {
-    if (/event-stream/.test(e.response.mimeType)) wire.streams.add(e.requestId);
-  });
-  cdp.on('Network.dataReceived', (/** @type {{ requestId: string, encodedDataLength: number }} */ e) =>
-    void wire.got.set(e.requestId, (wire.got.get(e.requestId) ?? 0) + e.encodedDataLength),
-  );
-  cdp.on('Network.loadingFinished', (/** @type {{ requestId: string, encodedDataLength: number }} */ e) => {
-    wire.inflight.delete(e.requestId);
-    wire.fin.set(e.requestId, e.encodedDataLength);
-  });
-  cdp.on('Network.loadingFailed', (/** @type {{ requestId: string }} */ e) => void wire.inflight.delete(e.requestId));
-  return { context, page, cdp, requests, wire };
+  const wire = wireOf(cdp);
+  return { context, page, cdp, wire };
 }
 
 /**
- * Waits until every request but the event streams (a live run's, which never finish) has finished and none started
- * for `quiet` ms, at most `max` ms; throws, naming what is still out, when it never goes quiet.
- * @param {import('playwright-core').Page} page
- * @param {{ inflight: Map<string, string>, streams: Set<string> }} wire
+ * The CDP time (monotonic seconds, the Network events' clock) of the page's `ready` mark: performance.now() counts from
+ * the document's navigation start, which CDP's Performance metrics give on that clock.
  */
-async function settleRequests(page, wire, quiet = 500, max = 15_000) {
-  const stream = (/** @type {string} */ id, /** @type {string} */ u) => wire.streams.has(id) || /\/events(\?|$)/.test(new URL(u).pathname + new URL(u).search);
-  const end = Date.now() + max;
-  let since = Date.now();
-  while (Date.now() < end) {
-    if ([...wire.inflight].some(([id, u]) => !stream(id, u))) since = Date.now();
-    else if (Date.now() - since >= quiet) return;
-    await page.waitForTimeout(50);
-  }
-  const out = [...wire.inflight].filter(([id, u]) => !stream(id, u)).map(([, u]) => new URL(u).pathname);
-  throw new Error(`the requests never went quiet within ${max / 1000} s: ${out.slice(0, 5).join(', ')}`);
+async function readyAt(/** @type {import('playwright-core').Page} */ page, /** @type {import('playwright-core').CDPSession} */ cdp) {
+  const ready = await page.evaluate(() => /** @type {any} */ (window).__perf.ready);
+  return (await metrics(cdp)).NavigationStart + ready / 1000;
 }
 
 /** Waits for the screen's content; on a timeout, says what the page shows instead (a port missing a screen). */
@@ -427,13 +384,12 @@ async function sample(what, f) {
 // ---------------------------------------------------------------- the phases
 /** One cold load of `screen`. */
 async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
-  const { context, page, cdp, requests, wire } = await open(screen.ready);
+  const { context, page, cdp, wire } = await open(screen.ready);
   try {
     await page.goto(url(app, screen.path), { waitUntil: 'commit' });
     await waitReady(page);
-    const reqs = requests.length;
-    const got = wire.received();
     const m = await metrics(cdp);
+    const at = m.NavigationStart + (await page.evaluate(() => /** @type {any} */ (window).__perf.ready)) / 1000;
     const t = await page.evaluate(async () => {
       const P = /** @type {any} */ (window).__perf;
       // Content can show before the first paint entry is recorded (a screen with nothing to fetch): wait for it.
@@ -453,6 +409,11 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
       };
     });
     const g = await afterGc(cdp);
+    // The network up to the mark, by each event's own time: what came after it never counts, however late CDP said so.
+    const got = wire.upTo(at);
+    // The two clocks are one: the document's own request went out after its navigation started and before the mark.
+    const doc = wire.events.find((e) => e.kind === 'sent');
+    if (!doc || doc.ts < m.NavigationStart || doc.ts > at) throw new Error(`the page's clock and CDP's disagree (navigation ${m.NavigationStart}, document request ${doc?.ts}, mark ${at})`);
     return {
       fcp: t.fcp,
       ready: t.ready,
@@ -466,10 +427,9 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
       elements: t.elements,
       nodes: g.m.Nodes,
       listeners: g.m.JSEventListeners,
-      requests: reqs,
-      netRequests: got.requests,
+      requests: got.requests,
       kb: got.bytes / 1024,
-      startup: requests.slice(0, reqs),
+      startup: got.urls,
     };
   } finally {
     await context.close();
@@ -478,20 +438,23 @@ async function cold(/** @type {App} */ app, /** @type {Screen} */ screen) {
 
 /** `screen` loaded a second time, its first load having filled the context's cache (the cache on, --net's network). */
 async function warm(/** @type {App} */ app, /** @type {Screen} */ screen) {
-  const { context, page, wire } = await open(screen.ready, true);
+  const { context, page, cdp, wire } = await open(screen.ready, true);
   try {
     await page.goto(url(app, screen.path), { waitUntil: 'commit' });
     await waitReady(page);
     // Let what the screen fetched after its content showed (images, later chunks) reach the cache: every request but
     // a live run's event stream, which never ends (Playwright's networkidle never came on the Run page, so its
     // warm-up waited 30 s and preloaded more than the other screens').
-    await settleRequests(page, wire);
+    await settleRequests(wire, (ms) => page.waitForTimeout(ms));
     // A new document: the instrument starts over, and the counts are this load's.
     await page.goto('about:blank');
     wire.reset();
     await page.goto(url(app, screen.path), { waitUntil: 'commit' });
     await waitReady(page);
-    const got = wire.received();
+    const at = await readyAt(page, cdp);
+    // Events up to the mark that CDP has not delivered yet: they are cut by their own time, so waiting costs nothing.
+    await page.waitForTimeout(250);
+    const got = wire.upTo(at);
     const t = await page.evaluate(() => ({
       ready: /** @type {any} */ (window).__perf.ready,
       fcp: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
@@ -635,7 +598,8 @@ function sizes(/** @type {string} */ dist, /** @type {string[]} */ paths) {
   let b = 0;
   for (const p of paths) {
     const f = join(dist, p.replace(/^\//, ''));
-    if (!existsSync(f)) continue;
+    // A file the page loaded that this build does not have: the page ran another build.
+    if (!existsSync(f)) throw new Error(`${p} is not in the build ${dist}`);
     const buf = readFileSync(f);
     raw += buf.length;
     g += gz(buf);
@@ -794,7 +758,7 @@ if (phases.has('bundle') || phases.has('cold')) {
   row('JS requested before Overview shows, KB raw', (a) => b(a, (x) => kb(x.startupJs.raw)), 1);
   row('JS requested before Overview shows, KB brotli', (a) => b(a, (x) => kb(x.startupJs.brotli)), 1);
   row('JS files requested before Overview shows', (a) => b(a, (x) => x.startupJs.files), 0);
-  row('requests before Overview shows (all)', (a) => b(a, (x) => x.startupRequests), 0);
+  row('requests sent before Overview shows (all)', (a) => b(a, (x) => x.startupRequests), 0);
   md.push(
     '',
     `In-browser mock in the startup JS: ${apps.map((a) => `${a} ${bundles[a] ? (bundles[a].mockInStartup ? '**yes**' : 'no') : '?'}`).join(', ')}. ` +
@@ -824,9 +788,8 @@ if (phases.has('cold')) {
     row('DOM elements', (a) => c(a, 'elements'), 0);
     row('DOM nodes (CDP)', (a) => c(a, 'nodes'), 0);
     row('JS event listeners', (a) => c(a, 'listeners'), 0);
-    row('requests', (a) => c(a, 'requests'), 0);
-    row('requests over the network', (a) => c(a, 'netRequests'), 0);
-    row('KB received by content shown (partial responses too)', (a) => c(a, 'kb'), 1);
+    row('requests sent by content shown (on the wire)', (a) => c(a, 'requests'), 0);
+    row('KB received by content shown (on the wire)', (a) => c(a, 'kb'), 1);
     md.push('');
   }
 }
@@ -842,8 +805,8 @@ if (phases.has('warm')) {
     const w = (/** @type {App} */ a, /** @type {string} */ k) => raw[a].warm[s.key]?.map((/** @type {any} */ v) => v[k]).filter((/** @type {any} */ x) => x !== null);
     row(`${s.label}: first contentful paint`, (a) => w(a, 'fcp'), 0);
     row(`${s.label}: content shown (+1 frame)`, (a) => w(a, 'ready'), 0);
-    row(`${s.label}: requests to the network`, (a) => w(a, 'requests'), 0);
-    row(`${s.label}: KB received by content shown`, (a) => w(a, 'kb'), 1);
+    row(`${s.label}: requests sent by content shown (on the wire)`, (a) => w(a, 'requests'), 0);
+    row(`${s.label}: KB received by content shown (on the wire)`, (a) => w(a, 'kb'), 1);
   }
   md.push('');
 }

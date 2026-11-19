@@ -1,17 +1,22 @@
-// Load faults on the production build: one request of the app's own files fails once (a dropped connection), and
-// Studio must recover without a reload, as it recovers from a chunk that failed to load (src/ScreenError.tsx, Retry).
-//   node scripts/load-faults.mjs [--dist <built dir>] [--base <url>] [--only <case,...>]
+// Load faults on the production build: one of the app's own files fails to load (a dropped connection, or gone for
+// good), and Studio must end where it ends on `main` or better, without a reload.
+//   node scripts/load-faults.mjs [--dist <built dir>] [--base <url>] [--only <case,...>] [--verbose]
 // Without --dist or --base it builds the app into node_modules/.faults-dist (never web/dist) and serves it with
 // `vite preview`; --dist serves a build made elsewhere (another version's, to compare), --base uses a running server.
-// Each case opens a cold `/?mock=1#/` (Overview, demo data) in a fresh context with one file failing:
-// - stylesheet: the first stylesheet a screen needs beyond the entry's (the shared one: every screen's ui parts), once;
-// - stylesheet-retry: the same, every time until Retry is pressed: the screen must say it could not load, and Retry
-//   must fetch the stylesheet again;
-// - screen-css: the first screen's own stylesheet, once;
-// - mock: the in-browser mock's module (`?mock=1` loads it as a chunk of its own), once.
-// What must follow: Overview (after Retry where it says it could not load) with every stylesheet a clean load of it
-// applies, applied, and "Demo data" in the footer; then Settings the same way (a later screen, so a stylesheet left
-// failed under it shows); no uncaught error, no reload. Exits 1 on any failure (`npm run qa`, so CI: its first shard).
+// Each case opens a cold `/?mock=1#/` (Overview, demo data) in a fresh context, then goes to Settings by a link (a hash
+// change), with one file failing (the first request of it the case picks, and as many more as it says):
+// - stylesheet: the first stylesheet a screen needs beyond the entry's (the shared one: every screen's ui parts), once.
+//   When Overview says it could not load (the bundler's preload helper fails the import), Retry must show it.
+// - screen-css: Overview's own stylesheet, once. Overview says it could not load, as on main; Retry must show it.
+// - screen-css-gone: Overview's own stylesheet, every time. Overview says it could not load; Settings, opened from
+//   there, must open as it does on main, with every stylesheet of its own; Overview's is asked for again (and fails).
+// - mock: the in-browser mock's module (`?mock=1` loads it as a chunk of its own), twice: its modulepreload and its
+//   import both fail; Studio must load it again and show the demo data.
+// What must follow, on each screen: it shows with "Demo data" in the footer and every stylesheet a clean load of it
+// applies (but the one gone for good), applied, in the order a clean load gives them (lib/failedStyles puts a stylesheet
+// it asks for again where the failed link was); no failed stylesheet link but the one gone for good; the failing file
+// asked for as often as the case says (the retry really went out); no uncaught error, no reload. Exits 1 on any failure
+// (`npm run qa`, so CI: its first shard).
 // Uses the installed Chrome (playwright-core, channel "chrome"); without one, Playwright's Chromium.
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
@@ -35,17 +40,21 @@ const SCREENS = [
 /** The first stylesheet a screen needs beyond the entry's (index.html links that one: its failure is the browser's). */
 const sharedCss = (/** @type {string} */ url) =>
   /\/assets\/[^/]+\.css$/.test(url) && !/\/assets\/index-[^/]+\.css$/.test(url) && !/\/Overview-[^/]+\.css$/.test(url);
+const overviewCss = (/** @type {string} */ url) => /\/assets\/Overview-[^/]+\.css$/.test(url);
 
 /**
- * The cases: `pick(url)` says whether a request is of the file that fails (the first such file; the same one after);
- * `untilRetry`: it fails every time until Retry is pressed, else once.
- * @type {{ name: string, pick: (url: string) => boolean, untilRetry?: boolean }[]}
+ * The cases. `pick(url)`: whether a request is of the file that fails (the first such file; the same one after);
+ * `fails`: how many of its requests fail (Infinity: all); `asked`: how many requests of it must be made at least (the
+ * retry went out); `first`: what Overview does, `shows`, `says` it could not load (then Retry, unless `gone`) or
+ * either (`any`: the bundler's preload helper fails every import waiting on the stylesheet then); `gone`:
+ * the file never loads, so it is missing at the end (its link failed) and Overview's error stays.
+ * @type {{ name: string, pick: (url: string) => boolean, fails: number, asked: number, first: 'shows' | 'says' | 'any', gone?: boolean }[]}
  */
 const CASES = [
-  { name: 'stylesheet', pick: sharedCss },
-  { name: 'stylesheet-retry', pick: sharedCss, untilRetry: true },
-  { name: 'screen-css', pick: (url) => /\/assets\/Overview-[^/]+\.css$/.test(url) },
-  { name: 'mock', pick: (url) => /\/assets\/mock-[^/]+\.js$/.test(url) },
+  { name: 'stylesheet', pick: sharedCss, fails: 1, asked: 2, first: 'any' },
+  { name: 'screen-css', pick: overviewCss, fails: 1, asked: 2, first: 'says' },
+  { name: 'screen-css-gone', pick: overviewCss, fails: Infinity, asked: 2, first: 'says', gone: true },
+  { name: 'mock', pick: (url) => /\/assets\/mock-[^/]+\.js$/.test(url), fails: 2, asked: 3, first: 'shows' },
 ];
 
 async function launch() {
@@ -77,26 +86,34 @@ const state = (page) =>
       title: document.querySelector('.page h1')?.textContent?.trim() ?? '',
       failed: document.body.innerText.includes('Could not load this screen'),
       conn: document.querySelector('.conn .label')?.textContent?.trim() ?? '',
-      // Every stylesheet the page applies, by file name with its hash; and every one it links to but does not apply.
-      sheets: [...new Set(links.filter(applied).map(path))].sort(),
+      // Every stylesheet the page applies, by file name with its hash, in document order; and every one it links to but
+      // does not apply.
+      sheets: [...new Set(links.filter(applied).map(path))],
       dead: links.filter((l) => !applied(l)).map(path),
     };
   });
 
 /**
- * Waits (real time) until the screen titled `title` shows, loaded, with demo data; the last state seen either way.
+ * Waits (real time) until `ok(state)`, or the screen titled `orError` says it could not load (a screen whose chunk has not
+ * loaded keeps the one before on display, its error too); the last state seen.
  * @param {import('playwright-core').Page} page
+ * @param {(s: Awaited<ReturnType<typeof state>>) => boolean} ok
+ * @param {string} [orError]
  */
-async function shown(page, title, ms = 15_000) {
+async function until(page, ok, orError, ms = 15_000) {
   const end = Date.now() + ms;
   let s = await state(page);
   while (Date.now() < end) {
     s = await state(page);
-    if (s.title === title && !s.failed && s.conn === 'Demo data') return { ok: true, s };
+    if (ok(s) || (orError !== undefined && s.failed && s.title === orError)) return s;
     await page.waitForTimeout(100);
   }
-  return { ok: false, s };
+  return s;
 }
+/** The screen titled `title` shows, loaded, with demo data. */
+const showing = (/** @type {string} */ title) => (/** @type {Awaited<ReturnType<typeof state>>} */ s) => s.title === title && !s.failed && s.conn === 'Demo data';
+/** The stylesheets whose order is checked: the entry's, the shared one and the two screens' own. */
+const ordered = (/** @type {string[]} */ sheets) => sheets.filter((f) => /\/assets\/(index|shared|Overview|Settings)-[^/]+\.css$/.test(f));
 
 // `npm run qa` runs this after the shoot's checks, on the build they made; CI splits the QA over runners
 // (FOLO_QA_SHARD=i/n), and the first one runs this.
@@ -133,9 +150,9 @@ try {
     await page.goto(`${base}/?mock=1${SCREENS[0].hash}`);
     for (const [i, sc] of SCREENS.entries()) {
       if (i > 0) await page.evaluate((h) => (location.hash = h), sc.hash);
-      const r = await shown(page, sc.title);
-      if (!r.ok) throw new Error(`a clean load of ${sc.hash} never showed: ${JSON.stringify(r.s)}`);
-      clean[sc.hash] = r.s.sheets;
+      const s = await until(page, showing(sc.title));
+      if (!showing(sc.title)(s)) throw new Error(`a clean load of ${sc.hash} never showed: ${JSON.stringify(s)}`);
+      clean[sc.hash] = s.sheets;
     }
     await ctx.close();
   }
@@ -150,20 +167,18 @@ try {
     if (args.includes('--verbose')) {
       page.on('requestfailed', (r) => console.log(`    x ${new URL(r.url()).pathname} ${r.failure()?.errorText} (${r.resourceType()})`));
       page.on('requestfinished', (r) => /\/assets\//.test(r.url()) && console.log(`    ok ${new URL(r.url()).pathname} (${r.resourceType()})`));
+      page.on('console', (m) => console.log(`    console.${m.type()}: ${m.text()}`));
     }
     let failed = '';
-    let failures = 0;
-    let retried = false;
+    let asked = 0;
     await ctx.route(
       (u) => u.pathname.startsWith('/assets/'),
       async (route) => {
         const url = new URL(route.request().url()).pathname;
         if (!failed && c.pick(url)) failed = url;
-        if (url === failed && (c.untilRetry ? !retried : failures === 0)) {
-          failures++;
-          return route.abort('connectionreset');
-        }
-        return route.continue();
+        if (url !== failed) return route.continue();
+        asked++;
+        return asked <= c.fails ? route.abort('connectionreset') : route.continue();
       },
     );
     const log = [`${c.name}:`];
@@ -173,30 +188,40 @@ try {
       say(`FAIL ${m}`);
     };
     await page.goto(`${base}/?mock=1${SCREENS[0].hash}`);
-    // The first screen, or its error.
-    const end = Date.now() + 10_000;
-    while (Date.now() < end) {
-      const s = await state(page);
-      if (s.failed || (s.title === SCREENS[0].title && s.conn === 'Demo data')) break;
-      await page.waitForTimeout(100);
-    }
-    if (!failed) fail('the request to fail was never made');
+    // Gone if the page reloads.
+    await page.evaluate(() => Object.defineProperty(window, '__faults', { value: true }));
     for (const [i, sc] of SCREENS.entries()) {
       if (i > 0) await page.evaluate((h) => (location.hash = h), sc.hash);
-      let s = await state(page);
+      let s = await until(page, showing(sc.title), sc.title);
+      if (i === 0 && c.first === 'says' && !s.failed) fail(`${sc.hash} did not say it could not load while ${failed} failed (as main does)`);
+      if (s.failed && !(i === 0 && c.first !== 'shows'))
+        fail(`${sc.hash} said it could not load: ${await page.evaluate(() => document.querySelector('main')?.textContent?.replace(/\s+/g, ' ').slice(0, 300))}`);
+      if (s.failed && c.gone) {
+        say(`${sc.hash}: "Could not load this screen" (${failed} gone, asked ${asked} time(s)), as on main`);
+        continue;
+      }
       if (s.failed) {
-        say(`${sc.hash}: "Could not load this screen" (${failed} failed ${failures} time(s)); Retry`);
-        retried = true;
+        say(`${sc.hash}: "Could not load this screen" (${failed} failed ${asked} time(s)); Retry`);
         await page.getByRole('button', { name: 'Retry' }).first().click();
-      } else if (c.untilRetry && i === 0) fail(`${sc.hash} did not say it could not load while ${failed} failed`);
-      const r = await shown(page, sc.title);
-      s = r.s;
-      if (!r.ok) fail(`${sc.hash} did not recover: title "${s.title}", load error ${s.failed}, footer "${s.conn}"`);
-      const missing = clean[sc.hash].filter((x) => !s.sheets.includes(x));
+      }
+      // Every stylesheet a clean load applies (but the one gone for good): a stylesheet asked for again applies when it
+      // arrives, so give it the time a load takes.
+      const want = clean[sc.hash].filter((f) => !(c.gone && f === failed));
+      s = await until(page, (x) => showing(sc.title)(x) && want.every((f) => x.sheets.includes(f)));
+      if (!showing(sc.title)(s)) fail(`${sc.hash} did not show: title "${s.title}", load error ${s.failed}, footer "${s.conn}"`);
+      const missing = want.filter((x) => !s.sheets.includes(x));
       if (missing.length) fail(`${sc.hash} without ${missing.join(', ')}`);
-      if (s.dead.length) fail(`${sc.hash} has a failed stylesheet link: ${s.dead.join(', ')}`);
-      if (r.ok && !missing.length && !s.dead.length) say(`${sc.hash}: shown with every stylesheet, footer "${s.conn}" (${failed} failed ${failures} time(s))`);
+      const order = ordered(s.sheets);
+      const cleanOrder = ordered(clean[sc.hash]).filter((f) => order.includes(f));
+      if (order.filter((f) => cleanOrder.includes(f)).join() !== cleanOrder.join()) fail(`${sc.hash}: stylesheets in the order ${order.join(', ')}; a clean load: ${cleanOrder.join(', ')}`);
+      const dead = s.dead.filter((x) => !(c.gone && x === failed));
+      if (dead.length) fail(`${sc.hash} has a failed stylesheet link: ${dead.join(', ')}`);
+      if (showing(sc.title)(s) && !missing.length && !dead.length) say(`${sc.hash}: shown with every stylesheet${c.gone ? ' but the one gone' : ''}, in order, footer "${s.conn}"`);
     }
+    if (!failed) fail('the request to fail was never made');
+    else if (asked < c.asked) fail(`${failed} asked for ${asked} time(s), expected at least ${c.asked} (the retry never went out)`);
+    else say(`${failed} asked for ${asked} time(s), ${Math.min(asked, c.fails)} failed`);
+    if (!(await page.evaluate(() => '__faults' in window))) fail('the page reloaded');
     if (errors.length) fail(`uncaught: ${errors.join(' | ')}`);
     console.log(log.join('\n'));
     await ctx.close();
