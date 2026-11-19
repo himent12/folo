@@ -42,6 +42,29 @@ export async function tokenWall(base: string, signal: AbortSignal): Promise<bool
 /** What `HEAD /api/runs` answers on a FOLO server that wants no token (axum answers HEAD as GET, without the body). */
 export const NO_WALL = 200;
 
+/** A server (or what is in front of it) that answers 403 to Studio's requests. */
+export const REFUSES_ACCESS = 'This server refuses access (403).';
+
+/**
+ * What the token check (`HEAD /api/runs`, as `tokenWall`) says about the server in use letting Studio in: `'in'` for a
+ * 2xx, the status for a 401 or 403 (refused), null when it cannot tell (no answer, a timeout, any other status).
+ */
+export type AccessAnswer = 'in' | 401 | 403 | null;
+
+export async function accessCheck(base: string, signal: AbortSignal): Promise<AccessAnswer> {
+  try {
+    const { status } = await fetch(`${base}/api/runs`, { method: 'HEAD', signal });
+    return status >= 200 && status < 300 ? 'in' : status === 401 || status === 403 ? status : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A refusal `accessCheck` found, in the words a connect uses: a 401 is the token wall. */
+export function refusedWords(status: 401 | 403): string {
+  return status === 401 ? TOKEN_WALL : REFUSES_ACCESS;
+}
+
 /**
  * The token check sent together with the health check (see `Hub`'s connect for when its answer is used). `answer`:
  * true for `401` (the token wall), false for `NO_WALL`, null for anything else: any other status, no HTTP answer, or
@@ -79,6 +102,6 @@ export function refusal(e: unknown): string | null {
   if ((e.status === 500 && e.code === 'http_500') || (e.status >= 502 && e.status <= 504)) return null;
   if (e.status === 401 && e.code === 'token_wall') return TOKEN_WALL;
   if (e.status === 401) return 'This server asks for sign-in (401).';
-  if (e.status === 403) return 'This server refuses access (403).';
+  if (e.status === 403) return REFUSES_ACCESS;
   return NOT_FOLO;
 }
