@@ -591,19 +591,32 @@ fn epoch_at(x: f32, spe: u64) -> String {
 }
 
 impl FoloApp {
-    /// The run charts' x extent, in epochs: the planned run, or (So far, and by default for a run that
-    /// ended short of its plan) the epochs trained.
+    /// The run charts' x extent, in epochs ([`x_total`]).
     pub(super) fn run_x_total(&self, r: &Run) -> f32 {
         let fit = self.run_x_fit.unwrap_or(!(r.status.is_active() || r.status == RunStatus::Completed));
-        if fit { self.run_x_so_far(r) } else { r.epochs.max(1) as f32 }
+        x_total(fit, r.epochs, r.epoch, self.run_last_step_epoch(r))
     }
 
     /// The "So far" extent: the epochs trained, steps included ([`fitted_total`]).
     fn run_x_so_far(&self, r: &Run) -> f32 {
-        let last_step =
-            self.store.run_data.get(&r.id).and_then(|x| x.ready()).and_then(|d| d.metrics.steps.last());
-        fitted_total(r.epoch, last_step.map(|s| s.epoch))
+        fitted_total(r.epoch, self.run_last_step_epoch(r))
     }
+
+    fn run_last_step_epoch(&self, r: &Run) -> Option<u32> {
+        self.store
+            .run_data
+            .get(&r.id)
+            .and_then(|x| x.ready())
+            .and_then(|d| d.metrics.steps.last())
+            .map(|s| s.epoch)
+    }
+}
+
+/// The planned run, or (`fit`: So far, and by default for a run that ended short of its plan) the
+/// epochs trained; a run with nothing recorded (ended during set-up) keeps the plan, as Studio does.
+fn x_total(fit: bool, planned: u32, kept: u32, last_step_epoch: Option<u32>) -> f32 {
+    let progress = kept > 0 || last_step_epoch.is_some();
+    if fit && progress { fitted_total(kept, last_step_epoch) } else { planned.max(1) as f32 }
 }
 
 /// "So far": the epochs trained, the one a run stopped (or failed) in included. A run stopped
@@ -665,6 +678,18 @@ mod tests {
         // No history loaded yet, or none at all.
         assert_eq!(fitted_total(2, None), 2.);
         assert_eq!(fitted_total(0, None), 1.);
+    }
+
+    #[test]
+    fn an_ended_run_with_nothing_recorded_keeps_the_planned_range() {
+        use super::x_total;
+        // Failed during set-up, epoch 0 of 4, no step: the empty charts end at 4, not 1.
+        assert_eq!(x_total(true, 4, 0, None), 4.);
+        // Failed after epoch 2 of 4: "So far" (2), and 3 with epoch 3's steps taken.
+        assert_eq!(x_total(true, 4, 2, None), 2.);
+        assert_eq!(x_total(true, 4, 2, Some(3)), 3.);
+        // "All 4" picked, or a run that trains or completed: the plan.
+        assert_eq!(x_total(false, 4, 2, None), 4.);
     }
 
     #[test]
