@@ -38,6 +38,14 @@ pub enum DataError {
     /// A dataset description (data.yaml, COCO JSON, directory layout) is invalid or not recognised.
     #[error("dataset format error: {0}")]
     Format(String),
+    /// A dataset folder whose writer has not finished it ([`crate::unfinished`]).
+    #[error(
+        "{} holds an unfinished dataset from an interrupted `folo dataset synth` or `folo dataset convert` (it has a \
+         {} file): run that command again",
+        crate::paths::shown(.0),
+        crate::unfinished::MARKER
+    )]
+    Unfinished(PathBuf),
     /// An invalid configuration value.
     #[error("invalid config: {0}")]
     Config(String),

@@ -49,7 +49,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 
 | status | code | when |
 |---|---|---|
-| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
+| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `dataset_unfinished`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
@@ -150,8 +150,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   detection uses: a `data.yaml`, a YAML with a `train:` line read to 64 KiB, `images/` + `labels/`, an
   `annotations/` JSON; only regular files are read, and nothing the `folo mcp --confine` read guard refuses), and
   nothing waits for them),
-  `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
-  request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
+  `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes),
+  `dataset_unfinished` (the folder holds a `.folo-unfinished` file: an interrupted `folo dataset synth` / `convert`
+  left it; running that command again finishes it, docs/CLI.md). The request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
   the same format) returns the existing dataset (still `201`) instead of a duplicate; its `name` is kept.
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`

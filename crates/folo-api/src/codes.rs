@@ -52,6 +52,12 @@ pub const CODES: &[Code] = &[
         1,
         "a dataset that cannot be used (malformed data.yaml, no images, an empty split)",
     ),
+    c(
+        "dataset_unfinished",
+        400,
+        1,
+        "a dataset folder that an interrupted `folo dataset synth` / `convert` left unfinished (`.folo-unfinished`)",
+    ),
     c("dataset_issues", 400, 1, "`folo dataset check` found errors or warnings (CLI)"),
     c(
         "bench_class_mismatch",

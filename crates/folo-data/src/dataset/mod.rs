@@ -386,6 +386,13 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
             std::io::Error::new(std::io::ErrorKind::NotFound, "dataset path not found"),
         ));
     }
+    // A folder whose writer has not finished it is no dataset yet, whatever it holds; a COCO JSON in `annotations/`
+    // belongs to the folder above.
+    let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+    crate::unfinished::check(dir)?;
+    if dir.ends_with("annotations") {
+        crate::unfinished::check(dir.parent().unwrap_or(dir))?;
+    }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if path.is_file() {
         return match (format, ext.as_deref()) {

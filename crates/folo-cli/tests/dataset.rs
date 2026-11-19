@@ -86,26 +86,67 @@ fn synth_then_stats_and_a_clean_check() {
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
 }
 
-/// A synth killed part way (issue #316) leaves only `.<name>.partial` beside the folder, and the same command run
-/// again replaces it; a folder of that name that is not FOLO's is refused and left as it is.
+/// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, and the
+/// same command run again, for fewer images than the stopped one wrote, writes exactly its own dataset.
 #[test]
 fn synth_again_after_a_stopped_one() {
     let t = TestDir::new("cli-synth-again");
-    let leftover = t.join(".shapes.partial");
-    std::fs::create_dir_all(leftover.join("images/train")).unwrap();
-    std::fs::write(leftover.join(".folo-partial"), "stopped").unwrap();
-    std::fs::write(leftover.join("images/train/000000.jpg"), "half").unwrap();
-    let (code, _, _) = folo(&["dataset", "stats", s(&t.join("shapes")), "--json"]);
-    assert_eq!(code, 3, "not a dataset yet");
-    let dir = synth(&t, "shapes", &[]);
-    assert!(dir.join("data.yaml").is_file() && !leftover.exists());
+    let dir = t.join("NEW");
+    drop(folo_data::unfinished::Writing::begin(&dir).unwrap());
+    std::fs::create_dir_all(dir.join("images/train")).unwrap();
+    for i in 0..300 {
+        std::fs::write(dir.join(format!("images/train/{i:06}.jpg")), "half").unwrap();
+    }
+    for cmd in ["stats", "check"] {
+        let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{err}");
+        assert!(err["message"].as_str().unwrap().contains("run that command again"), "{err}");
+    }
+    let (code, _, stderr) =
+        folo(&["dataset", "synth", s(&dir), "--images", "240", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let images = |split: &str| std::fs::read_dir(dir.join("images").join(split)).unwrap().count();
+    assert_eq!(images("train") + images("val"), 240);
+    assert!(!dir.join(folo_data::unfinished::MARKER).exists());
+    let (code, stdout, _) = folo(&["dataset", "stats", s(&dir), "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 192, "val": 48, "test": 0 }));
+}
 
-    std::fs::create_dir(t.join(".other.partial")).unwrap();
-    let (code, stdout, _) = folo(&["dataset", "synth", s(&t.join("other")), "--images", "2", "--json"]);
-    assert_eq!(code, 1);
-    let err = json_lines(&stdout).pop().unwrap()["error"].take();
-    assert_eq!(err["code"], "output_exists", "{err}");
-    assert!(t.join(".other.partial").is_dir() && !t.join("other").exists());
+/// A second synth into a folder another process is writing stops with `output_exists` and changes nothing.
+#[test]
+fn synth_into_a_folder_being_written_is_refused() {
+    let t = TestDir::new("cli-synth-busy");
+    let dir = t.join("NEW");
+    let writer = folo_data::unfinished::Writing::begin(&dir).unwrap();
+    let (code, stdout, _) = folo(&["dataset", "synth", s(&dir), "--images", "4", "--imgsz", "32", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("output_exists")), "{err}");
+    assert!(err["message"].as_str().unwrap().contains("another FOLO command is writing"), "{err}");
+    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [folo_data::unfinished::MARKER]);
+    writer.finish().unwrap();
+}
+
+/// Output folders `main` wrote into: the current folder (`synth .`) and a 250-character name.
+#[test]
+fn synth_into_the_current_folder_and_a_long_name() {
+    let t = TestDir::new("cli-synth-here");
+    let here = t.join("here");
+    std::fs::create_dir(&here).unwrap();
+    let out = folo_cmd()
+        .args(["dataset", "synth", ".", "--images", "4", "--imgsz", "32", "--json"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(here.join("data.yaml").is_file() && !here.join(folo_data::unfinished::MARKER).exists());
+
+    let long = t.join("n".repeat(250));
+    let (code, stdout, _) = folo(&["dataset", "synth", s(&long), "--images", "4", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(long.join("data.yaml").is_file());
 }
 
 #[test]

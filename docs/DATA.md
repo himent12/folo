@@ -126,10 +126,26 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   cleanup would do. The YOLO line rules are the loader's (`dataset::labels::parse_line`), so the checker and the
   loader cannot disagree. `folo dataset check` prints it (docs/CLI.md).
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
-  (images copied unchanged, stems made unique per split, COCO category ids 1-based), staged like synthetic
-  datasets (below): nothing is at `out` until it is complete.
+  (images copied unchanged, stems made unique per split, COCO category ids 1-based), marked unfinished while it
+  writes (below).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`.
+
+### Unfinished datasets
+`synthetic::write_yolo` and `convert::convert` write in place, into the folder they are given, which must not exist,
+be empty, or hold a stopped write. A `.folo-unfinished` file in it is the first thing they write and the last they
+remove (`unfinished::Writing`). Every reader (`open`, `open_splits`, `detect_format`, `check::check`, so `folo
+dataset stats` / `check` / `convert`, `folo train`, registering in `folo serve`) refuses a folder holding that
+file, also through its `data.yaml` or an `annotations/` JSON, with `DataError::Unfinished` (code
+`dataset_unfinished`, exit 1): a write stopped part way (killed, Ctrl+C, a crash) never reads as a dataset.
+
+The marker is also the writers' lock: a writer opens or creates it and takes an exclusive OS lock on it without
+waiting (`lock::try_lock`, which `serve.lock` uses too), and one that cannot is refused (`AlreadyExists`, CLI
+`output_exists`) before it touches anything. The holder writes a note into the marker before anything else and
+empties it before removing it. A writer that takes the lock of a marker holding the note has found a stopped write:
+it removes every other entry of the folder (links as links, never what they point to) and writes the folder whole.
+A folder with other entries and no marker, or whose marker is not a plain file holding the note or nothing, is
+refused untouched. Nothing outside the folder is touched.
 
 ## Packing
 `pack::pack(&loaded, &mut out)` writes an opened dataset, of any format and layout, as one tar stream into any
@@ -215,14 +231,8 @@ keeps one, as the YOLO reader drops duplicate label lines.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
-and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `SyntheticDataset::new(cfg, split)` renders the same images on demand.
-`dir` must not exist or be an empty folder: the files go to a staging folder beside it, `.<name>.partial`, renamed
-to `dir` once complete (`staging::Staging`), so a write stopped part way never leaves a folder that reads as a
-finished dataset. A `.folo-partial` marker inside the staging folder is locked while its writer runs: the next write
-of `dir` removes a staging folder whose marker nobody holds (a stopped run's leftover), and refuses one being
-written or one without the marker (not FOLO's; never deleted), with an `AlreadyExists` `DataError::Io`.
-`write_yolo_into` writes straight into a folder, for a caller that makes it known another way once complete (the
-server registers it). Classes are any of
+and `data.yaml` (`write_yolo_with_progress` also reports each finished image), marked unfinished until complete
+(Unfinished datasets, above); `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
 `circle, square, triangle, star, ring, cross, hexagon, heart`, drawn with anti-aliased signed distance fields, soft
 shadows and light shading on gradient, marbled, striped or grainy backgrounds, with small objects, partial occlusion,
 objects cut by the frame and some empty images. Output is a pure function of the config and seed.

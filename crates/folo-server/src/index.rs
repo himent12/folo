@@ -218,6 +218,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
             }
         }
         DataError::Format(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m),
+        DataError::Unfinished(_) => Error::new(StatusCode::BAD_REQUEST, "dataset_unfinished", e.to_string()),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_body", m),
         e => Error::internal(e.to_string()),
     }

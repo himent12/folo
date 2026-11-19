@@ -4,7 +4,7 @@
 //! its address to `<data dir>/serve.json`, so a second start can say where it is (FOLO Desktop connects there,
 //! `folo mcp` goes through it). The address is a hint: a reader checks that the server there serves this data dir.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// The data dir's serve lock, held until dropped; dropping it also removes `serve.json`.
@@ -25,22 +25,20 @@ pub enum Acquire {
 /// Takes `dir`'s serve lock (creating `dir` when missing) without waiting.
 pub fn acquire(dir: &Path) -> std::io::Result<Acquire> {
     std::fs::create_dir_all(dir)?;
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("serve.lock"))?;
     let info = dir.join("serve.json");
-    match file.try_lock() {
-        Ok(()) => {
+    match folo_data::lock::try_lock(&dir.join("serve.lock"))? {
+        Some(file) => {
             // A killed owner's address is stale: nobody listens there any more.
             let _ = std::fs::remove_file(&info);
             Ok(Acquire::Held(ServeLock { _file: file, info }))
         }
-        Err(TryLockError::WouldBlock) => {
+        None => {
             let url = std::fs::read(&info)
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
                 .and_then(|v| v["url"].as_str().map(str::to_string));
             Ok(Acquire::InUse { url })
         }
-        Err(TryLockError::Error(e)) => Err(e),
     }
 }
 

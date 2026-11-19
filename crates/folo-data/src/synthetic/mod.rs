@@ -481,8 +481,8 @@ pub struct WrittenDataset {
 /// Writes a YOLO-format dataset to `dir`: `images/{train,val}/NNNNNN.jpg|png`, `labels/{train,val}/NNNNNN.txt` and
 /// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic.
 ///
-/// `dir` must not exist or be an empty folder. The dataset is written beside it and moved there in one rename once
-/// complete ([`crate::staging`]), so a stopped write never leaves a partial dataset at `dir`.
+/// `dir` must not exist, be empty or hold a stopped write; it is marked unfinished until the dataset is complete
+/// ([`crate::unfinished`]).
 pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Result<WrittenDataset> {
     write_yolo_with_progress(cfg, dir, format, |_| {})
 }
@@ -495,22 +495,9 @@ pub fn write_yolo_with_progress(
     format: ImageFormat,
     progress: impl Fn(usize) + Sync,
 ) -> Result<WrittenDataset> {
-    let staging = crate::staging::Staging::begin(dir)?;
-    let written = write_yolo_into(cfg, staging.path(), format, progress)?;
-    staging.publish()?;
-    Ok(WrittenDataset { root: dir.to_path_buf(), yaml: dir.join("data.yaml"), ..written })
-}
-
-/// [`write_yolo_with_progress`] straight into `dir`, `data.yaml` last, for a caller that makes the folder known
-/// some other way once this returns (the server registers it): stopped part way, it leaves a partial dataset.
-pub fn write_yolo_into(
-    cfg: &SyntheticConfig,
-    dir: &Path,
-    format: ImageFormat,
-    progress: impl Fn(usize) + Sync,
-) -> Result<WrittenDataset> {
     let done = std::sync::atomic::AtomicUsize::new(0);
     let kinds = cfg.kinds()?;
+    let writing = crate::unfinished::Writing::begin(dir)?;
     for split in ["train", "val"] {
         for kind in ["images", "labels"] {
             let d = dir.join(kind).join(split);
@@ -547,6 +534,7 @@ pub fn write_yolo_into(
     }
     let yaml_path = dir.join("data.yaml");
     std::fs::write(&yaml_path, yaml).map_err(|e| DataError::io(&yaml_path, e))?;
+    writing.finish()?;
     Ok(WrittenDataset {
         root: dir.to_path_buf(),
         yaml: yaml_path,

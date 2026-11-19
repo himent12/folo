@@ -61,12 +61,7 @@ pub(crate) fn run_lock_path(run_dir: &Path) -> PathBuf {
 /// Takes `run_dir`'s [`RunLock`] if no process holds it: `None` when one does. A run folder that is gone is a
 /// `NotFound` error (no process can follow a deleted run).
 pub(crate) fn try_lock_run(run_dir: &Path) -> std::io::Result<Option<RunLock>> {
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(run_lock_path(run_dir))?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(RunLock { _file: file })),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(e)) => Err(e),
-    }
+    Ok(folo_data::lock::try_lock(&run_lock_path(run_dir))?.map(|file| RunLock { _file: file }))
 }
 
 /// `n` random bytes as lowercase hex (worker tokens, instance name nonces).
