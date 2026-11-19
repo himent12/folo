@@ -5,7 +5,7 @@ import { createRoot, flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api, RunEventHandlers } from './client';
 import { hub } from './index';
-import { HISTORY_DEADLINE_MS, LiveRun } from './live';
+import { LiveRun } from './live';
 import { MockApi } from './mock';
 import { epochsValidated } from './progress';
 import type { Epoch, Run, RunLogs, RunMetrics, Step } from './types';
@@ -31,6 +31,8 @@ describe('LiveRun at a run’s end (issue #327)', () => {
   let metrics: () => Promise<RunMetrics>;
   let logs: () => Promise<RunLogs>;
   let calls = 0;
+  /** The abort signal of every request the view made. */
+  let signals: (AbortSignal | undefined)[] = [];
   let live!: LiveRun;
   let stop = () => {};
   const saved = hub.api;
@@ -44,11 +46,12 @@ describe('LiveRun at a run’s end (issue #327)', () => {
     metrics = () => Promise.resolve({ steps, epochs: [] });
     logs = () => Promise.resolve({ lines: [] });
     calls = 0;
+    signals = [];
     const fake: Partial<Api> = {
       mock: false,
-      run: () => run(),
-      runMetrics: () => (calls++, metrics()),
-      runLogs: () => logs(),
+      run: (_id, s) => (signals.push(s), run()),
+      runMetrics: (_id, s) => (calls++, signals.push(s), metrics()),
+      runLogs: (_id, _n, s) => (signals.push(s), logs()),
       runEvents: (_id, h) => {
         handlers = h;
         return () => {};
@@ -105,16 +108,33 @@ describe('LiveRun at a run’s end (issue #327)', () => {
     expect(live.error).toBeUndefined();
   });
 
-  it('gives up a stalled history request at its deadline and asks again', async () => {
+  it('lets a slow final history download for as long as it keeps arriving, and applies it once', async () => {
+    // A long run's history over a slow link: its bytes arrive for a minute (30.5 MB at 160 KiB/s takes about 54 s).
+    const slow = deferred<RunMetrics>();
     run = () => Promise.resolve(completed);
-    metrics = () => new Promise(() => {});
+    metrics = () => slow.promise;
     handlers.status?.({ status: 'completed', error: null });
-    await vi.advanceTimersByTimeAsync(HISTORY_DEADLINE_MS);
-    // None of the epochs the server promises is here: the panels say so, with Retry, while the retries go on.
-    expect(live.error).toBeInstanceOf(Error);
-    metrics = () => Promise.resolve({ steps, epochs: [ep] });
-    await vi.advanceTimersByTimeAsync(1000);
-    expect([live.error, live.epochs.length]).toEqual([undefined, 1]);
+    const asked = calls;
+    await vi.advanceTimersByTimeAsync(55_000);
+    expect([live.error, calls]).toEqual([undefined, asked]);
+    slow.resolve({ steps, epochs: [ep] });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect([live.error, calls, live.epochs.map((e) => e.epoch)]).toEqual([undefined, asked, [1]]);
+  });
+
+  it('aborts its requests and clears its timers when the view goes, with requests stalled', async () => {
+    run = () => new Promise(() => {});
+    metrics = () => new Promise(() => {});
+    logs = () => new Promise(() => {});
+    const before = signals.length;
+    // A reconnect's snapshot, history and log, and the stream's check whether the run is gone: none answers.
+    handlers.reconnect?.();
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals.length - before).toBe(4);
+    stop();
+    expect(signals.every((s) => s?.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('ignores a resync that fails after the end started the final history request, and its retry', async () => {

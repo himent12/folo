@@ -175,6 +175,35 @@ describe('a run watched to its end while its results arrive (issue #327)', () =>
     expect(text()).not.toMatch(NEVER);
   });
 
+  it('holds them as loading, and calls nothing final, while the history ends before the epoch the run completed at', async () => {
+    const w = await watch();
+    const h = w.stream();
+    const at = (epoch: number, map50_95: number): Epoch => ({ ...w.epoch, epoch, val: { ...w.epoch.val, map50_95 } });
+    const all = [at(1, 0.12), at(2, 0.4), at(3, 0.72)];
+    w.serve({ status: 'running', queue_position: null, started: '2026-11-19T07:53:25Z', steps_per_epoch: 4, epochs: 3 });
+    h.status?.({ status: 'running', error: null, steps_per_epoch: 4, epochs: 3 });
+    // A reconnect after the run completed at epoch 3: /run says so, /metrics still holds only epoch 1.
+    w.serve({ status: 'completed', step: 12, epoch: 3, best: { epoch: 3, map50_95: 0.72 }, finished: '2026-11-19T07:53:26Z', eta_s: null });
+    const rest = deferred<RunMetrics>();
+    let asked = 0;
+    w.answer(() => (asked++ ? rest.promise : Promise.resolve({ steps: w.steps, epochs: all.slice(0, 1) })));
+    h.reconnect?.();
+    await settle(() => text().includes('Completed') && asked === 1);
+    const kpis = () => target.querySelector('.kpis')?.textContent ?? '';
+    expect(kpis()).not.toContain('· final');
+    expect(kpis()).not.toContain('0.120');
+    expect(target.querySelector('#chart-map .cs')).not.toBeNull();
+    expect(target.querySelector('#per-class .sk')).not.toBeNull();
+    expect(target.querySelector('#samples .cell-sk')).not.toBeNull();
+    // The retry brings the epochs the run validated.
+    await settle(() => asked === 2);
+    rest.resolve({ steps: w.steps, epochs: all });
+    await settle(() => kpis().includes('mAP50-95 · final'));
+    expect(kpis()).toContain('0.720');
+    expect(target.querySelector('#chart-map')?.textContent).toContain('Latest · ep 3');
+    expect(target.querySelector('#per-class .sk')).toBeNull();
+  });
+
   it('says it could not load the metrics, with Retry, when that final history fails', async () => {
     const w = await watch();
     w.answer(() => Promise.reject(new Error('Boom.')));

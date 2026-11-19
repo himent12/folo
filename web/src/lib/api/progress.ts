@@ -72,6 +72,17 @@ export function epochsValidated(run: Pick<Run, 'status' | 'epoch' | 'best'>): nu
   return Math.max(run.best?.epoch ?? 0, run.status === 'completed' ? run.epoch : 0);
 }
 
+/**
+ * An ended run's results are still on their way to a view whose last epoch is `lastHeld` (0: none): the server's
+ * snapshot `server` says it validated a later one (issue #327). While that snapshot still says the run is active (the
+ * stream reported the end first), only an empty history is. The one rule for the loading panels, the "final" wording,
+ * the refetch and when a failed retry shows its error.
+ */
+export function resultsPending(server: Pick<Run, 'status' | 'epoch' | 'best'>, lastHeld: number): boolean {
+  const validated = epochsValidated(server);
+  return validated === null ? lastHeld === 0 : lastHeld < validated;
+}
+
 /** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */
 export const ETA_PENDING = 'estimating time left…';
 

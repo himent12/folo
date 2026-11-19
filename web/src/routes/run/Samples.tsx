@@ -157,7 +157,7 @@ export default function Samples(props: SamplesProps) {
           <p class="none">The dataset was removed, so its sample images are gone.</p>
         ) : samples.error && !samples.data ? (
           <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
-        ) : !samples.data || props.epochsDone === 0 ? (
+        ) : !samples.data || props.pending ? (
           <div class="grid" ref={gridEl}>
             <Index each={Array.from({ length: FIRST.get() })}>{() => <Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />}</Index>
           </div>

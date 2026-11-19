@@ -42,7 +42,10 @@ export default function RunKpis(props: RunKpisProps) {
     return m.mosaicOff.get() ? `${progressText(r)} · ${m.closeText.get().cap}` : progressText(r);
   });
   const nothing = computed(() => run().best?.map50_95 === 0);
-  const mapLabel = computed(() => (running() ? 'mAP50-95 · latest' : completed() ? 'mAP50-95 · final' : waiting() ? 'mAP50-95' : 'mAP50-95 · last'));
+  // Nothing is final, or last, while the epochs the run validated are on their way (runModel `pending`).
+  const mapLabel = computed(() =>
+    running() ? 'mAP50-95 · latest' : waiting() || m.pending.get() ? 'mAP50-95' : completed() ? 'mAP50-95 · final' : 'mAP50-95 · last',
+  );
   const mapCap = computed(() => {
     const b = run().best;
     const le = m.lastEpoch.get();
