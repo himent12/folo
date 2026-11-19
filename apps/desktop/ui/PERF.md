@@ -383,6 +383,16 @@ Pixels: all 90 scenarios rendered with `--shot` by "main" (`c39e1862`, no trace 
 1280 x 800 @ 1 and 1920 x 1200 @ 1.5: 180 of 180 identical (`tools/parity.py --tol 0`). The release exe is
 31,053,824 bytes on main and 31,145,472 with this pull request.
 
+The third review round (the probe's second attempt after the check saw a listener, the deadline looked at before
+each connection, the path cache's eviction leaving room for its table's growth) was measured again against the
+same main, with the second round's build alongside, and these tables stand. Launch, ten alternating rounds, main /
+second round / third round: probe 551.7 / 45.2 / 47.0 ms, `folo serve` listening 729.5 / 76.8 / 77.3, lists on
+screen 747.1 / 92.6 / 92.8, system card 1182.4 / 431.1 / 440.9 (ranges overlapping). Run-live full frame, fifteen
+rounds: 2233 / 1881 / 1881 us at 1280 x 800, 2554 / 2227 / 2187 at 2560 x 1440, the third round faster than main
+in 15 of 15 rounds at both sizes and than the second in 5 and 7 of 15. Pixels against main, rendered one at a time:
+180 of 180 identical (rendered four at a time, one of main's own renders of run-live at 1920 x 1200 had one pixel 8
+levels off, which main does not reproduce). The release exe is 31,140,864 bytes.
+
 ## Not measured
 
 - A truly maximized 4K window on the real desktop: every launch here is off screen (or on a private desktop
