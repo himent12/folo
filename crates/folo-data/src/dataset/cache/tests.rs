@@ -7,11 +7,11 @@ use folo_test_support::TestDir;
 use std::time::Duration;
 
 fn settings(cache: &Path) -> Settings {
-    Settings { dir: Some(cache.to_path_buf()), min_files: 1, list: true }
+    Settings { dir: Some(cache.to_path_buf()), min_files: 1, list: true, now: None }
 }
 
 fn uncached() -> Settings {
-    Settings { dir: None, min_files: usize::MAX, list: false }
+    Settings { dir: None, min_files: usize::MAX, list: false, now: None }
 }
 
 /// Moves a file's modification time an hour back, so its stamp is settled and cacheable.
@@ -162,20 +162,29 @@ fn files_modified_in_the_last_seconds_are_not_cached() {
     assert!(!stamp(now + Duration::from_secs(60)).settled(now));
     assert!(stamp(now - SETTLE).settled(now));
 
-    // An open follows it: a file stamped ahead of the clock (still unsettled at each open, however long the open
-    // takes) is probed again after a same-stamp rewrite.
+    // An open follows it, on the clock the test gives it (so how long the open takes does not matter).
     let data = TestDir::new("scan-recent");
     let cache = TestDir::new("scan-recent-cache");
     yolo(&data);
     let img = data.join("images/train/0.png");
-    let recent = SystemTime::now() + Duration::from_secs(60);
-    padded_png(&img, 20, 10, 4096);
-    set_mtime(&img, recent);
-    open(&data, settings(&cache));
-    // Had the first open cached the probe, this same-stamp rewrite would be answered from the cache.
-    padded_png(&img, 33, 17, 4096);
-    set_mtime(&img, recent);
-    assert_eq!(open(&data, settings(&cache)), open(&data, uncached()));
+    let recent = now - Duration::from_millis(500);
+    let at = |now: SystemTime| Settings { now: Some(now), ..settings(&cache) };
+    let rewrite = |w, h| {
+        padded_png(&img, w, h, 4096);
+        set_mtime(&img, recent);
+    };
+    rewrite(20, 10);
+    open(&data, at(now));
+    // Modified 500 ms before the clock: not cached, so a same-stamp rewrite is probed again.
+    rewrite(33, 17);
+    let big = open(&data, uncached());
+    assert_eq!(open(&data, at(now)), big, "recent: probed again");
+    // The same file once the clock is past the window: cached, so a same-stamp rewrite is answered from the cache.
+    let later = now + SETTLE;
+    assert_eq!(open(&data, at(later)), big);
+    rewrite(20, 10);
+    assert_ne!(open(&data, uncached()), big, "the rewrite has another size");
+    assert_eq!(open(&data, at(later)), big, "settled: cached");
 }
 
 #[test]

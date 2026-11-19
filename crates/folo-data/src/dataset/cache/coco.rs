@@ -29,7 +29,7 @@ pub(crate) fn load_or_read(
     }
     let a = read()?;
     let images: usize = a.splits.iter().map(|s| s.images.len()).sum();
-    let now = SystemTime::now();
+    let now = settings.now.unwrap_or_else(SystemTime::now);
     if images >= settings.min_files
         && stamps.iter().all(|s| s.settled(now))
         && let Some(bytes) = encode(&a, &stamps)
