@@ -233,7 +233,13 @@ async fn a_box_moved_in_place_changes_the_revision_not_the_stats() {
     let (home, data) = (t.join("home"), t.join("shapes"));
     write_shapes(&data, 4);
     let label = data.join("labels/train/000000.txt");
-    std::fs::write(&label, "0 0.2500 0.5 0.2 0.2\n").unwrap();
+    // Same size, modified times set a minute apart: not left to the file system's clock resolution.
+    let write_at = |text: &str, secs: u64| {
+        std::fs::write(&label, text).unwrap();
+        let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        std::fs::File::options().write(true).open(&label).unwrap().set_modified(at).unwrap();
+    };
+    write_at("0 0.2500 0.5 0.2 0.2\n", 1_700_000_000);
     let app = app(&home);
     let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
     let uri = format!("/api/datasets/{}", ds.id);
@@ -241,7 +247,7 @@ async fn a_box_moved_in_place_changes_the_revision_not_the_stats() {
     assert!(before.revision.is_some(), "a real dataset has a revision");
     assert_eq!(ok::<Dataset>(&app, get(&uri)).await.revision, before.revision, "unchanged files keep it");
 
-    std::fs::write(&label, "0 0.7500 0.5 0.2 0.2\n").unwrap();
+    write_at("0 0.7500 0.5 0.2 0.2\n", 1_700_000_060);
     let after: Dataset = ok(&app, get(&uri)).await;
     let page: ImagePage = ok(&app, get(&format!("{uri}/images?limit=1"))).await;
     assert!(page.images[0].boxes[0].x1 > 32.0, "re-indexed: {:?}", page.images[0].boxes);

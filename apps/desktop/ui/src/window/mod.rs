@@ -133,6 +133,9 @@ pub struct Window {
     pub(crate) modifiers: Modifiers,
     /// Whether the window is active (focused by the OS).
     pub(crate) active: Rc<Cell<bool>>,
+    /// How many times the window became active: counted, so a deactivate and reactivate between two
+    /// frames is not lost to a reader that compares at its next frame.
+    pub(crate) activations: u64,
     /// Whether the mouse is over the window.
     pub(crate) hovered: Rc<Cell<bool>>,
     /// The focused element.
@@ -248,6 +251,7 @@ impl Window {
             mouse_hit_test: HitTest::default(),
             modifiers: platform_window.modifiers(),
             active: Rc::new(Cell::new(platform_window.is_active())),
+            activations: 0,
             hovered: Rc::new(Cell::new(platform_window.is_hovered())),
             focus: None,
             default_prevented: false,
@@ -395,6 +399,9 @@ fn wire_callbacks(platform_window: &dyn PlatformWindow, app: Weak<AppCell>, hand
         let app = app.clone();
         move |active| {
             update_window(&app, handle, |window, _| {
+                if active && !window.active.replace(active) {
+                    window.activations += 1;
+                }
                 window.active.set(active);
                 window.modifiers = window.platform_window.modifiers();
                 window.refresh();

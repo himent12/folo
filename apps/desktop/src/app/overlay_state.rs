@@ -166,10 +166,6 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Its dataset read again: a label edited since (a box moved, the stats as they were) shows
-        // where it is now, here and in the grid behind.
-        self.ds_recheck.insert(dataset.clone());
-        self.ensure_dataset_record(&dataset, cx);
         self.inspector = Some(Inspector {
             dataset,
             index,
@@ -207,6 +203,10 @@ impl FoloApp {
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let closed = self.inspector.take();
         let opener = self.inspector_return.take();
+        // A read of its dataset held while it was open (`ds_recheck`) goes now.
+        if let Some(i) = &closed {
+            self.ensure_dataset_record(&i.dataset, cx);
+        }
         // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
         // focused), not on the tile it was opened from (←/→ may have walked far from it).
         let last =

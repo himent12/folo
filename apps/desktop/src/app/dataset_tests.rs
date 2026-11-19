@@ -558,51 +558,6 @@ fn a_dataset_read_again_with_other_contents_lists_its_images_again() {
     });
 }
 
-/// Issue #346: a box moved in a label file while the dataset's page is open (its stats as they were,
-/// its `revision` not) shows where it is now once the inspector opens, and once the window is active
-/// again: the dataset is read again then, and its image list with it.
-#[test]
-fn a_box_moved_in_place_shows_where_it_is_now() {
-    let api = Arc::new(MockBackend::new(4200, true));
-    let (mut app, window) = open_with(api);
-    let id = "ds_8f2c".to_string();
-    drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx));
-    drawn_keys(&mut app, window);
-    // What the app holds from before the edit: another revision, the first box further left.
-    let held_from_before = |app: &mut folo_ui::HeadlessApp| {
-        drive(app, window, |this, _, _| {
-            let mut old = this.store.dataset.get(&id).and_then(|l| l.ready()).cloned().expect("read");
-            old.revision = Some("before".into());
-            this.store.dataset.insert(id.clone(), crate::store::Load::Ready(old));
-            let list = this.store.images.get_mut(&id).and_then(|l| l.ready_mut()).expect("listed");
-            let b = list.iter_mut().find_map(|im| im.boxes.first_mut()).expect("a box");
-            let now = b.x1;
-            b.x1 -= 5.;
-            b.x2 -= 5.;
-            now
-        })
-    };
-    let first_x1 = |app: &mut folo_ui::HeadlessApp| {
-        drawn_keys(app, window);
-        drawn_keys(app, window);
-        drive(app, window, |this, _, _| {
-            let list = this.store.images.get(&id).and_then(|l| l.ready()).expect("listed again");
-            list.iter().find_map(|im| im.boxes.first()).map(|b| b.x1)
-        })
-    };
-
-    let now = held_from_before(&mut app);
-    drive(&mut app, window, |this, w, cx| this.open_inspector(id.clone(), 0, w, cx));
-    assert_eq!(first_x1(&mut app), Some(now), "the inspector draws the box where it is now");
-
-    let now = held_from_before(&mut app);
-    drive(&mut app, window, |this, _, cx| {
-        this.window_active = false;
-        cx.notify();
-    });
-    assert_eq!(first_x1(&mut app), Some(now), "back to the window: the grid draws it where it is now");
-}
-
 /// Review round 3 of x1-parity-7: a dataset's issue check still on its way when its files change
 /// (the app forgets what it read of them, as a read with other contents does) answers after the
 /// check asked for since. The newer check's counts stand: the old file errors never come back.

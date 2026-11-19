@@ -31,6 +31,8 @@ mod preferences;
 mod previews;
 mod render;
 #[cfg(test)]
+mod revision_tests;
+#[cfg(test)]
 mod run_charts_tests;
 #[cfg(test)]
 mod run_page_tests;
@@ -359,6 +361,9 @@ pub struct FoloApp {
     /// Datasets whose image list is still arriving, a page at a time, with the generation of the
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
+    /// A list read again behind the one shown (only the dataset's `revision` moved), with its load's
+    /// generation: it takes the shown one's place once complete, the grid keeping its place.
+    pub images_next: HashMap<String, (u64, Vec<crate::api::ImageInfo>)>,
     pub images_seq: u64,
     /// Each card preview's latest read (a number from `images_seq`): an older one is dropped.
     pub preview_reads: HashMap<String, u64>,
@@ -529,8 +534,9 @@ pub struct FoloApp {
     pub restore_pending: bool,
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
-    /// The window was active at the last render: becoming active again reads its datasets again.
-    pub window_active: bool,
+    /// The window's activations seen by the last render: one more (each return to the window) reads
+    /// its datasets again.
+    pub window_activations: u64,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
     /// Closing the window would stop these runs (on the server this app started): asked first. Empty:
@@ -678,6 +684,7 @@ impl FoloApp {
             ds_fill: false,
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
+            images_next: HashMap::new(),
             images_seq: 0,
             preview_reads: HashMap::new(),
             ds_recheck: Default::default(),
@@ -772,7 +779,7 @@ impl FoloApp {
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
-            window_active: true,
+            window_activations: 0,
             confirm_stop: None,
             confirm_delete: None,
             confirm_close: None,

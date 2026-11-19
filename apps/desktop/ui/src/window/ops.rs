@@ -74,6 +74,11 @@ impl Window {
         self.active.get()
     }
 
+    /// How many times the window became active since it opened (each return counts).
+    pub fn window_activations(&self) -> u64 {
+        self.activations
+    }
+
     /// Enters or leaves full screen.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen()

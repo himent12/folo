@@ -112,6 +112,19 @@ impl HeadlessPlatform {
         }
     }
 
+    /// Every window becomes active (or inactive) through the core's `on_active_status_change` callback,
+    /// as when the user switches to it (or away).
+    pub fn set_active(&self, active: bool) {
+        let windows = self.windows.borrow().clone();
+        for window in windows {
+            let callback = window.callbacks.borrow_mut().active_status_change.take();
+            if let Some(mut callback) = callback {
+                callback(active);
+                window.callbacks.borrow_mut().active_status_change.get_or_insert(callback);
+            }
+        }
+    }
+
     /// Each window's frame appearance as the app last set it (`set_frame_appearance`; `None`:
     /// following the system), in the order the windows were opened.
     pub fn frame_appearances(&self) -> Vec<Option<WindowAppearance>> {
@@ -252,6 +265,8 @@ pub(crate) struct HeadlessCallbacks {
     pub(crate) hit_test_window_control: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     /// `on_appearance_changed`.
     pub(crate) appearance_changed: Option<Box<dyn FnMut()>>,
+    /// `on_active_status_change`.
+    pub(crate) active_status_change: Option<Box<dyn FnMut(bool)>>,
 }
 
 /// State shared between a `HeadlessWindow` and the harness.
@@ -387,7 +402,9 @@ impl PlatformWindow for HeadlessWindow {
         self.state.callbacks.borrow_mut().input = Some(callback);
     }
 
-    fn on_active_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
+    fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
+        self.state.callbacks.borrow_mut().active_status_change = Some(callback);
+    }
 
     fn on_hover_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
 
