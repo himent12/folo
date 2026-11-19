@@ -1,10 +1,12 @@
 // The New run form's errors, one per field, and the way from a review row or an error back to its control.
+import { effect, signal, type Signal } from 'fw';
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
 import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
 import { MAX_RUN_NAME, nameLength, runName } from './name';
 import { num } from '$lib/format';
+import { COPIED_SEED_ERROR, exactSeed, seedError } from '$lib/seed';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
 export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
@@ -115,7 +117,7 @@ export function formErrors(
     epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
     // As the server reads it, a 32-bit float: 1e-46 is 0 there and 9.999999999 is 10, both refused.
     lr0: !(typeof lr0 === 'number' && Math.fround(lr0) > 0 && Math.fround(lr0) < 10) ? 'Greater than 0 and below 10.' : null,
-    seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
+    seed: seedError(seed),
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: datasetError(dataset, gone),
     weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
@@ -125,6 +127,24 @@ export function formErrors(
     runon: cloudOn ? cloudPick.errors.runon : null,
     offer: onCloud ? cloudPick.errors.offer : null,
     hours: onCloud ? cloudPick.errors.hours : null,
+  };
+}
+
+/**
+ * The Seed field's copy of a run's seed (`?from=`). One over 2^53 − 1 arrived rounded by JSON parsing (lib/seed): another
+ * seed, so it is never offered as the run's; the field is left empty and says why until a seed is typed.
+ */
+export function copiedSeed(seed: Signal<number>) {
+  const over = signal(false);
+  effect(() => {
+    if (seed.get() !== null) over.set(false);
+  });
+  return {
+    copy(v: number) {
+      seed.set(exactSeed(v) ? v : (null as unknown as number));
+      over.set(!exactSeed(v));
+    },
+    errors: (e: FormErrors): FormErrors => (over.get() ? { ...e, seed: COPIED_SEED_ERROR } : e),
   };
 }
 

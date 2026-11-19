@@ -523,6 +523,45 @@ describe('New run from a link', () => {
     await open('?from=run_a2f0&epochs=40');
     await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
   });
+
+  /** `?from=run_a2f0` as a run created over the API or the CLI with `seed`, as this browser parsed it. */
+  async function fromSeed(seed: number) {
+    const run = api.run.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id: string) => {
+      const r = await run(id);
+      return { ...r, config: { ...r.config, seed } };
+    });
+    await open('?from=run_a2f0');
+    await until(() => (target.querySelector<HTMLInputElement>('input#name')?.value.includes('retry') ? true : null), 'the copy');
+    return target.querySelector<HTMLInputElement>('input#seed')!;
+  }
+
+  // Sweep 4 #330: the trainer's seed is a u64, and a copied run's seed over 2^32 − 1 was marked invalid.
+  it("copies a run's seed over 2^32 − 1 as it is", async () => {
+    const el = await fromSeed(4294967296);
+    expect(el.value).toBe('4294967296');
+    expect(target.querySelector('#seed-error')).toBeNull();
+    expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('Seed');
+  });
+
+  // Over 2^53 − 1 the seed arrives rounded by JSON parsing (9007199254740993 reads as …992): another seed, never
+  // offered as the run's. The field is left empty and says why until a seed is typed.
+  it("leaves out a run's seed that this browser could not read exactly, and says so", async () => {
+    const el = await fromSeed(2 ** 53);
+    expect(el.value).toBe('');
+    const why = "The copied run's seed is over 9,007,199,254,740,991, more than Studio holds exactly. Enter a seed.";
+    expect(target.querySelector('#seed-error')?.textContent).toBe(why);
+    expect(target.querySelector('#start-why')?.textContent).toBe(`Seed: ${why}`);
+    el.value = '12';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('#seed-error')).toBeNull();
+    // Cleared again, it is an empty field like any other, not the copied run's.
+    el.value = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('#seed-error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+  });
 });
 
 describe('New run: the draft', () => {

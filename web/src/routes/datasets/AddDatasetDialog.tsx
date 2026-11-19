@@ -7,6 +7,7 @@ import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { count, duration } from '$lib/format';
 import { href, router } from '$lib/router';
+import { seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
@@ -124,12 +125,11 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       };
     }
     const images = sImages.get();
-    const s = seed.get();
     return {
       name: nameError(synthName.get()),
       images: images === null || !Number.isFinite(images) || images < 10 || images > 20000 ? 'Between 10 and 20,000.' : null,
       classes: classes.get().length === 0 ? 'Add at least one class.' : null,
-      seed: s === null || !Number.isInteger(s) || s < 0 ? 'A non-negative integer.' : null,
+      seed: seedError(seed.get()),
     };
   });
   const valid = computed(() => Object.values(errs.get()).every((e) => !e));

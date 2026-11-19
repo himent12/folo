@@ -31,7 +31,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import { CloudPick } from './runnew/cloudPick';
 import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
 import { ampBlockOf } from './runnew/amp';
-import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
+import { copiedSeed, firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
 import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary';
 import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage, missingDevice, canonicalDevice } from './runnew/device';
@@ -116,6 +116,7 @@ function RunNewForm() {
   const e2e = signal(draft?.e2e ?? false);
   const lr0 = signal(draft ? (draft.lr0 as number) : 0.01);
   const seed = signal(draft ? (draft.seed as number) : 0);
+  const seedCopy = copiedSeed(seed);
   const weights = signal<string>(draft?.weights ?? 'none');
   const name = signal(draft?.name ?? '');
   const nameEdited = signal(draft?.nameEdited ?? false);
@@ -186,7 +187,7 @@ function RunNewForm() {
     amp.set(c.amp ?? false);
     e2e.set(c.head === 'o2o');
     lr0.set(c.lr0);
-    seed.set(c.seed);
+    seedCopy.copy(c.seed); // over 2^53 − 1 it arrived rounded: left out, and the field says so
     weights.set(c.weights ?? 'none');
     // A cloud run's connection, GPU and limit, where they still exist (else this machine, and Run on says why).
     cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
@@ -415,7 +416,7 @@ function RunNewForm() {
   const deviceMsg = computed(() => deviceMessage(deviceErr.get(), system));
 
   const errors = computed(() =>
-    formErrors(
+    seedCopy.errors(formErrors(
       name.get(),
       epochs.get(),
       lr0.get(),
@@ -433,7 +434,7 @@ function RunNewForm() {
       ampOn.get(),
       cloudOn.get(),
       cloudPick,
-    ),
+    )),
   );
   const valid = computed(() => prefilled.get() && Object.values(errors.get()).every((e) => e === null));
   /**

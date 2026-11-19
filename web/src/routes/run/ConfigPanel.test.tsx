@@ -49,6 +49,13 @@ function rows(resolved: ResolvedTrain | null, cfg: TrainConfig = config) {
 }
 
 describe('ConfigPanel', () => {
+  // Sweep 4 #330: a seed over 2^53 − 1 (a run made over the API or the CLI) arrives rounded by JSON parsing; the panel
+  // showed the rounded number as the run's seed.
+  it('shows a seed as it is, and one too large to read exactly as the bound it is over', () => {
+    expect(rows(null, { ...config, seed: 4294967296 })['Seed']?.textContent).toBe('4294967296');
+    expect(rows(null, { ...config, seed: 2 ** 53 })['Seed']?.textContent).toBe('Over 9,007,199,254,740,991');
+  });
+
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {
     // fasteners: 1920 images at batch 16 over 100 epochs; auto (rule 5) is MuSGD at 0.01 for every run.
     const r = rows(resolveTrain(config, 1920, 8, 120));
