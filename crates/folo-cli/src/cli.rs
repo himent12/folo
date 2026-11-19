@@ -33,7 +33,13 @@ pub enum Command {
     /// Train a detector.
     #[command(allow_negative_numbers = true)]
     Train(TrainArgs),
-    /// Ask a running `folo train` to stop after its current batch (it keeps the last epoch's checkpoint).
+    /// Ask a running `folo train` to stop after its current batch (it keeps the last epoch's checkpoint; a request
+    /// that comes after its last batch ends `completed`).
+    ///
+    /// A run is the CLI's to stop while a `folo train` process holds its folder, also a FOLO server's run resumed in
+    /// place with `folo train --resume`; a server's run folder (`run.json`) that no `folo train` holds is stopped in
+    /// Studio or with POST /api/runs/{id}/stop. A run of an older FOLO can be stopped once it is resumed with this
+    /// version (it then gets its folo-train.json); a finished one needs no stop.
     Stop(StopArgs),
     /// Evaluate weights on a dataset split (mAP, precision, recall).
     Val(ValArgs),

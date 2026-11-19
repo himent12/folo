@@ -591,21 +591,10 @@ fn stop_resume_and_epoch_only_records() {
     let project = root.join("runs");
     let run = project.join("long");
     let records = train_until_stopped(
-        &[
-            "--device",
-            "cpu",
-            "--data",
-            s(&data),
-            "--imgsz",
-            "64",
-            "--batch",
-            "4",
-            "--epochs",
-            UNSTOPPED_EPOCHS,
-        ]
-        .into_iter()
-        .chain(["--workers", "1", "--project", s(&project), "--name", "long"])
-        .collect::<Vec<_>>(),
+        &["--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4", "--epochs"]
+            .into_iter()
+            .chain([UNSTOPPED_EPOCHS, "--workers", "1", "--project", s(&project), "--name", "long"])
+            .collect::<Vec<_>>(),
         &run,
     );
     let done = records.last().unwrap();
@@ -614,6 +603,10 @@ fn stop_resume_and_epoch_only_records() {
     let finished = done["epochs_completed"].as_u64().unwrap();
     assert!(finished >= 1, "{done}");
     assert!(!run.join("stop").exists(), "the stop file is consumed");
+    // The run ended: nothing to stop.
+    let (code, lines, _) = folo(&["stop", "--json", s(&run)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("run_not_active")));
+    assert!(!run.join("stop").exists());
     // folo stop on something that is not a run.
     let (code, lines, _) = folo(&["stop", "--json", s(&data)]);
     assert_eq!((code, lines[0]["error"]["code"].as_str()), (3, Some("run_not_found")));

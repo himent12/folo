@@ -21,7 +21,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/serve_lock.rs` | One owner per data dir: the OS lock on `<data dir>/serve.lock` and the address in `serve.json` |
 | `src/mcp.rs` | `folo mcp`: picks the folo-mcp backend (embedded, `--mock`, `--server`) and runs it on stdio |
 | `src/doctor.rs` | `folo doctor`: host, GPU adapters, the adapter FOLO picks, the Studio build |
-| `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, Ctrl+C), `tests.rs` |
+| `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, the run folder's marker and lock, Ctrl+C), `tests.rs` |
 | `src/infer.rs` | `folo val`, `folo predict` and `folo export` |
 | `src/coco.rs` | `val --coco` / `--save-json`: pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
