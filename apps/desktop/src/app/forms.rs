@@ -81,9 +81,15 @@ pub const SYNTH_CLASSES: [&[&str]; 3] = [
 
 /// Images in a synthetic dataset: a whole number in 1..=100000 (the server's limits), plain
 /// (`12000`) or grouped in thousands by `,`, `_` or a space (`12,000`). A separator anywhere else
-/// is no number: `1,5` (a decimal comma) doesn't become 15.
+/// is no number: `1,5` (a decimal comma) doesn't become 15. One leading `+` (as a spreadsheet may
+/// show it) is a sign, not part of the first group.
 pub fn parse_images(s: &str) -> Option<u64> {
-    let groups: Vec<&str> = s.trim().split([',', '_', ' ']).collect();
+    let t = s.trim();
+    let t = t.strip_prefix('+').unwrap_or(t);
+    if t.starts_with('+') {
+        return None;
+    }
+    let groups: Vec<&str> = t.split([',', '_', ' ']).collect();
     if let [head, rest @ ..] = groups.as_slice()
         && !rest.is_empty()
         && !((1..=3).contains(&head.len()) && rest.iter().all(|g| g.len() == 3))
@@ -475,6 +481,13 @@ mod tests {
             assert!(parse_images(ok).is_some(), "{ok}");
         }
         for bad in ["1,5", "1,0", "10,00", "1,0000", "1000,000", ",500", "1,000,", "1,,000"] {
+            assert_eq!(parse_images(bad), None, "{bad}");
+        }
+        // A leading `+` is a sign, not part of the first group.
+        assert_eq!(parse_images("+100,000"), Some(100_000));
+        assert_eq!(parse_images("+1,000"), Some(1000));
+        assert_eq!(parse_images("+12"), Some(12));
+        for bad in ["+,100", "+", "++1", "+1,5", "+ 1,000"] {
             assert_eq!(parse_images(bad), None, "{bad}");
         }
         use super::synth_errors;
