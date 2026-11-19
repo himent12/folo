@@ -452,7 +452,7 @@ export default function BenchEntryPage() {
                       <CalibrationSection result={r()} entry={en()} bench={b()} />
                       <SelfLabelSection result={r()} entry={en()} loop={loop.get()} />
                       <LocalizationSection result={r()} />
-                      <ImagesSection bench={b()} entry={en()} bestConf={r().accuracy.best_conf} />
+                      <ImagesSection bench={b()} entry={en()} accuracy={r().accuracy} />
                     </>
                   ) : result.error ? (
                     <ErrorState error={result.error} title="Could not load the result" retry={() => result.refresh()} />

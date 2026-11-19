@@ -1,8 +1,8 @@
 //! Benchmarks as text: axis names and scores, contestants, sources, status tones, ranks and names.
 
 use crate::api::{
-    Bench, BenchAxis, BenchContestant, BenchEntry, BenchEntryStatus, BenchLoop, BenchPlan, BenchSource,
-    Label, LabelAgentId,
+    Bench, BenchAccuracy, BenchAxis, BenchContestant, BenchEntry, BenchEntryImagePage, BenchEntryStatus,
+    BenchLoop, BenchPlan, BenchSource, Label, LabelAgentId,
 };
 use crate::app::FoloApp;
 use crate::ui::*;
@@ -180,9 +180,121 @@ pub fn plan_intro(designed_by: Option<&str>, plan: &BenchPlan, default_len: Opti
     }
 }
 
+/// An entry's best-F1 confidence, `None` when it has none: its F1 is 0 at every confidence (`best_conf` is then 1,
+/// or 0 when no class has a true box; docs/BENCH.md, Accuracy).
+pub fn best_f1_conf(a: &BenchAccuracy) -> Option<f32> {
+    (a.f1 > 0.).then_some(a.best_conf)
+}
+
+/// The label of an entry's precision, recall and F1: where they were read.
+pub fn prf_label(a: &BenchAccuracy) -> String {
+    match best_f1_conf(a) {
+        Some(c) => format!("P · R · F1 at {}", fmt_conf(c)),
+        None => "P · R · F1 (F1 is 0 at every confidence)".into(),
+    }
+}
+
+/// What the images panel shows of a scored entry's detections, from the confidence its images were taken at (the
+/// page's `conf`, `best_conf` from a server before it): its best-F1 confidence as before; 0, its detections at every
+/// confidence, said as the cutoff and not a total so it is true on a partial page (or that it made none, once every
+/// image is loaded and none has one); above 0 with no best F1, an older FOLO's grading.
+pub fn images_shown(page: &BenchEntryImagePage, a: &BenchAccuracy) -> String {
+    let at = page.conf.unwrap_or(a.best_conf);
+    let best = best_f1_conf(a);
+    let all = page.images.len() as u64 >= page.total;
+    if best == Some(at) {
+        format!(" at confidence {} and up", fmt_conf(at))
+    } else if at <= 0. {
+        if all && page.images.iter().all(|im| im.detections.is_empty()) {
+            ": it made none".into()
+        } else {
+            " at every confidence (there is no best-F1 confidence)".into()
+        }
+    } else if best.is_some() {
+        format!(" at confidence {} and up", fmt_conf(at))
+    } else {
+        format!(
+            " at confidence {} and up (an older FOLO graded it: running the benchmark again shows every one)",
+            fmt_conf(at)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{BBox, BenchDetection, BenchEntryImage, BenchImage};
+
+    fn accuracy(f1: f32, best_conf: f32) -> BenchAccuracy {
+        BenchAccuracy {
+            map50_95: 0.,
+            ci95: [0., 0.],
+            map50: 0.,
+            map75: 0.,
+            precision: if f1 > 0. { 0.8 } else { 0. },
+            recall: if f1 > 0. { 0.5 } else { 0. },
+            f1,
+            best_conf,
+            map_small: Some(0.),
+            map_medium: None,
+            map_large: None,
+            per_class: Vec::new(),
+        }
+    }
+
+    /// A page of `images` with one true box each and `dets` detections on each, taken at `conf`.
+    fn page(conf: Option<f32>, images: usize, total: u64, dets: usize) -> BenchEntryImagePage {
+        let b = BBox { class: 0, x1: 10., y1: 10., x2: 20., y2: 20. };
+        let d = |score: f32| BenchDetection { class: 0, score, x1: 10., y1: 10., x2: 20., y2: 20. };
+        BenchEntryImagePage {
+            total,
+            conf,
+            images: (0..images)
+                .map(|i| BenchEntryImage {
+                    image: BenchImage {
+                        id: i.to_string(),
+                        file: format!("{i}.jpg"),
+                        width: 64,
+                        height: 64,
+                        boxes: vec![b],
+                    },
+                    detections: (0..dets).map(|k| d(0.9 - k as f32 * 0.001)).collect(),
+                    missed: u32::from(dets == 0),
+                    wrong: dets.saturating_sub(1) as u32,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_entry_with_no_best_f1_says_so_and_what_its_images_hold() {
+        // F1 0 at every confidence: `best_conf` is 1 (or 0 with no class evaluated), neither a best F1.
+        let none = accuracy(0., 1.);
+        assert_eq!(best_f1_conf(&none), None);
+        assert_eq!(best_f1_conf(&accuracy(0., 0.)), None);
+        assert_eq!(prf_label(&none), "P · R · F1 (F1 is 0 at every confidence)");
+        // 100 wrong above one right on an image (the scorer counts the top 100, so F1 is 0): graded at 0, all 101.
+        let every = " at every confidence (there is no best-F1 confidence)";
+        let cap = page(Some(0.), 1, 1, 101);
+        assert_eq!(images_shown(&cap, &none), every);
+        // No class evaluated: graded at 0 too, and `best_conf` 0 is not named.
+        assert_eq!(images_shown(&cap, &accuracy(0., 0.)), every);
+        // It made no detections: said once every image is in. Before, the cutoff, not a total: 24 of 27 loaded, none
+        // with a detection, may still have one on the last page.
+        assert_eq!(images_shown(&page(Some(0.), 2, 2, 0), &none), ": it made none");
+        assert_eq!(images_shown(&page(Some(0.), 24, 27, 0), &none), every);
+        // Stored by an older FOLO (no `conf`): taken at `best_conf`, 1, so not every detection.
+        assert_eq!(
+            images_shown(&page(None, 2, 2, 0), &none),
+            " at confidence 1.00 and up (an older FOLO graded it: running the benchmark again shows every one)"
+        );
+        // A normal entry, as before, with or without the page's `conf`.
+        let some = accuracy(0.62, 0.31);
+        assert_eq!(best_f1_conf(&some), Some(0.31));
+        assert_eq!(prf_label(&some), "P · R · F1 at 0.31");
+        assert_eq!(images_shown(&page(Some(0.31), 1, 1, 2), &some), " at confidence 0.31 and up");
+        assert_eq!(images_shown(&page(None, 1, 1, 2), &some), " at confidence 0.31 and up");
+    }
 
     #[test]
     fn only_the_default_plan_is_called_the_default_one() {

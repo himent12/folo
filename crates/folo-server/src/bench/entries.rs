@@ -331,6 +331,7 @@ impl Benches {
         let slot = self.slot(id)?;
         done_entry(&slot, entry_id)?;
         let file = slot.read_entry(entry_id)?;
+        let conf = file.result.as_ref().map(state::ResultParts::images_conf);
         let mut outcomes = file.images;
         if worst {
             outcomes.sort_by_key(|o| std::cmp::Reverse(o.missed + o.wrong));
@@ -350,7 +351,7 @@ impl Benches {
                 })
             })
             .collect();
-        Ok(BenchEntryImagePage { total: file.entry.images, images })
+        Ok(BenchEntryImagePage { total: file.entry.images, conf, images })
     }
 
     /// `POST …/entries/{entry_id}/stop`.

@@ -102,7 +102,12 @@ the class mean, so resamples run a little higher than the measurement; the shift
 number it belongs to). Two entries whose intervals overlap are not clearly different on this benchmark; more
 images make the interval narrower.
 Also reported: mAP@0.5, mAP@0.75, mAP for small / medium / large objects (COCO's area ranges), per-class AP, and
-precision / recall / F1 at the confidence with the best F1.
+precision / recall / F1 at the confidence with the best F1 (`best_conf`, the highest on ties). When F1 is 0 at every
+confidence (`f1` is 0) there is no best F1 and `best_conf` is not one: it reads 1 (every confidence ties), or 0 when
+no class has a true box (no class is evaluated). F1 can be 0 with a right detection among many wrong ones: like COCO,
+the scorer counts only the 100 highest-scoring detections of an image and class. The apps then say F1 is 0 at every
+confidence, and the entry's images hold every detection it made (`conf` 0 on its images page; an entry graded by an
+older FOLO kept only those from `best_conf` up, and says so).
 
 **Robustness.** For condition `c` at severity `s`, `kept(c, s) = min(1, mAP(c, s) / mAP(unchanged))` with
 mAP@0.5:0.95 on both sides. A condition's value is the mean of `kept` over its severities; the axis is the mean of

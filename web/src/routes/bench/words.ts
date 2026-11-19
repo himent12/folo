@@ -4,6 +4,7 @@
 
 import type {
   Bench,
+  BenchAccuracy,
   BenchAxis,
   BenchAxisScore,
   BenchCalibration,
@@ -781,6 +782,32 @@ export function forecastText(f: LabelForecast, poolImages: number | null): { tit
     text: `${at}${cost} ${f.stops ? `A loop stops when fewer than ${MIN_LABELED_IMAGES} pool images get a box.` : 'A student learns little from so few.'}`,
     remedy: f.from === 'chosen' ? 'A still lower confidence keeps more of its detections, fewer of them right.' : 'A lower confidence keeps more of its detections, fewer of them right.',
   };
+}
+
+/**
+ * An entry's best-F1 confidence, or null when it has none: its F1 is 0 at every confidence (`best_conf` is then 1, or 0
+ * when no class has a true box; docs/BENCH.md, Accuracy).
+ */
+export function bestF1Conf(a: Pick<BenchAccuracy, 'f1' | 'best_conf'>): number | null {
+  return a.f1 > 0 ? a.best_conf : null;
+}
+
+/**
+ * What the Images section shows of a scored entry's detections, from the confidence its images were taken at (`at`, the
+ * page's `conf`): its best-F1 confidence as before; 0, its detections at every confidence, said as the cutoff and not a
+ * total so it is true on a partly loaded gallery (or that it made none, once every image is loaded and none has one);
+ * above 0 with no best F1, an older FOLO's grading, which kept only those from the grid's top.
+ */
+export function imagesShownText(at: number, bestConf: number | null, noneMade: boolean): string {
+  if (bestConf !== null && at === bestConf) return `Its detections from confidence ${conf(at)} up (its best F1), on the unchanged images.`;
+  if (at <= 0) {
+    return noneMade
+      ? 'It made no detections on the unchanged images.'
+      : 'Its detections at every confidence (there is no best-F1 confidence), on the unchanged images.';
+  }
+  return bestConf !== null
+    ? `Its detections from confidence ${conf(at)} up, on the unchanged images.`
+    : `Its detections from confidence ${conf(at)} up, on the unchanged images: an older FOLO graded it, and running the benchmark again shows every detection.`;
 }
 
 /**

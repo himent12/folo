@@ -41,7 +41,8 @@ pub struct BenchAccuracy {
     pub recall: f32,
     /// Class-mean F1 at `best_conf`.
     pub f1: f32,
-    /// The confidence with the best class-mean F1.
+    /// The confidence with the best class-mean F1 (the highest on ties). With `f1` 0 there is no best F1: F1 is 0 at
+    /// every confidence and this is 1, or 0 when no class has a true box.
     pub best_conf: f32,
     /// mAP@0.5:0.95 of objects under 32² px; `null` when the benchmark has none.
     pub map_small: Option<f32>,
@@ -208,7 +209,7 @@ pub struct BenchLabelPoint {
 pub struct BenchEntryImage {
     /// The image with its true boxes.
     pub image: BenchImage,
-    /// The detections at or above the entry's `best_conf`, highest confidence first.
+    /// The detections at or above the page's `conf`, highest confidence first.
     pub detections: Vec<BenchDetection>,
     /// True boxes none of them matches (IoU at least 0.5, same class).
     pub missed: u32,
@@ -222,6 +223,11 @@ pub struct BenchEntryImage {
 pub struct BenchEntryImagePage {
     /// Images the entry ran (before `offset` / `limit`).
     pub total: u64,
+    /// The confidence the detections were taken at: those at or above it, so 0 is every detection. The entry's
+    /// `best_conf`, or 0 when it has no best F1 (`f1` 0). An entry graded by an older FOLO took `best_conf` in either
+    /// case. `null` from a server older than this field (which took `best_conf`).
+    #[serde(default)]
+    pub conf: Option<f32>,
     /// This page.
     pub images: Vec<BenchEntryImage>,
 }

@@ -529,7 +529,7 @@ export class MockBench extends MockBenchState {
     if (q.sort === 'worst') all.sort((x, y) => y.page.missed + y.page.wrong - (x.page.missed + x.page.wrong) || x.k - y.k);
     const offset = Math.max(0, q.offset ?? 0);
     const limit = Math.max(0, Math.min(IMAGES_PAGE_MAX, q.limit ?? 100));
-    return { total: all.length, images: all.slice(offset, offset + limit).map((x) => x.page) };
+    return { total: all.length, conf: e.result.accuracy.best_conf, images: all.slice(offset, offset + limit).map((x) => x.page) };
   }
 
   stopEntry(id: string, entryId: string, now: number): BenchEntry {

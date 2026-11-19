@@ -353,6 +353,7 @@ impl MockBench {
             let lim = if limit == 0 { 100 } else { limit.min(1000) } as usize;
             Ok(BenchEntryImagePage {
                 total: items.len() as u64,
+                conf: Some(best_conf),
                 images: items.into_iter().skip(offset as usize).take(lim).map(|(_, x)| x).collect(),
             })
         })
