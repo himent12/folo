@@ -330,6 +330,20 @@ fn mcp_errors_stay_off_stdout_with_json() {
         assert!(out.stdout.is_empty(), "{args:?}: stdout: {}", String::from_utf8_lossy(&out.stdout));
         assert!(stderr.contains(want), "{args:?}: {stderr}");
     }
+    // A root flag that is not Unicode, before `mcp`.
+    #[cfg(windows)]
+    let flag = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&"--x".encode_utf16().chain([0xD800]).collect::<Vec<_>>())
+    };
+    #[cfg(unix)]
+    let flag = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b"--x\xFF".to_vec())
+    };
+    let out = folo_cmd().arg(flag).args(["mcp", "--json"]).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
     for args in [
         &["--json", "serve", "--extra"][..],
         &["--json", "--", "mcp"],

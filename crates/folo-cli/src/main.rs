@@ -100,12 +100,14 @@ fn names_mcp(args: &[OsString]) -> bool {
 /// is neither a root flag nor a root option's value. A root option (as `root` defines it) that takes a value and is
 /// not given one in its token (`--opt=v`, `-ov`) takes the next argument unless that starts with `-`, as clap does;
 /// anything else starting with `-` (a repeated, unknown or malformed flag) is skipped alone. `--` ends the scan with
-/// no subcommand: what follows it is a positional, and the root has none.
+/// no subcommand: what follows it is a positional, and the root has none. A lone `-` is a value, as clap takes it. An
+/// argument that is not Unicode is read lossily: a flag still starts with `-` and matches no root flag, so it is
+/// skipped as an unknown one; anything else is a subcommand token that is not `mcp`.
 fn subcommand_token<'a>(root: &clap::Command, args: &'a [OsString]) -> Option<&'a OsStr> {
     let takes_value = |arg: Option<&clap::Arg>| arg.is_some_and(|a| a.get_action().takes_values());
     let mut rest = args.iter().skip(1).peekable();
     while let Some(token) = rest.next() {
-        let Some(s) = token.to_str() else { return Some(token) };
+        let s = token.to_string_lossy();
         let wants_next = if s == "--" {
             return None;
         } else if let Some(long) = s.strip_prefix("--") {
@@ -125,7 +127,9 @@ fn subcommand_token<'a>(root: &clap::Command, args: &'a [OsString]) -> Option<&'
         } else {
             return Some(token);
         };
-        if wants_next && rest.peek().is_some_and(|n| !n.to_string_lossy().starts_with('-')) {
+        if wants_next
+            && rest.peek().is_some_and(|n| n.as_os_str() == "-" || !n.to_string_lossy().starts_with('-'))
+        {
             rest.next();
         }
     }
@@ -278,8 +282,27 @@ mod tests {
             // A value equal to `mcp` is a value.
             ("folo --dir mcp --json", false),
             ("folo -d mcp --json", false),
+            // A lone `-` is a value.
+            ("folo --dir - mcp --json", true),
         ] {
             assert_eq!(names(&root, line), want, "{line}");
+        }
+        // An argument that is not Unicode: a flag is skipped as an unknown one, anything else names a subcommand.
+        let not_unicode = |prefix: &str| -> OsString {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStringExt;
+                OsString::from_wide(&prefix.encode_utf16().chain([0xD800]).collect::<Vec<_>>())
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                OsString::from_vec([prefix.as_bytes(), &[0xFF]].concat())
+            }
+        };
+        for (first, want) in [("--x", true), ("-x", true), ("x", false)] {
+            let args = ["folo".into(), not_unicode(first), "mcp".into(), "--json".into()];
+            assert_eq!(subcommand_token(&Cli::command(), &args).is_some_and(|t| t == "mcp"), want, "{first}");
         }
     }
 
