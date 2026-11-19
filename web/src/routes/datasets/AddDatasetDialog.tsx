@@ -7,7 +7,7 @@ import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { count, duration } from '$lib/format';
 import { href, router } from '$lib/router';
-import { parseSeed, seedError } from '$lib/seed';
+import { parseSeed, seedArrows, seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
@@ -377,7 +377,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                     <Input id={`${uid}-images`} type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.get().images)} />
                   </Field>{' '}
                   <Field label="Seed" for={`${uid}-seed`} error={show(errs.get().seed)}>
-                    <Input id={`${uid}-seed`} inputmode="numeric" bind:value={seed} invalid={!!show(errs.get().seed)} />
+                    <Input id={`${uid}-seed`} inputmode="numeric" bind:value={seed} onkeydown={seedArrows(seed)} invalid={!!show(errs.get().seed)} />
                   </Field>
                 </div>{' '}
                 <Field label="Image size" hint={`Square images, ${imgsz.get()} × ${imgsz.get()} px. 80% train, 20% val.`}>

@@ -746,6 +746,26 @@ describe('New run: the keyboard', () => {
     press(target.querySelector('input#epochs')!, { ctrlKey: true });
     await until(() => create.mock.calls.length === 1, 'the start');
   });
+
+  // #354 review: the Seed text field had lost the number field's Arrow Up / Down.
+  it('steps the seed by one with Arrow Up / Down, within its range, and leaves a field with no seed as typed', async () => {
+    await open();
+    const el = target.querySelector<HTMLInputElement>('input#seed')!;
+    const step = (from: string, key: string) => {
+      el.value = from;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      const e = press(el, { key });
+      flushSync();
+      return [el.value, e.defaultPrevented];
+    };
+    expect(step('7', 'ArrowUp')).toEqual(['8', true]);
+    expect(step('007', 'ArrowDown')).toEqual(['6', true]);
+    expect(step('0', 'ArrowDown')).toEqual(['0', true]);
+    expect(step('9007199254740991', 'ArrowUp')).toEqual(['9007199254740991', true]);
+    expect(step('1.5', 'ArrowUp')).toEqual(['1.5', false]);
+    expect(step('', 'ArrowDown')).toEqual(['', false]);
+  });
 });
 
 describe('New run: the run name', () => {

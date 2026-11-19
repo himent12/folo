@@ -546,7 +546,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // A seed over 2^53 − 1 (9007199254740991) is exact here but not in a JavaScript client, whose JSON parser rounds it:
 // Studio takes 0 to 2^53 − 1, digits only as typed (also for a synthetic dataset), shows a run's larger seed as "Over
 // 9,007,199,254,740,991" and never sends or copies it: New run's copy of the run, Copy JSON and the queue's wait
-// estimate leave it out (web/src/lib/seed.ts).
+// estimate leave it out (web/src/lib/seed.ts). New run's estimates leave out a Seed field that holds no seed.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
 // Real mode maps TrainConfig onto the trainer's config (docs/MODEL.md §8.1): the other recipe keys keep their
 // defaults, and "auto" resolves to the GPU when a model can be placed on it, else the CPU.

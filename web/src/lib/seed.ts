@@ -13,7 +13,9 @@
  *    would run: it is left out where it does not matter to the answer or is said to be left out
  *    (`withoutInexactSeed`: the wait estimate, Copy JSON), and New run, copying such a run, leaves its Seed empty with
  *    `COPIED_SEED_ERROR` (kept in the draft) and holds Start and the CLI command until one is typed. It is shown as
- *    `OVER_SEED`, never as the rounded number.
+ *    `OVER_SEED`, never as the rounded number. The same holds for a seed field with no seed in it (empty or refused):
+ *    New run's config carries NaN, never 0 or another stand-in, its estimates leave it out and Start and the CLI
+ *    command are held.
  */
 import { num } from './format';
 
@@ -27,6 +29,21 @@ export function parseSeed(text: string): number | null {
   // Past 2^53 − 1 a digit string reads as 2^53 or more, never as a safe integer: the bound needs no BigInt.
   const v = Number(t);
   return Number.isSafeInteger(v) ? v : null;
+}
+
+/**
+ * A seed field's Arrow Up / Down, as the number field it replaced stepped: one more or one less, within 0 to
+ * `MAX_SEED`, on a seed only (an empty or invalid field is left as typed). Not the wheel: a seed changed by scrolling
+ * past the field is an accident.
+ */
+export function seedArrows(seed: { get(): string; set(v: string): void }) {
+  return (e: KeyboardEvent) => {
+    const by = e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0;
+    const v = parseSeed(seed.get());
+    if (!by || v === null || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    seed.set(String(Math.min(MAX_SEED, Math.max(0, v + by))));
+  };
 }
 
 /** A seed field's error, or null when its text is a seed. */

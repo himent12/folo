@@ -38,8 +38,9 @@ export function trainConfig(
     lr0,
     weights: weights === 'none' ? null : weights,
     augment: { ...augment, hsv: [...augment.hsv] as [number, number, number], close_mosaic: Math.min(augment.close_mosaic, epochs) },
-    // Not a seed yet: Start and the CLI command are held (its error), and the estimate does not depend on it.
-    seed: parseSeed(seed) ?? 0,
+    // Not a seed yet: NaN, never another seed (lib/seed, rule B). Start and the CLI command are held (its error), and
+    // the estimates leave it out (`withoutInexactSeed`): they do not depend on it.
+    seed: parseSeed(seed) ?? NaN,
     // Only to servers that report capabilities (older ones predate `amp`), or train it in the cloud.
     ...(caps || onCloud ? { amp: ampOn } : {}),
     // Left out for the default (missing means `o2m`, docs/API.md), so older servers see the request they know.

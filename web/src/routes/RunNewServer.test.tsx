@@ -317,6 +317,27 @@ describe('New run: the estimate', () => {
     expect(target.querySelector('.dock-est .stale')).toBeNull();
   });
 
+  // #354 review: a Seed field with no seed in it (refused, or empty) was asked about as seed 0, another seed.
+  it('leaves the seed out of the estimate while the Seed field holds none, never 0', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const ask = vi.spyOn(api, 'estimateRun');
+    await open();
+    const seed = target.querySelector<HTMLInputElement>('input#seed')!;
+    /** Types `v` and returns the next estimate request's body. */
+    const asked = async (v: string) => {
+      const n = ask.mock.calls.length;
+      seed.value = v;
+      seed.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      await until(() => ask.mock.calls.length > n, `the estimate for ${JSON.stringify(v)}`);
+      return ask.mock.calls.at(-1)![0];
+    };
+    expect((await asked('7')).seed).toBe(7);
+    expect(await asked('9007199254740990.5')).not.toHaveProperty('seed');
+    expect((await asked('7')).seed).toBe(7);
+    expect(await asked('')).not.toHaveProperty('seed');
+  });
+
   it('falls back to the reference figures on a server without run_estimate, and says so', async () => {
     hub.api = api = new MockApi('no-throughput', 0);
     const ask = vi.spyOn(api, 'estimateRun');
