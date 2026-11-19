@@ -320,6 +320,70 @@ fn stop_refuses_server_runs() {
     assert!(!dir.join("stop").exists());
 }
 
+/// Review round 2, finding 4: a server run resumed in place with `folo train --resume` is the CLI's to stop while
+/// that `folo train` holds it, and the server's again once it ends.
+#[test]
+fn stop_of_a_server_run_a_folo_train_holds_is_the_clis() {
+    let root = TestDir::new("stop-server-resumed");
+    let dir = root.join("runs").join("run_a1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("run.json"), r#"{"run":{"id":"run_a1","status":"stopped"},"dataset":{}}"#)
+        .unwrap();
+    let claim = RunClaim::take(&dir).unwrap().expect("free");
+    assert_eq!(stop_code(&dir), None);
+    assert!(dir.join("stop").is_file());
+    drop(claim);
+    assert_eq!(stop_code(&dir).as_deref(), Some("run_owned_by_server"));
+}
+
+/// Finding 1a: the trainer ended between `folo stop`'s look at the lock and its write, so the request it wrote is
+/// taken back (the two halves of `request_stop`, with the trainer's lock dropped between them).
+#[test]
+fn stop_after_the_trainer_ended_takes_its_request_back() {
+    let root = TestDir::new("stop-late");
+    let (dir, claim) = run_folder(&root, "run", STEP);
+    drop(claim);
+    super::stop::write_request(&dir).unwrap();
+    assert!(dir.join("stop").is_file());
+    let err = super::stop::confirm_request(&dir, crate::output::Out { json: false }).unwrap_err();
+    assert_eq!(err.code, "run_not_active");
+    assert!(!dir.join("stop").exists());
+    // With the trainer still there, the request stays.
+    let claim = RunClaim::take(&dir).unwrap().expect("free");
+    super::stop::write_request(&dir).unwrap();
+    super::stop::confirm_request(&dir, crate::output::Out { json: false }).unwrap();
+    assert!(dir.join("stop").is_file());
+    drop(claim);
+}
+
+/// Finding 3: claiming a folder keeps a `folo-train.json` FOLO wrote, creates a missing one, and refuses one with
+/// other contents without changing anything.
+#[test]
+fn claim_never_overwrites_a_marker_folo_did_not_write() {
+    let root = TestDir::new("stop-marker");
+    let ours = root.join("ours");
+    std::fs::create_dir(&ours).unwrap();
+    let kept = br#"{"owner":"folo train","note":"kept"}"#;
+    std::fs::write(ours.join("folo-train.json"), kept).unwrap();
+    drop(RunClaim::take(&ours).unwrap().expect("free"));
+    assert_eq!(std::fs::read(ours.join("folo-train.json")).unwrap(), kept);
+    // A run of an older FOLO gets its marker.
+    let old = root.join("old");
+    std::fs::create_dir_all(old.join("weights")).unwrap();
+    drop(RunClaim::take(&old).unwrap().expect("free"));
+    assert_eq!(std::fs::read(old.join("folo-train.json")).unwrap(), b"{\"owner\":\"folo train\"}\n");
+    // Someone's own file of that name.
+    let user = root.join("user");
+    std::fs::create_dir(&user).unwrap();
+    std::fs::write(user.join("folo-train.json"), b"{\"mine\":true}").unwrap();
+    std::fs::write(user.join("stop"), b"keep").unwrap();
+    let err = RunClaim::take(&user).err().expect("refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(user.join("folo-train.json")).unwrap(), b"{\"mine\":true}");
+    assert_eq!(std::fs::read(user.join("stop")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&user).unwrap().count(), 2, "nothing written");
+}
+
 /// The server's `folo train` command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) parses with the real
 /// arguments, and maps to the trainer config the server builds from the same `TrainConfig` (`from_api`).
 #[test]

@@ -110,6 +110,18 @@ pub(super) fn resume(
                 format!("another `folo train` is running the run in {}", folo_api::json::path(&run_dir)),
             ));
         }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let marker = run_dir.join(super::stop::RUN_MARKER);
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "usage",
+                format!(
+                    "{} is not a file FOLO wrote; `folo train` will not overwrite it",
+                    folo_api::json::path(&marker)
+                ),
+            )
+            .hint("move or rename that file, then resume again"));
+        }
         Err(e) => {
             return Err(CliError::new(
                 ExitCode::Runtime,
