@@ -1,6 +1,7 @@
 //! Unit tests of `folo train`: `--set` overrides, what `--resume` refuses, distinct run folders for concurrent
-//! runs, and the server's CLI commands parsing into the server's config.
+//! runs, what `folo stop` asks and refuses, and the server's CLI commands parsing into the server's config.
 
+use super::RunClaim;
 use super::config::apply_sets;
 use super::resume::same;
 use folo_test_support::TestDir;
@@ -194,7 +195,7 @@ fn concurrent_runs_reserve_distinct_folders() {
     let threads: Vec<_> = (0..8)
         .map(|_| {
             let project = project.to_path_buf();
-            std::thread::spawn(move || super::reserve_dir(&project, "shapes-n").unwrap())
+            std::thread::spawn(move || super::reserve_dir(&project, "shapes-n").unwrap().0)
         })
         .collect();
     let mut dirs: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
@@ -205,44 +206,118 @@ fn concurrent_runs_reserve_distinct_folders() {
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// `folo stop` writes the stop file only into a run folder whose run has not ended, and never over a file there.
+/// `folo stop` code for `dir` (`None`: the request was written).
+fn stop_code(dir: &std::path::Path) -> Option<String> {
+    super::request_stop(dir, crate::output::Out { json: false }).err().map(|e| e.code)
+}
+
+/// A folder `folo train` reserved, with the files a run in training has (`metrics.jsonl` holding `lines`).
+fn run_folder(root: &TestDir, name: &str, lines: &str) -> (std::path::PathBuf, RunClaim) {
+    let (dir, claim) = super::reserve_dir(root, name).unwrap();
+    std::fs::create_dir(dir.join("weights")).unwrap();
+    std::fs::write(dir.join("metrics.jsonl"), lines).unwrap();
+    (dir, claim)
+}
+
+const STEP: &str = "{\"event\":\"step\",\"step\":1,\"loss\":0.5}\n";
+const COMPLETED: &str = "{\"event\":\"status\",\"status\":\"completed\",\"error\":null}\n";
+
+/// #311: a folder `folo train` did not make keeps every byte, whatever project files it has (review round 1,
+/// finding 1: `weights/` and a `metrics.jsonl` of another trainer are no proof).
 #[test]
-fn stop_asks_only_runs_that_train() {
-    let out = crate::output::Out { json: false };
-    let root = TestDir::new("stop");
-    let code = |dir: &std::path::Path| super::request_stop(dir, out).err().map(|e| e.code);
-    // A folder with a config.json of something else keeps every byte.
+fn stop_refuses_folders_folo_train_did_not_make() {
+    let root = TestDir::new("stop-other");
     let other = root.join("other");
-    std::fs::create_dir(&other).unwrap();
+    std::fs::create_dir_all(other.join("weights")).unwrap();
     std::fs::write(other.join("config.json"), r#"{"app":"unrelated settings"}"#).unwrap();
+    std::fs::write(other.join("metrics.jsonl"), "{\"step\":1,\"loss\":0.5}\n").unwrap();
     std::fs::write(other.join("stop"), b"keep these bytes").unwrap();
-    assert_eq!(code(&other).as_deref(), Some("run_not_found"));
+    assert_eq!(stop_code(&other).as_deref(), Some("run_not_found"));
     assert_eq!(std::fs::read(other.join("stop")).unwrap(), b"keep these bytes");
-    // A run that has only just started (the trainer made weights/ and metrics.jsonl, nothing written yet).
-    let run = root.join("run");
-    std::fs::create_dir_all(run.join("weights")).unwrap();
-    std::fs::write(run.join("metrics.jsonl"), "").unwrap();
-    assert_eq!(code(&run), None);
-    assert_eq!(std::fs::read(run.join("stop")).unwrap(), b"stop\n");
-    // Asked again before the trainer saw it: the file there stays.
-    std::fs::write(run.join("stop"), b"pending").unwrap();
-    assert_eq!(code(&run), None);
-    assert_eq!(std::fs::read(run.join("stop")).unwrap(), b"pending");
-    std::fs::remove_file(run.join("stop")).unwrap();
-    // Training, then ended.
-    let status = |s: &str| {
-        format!(r#"{{"event":"status","status":"{s}","error":null,"steps_per_epoch":2,"epochs":1}}"#)
-    };
-    std::fs::write(run.join("metrics.jsonl"), status("running") + "\n").unwrap();
-    assert_eq!(code(&run), None);
-    std::fs::remove_file(run.join("stop")).unwrap();
-    for end in ["completed", "stopped", "failed"] {
-        std::fs::write(run.join("metrics.jsonl"), format!("{}\n{}\n", status("running"), status(end)))
-            .unwrap();
-        assert_eq!(code(&run).as_deref(), Some("run_not_active"), "{end}");
-        assert!(!run.join("stop").exists(), "{end}");
+    std::fs::remove_file(other.join("stop")).unwrap();
+    assert_eq!(stop_code(&other).as_deref(), Some("run_not_found"));
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 3, "nothing written");
+}
+
+/// Finding 2: whether a run is live never depends on reading its `metrics.jsonl` (held open without sharing, torn
+/// after its final record, or a final record over 64 KiB).
+#[test]
+fn stop_of_an_ended_run_does_not_read_its_log() {
+    let root = TestDir::new("stop-ended");
+    let big =
+        format!("{{\"event\":\"status\",\"status\":\"completed\",\"error\":\"{}\"}}\n", "x".repeat(70_000));
+    for (name, log) in
+        [("torn", format!("{STEP}{COMPLETED}{{\"event\":\"st")), ("big", format!("{STEP}{big}"))]
+    {
+        let (dir, claim) = run_folder(&root, name, &log);
+        drop(claim);
+        assert_eq!(stop_code(&dir).as_deref(), Some("run_not_active"), "{name}");
+        assert!(!dir.join("stop").exists(), "{name}");
     }
-    let _ = std::fs::remove_dir_all(&root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, claim) = run_folder(&root, "held", &format!("{STEP}{COMPLETED}"));
+        drop(claim);
+        let _held =
+            std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join("metrics.jsonl")).unwrap();
+        assert_eq!(stop_code(&dir).as_deref(), Some("run_not_active"));
+        assert!(!dir.join("stop").exists());
+    }
+}
+
+/// Finding 3: a run is live exactly while its `folo train` holds the lock, from the moment it reserved the folder
+/// (setup: no `metrics.jsonl` yet) until its process ends, also when it is killed (the OS lets go of the lock; a
+/// request left behind is removed, and a resume takes it too).
+#[test]
+fn stop_follows_the_trainer_process() {
+    let root = TestDir::new("stop-live");
+    let (dir, claim) = super::reserve_dir(&root, "setup").unwrap();
+    assert_eq!(stop_code(&dir), None, "a run in setup is asked");
+    assert!(dir.join("stop").is_file());
+    assert!(RunClaim::take(&dir).unwrap().is_none(), "one trainer per run folder");
+    // Killed: the lock is gone with the process, its request is still there.
+    drop(claim);
+    std::fs::write(dir.join("stop"), b"stop\n").unwrap();
+    assert_eq!(stop_code(&dir).as_deref(), Some("run_not_active"));
+    assert!(!dir.join("stop").exists());
+    // A resume of a run killed with a request pending does not stop at once.
+    std::fs::write(dir.join("stop"), b"stop\n").unwrap();
+    let resumed = RunClaim::take(&dir).unwrap().expect("free");
+    assert!(!dir.join("stop").exists());
+    assert_eq!(stop_code(&dir), None);
+    drop(resumed);
+}
+
+/// Finding 4: a request stays until the run ends, so asking again is the same answer and leaves nothing behind
+/// once the trainer is gone.
+#[test]
+fn stop_twice_is_the_same_answer() {
+    let root = TestDir::new("stop-twice");
+    let (dir, claim) = run_folder(&root, "run", STEP);
+    assert_eq!(stop_code(&dir), None);
+    std::fs::write(dir.join("stop"), b"pending").unwrap();
+    assert_eq!(stop_code(&dir), None);
+    assert_eq!(std::fs::read(dir.join("stop")).unwrap(), b"pending", "never overwritten");
+    drop(claim);
+    assert!(!dir.join("stop").exists(), "removed when the run ends");
+    assert_eq!(stop_code(&dir).as_deref(), Some("run_not_active"));
+    assert!(!dir.join("stop").exists());
+}
+
+/// Finding 5: a FOLO server's run (its `run.json`) is stopped through the server, never by a file.
+#[test]
+fn stop_refuses_server_runs() {
+    let root = TestDir::new("stop-server");
+    let dir = root.join("runs").join("run_a1");
+    std::fs::create_dir_all(dir.join("weights")).unwrap();
+    std::fs::write(dir.join("metrics.jsonl"), STEP).unwrap();
+    std::fs::write(dir.join("run.json"), r#"{"run":{"id":"run_a1","status":"running"},"dataset":{}}"#)
+        .unwrap();
+    let err = super::request_stop(&dir, crate::output::Out { json: false }).unwrap_err();
+    assert_eq!(err.code, "run_owned_by_server");
+    assert!(err.hint.as_deref().is_some_and(|h| h.contains("/api/runs/run_a1/stop")), "{:?}", err.hint);
+    assert!(!dir.join("stop").exists());
 }
 
 /// The server's `folo train` command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) parses with the real

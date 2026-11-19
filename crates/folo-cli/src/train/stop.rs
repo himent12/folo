@@ -1,7 +1,12 @@
-//! Stopping a run: `folo stop` and its stop file, and Ctrl+C.
+//! Stopping a run: `folo stop` and its stop file, the run folder's claim it relies on, and Ctrl+C.
+//!
+//! `folo stop` decides from two things only the trainer makes: [`RUN_MARKER`] says a folder is a `folo train` run
+//! folder, and the OS lock on [`RUN_LOCK`] (taken the way `serve.lock` is) says a `folo train` process still owns
+//! it. The lock goes with the process, so a killed trainer leaves no live-looking run behind.
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,18 +16,54 @@ use crate::output::{CliError, ExitCode, Out};
 
 use super::STOP_FILE;
 
-/// Polls `<run_dir>/stop` (written by `folo stop`) every 200 ms and raises `stop` when it appears. With
-/// `clear_stale` (a resumed run), a stop file left from an earlier process is removed first; a new run's folder is
-/// its own from the start, so a stop file there was asked for this run while it set up.
-pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>, clear_stale: bool) {
-    let file = run_dir.join(STOP_FILE);
-    if clear_stale {
-        let _ = std::fs::remove_file(&file);
+/// Written by the `folo train` that reserves (or resumes) a run folder: what makes it one for `folo stop`.
+pub const RUN_MARKER: &str = "folo-train.json";
+/// Locked by the `folo train` process that owns the run folder, from reservation to its terminal cleanup.
+pub const RUN_LOCK: &str = "train.lock";
+const MARKER_BODY: &str = "{\"owner\":\"folo train\"}\n";
+
+/// A `folo train` process's hold on its run folder; dropping it (the run ended, or failed) removes a stop request
+/// still there, then lets go of the lock.
+pub(super) struct RunClaim {
+    dir: PathBuf,
+    /// Locked; dropping it unlocks (the OS also releases it when the process dies).
+    _lock: File,
+}
+
+impl RunClaim {
+    /// Takes `run_dir`'s lock and marks the folder, before the trainer sets up; `None` while another process holds
+    /// it. A stop file there is from an earlier process (`folo stop` writes one only while the lock is held), so it
+    /// is removed.
+    pub(super) fn take(run_dir: &Path) -> std::io::Result<Option<RunClaim>> {
+        let lock =
+            OpenOptions::new().create(true).truncate(false).write(true).open(run_dir.join(RUN_LOCK))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+        match std::fs::remove_file(run_dir.join(STOP_FILE)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::fs::write(run_dir.join(RUN_MARKER), MARKER_BODY)?;
+        Ok(Some(RunClaim { dir: run_dir.to_path_buf(), _lock: lock }))
     }
+}
+
+impl Drop for RunClaim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join(STOP_FILE));
+    }
+}
+
+/// Polls `<run_dir>/stop` (written by `folo stop`) every 200 ms and raises `stop` when it appears. The file stays
+/// until the run's [`RunClaim`] is dropped, so asking again gets the same answer.
+pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>) {
+    let file = run_dir.join(STOP_FILE);
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             if file.exists() {
-                let _ = std::fs::remove_file(&file);
                 eprintln!(
                     "stop requested ({}); stopping after the current batch…",
                     folo_api::json::path(&file)
@@ -35,75 +76,88 @@ pub(super) fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>, clear_stale
     });
 }
 
-/// `folo stop <run_dir>`: asks the `folo train` writing that run folder to stop after its current batch.
+/// `folo stop <run_dir>`: asks the `folo train` that owns that run folder to stop after its current batch.
 pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
-    let not_a_run = |code: &str, exit, msg: String| {
-        CliError::new(exit, code, msg).hint("pass the run_dir that `folo train` printed, e.g. runs/shapes-n")
-    };
+    let shown = folo_api::json::path(run_dir);
     if !run_dir.is_dir() {
-        let msg = format!("{} does not exist", folo_api::json::path(run_dir));
-        return Err(not_a_run("path_not_found", ExitCode::NotFound, msg));
+        return Err(CliError::new(ExitCode::NotFound, "path_not_found", format!("{shown} does not exist"))
+            .hint("pass the run_dir that `folo train` printed, e.g. runs/shapes-n"));
     }
-    // The trainer makes `weights/` and opens `metrics.jsonl` together, before it watches for the stop file.
-    let log = run_dir.join("metrics.jsonl");
-    if !log.is_file() || !run_dir.join("weights").is_dir() {
-        let msg = format!(
-            "{} is not a run folder (it has no metrics.jsonl and weights/)",
-            folo_api::json::path(run_dir)
-        );
-        return Err(not_a_run("run_not_found", ExitCode::NotFound, msg));
-    }
-    if let Some(status) = final_status(&log) {
-        let msg = format!(
-            "the run in {} already ended (status `{status}`); there is nothing to stop",
-            folo_api::json::path(run_dir)
-        );
-        return Err(CliError::new(ExitCode::Runtime, "run_not_active", msg));
-    }
-    // A stop file already there is a request not yet seen: leave it as it is.
+    let io_error = |p: &Path, e: std::io::Error| {
+        CliError::new(ExitCode::Runtime, "io_error", format!("cannot use {}: {e}", folo_api::json::path(p)))
+    };
+    let marked = std::fs::read(run_dir.join(RUN_MARKER))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| v["owner"] == "folo train");
+    let lock = run_dir.join(RUN_LOCK);
     let file = run_dir.join(STOP_FILE);
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
-        Ok(mut f) => f.write_all(b"stop\n"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && file.is_file() => Ok(()),
-        Err(e) => Err(e),
+    if marked && lock_held(&lock).map_err(|e| io_error(&lock, e))? {
+        // A request already there stays as it is: the trainer removes it when the run ends.
+        match OpenOptions::new().write(true).create_new(true).open(&file) {
+            Ok(mut f) => f.write_all(b"stop\n"),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && file.is_file() => Ok(()),
+            Err(e) => Err(e),
+        }
+        .map_err(|e| io_error(&file, e))?;
+        out.record(&json!({
+            "event": "stop_requested",
+            "run_dir": shown,
+            "stop_file": folo_api::json::path(&file),
+        }));
+        out.human(format!(
+            "Asked the run in {shown} to stop after its current batch; its `folo train` ends with status `stopped` \
+             (`completed` when the request comes after its last batch)."
+        ));
+        return Ok(());
     }
-    .map_err(|e| {
-        CliError::new(
+    if let Some(id) = server_run_id(run_dir) {
+        return Err(CliError::new(
             ExitCode::Runtime,
-            "io_error",
-            format!("cannot write {}: {e}", folo_api::json::path(&file)),
+            "run_owned_by_server",
+            format!("{shown} is the folder of the FOLO server run `{id}`, which `folo stop` cannot stop"),
         )
-    })?;
-    out.record(&json!({
-        "event": "stop_requested",
-        "run_dir": folo_api::json::path(run_dir),
-        "stop_file": folo_api::json::path(&file),
-    }));
-    out.human(format!(
-        "Asked the run in {} to stop after its current batch; its `folo train` ends with status `stopped`.",
-        folo_api::json::path(run_dir)
-    ));
-    Ok(())
+        .hint(format!("stop it in Studio, or with POST /api/runs/{id}/stop on that server")));
+    }
+    if !marked {
+        return Err(CliError::new(
+            ExitCode::NotFound,
+            "run_not_found",
+            format!("{shown} is not a `folo train` run folder (it has no {RUN_MARKER})"),
+        )
+        .hint("pass the run_dir that `folo train` printed, e.g. runs/shapes-n"));
+    }
+    // No `folo train` owns the run: it ended, or its process died. A request left from then is stale.
+    match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_error(&file, e)),
+        _ => {}
+    }
+    Err(CliError::new(
+        ExitCode::Runtime,
+        "run_not_active",
+        format!("no `folo train` is running the run in {shown}; there is nothing to stop"),
+    ))
 }
 
-/// The status a run's `metrics.jsonl` ends with when the run ended (`completed`, `stopped`, `failed`): its last
-/// line. `None` while it trains (or after a crash, which writes no final status). Only the tail is read.
-fn final_status(log: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 64 * 1024;
-    let mut f = std::fs::File::open(log).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
-    let mut tail = Vec::new();
-    f.read_to_end(&mut tail).ok()?;
-    let text = String::from_utf8_lossy(&tail);
-    let last: serde_json::Value =
-        serde_json::from_str(text.lines().rev().find(|l| !l.trim().is_empty())?).ok()?;
-    if last["event"] != "status" {
-        return None;
+/// Whether a process holds the lock on `lock` (a missing file: nobody does).
+fn lock_held(lock: &Path) -> std::io::Result<bool> {
+    let f = match File::open(lock) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match f.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(e),
     }
-    let status: folo_api::RunStatus = serde_json::from_value(last["status"].clone()).ok()?;
-    (!status.is_active()).then(|| last["status"].as_str().unwrap_or_default().to_string())
+}
+
+/// The run id in `run_dir/run.json` when the folder is a FOLO server's run (the server writes `{"run": {"id"…}}`
+/// there and stops its runs through its own API, never through a stop file).
+fn server_run_id(run_dir: &Path) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(run_dir.join("run.json")).ok()?).ok()?;
+    v["run"]["id"].as_str().map(str::to_string)
 }
 
 /// First Ctrl+C (on Windows also Ctrl+Break, which is what a script can send to a child started in its own

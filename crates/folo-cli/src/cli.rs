@@ -33,7 +33,8 @@ pub enum Command {
     /// Train a detector.
     #[command(allow_negative_numbers = true)]
     Train(TrainArgs),
-    /// Ask a running `folo train` to stop after its current batch (it keeps the last epoch's checkpoint).
+    /// Ask a running `folo train` to stop after its current batch (it keeps the last epoch's checkpoint; a request
+    /// that comes after its last batch ends `completed`).
     Stop(StopArgs),
     /// Evaluate weights on a dataset split (mAP, precision, recall).
     Val(ValArgs),

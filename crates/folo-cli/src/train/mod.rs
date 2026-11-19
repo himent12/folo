@@ -5,8 +5,8 @@
 //! - `config.rs`: the trainer config of a new run, from the flags and `--set KEY=VALUE`.
 //! - `resume.rs`: `--resume`, and which flags a resumed run may change.
 //! - `progress.rs`: the live view or JSON lines while it trains, and the summary at the end.
-//! - `stop.rs`: `folo stop` (the stop file) and Ctrl+C.
-//! - `tests.rs`: unit tests of `--set`, `--resume` and run-folder reservation.
+//! - `stop.rs`: `folo stop` (the stop file, the run folder's marker and lock) and Ctrl+C.
+//! - `tests.rs`: unit tests of `--set`, `--resume`, run-folder reservation and `folo stop`.
 
 mod config;
 mod progress;
@@ -26,7 +26,7 @@ use crate::output::{CliError, ExitCode, Out};
 use config::{apply_sets, config_of};
 use progress::{finish, progress_sink};
 use resume::resume;
-use stop::{watch_ctrl_c, watch_stop_file};
+use stop::{RunClaim, watch_ctrl_c, watch_stop_file};
 
 pub use stop::request_stop;
 pub(crate) use stop::watch_interrupt;
@@ -53,11 +53,12 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
     watch_ctrl_c(stop.clone());
     let nb = Arc::new(AtomicU64::new(0));
     let fresh = args.resume.is_none();
-    let (mut trainer, run_dir) = match &args.resume {
+    // `claim` is held until this returns: `folo stop` asks this process only while it is.
+    let (mut trainer, run_dir, claim) = match &args.resume {
         Some(ckpt) => resume(&args, ckpt, out, stop.clone(), nb.clone())?,
         None => start(&args, out, stop.clone(), nb.clone())?,
     };
-    watch_stop_file(&run_dir, stop, !fresh);
+    watch_stop_file(&run_dir, stop);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
     if !out.json {
         out.human(format!("Run folder: {}", folo_api::json::path(&run_dir)));
@@ -66,6 +67,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
         Ok(s) => s,
         Err(e) => {
             drop(trainer);
+            drop(claim);
             if fresh {
                 discard_if_empty(&run_dir, out);
             }
@@ -96,7 +98,7 @@ fn start(
     out: Out,
     stop: Arc<AtomicBool>,
     nb: Arc<AtomicU64>,
-) -> Result<(Trainer, PathBuf), CliError> {
+) -> Result<(Trainer, PathBuf, RunClaim), CliError> {
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let (ds, ds_name) = open_dataset(data_arg, crate::dataset::format_of(args.format))?;
     let mut weights = None;
@@ -132,7 +134,7 @@ fn start(
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(|e| engine_error("train", e))?;
     let data = train_data(&ds)?;
-    let run_dir = reserve_dir(&args.project, &name).map_err(|e| {
+    let (run_dir, claim) = reserve_dir(&args.project, &name).map_err(|e| {
         CliError::new(
             ExitCode::Runtime,
             "io_error",
@@ -149,8 +151,9 @@ fn start(
         ..TrainOptions::default()
     };
     match Trainer::new(cfg, data, opts) {
-        Ok(t) => Ok((t, run_dir)),
+        Ok(t) => Ok((t, run_dir, claim)),
         Err(e) => {
+            drop(claim);
             discard_if_empty(&run_dir, out);
             Err(engine_error("train", e))
         }
@@ -184,14 +187,22 @@ fn train_data(ds: &folo_data::LoadedDataset) -> Result<TrainData, CliError> {
     })
 }
 
-/// Creates `<project>/<name>`, or `<name>2`, `<name>3`, … if it exists, and returns it. `create_dir` claims the
-/// folder atomically, so concurrent `folo train`s never share one (and a failed run only removes its own).
-fn reserve_dir(project: &Path, name: &str) -> std::io::Result<PathBuf> {
+/// Creates `<project>/<name>`, or `<name>2`, `<name>3`, … if it exists, and returns it with its [`RunClaim`].
+/// `create_dir` claims the folder atomically, so concurrent `folo train`s never share one (and a failed run only
+/// removes its own).
+fn reserve_dir(project: &Path, name: &str) -> std::io::Result<(PathBuf, RunClaim)> {
     std::fs::create_dir_all(project)?;
     for i in 1.. {
         let dir = if i == 1 { project.join(name) } else { project.join(format!("{name}{i}")) };
         match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
+            Ok(()) => {
+                let claim = RunClaim::take(&dir)
+                    .and_then(|c| c.ok_or_else(|| std::io::Error::other("the new folder is locked")))
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_dir_all(&dir);
+                    })?;
+                return Ok((dir, claim));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }

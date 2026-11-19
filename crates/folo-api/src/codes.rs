@@ -110,6 +110,12 @@ pub const CODES: &[Code] = &[
     c("run_active", 409, 1, "the run is still queued, running or stopping"),
     c("run_not_active", 409, 1, "stopping a run that already finished"),
     c(
+        "run_owned_by_server",
+        409,
+        1,
+        "`folo stop` on a FOLO server's run folder: stop it in Studio or with POST /api/runs/{id}/stop (CLI)",
+    ),
+    c(
         "dataset_in_use",
         409,
         1,
