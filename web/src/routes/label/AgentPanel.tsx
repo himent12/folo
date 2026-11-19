@@ -10,7 +10,7 @@ import Pencil from '$icons/pencil';
 import RotateCw from '$icons/rotate-cw';
 import Sparkles from '$icons/sparkles';
 import Square from '$icons/square';
-import { bindable, computed, createUniqueId, css, effect, For, Index, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, Index, signal } from 'fw';
 import type { LabelAgent, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import { count, duration, num, sentence } from '$lib/format';
@@ -59,6 +59,7 @@ export default function AgentPanel(props: AgentPanelProps) {
   const uid = createUniqueId();
   const running = computed(() => props.job.status !== 'idle');
   const run = computed(() => props.job.run);
+  const who = computed(() => (run.get() ? runAgent(run.get()!, props.agents) : ['', '']));
   const failed = computed(() => !running.get() && run.get()?.outcome === 'failed');
   const n = computed(() => toLabel(props.job));
   const agent = computed(() => props.choice.agent);
@@ -116,7 +117,11 @@ export default function AgentPanel(props: AgentPanelProps) {
               ) : null}
               <p class="p-meta">
                 <Meta>
-                  <For each={runAgent(run.get()!, props.agents)}>{(f) => <span>{f()}</span>}</For>
+                  <span>{who.get()[0]}</span>
+                  {/* A free-text model id, the one item that may cut itself (ui/Meta, LastRun), whole in its tooltip. */}
+                  <span class="truncate" title={who.get()[1]}>
+                    {who.get()[1]}
+                  </span>
                   <span>{run.get()!.effort} effort</span>
                   {run.get()!.fast ? <span>fast</span> : null}
                 </Meta>
@@ -288,8 +293,10 @@ css`
     height: 8px;
     border-radius: 2px;
   }
+  /* One column no wider than the rail: a long model id cuts itself instead of widening the panel and the page. */
   .progress {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
   .p-head {

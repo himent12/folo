@@ -17,6 +17,7 @@ export interface LastRunProps {
 export default function LastRun(props: LastRunProps) {
   const used = computed(() => usageFacts(props.run.usage));
   const total = computed(() => (props.job.usage.calls > props.run.usage.calls ? usageFacts(props.job.usage) : []));
+  const who = computed(() => runAgent(props.run, props.agents));
 
   return (
     <div class="last">
@@ -26,7 +27,12 @@ export default function LastRun(props: LastRunProps) {
           <span>{props.run.outcome ? OUTCOME[props.run.outcome] : 'Running'}</span>
           <span>{num(props.run.done)} labeled</span>
           {props.run.failed ? <span>{num(props.run.failed)} failed</span> : null}
-          <For each={runAgent(props.run, props.agents)}>{(f) => <span>{f()}</span>}</For>
+          <span>{who.get()[0]}</span>
+          {/* A model id the agent does not list (a Bedrock profile's ARN) can be wider than the rail: the one item that
+              may cut itself (ui/Meta), whole in its tooltip. */}
+          <span class="truncate" title={who.get()[1]}>
+            {who.get()[1]}
+          </span>
           {props.run.finished ? <span>{ago(props.run.finished)}</span> : null}
         </Meta>
       </p>
@@ -51,8 +57,10 @@ export default function LastRun(props: LastRunProps) {
 }
 
 css`
+  /* One column no wider than the rail: a long model id cuts itself instead of widening the panel and the page. */
   .last {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
   .line {
