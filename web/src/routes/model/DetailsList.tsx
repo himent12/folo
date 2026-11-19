@@ -47,6 +47,11 @@ export interface DetailsListProps {
   unevaluated?: boolean;
   stored: string | null;
   head: 'o2m' | 'o2o';
+  /**
+   * Whether a dataset is known to be removed from FOLO (../overview/newDatasets `datasetPresence`): /eval still names a
+   * run's dataset by its id then (docs/API.md); its name is plain text, not a link to a page that is gone.
+   */
+  removed: (id: string | null | undefined) => boolean;
   aboutOpen?: boolean;
 }
 
@@ -160,9 +165,13 @@ export default function DetailsList(props: DetailsListProps) {
                 {props.context.data?.dataset ? (
                   <>
                     <span class="faint">{' on '}</span>
-                    <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
-                      {props.context.data.dataset.name}
-                    </a>
+                    {!props.removed(props.context.data.dataset.id) ? (
+                      <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
+                        {props.context.data.dataset.name}
+                      </a>
+                    ) : (
+                      <span>{props.context.data.dataset.name}</span>
+                    )}
                   </>
                 ) : null}
               </>
@@ -195,7 +204,7 @@ export default function DetailsList(props: DetailsListProps) {
           <dd class="evald">
             {props.unevaluated ? (
               <span class="muted">Not evaluated: no registered dataset has its classes</span>
-            ) : src().datasetName && src().datasetId ? (
+            ) : src().datasetName && src().datasetId && !props.removed(src().datasetId) ? (
               <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
                 {src().datasetName}
               </a>

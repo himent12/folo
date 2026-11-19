@@ -91,9 +91,11 @@ impl LiveClock {
             };
             let started = (t >= self.queue_s).then_some(self.origin_wall + self.queue_s);
             if let Some(lost) = self.lost_at.filter(|&l| t >= l) {
-                let started = (lost >= self.queue_s).then_some(self.origin_wall + self.queue_s);
+                // A stop before the loss ended the training then: it never starts, or steps on, after the stop.
+                let ended = self.stop_at.map_or(lost, |sa| sa.min(lost));
+                let started = (ended >= self.queue_s).then_some(self.origin_wall + self.queue_s);
                 let finished = Some(self.origin_wall + lost);
-                return Snap { status: RunStatus::Failed, step: steps_at(lost), started, finished, ..base };
+                return Snap { status: RunStatus::Failed, step: steps_at(ended), started, finished, ..base };
             }
             if let Some(sa) = self.stop_at {
                 let started = (sa >= self.queue_s).then_some(self.origin_wall + self.queue_s);

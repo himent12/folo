@@ -10,7 +10,7 @@ use folo_ui::{
 };
 
 use super::health::{Finding, findings_text, health_line};
-use crate::api::Dataset;
+use crate::api::{Dataset, Histogram};
 use crate::app::FoloApp;
 use crate::charts::{HoverFn, histogram};
 use crate::theme::{radius, theme, ty};
@@ -89,22 +89,10 @@ impl FoloApp {
                 .ok();
             })
         };
-        let size_labels: Vec<String> =
-            s.box_size_hist.edges.windows(2).map(|w| format!("{}–{}%", pct(w[0]), pct(w[1]))).collect();
+        let size_labels = bin_labels(&s.box_size_hist, size_label);
         let size_n = s.box_size_hist.counts.len();
         let per_n = s.boxes_per_image_hist.counts.len();
-        let per_labels: Vec<String> =
-            s.boxes_per_image_hist
-                .edges
-                .windows(2)
-                .map(|w| {
-                    if w[1] - w[0] <= 1.0 {
-                        format!("{}", w[0])
-                    } else {
-                        format!("{}–{}", w[0], w[1] - 1.0)
-                    }
-                })
-                .collect();
+        let per_labels = bin_labels(&s.boxes_per_image_hist, count_label);
         let size_hist = histogram(
             &t,
             "hist-size",
@@ -204,6 +192,30 @@ impl FoloApp {
     }
 }
 
+/// One label per bin of `h`, from its lower edge and its upper edge; the last bin has none (`None`): it also
+/// counts the values at or above its upper edge (`Histogram`, docs/API.md).
+fn bin_labels(h: &Histogram, label: fn(f64, Option<f64>) -> String) -> Vec<String> {
+    let n = h.counts.len();
+    h.edges.windows(2).take(n).enumerate().map(|(i, w)| label(w[0], (i + 1 < n).then_some(w[1]))).collect()
+}
+
+/// A box-size bin in % of the image side: "5–10%", the open last bin "≥50%".
+fn size_label(lo: f64, hi: Option<f64>) -> String {
+    match hi {
+        Some(hi) => format!("{}–{}%", pct(lo), pct(hi)),
+        None => format!("≥{}%", pct(lo)),
+    }
+}
+
+/// A boxes-per-image bin of whole counts: "1", "2–3", the open last bin "16+".
+fn count_label(lo: f64, hi: Option<f64>) -> String {
+    match hi {
+        None => format!("{lo}+"),
+        Some(hi) if hi - lo <= 1.0 => format!("{lo}"),
+        Some(hi) => format!("{lo}–{}", hi - 1.0),
+    }
+}
+
 /// A fraction as a short percentage: one decimal under 10 % when it matters ("2.5", "10").
 fn pct(v: f64) -> String {
     let p = v * 100.0;
@@ -268,5 +280,16 @@ mod tests {
         assert_eq!(super::pct(0.025), "2.5");
         assert_eq!(super::pct(0.1), "10");
         assert_eq!(super::pct(0.0), "0");
+    }
+
+    #[test]
+    fn last_bin_is_open() {
+        let h =
+            |edges: &[f64]| crate::api::Histogram { edges: edges.to_vec(), counts: vec![0; edges.len() - 1] };
+        // The server's edges (folo-data): an image with 88 boxes counts in the last bin, so it reads "16+".
+        let per = super::bin_labels(&h(&[0., 1., 2., 4., 8., 16., 32.]), super::count_label);
+        assert_eq!(per, ["0", "1", "2–3", "4–7", "8–15", "16+"]);
+        let size = super::bin_labels(&h(&[0., 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.]), super::size_label);
+        assert_eq!(size, ["0–1%", "1–2%", "2–5%", "5–10%", "10–20%", "20–50%", "≥50%"]);
     }
 }

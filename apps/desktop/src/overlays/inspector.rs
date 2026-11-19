@@ -718,6 +718,7 @@ impl FoloApp {
                         .right(px(24.))
                         .bottom(px(24.))
                         .occlude()
+                        .capture_any_mouse_down(Self::guard_presses(cx))
                         .flex()
                         .flex_col()
                         .rounded(px(radius::XL))

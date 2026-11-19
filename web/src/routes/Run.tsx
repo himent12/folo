@@ -51,6 +51,7 @@ import ConfigPanel from './run/ConfigPanel';
 import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
 import Outcome, { canContinue } from './run/Outcome';
+import { datasetPresence } from './overview/newDatasets';
 import Callout from './run/Callout';
 import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
@@ -103,6 +104,8 @@ export default function Run() {
   /** The datasets are in and the run's is not among them: it was removed. */
   const datasetGone = computed(() => !!datasets.data && !dataset.get());
   const datasetName = computed(() => dataset.get()?.name ?? recorded.get()?.name);
+  /** Whether the run's dataset is known removed (./overview/newDatasets): Outcome's Check dataset is then withdrawn. */
+  const presence = datasetPresence(datasets, () => [config.get()?.dataset_id]);
   const modelClasses = computed(() => {
     const id = run.get()?.model_id;
     return id ? models.data?.find((m) => m.id === id)?.classes : undefined;
@@ -144,6 +147,12 @@ export default function Run() {
     epochs: live.epochsLog,
     get version() {
       return live.version;
+    },
+    get server() {
+      return live.server;
+    },
+    get shortAnswers() {
+      return live.shortAnswers;
     },
   });
 
@@ -293,7 +302,9 @@ export default function Run() {
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = computed(() => [
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
-    { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn.get()).toLowerCase()} images after every epoch` },
+    // Up to the trainer's 16 (docs/API.md `/samples`), never a count: it reopens the folder when the run starts. The
+    // split is "validation" only on a dataset that has one; else (none, not reported, removed) a word true either way.
+    { name: 'Samples', what: `Predictions on up to 16 ${(dataset.get()?.splits.val ?? 0) > 0 ? 'validation' : 'evaluation'} images after every epoch` },
     { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
@@ -531,12 +542,18 @@ export default function Run() {
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
               datasetName={datasetName.get()}
+              datasetRemoved={presence(config.get()?.dataset_id) === 'removed'}
               system={system.data ?? (system.error ? null : undefined)}
             />
 
             {splitNotice.get() && !waitingLayout.get() ? (
               <Callout tone="warning" icon={TriangleAlert} title={splitNotice.get()!.title} role="note" label="Evaluation split">
                 {splitNotice.get()!.why}
+              </Callout>
+            ) : null}
+            {model.shortNote.get() && !waitingLayout.get() ? (
+              <Callout tone="warning" icon={TriangleAlert} title={model.shortNote.get()!.title} role="note" label="Run history">
+                {model.shortNote.get()!.why}
               </Callout>
             ) : null}
 
@@ -634,13 +651,22 @@ export default function Run() {
                           classes={classes.get()}
                           datasetGone={datasetGone.get()}
                           epochsDone={epochsDone.get()}
-                          ended={!!status.get() && !active.get()}
+                          ended={model.unvalidated.get()}
+                          pending={model.pending.get()}
                           title={`${scoresTitle(evalOn.get())} samples`}
                           unavailable={historyError.get() !== undefined}
                         />
                       </div>
                       <div class="part" data-part="classes">
-                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} ended={!!status.get() && !active.get()} />
+                        <PerClass
+                          classes={classes.get()}
+                          epochs={live.epochs}
+                          version={live.version}
+                          loading={live.loading || model.pending.get()}
+                          compact
+                          unavailable={historyError.get() !== undefined}
+                          ended={model.unvalidated.get()}
+                        />
                       </div>
                     </>
                   ) : null}

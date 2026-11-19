@@ -523,6 +523,71 @@ describe('New run from a link', () => {
     await open('?from=run_a2f0&epochs=40');
     await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
   });
+
+  /** `?from=run_a2f0` as a run created over the API or the CLI with `seed`, as this browser parsed it. */
+  async function fromSeed(seed: number) {
+    const run = api.run.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id: string) => {
+      const r = await run(id);
+      return { ...r, config: { ...r.config, seed } };
+    });
+    await open('?from=run_a2f0');
+    await until(() => (target.querySelector<HTMLInputElement>('input#name')?.value.includes('retry') ? true : null), 'the copy');
+    return target.querySelector<HTMLInputElement>('input#seed')!;
+  }
+
+  // Sweep 4 #330: the trainer's seed is a u64, and a copied run's seed over 2^32 − 1 was marked invalid.
+  it("copies a run's seed over 2^32 − 1 as it is", async () => {
+    const el = await fromSeed(4294967296);
+    expect(el.value).toBe('4294967296');
+    expect(target.querySelector('#seed-error')).toBeNull();
+    expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('Seed');
+  });
+
+  // Over 2^53 − 1 the seed arrives rounded by JSON parsing (9007199254740993 reads as …992): another seed, never
+  // offered as the run's. The field is left empty and says why until a seed is typed.
+  it("leaves out a run's seed that this browser could not read exactly, and says so", async () => {
+    const el = await fromSeed(2 ** 53);
+    expect(el.value).toBe('');
+    const why = "The copied run's seed is over 9,007,199,254,740,991, more than Studio holds exactly. Enter a seed.";
+    expect(target.querySelector('#seed-error')?.textContent).toBe(why);
+    expect(target.querySelector('#start-why')?.textContent).toBe(`Seed: ${why}`);
+    el.value = '12';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('#seed-error')).toBeNull();
+    // Cleared again, it is an empty field like any other, not the copied run's.
+    el.value = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('#seed-error')?.textContent).toBe('A whole number from 0 to 9,007,199,254,740,991.');
+  });
+
+  // #354 review: Start was held, but the CLI command, "the same run from a terminal", copied without `--seed` (seed 0).
+  it('holds the CLI command while the seed is missing, as Start, and says why', async () => {
+    await fromSeed(2 ** 53);
+    const cli = () => target.querySelector('details.cli')!;
+    expect(cli().querySelector('button[aria-label^="Copy"]')).toBeNull();
+    expect(cli().querySelector('code')).toBeNull();
+    expect(cli().querySelector('.cli-note')?.textContent).toBe('Enter a seed first: the command needs one.');
+    const el = target.querySelector<HTMLInputElement>('input#seed')!;
+    el.value = '12';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(cli().querySelector('button[aria-label="Copy command"]')).not.toBeNull();
+    expect(cli().querySelector('code')?.textContent).toContain('--seed 12');
+  });
+
+  // #354 review: a reload (the draft) brought back the empty seed without the reason it is empty.
+  it("keeps the reason a copied run's seed was left out across a reload, until one is typed", async () => {
+    await fromSeed(2 ** 53);
+    unmount(c!);
+    c = undefined;
+    await open('?from=run_a2f0');
+    const why = "The copied run's seed is over 9,007,199,254,740,991, more than Studio holds exactly. Enter a seed.";
+    expect(target.querySelector<HTMLInputElement>('input#seed')!.value).toBe('');
+    expect(target.querySelector('#seed-error')?.textContent).toBe(why);
+  });
 });
 
 describe('New run: the draft', () => {
@@ -680,6 +745,26 @@ describe('New run: the keyboard', () => {
     expect([...document.querySelectorAll('#folo-tooltip kbd')].map((k) => k.textContent)).toEqual(['Ctrl', '↵']);
     press(target.querySelector('input#epochs')!, { ctrlKey: true });
     await until(() => create.mock.calls.length === 1, 'the start');
+  });
+
+  // #354 review: the Seed text field had lost the number field's Arrow Up / Down.
+  it('steps the seed by one with Arrow Up / Down, within its range, and leaves a field with no seed as typed', async () => {
+    await open();
+    const el = target.querySelector<HTMLInputElement>('input#seed')!;
+    const step = (from: string, key: string) => {
+      el.value = from;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      const e = press(el, { key });
+      flushSync();
+      return [el.value, e.defaultPrevented];
+    };
+    expect(step('7', 'ArrowUp')).toEqual(['8', true]);
+    expect(step('007', 'ArrowDown')).toEqual(['6', true]);
+    expect(step('0', 'ArrowDown')).toEqual(['0', true]);
+    expect(step('9007199254740991', 'ArrowUp')).toEqual(['9007199254740991', true]);
+    expect(step('1.5', 'ArrowUp')).toEqual(['1.5', false]);
+    expect(step('', 'ArrowDown')).toEqual(['', false]);
   });
 });
 

@@ -66,6 +66,23 @@ export const settingsScenes = [
     },
   },
   {
+    // The longest names a theme file may give (issue #325): 40 unbroken characters, a 40-character id, and 40 emoji,
+    // each wrapping inside its line of the installed list (and of the import results) with Remove beside it, at 320 px
+    // too. None is chosen: a closed select cuts a 40-character name on a phone whatever its width.
+    name: 'settings-appearance-long-names',
+    path: '/settings?section=appearance',
+    themes: ['dark'],
+    fullPage: true,
+    viewports: ['desktop', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#appearance');
+      const file = (id, name) => ({ name: `${id}.json`, mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ folo_theme: 1, id, name, mode: 'dark' })) });
+      await page.locator('#appearance input[type="file"]').setInputFiles([file('w'.repeat(40), 'W'.repeat(40)), file('emoji', '🌈'.repeat(40))]);
+      await until(page, '#appearance ul.themes li + li');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
     // format, the device beside it (the whole page: the panel sits near the bottom).
     name: 'settings-gpu-pool',

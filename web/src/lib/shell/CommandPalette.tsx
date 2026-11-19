@@ -18,6 +18,7 @@ import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw
 import { hub } from '$lib/api/index';
 import { hasCloud } from '$lib/cloud';
 import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
+import { LABEL_FEATURE } from '$lib/label';
 import { failureCause } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { router } from '$lib/router';
@@ -88,7 +89,12 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const input = signal<HTMLInputElement>();
   const list = signal<HTMLUListElement>();
   const query = signal('');
-  const index = signal(0);
+  /**
+   * The highlighted item, by id (null: none yet, the first). A list that changes under it (a health answer's features, a
+   * list that loads late) keeps it highlighted; one that drops it highlights the first, so Enter runs only what is
+   * highlighted.
+   */
+  const selected = signal<string | null>(null);
   const runs = signal<Run[]>([]);
   const datasets = signal<Dataset[]>([]);
   const models = signal<Model[]>([]);
@@ -115,7 +121,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       el.showModal();
       backdrop.opened();
       query.set('');
-      index.set(0);
+      selected.set(null);
       recent.set(recentIds());
       queueMicrotask(() => input.peek()?.focus());
       const api = hub.api;
@@ -184,7 +190,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
       { id: 'compare', group: 'Actions', label: 'Compare runs', icon: GitCompare, run: go('/runs/compare') },
       // Agent labeling, under Datasets (no nav item of its own).
       { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex'], icon: Tags, run: go('/datasets/label') },
-      { id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') },
+      // Not on a server whose health said it cannot label (`folo serve --mock`): its form could only fail (#324).
+      ...(hub.lacks(LABEL_FEATURE) ? [] : [{ id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') }]),
       // Vision benchmarks: offered where the server has them (its list answered).
       ...(benchesOk.get()
         ? [{ id: 'bench-new', group: 'Actions', label: 'New benchmark', match: ['Benchmark a model', 'Vision benchmark'], icon: Plus, run: go('/benchmarks?new=1') }]
@@ -371,9 +378,18 @@ export default function CommandPalette(props: CommandPaletteProps) {
     return () => clearTimeout(t);
   });
 
+  /** Where the highlighted item is in `flat`. */
+  const index = computed(() => Math.max(0, flat.get().findIndex((i) => i.id === selected.get())));
   effect(() => {
     void query.get();
-    index.set(0);
+    selected.set(null);
+  });
+  // The first item is highlighted by its id too, at open, on a new query and when the highlighted one goes, so a row
+  // that loads above it later does not take the highlight; one that comes back later does not take it back.
+  effect(() => {
+    const all = flat.get();
+    const id = selected.get();
+    if (!all.some((i) => i.id === id)) selected.set(all[0]?.id ?? null);
   });
 
   effect(() => {
@@ -391,18 +407,19 @@ export default function CommandPalette(props: CommandPaletteProps) {
 
   function onkeydown(e: KeyboardEvent) {
     const all = flat.peek();
+    const to = (n: number) => selected.set(all[n]?.id ?? null);
     if (e.key === 'ArrowDown' || (e.key === 'n' && e.ctrlKey)) {
       e.preventDefault();
       // The selection wraps at the ends, so the last item is one key from the first.
-      index.set(all.length ? (index.peek() + 1) % all.length : 0);
+      to(all.length ? (index.peek() + 1) % all.length : 0);
     } else if (e.key === 'ArrowUp' || (e.key === 'p' && e.ctrlKey)) {
       e.preventDefault();
-      index.set(all.length ? (index.peek() - 1 + all.length) % all.length : 0);
+      to(all.length ? (index.peek() - 1 + all.length) % all.length : 0);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       choose(all[index.peek()]);
-    } else if (e.key === 'Home' && e.ctrlKey) index.set(0);
-    else if (e.key === 'End' && e.ctrlKey) index.set(all.length - 1);
+    } else if (e.key === 'Home' && e.ctrlKey) to(0);
+    else if (e.key === 'End' && e.ctrlKey) to(all.length - 1);
   }
 
   const activeId = () => {
@@ -478,7 +495,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
                         class="item"
                         class:on={on()}
                         data-n={x().n}
-                        onpointermove={() => index.set(x().n)}
+                        onpointermove={() => selected.set(x().item.id)}
                         onclick={() => choose(x().item)}
                       >
                         <Dynamic component={x().item.icon} size={16} strokeWidth={1.75} aria-hidden="true" />

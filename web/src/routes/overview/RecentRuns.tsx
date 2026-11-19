@@ -112,6 +112,15 @@ export default function RecentRuns(props: RecentRunsProps) {
                   </tr>
                 )}
               </For>
+            ) : props.recent.length === 0 && props.all.length > 0 ? (
+              // The one run there is fills the Training card above, so it is not a row here (issue #328).
+              <TableState cols={6}>
+                <EmptyState
+                  icon={Activity}
+                  title="No other runs"
+                  description="The run in Training above is your only one. Runs you start next appear here with their progress and best mAP."
+                />
+              </TableState>
             ) : props.recent.length === 0 ? (
               <TableState cols={6}>
                 <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />

@@ -175,7 +175,7 @@ export default function Appearance() {
                               {themeFacts(t()).map((f) => (
                                 <span>{f}</span>
                               ))}
-                              <span>
+                              <span class="t-id">
                                 <Ident value={t().id} kind="id" />
                               </span>
                             </Meta>
@@ -265,12 +265,24 @@ css`
     display: grid;
     gap: 2px;
   }
+  /* A name of 40 unbroken characters wraps inside its line, as the import results above do, so Remove stays on screen. */
   .t-name {
     color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
   .t-meta {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+  }
+  /* So does an id of 40 characters, the one meta item longer than a phone's line: whole where it fits, else in its
+     own column after its dot, so a second line starts under its first character, not under the clipped dot (ui/Meta). */
+  .t-meta .t-id {
+    display: flex;
+    white-space: normal;
+  }
+  .t-id > :global(.ident) {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 `;
