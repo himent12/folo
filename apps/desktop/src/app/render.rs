@@ -57,12 +57,15 @@ impl Render for FoloApp {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
         }
-        // Back to the window (its labels edited in another app, say): what it shows is read again.
+        // Back to the window (its labels edited in another app, say): the dataset whose page is shown
+        // is read again, and an open inspector's once it closes; not one whose read is on its way.
         // The window counts its activations, so one between two frames is not lost.
         let activations = window.window_activations();
         if activations != self.window_activations {
             self.window_activations = activations;
-            self.recheck_shown_datasets();
+            let page = if let Route::Dataset(id) = &self.route { Some(id.clone()) } else { None };
+            let open = self.inspector.as_ref().map(|i| i.dataset.clone());
+            self.ds_recheck.extend(page.into_iter().chain(open).filter(|id| !self.ds_reads.contains_key(id)));
         }
         self.narrow = window.viewport_size().width < px(1120.);
         self.shown_mode = if window.is_fullscreen() {

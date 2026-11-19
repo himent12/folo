@@ -1,10 +1,10 @@
 //! Issue #346: a box moved in a label file (the dataset's stats as they were, its `revision` not)
 //! shows where it is now once the dataset is read again: on a visit, and when the window is active
-//! again. Never under an open inspector, and the grid keeps its place.
+//! again. Never under an open inspector: its dataset is read once it closes, whichever way it closes.
 
 use std::sync::Arc;
 
-use folo_ui::{HeadlessApp, WindowHandle, point, px};
+use folo_ui::{HeadlessApp, WindowHandle};
 
 use super::tests::{drive, open_with};
 use super::{FoloApp, Route};
@@ -66,19 +66,44 @@ fn back_to_the_window_reads_the_dataset_again_even_between_two_frames() {
     assert_eq!(n, 1000, "every image");
 }
 
+/// Draws a few frames with at most one call held back (one more held one fails the test, as a stuck
+/// call does).
+fn frames_holding_one(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) {
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_held(1);
+    }
+}
+
+/// Whether a read of the dataset is out (its answer not in yet).
+fn reading(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> bool {
+    app.update(|cx| window.update(cx, |this, _, _| this.ds_reads.contains_key(ID)).unwrap())
+}
+
 #[test]
 fn a_read_again_waits_for_the_open_inspector_to_close() {
-    let (mut app, window) = on_its_page(Arc::new(MockBackend::new(4200, true)));
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = on_its_page(api.clone());
     drive(&mut app, window, |this, w, cx| this.open_inspector(ID.into(), 700, w, cx));
     let now = drive(&mut app, window, |this, _, _| held_from_before(this));
+    // Every read of the dataset from here on is held: its ticket stays out until released.
+    let (first, second) = (api.hold("dataset"), api.hold("dataset"));
     away_and_back(&mut app);
-    frames(&mut app, window);
+    frames_holding_one(&mut app, window);
+    assert!(!reading(&mut app, window) && !first.is_held(), "no read while the inspector is open");
     drive(&mut app, window, |this, _, _| {
         assert_eq!(shown(this), (Some(now - 5.), 1000), "the list under the inspector is as it was");
         assert_eq!(this.inspector.as_ref().map(|i| i.index), Some(700), "on its image");
         assert!(this.ds_recheck.contains(ID), "the read waits");
     });
-    drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
+    // (Plain updates while a call is held: `drive` waits for every call.)
+    app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
+    app.run_until_held(1);
+    first.wait_held();
+    frames_holding_one(&mut app, window);
+    assert!(reading(&mut app, window) && !second.is_held(), "one read once it closed");
+    drop((first, second));
+    app.run_until_idle();
     frames(&mut app, window);
     assert_eq!(drive(&mut app, window, |this, _, _| shown(this)).0, Some(now), "read once it closed");
 }
@@ -113,7 +138,7 @@ fn a_run_sample_inspector_keeps_its_image_through_a_read_again() {
     let (mut app, window) = on_its_page(Arc::new(MockBackend::new(4200, true)));
     let (now, image) = drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::Run("run_52e8".into()), w, cx);
-        // A read latched on an earlier page (a card's Retry, say), taken when the sample opens.
+        // A read latched on an earlier page (a card's Retry, say): it waits for the inspector.
         this.ds_recheck.insert(ID.into());
         let image = this.store.images.get(ID).and_then(|l| l.ready()).expect("listed")[5].id.clone();
         (held_from_before(this), image)
@@ -127,60 +152,62 @@ fn a_run_sample_inspector_keeps_its_image_through_a_read_again() {
     });
     drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
     frames(&mut app, window);
-    assert_eq!(drive(&mut app, window, |this, _, _| shown(this)).0, Some(now), "read once it closed");
+    assert!(drive(&mut app, window, |this, _, _| read_again(this)), "read once it closed");
 }
 
-/// A list of more than one page read again after a revision-only change: the old one stays on screen
-/// while the new one arrives, then takes its place, the grid scrolled where it was (dropped and
-/// read again, the grid landed at the end of the first page).
+/// A run's sample open on the dataset, its list from before an edit, and the window activated: the
+/// read waits for the inspector. Gives where the edited box is now and the sample's image id.
+fn sample_open_when_back(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> (f32, String) {
+    let image = drive(app, window, |this, w, cx| {
+        this.navigate(Route::Run("run_52e8".into()), w, cx);
+        this.store.images.get(ID).and_then(|l| l.ready()).expect("listed")[5].id.clone()
+    });
+    let again = image.clone();
+    drive(app, window, |this, w, cx| this.open_sample(ID.into(), again, "run_52e8".into(), w, cx));
+    frames(app, window);
+    let now = drive(app, window, |this, _, _| held_from_before(this));
+    away_and_back(app);
+    frames(app, window);
+    drive(app, window, |this, _, _| {
+        assert!(this.ds_recheck.contains(ID), "back to the window, the inspected dataset is marked");
+        assert_eq!(shown(this), (Some(now - 5.), 1000), "its list kept while open");
+    });
+    (now, image)
+}
+
+/// The record read again (the mock's has no revision; the one held from before had one).
+fn read_again(this: &FoloApp) -> bool {
+    !this.ds_recheck.contains(ID)
+        && this.store.dataset.get(ID).and_then(|l| l.ready()).is_some_and(|d| d.revision.is_none())
+}
+
+/// Review of #379: on a run page nothing asked for the dataset again once a sample inspector closed,
+/// and a sample opened again showed the box where it was.
 #[test]
-fn a_revision_only_change_keeps_the_grid_where_it_was() {
-    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images(ID, 25_000));
-    let (mut app, window) = on_its_page(api.clone());
-    let offset = |this: &FoloApp| this.grid_scroll.0.borrow().base_handle.offset();
-    drive(&mut app, window, |this, _, _| {
-        this.grid_scroll.0.borrow().base_handle.set_offset(point(px(0.), px(-800_000.)));
-    });
+fn a_sample_inspector_closed_on_a_run_page_reads_its_dataset_again() {
+    let (mut app, window) = on_its_page(Arc::new(MockBackend::new(4200, true)));
+    let (now, image) = sample_open_when_back(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
     frames(&mut app, window);
-    let now = drive(&mut app, window, |this, _, _| held_from_before(this));
-    let (first, second) = (api.hold("images"), api.hold("images"));
-    away_and_back(&mut app);
-    app.frame(window.into());
-    // (Plain updates while a call is held: `drive` waits for every call.)
-    let asked = app.update(|cx| window.update(cx, |this, _, _| this.ds_reads.contains_key(ID)).unwrap());
-    assert!(asked, "back to the window, the dataset is read again");
-    app.run_until_held(1);
-    drop(first);
-    // Until the first page is in and the second asked for (bounded by frames, not a time).
-    for _ in 0..20 {
-        if second.is_held() {
-            break;
-        }
-        app.frame(window.into());
-        app.run_until_held(1);
-    }
-    assert!(second.is_held(), "the rest of the list is asked for");
-    for _ in 0..3 {
-        app.frame(window.into());
-    }
-    app.update(|cx| {
-        window
-            .update(cx, |this, _, _| {
-                assert_eq!(
-                    shown(this),
-                    (Some(now - 5.), 26_000),
-                    "the old list stays while the new one loads"
-                );
-                assert!(!this.images_pending(ID), "complete as shown: no \"Loading…\"");
-                assert_eq!(offset(this).y, px(-800_000.));
-            })
-            .unwrap()
-    });
-    drop(second);
-    app.run_until_idle();
+    assert!(drive(&mut app, window, |this, _, _| read_again(this)), "read once it closed");
+    drive(&mut app, window, |this, w, cx| this.open_sample(ID.into(), image, "run_52e8".into(), w, cx));
     frames(&mut app, window);
     drive(&mut app, window, |this, _, _| {
-        assert_eq!(shown(this), (Some(now), 26_000), "the new list in");
-        assert_eq!(offset(this).y, px(-800_000.), "the grid where it was");
+        let i = this.inspector.as_ref().expect("open again");
+        assert_eq!((i.index, i.want.as_deref()), (5, None), "on its image");
+        assert_eq!(shown(this), (Some(now), 1000), "the box where it is now");
+    });
+}
+
+/// Review of #379: the close question took a sample inspector's place without its held read.
+#[test]
+fn the_close_question_in_a_sample_inspector_s_place_reads_its_dataset_again() {
+    let (mut app, window) = on_its_page(Arc::new(MockBackend::new(4200, true)));
+    sample_open_when_back(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.should_close_with(None, w, cx));
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.inspector.is_none() && this.confirm_close.is_some(), "the question in its place");
+        assert!(read_again(this), "its dataset read again");
     });
 }

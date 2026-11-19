@@ -287,7 +287,7 @@ impl FoloApp {
         // Read before and shown again on a page with cards (`ds_recheck`): read again in place, the
         // card keeping what it shows until the answer. Only an answer about the dataset replaces it
         // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
-        // Never under an open inspector: the read waits until it closes.
+        // Never under an open inspector: the read waits until it closes ([`FoloApp::take_inspector`]).
         if !self.inspecting(id)
             && self.ds_recheck.remove(id)
             && self.store.dataset.get(id).is_some_and(|l| !l.is_loading())
@@ -308,28 +308,14 @@ impl FoloApp {
                     }
                     match r {
                         Ok(d) => {
-                            let held = this.store.dataset.get(&b).and_then(|l| l.ready());
-                            let changed = held != Some(&d);
-                            let only_revision = held
-                                .is_some_and(|h| Dataset { revision: d.revision.clone(), ..h.clone() } == d);
-                            // An inspector opened on it since: its list stays, read again when it closes.
-                            if changed && this.inspecting(&b) {
-                                this.ds_recheck.insert(b);
-                                return;
-                            }
-                            // Only its revision moved (a label edited in place, the counts kept): the new
-                            // list loads behind the one shown, the grid keeping its place.
-                            if changed
-                                && only_revision
-                                && this.store.images.get(&b).is_some_and(|l| l.ready().is_some())
-                            {
-                                this.images_seq += 1;
-                                this.images_more.insert(b.clone(), this.images_seq);
-                                this.images_next.insert(b.clone(), (this.images_seq, Vec::new()));
-                                this.load_images_from(b.clone(), this.images_seq, 0, cx);
-                            } else if changed {
-                                // Back from a failure, or its contents changed: the images, their labels
-                                // and their pixels are read again (image ids are positions, docs/API.md).
+                            // Back from a failure, or its contents changed: the images, their labels and
+                            // their pixels are read again (image ids are positions, docs/API.md).
+                            if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
+                                // An inspector opened on it since: all stays, read again when it closes.
+                                if this.inspecting(&b) {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
                                 this.forget_dataset_contents(&b, cx);
                             }
                             this.store.dataset.insert(b, Load::Ready(d));
@@ -384,7 +370,6 @@ impl FoloApp {
     pub(super) fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
         self.store.images.remove(id);
         self.images_more.remove(id);
-        self.images_next.remove(id);
         self.store.previews.remove(id);
         self.store.issues.remove(id);
         self.issue_reads.remove(id);
@@ -417,12 +402,10 @@ impl FoloApp {
                 }
                 let page = match r {
                     Ok(p) => p,
-                    // A failed first page is the list's error (behind a list shown, that one stays).
+                    // A failed first page is the list's error.
                     Err(e) if offset == 0 => {
                         this.images_more.remove(&id);
-                        if this.images_next.remove(&id).is_none() {
-                            this.store.images.insert(id, Load::Failed(e));
-                        }
+                        this.store.images.insert(id, Load::Failed(e));
                         return;
                     }
                     // A later one keeps what came and asks again in a moment (the server
@@ -450,10 +433,7 @@ impl FoloApp {
                         return;
                     }
                 };
-                // Read again behind the list shown: the pages gather aside.
-                let behind = this.images_next.get(&id).is_some_and(|(g, _)| *g == generation);
                 let list = match this.store.images.get_mut(&id) {
-                    Some(Load::Ready(_)) if behind => &mut this.images_next.get_mut(&id).expect("seen").1,
                     Some(Load::Ready(l)) if l.len() == offset as usize => l,
                     Some(Load::Loading) if offset == 0 => {
                         this.store.images.insert(id.clone(), Load::Ready(Vec::new()));
@@ -474,41 +454,20 @@ impl FoloApp {
                     this.load_images_from(id, generation, next, cx);
                 } else {
                     this.images_more.remove(&id);
-                    if behind {
-                        this.swap_in_images(&id, cx);
-                    }
                 }
                 cx.notify();
             },
         );
     }
 
-    /// The list read again behind the one shown, complete, takes its place. Not under an inspector
-    /// opened since: then the dataset is read again when it closes (its revision forgotten, so that
-    /// read finds it changed).
-    fn swap_in_images(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some((_, list)) = self.images_next.remove(id) else { return };
-        if self.inspecting(id) {
-            if let Some(d) = self.store.dataset.get_mut(id).and_then(|l| l.ready_mut()) {
-                d.revision = None;
-            }
-            self.ds_recheck.insert(id.to_string());
-            return;
-        }
-        self.forget_dataset_contents(id, cx);
-        self.store.images.insert(id.to_string(), Load::Ready(list));
-    }
-
-    /// Whether an inspector (from the grid or a run's samples) is open on dataset `id`: its image
-    /// list is then never dropped or replaced.
+    /// Whether an inspector (the grid's or a run sample's) is open on dataset `id`: its list stays.
     pub(super) fn inspecting(&self, id: &str) -> bool {
         self.inspector.as_ref().is_some_and(|i| i.dataset == id)
     }
 
-    /// Whether more of a dataset's image list is still on its way (the grid shows what came). A list
-    /// read again behind a complete one is not.
+    /// Whether more of a dataset's image list is still on its way (the grid shows what came).
     pub fn images_pending(&self, id: &str) -> bool {
-        self.images_more.get(id).is_some_and(|g| self.images_next.get(id).is_none_or(|(n, _)| n != g))
+        self.images_more.contains_key(id)
     }
 
     pub fn ensure_eval(&mut self, id: &str, cx: &mut Context<Self>) {

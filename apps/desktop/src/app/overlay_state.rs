@@ -191,22 +191,30 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_dataset(&dataset, cx);
         let view = self.sample_view;
-        self.open_inspector(dataset, 0, window, cx);
+        self.open_inspector(dataset.clone(), 0, window, cx);
         if let Some(i) = self.inspector.as_mut() {
             i.want = Some(image);
             i.sample = Some((run, view));
         }
+        self.ensure_dataset(&dataset, cx);
+    }
+
+    /// Every way an inspector goes away: a read of its dataset held while it was open
+    /// (`ds_recheck`) goes now, whatever page is under it (a run's has none that would ask).
+    pub(crate) fn take_inspector(&mut self, cx: &mut Context<Self>) -> Option<Inspector> {
+        let closed = self.inspector.take();
+        if let Some(i) = &closed
+            && self.ds_recheck.contains(&i.dataset)
+        {
+            self.ensure_dataset(&i.dataset, cx);
+        }
+        closed
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let closed = self.inspector.take();
+        let closed = self.take_inspector(cx);
         let opener = self.inspector_return.take();
-        // A read of its dataset held while it was open (`ds_recheck`) goes now.
-        if let Some(i) = &closed {
-            self.ensure_dataset_record(&i.dataset, cx);
-        }
         // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
         // focused), not on the tile it was opened from (←/→ may have walked far from it).
         let last =

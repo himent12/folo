@@ -361,9 +361,6 @@ pub struct FoloApp {
     /// Datasets whose image list is still arriving, a page at a time, with the generation of the
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
-    /// A list read again behind the one shown (only the dataset's `revision` moved), with its load's
-    /// generation: it takes the shown one's place once complete, the grid keeping its place.
-    pub images_next: HashMap<String, (u64, Vec<crate::api::ImageInfo>)>,
     pub images_seq: u64,
     /// Each card preview's latest read (a number from `images_seq`): an older one is dropped.
     pub preview_reads: HashMap<String, u64>,
@@ -538,7 +535,7 @@ pub struct FoloApp {
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
     /// The window's activations seen by the last render: one more (each return to the window) reads
-    /// its datasets again.
+    /// the dataset shown, or inspected, again.
     pub window_activations: u64,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
@@ -687,7 +684,6 @@ impl FoloApp {
             ds_fill: false,
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
-            images_next: HashMap::new(),
             images_seq: 0,
             preview_reads: HashMap::new(),
             ds_recheck: Default::default(),
