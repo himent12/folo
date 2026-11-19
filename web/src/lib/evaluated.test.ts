@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelEval } from '$lib/api/types';
-import { evalSource, fallbackNotice, imagesOf, matrixAt, matrixVsPr, runEvalSource, samplesAhead, scoresTitle, type EvalSource } from './evaluated';
+import { evalSource, fallbackNotice, imagesOf, matrixAt, matrixVsPr, runEvalSource, scoresTitle, type EvalSource } from './evaluated';
 
 const base: ModelEval = { pr: [], confusion: [], per_class: [], images: 360 };
 const val: EvalSource = { datasetId: 'ds_fasteners', datasetName: 'fasteners', split: 'val', fallback: null };
@@ -73,22 +73,5 @@ describe('runEvalSource / scoresTitle', () => {
     expect(scoresTitle(null)).toBe('Evaluation');
     expect(scoresTitle({ datasetId: null, datasetName: null, split: null, fallback: null })).toBe('Evaluation');
     expect(scoresTitle({ datasetId: 'ds_t', datasetName: 'test-only', split: 'test', fallback: null })).toBe('Test-split');
-  });
-});
-
-describe('samplesAhead', () => {
-  const ahead = (train: number, val: number) => {
-    const d = { id: 'ds_s', name: 'shapes', splits: { train, val, test: 0 } };
-    return samplesAhead(runEvalSource(d), d);
-  };
-  it("promises the trainer's 16 at most, and no more than the split has", () => {
-    expect(ahead(1920, 360)).toBe('Predictions on 16 validation images after every epoch');
-    expect(ahead(10, 2)).toBe('Predictions on 2 validation images after every epoch');
-    expect(ahead(10, 1)).toBe('Predictions on 1 validation image after every epoch');
-    // No validation images: the training split's, as training falls back.
-    expect(ahead(5, 0)).toBe('Predictions on 5 training-split images after every epoch');
-  });
-  it('gives no count while the dataset is not known', () => {
-    expect(samplesAhead(null, undefined)).toBe('Predictions on evaluation images after every epoch');
   });
 });

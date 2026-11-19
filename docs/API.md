@@ -476,9 +476,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   resume the run repeats the steps of the epoch it restarts (they replace the earlier ones in the history), so a
   poller that sees `Run.step` below its cursor starts again from that step.
 - `GET /api/runs/{id}/samples?epoch=<n>` → `{ "epoch", "samples": [{ "image_id", "dataset_id", "width", "height",
-  "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of 16 images,
-  in original-image pixels: in real mode the first 16 of the validation split, or of the training split when there
-  is none;
+  "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of up to 16
+  images, in original-image pixels: in real mode the first 16 of the validation split, or of the training split when
+  there is none, as the trainer finds them when the run starts (fewer when the split has fewer);
   `epoch` defaults to the latest finished epoch; `404 epoch_not_available` before the first validation or for a
   future epoch)
 - `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }],

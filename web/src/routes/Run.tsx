@@ -52,7 +52,7 @@ import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
 import Outcome, { canContinue } from './run/Outcome';
 import Callout from './run/Callout';
-import { fallbackNotice, runEvalSource, samplesAhead, scoresTitle } from '$lib/evaluated';
+import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
@@ -299,7 +299,9 @@ export default function Run() {
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = computed(() => [
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
-    { name: 'Samples', what: samplesAhead(evalOn.get(), dataset.get()) },
+    // Up to the trainer's 16 (docs/API.md `/samples`), never a count: it reopens the folder when the run starts. The
+    // split is "validation" only on a dataset that has one; else (none, not reported, removed) a word true either way.
+    { name: 'Samples', what: `Predictions on up to 16 ${(dataset.get()?.splits.val ?? 0) > 0 ? 'validation' : 'evaluation'} images after every epoch` },
     { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
