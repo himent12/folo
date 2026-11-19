@@ -61,6 +61,17 @@ export function settledEta(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_p
   return run.eta_s !== null && etaSettled(run) ? run.eta_s : null;
 }
 
+/**
+ * The epochs a run validated, as its server snapshot says once it ended (issue #327): its best epoch and, completed,
+ * every epoch to its last (a stopped or failed run's `epoch` may be the one it was in). 0: it ended before its first
+ * validation. Null while the snapshot still says it is active (the stream reported the end before the server's word).
+ * A view holding fewer epochs than this has the rest on their way.
+ */
+export function epochsValidated(run: Pick<Run, 'status' | 'epoch' | 'best'>): number | null {
+  if (['queued', 'running', 'stopping'].includes(run.status)) return null;
+  return Math.max(run.best?.epoch ?? 0, run.status === 'completed' ? run.epoch : 0);
+}
+
 /** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */
 export const ETA_PENDING = 'estimating time left…';
 

@@ -145,8 +145,8 @@ export default function Run() {
     get version() {
       return live.version;
     },
-    get settling() {
-      return live.settling;
+    get server() {
+      return live.server;
     },
   });
 

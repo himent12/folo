@@ -12,7 +12,7 @@
 import { computed, effect, signal, untrack } from 'fw';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
+import { epochsValidated, etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
 import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
 import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
 import type { Pt } from '$lib/charts/downsample';
@@ -37,8 +37,8 @@ export interface RunSource {
   /** The run's finished epochs (`live.epochsLog`). */
   readonly epochs: AppendLog<Epoch>;
   readonly version: number;
-  /** The run ended and its final history is still on its way (`live.settling`): its epochs may still come. */
-  readonly settling?: boolean;
+  /** The run as the server's latest snapshot has it (`live.server`): how many epochs an ended run validated. */
+  readonly server?: Run;
 }
 
 type EpochField = 'map50_95' | 'map50' | 'precision' | 'recall';
@@ -70,7 +70,8 @@ function extentOf(series: Series[], log = false): [number, number] | null {
 
 export class RunModel {
   readonly run: () => Run;
-  private readonly settling: () => boolean;
+  /** Epochs the server says this ended run validated (progress `epochsValidated`); null while it says it is active. */
+  private readonly validated: () => number | null;
   readonly live = computed(() => ACTIVE.includes(this.run().status));
   readonly progress = computed(() => runProgress(this.run()));
   readonly elapsed = computed(() => trainingSeconds(this.run()));
@@ -112,7 +113,7 @@ export class RunModel {
 
   constructor(src: RunSource) {
     this.run = () => src.run!;
-    this.settling = () => src.settling ?? false;
+    this.validated = () => epochsValidated(src.server ?? src.run!);
     this.stepData = new StepSeries(untrack(() => src.steps));
     this.epochData = new EpochSeries(untrack(() => src.epochs));
     const stepsRev = computed(() => {
@@ -352,17 +353,17 @@ export class RunModel {
 
   // ---- the words of the readings ----
   /**
-   * It ended and the epochs it validated are still on their way (its final history, issue #327): the per-epoch
-   * readings hold their place as loading, and say neither "Waiting for the first validation…" nor that it never
-   * validated.
+   * It ended, the view holds none of its validated epochs, and the server has not said there are none: they are on
+   * their way (issue #327). The per-epoch readings hold their place as loading, and say neither "Waiting for the first
+   * validation…" nor that it never validated.
    */
-  readonly pending = computed(() => !this.live.get() && !this.lastEpoch.get() && this.settling());
+  readonly pending = computed(() => !this.live.get() && !this.lastEpoch.get() && this.validated() !== 0);
   /**
-   * It ended (stopped, failed) after training steps but before its first validation, as its final history says: the
-   * per-epoch readings will never come, so they say so instead of "after the first epoch" and "Waiting for the first
-   * validation…".
+   * It ended (stopped, failed) after training steps but before its first validation, as the server's snapshot says:
+   * the per-epoch readings will never come, so they say so instead of "after the first epoch" and "Waiting for the
+   * first validation…".
    */
-  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get() && !this.settling());
+  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get() && this.validated() === 0);
   readonly firstEpoch = computed(() => (this.unvalidated.get() ? 'not validated' : 'after the first epoch'));
   /** "Latest · ep 37", the per-epoch legends' note; per-step readings name the epoch the last step is in. */
   readonly latestEp = computed(() => (this.lastEpoch.get() ? `Latest · ep ${this.lastEpoch.get()!.epoch}` : undefined));

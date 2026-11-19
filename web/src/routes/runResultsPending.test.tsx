@@ -102,6 +102,10 @@ async function watch() {
     end,
     /** The history requests from now on answer with this. */
     answer: (m: () => Promise<RunMetrics>) => (metrics = m),
+    /** The run's events, sent by the test. */
+    stream: () => handlers,
+    /** The snapshot from now on. */
+    serve: (r: Partial<RunT>) => (server = { ...server, ...r }),
   };
 }
 
@@ -149,6 +153,26 @@ describe('a run watched to its end while its results arrive (issue #327)', () =>
     expect(text()).not.toMatch(NEVER);
     expect(target.querySelector('#per-class .sk')).toBeNull();
     expect(target.querySelector('#chart-map .cs')).toBeNull();
+  });
+
+  it('holds them as loading when a reconnect read the history before the validation and the run after its end', async () => {
+    const w = await watch();
+    const h = w.stream();
+    w.serve({ status: 'running', queue_position: null, started: '2026-11-19T07:53:25Z', steps_per_epoch: 4 });
+    h.status?.({ status: 'running', error: null, steps_per_epoch: 4, epochs: 1 });
+    for (const s of w.steps) h.step?.(s);
+    // The stream drops; the run validates and completes; its reconnect reads /metrics from before the validation and
+    // /run from after the end, and the terminal event is late.
+    w.serve({ status: 'completed', step: 4, epoch: 1, best: { epoch: 1, map50_95: w.epoch.val.map50_95 }, finished: '2026-11-19T07:53:26Z', eta_s: null });
+    let asked = 0;
+    w.answer(() => Promise.resolve({ steps: w.steps, epochs: asked++ ? [w.epoch] : [] }));
+    h.reconnect?.();
+    await settle(() => text().includes('Completed'));
+    expect(text()).not.toMatch(NEVER);
+    expect(target.querySelector('#per-class .sk')).not.toBeNull();
+    // That history was not the final one: it is asked for again.
+    await settle(() => (target.querySelector('#chart-map')?.textContent ?? '').includes('Latest · ep 1'));
+    expect(text()).not.toMatch(NEVER);
   });
 
   it('says it could not load the metrics, with Retry, when that final history fails', async () => {
