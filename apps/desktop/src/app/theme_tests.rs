@@ -205,3 +205,146 @@ fn re_picking_a_slots_theme_does_nothing_by_pointer_or_keys() {
     click_option(&mut app, window, "set-light-theme", 1);
     assert_eq!(state(&mut app, window), midnight);
 }
+
+/// A headless app `width` wide (tall enough for the whole Settings page) with the app's fonts and
+/// the dark theme, as the app starts.
+fn headless(width: f32) -> (HeadlessApp, folo_ui::Bounds<folo_ui::Pixels>) {
+    use folo_ui::{Bounds, HeadlessOptions, point, px, size};
+    let window_size = size(px(width), px(3200.));
+    let mut app = HeadlessApp::new(HeadlessOptions { size: window_size, ..Default::default() });
+    app.update(|cx| {
+        cx.text_system()
+            .add_fonts(crate::FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect())
+            .expect("bundled fonts load");
+        cx.set_global(crate::theme::Theme::new(Mode::Dark));
+    });
+    (app, Bounds::new(point(px(0.), px(0.)), window_size))
+}
+
+/// The app on Settings at `width` with the custom themes in `folder`.
+fn settings_at(width: f32, folder: &std::path::Path) -> (HeadlessApp, WindowHandle<FoloApp>) {
+    use folo_ui::{AppContext, WindowBounds, WindowOptions};
+    let (mut app, bounds) = headless(width);
+    let window = app.update(|cx| {
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
+        cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+            .expect("open window")
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    let folder = folder.to_path_buf();
+    drive(&mut app, window, move |this, w, cx| {
+        this.themes = Catalog::load(&folder);
+        this.navigate(Route::Settings, w, cx);
+    });
+    (app, window)
+}
+
+/// The glyphs a fresh frame paints in the danger and in the secondary ink: (wholly inside their
+/// clip, all).
+fn glyphs(app: &mut HeadlessApp, window: folo_ui::AnyWindowHandle) -> [(usize, usize); 2] {
+    app.frame(window);
+    app.run_until_idle();
+    app.frame(window);
+    let t = app.update(|cx| theme(cx));
+    let mut n = [(0, 0); 2];
+    for p in &app.scene(window).primitives {
+        if let folo_ui::Primitive::MonoSprite(s) = p
+            && s.kind == folo_ui::SpriteKind::Glyph
+        {
+            let ink = if s.color == t.danger_text {
+                0
+            } else if s.color == t.text_secondary {
+                1
+            } else {
+                continue;
+            };
+            n[ink].0 += usize::from(s.bounds.is_contained_within(&s.clip));
+            n[ink].1 += 1;
+        }
+    }
+    n
+}
+
+/// Each failed file's name and reason styled as the row styles them, each on its own unwrapped
+/// line: the glyphs the row must show, shaped by the same text backend.
+struct Reference(Vec<(String, String)>);
+
+impl folo_ui::Render for Reference {
+    fn render(
+        &mut self,
+        _: &mut folo_ui::Window,
+        cx: &mut folo_ui::Context<Self>,
+    ) -> impl folo_ui::IntoElement {
+        use crate::theme::ty;
+        use crate::ui::text;
+        use folo_ui::{ParentElement, Styled, div};
+        let t = theme(cx);
+        div().flex().flex_col().items_start().children(self.0.iter().flat_map(|(file, error)| {
+            [
+                text(ty::SM, t.text_secondary)
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .font_family(crate::theme::MONO)
+                    .child(file.clone()),
+                text(ty::SM, t.danger_text).flex_none().whitespace_nowrap().child(error.clone()),
+            ]
+        }))
+    }
+}
+
+/// #352: a failed file's name too long for its row pushed the reason past the panel's edge, where
+/// it was clipped. At the narrowest window and at 1280, a long name with no spaces and one with
+/// spaces each paint whole, and so does each reason: the glyphs the failed files add inside their
+/// clip are the glyphs the same names and reasons paint on unclipped lines. (Glyphs, not characters:
+/// a font may shape `fi` as one.)
+#[test]
+fn a_failed_file_with_a_long_name_shows_the_whole_name_and_reason() {
+    let dir = TestDir::new("desktop-theme-long-name");
+    // Two folders whose shown paths (in the names' ink) are as long.
+    let folder = dir.path().join("a").join("themes");
+    let empty = dir.path().join("b").join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let solid = format!("broken-theme-{}case.json", "filename-".repeat(17));
+    let spaced = format!("broken theme {}case.json", "file name ".repeat(12));
+    std::fs::write(
+        folder.join(&solid),
+        r#"{"folo_theme": 1, "id": "long-theme-file", "name": "Broken", "mode": "chartreuse"}"#,
+    )
+    .unwrap();
+    std::fs::write(folder.join(&spaced), r#"{"folo_theme": 2, "id": "spaced", "name": "S", "mode": "dark"}"#)
+        .unwrap();
+    // The reference: every name and reason on one line in a window far wider than any of them.
+    // (Not the Settings page in a wide window: its column stops at 880 px, so there the rows still
+    // wrap by the very layout under test.)
+    let failed = Catalog::load(&folder).failed;
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    let rows = failed
+        .iter()
+        .map(|f| (f.file.clone(), f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string()))
+        .collect();
+    let (mut app, bounds) = headless(8000.);
+    let window = app.update(|cx| {
+        use folo_ui::{AppContext, WindowBounds, WindowOptions};
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        cx.open_window(options, |_, cx| cx.new(|_| Reference(rows))).expect("open window")
+    });
+    let [reasons, names] = glyphs(&mut app, window.into());
+    assert!(reasons.1 > 0 && names.1 > 0, "the reference paints: {reasons:?} {names:?}");
+    assert_eq!(reasons.0, reasons.1, "the reference's reasons are unclipped");
+    assert_eq!(names.0, names.1, "the reference's names are unclipped");
+    for width in [960., 1280.] {
+        let (mut app, window) = settings_at(width, &folder);
+        let [with_reasons, with_names] = glyphs(&mut app, window.into());
+        // The same page without the failed files: what the rest of it paints in those inks.
+        drive(&mut app, window, |this, _, cx| {
+            this.themes = Catalog::load(&empty);
+            cx.notify();
+        });
+        let [without_reasons, without_names] = glyphs(&mut app, window.into());
+        assert_eq!(with_reasons.0 - without_reasons.0, reasons.1, "every reason's glyph shows at {width}");
+        assert_eq!(with_names.0 - without_names.0, names.1, "every name's glyph shows at {width}");
+    }
+}

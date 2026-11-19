@@ -150,15 +150,25 @@ impl FoloApp {
                         14.,
                         t.danger_solid,
                     )))
-                    .when(!f.file.is_empty(), |d| {
-                        d.child(
-                            text(ty::SM, t.text_secondary)
-                                .flex_none()
-                                .font_family(crate::theme::MONO)
-                                .child(f.file.clone()),
-                        )
-                    })
-                    .child(text(ty::SM, t.danger_text).min_w_0().text_left().child(error))
+                    // The name, then the reason beside it while both fit; a name too long for that
+                    // puts the reason on its own line, and wraps itself rather than run past the edge.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x(px(8.))
+                            .when(!f.file.is_empty(), |d| {
+                                d.child(
+                                    text(ty::SM, t.text_secondary)
+                                        .min_w_0()
+                                        .font_family(crate::theme::MONO)
+                                        .child(f.file.clone()),
+                                )
+                            })
+                            .child(text(ty::SM, t.danger_text).min_w_0().text_left().child(error)),
+                    )
             }))
         });
         let below = below.then(|| {
