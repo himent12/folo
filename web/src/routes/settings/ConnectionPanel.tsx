@@ -7,7 +7,7 @@ import PlugZap from '$icons/plug-zap';
 import WifiOff from '$icons/wifi-off';
 import { computed, css, effect, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
-import { isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from '$lib/api/handshake';
+import { accessCheck, isHealth, NOT_FOLO, refusal, refusedWords } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -16,7 +16,8 @@ import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import Row from './Row';
 
-type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: false; message: string };
+/** A test's outcome: Studio can use the server; it cannot (`message`); or it answers but its token check could not tell. */
+type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: false; message: string } | { ok: null; version: string };
 
 /**
  * The address to use for what was typed: trimmed, no trailing slash, and `http://` assumed when no scheme was typed
@@ -47,7 +48,11 @@ export default function ConnectionPanel() {
   });
   const failed = computed(() => {
     const t = test.get();
-    return t && !t.ok ? t : null;
+    return t?.ok === false ? t : null;
+  });
+  const unsure = computed(() => {
+    const t = test.get();
+    return t?.ok === null ? t : null;
   });
   const forced =typeof location !== 'undefined' && new URLSearchParams(location.search).get('mock') === '1';
 
@@ -71,15 +76,17 @@ export default function ConnectionPanel() {
     const mine = tested;
     const t0 = performance.now();
     try {
-      // As a connect checks it: FOLO's health, then whether it lets Studio in without a token (`tokenWall`).
+      // As a connect checks it: FOLO's health, then whether it lets Studio in (the token check, `accessCheck`). Green only
+      // when that check answers 2xx; one that cannot tell (no answer, another status) is not a pass.
       const base = normalized.peek();
       const within = AbortSignal.timeout(3000);
       const h: unknown = await new HttpApi(base).health(within);
       if (mine !== tested) return;
       if (!isHealth(h)) return test.set({ ok: false, message: NOT_FOLO });
-      const walled = await tokenWall(base, within);
+      const access = await accessCheck(base, within);
       if (mine !== tested) return;
-      test.set(walled ? { ok: false, message: TOKEN_WALL } : { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
+      if (access === null) return test.set({ ok: null, version: h.version });
+      test.set(access === 'in' ? { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 } : { ok: false, message: refusedWords(access) });
     } catch (e) {
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
       const message = timeout ? 'No answer within 3 s.' : (refusal(e) ?? (e instanceof Error ? e.message : String(e)));
@@ -204,8 +211,15 @@ export default function ConnectionPanel() {
               <span>{problem.get()}</span>
             </p>
           ) : test.get() ? (
-            <div class="test" class:ok={!!passed.get()} role="status">
-              {passed.get() ? (
+            <div class="test" class:ok={!!passed.get()} class:unsure={!!unsure.get()} role="status">
+              {unsure.get() ? (
+                <>
+                  <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+                  <span>
+                    Reachable: <span class="mono">folo serve {unsure.get()?.version}</span>, but access could not be confirmed.
+                  </span>
+                </>
+              ) : passed.get() ? (
                 <>
                   <Check size={14} strokeWidth={2.25} aria-hidden="true" />
                   <span>
@@ -343,6 +357,9 @@ css`
   }
   .test.ok {
     color: var(--success-text);
+  }
+  .test.unsure {
+    color: var(--text-secondary);
   }
   .test.ok > span:not(.faint) {
     color: var(--text-primary);

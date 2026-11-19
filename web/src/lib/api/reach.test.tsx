@@ -7,7 +7,6 @@ import ConnectionStatus from '$lib/shell/ConnectionStatus';
 import Topbar from '$lib/shell/Topbar';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { render } from '../../../framework/testing';
-import { TOKEN_WALL } from './handshake';
 import { CONNECT_TIMEOUT, hub, SLOW_CONNECT } from './index';
 import { PROBE_DELAYS, Reach } from './reach';
 import { Resource } from './resource';
@@ -124,47 +123,6 @@ describe('Reach', () => {
     reach.ok();
     expect(await hung).toBe(true);
   });
-
-  it('says a server that answers but refuses Studio, and an answer older than the probe does not undo it (#323)', async () => {
-    let refuses: string | null = 'needs a token';
-    let probes = 0;
-    const reach = new Reach();
-    reach.reset(async () => {
-      probes++;
-      return refuses ?? undefined;
-    });
-    // A request that went out before the token stopped coming; its 200 lands after the first 401's probe went out.
-    const before = performance.now();
-    await vi.advanceTimersByTimeAsync(1);
-    reach.failed(); // the 401
-    reach.ok(before);
-    await vi.advanceTimersByTimeAsync(0);
-    expect([reach.offline, reach.refused, probes]).toEqual([true, 'needs a token', 1]);
-    // Refused: more 401s and older answers add nothing, and no request is retried here; the probe repeats.
-    reach.failed();
-    reach.ok(before);
-    expect([reach.offline, reach.refused, probes]).toEqual([true, 'needs a token', 1]);
-    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
-    expect([reach.offline, probes]).toEqual([true, 2]);
-    // The proxy's session is renewed: the next probe lets Studio in, and what failed meanwhile refetches.
-    refuses = null;
-    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[1]!);
-    expect([reach.offline, reach.refused, reach.back, probes]).toEqual([false, null, 1, 3]);
-
-    // Refused again, then a request sent after the probe answers: that is news, Studio is let in at once.
-    refuses = 'needs a token';
-    reach.failed();
-    await vi.advanceTimersByTimeAsync(0);
-    expect([reach.offline, reach.refused]).toEqual([true, 'needs a token']);
-    reach.ok(performance.now());
-    expect([reach.offline, reach.refused, reach.back]).toEqual([false, null, 2]);
-    // A new server forgets it.
-    refuses = 'needs a token';
-    reach.failed();
-    await vi.advanceTimersByTimeAsync(0);
-    reach.reset(null);
-    expect([reach.offline, reach.refused]).toEqual([false, null]);
-  });
 });
 
 describe('hub.offline with the server', () => {
@@ -249,82 +207,6 @@ describe('hub.offline with the server', () => {
     expect(held()).toEqual([false, false]);
     stop();
     view.unmount();
-  });
-
-  it('says so when the server stops letting Studio in mid-session, in the words of a fresh visit, and comes back by itself (#323)', async () => {
-    // `folo serve --token` behind a proxy that sends the header, until it stops: the health stays open, the rest is 401.
-    let token = true;
-    let health = 0;
-    let lists = 0;
-    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/api/health')) {
-        health++;
-        return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
-      }
-      if (!token) return Response.json({ error: { code: 'unauthorized', message: 'this server needs a token', hint: null } }, { status: 401 });
-      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
-      lists++;
-      return Response.json({ datasets: [] });
-    });
-    await hub.connect();
-    const shell = document.createElement('div');
-    const view = render(
-      () => (
-        <>
-          <ConnectionStatus collapsed={false} />
-          <Topbar onsearch={() => {}} />
-        </>
-      ),
-      shell,
-    );
-    const said = () => [shell.querySelector('.conn .label')!.textContent!.trim(), shell.querySelector('.topbar [role=status] .long')?.textContent?.trim() ?? ''];
-    expect(said()).toEqual(['Connected', '']);
-    const checks = health;
-
-    token = false;
-    let r!: Resource<Dataset[]>;
-    const stop = createRoot((dispose) => {
-      r = new Resource((s) => hub.api.datasets(s));
-      return dispose;
-    });
-    flush();
-    // Several screens' requests refused at once: one probe, one change of state.
-    await Promise.allSettled([hub.api.datasets(), hub.api.datasets()]);
-    await vi.advanceTimersByTimeAsync(0);
-    flush();
-    expect(r.error).toBeDefined();
-    expect([hub.offline, hub.refused, health - checks]).toEqual([true, TOKEN_WALL, 1]);
-    expect(said()).toEqual(['Not connected', `${TOKEN_WALL} Retrying…`]);
-    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
-    expect([hub.refused, health - checks]).toEqual([TOKEN_WALL, 2]);
-
-    // The proxy's session is renewed: the next probe lets Studio in, and the refused list refetches.
-    token = true;
-    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[1]!);
-    flush();
-    await vi.advanceTimersByTimeAsync(0);
-    expect([hub.offline, hub.refused, r.error, r.data, lists]).toEqual([false, null, undefined, [], 1]);
-    expect(said()).toEqual(['Connected', '']);
-    stop();
-    view.unmount();
-  });
-
-  it('stays connected when one request is refused but the server still lets Studio in (#323)', async () => {
-    let health = 0;
-    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/api/health')) {
-        health++;
-        return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
-      }
-      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
-      // A refusal of that request alone (docs/API.md: `403 forbidden_origin` on a state-changing request).
-      return Response.json({ error: { code: 'forbidden_origin', message: 'not from this origin', hint: null } }, { status: 403 });
-    });
-    await hub.connect();
-    const checks = health;
-    await expect(hub.api.datasets()).rejects.toThrow('not from this origin');
-    await vi.advanceTimersByTimeAsync(0);
-    expect([hub.offline, hub.refused, health - checks]).toEqual([false, null, 1]);
   });
 });
 

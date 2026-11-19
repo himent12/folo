@@ -11,8 +11,9 @@
 import { computed, signal } from 'fw';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
+import { Access } from './access';
 import { ApiError, HttpApi, type Api } from './client';
-import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
+import { accessCheck, earlyTokenWall, isHealth, NOT_FOLO, refusal, refusedWords, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -110,6 +111,7 @@ class Hub {
   #shared = computed(() => shareApi(this.#api.get()));
   #epoch = signal(0);
   #reach = new Reach();
+  #access = new Access();
 
   get mode(): Mode {
     return this.#mode.get();
@@ -137,25 +139,27 @@ class Hub {
     this.#api.set(unshare(v));
   }
   /**
-   * The server in use stopped answering or letting Studio in (./reach: a failed request, a 401 or 403, or a dropped
-   * stream, confirmed by a probe, which repeats until it answers and lets Studio in again), or has not answered a
-   * connect yet (slow or not there; the connect keeps asking), or the demo's `?scenario=error`. Live data on screen is
-   * then a last known state, not the current one.
+   * The server in use stopped answering (./reach: a failed request or a dropped stream, confirmed by a health probe,
+   * which repeats until it answers again), or stopped letting Studio in (./access: a token check answered 401 or 403;
+   * it repeats until it answers 2xx), or has not answered a connect yet (slow or not there; the connect keeps asking),
+   * or the demo's `?scenario=error`. Live data on screen is then a last known state, not the current one.
    */
   get offline(): boolean {
-    return scenario === 'error' || this.#unreachable.get() || this.#reach.offline;
+    return scenario === 'error' || this.#unreachable.get() || this.#reach.offline || this.#access.refusal !== null;
   }
   /**
    * While offline: what the address answered when it answered but not as a usable FOLO server (not its health payload,
-   * a sign-in wall, a token Studio can't send), in words for the user; null when nothing answered. Said the same when a
-   * connect finds it and when the server in use starts refusing Studio (./reach); either way Studio keeps asking.
+   * a sign-in wall), in words for the user, as a connect finds it or as the server in use starts refusing Studio
+   * (./access, said in the connect's words unless the server does not answer at all); null when nothing answered.
    */
   get refused(): string | null {
-    return this.#refused.get() ?? this.#reach.refused;
+    const refusal = this.#reach.offline ? null : this.#access.refusal;
+    return this.#refused.get() ?? (refusal ? refusedWords(refusal) : null);
   }
-  /** Bumps each time the server answers again after an outage: Resources in error or holding data refetch. */
+  /** Bumps each time the server answers again after an outage, or lets Studio in again: Resources in error or holding
+   * data refetch. */
   get back(): number {
-    return this.#reach.back;
+    return this.#reach.back + this.#access.back;
   }
   /** Bumps on every (re)connect so data views refetch. */
   get epoch(): number {
@@ -194,11 +198,12 @@ class Hub {
     this.#unreachable.set(false);
     this.#refused.set(null);
     this.#reach.reset(null);
+    this.#access.reset(null);
     if (forcedMock) {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
     }
-    const http = new HttpApi(prefs.serverUrl, this.#reach);
+    const http = new HttpApi(prefs.serverUrl, this.#reach, this.#access);
     await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, settled));
   }
 
@@ -257,20 +262,13 @@ class Hub {
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
-          // nothing fails the probe. One that refuses Studio is said as this connect says it: a health that answers
-          // 401 or 403 (a proxy's own wall), or a token check that does (the token stopped coming mid-session). Its
-          // health is asked by a client of its own: its answer must not count as a request's and settle the probe
-          // before the token check has answered.
-          const own = new HttpApi(http.base);
-          this.#reach.reset(async (s) => {
-            try {
-              await own.health(s);
-            } catch (e) {
+          // nothing fails the probe.
+          this.#reach.reset((s) =>
+            http.health(s).catch((e: unknown) => {
               if (!(e instanceof ApiError) || e.status === 0) throw e;
-              return e.status === 401 || e.status === 403 ? refusal(e) : null;
-            }
-            return (await tokenWall(http.base, s)) ? TOKEN_WALL : null;
-          });
+            }),
+          );
+          this.#access.reset((s) => accessCheck(http.base, s));
           this.version = h.version;
           this.reason = null;
           this.#unreachable.set(false);

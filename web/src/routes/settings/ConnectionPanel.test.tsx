@@ -86,14 +86,15 @@ describe('ConnectionPanel', () => {
     target.remove();
   });
 
-  it('says a FOLO server that wants a token is one Studio cannot use, not a green check (#323 F2)', async () => {
-    // `folo serve --token`: the health is open, the token check (HEAD /api/runs) is 401 until it is restarted without.
-    let walled = true;
-    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) =>
-      url.endsWith('/api/runs') && init?.method === 'HEAD'
-        ? new Response(null, { status: walled ? 401 : 200 })
-        : Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false }),
-    );
+  it('is green only when the token check lets Studio in: refused is red, a check that cannot tell is neither (#323)', async () => {
+    // The health is open; the token check (HEAD /api/runs) answers `head`: `folo serve --token` (401), a proxy whose
+    // session expired (403), one that resets the connection, then a server Studio can use.
+    let head: number | 'reset' = 401;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!(url.endsWith('/api/runs') && init?.method === 'HEAD')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      if (head === 'reset') throw new TypeError('Failed to fetch');
+      return new Response(null, { status: head });
+    });
     const target = document.createElement('div');
     document.body.appendChild(target);
     const c = render(() => <ConnectionPanel />, target);
@@ -107,7 +108,13 @@ describe('ConnectionPanel', () => {
       return target.querySelector('.test')!.classList.contains('ok');
     };
     expect(await testIt("This server needs a token (folo serve --token), which Studio can't send.")).toBe(false);
-    walled = false;
+    head = 403;
+    expect(await testIt('This server refuses access (403).')).toBe(false);
+    head = 'reset';
+    expect(await testIt('Reachable: folo serve 0.1.0, but access could not be confirmed.')).toBe(false);
+    head = 404;
+    expect(await testIt('but access could not be confirmed.')).toBe(false);
+    head = 200;
     expect(await testIt('Reachable: folo serve 0.1.0')).toBe(true);
     c.unmount();
     target.remove();
