@@ -215,18 +215,20 @@ describe('the first handshake with an address that answers', () => {
     c.unmount();
   });
 
-  // #324: what the server can do comes from its health: the handshake's, and the one asked when it is back after an
-  // outage (a server restarted with other features), never from a request of its own.
-  it('keeps the features its health lists, and takes those of the health asked when it is back after an outage', async () => {
+  // #324: what the server can do comes from a health answer of this connection: the handshake's, and after an outage the
+  // one the probe that finds it back gets (a server restarted with other features), with no request of its own.
+  it("keeps the features its health lists, forgets them in an outage, and takes the probe's when it is back", async () => {
     const listing = (features: string[]) => () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false, features });
     const down = () => Promise.reject(new TypeError('Failed to fetch'));
     const c = await connectTo([listing(['queue_control', 'agent_labeling']), down, listing(['queue_control'])]);
     expect([hub.mode, hub.features, hub.lacks('agent_labeling')]).toEqual(['live', ['queue_control', 'agent_labeling'], false]);
-    // A request fails, the probe finds nothing: offline, and what it knew stays until the server answers again.
+    // A request fails, the probe finds nothing: offline, and what it knew is unknown at once (review of #341, round 2).
     expect(await hub.suspect()).toBe(false);
-    expect([hub.offline, hub.features]).toEqual([true, ['queue_control', 'agent_labeling']]);
+    expect([hub.offline, hub.features, hub.lacks('agent_labeling')]).toEqual([true, null, false]);
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
-    expect([hub.offline, hub.features, hub.lacks('agent_labeling'), c.checks()]).toEqual([false, ['queue_control'], true, 4]);
+    expect([hub.offline, hub.features, hub.lacks('agent_labeling'), c.checks()]).toEqual([false, ['queue_control'], true, 3]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(c.checks()).toBe(3);
     c.unmount();
   });
 

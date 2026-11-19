@@ -277,6 +277,24 @@ describe('CommandPalette: what the server can do', () => {
     expect(go.mock.calls[0]![0]).not.toMatch(/dataset=/);
   });
 
+  // Review of #341, round 2: the first item was highlighted by its place, so a row that loaded above it took the
+  // highlight, and Enter ran a command nobody had highlighted.
+  it('keeps the first item highlighted when a row loads above it', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    let late!: () => void;
+    const api = hub.api as MockApi;
+    const benches = api.benches.bind(api);
+    vi.spyOn(api, 'benches').mockImplementation(() => new Promise((r) => (late = () => r(benches()))));
+    const input = await openWith('new', '[id="pi-new-run"]');
+    expect(document.querySelector('[role="option"]')!.id).toBe('pi-new-run');
+    expect(input.getAttribute('aria-activedescendant')).toBe('pi-new-run');
+    late();
+    await vi.waitFor(() => (flushSync(), expect(document.querySelector('[role="option"]')!.id).toBe('pi-bench-new')));
+    expect(input.getAttribute('aria-activedescendant')).toBe('pi-new-run');
+    press(input, 'Enter');
+    expect(go).toHaveBeenCalledWith('/runs/new');
+  });
+
   it('keeps the highlight on its command when a list loads late', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     let late!: () => void;

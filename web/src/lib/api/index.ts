@@ -14,7 +14,7 @@ import { prefs } from '$lib/prefs';
 import { Access } from './access';
 import { ApiError, HttpApi, type Api } from './client';
 import { accessCheck, earlyTokenWall, featuresOf, isHealth, NOT_FOLO, refusal, refusedWords, TOKEN_WALL, tokenWall } from './handshake';
-import { PROBE_DELAYS, Reach } from './reach';
+import { PROBE_DELAYS, PROBE_TIMEOUT, Reach, type Reachability } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
 
@@ -107,7 +107,8 @@ class Hub {
   #unreachable = signal(false);
   #refused = signal<string | null>(null);
   #version = signal<string | null>(null);
-  #features = signal<readonly string[] | null>(null);
+  /** `features`, and the `back` of ./reach it holds for: the stretch since the outage it was heard after. */
+  #features = signal<{ list: readonly string[] | null; at: number } | null>(null);
   #api = signal<Api>(placeholder());
   #shared = computed(() => shareApi(this.#api.get()));
   #epoch = signal(0);
@@ -134,22 +135,26 @@ class Hub {
     this.#version.set(v);
   }
   /**
-   * The optional features the server in use listed in its health (`/api/health`'s `features`, docs/API.md), from the
-   * connect's handshake and replaced by every later health answer (one after an outage: a server restarted with other
-   * features). Null while unknown: before the handshake, a server too old to list them, the in-browser demo.
+   * The optional features the server in use listed in its health (`/api/health`'s `features`, docs/API.md), from a
+   * health answer of this connection since its last outage: the connect's handshake, or one after the outage (the
+   * probe's, else `#learn`'s). Null while unknown: before the handshake, a server too old to list them, the in-browser
+   * demo, and from the moment the server stops answering until such an answer (a server restarted with other features):
+   * a list from before an outage is never used after it.
    */
   get features(): readonly string[] | null {
-    return this.#features.get();
+    const f = this.#features.get();
+    return f && !this.#reach.offline && f.at === this.#reach.back ? f.list : null;
   }
+  /** What the server in use lists, as a health answer says; while offline, an answer that brings it back (the probe's). */
   set features(v: readonly string[] | null) {
-    this.#features.set(v);
+    this.#features.set({ list: v, at: this.#reach.back + (this.#reach.offline ? 1 : 0) });
   }
   /**
    * Whether the server in use has said it lacks `feature`: its health listed features without it. Unknown is not
    * lacking, so a command or a form that needs it is offered as before (#324).
    */
   lacks(feature: string): boolean {
-    const f = this.#features.get();
+    const f = this.features;
     return f !== null && !f.includes(feature);
   }
   get api(): Api {
@@ -224,7 +229,18 @@ class Hub {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
     }
-    const http = new HttpApi(prefs.serverUrl, this.#reach, this.#access);
+    // Only this connection's requests and streams say whether its server answers: an answer that comes late to one sent
+    // before (to an address changed since) changes nothing. One that ends an outage asks what the server can do now.
+    const reach: Reachability = {
+      ok: () => {
+        if (attempt !== this.#attempt) return;
+        const was = this.#reach.offline;
+        this.#reach.ok();
+        if (was) void this.#learn(http.base, attempt, ctrl.signal, 0);
+      },
+      failed: () => void (attempt === this.#attempt && this.#reach.failed()),
+    };
+    const http = new HttpApi(prefs.serverUrl, reach, this.#access);
     await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, settled));
   }
 
@@ -283,24 +299,26 @@ class Hub {
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
-          // nothing fails the probe. Back after an outage (a restart, maybe with other features), its health is asked
-          // once more and its features replace these, as the screens fetch theirs again (`back`); the last ask wins.
-          let asked = 0;
-          this.#reach.reset(
-            (s) =>
-              http.health(s).catch((e: unknown) => {
+          // nothing fails the probe. The probe tells ./reach itself (not through `http`), and the health it gets says
+          // what the server can do once it is back (a restart, maybe with other features); one that answers with
+          // something else leaves that to `#learn`. Only the latest probe of this connection counts.
+          const probing = new HttpApi(http.base, undefined, this.#access);
+          let probes = 0;
+          this.#reach.reset((s) => {
+            const n = ++probes;
+            const mine = () => n === probes && attempt === this.#attempt;
+            return probing.health(s).then(
+              (p: unknown) => {
+                if (!mine()) return;
+                if (isHealth(p)) this.features = featuresOf(p);
+                else void this.#learn(http.base, attempt, abort, 1);
+              },
+              (e: unknown) => {
                 if (!(e instanceof ApiError) || e.status === 0) throw e;
-              }),
-            () => {
-              const n = ++asked;
-              http.health().then(
-                (p: unknown) => {
-                  if (n === asked && attempt === this.#attempt && isHealth(p)) this.features = featuresOf(p);
-                },
-                () => {},
-              );
-            },
-          );
+                if (mine()) void this.#learn(http.base, attempt, abort, 1);
+              },
+            );
+          });
           this.#access.reset((s) => accessCheck(http.base, s));
           this.version = h.version;
           this.features = featuresOf(h);
@@ -365,6 +383,25 @@ class Hub {
    */
   suspect(): Promise<boolean> {
     return this.#reach.suspect();
+  }
+
+  /**
+   * What the server of connection `attempt` can do (`features`) once it is back after an outage, when no health answer
+   * has said yet: asks its health, outside ./reach (whether it answers is not this ask's to say), after `tries` asks
+   * already made (the probe's), then again at PROBE_DELAYS until one says. Stops on a newer connect, once said, and
+   * when that return is over (another outage: its probe asks).
+   */
+  async #learn(base: string, attempt: number, abort: AbortSignal, tries: number): Promise<void> {
+    const http = new HttpApi(base, undefined, this.#access);
+    const at = this.#reach.back + (this.#reach.offline ? 1 : 0);
+    const over = () => attempt !== this.#attempt || this.#reach.offline || this.#reach.back !== at || this.#features.peek()?.at === at;
+    for (let i = tries; ; i++) {
+      if (i > 0) await pause(PROBE_DELAYS[Math.min(i - 1, PROBE_DELAYS.length - 1)]!, abort);
+      if (over()) return;
+      const h: unknown = await http.health(AbortSignal.any([abort, AbortSignal.timeout(PROBE_TIMEOUT)])).catch(() => null);
+      if (over()) return;
+      if (isHealth(h)) return void (this.features = featuresOf(h));
+    }
   }
 }
 

@@ -90,8 +90,9 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const list = signal<HTMLUListElement>();
   const query = signal('');
   /**
-   * The highlighted item, by id (null: the first). A list that changes under it (a health answer's features, a list that
-   * loads late) keeps it highlighted; one that drops it highlights the first, so Enter runs only what is highlighted.
+   * The highlighted item, by id (null: none yet, the first). A list that changes under it (a health answer's features, a
+   * list that loads late) keeps it highlighted; one that drops it highlights the first, so Enter runs only what is
+   * highlighted.
    */
   const selected = signal<string | null>(null);
   const runs = signal<Run[]>([]);
@@ -383,10 +384,12 @@ export default function CommandPalette(props: CommandPaletteProps) {
     void query.get();
     selected.set(null);
   });
-  // An item that went is forgotten: one that comes back later does not take the highlight back.
+  // The first item is highlighted by its id too, at open, on a new query and when the highlighted one goes, so a row
+  // that loads above it later does not take the highlight; one that comes back later does not take it back.
   effect(() => {
+    const all = flat.get();
     const id = selected.get();
-    if (id !== null && !flat.get().some((i) => i.id === id)) selected.set(null);
+    if (!all.some((i) => i.id === id)) selected.set(all[0]?.id ?? null);
   });
 
   effect(() => {

@@ -24,7 +24,6 @@ export class Reach implements Reachability {
   #offline = signal(false);
   #back = signal(0);
   #probe: Probe | null = null;
-  #onBack: (() => void) | null = null;
   #gen = 0;
   #probing = false;
   #attempt = 0;
@@ -39,14 +38,10 @@ export class Reach implements Reachability {
     return this.#back.get();
   }
 
-  /**
-   * The server in use changed: forget any outage; `probe` checks the new one (null: no server, e.g. the mock), and
-   * `onBack` runs each time it answers again after an outage (with `back`).
-   */
-  reset(probe: Probe | null, onBack: (() => void) | null = null): void {
+  /** The server in use changed: forget any outage; `probe` checks the new one (null: no server, e.g. the mock). */
+  reset(probe: Probe | null): void {
     this.#gen++;
     this.#probe = probe;
-    this.#onBack = onBack;
     this.#probing = false;
     this.#attempt = 0;
     clearTimeout(this.#timer);
@@ -66,7 +61,6 @@ export class Reach implements Reachability {
     this.#timer = undefined;
     this.#offline.set(false);
     this.#back.set(this.#back.peek() + 1);
-    this.#onBack?.();
   }
 
   failed(): void {
