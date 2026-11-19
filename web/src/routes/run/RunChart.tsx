@@ -166,11 +166,11 @@ export default function RunChart(props: RunChartProps) {
             yDecimals={fit.get() && !fit.get()!.log ? fit.get()!.decimals : undefined}
             yLog={!!fit.get()?.log}
             yFormat={ips() ? (v) => num(v, 0) : kind === 'lr' ? (v) => String(+(v / lrScale()).toFixed(2)) : undefined}
-            valueFormat={ips() ? (v) => num(v, 0) : kind === 'lr' ? (v) => (v / lrScale()).toFixed(2) : unit ? (v) => axisMetric(v, fit.get()?.decimals) : (v) => metric(v)}
+            valueFormat={ips() ? (v) => num(v, 0) : kind === 'lr' ? (v) => (v / lrScale()).toFixed(2) : unit ? (v) => axisMetric(v, fit.get()?.domain[1]) : (v) => metric(v)}
             xTitle={epochTitle}
             curve={unit ? 'monotone' : 'linear'}
             markers={kind === 'map' ? m.best.get() : undefined}
-            legendBest={kind === 'map' ? m.bestLegend(fit.get()?.decimals) : undefined}
+            legendBest={kind === 'map' ? m.bestLegend(fit.get()?.domain[1]) : undefined}
             endDots
             xMark={m.xMark.get()}
             xEvent={kind === 'map' || kind === 'loss' ? m.failEvent.get() : undefined}

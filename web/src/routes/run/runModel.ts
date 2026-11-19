@@ -350,10 +350,10 @@ export class RunModel {
     const b = this.run().best;
     return b ? [{ x: b.epoch, y: b.map50_95, label: 'best', quiet: true, pulse: this.pulse.get(), focus: this.focus.get() }] : [];
   });
-  /** At the mAP chart's axis precision (`decimals`, lib/format `axisMetric`), as its series' values. */
-  bestLegend(decimals?: number): string | undefined {
+  /** At the decimals of the mAP chart's fitted top (lib/format `axisMetric`), as its series' values. */
+  bestLegend(top?: number): string | undefined {
     const b = this.run().best;
-    return b && b.map50_95 !== 0 ? `${axisMetric(b.map50_95, decimals)} @ ${b.epoch}` : undefined;
+    return b && b.map50_95 !== 0 ? `${axisMetric(b.map50_95, top)} @ ${b.epoch}` : undefined;
   }
 
   // ---- the words of the readings ----

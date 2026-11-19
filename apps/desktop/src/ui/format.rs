@@ -287,17 +287,17 @@ pub fn f3(v: f32) -> String {
     format!("{v:.3}")
 }
 
-/// A 0–1 score in the legend of a chart whose axis is fitted to `axis_max` (charts::domain), as
-/// Studio's `axisMetric` writes it: three decimals, or the axis labels' when a zoomed axis has more
-/// (on 0–0.00042, "0.00039", not "0.000"), and two significant figures for a nonzero score still
-/// under the last digit, so a small score never reads as zero.
-pub fn fmt_score_on(v: f32, axis_max: f32) -> String {
-    let mut d = crate::charts::domain::unit_domain(axis_max, 0.).decimals.max(3);
-    let a = v.abs() as f64;
-    if a > 0. && a < 0.5 * 10f64.powi(-(d as i32)) {
-        d = (1 - a.log10().floor() as i32) as usize;
-    }
-    format!("{v:.d$}")
+/// A 0–1 score in the legend of a chart whose y axis is fitted to `top` (charts::domain::unit_top),
+/// as Studio's `axisMetric` writes it (#338): three decimals down to a top of 0.01, then one more per
+/// power of ten, at most five ([`score_decimals`]).
+pub fn fmt_score_on(v: f32, top: f32) -> String {
+    format!("{v:.d$}", d = score_decimals(top))
+}
+
+/// `clamp(ceil(-log10(top) - 1e-6) + 1, 3, 5)`; no top: 3. The `1e-6` puts a power-of-ten top on the
+/// same side in f32 here and f64 in Studio (`scoreDecimals`).
+fn score_decimals(top: f32) -> usize {
+    if top > 0. { ((-(top as f64).log10() - 1e-6).ceil() + 1.).clamp(3., 5.) as usize } else { 3 }
 }
 
 #[cfg(test)]
@@ -321,21 +321,38 @@ mod tests {
         assert_eq!(fmt_conf(0.35), "0.35");
     }
 
-    /// #338: a one-epoch run's mAP50 0.000388 and mAP50-95 0.000068, on an axis zoomed to
-    /// 0–0.00042, both read "0.000" in the legend.
+    /// #338: a legend score's decimals follow its axis's fitted top. Studio's `format.test.ts` has the
+    /// same table (`scoreDecimals`, `axisMetric`).
     #[test]
-    fn a_zoomed_legend_reads_small_scores_apart() {
-        let max = 0.000_387_725_9;
-        assert_eq!(fmt_score_on(max, max), "0.00039");
-        assert_eq!(fmt_score_on(0.000_067_994_26, max), "0.00007");
-        // Under the axis's last digit: two significant figures, never zero.
-        assert_eq!(fmt_score_on(0.000_001_23, max), "0.0000012");
-        assert_eq!(fmt_score_on(0., max), "0.00000");
-        // A full-scale or lightly zoomed axis keeps three decimals; a finer one its own.
-        assert_eq!(fmt_score_on(0.741_23, 0.8), "0.741");
-        assert_eq!(fmt_score_on(0.051_2, 0.06), "0.051");
-        assert_eq!(fmt_score_on(0.004_12, 0.004_9), "0.0041");
-        assert_eq!(fmt_score_on(0.000_2, 0.6), "0.00020");
+    fn a_legend_score_takes_the_decimals_of_its_axis_top() {
+        let tops: [(f32, usize); 11] = [
+            (1., 3),
+            (0.5, 3),
+            (0.05, 3),
+            (0.01, 3),
+            (0.005, 4),
+            (0.001, 4),
+            (0.000_42, 5),
+            (0.000_1, 5),
+            (0.000_094, 5),
+            (0.000_01, 5),
+            (0., 3),
+        ];
+        for (top, d) in tops {
+            assert_eq!(score_decimals(top), d, "{top}");
+        }
+        // The issue: a one-epoch run on 0–0.00042 read "0.000" twice.
+        assert_eq!(fmt_score_on(0.000_07, 0.000_42), "0.00007");
+        assert_eq!(fmt_score_on(0.000_39, 0.000_42), "0.00039");
+        // On 0–0.001, two scores 44 % of the plot apart read apart.
+        assert_eq!(fmt_score_on(0.000_51, 0.001), "0.0005");
+        assert_ne!(fmt_score_on(0.000_51, 0.001), fmt_score_on(0.000_95, 0.001));
+        // A full-scale chart keeps main's three decimals.
+        assert_eq!(fmt_score_on(0.000_07, 1.), "0.000");
+        assert_eq!(fmt_score_on(0.5, 1.), "0.500");
+        // A top fitted to 0.0001 from 0.000094 (a hair under it in f32): five decimals, as in Studio.
+        let top = crate::charts::domain::unit_top(0.000_094);
+        assert_eq!(fmt_score_on(0.000_094, top), "0.00009");
     }
 
     #[test]

@@ -22,15 +22,16 @@ export function metric(x: number | null | undefined): string {
 }
 
 /**
- * A 0–1 score in the legend of a chart whose axis labels take `decimals` (lib/charts/domain): three decimals, or the
- * axis's when a zoomed axis has more (on 0–0.00042, "0.00039", not "0.000"), and two significant figures for a nonzero
- * score still under the last digit, so a small score never reads as zero (issue #338; Desktop's `fmt_score_on`).
+ * A 0–1 score in the legend of a chart whose y axis is fitted to `top` (lib/charts/domain `unitTop`), as Desktop's
+ * `fmt_score_on` writes it (#338): three decimals down to a top of 0.01, then one more per power of ten, at most five.
  */
-export function axisMetric(x: number | null | undefined, decimals = 3): string {
-  if (!ok(x)) return '—';
-  const a = Math.abs(x);
-  const d = Math.max(3, decimals);
-  return nf(a > 0 && a < 0.5 * 10 ** -d ? 1 - Math.floor(Math.log10(a)) : d).format(x);
+export function axisMetric(x: number | null | undefined, top?: number): string {
+  return num(x, scoreDecimals(top));
+}
+
+/** `clamp(ceil(-log10(top) - 1e-6) + 1, 3, 5)`; no top: 3. The `1e-6` puts a power-of-ten top on Desktop's (f32) side. */
+export function scoreDecimals(top?: number): number {
+  return top !== undefined && top > 0 ? Math.min(5, Math.max(3, Math.ceil(-Math.log10(top) - 1e-6) + 1)) : 3;
 }
 
 /** 0.7412 → "74.1%". */

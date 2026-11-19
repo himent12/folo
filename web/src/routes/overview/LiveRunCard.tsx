@@ -195,11 +195,11 @@ export default function LiveRunCard(props: LiveRunCardProps) {
                 yTickValues={fit.get()?.ticks}
                 yDecimals={fit.get()?.decimals}
                 yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
-                valueFormat={(v) => axisMetric(v, fit.get()?.decimals)}
+                valueFormat={(v) => axisMetric(v, fit.get()?.domain[1])}
                 xTitle={(x) => `Epoch ${Math.round(x)}`}
                 curve="monotone"
                 markers={model.best.get()}
-                legendBest={phoneQuery.current ? undefined : model.bestLegend(fit.get()?.decimals)}
+                legendBest={phoneQuery.current ? undefined : model.bestLegend(fit.get()?.domain[1])}
                 endDots
                 legendNote={phoneQuery.current ? undefined : latest.get() ? `Latest · ep ${latest.get()}` : 'Latest'}
                 label={`${scores.get() ?? 'Evaluation'} mAP by epoch`}
