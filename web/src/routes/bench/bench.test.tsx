@@ -715,4 +715,19 @@ describe('the list', () => {
     expect(document.querySelector('table.benches')).toBeNull();
     expect(document.querySelector('a[href="#/models"]')).not.toBeNull();
   });
+
+  // #324: the palette's New benchmark (`?new=1`) opened its form over "This server has no vision benchmarks", and
+  // Create could only fail (501).
+  const formOpen = () => [...document.querySelectorAll<HTMLDialogElement>('dialog')].some((d) => d.open && d.textContent?.includes('New benchmark'));
+  it('?new=1 opens New benchmark on a server with benchmarks, and only the explanation on one without', async () => {
+    router.route = parse('#/benchmarks?new=1');
+    open(Benchmarks, {});
+    await until(() => formOpen(), 'the form');
+    unmount(c!);
+    hub.api = new MockApi('no-bench', 0);
+    open(Benchmarks, {});
+    await until(() => text().includes('This server has no vision benchmarks'), 'the explanation');
+    await settle();
+    expect(formOpen()).toBe(false);
+  });
 });

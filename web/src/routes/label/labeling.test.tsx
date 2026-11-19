@@ -521,13 +521,26 @@ describe('the job list: the palette’s New labeling job', () => {
     open(LabelJobs, {});
     expect(dialogOpen()).toBe(false);
     router.go('/datasets/label?new=1');
-    flushSync();
-    expect(dialogOpen()).toBe(true);
+    // It opens once the server has said it labels (#324).
+    await vi.waitFor(() => (flushSync(), expect(dialogOpen()).toBe(true)));
     document.querySelector<HTMLButtonElement>('dialog[open] button[aria-label="Close"]')!.click();
     flushSync();
     expect(dialogOpen()).toBe(false);
     router.go('/datasets/label?new=1');
     flushSync();
     expect(dialogOpen()).toBe(true);
+  });
+
+  // #324: on `folo serve --mock` the ask opened the form over "This server cannot label images", and Create could only
+  // fail (501).
+  it('on a server that cannot label: the explanation, never the form', async () => {
+    hub.api = new MockApi('no-labeling', 0);
+    history.replaceState(null, '', '#/datasets/label?new=1');
+    router.route = parse('#/datasets/label?new=1');
+    open(LabelJobs, {});
+    await vi.waitFor(() => (flushSync(), expect(text()).toMatch(/This server cannot label images/)));
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(dialogOpen()).toBe(false);
   });
 });

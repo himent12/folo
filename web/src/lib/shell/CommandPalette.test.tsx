@@ -216,6 +216,55 @@ describe('CommandPalette: Settings and touch (shell F14, F17)', () => {
   });
 });
 
+// #324: on `folo serve --mock` the palette offered New labeling job over "This server cannot label images", and the
+// form it opened could only fail (501). A command that needs a server feature follows the server's `features`.
+describe('CommandPalette: what the server can do', () => {
+  const offered = (id: string) => document.getElementById(`pi-${id}`) !== null;
+  function type(input: HTMLInputElement, q: string) {
+    input.value = q;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+  }
+
+  it('offers no labeling job, benchmark or Cloud section on a server without them, and still Label images', async () => {
+    hub.api = new MockApi('no-labeling', 0);
+    vi.spyOn(hub.api, 'system').mockImplementation(async () => ({ ...(await new MockApi('no-labeling', 0).system()), features: ['queue_control'] }));
+    const input = await openWith('new', '[id="pi-new-run"]');
+    await vi.waitFor(() => (flushSync(), expect(offered('label-new')).toBe(false)));
+    expect(offered('bench-new')).toBe(false);
+    type(input, 'cloud');
+    expect(offered('settings-cloud')).toBe(false);
+    // Label images is a place, as Datasets' own link to it: there the server says why it cannot.
+    type(input, 'label images');
+    expect(offered('label')).toBe(true);
+  });
+
+  it('offers them before the server has answered: a normal server has them', async () => {
+    vi.spyOn(hub.api, 'system').mockImplementation(() => new Promise(() => {}));
+    const input = await openWith('new', '[id="pi-new-run"]');
+    expect(offered('label-new')).toBe(true);
+    expect(offered('bench-new')).toBe(true);
+    type(input, 'cloud');
+    expect(offered('settings-cloud')).toBe(true);
+  });
+
+  it('asks at a connect, so a command the server cannot do never shows', async () => {
+    hub.api = new MockApi('no-labeling', 0);
+    const asked = vi.spyOn(hub.api, 'system');
+    const open = signal(false);
+    c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+    hub.epoch++;
+    flushSync();
+    expect(asked).toHaveBeenCalled();
+    await asked.mock.results[0]!.value;
+    open.set(true);
+    flushSync();
+    type(document.querySelector<HTMLInputElement>('input[role="combobox"]')!, 'new');
+    expect(offered('new-run')).toBe(true);
+    expect(offered('label-new')).toBe(false);
+  });
+});
+
 describe('CommandPalette after a switch to another server', () => {
   it('lists nothing of the server before: neither what it listed nor an answer that comes late (review R4)', async () => {
     const open = signal(true);

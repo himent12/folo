@@ -14,10 +14,12 @@ import SunMoon from '$icons/sun-moon';
 import Tags from '$icons/tags';
 import Target from '$icons/target';
 import X from '$icons/x';
-import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw';
+import { bindable, computed, css, Dynamic, effect, For, Index, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import { hasCloud } from '$lib/cloud';
-import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
+import { hasFeature } from '$lib/api/queue';
+import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus, SystemInfo } from '$lib/api/types';
+import { BENCH_FEATURE } from '$lib/bench/rules';
+import { LABEL_FEATURE } from '$lib/label';
 import { failureCause } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { router } from '$lib/router';
@@ -61,8 +63,21 @@ interface Item {
   origin?: string;
   /** A run's status, from the API's enum: what filters read, never the hint's display word. */
   status?: RunStatus;
+  /**
+   * The optional server feature (`/api/system`'s `features`) it needs: offered unless the server's answer leaves it out,
+   * as the screens hide their own create buttons then (a form whose submit can only fail, #324).
+   */
+  needs?: string;
   run: () => void;
 }
+
+/**
+ * Whether the palette offers a command that needs `feature`: the screens' rule (a server that lists features but not
+ * this one has not got it). Before the answer, offered: every current `folo serve` has them, so a normal server's
+ * commands do not wait for it; the palette asks at each connect, so the answer is usually in before it opens.
+ */
+export const offered = (system: SystemInfo | null, feature: string | undefined): boolean =>
+  !feature || !system || hasFeature(system, feature);
 
 /** Settings' sections (routes/Settings: `?section=`), with what each holds, as people may look for it. */
 const SETTINGS_SECTIONS: { id: string; label: string; match: string[] }[] = [
@@ -94,17 +109,29 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const models = signal<Model[]>([]);
   /** Benchmarks, on servers that have them (a server without answers 501 or 404: none listed). */
   const benches = signal<Bench[]>([]);
-  const benchesOk = signal(false);
   /** Labeling jobs, and the benchmarks' self-improvement loops, on servers that have them (none listed otherwise). */
   const labelJobs = signal<LabelJob[]>([]);
   const loops = signal<BenchLoop[]>([]);
-  /** The server has cloud compute (`features`: `cloud`): only then is Settings' Cloud section there to open. */
-  const cloud = signal(false);
+  /** What the server in use can do (its `features`, `Item.needs`): null until it answers. */
+  const system = signal<SystemInfo | null>(null);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
   /** The hub epoch the lists above were fetched under. */
   let listed: number | null = null;
+  // Asked at every (re)connect, not only on open: a command the server cannot do is gone before the palette first shows
+  // it (and a reconnect to another server forgets the last one's answer at once).
+  effect(() => {
+    const epoch = hub.epoch;
+    untrack(() => {
+      system.set(null);
+      if (epoch === 0) return;
+      hub.api.system().then(
+        (s) => hub.epoch === epoch && system.set(s),
+        () => {},
+      );
+    });
+  });
   // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
   const backdrop = backdropClose(() => el, () => el.close());
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
@@ -128,10 +155,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
         datasets.set([]);
         models.set([]);
         benches.set([]);
-        benchesOk.set(false);
         labelJobs.set([]);
         loops.set([]);
-        cloud.set(false);
       }
       const mine =
         <A extends unknown[]>(f: (...a: A) => void) =>
@@ -144,14 +169,13 @@ export default function CommandPalette(props: CommandPaletteProps) {
       api.benches().then(
         mine((b) => {
           benches.set(b);
-          benchesOk.set(true);
           // Loops live under their benchmark: one request each (a server has a few benchmarks).
           Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then(mine((l) => loops.set(l.flat())));
         }),
-        mine(() => (benches.set([]), benchesOk.set(false), loops.set([]))),
+        mine(() => (benches.set([]), loops.set([]))),
       );
       api.labelJobs().then(mine((j) => labelJobs.set(j)), mine(() => labelJobs.set([])));
-      api.system().then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
+      api.system().then(mine((s) => system.set(s)), () => {});
     } else if (!open.get() && el.open) el.close();
   });
 
@@ -184,11 +208,16 @@ export default function CommandPalette(props: CommandPaletteProps) {
       { id: 'compare', group: 'Actions', label: 'Compare runs', icon: GitCompare, run: go('/runs/compare') },
       // Agent labeling, under Datasets (no nav item of its own).
       { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex'], icon: Tags, run: go('/datasets/label') },
-      { id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') },
-      // Vision benchmarks: offered where the server has them (its list answered).
-      ...(benchesOk.get()
-        ? [{ id: 'bench-new', group: 'Actions', label: 'New benchmark', match: ['Benchmark a model', 'Vision benchmark'], icon: Plus, run: go('/benchmarks?new=1') }]
-        : []),
+      { id: 'label-new', group: 'Actions', label: 'New labeling job', needs: LABEL_FEATURE, icon: Plus, run: go('/datasets/label?new=1') },
+      {
+        id: 'bench-new',
+        group: 'Actions',
+        label: 'New benchmark',
+        match: ['Benchmark a model', 'Vision benchmark'],
+        needs: BENCH_FEATURE,
+        icon: Plus,
+        run: go('/benchmarks?new=1'),
+      },
       {
         id: 'theme',
         group: 'Actions',
@@ -216,13 +245,14 @@ export default function CommandPalette(props: CommandPaletteProps) {
           ]),
     ];
     // Settings' sections, by name and by what they hold ("cloud", "theme", "server URL"): for a query only.
-    // Cloud only where Settings has it (a server with the cloud feature).
-    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts') && (x.id !== 'cloud' || cloud.get())).map((x) => ({
+    // Cloud only where Settings has it (a server with the cloud feature: `needs`).
+    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts')).map((x) => ({
       id: `settings-${x.id}`,
       group: 'Settings',
       label: x.label,
       match: x.match,
       scoped: true,
+      needs: x.id === 'cloud' ? 'cloud' : undefined,
       icon: SettingsIcon,
       run: go(`/settings?section=${x.id}`),
     }));
@@ -314,6 +344,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
     // With no query: navigation, the actions and the runs in flight. A filter reads the status enum, never the hint's
     // display word ("Running"): round 26's lowercase comparison against the sentence-case label dropped every run.
     const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.status !== undefined && ACTIVE.includes(i.status));
+    const sys = system.get();
     return [
       ...page,
       ...nav,
@@ -326,7 +357,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       ...b.map((i) => ({ ...i, scoped: true })),
       ...jobs.map((i) => ({ ...i, scoped: true })),
       ...l.map((i) => ({ ...i, scoped: true })),
-    ];
+    ].filter((i) => offered(sys, i.needs));
   });
 
   // No query: this page's commands, then Recent (the last items chosen, wherever they live), then the usual list.
