@@ -20,8 +20,10 @@ use folo_server::store::LogsQuery;
 use folo_server::{Options, RealStore, Server, Store, Token};
 use serde_json::{Value, json};
 
-/// Longest wait for a run or an instance to reach a state.
-const TIMEOUT: Duration = Duration::from_secs(120);
+/// Longest wait for a run or an instance to reach a state: only a hang gets here. A wait takes seconds on a quiet
+/// machine, but the waits for a first checkpoint copy or for every instance terminated took over two minutes with
+/// this binary's 26 tests training at once on a busy runner.
+const TIMEOUT: Duration = Duration::from_secs(600);
 /// The test connection's API key: it must never leave `connections.json`.
 pub(super) const SECRET: &str = "test-secret-key-0123456789";
 

@@ -570,8 +570,8 @@ fn train_until_stopped(args: &[&str], run: &Path) -> Vec<Value> {
     records
 }
 
-/// How long [`train_until_stopped`] lets a run take, start to exit: far more than a stopped run needs.
-const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long [`train_until_stopped`] lets a run take, start to exit: only one that ignores the stop reaches it.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// `folo stop` ends a running `folo train` after its current batch (status `stopped`); `--resume` then refuses a
 /// changed setting, and `--json-events epoch` leaves the step records out.

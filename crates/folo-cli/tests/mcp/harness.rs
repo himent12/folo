@@ -13,6 +13,11 @@ use serde_json::{Value, json};
 pub(super) const NEW: &str = "2026-07-28";
 pub(super) const OLD: &str = "2025-11-25";
 
+/// How long [`Client::finish`] lets `folo mcp` take to exit once stdin closes: only a hang gets here. The shutdown
+/// waits (at most a minute, `folo_server::real::SHUTDOWN_WAIT`) for a training run to stop after its current batch
+/// with its last checkpoint on disk, which took 17 s on a machine whose disk other builds kept busy.
+const EXIT_DEADLINE: Duration = Duration::from_secs(300);
+
 pub(super) struct Client {
     child: ChildGuard,
     pub(super) stdin: ChildStdin,
@@ -199,7 +204,7 @@ impl Client {
     /// Closes stdin, waits for the process and checks that stdout carried only JSON-RPC 2.0 messages.
     pub(super) fn finish(mut self) {
         drop(self.stdin);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + EXIT_DEADLINE;
         while self.child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "folo mcp did not exit after stdin closed");
             std::thread::sleep(Duration::from_millis(5));

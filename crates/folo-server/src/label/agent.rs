@@ -486,6 +486,10 @@ pub(super) fn cancel_when(marker: PathBuf) -> Arc<AtomicBool> {
 mod tests {
     use super::*;
 
+    /// The timeout of a shell call that should finish: only a hang gets here (starting a shell on a busy machine
+    /// has taken longer than [`PROBE_TIMEOUT`]).
+    const SHELL_CALL: Duration = Duration::from_secs(300);
+
     #[test]
     fn versions_are_read_from_either_cli() {
         assert_eq!(version_of("2.1.302 (Claude Code)\n").as_deref(), Some("2.1.302"));
@@ -495,11 +499,10 @@ mod tests {
 
     #[test]
     fn run_returns_output_and_status() {
-        let out = run(shell("echo hello"), None, PROBE_TIMEOUT, &AtomicBool::new(false)).unwrap();
+        let out = run(shell("echo hello"), None, SHELL_CALL, &AtomicBool::new(false)).unwrap();
         assert!(out.success);
         assert_eq!(out.stdout.trim(), "hello");
-        let out =
-            run(shell("echo oops 1>&2 && exit 3"), None, PROBE_TIMEOUT, &AtomicBool::new(false)).unwrap();
+        let out = run(shell("echo oops 1>&2 && exit 3"), None, SHELL_CALL, &AtomicBool::new(false)).unwrap();
         assert!(!out.success);
         assert_eq!(last_line(&out.stderr).as_deref(), Some("oops"));
     }
@@ -510,7 +513,7 @@ mod tests {
         let input = "x\n".repeat(1 << 19).into_bytes();
         // Either one copies its input to its output.
         let echo = if cfg!(windows) { shell("findstr x") } else { Command::new("cat") };
-        let out = run(echo, Some(input.clone()), PROBE_TIMEOUT, &AtomicBool::new(false)).unwrap();
+        let out = run(echo, Some(input.clone()), SHELL_CALL, &AtomicBool::new(false)).unwrap();
         assert!(out.success, "{}", out.stderr);
         assert_eq!(out.stdout.replace('\r', "").len(), input.len());
     }
