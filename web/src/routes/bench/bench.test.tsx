@@ -8,6 +8,7 @@ import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { Bench, BenchDesign, Model } from '$lib/api/types';
+import { BENCH_FEATURE } from '$lib/bench/rules';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -717,17 +718,27 @@ describe('the list', () => {
   });
 
   // #324: the palette's New benchmark (`?new=1`) opened its form over "This server has no vision benchmarks", and
-  // Create could only fail (501).
+  // Create could only fail (501). It follows the server's health (`hub.features`), at once: there is no answer to wait for.
   const formOpen = () => [...document.querySelectorAll<HTMLDialogElement>('dialog')].some((d) => d.open && d.textContent?.includes('New benchmark'));
-  it('?new=1 opens New benchmark on a server with benchmarks, and only the explanation on one without', async () => {
-    router.route = parse('#/benchmarks?new=1');
-    open(Benchmarks, {});
-    await until(() => formOpen(), 'the form');
-    unmount(c!);
-    hub.api = new MockApi('no-bench', 0);
-    open(Benchmarks, {});
-    await until(() => text().includes('This server has no vision benchmarks'), 'the explanation');
-    await settle();
-    expect(formOpen()).toBe(false);
-  });
+  for (const [what, features, opens] of [
+    ['lists benchmarks', [BENCH_FEATURE], true],
+    ['lists features without benchmarks', ['queue_control'], false],
+    ['lists no features (an older server, the demo)', null, true],
+  ] as const) {
+    it(`?new=1 on a server whose health ${what}: ${opens ? 'the form' : 'the explanation, never the form'}`, async () => {
+      if (!opens) hub.api = new MockApi('no-bench', 0);
+      hub.features = features;
+      try {
+        router.route = parse('#/benchmarks?new=1');
+        open(Benchmarks, {});
+        expect(formOpen()).toBe(opens);
+        if (!opens) {
+          await until(() => text().includes('This server has no vision benchmarks'), 'the explanation');
+          expect(formOpen()).toBe(false);
+        }
+      } finally {
+        hub.features = null;
+      }
+    });
+  }
 });

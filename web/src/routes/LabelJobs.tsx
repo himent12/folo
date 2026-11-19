@@ -7,6 +7,7 @@ import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { LabelJob } from '$lib/api/types';
+import { LABEL_FEATURE } from '$lib/label';
 import { media } from '$lib/design/tokens';
 import { ago, count as counted, num } from '$lib/format';
 import { href, router } from '$lib/router';
@@ -52,24 +53,15 @@ export default function LabelJobs() {
 
   // `#/datasets/label?new=1` opens the dialog (the palette's "New labeling job").
   // Followed, not read once: the palette can ask while this page is open (pages are keyed by path, not query). The ask
-  // leaves the URL at once, so the next one is a change again. It opens once the server has said it labels: on one that
-  // cannot (`folo serve --mock`), the page says so instead of a form whose Create can only fail (#324).
+  // leaves the URL at once, so the next one is a change again. Not on a server whose health said it cannot label
+  // (`folo serve --mock`): the page says so instead of a form whose Create can only fail (#324).
   const creating = signal(false);
-  const asked = signal(false);
   const askedNew = computed(() => router.route.query.get('new') === '1');
   effect(() => {
     if (!askedNew.get()) return;
     untrack(() => {
-      asked.set(true);
+      if (!hub.lacks(LABEL_FEATURE)) creating.set(true);
       router.go('/datasets/label', { replace: true });
-    });
-  });
-  const known = computed(() => unsupported.get() || system.data !== undefined || system.error !== undefined);
-  effect(() => {
-    if (!asked.get() || !known.get()) return;
-    untrack(() => {
-      asked.set(false);
-      if (!unsupported.get()) creating.set(true);
     });
   });
 

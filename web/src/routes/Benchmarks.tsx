@@ -3,10 +3,11 @@
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';
-import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, For, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Bench } from '$lib/api/types';
+import { BENCH_FEATURE } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
 import { href, router } from '$lib/router';
@@ -72,18 +73,9 @@ export default function Benchmarks() {
   const benches = new Resource((s) => hub.api.benches(s), { poll: 10_000 });
   const unsupported = computed(() => cannotBench(system.data, benches.error));
 
-  // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), once the server has said it has benchmarks:
-  // on one without (`folo serve --mock`), the page says so instead of a form whose Create can only fail (#324).
-  const creating = signal(false);
-  const asked = signal(untrack(() => router.route.query.get('new') === '1'));
-  const known = computed(() => unsupported.get() || system.data !== undefined || system.error !== undefined);
-  effect(() => {
-    if (!asked.get() || !known.get()) return;
-    untrack(() => {
-      asked.set(false);
-      if (!unsupported.get()) creating.set(true);
-    });
-  });
+  // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), unless the server's health said it has no
+  // benchmarks (`folo serve --mock`): the page says so instead of a form whose Create can only fail (#324).
+  const creating = signal(untrack(() => router.route.query.get('new') === '1' && !hub.lacks(BENCH_FEATURE)));
 
   // Newest first, as the server sends them.
   const sortKey = signal<Key>('created');

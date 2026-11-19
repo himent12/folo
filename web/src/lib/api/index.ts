@@ -12,7 +12,7 @@ import { computed, signal } from 'fw';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
-import { earlyTokenWall, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
+import { earlyTokenWall, featuresOf, isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -106,6 +106,7 @@ class Hub {
   #unreachable = signal(false);
   #refused = signal<string | null>(null);
   #version = signal<string | null>(null);
+  #features = signal<readonly string[] | null>(null);
   #api = signal<Api>(placeholder());
   #shared = computed(() => shareApi(this.#api.get()));
   #epoch = signal(0);
@@ -129,6 +130,25 @@ class Hub {
   }
   set version(v: string | null) {
     this.#version.set(v);
+  }
+  /**
+   * The optional features the server in use listed in its health (`/api/health`'s `features`, docs/API.md), from the
+   * connect's handshake and replaced by every later health answer (one after an outage: a server restarted with other
+   * features). Null while unknown: before the handshake, a server too old to list them, the in-browser demo.
+   */
+  get features(): readonly string[] | null {
+    return this.#features.get();
+  }
+  set features(v: readonly string[] | null) {
+    this.#features.set(v);
+  }
+  /**
+   * Whether the server in use has said it lacks `feature`: its health listed features without it. Unknown is not
+   * lacking, so a command or a form that needs it is offered as before (#324).
+   */
+  lacks(feature: string): boolean {
+    const f = this.#features.get();
+    return f !== null && !f.includes(feature);
   }
   get api(): Api {
     return this.#shared.get();
@@ -192,6 +212,7 @@ class Hub {
     this.#unreachable.set(false);
     this.#refused.set(null);
     this.#reach.reset(null);
+    this.features = null;
     if (forcedMock) {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
@@ -255,13 +276,26 @@ class Hub {
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
-          // nothing fails the probe.
-          this.#reach.reset((s) =>
-            http.health(s).catch((e: unknown) => {
-              if (!(e instanceof ApiError) || e.status === 0) throw e;
-            }),
+          // nothing fails the probe. Back after an outage (a restart, maybe with other features), its health is asked
+          // once more and its features replace these, as the screens fetch theirs again (`back`); the last ask wins.
+          let asked = 0;
+          this.#reach.reset(
+            (s) =>
+              http.health(s).catch((e: unknown) => {
+                if (!(e instanceof ApiError) || e.status === 0) throw e;
+              }),
+            () => {
+              const n = ++asked;
+              http.health().then(
+                (p: unknown) => {
+                  if (n === asked && attempt === this.#attempt && isHealth(p)) this.features = featuresOf(p);
+                },
+                () => {},
+              );
+            },
           );
           this.version = h.version;
+          this.features = featuresOf(h);
           this.reason = null;
           this.#unreachable.set(false);
           this.#refused.set(null);
