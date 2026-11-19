@@ -17,6 +17,9 @@ export function isHealth(h: unknown): h is Health {
   );
 }
 
+/** The features a health answer lists (`hub.features`); null from a server too old to list them. */
+export const featuresOf = (h: Health): readonly string[] | null => (Array.isArray(h.features) ? h.features : null);
+
 export const NOT_FOLO = 'This address answered, but not as a FOLO server.';
 
 /** A FOLO server started with `--token`: Studio has no token to send (docs/CLOUD.md, Securing a server). */

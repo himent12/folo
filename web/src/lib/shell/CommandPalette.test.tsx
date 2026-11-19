@@ -8,6 +8,7 @@ import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Run } from '$lib/api/types';
+import { LABEL_FEATURE } from '$lib/label';
 import { router } from '$lib/router';
 import CommandPalette, { type CommandPaletteProps } from './CommandPalette';
 
@@ -213,6 +214,100 @@ describe('CommandPalette: Settings and touch (shell F14, F17)', () => {
     expect(options()).not.toContain('Collapse sidebar');
     expect(document.querySelector('.palette footer')).toBeNull();
     expect(document.querySelector('.palette kbd')).toBeNull();
+  });
+});
+
+// #324: on `folo serve --mock` the palette offered New labeling job over "This server cannot label images", and the
+// form it opened could only fail (501). It follows the server's health (`hub.features`), which a later health replaces.
+describe('CommandPalette: what the server can do', () => {
+  afterEach(() => (hub.features = null));
+  const offered = (id: string) => document.getElementById(`pi-${id}`) !== null;
+  const press = (input: HTMLInputElement, key: string) => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    flushSync();
+  };
+  /** Arrows down to `id`: the combobox then points at it. */
+  function arrowTo(input: HTMLInputElement, id: string) {
+    for (let i = 0; i < 40 && input.getAttribute('aria-activedescendant') !== `pi-${id}`; i++) press(input, 'ArrowDown');
+    expect(input.getAttribute('aria-activedescendant')).toBe(`pi-${id}`);
+  }
+
+  for (const [what, features, shown] of [
+    ['lists labeling', [LABEL_FEATURE], true],
+    ['lists features without labeling', ['queue_control'], false],
+    ['lists no features (an older server, the demo)', null, true],
+  ] as const) {
+    it(`${shown ? 'offers' : 'does not offer'} New labeling job when the server's health ${what}; Label images always`, async () => {
+      hub.features = features;
+      const input = await openWith('new', '[id="pi-new-run"]');
+      expect(offered('label-new')).toBe(shown);
+      input.value = 'label images';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      // A place, as Datasets' own link to it: there the server says why it cannot.
+      expect(offered('label')).toBe(true);
+    });
+  }
+
+  it('follows a later health answer while open (a server restarted with other features)', async () => {
+    await openWith('new', '[id="pi-new-run"]');
+    expect(offered('label-new')).toBe(true);
+    hub.features = ['queue_control'];
+    flushSync();
+    expect(offered('label-new')).toBe(false);
+    hub.features = ['queue_control', LABEL_FEATURE];
+    flushSync();
+    expect(offered('label-new')).toBe(true);
+  });
+
+  // Review of #341: the highlight was a position, so when New labeling job went the one under it took its place, and
+  // Enter started a run on a dataset nobody had highlighted.
+  it('keeps the highlight on its command, and gives it to the first when that command goes', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const input = await openWith('new', '[id^="pi-act-train-"]');
+    arrowTo(input, 'label-new');
+    hub.features = ['queue_control'];
+    flushSync();
+    const first = document.querySelector<HTMLElement>('[role="option"]')!;
+    expect(input.getAttribute('aria-activedescendant')).toBe(first.id);
+    expect(first.getAttribute('aria-selected')).toBe('true');
+    press(input, 'Enter');
+    expect(go).toHaveBeenCalledTimes(1);
+    expect(first.id).not.toMatch(/^pi-act-train-/);
+    expect(go.mock.calls[0]![0]).not.toMatch(/dataset=/);
+  });
+
+  // Review of #341, round 2: the first item was highlighted by its place, so a row that loaded above it took the
+  // highlight, and Enter ran a command nobody had highlighted.
+  it('keeps the first item highlighted when a row loads above it', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    let late!: () => void;
+    const api = hub.api as MockApi;
+    const benches = api.benches.bind(api);
+    vi.spyOn(api, 'benches').mockImplementation(() => new Promise((r) => (late = () => r(benches()))));
+    const input = await openWith('new', '[id="pi-new-run"]');
+    expect(document.querySelector('[role="option"]')!.id).toBe('pi-new-run');
+    expect(input.getAttribute('aria-activedescendant')).toBe('pi-new-run');
+    late();
+    await vi.waitFor(() => (flushSync(), expect(document.querySelector('[role="option"]')!.id).toBe('pi-bench-new')));
+    expect(input.getAttribute('aria-activedescendant')).toBe('pi-new-run');
+    press(input, 'Enter');
+    expect(go).toHaveBeenCalledWith('/runs/new');
+  });
+
+  it('keeps the highlight on its command when a list loads late', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    let late!: () => void;
+    const api = hub.api as MockApi;
+    const datasets = api.datasets.bind(api);
+    vi.spyOn(api, 'datasets').mockImplementation(() => new Promise((r) => (late = () => r(datasets()))));
+    const input = await openWith('new', '[id="pi-label-new"]');
+    arrowTo(input, 'label-new');
+    late();
+    await vi.waitFor(() => (flushSync(), expect(document.querySelector('[id^="pi-act-train-"]')).not.toBeNull()));
+    expect(input.getAttribute('aria-activedescendant')).toBe('pi-label-new');
+    press(input, 'Enter');
+    expect(go).toHaveBeenCalledWith('/datasets/label?new=1');
   });
 });
 
