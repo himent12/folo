@@ -519,6 +519,66 @@ describe('the labeling editor: reviewing', () => {
   });
 });
 
+describe('the labeling editor: boxes changed elsewhere while a click was on its way (sweep 4 #318)', () => {
+  /** Holds the editor's next call of `method` until `go()`; the others (another client's) go through. */
+  function hold<K extends 'reviewLabelImage' | 'updateLabelImage'>(method: K) {
+    const gate = deferred<void>();
+    const real = hub.api[method].bind(hub.api) as (...a: unknown[]) => Promise<LabelImage>;
+    const spy = vi.spyOn(hub.api, method).mockImplementation(((...a: unknown[]) => gate.promise.then(() => real(...a))) as never);
+    return { real, spy, go: () => gate.resolve() };
+  }
+  const status = () => editor()!.querySelector('[role="status"]')?.textContent ?? '';
+
+  it('refuses "Looks right" once the boxes it was clicked on were replaced, and shows the new ones to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    const shown = boxCount();
+    expect(shown).toBeGreaterThan(0);
+    const review = hold('reviewLabelImage');
+    click(inEditor('Looks right'));
+    // Meanwhile the CLI clears the boxes and takes the review back (folo label set --clear, folo label review --undo).
+    await hub.api.updateLabelImage('lb_51d0', '23', []);
+    await review.real('lb_51d0', '23', false);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(boxCount()).toBe(0);
+    });
+    review.go();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(status()).toMatch(/Changed elsewhere/);
+    });
+    expect(review.spy.mock.calls[0]![3]).toMatch(new RegExp(`^${shown}-`));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 23 });
+    expect(page.images[22]).toMatchObject({ id: '23', boxes: [], reviewed: false });
+    // Still on this image, its new labels to look at.
+    expect(router.route.query.get('image')).toBe('23');
+    expect(inEditor('Looks right')).toBeDefined();
+  });
+
+  it('refuses a save once another client saved other boxes, and keeps the edits over those', async () => {
+    await openEditor('1');
+    const save = hold('updateLabelImage');
+    click(inEditor('Add box'));
+    click(inEditor('Save'));
+    const theirs = [
+      { class: 0, x1: 1, y1: 1, x2: 20, y2: 20 },
+      { class: 1, x1: 30, y1: 30, x2: 60, y2: 60 },
+    ];
+    await save.real('lb_7c21', '1', theirs);
+    save.go();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(status()).toMatch(/Changed elsewhere while you edited/);
+    });
+    expect((await hub.api.labelImages('lb_7c21', { limit: 1 })).images[0]!.boxes).toEqual(theirs);
+    expect(boxCount()).toBe(1);
+    expect(footer()).toMatch(/Unsaved changes/);
+    // Discard goes back to their boxes, not to the ones this editor opened with.
+    click(inEditor('Discard'));
+    expect(boxCount()).toBe(2);
+  });
+});
+
 describe('the labeling editor: saving from the keyboard (v-models-label N3)', () => {
   it('saves with Ctrl+S and stays, never the browser’s Save page', async () => {
     await openEditor('23', 'lb_51d0');

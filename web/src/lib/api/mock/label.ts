@@ -25,7 +25,7 @@ import type {
   StartLabeling,
   UpdateLabelJob,
 } from '../types';
-import { AGENT_NAME, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
+import { AGENT_NAME, boxRevision, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
 import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
 import { renderImage } from './render';
@@ -530,10 +530,18 @@ export class MockLabeling {
     if (r && !r.outcome && r.ids.slice(r.applied * r.batch).includes(im.id)) r.left.add(im.id);
   }
 
-  updateImage(id: string, imageId: string, boxes: Box[], now: number): LabelImage {
+  /** `409 label_boxes_changed` unless the image's boxes have the revision `expect` (when given), as the server checks. */
+  #expect(im: Img, expect: string | undefined) {
+    const now = boxRevision(im.boxes);
+    if (expect !== undefined && expect !== now)
+      throw new ApiError(409, 'label_boxes_changed', `image '${im.id}' has other boxes than revision ${expect} (now ${now})`);
+  }
+
+  updateImage(id: string, imageId: string, boxes: Box[], now: number, expect?: string): LabelImage {
     const j = this.#job(id);
     this.advance(j, now);
     const im = this.#image(j, imageId);
+    this.#expect(im, expect);
     if (boxes.length > 1000) throw new ApiError(400, 'invalid_body', 'field `boxes`: at most 1000');
     const clipped: Box[] = [];
     for (const b of boxes) {
@@ -559,10 +567,11 @@ export class MockLabeling {
   }
 
   /** `PUT …/images/{id}` with `reviewed` alone: the labels checked (or not), the boxes as they are. */
-  reviewImage(id: string, imageId: string, reviewed: boolean, now: number): LabelImage {
+  reviewImage(id: string, imageId: string, reviewed: boolean, now: number, expect?: string): LabelImage {
     const j = this.#job(id);
     this.advance(j, now);
     const im = this.#image(j, imageId);
+    this.#expect(im, expect);
     if (reviewed && im.status !== 'labeled')
       throw new ApiError(400, 'invalid_body', `image '${imageId}' has no labels to mark reviewed: save its boxes instead`);
     this.#claim(j, im);

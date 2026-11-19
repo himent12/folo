@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LabelEventMap, LabelJob, StartLabeling } from '../types';
+import { boxRevision } from '../../label';
 import { MockApi } from './index';
 import { BATCH_MS } from './label';
 
@@ -147,6 +148,16 @@ describe('MockApi agent labeling: edits and datasets', () => {
     await expect(api.updateLabelImage('lb_7c21', img.id, [{ class: 9, x1: 0, y1: 0, x2: 9, y2: 9 }])).rejects.toMatchObject({ status: 400 });
     const busy = (await api.labelImages('lb_3f9a', { status: 'labeling', limit: 1 })).images[0]!;
     await expect(api.updateLabelImage('lb_3f9a', busy.id, [])).rejects.toMatchObject({ status: 409, code: 'label_job_active' });
+  });
+
+  it('refuses a save or a review made on boxes the image no longer has (expect), as the server does', async () => {
+    const api = new MockApi('normal', 0);
+    const img = (await api.labelImages('lb_51d0', { limit: 23 })).images[22]!;
+    const seen = boxRevision(img.boxes);
+    await api.updateLabelImage('lb_51d0', img.id, [], seen);
+    await expect(api.reviewLabelImage('lb_51d0', img.id, true, seen)).rejects.toMatchObject({ status: 409, code: 'label_boxes_changed' });
+    await expect(api.updateLabelImage('lb_51d0', img.id, img.boxes, seen)).rejects.toMatchObject({ status: 409, code: 'label_boxes_changed' });
+    expect(await api.reviewLabelImage('lb_51d0', img.id, false, boxRevision([]))).toMatchObject({ boxes: [], reviewed: false });
   });
 
   it('takes an image that waits for its call out of the run when it is labeled by hand', async () => {
