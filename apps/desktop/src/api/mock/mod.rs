@@ -192,6 +192,14 @@ impl MockBackend {
         self
     }
 
+    /// Takes the boxes off a dataset's first `n` images: background images listed first.
+    #[cfg(test)]
+    pub fn with_background_first(mut self, id: &str, n: usize) -> Self {
+        let f = self.datasets.iter_mut().find(|d| d.ds.id == id).expect("a demo dataset");
+        f.images.iter_mut().take(n).for_each(|im| im.boxes.clear());
+        self
+    }
+
     /// The next run-history read fails as an unreachable server would.
     #[cfg(test)]
     pub fn fail_metrics_once(&self) {

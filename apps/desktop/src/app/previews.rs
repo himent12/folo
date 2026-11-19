@@ -1,28 +1,22 @@
-//! A dataset card's images: the first few of its list, not the whole of it (COCO's is 123k records,
-//! about 70 MB), read when a card shows it. Opening the dataset reads every image
-//! ([`FoloApp::ensure_dataset`]); a list read that way, or still arriving, serves the card from then on.
+//! A dataset card's images: the first page of its list, not the whole of it (COCO's is 123k
+//! records, about 70 MB), read when a card shows it, whatever the dataset's size. Opening the
+//! dataset reads every image ([`FoloApp::ensure_dataset`]); a list read that way, or still
+//! arriving, serves the card from then on.
 
 use folo_ui::Context;
 
 use super::FoloApp;
-use crate::api::{Dataset, ImageInfo, ImageQuery, SplitsExt};
+use crate::api::{Dataset, ImageInfo, ImageQuery};
 use crate::store::Load;
 
-/// The images a card reads of a larger dataset: the four with boxes it shows, with room for a few
+/// The images a card reads: the four it shows, those with boxes first, with room for a few
 /// without any.
 pub(crate) const PREVIEW_PAGE: u32 = 32;
-/// A dataset up to this size has its whole list read for its card instead: one request either way
-/// (the most a server's page holds, docs/API.md), and its page then opens on its full grid.
-pub(crate) const CARD_WHOLE_LIST: u64 = 1_000;
 
 impl FoloApp {
     /// What dataset `d`'s card shows: its own record (the class balance, what is wrong with it) and
     /// its first images.
     pub fn ensure_dataset_card(&mut self, d: &Dataset, cx: &mut Context<Self>) {
-        if d.splits.total() <= CARD_WHOLE_LIST {
-            self.ensure_dataset(&d.id, cx);
-            return;
-        }
         self.ensure_dataset_record(&d.id, cx);
         if self.store.images.contains_key(&d.id)
             || self.store.previews.get(&d.id).is_some_and(|l| !l.needs_fetch())
@@ -53,12 +47,15 @@ impl FoloApp {
         );
     }
 
-    /// The first `n` images with boxes of dataset `id` that a card shows: from its full list when
-    /// that is read (or arriving), else from the card's own read.
+    /// The first `n` images of dataset `id` that a card shows, those with boxes first, then the rest
+    /// (a card is never empty when the dataset has images): from its full list when that is read
+    /// (or arriving), else from the card's own read.
     pub fn card_images(&self, id: &str, n: usize) -> Vec<ImageInfo> {
         let held = self.store.images.get(id).and_then(|l| l.ready());
-        held.or_else(|| self.store.previews.get(id).and_then(|l| l.ready()))
-            .map(|v| v.iter().filter(|m| !m.boxes.is_empty()).take(n).cloned().collect())
-            .unwrap_or_default()
+        let Some(v) = held.or_else(|| self.store.previews.get(id).and_then(|l| l.ready())) else {
+            return Vec::new();
+        };
+        let boxed = v.iter().filter(|m| !m.boxes.is_empty());
+        boxed.chain(v.iter().filter(|m| m.boxes.is_empty())).take(n).cloned().collect()
     }
 }

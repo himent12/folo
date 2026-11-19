@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::data::IMAGE_PAGE;
-use super::previews::{CARD_WHOLE_LIST, PREVIEW_PAGE};
+use super::previews::PREVIEW_PAGE;
 use super::tests::{drive, open_with};
 use super::{Route, ServerMode};
 use crate::api::mock::MockBackend;
@@ -166,12 +166,7 @@ fn a_large_dataset_card_reads_only_its_first_images() {
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.card_images("ds_8f2c", 4).len(), 4, "the card has its four images");
         assert_eq!(held(this, "ds_8f2c"), None, "and no image list");
-        // A small dataset's card reads its whole list in its one request: its page opens full.
-        let small = this.store.dataset_summary("ds_c07a").map(|d| d.splits.total()).expect("listed");
-        assert!(small <= CARD_WHOLE_LIST);
-        assert_eq!(held(this, "ds_c07a"), Some(small));
     });
-    assert_eq!(asked("ds_c07a").len(), 1);
 
     // Opened: every image, from the first on.
     drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset("ds_8f2c".into()), w, cx));
@@ -193,6 +188,43 @@ fn a_large_dataset_card_reads_only_its_first_images() {
     drive(&mut app, window, |this, _, _| {
         assert_eq!(held(this, "ds_8f2c"), Some(total));
         assert_eq!(this.card_images("ds_8f2c", 4).len(), 4);
+    });
+}
+
+/// Issue #345, review: a dataset of any size has its card read one small page (shapes, 1,000
+/// images, read its whole list), and a page that starts with background images still fills the
+/// card: those with boxes first, then the rest (shapes-crowded showed an empty mosaic).
+#[test]
+fn every_dataset_card_reads_one_small_page_and_is_never_empty() {
+    let api = Arc::new(
+        MockBackend::new(4200, true)
+            .with_background_first("ds_c07a", 30)
+            .with_background_first("ds_5e21", 40),
+    );
+    let (mut app, window) = open_with(api.clone());
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
+    drawn_keys(&mut app, window);
+    let preview = ImageQuery { limit: PREVIEW_PAGE, ..Default::default() };
+    let lists = api.image_lists();
+    drive(&mut app, window, |this, _, _| {
+        let ids: Vec<String> =
+            this.store.datasets.ready().expect("listed").iter().map(|d| d.id.clone()).collect();
+        for id in &ids {
+            let asked: Vec<&ImageQuery> = lists.iter().filter(|(d, _)| d == id).map(|(_, q)| q).collect();
+            assert_eq!(asked, vec![&preview], "{id}: one small page");
+            assert!(!this.store.images.contains_key(id.as_str()), "{id}: no image list");
+        }
+        let thousand = this.store.dataset_summary("ds_8f2c").map(|d| d.splits.total());
+        assert_eq!(thousand, Some(1_000));
+        assert_eq!(this.card_images("ds_8f2c", 4).len(), 4);
+        // 30 background images, then annotated ones: those come first, the rest fill the card.
+        let mixed = this.card_images("ds_c07a", 4);
+        let boxed = mixed.iter().take_while(|m| !m.boxes.is_empty()).count();
+        assert!((1..4).contains(&boxed), "annotated first, then background: {boxed}");
+        assert!(mixed.len() == 4 && mixed[boxed..].iter().all(|m| m.boxes.is_empty()));
+        // A page with no box at all: four background images, not an empty mosaic.
+        let bare = this.card_images("ds_5e21", 4);
+        assert!(bare.len() == 4 && bare.iter().all(|m| m.boxes.is_empty()));
     });
 }
 
@@ -508,12 +540,21 @@ fn a_dataset_read_again_with_other_contents_lists_its_images_again() {
     drive(&mut app, window, |this, _, _| {
         let d = this.store.dataset.get(&id).and_then(|l| l.ready()).expect("read again");
         assert_eq!(d.splits.total(), total, "the dataset as it is now");
-        let images = this.store.images.get(&id).and_then(|l| l.ready()).map(|l| l.len() as u64);
-        assert_eq!(images, Some(total), "its image list read again, not the old one kept");
+        assert!(
+            !this.store.images.contains_key(&id),
+            "its old image list dropped (a card reads a page of its own)"
+        );
         assert!(
             this.store.issues.get(&id).is_none_or(|l| l.error().is_none_or(|e| e.code != "old")),
             "its old label issues dropped"
         );
+    });
+    // Opened: its image list read again.
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset(id.clone()), w, cx));
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let images = this.store.images.get(&id).and_then(|l| l.ready()).map(|l| l.len() as u64);
+        assert_eq!(images, Some(total), "its image list read again, not the old one kept");
     });
 }
 
