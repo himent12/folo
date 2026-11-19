@@ -84,6 +84,11 @@ impl Default for SyntheticConfig {
 }
 
 impl SyntheticConfig {
+    /// Fails with [`DataError::Config`] when the generator cannot use this config.
+    pub fn check(&self) -> Result<()> {
+        self.kinds().map(drop)
+    }
+
     /// Checks the settings and resolves class names to shape kinds.
     fn kinds(&self) -> Result<Vec<usize>> {
         if self.classes.is_empty() {
@@ -479,21 +484,25 @@ pub struct WrittenDataset {
 }
 
 /// Writes a YOLO-format dataset to `dir`: `images/{train,val}/NNNNNN.jpg|png`, `labels/{train,val}/NNNNNN.txt` and
-/// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic.
+/// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic. `dir`
+/// must be missing or empty: it is claimed before the first file ([`crate::unfinished::claim`]).
 pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Result<WrittenDataset> {
-    write_yolo_with_progress(cfg, dir, format, |_| {})
+    cfg.check()?;
+    write_yolo_with_progress(cfg, crate::unfinished::claim(dir)?, format, |_| {})
 }
 
-/// [`write_yolo`] that calls `progress(done)` after each image is written. Calls come from worker threads and
-/// `done` counts up to `cfg.images`.
+/// [`write_yolo`] into a folder the caller claimed, that calls `progress(done)` after each image is written. Calls
+/// come from worker threads and `done` counts up to `cfg.images`. Check `cfg` first ([`SyntheticConfig::check`]):
+/// like any error here, a refused config leaves the folder marked unfinished.
 pub fn write_yolo_with_progress(
     cfg: &SyntheticConfig,
-    dir: &Path,
+    out: crate::unfinished::Claim,
     format: ImageFormat,
     progress: impl Fn(usize) + Sync,
 ) -> Result<WrittenDataset> {
     let done = std::sync::atomic::AtomicUsize::new(0);
     let kinds = cfg.kinds()?;
+    let dir = out.dir();
     for split in ["train", "val"] {
         for kind in ["images", "labels"] {
             let d = dir.join(kind).join(split);
@@ -530,8 +539,10 @@ pub fn write_yolo_with_progress(
     }
     let yaml_path = dir.join("data.yaml");
     std::fs::write(&yaml_path, yaml).map_err(|e| DataError::io(&yaml_path, e))?;
+    let root = dir.to_path_buf();
+    out.finish()?;
     Ok(WrittenDataset {
-        root: dir.to_path_buf(),
+        root,
         yaml: yaml_path,
         splits: [ntrain, cfg.images - ntrain],
         boxes: boxes.iter().sum(),

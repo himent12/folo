@@ -113,6 +113,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
         }
         _ => yaml_dir.clone(),
     };
+    crate::unfinished::check(&root)?;
     let names = parse_names(&v, yaml)?;
     let mut splits: BTreeMap<Split, Vec<PathBuf>> = BTreeMap::new();
     for (split, keys) in

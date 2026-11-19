@@ -86,6 +86,66 @@ fn synth_then_stats_and_a_clean_check() {
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
 }
 
+/// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, the
+/// same command run again says what to do and deletes nothing, and run again after deleting the folder it writes
+/// the whole dataset.
+#[test]
+fn synth_after_a_stopped_one() {
+    let t = TestDir::new("cli-synth-again");
+    let dir = t.join("NEW");
+    // What a synth stopped after its first image leaves.
+    for d in ["images/train", "labels/train"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(dir.join(folo_data::unfinished::MARKER), "").unwrap();
+    std::fs::write(dir.join("images/train/000000.jpg"), "half").unwrap();
+    let hint = |err: &serde_json::Value| {
+        err["hint"].as_str().unwrap().contains("delete the folder and run the command")
+    };
+    for cmd in ["stats", "check"] {
+        let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{err}");
+        assert!(hint(err), "{err}");
+    }
+    let synth = ["dataset", "synth", s(&dir), "--images", "8", "--imgsz", "32", "--json"];
+    let (code, stdout, _) = folo(&synth);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("output_exists")), "{err}");
+    assert!(hint(err), "{err}");
+    assert!(
+        dir.join("images/train/000000.jpg").is_file() && dir.join(folo_data::unfinished::MARKER).is_file()
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+    let (code, _, stderr) = folo(&synth);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!dir.join(folo_data::unfinished::MARKER).exists());
+    let (code, stdout, _) = folo(&["dataset", "stats", s(&dir), "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 6, "val": 2, "test": 0 }));
+}
+
+/// Output folders `main` wrote into: the current folder (`synth .`) and a 250-character name.
+#[test]
+fn synth_into_the_current_folder_and_a_long_name() {
+    let t = TestDir::new("cli-synth-here");
+    let here = t.join("here");
+    std::fs::create_dir(&here).unwrap();
+    let out = folo_cmd()
+        .args(["dataset", "synth", ".", "--images", "4", "--imgsz", "32", "--json"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(here.join("data.yaml").is_file() && !here.join(folo_data::unfinished::MARKER).exists());
+
+    let long = t.join("n".repeat(250));
+    let (code, stdout, _) = folo(&["dataset", "synth", s(&long), "--images", "4", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(long.join("data.yaml").is_file());
+}
+
 #[test]
 fn check_reports_each_issue_and_exits_1() {
     let t = TestDir::new("cli-check");

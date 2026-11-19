@@ -14,7 +14,7 @@
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
 //! - **Tools** ([`check`], [`convert`], [`pack`]): line-level dataset validation, YOLO / COCO conversion, and a
-//!   dataset as one tar stream for another FOLO server.
+//!   dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being written.
 //! - **Support**: [`guard`] (a process-wide read guard, installed by `folo mcp --confine`), [`par`] (row
 //!   parallelism that the loader's workers switch off), [`paths`] (file names shared by `folo dataset check --json`
 //!   and the server), [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
@@ -71,6 +71,7 @@ pub mod resize;
 mod rng;
 mod stats;
 pub mod synthetic;
+pub mod unfinished;
 pub mod warp;
 
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
