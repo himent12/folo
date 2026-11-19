@@ -536,7 +536,8 @@ pub struct FoloApp {
     /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
     /// it opens, offered only for a dataset the server wrote.
     pub delete_files: bool,
-    /// Keeps the second press of the double-click that opened an overlay from dismissing it.
+    /// Keeps the rest of the click that opened an overlay (a double-click's second press) from
+    /// dismissing it or pressing what opened under the pointer.
     pub overlay_presses: crate::overlays::OverlayPresses,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.

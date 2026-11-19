@@ -15,8 +15,8 @@ mod toasts;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, App, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, Context, DispatchPhase, Div, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseUpEvent, ParentElement, StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 
 use crate::app::{Action, FoloApp};
@@ -26,33 +26,46 @@ use crate::ui::*;
 pub use confirm_close::closing_stops;
 pub use new_run_footer::estimate;
 
-/// Whether the overlay on top has seen a press begin, so that the second press of a double-click
-/// whose first press opened it is not taken as a press of its own: on the backdrop it would
-/// dismiss the overlay at once, on the panel it could press what opened under the pointer (a
-/// confirmation's Delete). The platform counts the clicks with the system's double-click time and
-/// distance (`MouseDownEvent::click_count`), so no timer is kept here: a press that starts a new
-/// click (count 1) is the overlay's own, and so is every later press of that click.
+/// Keeps an overlay from taking the rest of the click that opened it: the second press of a
+/// double-click whose first press (or its release) opened the overlay would dismiss it at once on
+/// the backdrop, or press what opened under the pointer on the panel (a confirmation's Delete).
+/// Only an overlay that came up while a press or release was handled is guarded, and only against
+/// the later presses of that same click, those whose click count goes on from the opening one's
+/// (`MouseDownEvent::click_count`, the platform's): one opened by a key, a command or a timer takes
+/// every press, and a press that starts a click of its own ends the guard. No timer is kept here.
 #[derive(Default)]
 pub struct OverlayPresses {
+    /// The overlay on top in the last frame.
     top: Option<&'static str>,
-    began: bool,
+    /// The click count of a press or release handled since the last frame.
+    pointer: Option<usize>,
+    /// The overlay on top came up while a press or release of this click count was handled.
+    opened_by: Option<usize>,
 }
 
 impl OverlayPresses {
-    /// The overlay now on top (each render): one that has just come up has seen no press.
+    /// A press (`down`) or release is being handled, before any element sees it (`press_tracker`).
+    /// A press that does not go on counting from the opening one starts a click of its own.
+    pub fn pointer(&mut self, click_count: usize, down: bool) {
+        if down && self.opened_by.is_some_and(|n| click_count <= n) {
+            self.opened_by = None;
+        }
+        self.pointer = Some(click_count);
+    }
+
+    /// The overlay on top this frame (each render; a press draws one): one that came up since the
+    /// last frame is guarded only when a press or release was handled meanwhile.
     pub fn shown(&mut self, top: Option<&'static str>) {
         if self.top != top {
             self.top = top;
-            self.began = false;
+            self.opened_by = top.and(self.pointer);
         }
+        self.pointer = None;
     }
 
     /// Whether the overlay on top takes a press with this click count.
-    pub fn admits(&mut self, click_count: usize) -> bool {
-        if click_count <= 1 {
-            self.began = true;
-        }
-        self.began
+    pub fn admits(&self, click_count: usize) -> bool {
+        self.opened_by.is_none_or(|n| click_count <= n)
     }
 }
 
@@ -144,8 +157,39 @@ impl FoloApp {
         out
     }
 
+    /// Tells `overlay_presses` of every press and release in the window, whatever is under the
+    /// pointer, before the page or an overlay sees it (the root's first child: ahead of them in the
+    /// capture phase), and draws a frame after it, in which `shown` sees whether it opened one.
+    pub(crate) fn press_tracker(cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
+        let track = move |click_count, down, cx: &mut App| {
+            let _ = view.update(cx, |this: &mut Self, cx| {
+                this.overlay_presses.pointer(click_count, down);
+                cx.notify();
+            });
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let up = track.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        track(ev.click_count, true, cx);
+                    }
+                });
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        up(ev.click_count, false, cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .into_any_element()
+    }
+
     /// For an overlay's backdrop and panel (the parts that take its presses): drops a press that
-    /// continues a double-click begun before the overlay came up (`OverlayPresses`).
+    /// goes on with the click that opened the overlay (`OverlayPresses`).
     fn guard_presses(cx: &mut Context<Self>) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         cx.listener(|this, ev: &MouseDownEvent, _, cx| {
             if !this.overlay_presses.admits(ev.click_count) {
@@ -312,24 +356,57 @@ impl FoloApp {
 mod tests {
     use super::OverlayPresses;
 
+    /// A press of this click count, as the window sees it: the tracker, then the overlay's guard.
+    fn press(p: &mut OverlayPresses, click_count: usize) -> bool {
+        p.pointer(click_count, true);
+        p.admits(click_count)
+    }
+
+    /// A whole click (press and release) of this click count.
+    fn click(p: &mut OverlayPresses, click_count: usize) -> bool {
+        let admitted = press(p, click_count);
+        p.pointer(click_count, false);
+        admitted
+    }
+
     #[test]
-    fn an_overlay_takes_the_presses_of_clicks_that_began_on_it() {
+    fn an_overlay_takes_no_more_presses_of_the_click_that_opened_it() {
         let mut p = OverlayPresses::default();
+        click(&mut p, 1);
         p.shown(Some("synth"));
-        assert!(!p.admits(2), "the double-click that opened it");
-        assert!(p.admits(1) && p.admits(2), "a double-click of its own");
-        // A dialog it opens on a press: that press's next one is not the new dialog's.
+        assert!(!press(&mut p, 2), "the double-click that opened it");
+        assert!(!press(&mut p, 3), "and a triple click");
+        assert!(press(&mut p, 1) && press(&mut p, 2), "a double-click of its own");
+        // A dialog it opens on a click: that click's next press is not the new dialog's.
+        click(&mut p, 1);
         p.shown(Some("confirm-delete"));
-        assert!(!p.admits(2));
-        // Back to the first one when it closes: the second press of the click that closed it is
+        assert!(!press(&mut p, 2));
+        // Back to the first one when it closes: the next press of the click that closed it is
         // not the first one's either.
-        p.admits(1);
+        click(&mut p, 1);
         p.shown(Some("synth"));
-        assert!(!p.admits(2));
-        // Closed, then opened again by a double-click.
-        p.admits(1);
+        assert!(!press(&mut p, 2));
+        // Closed by a click, then opened again by a double-click.
+        click(&mut p, 1);
         p.shown(None);
+        click(&mut p, 1);
         p.shown(Some("synth"));
-        assert!(!p.admits(2) && p.admits(1));
+        assert!(!press(&mut p, 2) && press(&mut p, 1));
+    }
+
+    #[test]
+    fn an_overlay_that_no_press_opened_takes_every_press() {
+        let mut p = OverlayPresses::default();
+        // A click on the page that opens nothing (its frame is drawn), then a key opens the palette.
+        click(&mut p, 1);
+        p.shown(None);
+        p.shown(Some("palette"));
+        assert!(press(&mut p, 2), "the next press of that click dismisses it");
+        // A press that opened it, then a frame: a later overlay on top (a timer's) is no press's.
+        p.shown(None);
+        click(&mut p, 1);
+        p.shown(Some("synth"));
+        p.shown(Some("confirm-close"));
+        assert!(press(&mut p, 2));
     }
 }
