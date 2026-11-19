@@ -346,7 +346,20 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     };
     let path =
         a.output.unwrap_or_else(|| PathBuf::from(format!("{}-{}.jpg", safe(&r.job_id), safe(&image.id))));
-    std::fs::write(&path, &jpeg).map_err(|e| {
+    if let Some(which) = job_image_at(&s.labels, &r.job_id, &path)? {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!(
+                "{} is {which} of job {}; a view never replaces it",
+                folo_api::json::path(&path),
+                r.job_id
+            ),
+        )
+        .hint("pass -o a file that is not one of the job's images"));
+    }
+    // Through a fresh file renamed over `path`: a hard link to an image is replaced, never written in place.
+    crate::infer::write_new(&path, &jpeg).map_err(|e| {
         CliError::new(ExitCode::Runtime, "io_error", format!("writing {}: {e}", folo_api::json::path(&path)))
     })?;
     let mut record = folo_api::json::to_value(&r).unwrap_or_default();
@@ -356,6 +369,40 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     out.human(text.replace("view again with from: ", "add --from "));
     out.human(format!("wrote {}", folo_api::json::path(&path)));
     Ok(())
+}
+
+/// Which image of job `job` `path` is (`image <file>`), if it is one: the same file however `path` spells it
+/// (relative, letter case, a symbolic link) when the job is open in this process. A server does not say where its
+/// images are, so there an existing `path` is taken for one (`named like image <file>`) when its stem, reduced as a
+/// job names its files (letters, digits, `.`, `_`, `-`; without case), is the stem of one of them. A new file is
+/// never one of them.
+fn job_image_at(labels: &Labels, job: &str, path: &Path) -> Result<Option<String>, CliError> {
+    let Ok(canon) = std::fs::canonicalize(path) else { return Ok(None) };
+    if let Some(files) = labels.files(job).map_err(api_error)? {
+        let found = files.iter().find(|f| std::fs::canonicalize(f).is_ok_and(|f| f == canon));
+        return Ok(found.map(|f| format!("image {}", f.file_name().unwrap_or_default().to_string_lossy())));
+    }
+    let stem = |name: &str| -> String {
+        let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+        let kept = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-');
+        stem.chars()
+            .map(|c| if kept(c) { c } else { '_' })
+            .collect::<String>()
+            .trim_matches('.')
+            .to_lowercase()
+    };
+    let ours = stem(&path.file_name().unwrap_or_default().to_string_lossy());
+    let mut offset = 0;
+    loop {
+        let (page, total) = labels.image_page(job, None, None, false, offset, 1000).map_err(api_error)?;
+        if let Some(i) = page.iter().find(|i| stem(&i.file) == ours) {
+            return Ok(Some(format!("named like image {}", i.file)));
+        }
+        offset += page.len() as u64;
+        if page.is_empty() || offset >= total {
+            return Ok(None);
+        }
+    }
 }
 
 /// `s` with only `A-Z a-z 0-9 - _` (a file name made from ids).

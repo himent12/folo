@@ -366,7 +366,7 @@ fn save_paths(dir: &Path, images: &[(PathBuf, PathBuf)]) -> Result<Vec<(PathBuf,
 
 /// Write `bytes` to `dst` through a fresh temporary file renamed over it, so an existing `dst` (even a hard link
 /// to a source image) is replaced as a directory entry, never overwritten in place.
-fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(dst).map_err(|e| e.to_string())?;
     let r = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| {

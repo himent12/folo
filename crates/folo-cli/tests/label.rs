@@ -218,6 +218,17 @@ fn label_review_and_export_in_this_process() {
     let jpeg = image::open(&out).unwrap();
     assert_eq!((jpeg.width(), jpeg.height()), (64, 48), "never upscaled");
     let rev = s(&view["image"]["revision"]).to_string();
+    // Never over an image of the job (any of them, however its path is spelled); a hard link to one is replaced as
+    // a link, the image keeps its bytes.
+    let source = std::fs::read(dir.join("p4.png")).unwrap();
+    let spelled = dir.join("..").join("photos").join(if cfg!(windows) { "P4.PNG" } else { "p4.png" });
+    assert_eq!(env.fails(&["view", &job, &a, "-o", spelled.to_str().unwrap()], 2), "usage");
+    assert_eq!(std::fs::read(dir.join("p4.png")).unwrap(), source);
+    let link = t.join("link.png");
+    std::fs::hard_link(dir.join("p4.png"), &link).unwrap();
+    env.ok(&["view", &job, &a, "-o", link.to_str().unwrap()]);
+    assert_eq!(std::fs::read(dir.join("p4.png")).unwrap(), source);
+    assert_ne!(std::fs::read(&link).unwrap(), source);
 
     let edit = ["set", &job, &a, "--relabel", "1=person", "--add", "car,0,0,16,12", "--size", "32x24"];
     assert_eq!(env.fails(&edit, 2), "usage", "every edit needs --expect");
@@ -309,6 +320,11 @@ fn label_through_a_folo_serve() {
 
     let page = env.ok(&[&["images", &job, "--limit", "1"], &srv[..]].concat());
     let a = s(&page["items"][0]["id"]).to_string();
+    // The server does not say where its images are: a file named like one of them is never replaced.
+    let p4 = dir.join("p4.png");
+    let source = std::fs::read(&p4).unwrap();
+    assert_eq!(env.fails(&[&["view", &job, &a, "-o", p4.to_str().unwrap()], &srv[..]].concat(), 2), "usage");
+    assert_eq!(std::fs::read(&p4).unwrap(), source);
     let boxes = env.ok(&[&["images", &job, "--limit", "1", "--boxes"], &srv[..]].concat());
     let seen = s(&boxes["items"][0]["revision"]).to_string();
     let set = env.ok(&[&["set", &job, &a, "--clear", "--expect", &seen], &srv[..]].concat());
