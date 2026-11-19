@@ -794,12 +794,17 @@ export function bestF1Conf(a: Pick<BenchAccuracy, 'f1' | 'best_conf'>): number |
 
 /**
  * What the Images section shows of a scored entry's detections, from the confidence its images were taken at (`at`, the
- * page's `conf`): its best-F1 confidence as before; 0, every detection (or that it made none, once every image is loaded
- * and none has one); above 0 with no best F1, an older FOLO's grading, which kept only those from the grid's top.
+ * page's `conf`): its best-F1 confidence as before; 0, its detections at every confidence, said as the cutoff and not a
+ * total so it is true on a partly loaded gallery (or that it made none, once every image is loaded and none has one);
+ * above 0 with no best F1, an older FOLO's grading, which kept only those from the grid's top.
  */
 export function imagesShownText(at: number, bestConf: number | null, noneMade: boolean): string {
   if (bestConf !== null && at === bestConf) return `Its detections from confidence ${conf(at)} up (its best F1), on the unchanged images.`;
-  if (at <= 0) return noneMade ? 'It made no detections on the unchanged images.' : 'Every detection it made, on the unchanged images.';
+  if (at <= 0) {
+    return noneMade
+      ? 'It made no detections on the unchanged images.'
+      : 'Its detections at every confidence (there is no best-F1 confidence), on the unchanged images.';
+  }
   return bestConf !== null
     ? `Its detections from confidence ${conf(at)} up, on the unchanged images.`
     : `Its detections from confidence ${conf(at)} up, on the unchanged images: an older FOLO graded it, and running the benchmark again shows every detection.`;

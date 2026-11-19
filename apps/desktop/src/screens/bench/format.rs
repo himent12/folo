@@ -195,8 +195,9 @@ pub fn prf_label(a: &BenchAccuracy) -> String {
 }
 
 /// What the images panel shows of a scored entry's detections, from the confidence its images were taken at (the
-/// page's `conf`, `best_conf` from a server before it): its best-F1 confidence as before; 0, every detection (or that
-/// it made none, once every image is loaded and none has one); above 0 with no best F1, an older FOLO's grading.
+/// page's `conf`, `best_conf` from a server before it): its best-F1 confidence as before; 0, its detections at every
+/// confidence, said as the cutoff and not a total so it is true on a partial page (or that it made none, once every
+/// image is loaded and none has one); above 0 with no best F1, an older FOLO's grading.
 pub fn images_shown(page: &BenchEntryImagePage, a: &BenchAccuracy) -> String {
     let at = page.conf.unwrap_or(a.best_conf);
     let best = best_f1_conf(a);
@@ -207,7 +208,7 @@ pub fn images_shown(page: &BenchEntryImagePage, a: &BenchAccuracy) -> String {
         if all && page.images.iter().all(|im| im.detections.is_empty()) {
             ": it made none".into()
         } else {
-            ", every one it made".into()
+            " at every confidence (there is no best-F1 confidence)".into()
         }
     } else if best.is_some() {
         format!(" at confidence {} and up", fmt_conf(at))
@@ -273,13 +274,15 @@ mod tests {
         assert_eq!(best_f1_conf(&accuracy(0., 0.)), None);
         assert_eq!(prf_label(&none), "P · R · F1 (F1 is 0 at every confidence)");
         // 100 wrong above one right on an image (the scorer counts the top 100, so F1 is 0): graded at 0, all 101.
+        let every = " at every confidence (there is no best-F1 confidence)";
         let cap = page(Some(0.), 1, 1, 101);
-        assert_eq!(images_shown(&cap, &none), ", every one it made");
+        assert_eq!(images_shown(&cap, &none), every);
         // No class evaluated: graded at 0 too, and `best_conf` 0 is not named.
-        assert_eq!(images_shown(&cap, &accuracy(0., 0.)), ", every one it made");
-        // It made no detections: said once every image is in; before, what is shown is still every one.
+        assert_eq!(images_shown(&cap, &accuracy(0., 0.)), every);
+        // It made no detections: said once every image is in. Before, the cutoff, not a total: 24 of 27 loaded, none
+        // with a detection, may still have one on the last page.
         assert_eq!(images_shown(&page(Some(0.), 2, 2, 0), &none), ": it made none");
-        assert_eq!(images_shown(&page(Some(0.), 2, 30, 0), &none), ", every one it made");
+        assert_eq!(images_shown(&page(Some(0.), 24, 27, 0), &none), every);
         // Stored by an older FOLO (no `conf`): taken at `best_conf`, 1, so not every detection.
         assert_eq!(
             images_shown(&page(None, 2, 2, 0), &none),
