@@ -4,7 +4,8 @@
 //! folds a call whose argument it can see into the correctly rounded value, so whether a vertex came from the
 //! compiler or from libm depended on inlining, that is on the build profile: release and debug builds drew a
 //! square 1 ulp apart and wrote different images and labels for one seed. These functions give the same bits
-//! wherever they run and however they are compiled, and the generator never calls libm.
+//! wherever they run and however they are compiled. The generator uses no other approximation from libm: what it
+//! still calls (`sqrt`, `floor`, `round`, the remainder of `rem_euclid`) is exactly specified, the same everywhere.
 
 use std::f64::consts::{FRAC_2_PI, LN_2};
 
@@ -13,10 +14,11 @@ use std::f64::consts::{FRAC_2_PI, LN_2};
 const PIO2_HI: f64 = f64::from_bits(0x3FF9_21FB_5440_0000);
 const PIO2_LO: f64 = f64::from_bits(0x3DD0_B461_1A62_6331);
 
-/// `(sin x, cos x)` for finite `|x| < 1e6`, each within an ulp of the true value (almost always the correctly
-/// rounded one: the work is done in `f64`).
+/// `(sin x, cos x)` for finite `x`: for `|x| < 1e6` (the generator's stripes stay below 1000 at 8192 px) each within
+/// an ulp of the true value, almost always the correctly rounded one (the work is done in `f64`); beyond, less
+/// accurate, still the same bits everywhere.
 pub(crate) fn sin_cos(x: f32) -> (f32, f32) {
-    debug_assert!(x.is_finite() && x.abs() < 1e6, "sin_cos({x})");
+    debug_assert!(x.is_finite(), "sin_cos({x})");
     let x = x as f64;
     // x = k π/2 + r with |r| <= π/4, then the Taylor series of both on r (the last term is below 1e-24).
     let k = (x * FRAC_2_PI).round();

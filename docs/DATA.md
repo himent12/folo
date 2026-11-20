@@ -239,10 +239,11 @@ and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `
 `circle, square, triangle, star, ring, cross, hexagon, heart`, drawn with anti-aliased signed distance fields, soft
 shadows and light shading on gradient, marbled, striped or grainy backgrounds, with small objects, partial occlusion,
 objects cut by the frame and some empty images. Output is a pure function of the config and seed, with the same
-bytes in every build (release or debug) and on every machine: the generator uses only IEEE basic operations (its
-sine, cosine and powers of two are in `synthetic/math.rs`), never the platform's libm, whose last bits differ between
-systems and, where the compiler folds a call whose argument it can see, between builds. `synthetic/tests.rs` pins the
-pixels and boxes of 48 images.
+bytes in every build (release or debug) and on every machine: the generator uses only exactly specified operations
+(`+ - * /`, `sqrt`, `floor`, `round`, a remainder; its sine, cosine and powers of two are built from them in
+`synthetic/math.rs`), never an approximation from the platform's libm, whose last bits differ between systems and,
+where the compiler folds a call whose argument it can see, between builds. `synthetic/tests.rs` pins the pixels and
+boxes of 48 images, and `tests/synthetic.rs` the files of a small written dataset.
 `SyntheticConfig::classes` are shape names; `names` (optional, same length) are the class names written to
 `data.yaml`. `shapes_for(&names)` picks shapes for arbitrary names: a shape name keeps its shape, others take the
 next unclaimed shape (at most 8 classes).
