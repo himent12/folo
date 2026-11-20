@@ -23,9 +23,9 @@ Fastest path for an agent:
 - **From a checkout:** `cargo folo ...` (an alias for `cargo run --release -p folo-cli -- ...`).
 
 ## Start here
-- [README](README.md): the pitch, the speed and accuracy charts against Ultralytics yolo26n, the quickstart, Studio
-  and Desktop, agent setup (Claude Code / Codex / .mcp.json), architecture at a glance, where each folder is, project
-  status
+- [README](README.md): what FOLO is and the end-to-end workflow, the speed and accuracy charts against Ultralytics
+  yolo26n, quickstart, Studio and Desktop, agent setup (Claude Code / Codex / .mcp.json), architecture at a glance,
+  where each folder is, and project status
 - [Docs index](docs/README.md): every doc in docs/, grouped by task (use FOLO, drive it from an agent, the apps, the
   internals, measuring, contributing), and a reading order for a new contributor
 - [Quickstart](docs/QUICKSTART.md): the longer walkthrough. It covers building, synthetic data, training on your
@@ -126,10 +126,10 @@ Fastest path for an agent:
     [log](apps/desktop/notes/HILLCLIMB.md), [review brief](apps/desktop/tools/review-brief.md)
 
 ## Project
-- [CLAUDE.md](CLAUDE.md): the entry point for Claude Code; it points at AGENTS.md, docs/ARCHITECTURE.md and the
-  crate READMEs
-- [Agent rules](AGENTS.md): where to find your way, the ground rules for contributors, agents and people (stable
-  Rust, no ML frameworks, tests, docs), the pull request workflow and the layout
+- [CLAUDE.md](CLAUDE.md): the entry point for Claude Code; points at AGENTS.md, docs/ARCHITECTURE.md,
+  docs/notes/PROCESS.md, and the crate READMEs
+- [Agent rules](AGENTS.md): where to find your way, the four-role agentic subagent roster (orchestrator, implementer,
+  play-tester/reviewer, writer), ground rules for contributors, the pull request workflow, and the repo layout
 - [Contributing](CONTRIBUTING.md): a map of the repository, building, the checks a pull request must pass,
   conventions, licence;
   [Security](SECURITY.md): reporting a vulnerability, and what to keep in mind when exposing `folo serve`
