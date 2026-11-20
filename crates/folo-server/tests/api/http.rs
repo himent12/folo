@@ -122,10 +122,23 @@ async fn web_dir_cache_headers() {
         assert!(h.contains_key(header::LAST_MODIFIED), "{path} has a validator");
     }
 
-    // A source map is named after its chunk's hash, not its own: revalidated.
+    // A source map is named after its chunk's hash, not its own: revalidated, also asked for percent-encoded (review of
+    // #393, round 2: `ServeDir` decodes it).
     std::fs::write(dir.join("assets/app-1a2b3c.js.map"), "{}").unwrap();
-    let (s, h, _) = send(&app, get("/assets/app-1a2b3c.js.map")).await;
-    assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
+    for path in ["/assets/app-1a2b3c.js.map", "/assets/app-1a2b3c.js%2Emap", "/assets/app%2D1a2b3c.js"] {
+        let (s, h, _) = send(&app, get(path)).await;
+        assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"), "{path}");
+    }
+    // A folder under `assets/` with an `index.html`: `ServeDir` redirects to the slash and serves that file there.
+    std::fs::create_dir_all(dir.join("assets/help")).unwrap();
+    std::fs::write(dir.join("assets/help/index.html"), "<p>help</p>").unwrap();
+    let (s, _, _) = send(&app, get("/assets/help")).await;
+    assert!(s.is_redirection(), "{s}");
+    let (s, h, b) = send(&app, get("/assets/help/")).await;
+    assert_eq!(
+        (s, cache(&h).as_str(), b.as_slice()),
+        (StatusCode::OK, "no-cache", b"<p>help</p>".as_slice())
+    );
 
     // Review of #393, round 1: a browser caches the fallback under an asset's name before that asset exists, then the
     // asset is restored from a build older than the fallback's date. Revalidating with the fallback's date gets the

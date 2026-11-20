@@ -39,8 +39,9 @@ service, the one under `real/` connects it to `RealStore`.
    both cache the same way (`web::cache_control`): Vite's content-hashed `assets/` for a year (`public,
    max-age=31536000, immutable`), everything else `no-cache` (`index.html`, the SPA fallback for any other path, an
    asset name that is no file, source maps, the unhashed files of `public/`), so a new build shows on the next load.
-   The embedded copy revalidates by `ETag`. The folder is always sent in full: it ignores `If-Modified-Since`, since
-   a date from another file (the fallback's, a newer build's before a rollback) could get a `304` for this one;
+   The embedded copy revalidates by `ETag`. The folder ignores `If-Modified-Since`, since a date from another file
+   (the fallback's, a newer build's before a rollback) could get a `304` for this one. Only a plain path under
+   `assets/` (no percent-encoding, no `.`, `..` or empty segment, not a folder) is kept for a year;
 3. the origin guard, compression (not for `application/octet-stream`: weights files are sent as they are), and CORS
    (loopback origins only unless the server was started to allow any);
 4. the Host guard when the server listens on loopback (no bind address given, or a loopback one), so nothing runs for

@@ -333,17 +333,22 @@ async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Res
 /// The web app on disk (`--web-dir`) is cached as the embedded one is ([`web::cache_control`]), by what was served:
 /// the SPA fallback marks its own answer `no-cache` ([`no_cache`]), so a path the folder did not serve as that file
 /// (no such file, or one it could not read) is never kept, and only `ServeDir`'s own answer from the file at the path
-/// gets the path's policy. Every file is sent in full (`If-Modified-Since` is dropped): `ServeDir` compares dates only,
-/// so a date from another answer (the fallback's, cached under an asset's name before that asset existed; a newer
-/// `index.html` before a rollback) would otherwise get a `304` for a different file.
+/// gets the path's policy, and only for a plain path: one `ServeDir` serves as it is written (no percent-encoding, no
+/// `\`, no empty, `.` or `..` segment, no trailing `/` that it answers with the folder's `index.html`); any other is
+/// `no-cache`. `If-Modified-Since` is dropped: `ServeDir` compares dates only, so a date from another answer (the
+/// fallback's, cached under an asset's name before that asset existed; a newer `index.html` before a rollback) would
+/// get a `304` for a different file. Other conditions and ranges are answered as `ServeDir` does.
 async fn web_dir_cache(mut req: Request, next: Next) -> Response {
     req.headers_mut().remove(header::IF_MODIFIED_SINCE);
     let path = req.uri().path().trim_start_matches('/').to_string();
+    let plain =
+        !path.contains(['%', '\\']) && path.split('/').all(|s| !s.is_empty() && s != "." && s != "..");
     let mut res = next.run(req).await;
     if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT)
         && !res.headers().contains_key(header::CACHE_CONTROL)
     {
-        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(web::cache_control(&path)));
+        let cache = if plain { web::cache_control(&path) } else { "no-cache" };
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     }
     res
 }
