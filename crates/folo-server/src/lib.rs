@@ -330,18 +330,27 @@ async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Res
     next.run(req).await
 }
 
-/// The web app on disk (`--web-dir`, `dir`) is cached as the embedded one is ([`web::cache_control`]). `ServeDir`
-/// sends `Last-Modified` and answers `If-Modified-Since`, so the `no-cache` files revalidate with a `304`. A path that
-/// is no file falls back to `index.html` (`/assets/` included, an old build's asset name say), which is `no-cache`:
-/// only a file that exists under `assets/` is kept for a year.
-async fn web_dir_cache(State(dir): State<Arc<Path>>, req: Request, next: Next) -> Response {
+/// The web app on disk (`--web-dir`) is cached as the embedded one is ([`web::cache_control`]), by what was served:
+/// the SPA fallback marks its own answer `no-cache` ([`no_cache`]), so a path the folder did not serve as that file
+/// (no such file, or one it could not read) is never kept, and only `ServeDir`'s own answer from the file at the path
+/// gets the path's policy. Every file is sent in full (`If-Modified-Since` is dropped): `ServeDir` compares dates only,
+/// so a date from another answer (the fallback's, cached under an asset's name before that asset existed; a newer
+/// `index.html` before a rollback) would otherwise get a `304` for a different file.
+async fn web_dir_cache(mut req: Request, next: Next) -> Response {
+    req.headers_mut().remove(header::IF_MODIFIED_SINCE);
     let path = req.uri().path().trim_start_matches('/').to_string();
     let mut res = next.run(req).await;
-    if res.status().is_success() || res.status() == StatusCode::NOT_MODIFIED {
-        let file = !path.split('/').any(|p| p == ".." || p.is_empty()) && dir.join(&path).is_file();
-        let cache = web::cache_control(if file { &path } else { "index.html" });
-        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT)
+        && !res.headers().contains_key(header::CACHE_CONTROL)
+    {
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(web::cache_control(&path)));
     }
+    res
+}
+
+/// The disk app's SPA fallback (`index.html` for any path that is no file): revalidated on every use.
+async fn no_cache(mut res: Response) -> Response {
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     res
 }
 
@@ -393,11 +402,11 @@ impl Server {
         let mut router = Router::new().nest("/api", api).with_state(state);
         router = match (opts.web, embedded) {
             (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
-                let spa = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
+                let shell = axum::routing::any_service(ServeFile::new(dir.join("index.html")))
+                    .layer(axum::middleware::map_response(no_cache));
+                let spa = ServeDir::new(&dir).fallback(shell);
                 router.fallback_service(
-                    Router::new()
-                        .fallback_service(spa)
-                        .layer(axum::middleware::from_fn_with_state(Arc::<Path>::from(dir), web_dir_cache)),
+                    Router::new().fallback_service(spa).layer(axum::middleware::from_fn(web_dir_cache)),
                 )
             }
             (_, Some(files)) => {

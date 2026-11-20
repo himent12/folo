@@ -122,20 +122,36 @@ async fn web_dir_cache_headers() {
         assert!(h.contains_key(header::LAST_MODIFIED), "{path} has a validator");
     }
 
-    // Revalidated: an unchanged file answers 304, still `no-cache`; the fallback for a gone asset never turns immutable.
-    let (_, h, _) = send(&app, get("/")).await;
+    // A source map is named after its chunk's hash, not its own: revalidated.
+    std::fs::write(dir.join("assets/app-1a2b3c.js.map"), "{}").unwrap();
+    let (s, h, _) = send(&app, get("/assets/app-1a2b3c.js.map")).await;
+    assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
+
+    // Review of #393, round 1: a browser caches the fallback under an asset's name before that asset exists, then the
+    // asset is restored from a build older than the fallback's date. Revalidating with the fallback's date gets the
+    // asset in full, not a 304 that would keep the HTML under the asset's name for a year; `index.html` is sent in
+    // full the same way (a rollback to an older file).
+    let (s, h, b) = send(&app, get("/assets/app-later7.js")).await;
+    assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
+    assert!(b.starts_with(b"<!doctype html>"));
     let since = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
-    for path in ["/", "/assets/app-old999.js"] {
+    let restored = dir.join("assets/app-later7.js");
+    std::fs::write(&restored, "console.log(7)").unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+    std::fs::File::options().write(true).open(&restored).unwrap().set_modified(old).unwrap();
+    for (path, body) in
+        [("/assets/app-later7.js", "console.log(7)"), ("/", "<!doctype html><title>Studio</title>")]
+    {
         let req = Request::builder()
             .uri(path)
             .header(header::IF_MODIFIED_SINCE, &since)
             .body(Body::empty())
             .unwrap();
-        let (s, h, b) = send(&app, req).await;
-        assert_eq!(s, StatusCode::NOT_MODIFIED, "{path}");
-        assert_eq!(cache(&h), "no-cache", "{path}");
-        assert!(b.is_empty());
+        let (s, _, b) = send(&app, req).await;
+        assert_eq!((s, b.as_slice()), (StatusCode::OK, body.as_bytes()), "{path}");
     }
+    let (_, h, _) = send(&app, get("/assets/app-later7.js")).await;
+    assert_eq!(cache(&h), immutable);
     // An API answer is not the web app's to cache.
     let (_, h, _) = send(&app, get("/api/health")).await;
     assert_ne!(h.get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap()), Some(immutable));
