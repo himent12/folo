@@ -319,3 +319,116 @@ is how far the chosen epoch is above the last one on that same curve. Benchmark 
 The rule smooths every curve by 4 to 18 times. Brain-tumor's val curve under the default is the noisy one (both
 classes swing about equally: 0.033 and 0.028), and choosing its maximum puts `best.folo` 0.070 above the last epoch
 on the very images it is then scored on.
+
+### Part B: which published weights fine-tune best on brain-tumor
+
+The benchmark's protocol (bench/finetune/README.md: 640 px, batch 16, 100 epochs, f32, `best.folo` chosen by the
+trainer on the split it is then scored on for brain-tumor, on val for BCCD), `main` 71284767 (the default EMA, so
+these runs are comparable with the published column and with the first lane's v2 and v5 runs), three seeds per
+weights, pycocotools. `last.folo` is scored too. The v3 and v4 files were pulled into the lane's folder and checked
+against their published sha256 (`f366a2fd…`, `d3896e3c…`).
+
+Brain-tumor (val, 223 images):
+
+| weights (COCO AP) | `best.folo`: seeds 0 / 1 / 2 | mean | `last.folo`: seeds 0 / 1 / 2 | mean |
+|---|---|---:|---|---:|
+| v2 (0.317) | 0.4575 / 0.4592 / 0.4381 | **0.4516** | 0.4146 / 0.4056 / 0.3746 | **0.3983** |
+| v3 (0.340, v2 annealed 16 epochs) | 0.4130 / 0.4213 / 0.4207 | 0.4183 | 0.3859 / 0.3697 / 0.3363 | 0.3640 |
+| v4 (0.356, distilled from folo-s) | 0.4568 / 0.4177 / 0.4567 | 0.4437 | 0.4013 / 0.3451 / 0.4091 | 0.3852 |
+| v5 (0.370, v4 + 64 distilled epochs) | 0.4287 / 0.4295 / 0.4072 | 0.4218 | 0.3329 / 0.3979 / 0.3257 | 0.3522 |
+
+(v2 and v5: the first lane's runs; their `last.folo` scored here. v3 and v4: this lane's.)
+
+Within each lineage the longer-trained COCO model is the worse start on brain-tumor: v2 → v3 is −0.033 on
+`best.folo` with the seed ranges apart (v3's highest 0.4213 below v2's lowest 0.4381) and −0.034 on `last.folo`;
+v4 → v5 is −0.022 on `best.folo` (the ranges overlap: v4's seed 1, 0.4177, lies between v5's seed 2, 0.4072, and
+its other two) and −0.033 on `last.folo`. v4 against v2 (a different COCO recipe, distillation included) is −0.008
+on `best.folo` and −0.013 on `last.folo`, inside the seed spreads. The `last.folo` column orders the four the same
+way as `best.folo`, so the order is not only the benchmark's selection on the scored split. Three seeds on one
+dataset are all there is, though, and brain-tumor val is the noisiest of the four scored splits (the bootstrap
+below).
+
+**The check on BCCD** (test, 72 images; `best.folo` chosen on BCCD val), v2 and v3 as the brief asked, v5 for
+reference (the first lane's baseline):
+
+| weights | `best.folo`: seeds 0 / 1 / 2 | mean | `last.folo`: seeds 0 / 1 / 2 | mean |
+|---|---|---:|---|---:|
+| v2 | 0.6098 / 0.6304 / 0.6220 | 0.6207 | 0.6057 / 0.6173 / 0.6199 | 0.6143 |
+| v3 | 0.6012 / 0.6209 / 0.6259 | 0.6160 | 0.6132 / 0.6172 / 0.6085 | 0.6129 |
+| v5 | 0.6166 / 0.6363 / 0.6205 | 0.6245 | 0.6176 / 0.6140 / 0.6159 | 0.6158 |
+
+On BCCD the pattern does not hold: v3 is −0.005 against v2 on `best.folo` and −0.001 on `last.folo`, both inside
+the seed spread (0.021 and 0.014), and v5, the longest-trained, is the best of the three (+0.004 over v2, also inside
+the spread). v3's seeds 0 and 1 reproduce examples/coco's v4 check (0.6012, 0.6209) to every digit.
+
+**What it means for a user.** No published file is the best start everywhere. On BCCD, signature and medical-pills
+v5 is level with v4 and v2 (examples/coco's checks and the table above); on brain-tumor, the largest set (893 train
+images) and the one with the most optimizer steps, v2 is ahead of v5 by 0.030 (`best.folo`) and 0.046 (`last.folo`) with
+three seeds a side. That is one dataset, so v5 stays the documented default; the docs now say to try v2 when a
+fine-tune falls short, and examples/coco's starting-point check for the next weights release includes brain-tumor.
+
+### How much one score moves: a bootstrap over the scored images
+
+`bin/swing.py` also resamples the scored split's images with replacement (200 resamples, pycocotools on each) for
+one P2 run per arm and set, with that run's detections held fixed. The standard error is the noise one training's
+AP carries from which images happen to be in the split; it leaves out seed noise and says nothing directly about the
+noise of a paired difference between two arms:
+
+| set (split, images) | default: AP, SE | rule: AP, SE |
+|---|---|---|
+| BCCD (test, 72) | 0.6218, 0.012 | 0.6291, 0.012 |
+| brain-tumor (val, 223) | 0.3942, 0.028 | 0.3669, 0.026 |
+| signature (val, 35) | 0.9821, 0.011 | 0.9881, 0.007 |
+| medical-pills (val, 23) | 0.7973, 0.006 | 0.7986, 0.005 |
+
+Brain-tumor's val split is the noisiest by far, though it has the most images. Estimating the uncertainty of the
+paired differences themselves (resampling images jointly for both arms) was not done.
+
+### Part C: three screens, on the hold-out
+
+Each screen changes one thing on top of the EMA rule (built from this branch, `ema_run_fraction` at its default
+0.25) and is scored on the hold-out it chose `best.folo` on: seed 0's 20% of the train split, never on the reported
+splits, which no choice here was made on. Three seeds; the baseline is the first lane's `ho-ema25-*` runs (the rule
+as it ships, P2's training), with their `last.folo` scored on the hold-out here (`bin/score-base-last.sh`). Rebuilding
+`ho-ema25-bccd-s0` with this branch's binary scores 0.6544 again, so the screens and the baseline are comparable. A
+screen wins only if it is up by more than the baseline's seed spread on two sets; anything that did would have gone
+to P2 next. Hold-out AP, `best.folo` (and `last.folo`), Δ against the baseline's mean:
+
+| screen | set | `best.folo`: seeds 0 / 1 / 2 | mean (Δ) | `last.folo` mean (Δ) |
+|---|---|---|---:|---:|
+| baseline (rule) | BCCD | 0.6544 / 0.6585 / 0.6494 | 0.6541 | 0.6417 |
+| close mosaic 20 epochs (default 10) | BCCD | 0.6544 / 0.6585 / 0.6494 | 0.6541 (0) | 0.6441 (+0.002) |
+| `nbs=16` | BCCD | 0.6493 / 0.6394 / 0.6367 | 0.6418 (−0.012) | 0.6165 (−0.025) |
+| `nbs=16`, lr0 0.005 | BCCD | 0.6500 / 0.6516 / 0.6513 | 0.6510 (−0.003) | 0.6247 (−0.017) |
+| baseline (rule) | brain-tumor | 0.6722 / 0.6691 / 0.6829 | 0.6747 | 0.6717 |
+| lr0 0.003 (×0.3) | brain-tumor | 0.6584 / 0.6617 / 0.6695 | 0.6632 (−0.012) | 0.6616 (−0.010) |
+| `nbs=16` | brain-tumor | 0.6750 / 0.6610 / 0.6427 | 0.6596 (−0.015) | 0.6578 (−0.014) |
+| `nbs=16`, lr0 0.005 | brain-tumor | 0.6775 / 0.6718 / 0.6755 | 0.6749 (+0.000) | 0.6631 (−0.009) |
+
+(Baseline seed spread: BCCD 0.009, brain-tumor 0.014. The lr0 screens set `--optimizer musgd` explicitly;
+`optimizer auto` resolves to MuSGD at lr0 0.01 for these runs.)
+
+**1. Brain-tumor's swinging val curve.** The swing table above shows most of it: under the rule the curve swings
+0.0014 from epoch to epoch on val and 0.0013 on the hold-out, against the default's 0.025 and 0.017. The swing is
+not only on the 223 val images: under the default the hold-out curve (179 images carved from train) swings too, and
+a bootstrap gives one brain-tumor val score a standard error of about 0.027, the largest of the four sets (the
+bootstrap section above). A lower LR on top of the rule (lr0 0.003) costs 0.012 on `best.folo` and 0.010 on
+`last.folo`, every seed down; its swing was not measured. Not run: re-estimating the BN statistics after training.
+FOLO has no such step to switch on, and writing one was beyond a 90-minute screen.
+
+**2. `nbs=16`.** `nbs` is the nominal batch: at batch 16 the default 64 accumulates four batches per optimizer
+step (MODEL.md), and the trainer also steps at the end of an epoch's partial window. `nbs=16` steps every batch:
+11 instead of 3 optimizer steps per epoch on BCCD's 164 hold-out train images, 45 instead of 12 on brain-tumor's
+714, at the same lr0 and the same effective weight decay (0.0005); the rule's EMA window, a quarter of the run's
+steps, grows with them. That
+loses on both sets, worst on `last.folo` (−0.025 on BCCD). Halving lr0 with it brings `best.folo` level on
+brain-tumor (+0.0002, inside the spread) and keeps it below on BCCD (−0.003); `last.folo` is below on both
+(−0.017, −0.009). No win, so it did not go to P2.
+
+**3. Closing mosaic 20 epochs before the end, with the rule, on BCCD.** `best.folo` comes from the same epoch on
+every seed, and its detections on the hold-out are byte for byte the baseline's (the files' hashes differ): all
+three best epochs (54, 78, 39) come before epoch 81, the first with mosaic off. `last.folo` is +0.002, inside the 0.017 spread of the baseline's `last.folo`. Not
+worth a default.
+
+GPU time: about 80 minutes of the 90 (19 trainings with their scoring, and the baseline's `last.folo` scored). With
+nothing up by more than its spread, nothing went to P2, and no default changes beyond the EMA rule of PR #399.
