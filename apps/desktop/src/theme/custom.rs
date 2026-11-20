@@ -87,6 +87,9 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
     let Some(name) = name else {
         return Err("name: must be 1 to 40 characters".into());
     };
+    if let Some(e) = name_problem(name) {
+        return Err(e.into());
+    }
     let description = match root.get("description") {
         None => "",
         Some(v) => match v.as_str().map(str::trim).filter(|d| d.chars().count() <= 120) {
@@ -129,6 +132,36 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
         description: description.to_string(),
         colors,
     })
+}
+
+/// What is wrong with a (trimmed) name that no list could show as written, in the words of every
+/// validator (design/THEMES.md; Studio's `HIDDEN` and `VISIBLE`): it holds a control character, a
+/// line or paragraph separator or an invisible format character (not the zero-width joiner and
+/// non-joiner, which emoji sequences and some scripts need), or it has no letter, number, punctuation
+/// or symbol (the Hangul fillers and the blank Braille pattern count as none). An unassigned code
+/// point counts as visible here; the JavaScript validators know no more than their engine's Unicode.
+fn name_problem(name: &str) -> Option<&'static str> {
+    use super::name_chars::{FORMAT, MARKS};
+    let within = |table: &[(u32, u32)], c: char| {
+        let c = c as u32;
+        let i = table.partition_point(|&(_, hi)| hi < c);
+        table.get(i).is_some_and(|&(lo, _)| lo <= c)
+    };
+    let format = |c: char| within(&FORMAT, c) && !matches!(c, '\u{200C}' | '\u{200D}');
+    if name.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || format(c)) {
+        return Some("name: must not hold control or invisible characters");
+    }
+    // Not a letter, number, punctuation or symbol: a mark, a space, a joiner, a private-use character
+    // (the controls and other format characters are refused above), or a blank one Unicode files as a
+    // letter or symbol.
+    let blank = |c: char| {
+        within(&MARKS, c)
+            || c.is_whitespace()
+            || within(&FORMAT, c)
+            || matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}')
+            || matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}' | '\u{2800}')
+    };
+    name.chars().all(blank).then_some("name: must have a visible character")
 }
 
 /// Sets every token of `group` (at `prefix`, `""` for `color` itself) on `colors`, one level of the
@@ -315,6 +348,27 @@ mod tests {
                 assert!(set, "{what}: {token} is no token path");
                 assert_eq!(c, t.colors, "{what}: {token} is not {want}");
             }
+        }
+    }
+
+    /// The generated ranges (`name_chars.rs`) are in order and apart, which the lookup needs; the
+    /// names themselves are the shared cases' ("raw: name with ...").
+    #[test]
+    fn the_name_tables_are_ordered_ranges() {
+        use super::super::name_chars::{FORMAT, MARKS};
+        for table in [&MARKS[..], &FORMAT[..]] {
+            assert!(table.iter().all(|&(lo, hi)| lo <= hi));
+            assert!(table.windows(2).all(|w| w[0].1 < w[1].0));
+        }
+        // Each table's ends and a middle range are found, their neighbours not.
+        let blank = Some("name: must have a visible character");
+        assert_eq!(name_problem("\u{0300}\u{036F}\u{1E94A}\u{E01EF}"), blank);
+        let hidden = Some("name: must not hold control or invisible characters");
+        assert_eq!(name_problem("\u{00AD}"), hidden);
+        assert_eq!(name_problem("A\u{E007F}"), hidden);
+        // Each neighbour on its own (review r1: together, one could hide the other).
+        for visible in ["\u{02FF}", "\u{0370}", "\u{00AC}", "\u{00AE}", "A\u{E0080}", "Night shift"] {
+            assert_eq!(name_problem(visible), None, "{visible:?}");
         }
     }
 

@@ -73,13 +73,16 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   Desktop, of two files in the folder with one id, the later file name (in name order) wins. Required.
 - `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters after trimming.
   Both are stored trimmed. Lengths count Unicode code points (an emoji is one), and trimming removes Unicode white
-  space (the White_Space property) at both ends: the same in every validator. Studio's import also refuses a name
-  that holds a control character (a newline, a tab), a line or paragraph separator, or an invisible format character
-  (a zero-width space, a bidi override; the zero-width joiner and non-joiner are allowed), "name: must not hold control
-  or invisible characters", and one with no letter, digit, punctuation or symbol (the blank ones, the Hangul fillers
-  U+115F, U+1160, U+3164, U+FFA0 and the blank Braille pattern U+2800, do not count), "name: must have a visible
-  character"; a theme stored before that rule stays installed. Desktop and `design/theme-cases.json` take this rule
-  in a later change.
+  space (the White_Space property) at both ends: the same in every validator. A name that holds a control character
+  (a newline, a tab), a line or paragraph separator, or an invisible format character (a zero-width space, a bidi
+  override, U+FEFF; the zero-width joiner and non-joiner, which emoji sequences and some scripts need, are allowed) is
+  refused, "name: must not hold control or invisible characters", and so is one with no letter, number, punctuation or
+  symbol (only marks or spaces; the blank ones, the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 and the blank Braille
+  pattern U+2800, do not count), "name: must have a visible character". Every validator checks this
+  (`design/theme-cases.json`, "raw: name with ..."); Studio checks it on import only, so a theme stored there before
+  the rule stays installed, while Desktop, which reads its folder at every start and Reload, lists such a file with
+  the reason. Desktop takes the Mark and Format categories from a table generated from Node's Unicode data
+  (`apps/desktop/tools/name-chars.mjs`); a code point unassigned in that table counts as visible in Desktop.
 - `mode`: `"dark"` or `"light"`. Required.
 - `base`: optional, a **built-in** theme id of the same mode; default: the mode's default (`dark` or `light`). The
   palette is the base theme's resolved palette with `color` merged over it.
