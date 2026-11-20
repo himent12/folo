@@ -78,16 +78,9 @@ pub fn cli_command(template: &str, paths: &[(&str, &Path)]) -> String {
     {
         line.push_str(before);
         let p = paths.iter().find(|(n, _)| *n == name).map(|(_, p)| path(p));
-        match p {
-            Some(p)
-                if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c)) =>
-            {
-                line.push_str(&p)
-            }
-            Some(p) if !p.chars().any(|c| UNQUOTABLE.contains(c) || c.is_control()) => {
-                line.push_str(&format!("\"{p}\""))
-            }
-            p => {
+        match p.as_deref().and_then(quote_path) {
+            Some(quoted) => line.push_str(&quoted),
+            None => {
                 line.push_str(&format!("<{name}>"));
                 if let Some(p) = p {
                     notes.push_str(&format!(
@@ -101,9 +94,24 @@ pub fn cli_command(template: &str, paths: &[(&str, &Path)]) -> String {
     line + rest + &notes
 }
 
+/// A path already written as FOLO writes it ([`path`]; a server's path as the API gives it) as one argument of a
+/// command to paste, by [`cli_command`]'s rule: bare when it holds only ASCII letters, digits and `-_./:`, else in
+/// double quotes; `None` when one of the shells would change it inside them (`UNQUOTABLE`, a control character), for
+/// the caller to show the path as it is instead. The path is taken verbatim: a `\` in it (a POSIX name) is kept.
+pub fn quote_path(p: &str) -> Option<String> {
+    if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c)) {
+        Some(p.to_string())
+    } else if !p.chars().any(|c| UNQUOTABLE.contains(c) || c.is_control()) {
+        Some(format!("\"{p}\""))
+    } else {
+        None
+    }
+}
+
 /// What PowerShell (`"` `$` `` ` `` and the typographic double quotes, which it reads as `"`), cmd (`%`, `!` with
-/// delayed expansion) or a POSIX shell (`$` `` ` `` `\`, `!` when interactive) changes inside double quotes. On
-/// Windows [`path`] has turned every `\` into `/`.
+/// delayed expansion) or a POSIX shell (`$` `` ` `` `\`, `!` when interactive) changes inside double quotes. In
+/// [`cli_command`] on Windows, [`path`] has turned every `\` into `/` first; a path given to [`quote_path`] as written
+/// keeps its `\`, and is then shown, not quoted.
 const UNQUOTABLE: &str = "\"$`%!\\\u{201C}\u{201D}\u{201E}\u{201F}\u{2033}";
 
 /// A duration in milliseconds as FOLO reports it: rounded to 0.1 µs, so a sum of stage times reads `10.5163` rather
@@ -204,6 +212,16 @@ mod tests {
                 "{c:?}"
             );
         }
+    }
+
+    /// A path already written takes the same rule verbatim: a `\` (a POSIX file name on a server) is never turned
+    /// into a separator, so it is shown as it is, not quoted.
+    #[test]
+    fn a_written_path_is_quoted_verbatim() {
+        assert_eq!(quote_path("D:/data/shapes").as_deref(), Some("D:/data/shapes"));
+        assert_eq!(quote_path("D:/my data").as_deref(), Some("\"D:/my data\""));
+        assert_eq!(quote_path(r"/data/set\blue"), None);
+        assert_eq!(quote_path("D:/a$b"), None);
     }
 
     #[test]

@@ -96,7 +96,12 @@ impl FoloApp {
                     }
                     None => format!("{} · lr0 {}", c.optimizer.label(), crate::ui::fmt_lr(c.lr0 as f64)),
                 }),
-            ));
+            ))
+            // The EMA's window (`Run.resolved.ema_decay`): none for a run without one, or from a
+            // server older than the field.
+            .when_some(crate::ui::fmt_ema_window(r.resolved.as_ref().and_then(|s| s.ema_decay)), |d, w| {
+                d.child(kv(&t, "EMA", mono_v(w)))
+            });
         // Augmentation, one setting per row, under the training settings.
         let col3 = div()
             .flex()

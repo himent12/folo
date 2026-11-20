@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use super::*;
 
-pub use server::{ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_server};
+pub use server::{Probe, ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_server};
 pub(crate) use transport::address_ok;
 #[cfg(test)]
 pub(crate) use transport::needs_token;
@@ -754,17 +754,17 @@ connection: close
             .to_vec(),
         ]);
         // `/api/health` is open on such a server: the probe passes, every other call is refused.
-        assert!(probe(&url));
+        assert_eq!(probe(&url), Probe::Folo);
         // Any web server answers 200; only a FOLO server's health counts.
         let (page, _r) = canned_server(vec![
             b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 15\r\nconnection: close\r\n\r\n<html></html>\r\n"
                 .to_vec(),
         ]);
-        assert!(!probe(&page));
+        assert_eq!(probe(&page), Probe::Answered);
         // Nor an unhealthy health: the app starts its own server only where nothing healthy answers.
         let (down, _r) =
             canned_server(vec![json("200 OK", r#"{ "status": "down", "version": "0.1.0", "mock": false }"#)]);
-        assert!(!probe(&down));
+        assert_eq!(probe(&down), Probe::Answered);
         let api = HttpBackend::new(&url);
         for e in [api.system().unwrap_err(), api.datasets().unwrap_err()] {
             assert_eq!((e.code.as_str(), e.message.as_str()), ("unauthorized", "This server needs a token"));
@@ -817,12 +817,12 @@ connection: close
         });
         let url = format!("http://{closed}");
         let probe_through = super::server::probe_through;
-        assert!(probe_through(&url, Some(ureq::Proxy::new(&proxy_url).unwrap())));
+        assert_eq!(probe_through(&url, Some(ureq::Proxy::new(&proxy_url).unwrap())), Probe::Folo);
         let connect = connects.recv().unwrap();
         assert!(connect.starts_with(&format!("CONNECT {closed} ")), "{connect}");
         // Without the proxy the same address is closed (where it is still held: Windows).
         #[cfg(windows)]
-        assert!(!probe_through(&url, None));
+        assert_eq!(probe_through(&url, None), Probe::Nothing);
     }
 
     /// A server whose accept queue has one free slot: the refused-at-once check's connection, closed
@@ -838,7 +838,7 @@ connection: close
         let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
         let listener = super::refused::ports::listener(1);
         let (url, requests) = canned_server_on(listener, std::time::Duration::from_millis(200), vec![health]);
-        assert!(super::server::probe_through(&url, None));
+        assert_eq!(super::server::probe_through(&url, None), Probe::Folo);
         assert!(requests.recv().unwrap().starts_with("GET /api/health "));
     }
 

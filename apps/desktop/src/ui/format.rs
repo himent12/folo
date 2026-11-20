@@ -273,6 +273,15 @@ pub fn sci(size: TypeStep, color: Hsla, s: String) -> Div {
         })
 }
 
+/// A run's EMA (`Run.resolved.ema_decay`, docs/MODEL.md §8.5) as its nominal window
+/// `1 / (1 − decay)`, in the trainer's log line's words ("window 400 steps"; Studio writes the
+/// same). `None` for a run without an EMA, a server older than the field, or a decay with no
+/// window.
+pub fn fmt_ema_window(decay: Option<f64>) -> Option<String> {
+    let w = 1. / (1. - decay?);
+    (w.is_finite() && w >= 1.).then(|| format!("window {w:.0} steps"))
+}
+
 /// An augmentation strength (mosaic, mixup, flip): two decimals, as New run's sliders show it.
 pub fn fmt_aug(v: f32) -> String {
     format!("{v:.2}")
@@ -315,6 +324,17 @@ fn score_decimals(top: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PR #399's `ema_decay`: the window the trainer logs ("EMA window 400 steps"), none without it.
+    #[test]
+    fn a_runs_ema_reads_as_its_window_in_steps() {
+        assert_eq!(fmt_ema_window(Some(0.9999)).as_deref(), Some("window 10000 steps"));
+        assert_eq!(fmt_ema_window(Some(0.9975)).as_deref(), Some("window 400 steps"));
+        assert_eq!(fmt_ema_window(Some(1. - 1. / 350.)).as_deref(), Some("window 350 steps"));
+        assert_eq!(fmt_ema_window(None), None);
+        assert_eq!(fmt_ema_window(Some(1.)), None);
+        assert_eq!(fmt_ema_window(Some(f64::NAN)), None);
+    }
 
     /// d1-datasets: a one-image split read "1 images".
     #[test]
