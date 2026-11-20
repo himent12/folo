@@ -6,6 +6,19 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+/// serde `deserialize_with` for an optional `f64` that must read back as the very value written (`Run.resolved`'s EMA
+/// pair): the JSON number parsed by `f64::from_str`, which rounds correctly, not by serde_json's fast path, which can
+/// land one ulp off a 17-digit decimal (`0.9090909090909091`). A number that overflows to infinity is refused.
+pub fn exact_opt_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    use serde::Deserialize as _;
+    let raw = Option::<Box<serde_json::value::RawValue>>::deserialize(d)?;
+    raw.map(|r| match r.get().parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        _ => Err(serde::de::Error::custom(format!("{} is not a finite number", r.get()))),
+    })
+    .transpose()
+}
+
 /// `v` as a JSON value whose floats read as they were stored ([`clean_floats`]).
 pub fn to_value<T: Serialize + ?Sized>(v: &T) -> serde_json::Result<Value> {
     let mut v = serde_json::to_value(v)?;

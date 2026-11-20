@@ -851,7 +851,8 @@ Examples at 100 epochs, batch 16 (4 batches a step): BCCD (205 images, `T = 400`
 brain-tumor (893 images, `T = 1,400`): window 350, decay 0.99714, tau 70. The pair is stored as `folo.ema`, so a
 resume continues the same average; it is in `Run.resolved` (`ema_decay`, `ema_tau`) and ends the run's configuration
 log line (`EMA window N steps`). `ema_run_fraction = 0` gives every run the default window, as configs written before the key
-mean (`GET /api/runs/{id}/cli` of such a fine-tune ends with `--set ema_run_fraction=0`).
+mean (`GET /api/runs/{id}/cli` of such a fine-tune ends with `--set ema_run_fraction=0` when its command starts from
+weights; a command without `--weights` trains from scratch and cannot repeat a fine-tune's scaled EMA, docs/API.md).
 
 Why (docs/notes/hill/r6-finetune.md; folo-n from `folo-n-coco-v5`, the four sets of
 docs/BENCHMARKS.md "Fine-tuning on small datasets", three seeds per side, paired by seed): trained on each train split

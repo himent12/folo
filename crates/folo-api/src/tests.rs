@@ -216,3 +216,31 @@ fn eval_provenance_is_additive() {
         "timing":{"total_s":0,"per_image_ms":0}}"#;
     assert_eq!(serde_json::from_str::<ValReport>(old).unwrap().dataset_name, None);
 }
+
+/// `Run.resolved`'s EMA pair reads back from text (a `run.json`, an API answer) as the very `f64`s written: an
+/// 11-step window's decay is a 17-digit decimal that serde_json's fast float path reads one ulp off. (A `Value`
+/// parsed before has already rounded it: only text can be read exactly.) Absent or null is `None`, an overflowing
+/// number is refused.
+#[test]
+fn the_resolved_ema_pair_round_trips_to_the_bit() {
+    let decay: f64 = 1.0 - 1.0 / 11.0;
+    let v = serde_json::json!({
+        "optimizer": "musgd", "lr0": 0.01, "lrf": 0.01, "cos_lr": false, "momentum": 0.937, "weight_decay": 0.0005,
+        "batch": 16, "accumulate": 4, "nbs": 64, "optimizer_steps_per_epoch": 1, "warmup_iters": 3,
+        "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.1,
+    });
+    let mut with = v.clone();
+    with["ema_decay"] = decay.into();
+    with["ema_tau"] = 2.2.into();
+    let text = with.to_string();
+    assert!(text.contains("0.9090909090909091"), "{text}");
+    let a: ResolvedTrain = serde_json::from_str(&text).unwrap();
+    assert_eq!(a.ema_decay.map(f64::to_bits), Some(decay.to_bits()));
+    assert_eq!(a.ema_tau, Some(2.2));
+    assert_eq!(serde_json::from_value::<ResolvedTrain>(v.clone()).unwrap().ema_decay, None);
+    let mut null = v.clone();
+    null["ema_decay"] = serde_json::Value::Null;
+    assert_eq!(serde_json::from_value::<ResolvedTrain>(null).unwrap().ema_decay, None);
+    let huge = text.replace("0.9090909090909091", "1e400");
+    assert!(serde_json::from_str::<ResolvedTrain>(&huge).is_err());
+}

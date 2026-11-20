@@ -540,6 +540,23 @@ fn an_older_resolved_gets_its_ema_pair_from_config_json() {
         assert_eq!(r.close_mosaic, Some(close_mosaic), "{id}");
     }
     runs.shutdown(None);
+
+    // A short fine-tune's pair, recorded in run.json, reads back to the bit after a restart (an 11-step window's
+    // decay, a 17-digit decimal).
+    let dir = TestDir::new("runs-resolved-ema-bits");
+    let short =
+        folo_vision::TrainConfig { transfer: true, epochs: 11, ..folo_vision::TrainConfig::default() };
+    let resolved = short.resolved_train(64, 3);
+    let resolved =
+        folo_api::ResolvedTrain { ema_decay: Some(1.0 - 1.0 / 11.0), ema_tau: Some(2.2), ..resolved };
+    let mut file = queued_file("run_short", config.clone());
+    file.run.resolved = Some(resolved.clone());
+    std::fs::create_dir_all(dir.join("run_short")).unwrap();
+    std::fs::write(dir.join("run_short").join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let got = runs.get("run_short").unwrap().run().resolved.unwrap();
+    assert_eq!(got.ema_decay.map(f64::to_bits), resolved.ema_decay.map(f64::to_bits));
+    runs.shutdown(None);
 }
 
 /// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.

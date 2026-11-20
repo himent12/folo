@@ -462,6 +462,8 @@ fn a_scaled_ema_resumes_with_the_very_contract_it_saved() {
             "{steps} steps"
         );
     }
+    // A contract that overflows to infinity is refused when it is read, not when the EMA is restored.
+    assert!(serde_json::from_str::<folo_nn::EmaContract>(r#"{"decay":0.99,"tau":1e400}"#).is_err());
 }
 
 #[test]
