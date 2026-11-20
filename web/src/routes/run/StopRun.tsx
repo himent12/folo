@@ -26,9 +26,12 @@ export function stopDescription(r: Pick<Run, 'status' | 'cloud'>, done: number):
  * The toast once the server took the stop of `r` (as it now is) with `done` epochs finished. Until the run has stopped
  * it says what is certain: an epoch whose last batch is done still validates and saves, and a stop after the run's
  * last batch changes nothing (it completes with all its results, docs/API.md), so "nothing is saved" is not known yet.
- * A run that has ended by then (the stream said so before the answer came) is told as it ended.
+ * A run that has ended by then (the stream said so before the answer came) is told as it ended. One the page still
+ * shows queued or running (resumed elsewhere since, or its `stopping` not streamed yet) gets no toast: the page says
+ * what the stream reports.
  */
 export function stoppedToast(r: Pick<Run, 'name' | 'cloud' | 'epoch' | 'status'>, done: number): void {
+  if (r.status === 'queued' || r.status === 'running') return;
   // page-level: both callers have closed their confirm first.
   if (r.status === 'completed') return void toast.info(`${r.name} completed`, 'It finished before the stop took effect, with all its results.');
   if (r.status === 'failed') return void toast.info(`${r.name} failed`, 'Its page has the error and the log.');

@@ -71,10 +71,10 @@ export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_
 
 /**
  * Whether Resume (or Start again) is offered: not on the mock server (`folo serve --mock`, `hub.serverMock`), which
- * answers it `501` (issue #382: the palette's Resume did). Every real server resumes, older ones too; the in-browser
- * demo does as well.
+ * answers it `501` (issue #382: the palette's Resume did), and not in the in-browser demo, which answers the same.
+ * Every real server resumes, older ones too.
  */
-export const canResume = () => hub.serverMock !== true;
+export const canResume = () => hub.serverMock !== true && hub.mode !== 'mock';
 
 /**
  * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A

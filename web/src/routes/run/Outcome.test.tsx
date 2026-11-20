@@ -157,8 +157,8 @@ describe('Outcome', () => {
   });
 
   // #382: on `folo serve --mock` Resume answered 501. Every real server resumes, also one from before any feature named
-  // it (review: a list without one must not hide it), and so does the in-browser demo (null).
-  it('offers Resume except on the mock server', () => {
+  // it (review: a list without one must not hide it). The in-browser demo answers it 501 too (review round 3).
+  it('offers Resume except on the mock server and in the demo', () => {
     const run = failed('dataset folder D:/data/shapes-hard is gone');
     for (const [mock, labels] of [
       [true, ['Details']],
@@ -171,7 +171,13 @@ describe('Outcome', () => {
       expect(r.labels, JSON.stringify(mock)).toEqual(labels);
       r.done();
     }
+    const mode = hub.mode;
     hub.serverMock = null;
+    hub.mode = 'mock';
+    const demo = render(run);
+    expect(demo.labels).toEqual(['Details']);
+    demo.done();
+    hub.mode = mode;
     hub.features = null;
   });
 

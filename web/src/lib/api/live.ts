@@ -643,21 +643,21 @@ export class LiveRun {
 
   /**
    * Stops the run through `call` (POST /api/runs/{id}/stop, or a resumed run's removal from the queue). The answer is
-   * the run as the server had it once it took the stop. If the view meanwhile has the run ended (a status event or a
-   * snapshot: it completed after its last batch, say), or in a newer attempt (resumed elsewhere after it stopped),
-   * that is newer: the view keeps it. A status event that says it is active (a reconnect's snapshot, a late `queued`,
-   * the stop's own `stopping`) is not: the answer's status applies, over the progress the stream has delivered.
-   * Returns the run as the view now has it.
+   * the run as the server had it once it took the stop. It applies only over the state it answered: if the view heard
+   * anything about the run's status meanwhile (a status event, a snapshot, a resume), the stream is newer than the
+   * answer or about to be (the server sends every change of status as an event, the stop's own `stopping` too), and
+   * the view keeps what it has: the run may have ended, or been resumed elsewhere after it stopped. Returns the run as
+   * the view now has it.
    */
   async stop(call: () => Promise<Run | null>): Promise<Run | null> {
     const seq = this.#statusSeq;
     const attempt = this.#attempt;
+    const before = this.run?.status;
     const r = await call();
     if (!r) return null;
     const cur = this.run;
-    if (cur && (attempt !== this.#attempt || !ACTIVE.includes(cur.status))) return cur;
-    if (cur && this.#statusSeq !== seq) this.run = { ...cur, status: r.status, error: r.error };
-    else this.run = keepStepsPerEpoch(r, cur);
+    if (cur && (seq !== this.#statusSeq || attempt !== this.#attempt || cur.status !== before)) return cur;
+    this.run = keepStepsPerEpoch(r, cur);
     return this.run ?? r;
   }
 

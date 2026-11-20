@@ -111,17 +111,29 @@ describe('LiveRun.stop', () => {
     dispose();
   });
 
-  it("applies the answer over an active state the stream reported meanwhile (a reconnect's running), keeping its progress", async () => {
+  it("leaves the run to the stream once it reported a status meanwhile (a reconnect's running): its stopping follows", async () => {
     const { live, dispose } = await started();
     const answer = deferred<Run>();
     const pending = live.stop(() => answer.promise);
-    // The stream reconnects while the stop is out: its snapshot still says running, a step further on.
     handlers.status?.({ status: 'running', error: null });
-    live.run = { ...live.run!, step: 5 };
     answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
-    const now = await pending;
-    expect([now?.status, now?.step]).toEqual(['stopping', 5]);
+    expect((await pending)?.status).toBe('running');
+    // The server sends the stop's own status on the stream.
+    handlers.status?.({ status: 'stopping', error: null });
     expect(live.run?.status).toBe('stopping');
+    dispose();
+  });
+
+  it('keeps a newer attempt a snapshot brought before its status event (review of #389, round 3)', async () => {
+    const { live, dispose } = await started();
+    const answer = deferred<Run>();
+    const pending = live.stop(() => answer.promise);
+    // Stopped, then resumed elsewhere and waiting in the queue: the terminal refresh reads `queued` first.
+    live.run = { ...live.run!, status: 'queued' };
+    handlers.status?.({ status: 'queued', error: null });
+    answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
+    expect((await pending)?.status).toBe('queued');
+    expect(live.run?.status).toBe('queued');
     dispose();
   });
 });
@@ -147,6 +159,12 @@ describe('stoppedToast', () => {
       ['Stopped s', 'The checkpoint from epoch 2 is kept.'],
       ['f failed', 'Its page has the error and the log.'],
     ]);
+  });
+
+  it('says nothing for a run the page shows active again (resumed elsewhere since, or its stopping not streamed yet)', () => {
+    stoppedToast({ name: 'r', epoch: 2, status: 'running' }, 1);
+    stoppedToast({ name: 'q', epoch: 2, status: 'queued' }, 1);
+    expect(toast.items).toEqual([]);
   });
 
   it('the confirm does not promise nothing is saved either', () => {

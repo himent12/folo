@@ -58,15 +58,21 @@ describe('the run page', () => {
     await until('the confirm to close', () => !confirm());
   });
 
-  it("offers Resume in the palette except on the mock server", async () => {
+  it('offers Resume in the palette except on the mock server and in the in-browser demo', async () => {
     await open('stopped');
     const resume = () => pageCommandList.items.some((x) => x.id === 'run-resume');
     await until('the commands', () => pageCommandList.items.length > 0);
-    expect(resume()).toBe(true);
+    // The demo answers Resume 501 as `folo serve --mock` does (review of #389, round 3).
+    expect(resume()).toBe(false);
+    // As a real server: offered, also when its health has not said (`serverMock` unknown).
+    hub.mode = 'live';
+    hub.serverMock = false;
+    // The page loads the run again for the new mode.
+    await until('Resume', resume);
     hub.serverMock = true;
     flushSync();
     expect(resume()).toBe(false);
-    hub.serverMock = false;
+    hub.serverMock = null;
     flushSync();
     expect(resume()).toBe(true);
   });
