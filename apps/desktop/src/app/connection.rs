@@ -116,6 +116,11 @@ impl FoloApp {
         self.play_open_seq += 1;
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
+        // A dataset id may name another dataset here (ids are unique per data dir), and a class
+        // index another class: the filters are a view setting, so they go with the old source
+        // (a restart of the same server too) rather than apply where they don't belong.
+        self.ds_class = None;
+        self.ds_empty_of = None;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).

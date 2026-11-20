@@ -90,7 +90,7 @@ impl Backend for MockBackend {
         self.hold_point("system");
         Ok(SystemResponse {
             system,
-            data_dir: None,
+            data_dir: self.data_dir.clone(),
             features,
             capabilities: Some(capabilities),
             gpu_pool: None,
