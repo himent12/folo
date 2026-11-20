@@ -164,18 +164,24 @@ pub(super) fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
 
 /// A cloud run's lines after training, the weights copied back and then the instance going, in the
 /// real control plane's words (folo-server's `cloud/executor`): added to its log once the run gets
-/// there, whenever its log is read or streamed (as its phases are worked out from the clock). A run
-/// that lost its instance, or ended before it trained, has nothing to copy.
+/// there, whenever its log is read or streamed (as its phases are worked out from the clock), and
+/// before its instance is terminated by hand (`terminate_instance`), so what it reached stays
+/// whenever it is read. A run that ended before it trained has nothing to copy; one that lost its
+/// instance says only what came before; a run with no instance (a remote FOLO server) has none to
+/// terminate (the executor says so only with an instance id).
 pub(super) fn log_cloud_end(f: &mut RunFixture) {
     let Some(sim) = &f.cloud else { return };
-    let skipped = sim.ended.is_some_and(|(e, how)| how == Ended::InstanceLost || e < sim.train_at());
-    let Some(done) = sim.trained_at().filter(|_| !skipped) else { return };
-    let lines = [
-        (done, "cloud: the run ended on the worker; copying its weights"),
-        (done + COLLECT_S, "cloud: terminating the instance"),
-    ];
+    if sim.ended.is_some_and(|(e, _)| e < sim.train_at()) {
+        return;
+    }
+    let Some(done) = sim.trained_at() else { return };
+    let lost = sim.ended.filter(|(_, how)| *how == Ended::InstanceLost).map_or(f64::INFINITY, |(e, _)| e);
+    let mut lines = vec![(done, "cloud: the run ended on the worker; copying its weights")];
+    if sim.base.instance_id.is_some() {
+        lines.push((done + COLLECT_S, "cloud: terminating the instance"));
+    }
     for (at, message) in lines {
-        if sim.elapsed() >= at && !f.logs.iter().any(|l| l.message == message) {
+        if sim.elapsed() >= at && at < lost && !f.logs.iter().any(|l| l.message == message) {
             f.logs.push(LogLine { t: sim.at(at), level: LogLevel::Info, message: message.into() });
         }
     }

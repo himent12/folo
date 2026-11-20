@@ -200,7 +200,7 @@ impl FoloApp {
                     "mAP50-95 · latest",
                     text(KPI_VALUE, t.text_primary)
                         .tnum()
-                        .child(map_now.map_or("–".into(), f3))
+                        .child(map_now.map_or("–".into(), fmt_score))
                         .into_any_element(),
                     Some(best_line),
                 ),

@@ -37,7 +37,7 @@ pub(super) struct CloudSim {
     /// Where the training clock is anchored: (seconds since `t0`, steps done then).
     pub(super) anchor: (f64, u64),
     /// The run's length in steps.
-    total: u64,
+    pub(super) total: u64,
     /// Ended early: when, and how.
     pub(super) ended: Option<(f64, Ended)>,
     /// Why the provider hasn't confirmed the termination (the instance stays `terminating`).
@@ -89,6 +89,12 @@ impl CloudSim {
 
     pub(super) fn steps(&self) -> u64 {
         self.steps_at(self.elapsed())
+    }
+
+    /// When training step `step` was done, in seconds since `t0`, on the clock that counts the
+    /// steps (an epoch's log line is stamped at its last step, so it comes before the end's lines).
+    pub(super) fn step_at(&self, step: u64) -> f64 {
+        self.anchor.0 + (step as f64 - self.anchor.1 as f64) * self.step_dt
     }
 
     /// When training ended (all steps done, or stopped), if it has.

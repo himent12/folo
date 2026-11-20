@@ -281,6 +281,12 @@ impl Store {
             }
             RunEvent::Log(l) => {
                 if let Some(Load::Ready(lines)) = self.logs.get_mut(run_id) {
+                    // A line the loaded history already has (it was read after the line was
+                    // logged, and the stream sent it after that): once, as `install_logs` merges.
+                    let later = lines.iter().rev().take_while(|x| x.t >= l.t);
+                    if later.into_iter().any(|x| x.t == l.t && x.message == l.message) {
+                        return;
+                    }
                     lines.push(l);
                     if lines.len() > 2000 {
                         lines.drain(..lines.len() - 2000);
@@ -609,6 +615,25 @@ mod tests {
         store2.apply(id, RunEvent::Step(history.steps[100]));
         store2.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
         assert_eq!(store2.run_data[id].ready().unwrap().metrics.steps.len(), history.steps.len());
+    }
+
+    /// Review round 1 (#382): a line the loaded history has, sent by the stream after the history
+    /// was read, showed twice. Once; a new line, even with the same words, still shows.
+    #[test]
+    fn a_streamed_line_the_loaded_history_has_shows_once() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_x";
+        let line = |t: i64, m: &str| LogLine {
+            t: crate::api::time::format(1_000 + t),
+            level: LogLevel::Info,
+            message: m.into(),
+        };
+        store.logs.insert(id.into(), Load::Loading);
+        store.install_logs(id, Ok(vec![line(0, "a"), line(5, "copying"), line(5, "epoch 9")]));
+        store.apply(id, RunEvent::Log(line(5, "copying")));
+        store.apply(id, RunEvent::Log(line(6, "copying")));
+        let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(got, ["a", "copying", "epoch 9", "copying"]);
     }
 
     #[test]

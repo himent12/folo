@@ -595,7 +595,54 @@ mod tests {
         let log: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
         let at = |s: &str| log.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}: {log:#?}"));
         assert!(at("training on the instance") < at("copying its weights"));
+        // Review round 1: its epochs were stamped on another clock than the end's lines, so the
+        // last two came after the instance went. Each end line once, after the final epoch.
+        let last = log.iter().rposition(|l| l.starts_with("epoch ")).unwrap_or_else(|| panic!("{log:#?}"));
+        assert!(log[last].starts_with(&format!("epoch {}/", released.epochs)), "{}", log[last]);
+        assert!(last < at("copying its weights"), "{log:#?}");
+        let again: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        for end in ["copying its weights", "terminating the instance"] {
+            assert_eq!(again.iter().filter(|l| l.contains(end)).count(), 1, "{end}");
+        }
         assert!(at("copying its weights") < at("terminating the instance"));
+    }
+
+    /// Review round 1 (#382): the end of a cloud run's log follows its instance. On a remote FOLO
+    /// server there is none: the weights are copied back, nothing is terminated. One terminated by
+    /// hand while its weights were copied says so after "copying", whether its log was read before.
+    #[test]
+    fn a_cloud_runs_end_lines_follow_its_instance() {
+        for (remote, read_first) in [(true, false), (false, false), (false, true)] {
+            let m = MockBackend::new(0, true);
+            let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+            let instance = {
+                let mut runs = m.runs.lock().unwrap();
+                let s = runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap();
+                // Trained at once, and half way through copying the weights back.
+                s.pre = [0., 0., 0.];
+                s.anchor = (0., s.total);
+                s.t0 -= if remote { COLLECT_S + 1. } else { COLLECT_S / 2. };
+                if remote {
+                    s.base.instance_id = None;
+                }
+                s.base.instance_id.clone()
+            };
+            let log = || -> Vec<String> { m.logs(&run.id).unwrap().into_iter().map(|l| l.message).collect() };
+            if read_first {
+                log();
+            }
+            if let Some(id) = &instance {
+                m.terminate_instance(id).unwrap();
+            }
+            let lines = log();
+            let at = |s: &str| lines.iter().position(|l| l.contains(s));
+            let case = format!("remote {remote}, read first {read_first}: {lines:#?}");
+            assert!(at("copying its weights").is_some(), "{case}");
+            assert_eq!(at("terminating the instance"), None, "{case}");
+            if !remote {
+                assert!(at("copying its weights") < at("terminated by hand"), "{case}");
+            }
+        }
     }
 
     #[test]

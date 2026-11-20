@@ -140,11 +140,12 @@ impl MockBackend {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let (now, lines) = {
+                let (now, lines, sim) = {
                     let mut runs = runs.lock().unwrap();
                     let Some(f) = runs.iter_mut().find(|f| f.run.id == run_id) else { return };
                     super::training::log_cloud_end(f);
-                    (Self::snapshot(f), f.logs.get(logs..).map(<[LogLine]>::to_vec).unwrap_or_default())
+                    let lines = f.logs.get(logs..).map(<[LogLine]>::to_vec).unwrap_or_default();
+                    (Self::snapshot(f), lines, f.cloud.clone())
                 };
                 logs += lines.len();
                 while sent < now.step {
@@ -153,11 +154,11 @@ impl MockBackend {
                     if sent.is_multiple_of(spe) {
                         let e = (sent / spe) as u32;
                         let ep = curve.epoch(e);
-                        let line = LogLine {
-                            t: time::format(clock.now() as i64),
-                            level: LogLevel::Info,
-                            message: epoch_line(e, epochs, &ep),
-                        };
+                        // On the run's step clock, as its history stamps it.
+                        let t = sim
+                            .as_ref()
+                            .map_or_else(|| time::format(clock.now() as i64), |s| s.at(s.step_at(sent)));
+                        let line = LogLine { t, level: LogLevel::Info, message: epoch_line(e, epochs, &ep) };
                         let _ = tx.send(RunEvent::Epoch(ep));
                         let _ = tx.send(RunEvent::Log(line));
                     }
