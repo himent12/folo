@@ -486,8 +486,9 @@ mod tests {
         assert!(decode(&png[..png.len() / 2]).is_err());
     }
 
-    /// The JPEG path decodes as `image::load_from_memory` + `into_rgb8` does: colour and greyscale, 4:2:0 and
-    /// 4:4:4, whole and cut short (a cut scan still decodes), and fails where it fails.
+    /// The JPEG path decodes as `image::load_from_memory` + `into_rgb8` does: colour and greyscale, files from
+    /// another encoder with 4:2:0, 4:2:2 and 4:4:4 chroma, progressive, and CMYK (`tests/fixtures/jpeg`, written by
+    /// Pillow), whole and cut short (a cut scan still decodes), and fails where it fails.
     #[test]
     fn jpeg_decodes_as_the_generic_path() {
         use image::ImageEncoder;
@@ -509,6 +510,16 @@ mod tests {
             .write_image(&luma, 61, 37, image::ExtendedColorType::L8)
             .unwrap();
         files.push(grey);
+        files.extend(
+            [
+                &include_bytes!("../tests/fixtures/jpeg/s420.jpg")[..],
+                include_bytes!("../tests/fixtures/jpeg/s422.jpg"),
+                include_bytes!("../tests/fixtures/jpeg/s444.jpg"),
+                include_bytes!("../tests/fixtures/jpeg/progressive420.jpg"),
+                include_bytes!("../tests/fixtures/jpeg/cmyk.jpg"),
+            ]
+            .map(<[u8]>::to_vec),
+        );
         for f in files {
             for bytes in [&f[..], &f[..f.len() * 2 / 3], &f[..f.len() / 4], &f[..3]] {
                 match (decode_jpeg(bytes).unwrap(), generic(bytes)) {

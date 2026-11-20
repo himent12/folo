@@ -178,21 +178,39 @@ const FILES: [[u64; 3]; 7] = [
     [0x16a2a94ab03abb96, 0x883c7ab7b77b851f, 0x3676ef8b3ddcaaa7], // validation
 ];
 
-fn check(ds: Arc<dyn Dataset>, golden: &[[u64; 3]; 7], what: &str) {
-    let mut got = Vec::new();
-    for (name, cfg) in configs() {
-        let loader = DataLoader::new(ds.clone(), cfg).unwrap();
-        let d: Vec<u64> = loader.epoch(1).take(3).map(|b| digest(&b.unwrap())).collect();
-        got.push((name, d));
-    }
-    let found: Vec<[u64; 3]> = got.iter().map(|(_, d)| [d[0], d[1], d[2]]).collect();
+/// Digests of the first three batches of epoch 1 for each of `configs`.
+fn digests(ds: &Arc<dyn Dataset>, configs: &[(&'static str, LoaderConfig)]) -> Vec<(&'static str, [u64; 3])> {
+    configs
+        .iter()
+        .map(|(name, cfg)| {
+            let loader = DataLoader::new(ds.clone(), cfg.clone()).unwrap();
+            let d: Vec<u64> = loader.epoch(1).take(3).map(|b| digest(&b.unwrap())).collect();
+            (*name, [d[0], d[1], d[2]])
+        })
+        .collect()
+}
+
+fn assert_golden(got: &[(&str, [u64; 3])], golden: &[[u64; 3]], what: &str) {
+    let found: Vec<[u64; 3]> = got.iter().map(|(_, d)| *d).collect();
     if found != golden {
-        let mut msg = format!("{RE_BLESS}\n{what}: [\n");
-        for (name, d) in &got {
-            msg += &format!("    [{:#018x}, {:#018x}, {:#018x}], // {name}\n", d[0], d[1], d[2]);
+        let mut msg = format!(
+            "{RE_BLESS}
+{what}: [
+"
+        );
+        for (name, d) in got {
+            msg += &format!(
+                "    [{:#018x}, {:#018x}, {:#018x}], // {name}
+",
+                d[0], d[1], d[2]
+            );
         }
         panic!("{msg}]");
     }
+}
+
+fn check(ds: Arc<dyn Dataset>, golden: &[[u64; 3]; 7], what: &str) {
+    assert_golden(&digests(&ds, &configs()), golden, what);
 }
 
 #[test]
@@ -204,4 +222,30 @@ fn batches_from_memory_are_golden() {
 fn batches_from_files_are_golden() {
     let dir = TempDir::new("golden");
     check(file_dataset(&dir, 14), &FILES, "FILES");
+}
+
+/// At imgsz 192 from the files: decoded images, resized tiles, letterboxes and warped samples are all large enough
+/// for the loader's buffer pool (64 KiB and up), which imgsz 96 leaves to plain allocations.
+const LARGE: [[u64; 3]; 4] = [
+    [0xa4efaa43906f678b, 0xf00810c7dd3675e8, 0x80eacf6d3e6c7bd0], // mosaic
+    [0x26f1f3d83c43b64d, 0x24b33b064b006555, 0x8779b930596dfee4], // mosaic rotate shear
+    [0xf4f4561b2004e1f1, 0x030bcfc33f154304, 0x9b82352ea4240c26], // letterbox affine
+    [0x3602c5be7c80e213, 0x5334afa76a869a38, 0x4a39ce535f8dd160], // validation
+];
+
+/// The pooled sizes give the same batches on the calling thread (no workers, no pool) and on 3 workers (pooled
+/// buffers, reused across samples and threads), and those are golden.
+#[test]
+fn large_batches_are_golden_with_and_without_workers() {
+    let dir = TempDir::new("golden-large");
+    let ds = file_dataset(&dir, 14);
+    let pinned = ["mosaic", "mosaic rotate shear", "letterbox affine", "validation"];
+    for workers in [0, 3] {
+        let configs: Vec<_> = configs()
+            .into_iter()
+            .filter(|(name, _)| pinned.contains(name))
+            .map(|(name, cfg)| (name, LoaderConfig { imgsz: 192, workers, ..cfg }))
+            .collect();
+        assert_golden(&digests(&ds, &configs), &LARGE, &format!("LARGE ({workers} workers)"));
+    }
 }

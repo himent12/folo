@@ -73,12 +73,14 @@ unsafe fn hsv_blocks_avx2(row: &mut [u8], t: &Tables) {
 }
 
 /// Pixels per block of [`hsv_blocks`].
+#[cfg(any(test, target_arch = "x86_64"))]
 const BLOCK: usize = 64;
 
 /// [`hsv_pixels`], 64 pixels at a time: the block's channels are copied into `i32` arrays, then one loop without
 /// branches computes every output channel (the cases of [`hsv_pixels`] become masks and selects, and a grey pixel
 /// needs no case: its saturation is `slut[0] = 0`, which makes all three channels `v`), so the compiler can run
 /// it on vectors.
+#[cfg(any(test, target_arch = "x86_64"))]
 #[inline(always)]
 fn hsv_blocks(row: &mut [u8], t: &Tables) {
     // `u32` tables: what a vector gather reads.

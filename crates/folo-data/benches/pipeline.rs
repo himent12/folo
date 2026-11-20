@@ -98,7 +98,8 @@ fn epoch_rate(loader: &DataLoader, epoch: u32, batches: usize) -> folo_data::Res
 
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
 }
 
 fn main() -> folo_data::Result<()> {

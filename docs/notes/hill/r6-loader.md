@@ -16,7 +16,10 @@ free commit memory was often 2-4 GB. "Load" below is the whole machine's CPU bus
 (31 to 321 px, odd sizes included) to memory and to JPEG and PNG files and pins an FNV digest of each of the first
 3 batches of epoch 1, for each path of the transform: mosaic (u8 and f32 output), mosaic with rotation and shear,
 mosaic with mixup and up-down flips, letterbox + affine (mosaic 0), letterbox with rotation, and validation. The
-digests were blessed on `origin/main`'s code; every later commit passes unchanged. The existing determinism tests
+digests were blessed on `origin/main`'s code; every later commit passes unchanged. After the review a second set
+was added, blessed the same way: from the files at imgsz 192 (where decoded images, resized tiles, letterboxes and
+warped samples are all 64 KiB or more, so the loader's buffer pool serves them) for mosaic, rotation + shear,
+letterbox + affine and validation, with no workers (no pool) and with 3 workers, both against the same digests. The existing determinism tests
 (batches independent of the worker count) stay green, and each new kernel has a test against the kernel it
 replaces (below).
 
@@ -73,7 +76,10 @@ many threads doing that at once the faults serialise in the kernel. A mosaic sam
    free buffers; emptied when the loader stops.
 4. **JPEG decode into a pooled buffer** (`image.rs` `decode_jpeg`): the same `JpegDecoder` with the limits
    `ImageReader::decode` sets, writing into a pooled buffer, then EXIF orientation through a scratch buffer (test
-   `jpeg_decodes_as_the_generic_path`).
+   `jpeg_decodes_as_the_generic_path`, on our encoder's files and on Pillow-written 4:2:0, 4:2:2, 4:4:4,
+   progressive and CMYK files in `tests/fixtures/jpeg`). The `--cache ram` entries, kept for the whole run, are
+   shrunk to their exact size, so a pooled buffer of a larger size class does not hold memory the cache's
+   reservation does not count.
 5. **HSV on AVX2** (`augment/hsv.rs`). The per-pixel kernel with branches stays as the fallback. On CPUs with AVX2,
    blocks of 64 pixels are copied into channel arrays and one loop without branches computes them (the hue sector
    and the max channel become masks and selects, table reads become gathers). Test `kernels_agree_on_all_colours`
@@ -83,9 +89,10 @@ many threads doing that at once the faults serialise in the kernel. A mosaic sam
 
 ## Profile (after)
 
-`profile-simd-x.txt` (head of the branch, 256 samples). The two profiles ran at different, unmeasured loads (the
-whole table is 2.1x slower here, decode included, whose code did not change), so compare the stages against the
-decode, whose cost is the same in both:
+`profile-simd-x.txt` (head of the branch, 256 samples; the profile before used 512). The two profiles are separate
+runs at different, unmeasured loads: the whole table here is 2.1x slower, the decode included, whose code did not
+change. The shares and the ratio of each stage to the decode are what the two runs observed, not a controlled
+comparison (the A/B below is that):
 
 | stage | before, ms (share) | after, ms (share) | stage / decode before → after |
 |---|---|---|---|
@@ -104,48 +111,50 @@ decode, whose cost is the same in both:
 with this branch's bench file for `--same-epoch` and `SCAN_CACHE`) and from the branch (`bin/pipeline-new.exe`),
 one process per arm, arms alternated, under the `cpu` lock. Each process opens COCO train2017 (118 287 images)
 through the scan cache, runs epoch 1's first 125 batches of 16 (2 000 images) as a discarded warm-up pass (so both
-arms read equally warm files), then 2 measured passes over the same 2 000 images; img/s is the median of the two.
-"CPU ms/img" is the process's total CPU time (all threads, warm-up included) over the 6 000 images it made: what a
-sample costs, which other processes' load changes much less than the wall rate. Default augmentation, 640 px, u8
-batches. `logs/w{4,8,16}-a/summary.csv`.
+arms read equally warm files), then 2 measured passes over the same 2 000 images. img/s below is the mean of the
+two passes (their median): the bench's own "median" column printed the faster pass when the count was even, a bug
+the review found and this branch fixes; the rates here are recomputed from the two passes each log records
+(`scripts/recompute.py`). "CPU ms/img" is the process's total CPU time (all threads, warm-up included) over the
+6 000 images it made: what a sample costs, which other processes' load changes much less than the wall rate.
+Default augmentation, 640 px, u8 batches. `logs/w{4,8,16}-a/`.
 
 | workers | round | base img/s | new img/s | new / base | base CPU ms/img | new CPU ms/img | load before/after (base; new) |
 |---|---|---|---|---|---|---|---|
-| 8 | 1 | 332.7 | 423.2 | 1.27 | 24.98 | 18.10 | 93/78; 59/67 |
-| 8 | 2 | 346.4 | 481.9 | 1.39 | 23.85 | 17.22 | 66/50; 49/78 |
-| 8 | 3 | 307.1 | 380.6 | 1.24 | 24.99 | 19.74 | 78/95; 89/83 |
-| 8 | 4 | 334.0 | 460.6 | 1.38 | 23.71 | 17.83 | 74/56; 49/54 |
-| 16 | 1 | 540.9 | 602.8 | 1.11 | 27.28 | 19.95 | 64/82; 76/90 |
-| 16 | 2 | 455.0 | 544.7 | 1.20 | 26.99 | 20.84 | 99/96; 100/100 |
-| 16 | 3 | 464.2 | 686.1 | 1.48 | 26.49 | 20.22 | 100/76; 82/93 |
-| 16 | 4 | 531.8 | 670.8 | 1.26 | 26.77 | 20.53 | 88/81; 86/93 |
-| 4 | 1 | 151.8 | 221.7 | 1.46 | 25.08 | 18.64 | 66/67; 94/75 |
-| 4 | 2 | 95.8 | 130.2 | 1.36 | 25.32 | 21.38 | 91/85; 86/82 |
-| 4 | 3 | 125.5 | 127.8 | 1.02 | 26.21 | 19.21 | 97/92; 90/48 |
-| 4 | 4 | 158.3 | 188.3 | 1.19 | 19.68 | 17.86 | 41/76; 37/47 |
+| 8 | 1 | 323.2 | 419.7 | 1.30 | 24.98 | 18.10 | 93/78; 59/67 |
+| 8 | 2 | 344.2 | 472.9 | 1.37 | 23.85 | 17.22 | 66/50; 49/78 |
+| 8 | 3 | 304.5 | 375.3 | 1.23 | 24.99 | 19.74 | 78/95; 89/83 |
+| 8 | 4 | 320.4 | 452.1 | 1.41 | 23.71 | 17.83 | 74/56; 49/54 |
+| 16 | 1 | 539.2 | 583.4 | 1.08 | 27.28 | 19.95 | 64/82; 76/90 |
+| 16 | 2 | 441.9 | 523.5 | 1.18 | 26.99 | 20.84 | 99/96; 100/100 |
+| 16 | 3 | 439.2 | 675.0 | 1.54 | 26.49 | 20.22 | 100/76; 82/93 |
+| 16 | 4 | 519.0 | 653.9 | 1.26 | 26.77 | 20.53 | 88/81; 86/93 |
+| 4 | 1 | 144.1 | 200.2 | 1.39 | 25.08 | 18.64 | 66/67; 94/75 |
+| 4 | 2 | 83.4 | 104.3 | 1.25 | 25.32 | 21.38 | 91/85; 86/82 |
+| 4 | 3 | 111.0 | 96.4 | 0.87 | 26.21 | 19.21 | 97/92; 90/48 |
+| 4 | 4 | 129.8 | 177.1 | 1.36 | 19.68 | 17.86 | 41/76; 37/47 |
 
 Medians:
 
-| workers | base img/s (range) | new img/s (range) | median of the pair ratios | CPU ms/img base → new |
+| workers | base img/s (range) | new img/s (range) | median of the pair ratios (lowest) | CPU ms/img base → new |
 |---|---|---|---|---|
-| 4 | 138.7 (95.8-158.3) | 159.3 (127.8-221.7) | 1.27x | 25.2 → 18.9 (1.33x) |
-| **8** | **333.4 (307.1-346.4)** | **441.9 (380.6-481.9)** | **1.33x** | **24.4 → 18.0 (1.36x)** |
-| 16 | 498.0 (455.0-540.9) | 636.8 (544.7-686.1) | 1.23x | 26.9 → 20.4 (1.32x) |
+| 4 | 120.4 (83.4-144.1) | 140.7 (96.4-200.2) | 1.31x (0.87) | 25.2 → 18.9 (−25%) |
+| **8** | **321.8 (304.5-344.2)** | **435.9 (375.3-472.9)** | **1.34x (1.23)** | **24.4 → 18.0 (−26%)** |
+| 16 | 480.4 (439.2-539.2) | 618.6 (523.5-675.0) | 1.22x (1.08) | 26.9 → 20.4 (−24%) |
 
-The 8-worker target (1.25x) is met: every 8-worker pair is above 1.24x. The CPU cost per image falls by a third at
-every worker count, with less spread than the wall rates. The machine was busy (load 37-100%), so the wall rates
-move by up to 1.6x between rounds of the same arm; the 4-worker pairs especially.
+The 8-worker target (1.25x) is met on the median pair; the weakest 8-worker pair is 1.23x. The CPU cost per image
+falls by about a quarter at every worker count, with less spread than the wall rates. The machine was busy (load
+37-100%), so the wall rates move by up to 1.7x between rounds of the same arm, the 4-worker ones most.
 
 ## Real training
 
-`scripts/train_ab.sh train-w8 3 8`: `folo train --model folo-n --amp --epochs 2 --batch 16 --imgsz 640 --workers 8
---close-mosaic 0` (mosaic on in both epochs) on `coco5k/` (COCO val2017's 5 000 JPEGs and labels as the training
-split; an 8 000-image train2017 subset was the brief's example, but the val2017 files were already on disk as one
-folder and a training set of 5 000 photographs is enough to be loader-bound at 8 workers), `bin/folo-base.exe`
-(`origin/main`) against `bin/folo-new.exe` (this branch), alternated, 3 rounds, under the `gpu` lock. The rate is the
-last epoch-2 `imgs_per_s` of `metrics.jsonl` (the running mean of epoch 2). Two sets: `logs/train-w8/summary.txt`
-(3 rounds) and `logs/train-w8-b/summary.csv` (5 rounds, `scripts/train_ab2.ps1`, which also records the process's
-CPU time over the 10 000 training images and the wall time of the whole run, start-up and validation included).
+`folo train --model folo-n --amp --epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0` (mosaic on in both
+epochs) on `coco5k/` (COCO val2017's 5 000 JPEGs and labels as the training split; the brief's example was an
+8 000-image train2017 subset, but the val2017 files were already on disk as one folder), `bin/folo-base.exe`
+(`origin/main`) against `bin/folo-new.exe` (this branch), alternated, under the `gpu` lock. The rate is the last
+epoch-2 `imgs_per_s` of `metrics.jsonl` (the running mean of epoch 2). Two sets: A, `scripts/train_ab.sh train-w8 3
+8` (3 rounds, `logs/train-w8/summary.txt`), and B, `scripts/train_ab2.ps1` (5 rounds, `logs/train-w8-b/summary.csv`,
+which also records the process's CPU time over the 10 000 training images and the wall time of the whole run,
+start-up and validation included). Load is the machine's CPU busy percentage just before and just after each run.
 
 | set, round | base img/s | new img/s | new / base | base CPU ms/img | new CPU ms/img | load before/after (base; new) |
 |---|---|---|---|---|---|---|
@@ -158,18 +167,19 @@ CPU time over the 10 000 training images and the wall time of the whole run, sta
 | B 4 | 226.5 | 253.8 | 1.12 | 28.09 | 22.93 | 66/38; 36/56 |
 | B 5 | 365.6 | 447.3 | 1.22 | 27.27 | 22.36 | 48/65; 76/58 |
 
-- **Rate:** median of the 8 pair ratios **1.17x** (0.70-1.53). Both arms stay far below what the trainer sustains on
-  synthetic data (folo-n AMP 613 img/s, docs/BENCHMARKS.md row 10), so the training was loader-bound as intended; the machine was
-  37-100% busy and the other lanes' load moved single runs by 2x (set B's base arm: 169-366 img/s). The two pairs where new lost are the two where its run had the heavier load (set A 3:
-  88-100% against 58-75%; set B 2 took 71 s of wall against 42 s, a run slowed as a whole).
+- **Rate:** median of the 8 pair ratios **1.17x** (0.70-1.53). The machine was 22-100% busy around the runs and
+  single runs of one arm moved by 2x (set B's base arm: 169-366 img/s). Two pairs went the other way (A 3, B 2);
+  the before/after load readings do not explain B 2 (new 88/50 against base 99/90), and two readings per run cannot
+  say what ran during it. Both arms' rates stay below what the trainer sustains on synthetic data (folo-n AMP 613
+  img/s, docs/BENCHMARKS.md row 10), which suggests the data side limited these runs; this check does not measure
+  the trainer's wait for batches directly.
 - **CPU per training image** (set B, the whole process: loader, trainer, driver threads): base 27.3-30.1 ms, median
-  29.1; new 22.4-26.2, median 22.9: **-21%, lower in all 5 pairs**. This is the loader's third (6.4 ms of the
-  loader-alone A/B) showing up in a real run.
-- **Same training:** all 16 runs end epoch 2 at the same total train loss (11.849166) and the same validation
-  metrics: the batches, hence the training, are identical end to end.
+  29.1; new 22.4-26.2, median 22.9: **−21%, lower in all 5 pairs**, about the 6.4 ms per image the loader alone saved.
+- **Same training:** all 16 runs end epoch 2 with the same total train loss (11.849166) and the same validation
+  metrics, as identical batches would give; `tests/golden.rs` is what pins the bytes.
 
-So the gain is visible, about 1.2x on the median pair at 8 workers, but this machine could not measure it tighter
-today; the CPU time per image is the steady number.
+So a gain shows in real training, about 1.2x on the median pair at 8 workers with a wide spread; the CPU time per
+image is the steadier number.
 
 ## What lost
 
@@ -196,4 +206,5 @@ today; the CPU time per image is the steady number.
 6. **One resampling pass** (decode → warp directly, skipping the resize) changes the bytes: a separate, judged PR with
    the 320 px proxy accuracy check, as the brief says.
 7. Not measured: the channel hand-off (workers blocked on a full channel, the trainer on an empty one). The training
-   check's rates, far below the trainer's on synthetic data, say the trainer waits on the loader at 8 workers.
+   check's rates, below the trainer's on synthetic data, suggest the trainer waits on the loader at 8 workers;
+   timing that wait is the way to know.

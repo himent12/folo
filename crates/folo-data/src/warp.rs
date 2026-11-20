@@ -152,6 +152,9 @@ impl<'a> Plane<'a> {
             height: self.height,
             data: crate::buffers::scratch(self.width as usize * self.height as usize * 3),
         };
+        if img.data.is_empty() {
+            return img;
+        }
         for px in img.data.as_chunks_mut::<3>().0.iter_mut() {
             *px = self.fill;
         }
@@ -187,7 +190,12 @@ pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> 
         warp_rows(plane, &inv, width as usize, &mut out);
     } else {
         match plane.tiles.as_slice() {
-            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64] && t.src == [0, 0] => {
+            // One tile that is its whole image and the whole plane: warp the image itself. (A tile showing part of
+            // a larger image must not: the general path would read the image's pixels outside the plane.)
+            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64]
+                && t.src == [0, 0]
+                && (t.img.width, t.img.height) == (plane.width, plane.height) =>
+            {
                 warp_general(t.img, &inv, width as usize, border, &mut out)
             }
             _ => {
@@ -279,8 +287,12 @@ fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
             let fv = (v0 * fone).round() as i64;
             let iy = fv >> FRAC;
             let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
-            // Left taps run from `ix_a` to `ix_b`; off columns `-1 ..= pw - 1` both taps are `fill`.
-            let (ix_a, ix_b) = (fu0 >> FRAC, (fu0 + du * (width as i64 - 1)) >> FRAC);
+            // Left taps run from `ix_a` to `ix_b`; off columns `-1 ..= pw - 1` both taps are `fill`. The last
+            // position in `i128`: the per-pixel steps below stay in `i64` as the general path's do, but the product
+            // `du · (width - 1)` alone can overflow where the running sum does not.
+            let last_fu = fu0 as i128 + du as i128 * (width as i128 - 1);
+            let ix_a = fu0 >> FRAC;
+            let ix_b = (last_fu >> FRAC).clamp(i64::MIN as i128 / 2, i64::MAX as i128 / 2) as i64;
             let lo = ix_a.min(ix_b).max(-1);
             let hi = (ix_a.max(ix_b) + 1).min(pw);
             if iy < -1 || iy >= ph || hi <= lo {
@@ -436,6 +448,56 @@ mod tests {
             warp_general(&rendered, &inv, w as usize, [114; 3], &mut general);
             assert_eq!(warp_plane(&plane, &m, w, h).data, general, "case {case}");
         }
+    }
+
+    /// A single tile showing part of a larger image (a mosaic's one visible tile, cropped by the canvas), warped
+    /// with shear: the warp reads only the shown part, as the rendered plane has it.
+    #[test]
+    fn a_cropped_tile_shows_only_its_part() {
+        let img = pattern(4, 4);
+        let tiles = |dst, src| vec![Tile { img: &img, dst, src }];
+        for (dst, src) in [([0, 0, 2, 2], [0, 0]), ([0, 0, 2, 2], [2, 2]), ([0, 0, 3, 2], [1, 0])] {
+            let plane =
+                Plane { width: dst[2] as u32, height: dst[3] as u32, fill: [114; 3], tiles: tiles(dst, src) };
+            for m in [
+                Affine([1.0, 0.0, -2.0, 1.0, 1.0, -4.0]),
+                Affine([1.0, 0.3, 0.0, 0.2, 1.0, 0.0]),
+                Affine::rotate(20.0).then(&Affine::scale(2.0, 2.0)),
+            ] {
+                for (w, h) in [(1, 1), (5, 4)] {
+                    assert_eq!(
+                        warp_plane(&plane, &m, w, h),
+                        warp_affine(&plane.render(), &m, w, h, [114; 3]),
+                        "{dst:?} {src:?} {m:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An empty plane renders as an empty image and warps to the fill.
+    #[test]
+    fn empty_planes() {
+        for (pw, ph) in [(0, 0), (0, 5), (5, 0)] {
+            let plane = Plane { width: pw, height: ph, fill: [9, 8, 7], tiles: Vec::new() };
+            let r = plane.render();
+            assert_eq!((r.width, r.height, r.data.len()), (pw, ph, 0));
+            for m in [Affine::translate(1.0, 2.0), Affine::rotate(10.0)] {
+                assert_eq!(warp_plane(&plane, &m, 3, 2), Image::new(3, 2, [9, 8, 7]));
+            }
+        }
+    }
+
+    /// A step so large that `du · (width - 1)` overflows `i64` while every running position the general path adds up
+    /// fits: the row path gives the general path's bytes, without overflowing.
+    #[test]
+    fn a_huge_step_does_not_overflow() {
+        let src = pattern(1, 1);
+        let m = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(128.5, 0.0));
+        let inv = m.inverse().unwrap();
+        let mut general = vec![0u8; 257 * 3];
+        warp_general(&src, &inv, 257, [114; 3], &mut general);
+        assert_eq!(warp_affine(&src, &m, 257, 1, [114; 3]).data, general);
     }
 
     #[test]
