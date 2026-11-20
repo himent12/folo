@@ -17,7 +17,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 | `src/init.rs` | Seeded Kaiming / Xavier initialisation and the head bias priors (MODEL.md §2.9, §6.5) |
 | `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `sgd.rs`, `adamw.rs`, `musgd.rs` (MuSGD and Newton–Schulz `orthogonalize`), `grads.rs` (`GradAccumulator`, clipping) |
 | `src/sched.rs` | `LrSchedule`: warmup, then linear or cosine decay (MODEL.md §8.4, `folo.sched` in FORMAT.md) |
-| `src/ema.rs` | `ModelEma` (MODEL.md §8.5) |
+| `src/ema.rs` | `ModelEma`, `ema_for_run` (a fine-tune's EMA window; MODEL.md §8.5) |
 | `src/amp.rs` | `GradScaler`, dynamic loss scaling for mixed-precision training (`folo.amp` in FORMAT.md) |
 | `src/io/` | `.folo` files: `safetensors.rs` (the container), `meta.rs` (`__metadata__`, `ModelConfig`, `scale_row`), `file.rs` (`ModelFile`, loading rules), `checkpoint.rs` (training state), `export.rs` (Conv+BN fusion, `F16` export), `replace.rs` (`rename_over`), `publish.rs` (`publish_new`: a finished file moved to a name only while it is free) |
 | `src/error.rs` | `Error` and `Result` |

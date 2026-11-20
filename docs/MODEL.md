@@ -638,6 +638,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `cos_lr` | false | linear decay by default |
 | `close_mosaic` | 10 | epochs at the end with mosaic off, at most half of the run (§8.6) |
 | `ema` | true | `false`: no EMA (§8.5) |
+| `ema_run_fraction` | 0.25 | a fine-tune's EMA window as a fraction of its optimizer steps, at most 10,000 (§8.5); `0`: the default window for every run, as in configs written before the key |
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
@@ -837,6 +838,29 @@ of training. After every optimizer step: `updates += 1`, `d = 0.9999 · (1 − e
 tracked tensor `ema = d · ema + (1 − d) · model`. The EMA is always in eval mode. Validation, the `best`/`last`
 weights and export use it (FORMAT.md: `ema.*`, `ema.__updates`, `folo.ema = {"decay": 0.9999, "tau": 2000}`).
 With `ema = false`, those uses take the live model in eval mode, and checkpoints carry no `ema.` tensors.
+
+**A fine-tune's window** (`ema_run_fraction`, default 0.25). The decay and tau above make a nominal window of
+`1 / (1 − 0.9999) = 10,000` updates, which a COCO run (tens of thousands of optimizer steps) fills but a fine-tune
+of a few hundred never ramps up to: at the end of a 400-step run `d` is 0.18 and the "EMA" is 82% the last step.
+So a run from pretrained weights (`TrainConfig.transfer`, §8.2) of `T` optimizer steps (§8.4) takes the window
+`w = max(ema_run_fraction · T, 1)` with `decay = 1 − 1 / w` and `tau = max(w / 5, 1)` (the default's ratio, 2000 /
+10000), `folo_nn::ema_for_run`; when `ema_run_fraction · T` reaches 10,000 (every fine-tune of 40,000 steps or
+more) it is the default `0.9999` / `2000` exactly. A run from scratch always takes the default, so no from-scratch
+run changes (COCO pretraining, the 320 px COCO proxy of docs/notes/hill/, the shapes gate of §10.6, the tests).
+Examples at 100 epochs, batch 16 (4 batches a step): BCCD (205 images, `T = 400`): window 100, decay 0.99, tau 20;
+brain-tumor (893 images, `T = 1,400`): window 350, decay 0.99714, tau 70. The pair is stored as `folo.ema`, so a
+resume continues the same average; it is in `Run.resolved` (`ema_decay`, `ema_tau`) and the run's first log line
+(`EMA window N steps`). `ema_run_fraction = 0` gives every run the default window, as configs written before the key
+mean (`GET /api/runs/{id}/cli` of such a fine-tune ends with `--set ema_run_fraction=0`).
+
+Why (docs/notes/hill/r6-finetune.md; folo-n from `folo-n-coco-v5`, the four sets of
+docs/BENCHMARKS.md "Fine-tuning on small datasets", three seeds per side, paired by seed): trained on each train split
+minus a seeded 20% hold-out, `best.folo` chosen on that hold-out and scored on the reported split, which neither side
+saw, the window raises AP by 0.0052 over the four sets (BCCD +0.0096, brain-tumor −0.0044, signature +0.0098,
+medical-pills +0.0057; 11 of the 12 seed pairs up), and `last.folo` by 0.0064 (every set up). Under the benchmark's
+own protocol, which picks `best.folo` on the split it then scores for three of the four sets, the same window was
+0.005 lower (brain-tumor −0.033): the default's noisier per-epoch curve has a higher maximum on the scored images.
+Not tried: other windows than `h = 0.25` with the selection-free protocol (0.1 and 0.5 lost to it on the hold-outs).
 
 ### 8.6 Data and augmentation (folo-data implements; the trainer configures)
 `s = imgsz`. Gray means 114 in every channel. Boxes are `xyxy` pixels throughout, and every geometric step below

@@ -103,7 +103,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   `contract()` / `from_contract()` are `folo.sched`.
 - `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device) and updates every
   parameter and floating buffer with `d = decay · (1 − exp(−updates / tau))` (on the GPU one multi-tensor
-  `a·p + b·g` call for all of them, 16 per dispatch).
+  `a·p + b·g` call for all of them, 16 per dispatch). `ModelEma::new` takes MODEL.md §8.5's 0.9999 / 2000;
+  `ema_for_run(total_updates, fraction)` is the `(decay, tau)` of a window of `fraction` of a run (a fine-tune's,
+  capped at the default window), for `ModelEma::with_params`.
   The object-safe `EmaState` trait is what checkpoints use.
 
 ## `.folo` files (`folo_nn::io`)

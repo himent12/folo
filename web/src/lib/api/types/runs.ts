@@ -109,6 +109,12 @@ export interface ResolvedTrain {
    * from the request. Read only through `effectiveCloseMosaic` (routes/run/resolved).
    */
   close_mosaic?: number;
+  /**
+   * The EMA's decay and ramp time constant (docs/MODEL.md §8.5): 0.9999 / 2000, or a fine-tune's shorter window;
+   * missing for a run without an EMA and from older servers.
+   */
+  ema_decay?: number;
+  ema_tau?: number;
 }
 
 /** GET /api/runs/{id}/cli (servers list `run_cli`): the run's `folo train` command on the server's machine. */

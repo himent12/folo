@@ -177,6 +177,32 @@ pub fn with_warmup_floor(mut cmd: CliCommand, floor: Option<u64>) -> CliCommand 
     cmd
 }
 
+/// The EMA window fraction (`TrainConfig.ema_run_fraction`, docs/MODEL.md §8.5) a run trained with
+/// ([`recorded_train`]): its `ema_run_fraction`, or 0 (the default window) when the key is absent (written before it
+/// existed). `None` when nothing records the run's config (it starts with the current default).
+pub fn recorded_ema_run_fraction(run_dir: &std::path::Path) -> Option<f64> {
+    let train = recorded_train(run_dir)?;
+    Some(train.get("ema_run_fraction").and_then(serde_json::Value::as_f64).unwrap_or(0.0))
+}
+
+/// `cmd` with `--set ema_run_fraction=F` when a run from pretrained weights (`transfer`; the fraction changes no other
+/// run) trained with another fraction than a new run takes, so the command averages as the run did (fine-tunes made
+/// before the key: the default window, 0).
+pub fn with_ema_run_fraction(
+    mut cmd: CliCommand,
+    fraction: Option<f64>,
+    transfer: Option<bool>,
+) -> CliCommand {
+    if let Some(f) = fraction
+        && transfer == Some(true)
+        && f != folo_vision::TrainConfig::default().ema_run_fraction
+    {
+        cmd.argv.extend(["--set".to_string(), format!("ema_run_fraction={f}")]);
+        cmd.cli = shell_join(&cmd.argv);
+    }
+    cmd
+}
+
 /// Whether a run started from pretrained weights (`TrainConfig.transfer`, docs/MODEL.md §8.2) ([`recorded_train`]):
 /// `false` when the key is absent (written before it existed). `None` when nothing records the run's config.
 pub fn recorded_transfer(run_dir: &std::path::Path) -> Option<bool> {
@@ -349,6 +375,28 @@ mod tests {
         let current = folo_vision::TrainConfig::default().warmup_floor;
         assert_eq!(with_warmup_floor(base(), Some(current)).cli, base().cli);
         assert_eq!(with_warmup_floor(base(), None).cli, base().cli);
+    }
+
+    /// A fine-tune made before `ema_run_fraction` (the default window then) repeats with `--set ema_run_fraction=0`;
+    /// a fine-tune with the current default, a run from scratch and a run that never started get no `--set`.
+    #[test]
+    fn fine_tunes_repeat_with_their_ema_window() {
+        use folo_test_support::TestDir;
+        let dir = TestDir::new("cli-ema-window");
+        let write = |v: serde_json::Value| std::fs::write(dir.join("config.json"), v.to_string()).unwrap();
+        assert_eq!(recorded_ema_run_fraction(&dir), None, "no config.json");
+        write(serde_json::json!({ "train": { "epochs": 100, "transfer": true } }));
+        assert_eq!(recorded_ema_run_fraction(&dir), Some(0.0), "written before the key");
+        write(serde_json::json!({ "train": { "ema_run_fraction": 0.1 } }));
+        assert_eq!(recorded_ema_run_fraction(&dir), Some(0.1));
+        let c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        let base = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, None);
+        let cmd = with_ema_run_fraction(base(), Some(0.0), Some(true));
+        assert_eq!(cmd.argv[cmd.argv.len() - 2..], ["--set", "ema_run_fraction=0"]);
+        let current = folo_vision::TrainConfig::default().ema_run_fraction;
+        assert_eq!(with_ema_run_fraction(base(), Some(current), Some(true)).cli, base().cli);
+        assert_eq!(with_ema_run_fraction(base(), Some(0.0), Some(false)).cli, base().cli, "from scratch");
+        assert_eq!(with_ema_run_fraction(base(), None, None).cli, base().cli);
     }
 
     /// A run folder without `config.json` (a cloud run's) reads the recipe from `weights/last.folo`, else

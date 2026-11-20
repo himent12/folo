@@ -334,6 +334,11 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
     // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4; new runs have no warmup floor).
     let spe = batches.div_ceil(accumulate as u64);
     let warmup_iters = folo_nn::warmup_iters_floor(3.0, config.epochs as u64, spe, 0);
+    // The EMA: a fine-tune's window is a quarter of its optimizer steps (docs/MODEL.md §8.5).
+    let (ema_decay, ema_tau) = match config.weights {
+        Some(_) => folo_nn::ema_for_run(config.epochs as u64 * spe, 0.25),
+        None => (folo_nn::EMA_DECAY, folo_nn::EMA_TAU),
+    };
     ResolvedTrain {
         optimizer,
         lr0,
@@ -352,6 +357,8 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
         warmup_bias_lr,
         // The trainer's cap: at most half the run.
         close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
+        ema_decay: Some(ema_decay),
+        ema_tau: Some(ema_tau),
     }
 }
 

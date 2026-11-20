@@ -81,7 +81,7 @@ async fn transfer_runs_without_weights_keep_their_musgd_weights() {
         let dir = home.join("runs").join(id);
         write_run(&dir, id, &data);
         let train = json!({ "dataset_id": "ds_legacy", "epochs": 3, "auto_rule": 5, "warmup_floor": 0,
-                            "transfer": transfer, "musgd": musgd });
+                            "ema_run_fraction": 0.25, "transfer": transfer, "musgd": musgd });
         std::fs::write(dir.join("config.json"), json!({ "train": train }).to_string()).unwrap();
     }
     let s = store(&home);
