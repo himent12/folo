@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, shortFingerprint, sourceKind, unreviewedText } from './words';
+import { axisWhyNot, compareCaveats, contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, selfLabelReading, shortFingerprint, sourceKind, unreviewedText } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
@@ -30,7 +30,21 @@ describe('words', () => {
     expect(contestantFacts(entry({ name: 'Claude Code · Sonnet', contestant: { kind: 'agent', agent: 'claude', model: 'sonnet', effort: 'medium' } }))).toEqual({ facts: ['Agent', 'medium effort'] });
     expect(contestantFacts(entry({ name: 'my agent', contestant: { kind: 'agent', agent: 'codex', model: null, effort: 'low' } }))).toEqual({ facts: ['Agent', 'Codex', 'Default model', 'low effort'] });
     expect(contestantFacts(entry({ contestant: { kind: 'model', model_id: 'm', arch: 'folo-s', params: 9_100_000, imgsz: 640 } }))).toEqual({ arch: 'folo-s', facts: ['9.1M params'] });
-    expect(contestantFacts(entry({ contestant: { kind: 'external' }, scored: false })).facts).toEqual(['External', 'no confidences']);
+    expect(contestantFacts(entry({ contestant: { kind: 'external' }, scored: false })).facts).toEqual(['External', 'scored without confidences']);
+  });
+
+  // #382: an external entry added with "The model gives confidences" off, from a file full of scores, read "no
+  // confidences" and "Its predictions came without confidences". It was scored without them: that is all it knows.
+  it('says an unscored external entry was scored without confidences, never that it has none', () => {
+    const ext = entry({ contestant: { kind: 'external' }, scored: false, score: { total: 50, partial: true, axes: [] } });
+    const agent = entry({ contestant: { kind: 'agent', agent: 'claude', model: null, effort: 'low' }, scored: false, score: { total: 50, partial: true, axes: [] } });
+    expect(coverageFacts(ext, bench)).toEqual(['scored without confidences']);
+    expect(coverageFacts(agent, bench)).toEqual(['no confidences']);
+    const why = axisWhyNot('calibration', ext, bench)!;
+    expect(why).toContain('scored without them');
+    expect(why).not.toMatch(/came without/);
+    expect(compareCaveats([ext], bench).map((c) => c.text).join(' ')).toContain('x was scored without confidences: its AP comes from one');
+    expect(selfLabelReading({ threshold: null, precision: 0.93, recall: 0.61, mean_iou: null, labels_per_image: 4, labels: 200, curve: [] }, false, ext)).toMatch(/^It was scored without confidences, so it has one operating point/);
   });
 
   it('words where a running entry is and what it cost', () => {

@@ -34,6 +34,15 @@ const SLOT: Record<Mode, { name: string; desc: string }> = {
   light: { name: 'Light theme', desc: 'Used when the theme is Light, or System while your system is light.' },
 };
 
+let canvas: CanvasRenderingContext2D | null | undefined;
+/** `text`'s width in `font` on a canvas; 0 where there is none (it then never reads as cut). */
+function textWidth(text: string, font: string): number {
+  if (canvas === undefined) canvas = document.createElement('canvas').getContext('2d');
+  if (!canvas) return 0;
+  canvas.font = font;
+  return canvas.measureText(text).width;
+}
+
 /** What an import said about one file, as one line: "night.json: color.bg.ap: not a colour token". */
 export function resultText(r: ImportResult): string {
   // A whole-file error's path is "(file)": the file's own name says that better.
@@ -105,14 +114,42 @@ export default function Appearance() {
     const pick = (v: string) => {
       if (v !== prefs.slotTheme(m).id) prefs.useTheme(v);
     };
+    // A closed native select cannot wrap: a theme name wider than its field (a custom one, up to 40 characters) is cut
+    // there, so the row then says it whole under its description (ui/Select: say the rest under the select; issue
+    // #382). The field's text box and font are measured on every resize, as `npm run qa`'s cut-select check does.
+    const room = signal<{ px: number; font: string } | null>(null);
+    const measured = (node: HTMLElement) => {
+      const ro = new ResizeObserver(() => {
+        const s = node.querySelector('select');
+        if (!s) return;
+        const cs = getComputedStyle(s);
+        const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+        room.set({ px: s.clientWidth - pad, font: `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}` });
+      });
+      ro.observe(node);
+      return { destroy: () => ro.disconnect() };
+    };
+    const whole = computed(() => {
+      const r = room.get();
+      const name = options.get().find((o) => o.value === value.get())?.label;
+      return r && name && textWidth(name, r.font) > r.px + 1 ? name : null;
+    });
     return (
       <Row
         name={SLOT[m].name}
         for={id}
-        desc={SLOT[m].desc}
+        desc={
+          whole.get() ? (
+            <>
+              {SLOT[m].desc} <span class="whole">Chosen: {whole.get()}</span>
+            </>
+          ) : (
+            SLOT[m].desc
+          )
+        }
         descId={`${id}-desc`}
         control={
-          <span class="pick">
+          <span class="pick" use:measured>
             <Select id={id} bind:value={value} options={options.get()} describedby={`${id}-desc`} onchange={pick} />
           </span>
         }
@@ -206,6 +243,11 @@ css`
   }
   .pick > :global(.select) {
     flex: 1;
+  }
+  .whole {
+    display: block;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
   .custom {
     display: grid;

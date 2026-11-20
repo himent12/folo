@@ -188,8 +188,17 @@ export function contestantFacts(e: Pick<BenchEntry, 'contestant' | 'scored' | 'n
       facts: ['Agent', ...(name.includes(AGENT_NAME[c.agent].toLowerCase()) ? [] : [AGENT_NAME[c.agent]]), ...(name.includes(model.toLowerCase()) ? [] : [model]), `${c.effort} effort`],
     };
   }
-  return { facts: ['External', e.scored ? 'with confidences' : 'no confidences'] };
+  return { facts: ['External', e.scored ? 'with confidences' : noConfidences(e)] };
 }
+
+/**
+ * An entry graded without confidences, in a few words: an agent gives none; an external entry was added as a model
+ * that gives none ("The model gives confidences" off), so it was scored without them whatever its predictions carry
+ * (issue #382: it read "no confidences" beside a file full of scores).
+ */
+export const noConfidences = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'scored without confidences' : 'no confidences');
+/** The same as a sentence's verb: "it gives no confidences", "it was scored without confidences". */
+export const givesNone = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'was scored without confidences' : 'gives no confidences');
 
 /** "Model", "Agent", "External": what kind of contestant, in one word. */
 export const KIND: Record<BenchEntry['contestant']['kind'], string> = { model: 'Model', agent: 'Agent', external: 'External' };
@@ -210,7 +219,7 @@ export function coverageFacts(e: BenchEntry, b: Pick<Bench, 'images' | 'classes'
   // An open external entry has not said yet which conditions it answers: nothing to say until it is finished.
   if (planned && !e.conditions && !receiving(e)) out.push('unchanged only');
   else if (planned && conditionsRun !== undefined && conditionsRun < planned) out.push(`${conditionsRun} of ${planned} conditions`);
-  if (!e.scored) out.push('no confidences');
+  if (!e.scored) out.push(noConfidences(e));
   if (e.missing_classes.length) out.push(`knows ${b.classes.length - e.missing_classes.length} of ${b.classes.length} classes`);
   // A scored entry whose detections never reach confidence 0.1 has no calibration: partial for that, whatever it ran.
   if (e.scored && e.score && axis('calibration')?.value === null) out.push(CALIBRATION_NONE);
@@ -403,7 +412,7 @@ export function axisWhyNot(axis: BenchAxis, e: Pick<BenchEntry, 'conditions' | '
     if (!e.scored)
       return e.contestant.kind === 'agent'
         ? 'Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate.'
-        : 'Its predictions came without confidences.';
+        : 'It was added as a model that gives no confidences, so it was scored without them, also where its predictions carry scores.';
     return 'No detection on the unchanged images reached confidence 0.1.';
   }
   return null;
@@ -484,11 +493,13 @@ export const READINESS_MEANS: Record<BenchReadiness, string> = {
 export function selfLabelReading(
   s: Pick<BenchSelfLabeling, 'threshold' | 'precision' | 'recall' | 'mean_iou' | 'labels_per_image' | 'labels' | 'curve'>,
   scored: boolean,
+  /** Who it is, for the words of an entry without confidences (`givesNone`). */
+  e?: Pick<BenchEntry, 'contestant'>,
 ): string {
   const per = perImageText(s.labels_per_image, s.labels);
   const iou = s.mean_iou !== null ? `, mean IoU ${num(s.mean_iou, 2)}` : '';
   if (!scored) {
-    const head = `It gives no confidences, so it has one operating point: its ${labelsText(s.labels)} (${per}) ${s.labels === 1 ? 'is' : 'are'}`;
+    const head = `It ${e ? givesNone(e) : 'gives no confidences'}, so it has one operating point: its ${labelsText(s.labels)} (${per}) ${s.labels === 1 ? 'is' : 'are'}`;
     if (s.recall > 0) return `${head} ${pct(s.precision, 0)} right and cover ${share(s.recall)} of all objects${iou}.`;
     if (s.labels < MIN_LABELS) return `${head} ${pct(s.precision, 0)} right: too few to rest a label set on (it takes at least ${MIN_LABELS}).`;
     return `${head} ${shareApart(s.precision, TARGET_PRECISION)} right, short of the ${pct(TARGET_PRECISION, 0)} a label set to train on needs.`;
@@ -575,7 +586,7 @@ export function compareCaveats(entries: readonly BenchEntry[], b: Pick<Bench, 'i
     if (planned && !e.conditions) out.push({ id: e.id, text: `${e.name} ran the unchanged images only: it has no robustness to compare.` });
     else if (planned && e.conditions_run < planned) out.push({ id: e.id, text: `${e.name} ran ${e.conditions_run} of ${planned} conditions: its robustness is over those.` });
     if (!e.scored)
-      out.push({ id: e.id, text: `${e.name} gives no confidences: its AP comes from one precision–recall point. Compare it on precision, recall and self-labeling rather than mAP.` });
+      out.push({ id: e.id, text: `${e.name} ${givesNone(e)}: its AP comes from one precision–recall point. Compare it on precision, recall and self-labeling rather than mAP.` });
     if (e.missing_classes.length) out.push({ id: e.id, text: `${e.name} knows ${b.classes.length - e.missing_classes.length} of ${b.classes.length} classes: its AP on the others is 0.` });
   }
   return out;

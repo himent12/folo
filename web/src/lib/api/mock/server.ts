@@ -288,7 +288,9 @@ export class MockServer {
 
   createSyntheticDataset(body: CreateSyntheticDataset): Promise<Dataset> {
     return this.call(() => {
-      const n = Math.max(10, Math.min(20000, Math.round(body.images)));
+      // As the real server: a count outside its limits is a 400, never clamped or rounded.
+      const n = body.images;
+      if (!Number.isInteger(n) || n < 1 || n > 100_000) throw new ApiError(400, 'invalid_body', 'images must be in 1..=100000');
       const train = Math.round(n * 0.8);
       const classes = (body.classes.length ? body.classes : ['circle', 'square', 'triangle']).slice(0, 6);
       const spec: MockDatasetSpec = {

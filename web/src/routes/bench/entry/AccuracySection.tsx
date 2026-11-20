@@ -10,7 +10,7 @@ import type { Bench, BenchEntry, BenchResult } from '$lib/api/types';
 import { unitTop } from '$lib/charts/domain';
 import { atBestF1, count, metric, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
-import { bestF1Conf, intervalReading, intervalText } from '../words';
+import { bestF1Conf, givesNone, intervalReading, intervalText } from '../words';
 
 export interface AccuracySectionProps {
   result: BenchResult;
@@ -101,7 +101,7 @@ export default function AccuracySection(props: AccuracySectionProps) {
           </dl>
           <p class="cap">
             {!props.entry.scored
-              ? 'Precision, recall and F1 of all its boxes (it gives no confidences), class means.'
+              ? `Precision, recall and F1 of all its boxes (it ${givesNone(props.entry)}), class means.`
               : bestF1Conf(a.get()) === null
                 ? 'F1 is 0 at every confidence, so there is no best-F1 confidence.'
                 : `Precision, recall and F1 ${atBestF1(a.get().best_conf)}, class means.`}

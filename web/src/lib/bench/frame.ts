@@ -22,3 +22,16 @@ export function containFit(cw: number, ch: number, width: number, height: number
 export function placeBox(f: Fit, b: Pick<Box, 'x1' | 'y1' | 'x2' | 'y2'>): { left: number; top: number; width: number; height: number } {
   return { left: f.ox + b.x1 * f.s, top: f.oy + b.y1 * f.s, width: (b.x2 - b.x1) * f.s, height: (b.y2 - b.y1) * f.s };
 }
+
+/**
+ * A placed box pulled in so its line, drawn `edge` px outside it (its stroke and halo, ./MatchView), stays inside the
+ * `cw × ch` frame, which clips: a box along the image's edge, a whole-image box above all, drew its line where the
+ * frame cut it off and showed nothing (issue #382). A box `edge` px or more inside the frame is unchanged.
+ */
+export function insideFrame(r: { left: number; top: number; width: number; height: number }, cw: number, ch: number, edge: number): { left: number; top: number; width: number; height: number } {
+  const left = Math.max(r.left, edge);
+  const top = Math.max(r.top, edge);
+  const right = Math.min(r.left + r.width, cw - edge);
+  const bottom = Math.min(r.top + r.height, ch - edge);
+  return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+}

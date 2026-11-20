@@ -300,12 +300,17 @@ export class RunModel {
   readonly plotPx = (height: number) => height - 46;
   /** Re-fit at most once per epoch while it trains (values never tween). */
   private epochKey = () => (this.live.get() ? Math.floor(this.observed.get()) : -1);
-  /** A 0–1 metric's domain: 0 to its top plus headroom; zoomed under 0.25 (the y caption says so). */
+  /**
+   * A 0–1 metric's domain: 0 to its top plus headroom; zoomed under 0.25 (the y caption says so). A fit to values that
+   * are all zero is 0–1 for want of a top (`unitTop`), not a scale to hold: the first non-zero value re-fits at once,
+   * also when it arrives within the epoch (issue #382).
+   */
   unitFit(series: () => Series[], height: () => number) {
+    const ext = computed(() => extentOf(series()));
     return held(
-      () => `${height()}|${this.epochKey()}`,
+      () => `${height()}|${this.epochKey()}|${(ext.get()?.[1] ?? 0) > 0}`,
       () => {
-        const e = extentOf(series());
+        const e = ext.get();
         return e ? unitDomain(e[1], this.plotPx(height())) : null;
       },
     );

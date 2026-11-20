@@ -7,7 +7,7 @@
  */
 import { computed, css, effect, For, signal } from 'fw';
 import type { Box, BenchDetection } from '$lib/api/types';
-import { containFit, placeBox } from '$lib/bench/frame';
+import { containFit, insideFrame, placeBox } from '$lib/bench/frame';
 import { matchImage } from '$lib/bench/match';
 import { placeChips } from '$lib/detect/chips';
 import { cancelOnRemove } from '$lib/detect/DetectionView';
@@ -101,7 +101,9 @@ export default function MatchView(props: MatchViewProps) {
         <div class="layer" aria-hidden="true">
           <For each={marks.get()} key={(k) => k.key}>
             {(k, n) => {
-              const at = computed(() => placeBox(geo.get()!, k().box));
+              // Its line and halo sit outside it (2 px on a thumbnail; at most 4.5 px at full size, highlighted): kept
+              // inside the frame, which clips, so a box along the image's edge still shows (issue #382).
+              const at = computed(() => insideFrame(placeBox(geo.get()!, k().box), cw.get(), ch.get(), full() ? 4.5 : 2));
               const chip = () => chips.get()[n()];
               return (
                 <div

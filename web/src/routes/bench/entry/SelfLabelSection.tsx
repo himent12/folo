@@ -17,7 +17,7 @@ import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import { labelCurves, labelPointAt } from '../charts';
 import { MIN_LABELS } from '$lib/bench/score';
-import { fine, labelsText, perImageText, READINESS, READINESS_MEANS, selfLabelReading, share, shareApart } from '../words';
+import { fine, givesNone, labelsText, perImageText, READINESS, READINESS_MEANS, selfLabelReading, share, shareApart } from '../words';
 
 export interface SelfLabelSectionProps {
   result: BenchResult;
@@ -140,7 +140,7 @@ export default function SelfLabelSection(props: SelfLabelSectionProps) {
           ) : one.get() ? (
             // No confidences: one operating point, read as two shares against the 90% a label set needs.
             <div class="one">
-              <p class="one-h">One operating point: it gives no confidences, so no threshold can trade labels for precision.</p>
+              <p class="one-h">One operating point: it {props.entry.scored ? 'gives no confidences' : givesNone(props.entry)}, so no threshold can trade labels for precision.</p>
               <For each={meters.get()} key={(row) => row.k}>
                 {(row) => (
                   <div class="meter">
@@ -169,7 +169,7 @@ export default function SelfLabelSection(props: SelfLabelSectionProps) {
         <aside class="read">
           <h3 class="verdict">{READINESS[s.get().readiness]}</h3>
           <p class="means">{READINESS_MEANS[s.get().readiness]}</p>
-          <p class="sentence">{selfLabelReading(s.get(), scored.get())}</p>
+          <p class="sentence">{selfLabelReading(s.get(), scored.get(), props.entry.scored ? undefined : props.entry)}</p>
           <dl class="kv">
             <div>
               <dt>Threshold t*</dt>

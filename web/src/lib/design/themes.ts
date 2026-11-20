@@ -61,6 +61,14 @@ const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const trim = (s: string) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
 /** Length in code points, as Rust's `chars().count()` (not UTF-16 units). */
 const length = (s: string) => [...s].length;
+/**
+ * What a name may not hold, as the lists and selects could not show it as written: control characters (a newline, a
+ * tab), line and paragraph separators, and invisible format characters (a zero-width space, a bidi override), but for
+ * the zero-width joiner and non-joiner that emoji sequences and some scripts are written with (issue #382).
+ */
+const HIDDEN = /[\p{Cc}\p{Zl}\p{Zp}]|(?![\u200C\u200D])\p{Cf}/u;
+/** A character that shows: a letter, digit, punctuation or symbol (a name of only combining marks does not). */
+const VISIBLE = /[\p{L}\p{N}\p{P}\p{S}]/u;
 
 /** Orders two strings by code point (as Rust compares strings), not by UTF-16 unit or locale. */
 export function compareCodePoints(a: string, b: string): number {
@@ -138,9 +146,9 @@ function strip(v: unknown): unknown {
  * Checks a custom theme file's content (already parsed from JSON) per design/THEMES.md, Custom themes. The first
  * error names its path (`color.bg.ap: not a colour token`); a file with one is not installed.
  */
-export function checkCustomTheme(raw: unknown): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
+export function checkCustomTheme(raw: unknown, imported = false): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
   try {
-    return { ok: true, theme: check(raw) };
+    return { ok: true, theme: check(raw, imported) };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
@@ -150,7 +158,7 @@ export function checkCustomTheme(raw: unknown): { ok: true; theme: CustomThemeFi
  * The checks in the order every validator runs them (design/theme-cases.json, which design/contrast.mjs and Desktop
  * replay too): unknown top-level keys, then folo_theme, id, name, description, mode, base, then `color` depth first.
  */
-function check(raw: unknown): CustomThemeFile {
+function check(raw: unknown, imported: boolean): CustomThemeFile {
   if (!isObj(raw)) throw new Error('(file): must be a JSON object');
   for (const k of Object.keys(raw)) if (!isMeta(k) && !KEYS.includes(k)) throw new Error(`${k}: unknown key`);
   const need = (k: string) => {
@@ -166,6 +174,10 @@ function check(raw: unknown): CustomThemeFile {
   const name = need('name');
   const trimmed = typeof name === 'string' ? trim(name) : '';
   if (!trimmed || length(trimmed) > NAME_MAX) throw new Error(`name: must be 1 to ${NAME_MAX} characters`);
+  // A file being imported only: a theme stored before this rule stays installed (`readStoredThemes`). Studio's rule
+  // for now; Desktop's twin (theme/custom.rs) and design/theme-cases.json follow together.
+  if (imported && HIDDEN.test(trimmed)) throw new Error('name: must not hold control or invisible characters');
+  if (imported && !VISIBLE.test(trimmed)) throw new Error('name: must have a visible character');
   const rawDescription = raw.description;
   const description = typeof rawDescription === 'string' ? trim(rawDescription) : undefined;
   if (rawDescription !== undefined && (description === undefined || length(description) > DESCRIPTION_MAX))
@@ -202,7 +214,7 @@ export function parseThemeFile(text: string): { ok: true; theme: CustomThemeFile
   } catch (e) {
     return { ok: false, error: `(file): not valid JSON (${(e as Error).message})` };
   }
-  return checkCustomTheme(raw);
+  return checkCustomTheme(raw, true);
 }
 
 /**

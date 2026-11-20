@@ -1,4 +1,5 @@
 // Number, size, time and duration formatting. Metric values render with tabular numerals at the call site.
+import { unitTop } from './charts/domain';
 
 const cache = new Map<number, Intl.NumberFormat>();
 function nf(digits: number): Intl.NumberFormat {
@@ -16,9 +17,16 @@ export function num(x: number | null | undefined, digits = 0): string {
   return ok(x) ? nf(digits).format(x) : '—';
 }
 
-/** 0.7412 → "0.741" (metrics like mAP stay in 0..1 with three decimals, as researchers read them). */
+/**
+ * 0.7412 → "0.741" (metrics like mAP stay in 0..1 with three decimals, as researchers read them). A score that is not
+ * zero never reads as zero (issue #382): under 0.0005 it takes the decimals a chart fitted to it gives its legend
+ * (`axisMetric` on `unitTop`: 0.00042 → "0.00042"), and under five decimals' reach it reads "<0.00001".
+ */
 export function metric(x: number | null | undefined): string {
-  return num(x, 3);
+  if (!ok(x) || x === 0 || Math.abs(x) >= 0.0005) return num(x, 3);
+  const a = Math.abs(x);
+  const d = scoreDecimals(unitTop(a));
+  return a >= 0.5 * 10 ** -d ? num(x, d) : `${x < 0 ? '>-' : '<'}${num(10 ** -d, d)}`;
 }
 
 /**

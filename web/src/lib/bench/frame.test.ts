@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { dominantAspect } from '$lib/ui/TileGrid';
-import { containFit, placeBox } from './frame';
+import { containFit, insideFrame, placeBox } from './frame';
 
 // Real photos are not square (COCO: 640×427, 427×640, panoramas): a benchmark's gallery tile, its large view and the
 // condition preview show each one whole in a frame of another shape, and every box has to land on its object.
@@ -66,5 +66,21 @@ describe('an image in a frame of another shape', () => {
     // Within 3:4 to 16:9: a set of panoramas does not make slivers of tiles.
     expect(dominantAspect([{ width: 1600, height: 520 }])).toBeCloseTo(16 / 9, 9);
     expect(dominantAspect([])).toBeCloseTo(4 / 3, 9);
+  });
+});
+
+describe('a box along the frame edge (issue #382)', () => {
+  it('keeps its line, drawn outside the box, inside the frame that clips it', () => {
+    // A whole-image box on an image that fills its 216 × 162 tile: its 1 px line and halo (2 px out) were cut off.
+    const f = containFit(216, 162, 640, 480)!;
+    const whole = placeBox(f, { x1: 0, y1: 0, x2: 640, y2: 480 });
+    expect(insideFrame(whole, 216, 162, 2)).toEqual({ left: 2, top: 2, width: 212, height: 158 });
+    // A box well inside is drawn where it is.
+    const inner = placeBox(f, { x1: 64, y1: 48, x2: 320, y2: 240 });
+    expect(insideFrame(inner, 216, 162, 2)).toEqual(inner);
+    // Where the image leaves a band of the well, a whole-image box keeps its place: its line falls in the band.
+    const band = containFit(216, 162, 640, 427)!;
+    const wide = placeBox(band, { x1: 0, y1: 0, x2: 640, y2: 427 });
+    expect(insideFrame(wide, 216, 162, 2)).toMatchObject({ top: wide.top, height: wide.height, left: 2 });
   });
 });

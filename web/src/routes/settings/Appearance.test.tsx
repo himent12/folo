@@ -160,6 +160,43 @@ function refusing(real: Storage, key: string, refuse: () => boolean): Storage {
   };
 }
 
+describe('a theme name wider than its select (issue #382)', () => {
+  // No layout here: a canvas that gives every character 10 px, and a select field with a 100 px text box (no padding
+  // in happy-dom), measured once when observed.
+  beforeEach(() => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ font: '', measureText: (t: string) => ({ width: t.length * 10 }) } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLSelectElement.prototype, 'clientWidth', 'get').mockReturnValue(100);
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private cb: () => void) {}
+        observe() {
+          this.cb();
+        }
+        disconnect() {}
+      },
+    );
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('says the whole name under the row when the closed select cuts it, and nothing more when it fits', () => {
+    const long = 'Night shift with the long name';
+    prefs.installThemes([parsed('n.json', { ...night, name: long }), parsed('s.json', { ...night, id: 'short', name: 'Short' })]);
+    prefs.useTheme('night');
+    show();
+    const desc = () => target.querySelector('#appearance-dark-desc')!;
+    expect(desc().querySelector('.whole')?.textContent).toBe(`Chosen: ${long}`);
+    // The select is described by that line, so a screen reader hears it as well.
+    expect(select('dark').getAttribute('aria-describedby')).toBe('appearance-dark-desc');
+    choose('dark', 'short');
+    expect(desc().querySelector('.whole')).toBeNull();
+    expect(desc().textContent).toBe('Used when the theme is Dark, or System while your system is dark.');
+  });
+});
+
 describe('importing large picks and failed saves', () => {
   /** What the stub files below did, in order: "read <name>" when a read starts. */
   let log: string[] = [];
