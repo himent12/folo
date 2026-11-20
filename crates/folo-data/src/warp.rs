@@ -178,6 +178,9 @@ pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8
 /// plane's fill as the border, without rendering the plane when the source row does not change along a destination
 /// row.
 pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> Image {
+    if width == 0 || height == 0 {
+        return Image { width, height, data: Vec::new() };
+    }
     let mut out = crate::buffers::scratch(width as usize * height as usize * 3);
     let border = plane.fill;
     let Some(inv) = m.inverse() else {
@@ -265,14 +268,18 @@ fn warp_general(src: &Image, inv: &Affine, width: usize, border: [u8; 3], out: &
     });
 }
 
-/// Whether every horizontal position [`warp_rows`] samples, `fu0 + k·du` for `k < width` in each of `height` rows,
-/// fits in `i64`. Then the general path's running sums reach them without wrapping; otherwise (steps of `2^47`
-/// source pixels and more) the general path runs, whose `i64` sums wrap in a release build exactly as they always
-/// did.
+/// Whether [`warp_rows`] may run (both paths give the same bytes; this picks where the rows are the faster and safe
+/// one): the step is at most 4 source pixels per output pixel (a row blends the source span it crosses, so a much
+/// smaller output would blend far more than it samples), and every horizontal position it samples, `fu0 + k·du`
+/// for `k < width` in each of `height` rows, fits in `i64`. Then the general path's running sums reach them without
+/// wrapping; otherwise the general path runs, whose `i64` sums wrap in a release build exactly as they always did.
 fn rows_fit(inv: &Affine, width: usize, height: usize) -> bool {
     let [a, b, c, ..] = inv.0;
     let fone = (1i64 << FRAC) as f64;
     let du = (a * fone).round() as i64 as i128;
+    if du.abs() > 4 << FRAC {
+        return false;
+    }
     (0..height).all(|y| {
         let yc = y as f64 + 0.5;
         let fu0 = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64 as i128;
@@ -293,9 +300,8 @@ fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
     let (pw, ph) = (plane.width as i64, plane.height as i64);
     let fill = plane.fill;
     for_bands(out, width * 3, |y0, band| {
-        // Scratch for columns `-1 ..= pw` at most.
-        let cap = (pw as usize + 2) * 3;
-        let (mut top, mut bottom, mut v) = (vec![0u8; cap], vec![0u8; cap], vec![0u32; cap]);
+        // Scratch for the columns a row reaches, grown as rows need it.
+        let (mut top, mut bottom, mut v) = (Vec::new(), Vec::new(), Vec::<u32>::new());
         for (i, row) in band.chunks_exact_mut(width * 3).enumerate() {
             let yc = (y0 + i) as f64 + 0.5;
             let u0 = a * 0.5 + b * yc + c - 0.5;
@@ -317,6 +323,11 @@ fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
                 continue;
             }
             let n = (hi - lo + 1) as usize * 3;
+            if top.len() < n {
+                top.resize(n, 0);
+                bottom.resize(n, 0);
+                v.resize(n, 0);
+            }
             plane.row(iy, lo, &mut top[..n]);
             plane.row(iy + 1, lo, &mut bottom[..n]);
             let iwy = WONE - wy;
@@ -490,6 +501,18 @@ mod tests {
         }
     }
 
+    /// An empty output is returned at once, whatever the other side's size (no per-row work, no scratch).
+    #[test]
+    fn empty_outputs() {
+        let src = pattern(1, 1);
+        for (w, h) in [(0, u32::MAX), (u32::MAX, 0), (0, 0)] {
+            let out = warp_affine(&src, &Affine::IDENTITY, w, h, [1; 3]);
+            assert_eq!((out.width, out.height, out.data.len()), (w, h, 0));
+        }
+        let wide = Image { width: 1 << 30, height: 0, data: Vec::new() };
+        assert!(warp_affine(&wide, &Affine::IDENTITY, 1, 0, [1; 3]).data.is_empty());
+    }
+
     /// An empty plane renders as an empty image and warps to the fill.
     #[test]
     fn empty_planes() {
@@ -504,7 +527,7 @@ mod tests {
     }
 
     /// A step so large that `du · (width - 1)` overflows `i64` while every running position the general path adds up
-    /// fits: the row path gives the general path's bytes, without overflowing.
+    /// fits: the warp gives the general path's bytes, without overflowing.
     #[test]
     fn a_huge_step_does_not_overflow() {
         let src = pattern(1, 1);
@@ -522,9 +545,10 @@ mod tests {
         let m = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(-0.5, 0.0));
         let inv = m.inverse().unwrap();
         assert!(!rows_fit(&inv, 512, 1));
-        assert!(rows_fit(&inv, 1, 1));
-        let fits = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(128.5, 0.0));
-        assert!(rows_fit(&fits.inverse().unwrap(), 257, 1));
+        // Steps of more than 4 source pixels per output pixel take the general path too.
+        assert!(!rows_fit(&inv, 1, 1));
+        assert!(!rows_fit(&Affine::scale(0.2, 1.0).inverse().unwrap(), 10, 1));
+        assert!(rows_fit(&Affine::scale(0.25, 1.0).inverse().unwrap(), 10, 1));
         // The sums overflow, which a build with overflow checks stops at; compare the bytes where they wrap.
         #[cfg(not(debug_assertions))]
         {
