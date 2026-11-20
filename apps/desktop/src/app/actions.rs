@@ -467,10 +467,14 @@ impl FoloApp {
                         *slot = run.clone();
                     }
                     this.changed_here(List::Runs, cx);
-                    let shown = this.store.run(&run.id).cloned().unwrap_or(run);
-                    let dequeued = prev == Some(RunStatus::Queued) && shown.cloud.is_none();
-                    if let Some((title, body)) = stop_toast(&shown, dequeued) {
-                        this.toast(Tone::Neutral, title, Some(body.into()), cx);
+                    // Told from the run as shown once it has ended (newer than the answer), else from
+                    // the answer: a list read can show it running again before the server took the
+                    // stop, and its `stopped` then brings no toast of its own.
+                    let ended = this.store.run(&run.id).filter(|r| !r.status.is_active()).cloned();
+                    let told = ended.unwrap_or(run);
+                    let dequeued = prev == Some(RunStatus::Queued) && told.cloud.is_none();
+                    if let Some((title, body)) = stop_toast(&told, dequeued) {
+                        this.toast(Tone::Neutral, title, body.map(Into::into), cx);
                     }
                 }
                 Err(e) => {
@@ -515,34 +519,30 @@ impl FoloApp {
     }
 }
 
-/// The toast for a stop the server took, told from run `r` as it is now shown (the stream may have
-/// moved it on past the answer). A run shown completed or failed had its end's own toast, and one
-/// shown queued or running (resumed since, or its `stopping` not streamed yet) gets none: its page
-/// says what the stream reports. An epoch whose last batch is done when the stop comes still
-/// validates and saves (folo-vision `train/run.rs`), so a stop under way with no finished epoch
-/// doesn't yet know that nothing is saved.
-pub(super) fn stop_toast(r: &Run, dequeued: bool) -> Option<(String, &'static str)> {
+/// The toast for a stop the server took, told from run `r`: the answer, or the run as shown once the
+/// stream said it ended. A run that completed or failed had its end's own toast. A checkpoint is claimed
+/// only when one is known (a model, or a validated epoch); "nothing is saved" never is: an epoch whose
+/// last batch is done when the stop comes still validates and saves (folo-vision `train/run.rs`), and a
+/// stream opened again after the run stopped does not replay that epoch.
+pub(super) fn stop_toast(r: &Run, dequeued: bool) -> Option<(String, Option<&'static str>)> {
     let (name, kept) = (&r.name, r.can_continue());
-    let nothing = "No epoch had finished, so nothing is saved.";
     match r.status {
         // A resumed run that waited to continue: it keeps what it trained.
         RunStatus::Stopping | RunStatus::Stopped if dequeued => Some((
             format!("Removed {name} from the queue"),
-            if kept { "It keeps what it trained so far." } else { nothing },
+            kept.then_some("It keeps what it trained so far."),
         )),
         RunStatus::Stopping => Some((
             format!("Stopping {name}"),
-            if kept {
+            Some(if kept {
                 "Finishing the current batch; the last finished epoch's checkpoint is kept."
             } else {
                 "Finishing the current batch. No epoch had finished yet. Unless one finishes before it stops, \
                  nothing is saved."
-            },
+            }),
         )),
         // No epoch number: a stopped run's `epoch` is the one its last step was in, maybe unfinished.
-        RunStatus::Stopped => {
-            Some((format!("Stopped {name}"), if kept { "Last checkpoint kept." } else { nothing }))
-        }
+        RunStatus::Stopped => Some((format!("Stopped {name}"), kept.then_some("Last checkpoint kept."))),
         _ => None,
     }
 }

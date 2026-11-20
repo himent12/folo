@@ -52,8 +52,14 @@ fn a_stop_answered_after_the_stream_said_the_run_completed_leaves_it_completed()
         this.drain_streams(cx);
     });
     stop.release();
-    // Until the answer is in: the run-list read it asks for is then held.
+    // Until the answer is in: the run-list read it asks for is then held. Bounded only to fail clearly
+    // (as `Held::wait_held` is) if that read never comes.
+    let asked = std::time::Instant::now();
     while !lists.1.is_held() {
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(10),
+            "the stop's answer asked for no run list"
+        );
         app.run_until_held(2);
         std::thread::yield_now();
     }
@@ -83,8 +89,29 @@ fn a_stop_answered_with_nothing_newer_shown_applies() {
     });
 }
 
+/// A list read asked just after the stop, answered before the server took it, shows the run running
+/// again; the answer then still says what the stop did (the stream's `stopped` brings no toast).
+#[test]
+fn a_stop_answered_after_a_list_read_showed_the_run_running_still_says_so() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let stop = api.hold("stop");
+    step(&mut app, window, 1, |this, cx| this.stop_run(LIVE.into(), cx));
+    stop.wait_held();
+    step(&mut app, window, 1, |this, _| {
+        let runs = this.store.runs.ready_mut().unwrap();
+        runs.iter_mut().find(|r| r.id == LIVE).unwrap().status = RunStatus::Running;
+    });
+    stop.release();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        let name = &this.store.run(LIVE).unwrap().name;
+        assert_eq!(titles(this), [format!("Stopped {name}")]);
+    });
+}
+
 /// The toast for `status`, with or without a validated epoch.
-fn toast(status: RunStatus, kept: bool, dequeued: bool) -> Option<(String, &'static str)> {
+fn toast(status: RunStatus, kept: bool, dequeued: bool) -> Option<(String, Option<&'static str>)> {
     let api = MockBackend::new(4200, true);
     let mut r: Run = crate::api::Backend::run(&api, LIVE).unwrap();
     r.status = status;
@@ -102,17 +129,19 @@ fn a_stop_under_way_with_no_finished_epoch_does_not_yet_say_nothing_is_saved() {
     // An epoch whose last batch is done when the stop comes still validates and saves.
     assert_eq!(
         body,
-        "Finishing the current batch. No epoch had finished yet. Unless one finishes before it stops, \
-         nothing is saved."
+        Some(
+            "Finishing the current batch. No epoch had finished yet. Unless one finishes before it stops, \
+             nothing is saved."
+        )
     );
-    assert!(toast(RunStatus::Stopping, true, false).unwrap().1.contains("checkpoint is kept"));
-    // Stopped: the server's answer (or the stream's epochs) says what was kept.
-    assert_eq!(
-        toast(RunStatus::Stopped, false, false).unwrap().1,
-        "No epoch had finished, so nothing is saved."
-    );
-    assert_eq!(toast(RunStatus::Stopped, true, true).unwrap().1, "It keeps what it trained so far.");
-    // Shown ended (the end had its own toast), or queued or running again: no stop toast.
+    assert!(toast(RunStatus::Stopping, true, false).unwrap().1.unwrap().contains("checkpoint is kept"));
+    // Stopped: a checkpoint is claimed only when one is known, and "nothing is saved" never (a stream
+    // opened again after the stop does not replay the epoch that finished meanwhile).
+    assert_eq!(toast(RunStatus::Stopped, true, false).unwrap().1, Some("Last checkpoint kept."));
+    assert_eq!(toast(RunStatus::Stopped, false, false).unwrap().1, None);
+    assert_eq!(toast(RunStatus::Stopped, true, true).unwrap().1, Some("It keeps what it trained so far."));
+    assert_eq!(toast(RunStatus::Stopped, false, true).unwrap().1, None);
+    // Ended (the end had its own toast), or anything else: no stop toast.
     for status in [RunStatus::Completed, RunStatus::Failed, RunStatus::Running, RunStatus::Queued] {
         assert_eq!(toast(status, true, false), None, "{status:?}");
     }

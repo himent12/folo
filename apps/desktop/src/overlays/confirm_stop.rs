@@ -21,6 +21,20 @@ fn kept_epoch(validated: Option<u32>, run: Option<&crate::api::Run>) -> Option<u
     }
 }
 
+/// What the confirmation says a stop does, with `finished` the epoch whose checkpoint it keeps (`None`
+/// while the history is loading, `Some(None)` when no epoch has finished).
+fn stop_text(finished: Option<Option<u32>>, never_started: bool, waiting: bool) -> String {
+    // The epoch in progress is discarded; last.folo is the last finished epoch's.
+    match finished {
+        _ if never_started => "It hasn't started, so nothing is lost: it leaves the queue and the runs list, and the runs behind it move up.".to_string(),
+        _ if waiting => "It stops waiting and keeps what it trained so far. You can resume it later.".to_string(),
+        Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
+        // An epoch whose last batch is done when the stop comes still validates and saves.
+        Some(None) => "Stops after the current batch. No epoch has finished yet: unless one finishes first, nothing is saved.".to_string(),
+        None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
+    }
+}
+
 impl FoloApp {
     pub(super) fn stop_dialog(
         &mut self,
@@ -75,23 +89,13 @@ impl FoloApp {
                 }
             }),
         );
-        let body = div()
-            .px(px(20.))
-            .pb(px(20.))
-            .child(
-                text(ty::BASE, t.text_secondary)
-                    .w_full()
-                    .min_w_0()
-                    .whitespace_normal()
-                    // The epoch in progress is discarded; last.folo is the last finished epoch's.
-                    .child(match finished {
-                        _ if never_started => "It hasn't started, so nothing is lost: it leaves the queue and the runs list, and the runs behind it move up.".to_string(),
-                        _ if waiting => "It stops waiting and keeps what it trained so far. You can resume it later.".to_string(),
-                        Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
-                        Some(None) => "Stops after the current batch. No epoch has finished yet: unless one finishes first, nothing is saved.".to_string(),
-                        None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
-                    }),
-            );
+        let body = div().px(px(20.)).pb(px(20.)).child(
+            text(ty::BASE, t.text_secondary).w_full().min_w_0().whitespace_normal().child(stop_text(
+                finished,
+                never_started,
+                waiting,
+            )),
+        );
         let footer = dialog_footer(&t).justify_end().child(cancel).child(stop);
         self.dialog_frame(
             &t,
@@ -116,6 +120,15 @@ impl FoloApp {
 #[cfg(test)]
 mod tests {
     use crate::api::Backend;
+
+    #[test]
+    fn a_stop_with_no_finished_epoch_says_nothing_is_saved_only_unless_one_finishes() {
+        assert_eq!(
+            super::stop_text(Some(None), false, false),
+            "Stops after the current batch. No epoch has finished yet: unless one finishes first, nothing is saved."
+        );
+        assert!(super::stop_text(Some(Some(3)), false, false).contains("keeps the epoch 3 checkpoint"));
+    }
 
     #[test]
     fn a_stop_keeps_the_epoch_being_validated() {
