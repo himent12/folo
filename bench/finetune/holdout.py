@@ -60,12 +60,17 @@ def _link(src: Path, dst: Path) -> None:
 def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: float = DEFAULT_FRACTION) -> dict:
     """Lay out `spec`'s hold-out split from the dataset in `src` (checked against its recorded layout digest first)
     under `dest_root`; returns its meta. A folder already there with the same source digest, seed, fraction and
-    files is kept as it is."""
+    files is kept as it is; any other folder there (another carve, changed files, or no `meta.json`) is refused.
+    The folder is built next to its place (`.<name>.partial`, removed first if an interrupted carve left one) and
+    renamed into it once complete, so a carve cut short leaves nothing that looks like one."""
     source_digest = datasets.verify_layout(spec, src)
     dest = dest_root / folder_name(spec.name, seed)
     meta_path = dest / "meta.json"
-    if meta_path.is_file():
-        meta = json.loads(meta_path.read_text())
+    if dest.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            raise SystemExit(f"{dest} is not a complete hold-out carve (no readable meta.json): remove it") from None
         same = (meta.get("source_layout_sha256"), meta.get("seed"), meta.get("fraction")) == (
             source_digest, seed, fraction
         )
@@ -74,6 +79,13 @@ def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: 
         raise SystemExit(f"{dest} holds another hold-out (or its files changed): remove it and carve it again")
     imgs = sorted(p for p in (src / "images" / "train").iterdir() if p.suffix.lower() in datasets.IMAGE_EXTS)
     ho = holdout_names([p.name for p in imgs], spec.name, seed, fraction)
+    if len(ho) >= len(imgs):
+        raise SystemExit(
+            f"{spec.name}: a hold-out of {fraction} takes all {len(imgs)} train images, leaving none to train on"
+        )
+    final, dest = dest, dest_root / f".{folder_name(spec.name, seed)}.partial"
+    if dest.exists():
+        shutil.rmtree(dest)
     classes = list(spec.classes)
     val, n_train = [], 0
     for img in imgs:
@@ -103,7 +115,8 @@ def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: 
         "holdout": sorted(ho),
         "layout_sha256": datasets.layout_digest(dest),
     }
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", newline="\n")
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", newline="\n")
+    os.replace(dest, final)
     return meta
 
 

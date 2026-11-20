@@ -164,14 +164,21 @@ def shared(r: dict) -> bool:
     return ((r.get("compute") or {}).get("concurrent_jobs") or 1) > 1
 
 
+def selection_of(r: dict) -> tuple | None:
+    """The hold-out a `holdout` run chose its best checkpoint on, as (seed, fraction); None for the other variants."""
+    s = (r.get("versions") or {}).get("selection") if r.get("variant") == "holdout" else None
+    return (s.get("seed"), s.get("fraction")) if s else None
+
+
 def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
-    """Group runs by (dataset, tool, model, variant): AP / AP50 / AP75 / training time over seeds, with which seeds
-    are present, and `complete` once `expected_seeds` seeds are (1 for the scratch control)."""
+    """Group runs by (dataset, tool, model, variant, and for `holdout` the hold-out split): AP / AP50 / AP75 /
+    training time over seeds, with which seeds are present, and `complete` once `expected_seeds` seeds are (1 for the
+    scratch control)."""
     groups: dict[tuple, list[dict]] = {}
     for r in results:
-        groups.setdefault((r["dataset"], r["tool"], r["model"], r["variant"]), []).append(r)
+        groups.setdefault((r["dataset"], r["tool"], r["model"], r["variant"], selection_of(r)), []).append(r)
     rows = []
-    for (dataset, tool, model, variant), rs in sorted(groups.items()):
+    for (dataset, tool, model, variant, selection), rs in sorted(groups.items(), key=lambda kv: repr(kv[0])):
         rs = sorted(rs, key=lambda r: r["seed"])
         want = 1 if variant == "scratch" else expected_seeds
         metric = lambda k: [r["metrics"][k] for r in rs if r.get("metrics") and r["metrics"].get(k) is not None]
@@ -181,6 +188,7 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
                 "tool": tool,
                 "model": model,
                 "variant": variant,
+                **({"selection": {"seed": selection[0], "fraction": selection[1]}} if selection else {}),
                 "seeds": [r["seed"] for r in rs],
                 "complete": len(rs) >= want,
                 "eval_split": rs[0].get("eval_split"),

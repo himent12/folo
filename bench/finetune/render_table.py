@@ -52,11 +52,12 @@ def minutes(stat: dict | None) -> str:
 
 def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> tuple[str, dict]:
     kept = [r for r in results if r.get("epochs_planned") == epochs]
-    ignored = len(results) - len(kept)
+    # The holdout variant chooses its best checkpoint by another protocol: summary.json has it, the tables (and what
+    # they say about the runs: the omitted count, the GPUs) do not.
+    ignored = sum(1 for r in results if r.get("variant") != "holdout" and r.get("epochs_planned") != epochs)
     summary = common.summarize(kept, expected_seeds=seeds)
     summary["epochs"] = epochs
     summary["ignored_other_epochs"] = ignored
-    # The holdout variant chooses its best checkpoint by another protocol: summary.json has it, the tables do not.
     groups = {
         (g["dataset"], g["tool"], g["model"], g["variant"]): g for g in summary["groups"] if g["variant"] != "holdout"
     }
@@ -99,7 +100,7 @@ def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> t
         fm = (models["folo"] or [f"folo-{size}"])[0]
         um = (models["ultralytics"] or [f"yolo26{size}"])[0]
         lines.extend(results_table(groups, names, fm, um, seeds, epochs, ignored if size == sizes[0] else 0))
-    gpus = sorted({gpu for grp in summary["groups"] for gpu in grp["gpus"]})
+    gpus = sorted({gpu for grp in groups.values() for gpu in grp["gpus"]})
     if gpus:
         lines.append("Trained on: " + "; ".join(gpus) + ".")
     return "\n".join(lines).rstrip("\n") + "\n", summary

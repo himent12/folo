@@ -85,8 +85,9 @@ it differently). Nothing but the code and `datasets.json` is committed.
   of the box. To compare FOLO settings without it, `run_folo.py --variants holdout` trains on the train split
   minus a seeded 20% (`holdout.py`: the same split on every machine, recorded in the result's
   `versions.selection`), lets the server choose `best.folo` on that hold-out, and scores both checkpoints on the
-  evaluation split, which the run never saw. These runs have the variant `holdout`; `summary.json` has them and
-  the tables leave them out.
+  evaluation split, which the run never saw. These runs have the variant `holdout`; `summary.json` has them (one
+  group per hold-out split, `selection`) and the tables leave them out. Result file names carry no hold-out seed,
+  so a `--results` folder holds one hold-out split: a runner given another refuses to start.
 - **Training time** is the wall time of training (all epochs, with the per-epoch validation both tools run): FOLO
   from the run's `started` to `finished`, Ultralytics around `train()`.
 - **Hardware**: the matrix below ran on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod

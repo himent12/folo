@@ -673,17 +673,20 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def check_selection(key: common.RunKey, selection: dict, results: Path) -> None:
-    """A holdout result file already in `results` must come from this hold-out split: its name has no hold-out seed,
-    so a run of another split would otherwise be skipped as done."""
-    path = key.result_path(results)
-    if not path.is_file():
-        return
-    got = (json.loads(path.read_text()).get("versions") or {}).get("selection")
-    if got != selection:
-        raise SystemExit(
-            f"{path} was chosen on another hold-out ({got}, not {selection}): use another --results folder per "
-            "--holdout-seed / --holdout-fraction"
-        )
+    """Every holdout result file of `key`'s model and dataset already in `results`, of any seed, must come from this
+    hold-out split: the file names carry no hold-out seed, so a run of another split would be skipped as done, and
+    the summary would pool runs of two splits as the seeds of one."""
+    for path in sorted(Path(results).glob(f"{key.model}-{key.dataset}-holdout-s*.json")):
+        try:
+            r = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        got = (r.get("versions") or {}).get("selection")
+        if got != selection:
+            raise SystemExit(
+                f"{path} was chosen on another hold-out ({got}, not {selection}): use another --results folder per "
+                "--holdout-seed / --holdout-fraction"
+            )
 
 
 def run_matrix(m: Matrix, keys: list[common.RunKey], variants: list[str]) -> int:
