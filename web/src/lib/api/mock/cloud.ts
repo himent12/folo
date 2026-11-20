@@ -290,11 +290,9 @@ export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, datase
   if (end > start) lines.push([start, 'info', 'upload done; the worker trains']);
   if (c.lost) {
     lines.push([end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
-    // The release still asks for it (its id stays the run's): nothing to copy, and the termination is confirmed.
-    if (c.instanceId) {
-      lines.push([end, 'info', 'terminating the instance']);
-      lines.push([end + CONFIRM_MS, 'info', `terminated ${c.instanceName}`]);
-    }
+    // The release still asks for it (its id stays the run's), with nothing to copy: 1 ms after the loss, so after the
+    // trainer's last line and the failure, stamped at the loss at the latest. Its confirmation is the instance list's.
+    if (c.instanceId) lines.push([end + 1, 'info', 'terminating the instance']);
   } else {
     if (end > start) {
       // 1 ms after `end`, where the trainer's final epoch line is stamped: the log sorts by time, and this follows it.

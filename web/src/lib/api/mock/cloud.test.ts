@@ -223,10 +223,25 @@ describe('mock cloud: runs and instances', () => {
     const gone = (await lost.runLogs('run_c7b1')).lines.map((l) => l.message);
     expect(gone).toContain('instance folo-run_c7b1-9d03 was terminated before the run ended');
     expect(gone).not.toContain(COPYING);
-    // The executor's release still has the instance's id: it says so after the loss, and the termination is confirmed.
+    // The executor's release still has the instance's id: it says so after the loss and the trainer's last line.
     const lostAt = gone.indexOf('instance folo-run_c7b1-9d03 was terminated before the run ended');
     expect(gone.indexOf(TERMINATING)).toBeGreaterThan(lostAt);
-    expect(gone.indexOf('terminated folo-run_c7b1-9d03')).toBeGreaterThan(gone.indexOf(TERMINATING));
+    expect(gone.indexOf(TERMINATING)).toBeGreaterThan(gone.findLastIndex((m) => m.startsWith('epoch ')));
+    expect(gone).not.toContain('terminated folo-run_c7b1-9d03');
+  });
+
+  it('releases an instance terminated by hand while its weights are collected after the final epoch line', async () => {
+    // The loss is stamped at the end of training (the mock's clock clamps it there): the release line follows the
+    // final epoch, never before it.
+    const api = new MockApi('normal', 0);
+    const created = await api.createRun(await cloudConfig(api));
+    vi.setSystemTime(NOW + 6000 + 600_000 + 1750);
+    expect((await api.run(created.id)).cloud!.phase).toBe('collecting');
+    const inst = (await api.cloudInstances()).find((i) => i.run_id === created.id)!;
+    await api.terminateCloudInstance(inst.id);
+    const lines = (await api.runLogs(created.id, 5000)).lines.map((l) => l.message);
+    expect(lines.indexOf(TERMINATING)).toBeGreaterThan(lines.findIndex((m) => m.startsWith('epoch 10/10')));
+    expect(lines).not.toContain(COPYING);
   });
 
   it('has no instance to terminate on a remote FOLO server, and still copies the weights home', () => {
