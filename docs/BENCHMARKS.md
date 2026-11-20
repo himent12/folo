@@ -1357,7 +1357,7 @@ folo-n fine-tuned AP, three seeds: BCCD 0.624 (0.617–0.636), brain-tumor 0.422
 from `folo-n-coco-v2` scores 0.452 (0.438–0.459), the lowest v2 seed above the highest v5 seed, so the better COCO
 model is the worse fine-tuning start there. No default changed: an EMA scaled to the run's length (nominal window a
 quarter of its optimizer steps) gives a better last-epoch model (+0.009 AP over the four sets) but a worse best
-checkpoint as this protocol picks it, on the split it then scores (−0.005), and a lower backbone LR was level.
+checkpoint as this protocol picks it (−0.005; three of the four sets pick it on the split they then score), and a lower backbone LR was level.
 
 ## FOLO on the GPU
 

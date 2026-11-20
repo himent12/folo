@@ -5,11 +5,13 @@ few hundred of their own images (`folo train --weights ... `, everything else at
 default with the evidence for it, or say with measurements that the open leads do not pay. **Result: no default
 changes.** The one lead with a real effect, an EMA that actually averages in short runs, gives a better
 last-epoch model (+0.009 AP over the four sets, 11 of 12 seed pairs) but a worse best checkpoint as the benchmark
-picks it (−0.005: the best epoch on the split it then scores); it misses the gate either way. Everything else
+picks it (−0.005; three of the four sets pick the best epoch on the split they then score, BCCD picks on val and
+scores test); it misses the gate either way. Everything else
 tried (a lower backbone LR, `cls_gain` 0.25, `top_k` 13) is level or a little worse. Along the way: the brief's
 step count was wrong by the accumulation factor, `folo-n-coco-v5` is a worse fine-tuning start than
 `folo-n-coco-v2` on brain-tumor (−0.030 AP, three seeds per side), and a hold-out carved from brain-tumor's train
-split is much easier than its val split.
+split scores far higher than its val split (0.66 against 0.42, with different training pools and images, so not a
+like-for-like gap).
 
 ## Protocol
 
@@ -88,7 +90,7 @@ seed, −0.003, one seed). Nothing to change.
 Knob (experiment build only): `FOLO_X_EMA_H=h` gives the EMA a nominal window of `w = h · T` optimizer steps: the
 §8.5 formula `d = decay · (1 − e^(−updates / tau))` with `decay = 1 − 1 / w` and `tau = w / 5` (the default's ratio,
 2000 / 10000). At `h = 0.25` that is decay 0.990 / tau 20 on BCCD, 0.9971 / 70 on brain-tumor, 0.9867 / 15 on
-signature, 0.980 / 10 on pills. "Window" is nominal: at the last step the last quarter of the run carries 63% of
+signature, 0.980 / 10 on pills. "Window" is nominal: at the last step the last quarter of the run carries about 63% of
 the average and the earlier steps 37%, on every set (the same recurrence). A rule of this form capped at the default
 (window 10,000) leaves every run of more than 40,000 steps (COCO) exactly as it is.
 
