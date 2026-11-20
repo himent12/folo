@@ -278,7 +278,10 @@ impl Trainer {
             let mut shadow = FoloModel::new(mconf)?;
             shadow.set_classes(data.classes.clone())?;
             shadow.set_imgsz(cfg.imgsz);
-            Some(ModelEma::new(place_model(shadow, device)?, &model)?)
+            // §8.5: a fine-tune averages over a share of its optimizer steps (a resume restores the stored values).
+            let total = cfg.epochs as u64 * n_train.div_ceil(cfg.batch).div_ceil(cfg.accumulate()) as u64;
+            let (decay, tau) = cfg.ema_params(total);
+            Some(ModelEma::with_params(place_model(shadow, device)?, &model, decay, tau)?)
         } else {
             None
         };

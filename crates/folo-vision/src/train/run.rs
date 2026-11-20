@@ -94,7 +94,7 @@ impl Trainer {
             LogLevel::Info,
             format!(
                 "{} ({} params, {} classes) on {}: {} train / {} val images at {}px, batch {} × accumulate {}, {} {} \
-                 lr0 {} momentum {}{}, {} batches = {} optimizer steps per epoch, warmup {} steps",
+                 lr0 {} momentum {}{}, {} batches = {} optimizer steps per epoch, warmup {} steps{}",
                 self.model.arch(),
                 self.model.num_parameters(),
                 self.data.classes.len(),
@@ -115,7 +115,12 @@ impl Trainer {
                 },
                 self.nb,
                 c.steps_per_epoch,
-                c.warmup_iters
+                c.warmup_iters,
+                match &self.ema {
+                    // The nominal window 1 / (1 − decay) of §8.5.
+                    Some(e) => format!(", EMA window {:.0} steps", 1.0 / (1.0 - e.contract().decay)),
+                    None => String::new(),
+                }
             ),
         );
         if self.model.has_o2o() {

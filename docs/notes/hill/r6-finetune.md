@@ -214,3 +214,108 @@ starting weights matter more than the recipe on the one set where size could sho
   nominal batch 64 it is 4 optimizer steps an epoch, 400 in all (the table above).
 - "`folo weights` shows what `folo-n-coco` resolves to": the name `folo-n-coco` is the first release (`weights-v1`,
   AP 0.314); the documented fine-tuning start is `folo-n-coco-v5`, which these runs used.
+
+## Lane finetune2: the EMA rule on a protocol that does not select on what it scores
+
+Lane `finetune2` of wave 6 (2026-11-20), continuing the sections above. Scripts and logs (not in the repo):
+`D:/folo-wave6/lanes/finetune2/` — `bin/p2score.sh` (P2's scoring), `bin/g2.py` (the table and the gate),
+`bin/ft.sh` and `bin/runner.sh` (copies of the first lane's, scoring `last.folo` too), `bin/bitcheck.py`;
+`runs/p2-<run>/` (`score-best.json`, `score-last.json`), `logs/p2score.out`, `logs/g2.out`.
+
+### Protocol P2 and gate G2 (fixed before any score was read)
+
+For each of the four sets: train on the train split minus the seeded 20% hold-out of `make_holdout.py` (seed 0),
+let the trainer choose `best.folo` on that hold-out, and score that `best.folo` on the set's reported split (BCCD
+test; val for the other three), which neither arm saw in training or selection. Three seeds per arm, paired by seed;
+otherwise bench/finetune/README.md's protocol (640 px, batch 16, 100 epochs, f32, `folo-n-coco-v5`, pycocotools).
+`last.folo` is scored on the reported split too. Arms: today's default against the EMA rule as it ships (window
+`min(10000, 0.25 T)` optimizer steps, `decay = 1 − 1/w`, `tau = w/5`; a run of 40,000 steps or more keeps today's EMA).
+
+G2: ship the rule only if, on P2's `best.folo` numbers, (a) the mean over the four sets is up by at least 0.005,
+(b) at least 9 of the 12 seed pairs are up, (c) no set is down by more than its baseline seed spread (max − min),
+and (d) `last.folo` is not down on any set's mean.
+
+**The runs are the first lane's hold-out runs.** `ho-base-*` and `ho-ema25-*` above are exactly P2's training and
+selection: trained on the hold-out's 80%, `best.folo` chosen on the 20%, with the knob at `h = 0.25` (the runs' log
+lines: decay 0.98667 / tau 15 at `T` 300 on BCCD's 164 images, 0.99667 / 60 at 1,200 on brain-tumor, 0.98 / 10 at
+200 on signature and pills; every `T` is under 40,000, so the cap does not bind and the knob is the rule). Only their
+reported-split scores were missing, and nobody had read them. P2 therefore scored those 24 runs (`p2score.sh`:
+`folo val --save-json` of `best.folo` and `last.folo` on the reported split at conf 0.001, IoU 0.7, then the scorer)
+instead of training them again. The scoring was checked first: `base-bccd-s0`'s `best.folo` scores 0.61663 on
+BCCD test, the first lane's number. The rule as shipped reproduces the knob bit for bit: `ho-ema25-bccd-s0` trained
+again with the PR's build (`main` f875e5c9 + this change, no knob) has, in every epoch event, the same epoch number,
+validation metrics and training losses (the epoch durations differ), and every tensor of `best.folo` and `last.folo`
+byte for byte the same as the knob's run (`bin/bitcheck.py`; its configuration log line ends "EMA window 75 steps").
+
+### P2: AP on the reported split (three seeds, Δ paired by seed)
+
+`best.folo` (chosen on the hold-out):
+
+| dataset | default | EMA window 0.25 T | Δ per seed | mean Δ |
+|---|---|---|---|---:|
+| BCCD (test) | 0.6218 / 0.6215 / 0.6114 | 0.6291 / 0.6326 / 0.6217 | +0.0073 / +0.0111 / +0.0103 | +0.0096 |
+| brain-tumor (val) | 0.3942 / 0.3349 / 0.3495 | 0.3669 / 0.3438 / 0.3547 | −0.0274 / +0.0089 / +0.0052 | −0.0044 |
+| signature (val) | 0.9821 / 0.9733 / 0.9676 | 0.9881 / 0.9851 / 0.9791 | +0.0060 / +0.0119 / +0.0115 | +0.0098 |
+| medical-pills (val) | 0.7973 / 0.7892 / 0.7943 | 0.7986 / 0.7944 / 0.8049 | +0.0013 / +0.0052 / +0.0106 | +0.0057 |
+| mean | 0.6864 | 0.6916 | | **+0.0052** |
+
+`last.folo` (no selection):
+
+| dataset | default | EMA window 0.25 T | Δ per seed | mean Δ |
+|---|---|---|---|---:|
+| BCCD (test) | 0.6086 / 0.6178 / 0.6008 | 0.6180 / 0.6301 / 0.6191 | +0.0094 / +0.0123 / +0.0184 | +0.0133 |
+| brain-tumor (val) | 0.3690 / 0.3433 / 0.3533 | 0.3791 / 0.3438 / 0.3599 | +0.0102 / +0.0005 / +0.0065 | +0.0057 |
+| signature (val) | 0.9850 / 0.9730 / 0.9791 | 0.9851 / 0.9791 / 0.9788 | +0.0002 / +0.0061 / −0.0003 | +0.0020 |
+| medical-pills (val) | 0.7976 / 0.7945 / 0.7982 | 0.7996 / 0.8007 / 0.8036 | +0.0020 / +0.0062 / +0.0054 | +0.0046 |
+| mean | 0.6850 | 0.6914 | | **+0.0064** |
+
+### G2, line by line
+
+- (a) mean `best.folo` Δ +0.0052 ≥ +0.005: **pass**, by 0.0002. It is the line closest to failing.
+- (b) 11 of 12 seed pairs up (brain-tumor seed 0 down): **pass**.
+- (c) no set down by more than its baseline spread: brain-tumor −0.0044 against a spread of 0.0593; the others are
+  up: **pass**.
+- (d) `last.folo` mean up on all four sets (+0.0133, +0.0057, +0.0020, +0.0046): **pass**.
+
+**G2 passes, so the rule ships** (`ema_run_fraction` 0.25, docs/MODEL.md §8.5).
+
+### Reading
+
+- Without selection on the scored images the order of the first lane's benchmark-protocol result turns around:
+  there the rule was −0.0051 with brain-tumor −0.033; here it is +0.0052 with brain-tumor −0.0044, and brain-tumor's
+  `last.folo` gains as on every other set. That the earlier brain-tumor loss was the selection is a hypothesis, not
+  shown: P2 also trains on 80% of the train split (1,200 optimizer steps instead of 1,400), so the two protocols
+  differ in more than where `best.folo` is chosen. It is the likely one: on the scored split the default's
+  per-epoch curve swings 0.025 AP from epoch to epoch over epochs 51–100 against the rule's 0.0014, and its best
+  epoch there is 0.070 above its last, against 0.018 (the swing table below).
+- The margin is thin. (a) passes by 0.0002, and brain-tumor's P2 baseline spreads over 0.059 across three seeds,
+  so this is a small, consistent gain (11 of 12 pairs, `last.folo` up everywhere), not a large one. Under the
+  benchmark's own protocol the published table will not show it on brain-tumor.
+- P2 trains on 80% of each train split, so its absolute numbers are below the benchmark's (brain-tumor 0.36 against
+  0.42; with the protocol's selection on the scored split included in the 0.42); the comparison is the pair.
+- Brain-tumor's hold-out is the weakest selection split (the first lane: possibly near-duplicate slices, 0.66 on it
+  against 0.36–0.39 on val). It still selected epochs whose val AP favours the rule on two of three seeds.
+- The best epochs on the hold-out (default / rule): BCCD 38, 97, 25 / 54, 78, 39; brain-tumor 83, 75, 93 / 88, 100,
+  82; signature 84, 84, 55 / 91, 96, 83; pills 94, 50, 86 / 96, 63, 93.
+
+### The swing of the selection curve
+
+The validation curve a run chooses `best.folo` on, from the runs' `metrics.jsonl` (`bin/swing.py`, `logs/swing.out`;
+three seeds averaged). "Swing" is the mean |Δ mAP50-95| from one epoch to the next over epochs 51–100; "best − last"
+is how far the chosen epoch is above the last one on that same curve. Benchmark protocol (the first lane's `base` /
+`ema25` runs: chosen on the split they are scored on, except BCCD) and hold-out (`ho-*`: chosen on the hold-out):
+
+| dataset | curve | swing, default | swing, rule | best − last, default | best − last, rule |
+|---|---|---:|---:|---:|---:|
+| BCCD | val (scored on test) | 0.0062 | 0.0006 | 0.0096 | 0.0068 |
+| BCCD | hold-out | 0.0054 | 0.0007 | 0.0156 | 0.0124 |
+| brain-tumor | val (the scored split) | 0.0249 | 0.0014 | 0.0697 | 0.0175 |
+| brain-tumor | hold-out | 0.0169 | 0.0013 | 0.0086 | 0.0030 |
+| signature | val (the scored split) | 0.0042 | 0.0009 | 0.0065 | 0.0083 |
+| signature | hold-out | 0.0024 | 0.0005 | 0.0080 | 0.0023 |
+| medical-pills | val (the scored split) | 0.0031 | 0.0006 | 0.0031 | 0.0030 |
+| medical-pills | hold-out | 0.0056 | 0.0007 | 0.0042 | 0.0042 |
+
+The rule smooths every curve by 4 to 18 times. Brain-tumor's val curve under the default is the noisy one (both
+classes swing about equally: 0.033 and 0.028), and choosing its maximum puts `best.folo` 0.070 above the last epoch
+on the very images it is then scored on.

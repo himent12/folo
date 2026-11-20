@@ -300,7 +300,13 @@ impl Trainer {
     /// docs/API.md's `Run.resolved`: the optimizer, effective LR and weight decay, accumulation and warmup this run
     /// trains with (also `resolved` in its `config.json`).
     pub fn resolved_train(&self) -> folo_api::ResolvedTrain {
-        self.resolved.to_api(&self.cfg, self.accumulate, self.sched.contract().steps_per_epoch)
+        let mut r = self.resolved.to_api(&self.cfg, self.accumulate, self.sched.contract().steps_per_epoch);
+        // The pair the EMA averages with: a resumed run's is its checkpoint's `folo.ema`, whatever its recipe says.
+        if let Some(e) = &self.ema {
+            let c = e.contract();
+            (r.ema_decay, r.ema_tau) = (Some(c.decay), Some(c.tau));
+        }
+        r
     }
 
     /// Training batches per epoch, `nb` (docs/API.md `steps_per_epoch`).

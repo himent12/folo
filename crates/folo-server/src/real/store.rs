@@ -160,6 +160,8 @@ impl Store for RealStore {
             (crate::cli::recorded_transfer(e.dir()), crate::cli::recorded_musgd_weights(e.dir()));
         let cmd = crate::cli::with_transfer(cmd, &config, rule, transfer, weights);
         let cmd = crate::cli::with_warmup_floor(cmd, crate::cli::recorded_warmup_floor(e.dir()));
+        // A fine-tune keeps its EMA window (made before the key: the default window, §8.5).
+        let cmd = crate::cli::with_ema_run_fraction(cmd, crate::cli::recorded_ema_run_fraction(e.dir()));
         // A run continued from a distillation run's checkpoint keeps its teacher.
         Ok(crate::cli::with_distill(cmd, crate::cli::recorded_distill(e.dir())))
     }
