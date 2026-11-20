@@ -50,7 +50,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import ConfigPanel from './run/ConfigPanel';
 import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
-import Outcome, { canContinue } from './run/Outcome';
+import Outcome, { canContinue, canResume } from './run/Outcome';
 import { datasetPresence } from './overview/newDatasets';
 import Callout from './run/Callout';
 import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
@@ -249,15 +249,15 @@ export default function Run() {
     try {
       if (removing.peek()) {
         // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
-        const r = await removeQueued(cur);
+        const r = await live.stop(() => removeQueued(cur));
         stopOpen.set(false);
         removedToast(cur);
-        if (r) live.run = r;
-        else router.go('/runs', { replace: true });
+        if (!r) router.go('/runs', { replace: true });
         return;
       }
-      const r = await hub.api.stopRun(cur.id);
-      live.run = r;
+      // The run as the view now has it: the stream may have said it ended while the stop was on its way.
+      const r = await live.stop(() => hub.api.stopRun(cur.id));
+      if (!r) return;
       stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
       stoppedToast(r, untrack(() => epochsDone.get()));
@@ -317,7 +317,7 @@ export default function Run() {
     const out: PageCommand[] = [];
     if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: CircleStop, run: () => stopOpen.set(true) });
     // As the run's banner: anything but out of memory continues from the last checkpoint.
-    if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
+    if ((r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error))) && canResume())
       out.push(
         canContinue(r)
           ? { id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() }

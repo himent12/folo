@@ -70,6 +70,13 @@ const NONE: string[] = [];
 export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
 
 /**
+ * Whether Resume (or Start again) is offered: not on the mock server (`folo serve --mock`, `hub.serverMock`), which
+ * answers it `501` (issue #382: the palette's Resume did), and not in the in-browser demo, which answers the same.
+ * Every real server resumes, older ones too.
+ */
+export const canResume = () => hub.serverMock !== true && hub.mode !== 'mock';
+
+/**
  * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A
  * cloud run's is its worker's (a remote server or an instance restarted), not this server's, which ran on.
  */
@@ -190,11 +197,12 @@ export default function Outcome(props: OutcomeProps) {
     </>
   );
   /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
-  const resumeAction = () => (
-    <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
-      {canContinue(props.run) ? 'Resume' : 'Start again'}
-    </Button>
-  );
+  const resumeAction = () =>
+    canResume() ? (
+      <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
+        {canContinue(props.run) ? 'Resume' : 'Start again'}
+      </Button>
+    ) : null;
 
   return (
     <>
