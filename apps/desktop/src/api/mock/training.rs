@@ -182,7 +182,7 @@ pub(super) fn log_cloud_end_at(f: &mut RunFixture, now: f64) {
     if sim.ended.is_some_and(|(e, _)| e < sim.train_at()) {
         return;
     }
-    let Some(done) = sim.trained_at() else { return };
+    let Some(done) = sim.trained_by(now) else { return };
     let lost = sim.lost_at.unwrap_or(f64::INFINITY);
     let mut lines = vec![(done, "cloud: the run ended on the worker; copying its weights")];
     if sim.base.instance_id.is_some() {

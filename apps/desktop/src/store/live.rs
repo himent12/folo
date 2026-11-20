@@ -165,13 +165,21 @@ impl Store {
     pub fn install_logs(&mut self, run_id: &str, lines: ApiResult<Vec<LogLine>>) {
         let mut load: Load<Vec<LogLine>> = lines.into();
         if let Load::Ready(lines) = &mut load {
-            let mut unsent: std::collections::HashMap<(String, String), u32> = Default::default();
+            let mut has: std::collections::HashMap<(String, String), u32> = Default::default();
             for l in lines.iter() {
-                *unsent.entry((l.t.clone(), l.message.clone())).or_default() += 1;
+                *has.entry((l.t.clone(), l.message.clone())).or_default() += 1;
+            }
+            // The history's lines the stream may still send: not the ones it sent already (before
+            // the history was read, or while it loaded).
+            let mut unsent = has.clone();
+            for key in self.log_streamed.get(run_id).into_iter().flatten() {
+                if let Some(n) = unsent.get_mut(key).filter(|n| **n > 0) {
+                    *n -= 1;
+                }
             }
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 if let RunEvent::Log(l) = ev
-                    && !take_unsent(&mut unsent, l)
+                    && !take_unsent(&mut has, l)
                 {
                     lines.push(l.clone());
                 }
@@ -193,13 +201,34 @@ impl Store {
         self.samples.remove(run_id);
         self.pending.remove(run_id);
         self.log_unsent.remove(run_id);
+        self.log_streamed.remove(run_id);
         self.resumed.insert(run_id.to_string());
+    }
+
+    /// Forget a run's loaded log (to read it again) and which of its lines the stream may repeat.
+    pub fn drop_logs(&mut self, run_id: &str) -> bool {
+        self.log_unsent.remove(run_id);
+        self.logs.remove(run_id).is_some()
+    }
+
+    /// A run is gone: its log and the lines its stream sent.
+    pub fn forget_logs(&mut self, run_id: &str) {
+        self.drop_logs(run_id);
+        self.log_streamed.remove(run_id);
+    }
+
+    /// Every run's log (a new data source).
+    pub fn clear_logs(&mut self) {
+        self.logs.clear();
+        self.log_unsent.clear();
+        self.log_streamed.clear();
     }
 
     /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
     pub fn clear_pending(&mut self) {
         self.pending.clear();
         self.log_unsent.clear();
+        self.log_streamed.clear();
         self.resumed.clear();
         self.lengths.clear();
     }
@@ -235,6 +264,13 @@ impl Store {
 
     /// Apply one live event to the run list and its metric history.
     pub fn apply(&mut self, run_id: &str, ev: RunEvent) {
+        if let RunEvent::Log(l) = &ev {
+            let sent = self.log_streamed.entry(run_id.to_string()).or_default();
+            sent.push_back((l.t.clone(), l.message.clone()));
+            if sent.len() > 2000 {
+                sent.pop_front();
+            }
+        }
         let loading = matches!(self.run_data.get(run_id), Some(Load::Loading))
             || matches!(self.logs.get(run_id), Some(Load::Loading));
         if loading && matches!(ev, RunEvent::Step(_) | RunEvent::Epoch(_) | RunEvent::Log(_)) {
@@ -681,6 +717,30 @@ mod tests {
         store.install_logs(id, Ok(vec![line(0, "a"), line(11, "b")]));
         let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
         assert_eq!(got, ["a", "b", "same", "same"]);
+    }
+
+    /// Review round 3: a line the stream sent before the history was read is in that history; a
+    /// new line alike that follows is shown, not taken for its copy. Forgetting the log forgets
+    /// which lines the stream may repeat.
+    #[test]
+    fn a_line_streamed_before_the_history_was_read_does_not_hide_a_new_one_alike() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_x";
+        let line = |t: i64, m: &str| LogLine {
+            t: crate::api::time::format(1_000 + t),
+            level: LogLevel::Info,
+            message: m.into(),
+        };
+        store.apply(id, RunEvent::Log(line(5, "copied weights/last.folo")));
+        store.logs.insert(id.into(), Load::Loading);
+        store.install_logs(id, Ok(vec![line(0, "a"), line(5, "copied weights/last.folo")]));
+        store.apply(id, RunEvent::Log(line(5, "copied weights/last.folo")));
+        let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(got, ["a", "copied weights/last.folo", "copied weights/last.folo"]);
+        store.drop_logs(id);
+        assert!(!store.log_unsent.contains_key(id));
+        store.forget_logs(id);
+        assert!(!store.log_streamed.contains_key(id));
     }
 
     #[test]

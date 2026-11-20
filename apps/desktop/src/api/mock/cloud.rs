@@ -103,20 +103,30 @@ impl CloudSim {
 
     /// When training ended (all steps done, or stopped), if it has.
     pub(super) fn trained_at(&self) -> Option<f64> {
+        self.trained_by(self.elapsed())
+    }
+
+    /// [`Self::trained_at`] as of `now` seconds into the instance's life.
+    pub(super) fn trained_by(&self, now: f64) -> Option<f64> {
         let natural = self.anchor.0 + self.total.saturating_sub(self.anchor.1) as f64 * self.step_dt;
         let end = self.ended.map_or(natural, |(e, _)| e.min(natural)).max(self.train_at());
-        (self.elapsed() >= end).then_some(end)
+        (now >= end).then_some(end)
     }
 
     /// When the instance was released: right away for a run that ended before training or lost its
     /// instance, else after collecting the weights.
     pub(super) fn released_at(&self) -> Option<f64> {
+        self.released_by(self.elapsed())
+    }
+
+    /// [`Self::released_at`] as of `now` seconds into the instance's life.
+    pub(super) fn released_by(&self, now: f64) -> Option<f64> {
         if self.lost_at.is_some() {
             return self.lost_at;
         }
         match self.ended {
             Some((e, how)) if how == Ended::InstanceLost || e < self.train_at() => Some(e),
-            _ => self.trained_at().map(|t| t + COLLECT_S + RELEASE_S).filter(|r| self.elapsed() >= *r),
+            _ => self.trained_by(now).map(|t| t + COLLECT_S + RELEASE_S).filter(|r| now >= *r),
         }
     }
 

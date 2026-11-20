@@ -692,7 +692,7 @@ impl Backend for MockBackend {
             let now = sim.elapsed();
             // The provider confirms at once; a run still using it fails.
             sim.release_error = None;
-            if sim.released_at().is_none() {
+            if sim.released_by(now).is_none() {
                 // What the run reached before (its weights being copied) is said first, as the
                 // control plane did; then the loss.
                 super::training::log_cloud_end_at(f, now);

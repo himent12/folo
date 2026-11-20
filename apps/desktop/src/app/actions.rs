@@ -350,7 +350,7 @@ impl FoloApp {
         self.changed_here(List::Runs, cx);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
-        self.store.logs.remove(id);
+        self.store.forget_logs(id);
         self.forget_history(id);
         let made: Vec<String> = self
             .store
