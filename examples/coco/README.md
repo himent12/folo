@@ -694,9 +694,12 @@ pattern: v2 0.6207, v3 0.6160, v5 0.6245, all inside the seed spread. v5 stays t
 says to try v2 when a fine-tune falls short.
 
 **The starting-point check of the next weights release** runs all four sets of bench/finetune, brain-tumor
-included, with three seeds a side and the 0.010 bar on every set, and scores `last.folo` as well as `best.folo`.
-Brain-tumor scores on the same split it chooses `best.folo` on, and its per-epoch val curve swings, so for brain-tumor
-the `last.folo` column must clear the bar too (`run_folo.py` records it as `metrics_last`).
+included, with three seeds a side. The bar: on every set, the new file's mean AP is not more than 0.010 below the
+current recommended start's. Brain-tumor scores on the same split it chooses `best.folo` on, and its per-epoch val
+curve swings, so there the mean AP of `last.folo` must clear the same bar too. Score `last.folo` like `best.folo`:
+`folo val --model <run dir>/weights/last.folo --data <set> --split val --conf 0.001 --iou 0.7 --save-json
+dets.json`, then `python bench/finetune/scorer.py <set>/annotations/instances_val.json dets.json` (BCCD: `test`
+for `val` in both).
 
 ## folo-s: 56 epochs on a rented GPU
 
