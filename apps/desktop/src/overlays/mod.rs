@@ -34,7 +34,11 @@ pub use new_run_footer::estimate;
 /// (`MouseDownEvent::click_count`, the platform's): one opened by a key, a command or a timer takes
 /// every press, and a press that starts a click of its own ends the guard. No timer is kept here.
 /// The same goes the other way: when a press or release closes the last overlay (Cancel, the
-/// backdrop), the rest of that click does not reach the page that was under it.
+/// backdrop), the rest of that click does not reach the page that was under it. Which one closed
+/// it is told right after its dispatch (`dispatched`), not at the next frame: a key that closed it
+/// between a press and its release is no press's, and a second press before the frame is stopped
+/// before the backdrop drawn last can take it. A press on a caption area (the title bar's drag band,
+/// its buttons) is left to the window.
 #[derive(Default)]
 pub struct OverlayPresses {
     /// The overlay on top in the last frame.
@@ -43,7 +47,7 @@ pub struct OverlayPresses {
     pointer: Option<usize>,
     /// The overlay on top came up while a press or release of this click count was handled.
     opened_by: Option<usize>,
-    /// The last overlay went while a press or release of this click count was handled.
+    /// A press or release of this click count closed the last overlay.
     closed_by: Option<usize>,
 }
 
@@ -64,11 +68,21 @@ impl OverlayPresses {
     /// last frame is guarded only when a press or release was handled meanwhile.
     pub fn shown(&mut self, top: Option<&'static str>) {
         if self.top != top {
-            self.closed_by = if top.is_none() { self.top.and(self.pointer) } else { None };
+            if top.is_some() {
+                self.closed_by = None;
+            }
             self.top = top;
             self.opened_by = top.and(self.pointer);
         }
         self.pointer = None;
+    }
+
+    /// A press or release of `click_count` was dispatched, an overlay up before it (`was_open`)
+    /// and after it (`open`): it closed the last one when one was up and none is now.
+    pub fn dispatched(&mut self, click_count: usize, was_open: bool, open: bool) {
+        if was_open && !open {
+            self.closed_by = Some(click_count);
+        }
     }
 
     /// Whether the overlay on top takes a press with this click count.
@@ -120,7 +134,23 @@ fn error_note(t: &Theme, message: String, hint: Option<String>) -> Div {
 }
 
 impl FoloApp {
+    /// Whether an overlay that takes presses is up, as the state has it now (what `overlays` draws,
+    /// toasts aside).
+    pub(crate) fn any_overlay(&self) -> bool {
+        self.inspector.is_some()
+            || self.new_run.is_some()
+            || self.synth.is_some()
+            || self.confirm_stop.is_some()
+            || self.confirm_delete.is_some()
+            || self.confirm_close.is_some()
+            || self.cloud.connect.is_some()
+            || self.cloud.disconnect.is_some()
+            || self.cloud.terminate.is_some()
+            || self.palette.is_some()
+    }
+
     pub fn overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let open = self.any_overlay();
         let mut out = Vec::new();
         // The last one pushed is on top (toasts aside: they take no presses for it).
         let mut top = None;
@@ -164,6 +194,7 @@ impl FoloApp {
             out.push(self.palette_view(window, cx));
             top = Some("palette");
         }
+        debug_assert_eq!(open, top.is_some(), "any_overlay names every overlay drawn here");
         self.overlay_presses.shown(top);
         if !self.toasts.is_empty() {
             out.push(self.toasts_view(window, cx));
@@ -173,13 +204,23 @@ impl FoloApp {
 
     /// Tells `overlay_presses` of every press and release in the window, whatever is under the
     /// pointer, before the page or an overlay sees it (the root's first child: ahead of them in the
-    /// capture phase), and draws a frame after it, in which `shown` sees whether it opened one. A
-    /// press that goes on with the click that closed the last overlay stops here (`page_admits`).
+    /// capture phase), and draws a frame after it, in which `shown` sees whether it opened one; right
+    /// after its dispatch, whether it closed the last one (`dispatched`). A press that goes on with
+    /// the click that closed the last overlay stops here (`page_admits`), unless it is on a caption
+    /// area (a press the app stops is not the window's: no drag, no maximize on a double-click).
     pub(crate) fn press_tracker(cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         let track = move |click_count, down, cx: &mut App| {
+            let after = view.clone();
             view.update(cx, |this: &mut Self, cx| {
                 this.overlay_presses.pointer(click_count, down);
+                let was_open = this.any_overlay();
+                cx.defer(move |cx| {
+                    let _ = after.update(cx, |this: &mut Self, _| {
+                        let open = this.any_overlay();
+                        this.overlay_presses.dispatched(click_count, was_open, open);
+                    });
+                });
                 cx.notify();
                 this.overlay_presses.page_admits(click_count)
             })
@@ -189,8 +230,11 @@ impl FoloApp {
             |_, _, _| {},
             move |_, _, window, _| {
                 let up = track.clone();
-                window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture && !track(ev.click_count, true, cx) {
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture
+                        && !track(ev.click_count, true, cx)
+                        && window.hit_test_window_control().is_none()
+                    {
                         cx.stop_propagation();
                     }
                 });
@@ -418,17 +462,24 @@ mod tests {
         let mut p = OverlayPresses::default();
         p.shown(Some("confirm-delete"));
         // Closed by its first click's release (a button), then the double-click's second press.
-        click(&mut p, 1);
+        p.pointer(1, true);
+        p.dispatched(1, true, true);
+        p.pointer(1, false);
+        p.dispatched(1, true, false);
         p.shown(None);
         p.pointer(2, true);
         assert!(!p.page_admits(2) && !p.page_admits(3), "the rest of that click");
         assert!(press(&mut p, 1) && p.page_admits(1), "a click of its own");
         assert!(p.page_admits(2), "and its own double-click");
-        // Closed by a press (the backdrop): the same.
+        // Closed by a press (the backdrop): the same, before the next frame too.
         p.shown(Some("synth"));
         p.pointer(1, true);
-        p.shown(None);
+        p.dispatched(1, true, false);
+        p.pointer(1, false);
+        p.dispatched(1, false, false);
         p.pointer(2, true);
+        assert!(!p.page_admits(2), "the second press before a frame");
+        p.shown(None);
         assert!(!p.page_admits(2));
         // A dialog closed onto another keeps the other's guard (`admits`); the page has none.
         p.pointer(1, true);
@@ -439,6 +490,15 @@ mod tests {
         assert!(!press(&mut p, 2) && p.page_admits(2));
         // Closed by a key (no press since the last frame): every press reaches the page.
         p.shown(Some("confirm-close"));
+        p.shown(None);
+        assert!(p.page_admits(2));
+        // Review round 1: a press on the dialog, a key closes it, the release before the frame: the
+        // release closed nothing, so the next press of that click reaches the page.
+        p.shown(Some("confirm-close"));
+        p.pointer(1, true);
+        p.dispatched(1, true, true);
+        p.pointer(1, false);
+        p.dispatched(1, false, false);
         p.shown(None);
         assert!(p.page_admits(2));
     }

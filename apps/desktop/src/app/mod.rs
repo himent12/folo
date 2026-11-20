@@ -516,6 +516,9 @@ pub struct FoloApp {
     pub reached: bool,
     /// A `/system` request is out: the 2 s refresh asks no more until it answers (`refresh_system`).
     pub system_out: bool,
+    /// The last `/system` request's number: an answer to an earlier one (asked before a Retry) is
+    /// dropped.
+    pub system_seq: u64,
     pub reduce_motion: bool,
 
     // Overlays
@@ -771,6 +774,7 @@ impl FoloApp {
             start_error: None,
             reached: false,
             system_out: false,
+            system_seq: 0,
             // Follow the OS animation setting until the user picks in Settings.
             reduce_motion: calm,
             palette: None,

@@ -129,3 +129,63 @@ fn a_double_click_that_opens_a_confirmation_cannot_confirm_it() {
         assert!(this.store.run("run_52e8").is_none(), "deleted");
     });
 }
+
+fn input(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, (x, y): (f32, f32), down: bool, count: usize) {
+    use folo_ui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, point, px};
+    let (position, modifiers, button) = (point(px(x), px(y)), Modifiers::default(), MouseButton::Left);
+    let ev = if down {
+        PlatformInput::MouseDown(MouseDownEvent {
+            button,
+            position,
+            modifiers,
+            click_count: count,
+            first_mouse: false,
+        })
+    } else {
+        PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count: count })
+    };
+    app.simulate_input(window.into(), ev);
+    app.run_until_idle();
+}
+
+/// Review round 1: a press on the dialog, Escape closes it while the button is held, and the
+/// release comes before the next frame. The release was taken for the one that closed it, so the
+/// next press of that click was kept from the page. It closed nothing: the page takes that press.
+#[test]
+fn a_dialog_closed_by_a_key_while_the_button_is_held_leaves_the_next_press_to_the_page() {
+    let (mut app, window) = datasets();
+    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    app.frame(window.into());
+    // The dialog's middle: on its panel, not the backdrop.
+    input(&mut app, window, (640., 400.), true, 1);
+    app.frame(window.into());
+    assert!(synth_open(&mut app, window), "a press on the panel keeps it");
+    // Escape (its action: the tests' app binds no keys), with no frame drawn after it.
+    drive(&mut app, window, |this, w, cx| this.dismiss(w, cx));
+    assert!(!synth_open(&mut app, window), "Escape closes it");
+    input(&mut app, window, (640., 400.), false, 1);
+    app.frame(window.into());
+    click(&mut app, window, SYNTH_BUTTON, 2);
+    assert!(synth_open(&mut app, window), "the press reaches Generate synthetic");
+}
+
+/// Review round 1: both presses of a double-click on the backdrop before a frame is drawn. The
+/// backdrop still in the last frame took the second as well and closed the dialog again, moving
+/// focus from the control it went back to (Generate synthetic) to the page. Stopped at once.
+#[test]
+fn the_second_press_before_a_frame_does_not_close_the_dialog_twice() {
+    let (mut app, window) = datasets();
+    drive(&mut app, window, |this, w, cx| w.focus(&this.fh("ds-synth", cx)));
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    app.frame(window.into());
+    input(&mut app, window, BACKDROP, true, 1);
+    input(&mut app, window, BACKDROP, false, 1);
+    assert!(!synth_open(&mut app, window), "the backdrop dismissed it");
+    let back =
+        |app: &mut HeadlessApp| drive(app, window, |this, w, cx| this.fh("ds-synth", cx).is_focused(w));
+    assert!(back(&mut app), "focus back on Generate synthetic");
+    input(&mut app, window, BACKDROP, true, 2);
+    input(&mut app, window, BACKDROP, false, 2);
+    assert!(back(&mut app), "the second press closed nothing more");
+}

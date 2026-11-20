@@ -339,8 +339,9 @@ impl Window {
     }
 
     /// The `on_hit_test_window_control` callback: the control area under the mouse in the rendered frame
-    /// (an area under an occluding element is not reported).
-    pub(crate) fn hit_test_window_control(&self) -> Option<WindowControlArea> {
+    /// (an area under an occluding element is not reported). Public so that a listener that stops a press
+    /// can leave one on a caption area to the platform.
+    pub fn hit_test_window_control(&self) -> Option<WindowControlArea> {
         let hit_test = self.rendered_frame.hit_test(self.mouse_position);
         self.rendered_frame
             .window_control_hitboxes

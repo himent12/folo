@@ -141,10 +141,16 @@ impl FoloApp {
 
     fn fetch_system(&mut self, cx: &mut Context<Self>) {
         self.system_out = true;
+        self.system_seq += 1;
+        let seq = self.system_seq;
         self.fetch(
             cx,
             |api| api.system(),
-            |this, r, cx| {
+            move |this, r, cx| {
+                // Asked again since (Retry): this answer is older than what is on its way.
+                if this.system_seq != seq {
+                    return;
+                }
                 this.system_out = false;
                 if let Ok(s) = &r
                     && let Some(g) = s.system.gpus.first().and_then(|g| g.util)

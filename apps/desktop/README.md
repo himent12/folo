@@ -197,7 +197,9 @@ second press cannot press what opened under the pointer (a confirmation's Delete
 its own dismisses. An overlay opened by a key, a command or a timer has no such guard: every press reaches it.
 The other way round too: when a press or its release closes the last overlay (Cancel, the dimmed page), the rest
 of that click does not reach the page that was under it (`OverlayPresses::page_admits`, checked by the root's
-press tracker before anything else sees the press).
+press tracker before anything else sees the press). Which press or release closed it is told right after its
+dispatch, so one that arrives before the next frame is stopped too, and an overlay closed by a key between a press
+and its release guards nothing. A press on the title bar's caption areas is always the window's.
 Menus and selects are not overlays: a double-click on a select opens and closes it, as on a Windows combo box.
 The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
 `window.close`, `window.close_text`).

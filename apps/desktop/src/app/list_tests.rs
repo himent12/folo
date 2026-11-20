@@ -477,3 +477,58 @@ fn the_system_refresh_waits_for_its_last_answer_and_keeps_it_on_screen() {
     assert_eq!(api.system_calls(), asked + 2);
     assert!(drive(&mut app, window, |this, _, _| !this.system_out && this.store.system.ready().is_some()));
 }
+
+/// Review round 1: the 2 s refresh itself (the app's pump), not only `refresh_system`: while its
+/// request is held, the next refreshes send nothing and the last answer stays on screen (a pump
+/// that set `/system` back to Idle each tick showed the skeleton).
+#[test]
+fn the_two_second_refresh_waits_for_a_hung_system_answer() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    // The tests' app is still (no pump): this one runs the app's own, as a window does.
+    drive(&mut app, window, |this, _, cx| this.start_pump(cx));
+    let asked = api.system_calls();
+    let held = api.hold("system");
+    app.advance_clock_held(std::time::Duration::from_secs(2), 1);
+    held.wait_held();
+    assert_eq!(api.system_calls(), asked + 1, "the refresh asked");
+    for _ in 0..4 {
+        app.advance_clock_held(std::time::Duration::from_secs(2), 1);
+        assert!(start(&mut app, window, 1, |this, _, _| this.store.system.ready().is_some()), "on screen");
+    }
+    assert_eq!(api.system_calls(), asked + 1, "no second request while the first is out");
+    drop(held);
+    app.run_until_idle();
+    app.advance_clock(std::time::Duration::from_secs(2));
+    assert_eq!(api.system_calls(), asked + 2, "answered: the next refresh asks again");
+}
+
+/// Review round 1: Retry (a connection error's) while a `/system` refresh hung cleared what it
+/// had said but sent no request of its own: the hung one stood for it, and its answer, whenever
+/// it came, was taken. Retry asks again, and the older answer is dropped.
+#[test]
+fn retry_asks_for_system_again_while_an_answer_hangs() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let asked = api.system_calls();
+    let held = api.hold("system");
+    start(&mut app, window, 1, |this, _, cx| this.refresh_system(cx));
+    held.wait_held();
+    start(&mut app, window, 1, |this, _, cx| {
+        this.retry_all(cx);
+        this.ensure_core(cx);
+    });
+    assert_eq!(api.system_calls(), asked + 2, "Retry asked");
+    let seq = start(&mut app, window, 1, |this, _, _| {
+        assert!(!this.system_out && this.store.system.ready().is_some(), "its answer is in");
+        this.system_seq
+    });
+    // The hung answer lands: it is older than what is shown, and dropped.
+    let util = start(&mut app, window, 1, |this, _, _| this.store.gpu_util.len());
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, move |this, _, _| {
+        assert_eq!((this.system_seq, this.store.gpu_util.len()), (seq, util), "the older answer is dropped");
+        assert!(!this.system_out);
+    });
+}
