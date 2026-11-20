@@ -20,7 +20,15 @@
 //! it, so the probe's own connection right after finds the queue full (on Windows it is turned away and
 //! times out waiting for its next attempt). So when the check saw a listener ([`Found::Listener`]) and the
 //! probe then could not connect, the probe tries once more before it says nobody is there
-//! (`server::probe_through`).
+//! (`server::ask_health`; only a failure to connect, never a connection that was made and then reset).
+//!
+//! Two corners stay (#308). The second attempt gets its own half second, so a server that stops listening
+//! between the check and the probe (a window of about a millisecond) is found gone after 1.0 s instead of
+//! 0.5 s. And the check's connection is not handed to the probe: on a listener with exactly one free slot
+//! in its accept queue that does not accept for longer than both attempts (a saturated port forwarder, not
+//! a `folo serve`, which keeps a queue of 1024 and accepts at once), both attempts time out connecting and
+//! the app says nobody is there. Reusing the check's socket for the health request would close that, but
+//! it would need the HTTP client to take a socket it did not open.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};

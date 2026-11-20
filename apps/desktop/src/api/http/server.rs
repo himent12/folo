@@ -123,15 +123,7 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
         .proxy(proxy)
         .build();
     let agent: ureq::Agent = agent.into();
-    let mut answer = agent.get(&health).call();
-    // The check's own connection, closed without a request, waits in the server's accept queue until the
-    // server takes it: with one free slot left there, this connection then finds the queue full (on Windows
-    // it is turned away and times out before its next attempt). Something listens, so once more (the
-    // server takes its queue meanwhile) before saying nobody is there. An answer, or a timeout after the
-    // connection was made, is final.
-    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
-        answer = agent.get(&health).call();
-    }
+    let (answer, _) = ask_health(found, || agent.get(&health).call());
     answer
         .ok()
         .filter(|r| r.status().is_success())
@@ -139,15 +131,28 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
         .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok"))
 }
 
-/// Whether a call failed on its connection: it could not connect in time, or the connection was refused,
-/// reset or aborted.
-fn not_connected(e: &ureq::Error) -> bool {
-    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
-    match e {
-        ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
-        ureq::Error::Io(e) => matches!(e.kind(), ConnectionReset | ConnectionAborted | ConnectionRefused),
-        _ => false,
+/// The health request (`call`), and how many times it was sent. The check's own connection, closed
+/// without a request, waits in the server's accept queue until the server takes it: with one free slot left
+/// there, this request's connection then finds the queue full (on Windows it is turned away and times out
+/// before its next attempt). So when the check saw a listener and the request could not connect, it is sent
+/// once more (the server takes its queue meanwhile) before nobody is said to be there. Only a failure to
+/// connect is tried again (#308): an answer is final, and so is a connection that was made and then reset,
+/// aborted or timed out, which a second attempt would only make wait as long again (a listener that accepts
+/// and resets after `t` cost `2t`) or send twice.
+pub(super) fn ask_health<T>(
+    found: Found,
+    mut call: impl FnMut() -> Result<T, ureq::Error>,
+) -> (Result<T, ureq::Error>, u32) {
+    let answer = call();
+    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
+        return (call(), 2);
     }
+    (answer, 1)
+}
+
+/// Whether a call never connected: the connect limit passed, or the client found no connection to make.
+fn not_connected(e: &ureq::Error) -> bool {
+    matches!(e, ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed)
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).
