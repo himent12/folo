@@ -364,8 +364,8 @@ What works today (v0.1):
 
 Not yet:
 - COCO accuracy level with the incumbent, or a COCO comparison at an equal budget ([Accuracy](#accuracy));
-- `folo bench`, the speed benchmark as a CLI command: it exists but returns "not implemented" (the speed numbers above
-  come from `cargo bench`, [docs/BENCHMARKS.md](docs/BENCHMARKS.md); this is separate from Studio's Benchmarks screen);
+- a speed benchmark as a CLI command (the speed numbers above come from `cargo bench`,
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md); `folo bench` is the vision benchmarks of Studio's Benchmarks screen);
 - a prebuilt macOS release binary.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the live checklist.

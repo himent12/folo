@@ -4,8 +4,9 @@
 evaluate, predict and export through FOLO. The protocol layer is the `rmcp` SDK; this crate adds the FOLO tools, `folo://` resources and
 prompts on top of folo-server's `Store` trait. It depends on folo-api (with its `schema` feature), folo-server,
 folo-data and folo-client. folo-cli is the only crate that depends on it: `crates/folo-cli/src/mcp.rs` builds the
-server from the `folo mcp` flags, `folo describe` includes the tool schemas, and `folo label`
-(`crates/folo-cli/src/label/`) runs the labeling operations of `src/label/`. The contract is
+server from the `folo mcp` flags, `folo describe` includes the tool schemas, `folo label`
+(`crates/folo-cli/src/label/`) runs the labeling operations of `src/label/`, and `folo bench`
+(`crates/folo-cli/src/bench/`) the benchmark operations of `src/bench/`. The contract is
 [docs/MCP.md](../../docs/MCP.md).
 
 ## Where things are
@@ -15,8 +16,9 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, and
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
 | `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
 | `src/tools/` | The tools; see below |
-| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views) |
+| `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views); `src/types/bench.rs`: the compact benchmark results (catalog, summaries, a benchmark with its leaderboard, an entry's state and score) |
 | `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
+| `src/bench/` | Vision benchmarks for `folo bench`: `Benchmarks` (`mod.rs`, a store's `Benches` in this process, or `/api/bench` of a `folo serve` that lists `vision_bench`), the operations (`ops.rs`: the compact results, starting an entry of a model or of a file of predictions sent in parts and removed again when refused, following an entry; errors without hints) and the hints in each front end's words (`hints.rs`) |
 | `src/resources.rs` | `folo://` URIs (`FoloUri`), the resource listing and templates, JSON snapshots |
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
 | `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |

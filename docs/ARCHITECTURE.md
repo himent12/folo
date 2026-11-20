@@ -98,7 +98,7 @@ The running processes. `┄` lines are not cargo dependencies: they are HTTP, SS
 | folo-server | the HTTP + SSE server, the `Store` trait and the services behind it | api, bench, client, cloud, core, data, gpu, nn, vision | `Server`, `Store`, `RealStore`, `MockStore` | [SERVER.md](SERVER.md), [README](../crates/folo-server/README.md) |
 | folo-client | blocking HTTP client of API.md; transfers in parts | api | `Client`, `transfer` | [SERVER.md](SERVER.md), [README](../crates/folo-client/README.md) |
 | folo-cloud | cloud compute providers behind one trait | api, client | `Provider`, `providers()`, `runpod`, `remote`, `bootstrap` | [CLOUD.md](CLOUD.md), [README](../crates/folo-cloud/README.md) |
-| folo-mcp | the MCP server (rmcp, stdio) over the server's `Store`; the labeling operations `folo label` shares | api, client, data, server | `build`, `serve_stdio`, `Backend`, `proxy::HttpStore`, `label::Labels` | [MCP.md](MCP.md), [README](../crates/folo-mcp/README.md) |
+| folo-mcp | the MCP server (rmcp, stdio) over the server's `Store`; the labeling and benchmark operations `folo label` and `folo bench` share | api, client, data, server | `build`, `serve_stdio`, `Backend`, `proxy::HttpStore`, `label::Labels`, `bench::Benchmarks` | [MCP.md](MCP.md), [README](../crates/folo-mcp/README.md) |
 | folo-cli | the `folo` binary | api, client, data, gpu, mcp, nn, server, vision | `cli::Command`, `main.rs` (`run`) | [CLI.md](CLI.md), [README](../crates/folo-cli/README.md) |
 | folo-test-support | test-only helpers (a dev-dependency) | none | `TestDir`, `TestFile`, `ChildGuard`, `FOLO_TEST_TMP` | [CI.md](CI.md#test-temp-dirs), [README](../crates/folo-test-support/README.md) |
 
@@ -203,6 +203,7 @@ Paths are under `crates/` unless they start with `web/`, `apps/` or `site/`. Eac
 | add an error code | `c(code, status, exit, meaning)` in `CODES` (`folo-api/src/codes.rs`); raise it with `Error::new(status, code, message).hint(..)` | `folo-cli/tests/codes.rs` fails until it is listed | [API.md](API.md#errors), [CLI.md](CLI.md) |
 | add an MCP tool | a `ToolDef` in `TOOLS` (`folo-mcp/src/tools/mod.rs`), its types in `types.rs` or `folo-api`, a match arm in `tools/dispatch.rs`, a handler in `tools/<area>.rs`; `ALL_TOOLS` in `folo-cli/tests/mcp/harness.rs` | `folo-mcp/src/tools/tests.rs` checks the tool count and list stated in README.md, QUICKSTART.md, MCP.md and `llms.txt`; `folo-cli/tests/mcp/` compares `tools/list` with `ALL_TOOLS` | [MCP.md](MCP.md) |
 | change the labeling tools or `folo label` | the operations in `folo-mcp/src/label/` (`ops.rs`; `compact.rs` for boxes in pixels of a view; `view.rs` for the drawn view; `hints.rs` for each front end's hints), the tool handlers in `folo-mcp/src/tools/label.rs` and types in `types/label.rs`, the CLI in `folo-cli/src/cli/label.rs` and `folo-cli/src/label/`; a new server filter or check in `folo-server/src/label/images.rs` and `routes/label.rs`, with a `FEATURE_*` and the fallback in `Labels` (`label/mod.rs`) | `folo-mcp/src/tools/label_tests.rs`, `folo-cli/tests/label.rs`, `folo-server/tests/label/` | [MCP.md](MCP.md), [CLI.md](CLI.md#labeling), [LABELING.md](LABELING.md) |
+| change `folo bench` or the benchmark operations | the calls in `folo-mcp/src/bench/mod.rs` (one per `/api/bench` endpoint, in process or through a server), the operations in `bench/ops.rs` (compact results, a file of predictions, following an entry), hints in `bench/hints.rs`, types in `folo-mcp/src/types/bench.rs`, the CLI in `folo-cli/src/cli/bench.rs` and `folo-cli/src/bench/` | `folo-mcp/src/bench/` unit tests, `folo-cli/tests/bench.rs` | [CLI.md](CLI.md#vision-benchmarks), [BENCH.md](BENCH.md) |
 | add a cloud provider | a type implementing `Provider` in `folo-cloud`, listed in `providers()` (`lib.rs`); mock offers in `folo-server/src/mock/`; Desktop's demo list in `apps/desktop/src/api/mock/cloud.rs` | the provider id lists asserted in `folo-cloud/src/lib.rs`, `folo-cli/tests/cloud.rs`, `folo-server/tests/mock_cloud.rs` | [CLOUD.md](CLOUD.md#adding-a-provider) |
 | add a labeling agent | a `LabelAgentId` variant with its entries in `ALL`, `as_str` and `display_name` (`folo-api/src/label.rs`); an `Agent` (`folo-server/src/label/agent.rs`) as `claude.rs` / `codex.rs`, added in `label/mod.rs`; Desktop's exhaustive `agent_name` in `apps/desktop/src/screens/bench/format.rs`; Studio's `LabelAgentId` in `web/src/lib/api/types/label.ts`, `AGENT_NAME` in `web/src/lib/label.ts` and `DEFAULT_BATCH` in `web/src/lib/api/mock/label.ts` | `folo-server/tests/label/` (scripted agents) | [LABELING.md](LABELING.md), [API.md](API.md) |
 | add a benchmark condition | `Condition` and its parameter table in `folo-bench/src/conditions/mod.rs`, `transform.rs`, `catalog.rs`; bump `ENGINE_VERSION` (`lib.rs`); the mock catalogs in `web/src/lib/api/mock/benchCatalog.ts` and `apps/desktop/src/api/mock_bench/` | `folo-bench/tests/golden.rs`; `conditions/tests.rs` checks BENCH.md's table; update the condition-count and default-plan assertions in `folo-bench/src/plan.rs`, `folo-server/tests/bench/benchmarks.rs`, `web/src/lib/api/mock/bench.test.ts`, `web/src/lib/bench/plan.test.ts`, `web/src/routes/bench/results.test.tsx`, and the ignored `real_server_bench_calls` test in `apps/desktop/src/api/http/mod.rs` | [BENCH.md](BENCH.md) |
@@ -343,12 +344,13 @@ trait as the HTTP handlers: the embedded `RealStore` / `MockStore`, or `proxy::H
 
 ### folo-cli
 The `folo` binary ([CLI.md](CLI.md)): `serve`, `describe`, `doctor`, `train`, `stop`, `val`, `predict`, `export`,
-`bench`, `dataset check|stats|synth|convert`, `weights`, `cloud` and `mcp` (Model Context Protocol server over stdio
-so agents can train and run models). `folo bench` is a placeholder that answers `not_implemented`. Every command takes
+`bench`, `dataset check|stats|synth|convert`, `weights`, `cloud`, `label` and `mcp` (Model Context Protocol server over
+stdio so agents can train and run models); `bench` and `label` run folo-mcp's benchmark and labeling operations. Every
+command takes
 `--json` (one JSON object per line on stdout, human text on stderr; `folo mcp` keeps stdout for the protocol, also
 with `--json`) and uses stable exit codes. `cli.rs` is the clap tree and `main.rs` dispatches. Most commands have a
-module of their own; `val`, `predict` and `export` share `infer.rs`, `stop` shares `train/`, and `bench` is answered
-in `main.rs`.
+module of their own; `val`, `predict` and `export` share `infer.rs`, `stop` shares `train/`, `label` and `bench` are
+folders (`src/label/`, `src/bench/`).
 
 ### folo-test-support
 Test-only helpers, used as a dev-dependency: `TestDir`, `TestFile` and `ChildGuard`, which keep test scratch folders

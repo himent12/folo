@@ -249,6 +249,12 @@ pub const CODES: &[Code] = &[
     c("data_dir_lock_failed", 500, 1, "the data dir's `serve.lock` could not be locked (CLI)"),
     c("mcp_failed", 500, 1, "`folo mcp` stopped with an error (CLI)"),
     c(
+        "bench_entry_failed",
+        500,
+        1,
+        "`folo bench run` or `folo bench status --wait` waited for a benchmark entry that ended failed (CLI)",
+    ),
+    c(
         "label_run_failed",
         502,
         1,

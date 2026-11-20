@@ -56,7 +56,8 @@ Fastest path for an agent:
   coding agent or externally made predictions, scored 0 to 100 on five axes (accuracy, robustness, self-labeling,
   calibration, localization), each defined exactly; a self-improvement loop has a model label a pool, trains a
   student on those labels alone and grades it. HTTP API under `/api/bench` (feature `vision_bench`); the engine is
-  `crates/folo-bench`. Not the speed benchmark (`folo bench`, docs/BENCHMARKS.md)
+  `crates/folo-bench`; `folo bench` drives them from the command line (docs/CLI.md, Vision benchmarks). Not the
+  speed benchmark (docs/BENCHMARKS.md, `cargo bench`)
 - [Cloud compute](docs/CLOUD.md): training runs on a rented GPU (RunPod) or on another FOLO server
   (`TrainConfig.compute`, `folo cloud`, MCP `cloud_*`). It has the lifecycle of a cloud run, how instances are
   never left behind, the providers, and `folo serve --token`

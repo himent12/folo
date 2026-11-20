@@ -110,17 +110,14 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
 }
 
 #[test]
-fn stubs_exit_4_with_error_envelope() {
+fn a_command_group_without_its_command_is_usage() {
+    // `folo bench` was a stub answering `not_implemented`; it is a group of commands now (tests/bench.rs).
     let args = ["bench", "--json"];
     let (code, stdout, stderr) = folo(&args);
-    assert_eq!(code, 4, "{args:?}: {stderr}");
+    assert_eq!(code, 2, "{args:?}: {stderr}");
     let v = &json_lines(&stdout)[0];
-    assert_eq!(v["error"]["code"], "not_implemented", "{args:?}");
-    assert!(v["error"]["hint"].is_string());
-    let (code, stdout, stderr) = folo(&["bench"]);
-    assert_eq!(code, 4);
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("not implemented"));
+    assert_eq!(v["error"]["code"], "usage", "{args:?}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("run, status"), "{v}");
 }
 
 #[test]
