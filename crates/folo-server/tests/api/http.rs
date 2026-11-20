@@ -87,6 +87,61 @@ async fn static_files_spa_fallback() {
     err(&embedded, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
 }
 
+/// `folo serve --web-dir` caches as the embedded app does (issue #309): Vite's hashed `assets/` for a year, everything
+/// else revalidated (`no-cache` with `Last-Modified`), and an asset name that is no file falls back to `index.html`
+/// without being kept.
+#[tokio::test]
+async fn web_dir_cache_headers() {
+    let dir = TestDir::new("web-cache");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><title>Studio</title>").unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c.js"), "console.log(1)").unwrap();
+    std::fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
+    let app = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
+    )
+    .router();
+    let cache = |h: &axum::http::HeaderMap| h[header::CACHE_CONTROL].to_str().unwrap().to_string();
+    let immutable = "public, max-age=31536000, immutable";
+
+    let (s, h, b) = send(&app, get("/assets/app-1a2b3c.js")).await;
+    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"console.log(1)".as_slice()));
+    assert_eq!(cache(&h), immutable);
+    for path in [
+        "/",
+        "/index.html",
+        "/runs/run_1a01",
+        "/favicon.svg",
+        "/assets/app-old999.js",
+        "/assets/../index.html",
+    ] {
+        let (s, h, _) = send(&app, get(path)).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        assert_eq!(cache(&h), "no-cache", "{path}");
+        assert!(h.contains_key(header::LAST_MODIFIED), "{path} has a validator");
+    }
+
+    // Revalidated: an unchanged file answers 304, still `no-cache`; the fallback for a gone asset never turns immutable.
+    let (_, h, _) = send(&app, get("/")).await;
+    let since = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
+    for path in ["/", "/assets/app-old999.js"] {
+        let req = Request::builder()
+            .uri(path)
+            .header(header::IF_MODIFIED_SINCE, &since)
+            .body(Body::empty())
+            .unwrap();
+        let (s, h, b) = send(&app, req).await;
+        assert_eq!(s, StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(cache(&h), "no-cache", "{path}");
+        assert!(b.is_empty());
+    }
+    // An API answer is not the web app's to cache.
+    let (_, h, _) = send(&app, get("/api/health")).await;
+    assert_ne!(h.get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap()), Some(immutable));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[tokio::test]
 async fn cors_and_gzip() {
     let (server, _) = mock();

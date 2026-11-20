@@ -36,6 +36,10 @@ service, the one under `real/` connects it to `RealStore`.
 1. `routes::api()` nested under `/api`, behind the token check (`require_token`) when the server has a token
    (`folo serve --token`);
 2. the web app as the fallback: a built `web/dist`-style folder, or the copy compiled in by the `embed-web` feature;
+   both cache the same way (`web::cache_control`): Vite's content-hashed `assets/` for a year (`public,
+   max-age=31536000, immutable`), everything else `no-cache` (`index.html`, the SPA fallback for any other path, an
+   asset name that is no file, the unhashed files of `public/`), revalidated with a validator (the embedded copy's
+   `ETag`, the folder's `Last-Modified`), so a new build shows on the next load;
 3. the origin guard, compression (not for `application/octet-stream`: weights files are sent as they are), and CORS
    (loopback origins only unless the server was started to allow any);
 4. the Host guard when the server listens on loopback (no bind address given, or a loopback one), so nothing runs for

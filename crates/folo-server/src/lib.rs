@@ -330,6 +330,21 @@ async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Res
     next.run(req).await
 }
 
+/// The web app on disk (`--web-dir`, `dir`) is cached as the embedded one is ([`web::cache_control`]). `ServeDir`
+/// sends `Last-Modified` and answers `If-Modified-Since`, so the `no-cache` files revalidate with a `304`. A path that
+/// is no file falls back to `index.html` (`/assets/` included, an old build's asset name say), which is `no-cache`:
+/// only a file that exists under `assets/` is kept for a year.
+async fn web_dir_cache(State(dir): State<Arc<Path>>, req: Request, next: Next) -> Response {
+    let path = req.uri().path().trim_start_matches('/').to_string();
+    let mut res = next.run(req).await;
+    if res.status().is_success() || res.status() == StatusCode::NOT_MODIFIED {
+        let file = !path.split('/').any(|p| p == ".." || p.is_empty()) && dir.join(&path).is_file();
+        let cache = web::cache_control(if file { &path } else { "index.html" });
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    }
+    res
+}
+
 async fn web_not_built() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -379,7 +394,11 @@ impl Server {
         router = match (opts.web, embedded) {
             (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
                 let spa = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
-                router.fallback_service(spa)
+                router.fallback_service(
+                    Router::new()
+                        .fallback_service(spa)
+                        .layer(axum::middleware::from_fn_with_state(Arc::<Path>::from(dir), web_dir_cache)),
+                )
             }
             (_, Some(files)) => {
                 router.fallback(move |method: Method, uri: Uri, headers: HeaderMap| async move {
@@ -519,6 +538,7 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK);
             assert_eq!(res.headers()[header::CONTENT_ENCODING], "gzip");
             assert_eq!(res.headers()[header::ETAG], "W/\"i1\"");
+            assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache", "the SPA fallback revalidates");
             assert!(res.headers().get_all(header::VARY).iter().any(|v| v == "accept-encoding"));
         }
         let plain = web_request(Method::HEAD, &[]).await;
