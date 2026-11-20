@@ -158,6 +158,7 @@ class Variant(unittest.TestCase):
         key = common.RunKey("folo", "folo-n", "bccd", "holdout", 2, holdout.split_label(0))
         self.assertEqual(key.stem, "folo-n-bccd-holdout-ho0-s2")
         self.assertEqual(holdout.split_label(1, 0.3), "ho1-f0.3")
+        self.assertNotEqual(holdout.split_label(0, 0.3), holdout.split_label(0, 0.2999999), "61 and 62 of BCCD's 205")
         for bad in (("holdout", ""), ("pretrained", "ho0")):
             with self.assertRaises(ValueError):
                 common.RunKey("folo", "folo-n", "bccd", bad[0], 0, bad[1])
@@ -333,7 +334,11 @@ class Runner(fake_folo.Case):
         self.assertEqual(path.name, "folo-n-toy-holdout-ho0-s0.json", "the split is in the file name")
         ok = common.result_record(keys[0], metrics={"ap": 0.5}, versions={"selection": same})
         # Of this split but carved from other files (another layout digest), or not a readable result: refused.
-        for bad in (dict(ok, versions={"selection": dict(same, layout_sha256="00")}), "{", {"version": 0}):
+        bad_results = (
+            dict(ok, versions={"selection": dict(same, layout_sha256="00")}), "{", {"version": 0}, [1],
+            dict(ok, metrics={}), dict(ok, metrics={"ap": None}),
+        )
+        for bad in bad_results:
             path.write_text(bad if isinstance(bad, str) else json.dumps(bad))
             with self.assertRaises(SystemExit):
                 run_folo.run_matrix(m, keys, ["holdout"])

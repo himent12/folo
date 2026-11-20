@@ -697,7 +697,10 @@ def check_results(keys: list[common.RunKey], selections: dict[str, dict], result
             r = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as e:
             raise SystemExit(f"{path}: not a readable result file ({e}): remove it to run {key.stem} again") from None
-        if not isinstance(r, dict) or r.get("version") != common.RESULT_VERSION or r.get("metrics") is None:
+        metrics = r.get("metrics") if isinstance(r, dict) else None
+        ap = metrics.get("ap") if isinstance(metrics, dict) else None
+        numeric = isinstance(ap, (int, float)) and not isinstance(ap, bool)
+        if not isinstance(r, dict) or r.get("version") != common.RESULT_VERSION or not numeric:
             raise SystemExit(f"{path}: not a result file of this harness: remove it to run {key.stem} again")
         if key.stem in selections:
             got = (r.get("versions") or {}).get("selection")

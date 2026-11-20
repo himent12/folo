@@ -49,8 +49,9 @@ def folder_name(dataset: str, seed: int) -> str:
 
 
 def split_label(seed: int, fraction: float = DEFAULT_FRACTION) -> str:
-    """The name of a hold-out split in result file names: `ho<seed>`, with `-f<fraction>` when not the default."""
-    return f"ho{seed}" if fraction == DEFAULT_FRACTION else f"ho{seed}-f{fraction:g}"
+    """The name of a hold-out split in result file names: `ho<seed>`, with `-f<fraction>` (the shortest decimal that
+    reads back as the same float, so two fractions never share a name) when not the default."""
+    return f"ho{seed}" if fraction == DEFAULT_FRACTION else f"ho{seed}-f{fraction!r}"
 
 
 def _link(src: Path, dst: Path) -> None:
