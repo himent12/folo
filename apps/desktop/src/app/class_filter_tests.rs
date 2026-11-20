@@ -1,7 +1,8 @@
 //! Datasets › class filter (issue #301): the filter belongs to the dataset it was set on and
 //! applies there only while its class is one of that dataset's classes, whichever way the page was
 //! reached (a launch straight onto it, the list and back) and whatever else reads the filtered list
-//! (the image inspector opened from another dataset's run sample).
+//! (the image inspector opened from another dataset's run sample). A change of data source forgets
+//! it.
 
 use super::select_driving::{click_option, press};
 use super::tests::{drive, open};
@@ -88,8 +89,7 @@ fn a_run_sample_from_another_dataset_neither_takes_nor_clears_the_class_filter()
     }
 }
 
-/// A class list read again with fewer classes (or another server's dataset under the same id)
-/// leaves the stored class past them: the select shows "All classes", and so does the grid.
+/// A class list read again with fewer classes leaves the stored class past them: the select shows "All classes", and so does the grid.
 #[test]
 fn a_class_past_a_refreshed_class_list_filters_nothing() {
     let (mut app, window) = open();
@@ -151,104 +151,58 @@ fn another_datasets_empty_images_and_all_classes_leave_the_class_filter_alone() 
     drive(&mut app, window, |this, _, _| assert!(!this.empty_only(HARD)));
 }
 
-fn found_local(_: std::time::Duration) -> Result<crate::api::http::Spawned, String> {
-    Ok(crate::api::http::Spawned::Running("http://127.0.0.1:4100".into()))
-}
-
-/// The demo as a local `folo serve` of the data dir `D:/data`.
-fn data(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
-    std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"))
-}
-
-/// The demo as another data dir's server.
-fn other(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
-    std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/other"))
-}
-
-/// The demo: no data dir.
-fn demo(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
-    std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true))
-}
-
-/// Review rounds 1 to 3: dataset ids are unique per data dir, so the same id on another server
-/// is another dataset (`circle` there may be `person`). The filters follow the store `/system`
-/// names (host and data dir): kept through a recovery and a Connect that reach the same one,
-/// dropped when another answers (the same path on another host, one that took the address with no
-/// switch here) or a switched-to one names none.
+/// Final check: a change of data source (a switch, a reconnect, a restarted server recovered) may
+/// be another data dir, where the ids and class indices mean other things: it forgets the filters,
+/// nothing comes back, and what is picked on the new source stays as picked, before and after its
+/// `/system` answers (once, "All classes" picked after a class came back as the old class).
 #[test]
-fn the_dataset_filters_follow_the_data_dir_the_server_names() {
-    use super::{Connector, ServerMode};
+fn a_change_of_data_source_forgets_the_filters_and_keeps_new_picks() {
+    use crate::api::mock::MockBackend;
     use crate::store::Load;
-    let (mut app, window) = super::tests::open_with(std::sync::Arc::new(
-        crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"),
-    ));
-    let set = (Some((HARD.to_string(), 4)), Some(SHAPES.to_string()));
-    let filters = |app: &mut HeadlessApp| {
+    // A local `folo serve` names its data dir; restarted, it names the same one.
+    let serve = || MockBackend::new(4200, true).with_data_dir("D:/data");
+    let (mut app, window) = super::tests::open_with(std::sync::Arc::new(serve()));
+    go(&mut app, window, Route::Dataset(HARD.into()));
+    click_option(&mut app, window, "ds-class", 5);
+    let (filtered, all) = shown(&mut app, window, HARD);
+    assert!(filtered < all, "hexagon picked: {filtered} of {all}");
+    // The same server, restarted: a new backend whose `/system` is still preparing (it is asked
+    // once the test lets it).
+    let switch = |app: &mut HeadlessApp| {
+        drive(app, window, move |this, _, cx| {
+            this.ds_empty_of = Some(SHAPES.into());
+            this.set_backend(std::sync::Arc::new(serve()), super::ServerMode::Local, cx);
+            this.store.system = Load::Loading;
+        });
+        settle(app, window);
         drive(app, window, |this, _, _| {
-            (this.ds_class.clone(), this.ds_empty_of.clone(), this.class_filter(HARD))
-        })
+            assert!(this.store.system.ready().is_none(), "`/system` has not answered");
+            assert!(!this.empty_only(SHAPES), "the empty-images filter went");
+        });
     };
-    let pick = |app: &mut HeadlessApp| {
-        let set = set.clone();
-        drive(app, window, move |this, _, _| (this.ds_class, this.ds_empty_of) = set)
+    let answer = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, cx| {
+            this.store.system = Load::Idle;
+            this.ensure_core(cx);
+        });
+        settle(app, window);
+        assert!(drive(app, window, |this, _, _| this.store.system.ready().is_some()), "answered");
     };
-    let kept = (set.0.clone(), set.1.clone(), Some(4));
-    // Connected at the local server's address; it names its store.
-    drive(&mut app, window, |this, _, cx| {
-        this.connected_url = Some("http://127.0.0.1:4000".into());
-        this.store.system = Load::Idle;
-        this.ensure_core(cx);
-    });
-    pick(&mut app);
-    // The local server stops answering; the data dir's server answers at another address.
-    drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| false, start: found_local, backend: data };
-        this.server_mode = ServerMode::Local;
-        this.local_url = Some("http://127.0.0.1:4000".into());
-        this.store.api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).failing());
-        this.store.system = Load::Idle;
-        this.ensure_core(cx);
-    });
-    drive(&mut app, window, |this, _, cx| {
-        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"), "recovered");
-        assert!(this.backend_gen > 0, "onto a new backend");
-        this.ensure_core(cx);
-    });
-    assert_eq!(filters(&mut app), kept, "the same data dir after a recovery");
-    // Connect on the same server: the same data dir.
-    drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| true, start: found_local, backend: data };
-        this.server_url.update(cx, |i, cx| i.set_text("http://127.0.0.1:4100", cx));
-        this.switch_source(ServerMode::Local, cx);
-    });
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
-    assert_eq!(filters(&mut app), kept, "Connect on the same server");
-    // The same path on another machine: another store.
-    drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| true, start: found_local, backend: data };
-        this.server_url.update(cx, |i, cx| i.set_text("http://192.168.9.9:7878", cx));
-        this.switch_source(ServerMode::Local, cx);
-    });
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
-    assert_eq!(filters(&mut app), (None, None, None), "the same path on another host");
-    pick(&mut app);
-    // Another data dir's server takes the address, with no switch here (the next refresh).
-    drive(&mut app, window, |this, _, cx| {
-        this.store.api = other("");
-        this.store.system = Load::Idle;
-        this.ensure_core(cx);
-    });
-    assert_eq!(filters(&mut app), (None, None, None), "another data dir at the same address");
-    // A switch to a server that names none (the demo).
-    pick(&mut app);
-    drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
-        this.server_url.update(cx, |i, cx| i.set_text("http://192.168.9.9:7878", cx));
-        this.switch_source(ServerMode::Local, cx);
-    });
-    assert_eq!(drive(&mut app, window, |this, _, _| this.class_filter(HARD)), None, "waits for its data dir");
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
-    assert_eq!(filters(&mut app), (None, None, None), "a server that names no data dir");
+    switch(&mut app);
+    assert_eq!(shown(&mut app, window, HARD), (all, all), "the old hexagon filter went");
+    click_option(&mut app, window, "ds-class", 1);
+    let circle = shown(&mut app, window, HARD);
+    assert!(circle.0 < all, "circle picked before the answer applies at once: {circle:?}");
+    click_option(&mut app, window, "ds-class", 0);
+    assert_eq!(shown(&mut app, window, HARD), (all, all), "All classes");
+    answer(&mut app);
+    assert_eq!(shown(&mut app, window, HARD), (all, all), "All classes stays after the answer");
+    // A class picked before the answer stays after it.
+    switch(&mut app);
+    click_option(&mut app, window, "ds-class", 1);
+    assert_eq!(shown(&mut app, window, HARD), circle, "circle, before the answer");
+    answer(&mut app);
+    assert_eq!(shown(&mut app, window, HARD), circle, "circle stays after the answer");
 }
 
 /// Review round 2: the class filter turned on after the inspector's image was drawn, before the
@@ -346,56 +300,7 @@ fn a_sample_the_split_hides_clears_the_split_but_not_another_datasets_class() {
     });
 }
 
-/// Review round 3: a filter picked on a switched-to server before its `/system` answer applies at
-/// once and stays when that answer names another store than the old filters'.
-#[test]
-fn a_filter_picked_before_a_switched_servers_answer_applies_and_stays() {
-    let (mut app, window) = super::tests::open_with(std::sync::Arc::new(
-        crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"),
-    ));
-    go(&mut app, window, Route::Dataset(HARD.into()));
-    click_option(&mut app, window, "ds-class", 5);
-    drive(&mut app, window, |this, _, cx| {
-        this.set_backend(other(""), super::ServerMode::Local, cx);
-        this.connected_url = Some("http://127.0.0.1:4100".into());
-        assert_eq!(this.ds_class, None, "the old server's filter is put aside");
-        this.ds_class = Some((HARD.into(), 4));
-        this.ds_empty_of = None;
-    });
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
-    go(&mut app, window, Route::Dataset(HARD.into()));
-    assert_eq!(drive(&mut app, window, |this, _, _| this.class_filter(HARD)), Some(4));
-}
-
-/// Review round 3: `/system` answers can land out of order at one address (a proxy pointed at
-/// another store in between): an older one does not take the filters back to its store.
-#[test]
-fn an_older_system_answer_landing_late_leaves_the_filters_alone() {
-    let (mut app, window) = open();
-    drive(&mut app, window, |this, _, _| {
-        this.connected_url = Some("http://127.0.0.1:4100".into());
-        let (a, b) = (this.system_asked(), this.system_asked());
-        this.check_filters(b, Some("D:/other"));
-        this.ds_class = Some((HARD.into(), 4));
-        this.check_filters(a, Some("D:/data"));
-        assert_eq!(this.ds_class, Some((HARD.into(), 4)));
-        assert_eq!(this.ds_filters_store, Some(("loopback".into(), "D:/other".into())));
-    });
-}
-
-/// Review round 3: the store a server names is its host (every loopback address one) and its data
-/// dir, case-blind only between Windows paths.
-#[test]
-fn a_store_is_its_host_and_data_dir() {
-    use super::connection::{same_store_dir, url_host};
-    assert!(!same_store_dir("/srv/Data", "/srv/data"));
-    assert!(same_store_dir("/srv/data/", "/srv/data"));
-    assert!(same_store_dir(r"D:\Data\", "d:/data"));
-    assert_eq!(url_host("http://LOCALHOST:4100"), url_host("http://127.0.0.1:7000"));
-    assert_ne!(url_host("http://10.0.0.2:7878"), url_host("http://10.0.0.3:7878"));
-}
-
-/// Review round 3: the empty-images filter put aside under the open inspector (a server switch)
+/// Review round 3: the empty-images filter cleared under the open inspector (a server switch)
 /// moves every place, as the class filter does: it stays on the image it showed.
 #[test]
 fn the_inspector_keeps_its_image_when_the_empty_images_filter_goes() {

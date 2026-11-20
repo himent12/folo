@@ -254,10 +254,6 @@ pub struct Toast {
     pub action: Option<(SharedString, Action)>,
 }
 
-/// The dataset filters: the class filter and the dataset it was set on, and the dataset whose
-/// empty images only are shown.
-pub type DsFilters = (Option<(String, u32)>, Option<String>);
-
 /// The image inspector over a dataset grid.
 pub struct Inspector {
     pub dataset: String,
@@ -361,17 +357,8 @@ pub struct FoloApp {
     pub ds_class: Option<(String, u32)>,
     /// Show only images without labels (from the Empty images tile), on the dataset it was set on
     /// (read it through `empty_only`): it and the class filter never both apply to one dataset.
+    /// Both go at a change of data source (`set_backend`).
     pub ds_empty_of: Option<String>,
-    /// The store the connected server last named (`/system`: its host and data dir): the dataset
-    /// filters belong to its datasets (ids are unique per data dir), so another drops them
-    /// (`check_filters`).
-    pub ds_filters_store: Option<(String, String)>,
-    /// The filters set before a server switch, off until the new server names its store: back if
-    /// it is the same one and nothing was picked since, else dropped.
-    pub ds_filters_carried: Option<DsFilters>,
-    /// `/system` requests sent and the latest one whose answer was applied to the filters: an
-    /// older answer landing late is not the store the server serves now.
-    pub ds_filters_seq: (u64, u64),
     pub ds_boxes: bool,
     /// Grid tiles crop to fill the cell instead of showing the whole image.
     pub ds_fill: bool,
@@ -697,9 +684,6 @@ impl FoloApp {
             ds_split: None,
             ds_class: None,
             ds_empty_of: None,
-            ds_filters_store: None,
-            ds_filters_carried: None,
-            ds_filters_seq: (0, 0),
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,

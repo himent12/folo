@@ -80,8 +80,8 @@ impl FoloApp {
     }
 
     /// The class filter of dataset `id`: one set on that dataset, while its class is one of the
-    /// dataset's classes as last read (a refreshed class list, or another server, can leave it
-    /// past them). Anywhere else none: another dataset's index means another class there.
+    /// dataset's classes as last read (a refreshed class list can leave it past them). Anywhere
+    /// else none: another dataset's index means another class there.
     pub fn class_filter(&self, id: &str) -> Option<u32> {
         let (of, class) = self.ds_class.as_ref()?;
         let ds =
