@@ -71,7 +71,7 @@ fn texture(seed: u64, w: u32, h: u32) -> Image {
     for y in 0..h {
         for x in 0..w {
             let grain = folo_data::splitmix64(&mut (seed ^ ((y as u64) << 32 | x as u64)));
-            let check = ((x / 7 + y / 5) % 2) as u32 * 50;
+            let check = ((x / 7 + y / 5) % 2) * 50;
             let p = [
                 ((x * 255 / w.max(1)) + check + (grain & 31) as u32) as u8,
                 ((y * 200 / h.max(1)) + (grain >> 8 & 63) as u32) as u8,

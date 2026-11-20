@@ -1,9 +1,12 @@
 //! 4-image mosaic and mixup.
 
+use super::AugmentConfig;
+use super::geometry::random_affine_plane;
 use crate::bbox::BBox;
-use crate::image::{Image, Sample};
+use crate::image::Sample;
 use crate::letterbox::PAD_VALUE;
 use crate::rng::Rng;
+use crate::warp::{Plane, Tile};
 
 /// Tiles four samples around a random centre on a `2s x 2s` grey canvas (YOLO's mosaic).
 ///
@@ -12,13 +15,27 @@ use crate::rng::Rng;
 /// are offset and clipped to the canvas; follow with an affine (as [`crate::TrainTransform`] does) to get back to
 /// `s x s` and to drop boxes that became too small.
 pub fn mosaic4(parts: [&Sample; 4], s: u32, rng: &mut Rng) -> Sample {
+    let (plane, boxes) = mosaic_plane(parts, s, rng);
+    Sample { image: plane.render(), boxes }
+}
+
+/// [`random_affine`](super::random_affine) of [`mosaic4`] into `s x s` (the training transform's mosaic), bit for
+/// bit, drawing the same numbers from `rng`, without painting the `2s x 2s` canvas: the warp reads the four tiles
+/// where they lie on it.
+pub fn mosaic_affine(parts: [&Sample; 4], s: u32, cfg: &AugmentConfig, rng: &mut Rng) -> Sample {
+    let (plane, boxes) = mosaic_plane(parts, s, rng);
+    random_affine_plane(&plane, &boxes, s, s, cfg, rng)
+}
+
+/// [`mosaic4`] as its canvas's tiles on a grey plane (the canvas is [`Plane::render`]) and its boxes, drawing the
+/// same numbers from `rng`: the training transform warps the tiles without painting the canvas.
+pub(crate) fn mosaic_plane<'a>(parts: [&'a Sample; 4], s: u32, rng: &mut Rng) -> (Plane<'a>, Vec<BBox>) {
     let cs = 2 * s as i64;
     let xc = rng.uniform(s as f32 * 0.5, s as f32 * 1.5) as i64;
     let yc = rng.uniform(s as f32 * 0.5, s as f32 * 1.5) as i64;
-    let mut canvas = Image::new(cs as u32, cs as u32, [PAD_VALUE; 3]);
+    let mut tiles = Vec::with_capacity(4);
     let mut boxes = Vec::new();
-    let cstride = canvas.stride();
-    for (i, part) in parts.iter().enumerate() {
+    for (i, part) in parts.into_iter().enumerate() {
         let (w, h) = (part.image.width as i64, part.image.height as i64);
         // Destination rectangle on the canvas (a) and source rectangle in the image (b).
         let (x1a, y1a, x2a, y2a) = match i {
@@ -33,16 +50,8 @@ pub fn mosaic4(parts: [&Sample; 4], s: u32, rng: &mut Rng) -> Sample {
             2 => (w - (x2a - x1a), 0),
             _ => (0, 0),
         };
-        let (cw, ch) = (x2a - x1a, y2a - y1a);
-        if cw > 0 && ch > 0 {
-            let sstride = part.image.stride();
-            for row in 0..ch {
-                let src = &part.image.data[((y1b + row) as usize) * sstride + x1b as usize * 3..]
-                    [..cw as usize * 3];
-                let dst = &mut canvas.data[((y1a + row) as usize) * cstride + x1a as usize * 3..]
-                    [..cw as usize * 3];
-                dst.copy_from_slice(src);
-            }
+        if x2a > x1a && y2a > y1a {
+            tiles.push(Tile { img: &part.image, dst: [x1a, y1a, x2a, y2a], src: [x1b, y1b] });
         }
         let (padw, padh) = ((x1a - x1b) as f32, (y1a - y1b) as f32);
         let csf = cs as f32;
@@ -59,7 +68,7 @@ pub fn mosaic4(parts: [&Sample; 4], s: u32, rng: &mut Rng) -> Sample {
             }
         }
     }
-    Sample { image: canvas, boxes }
+    (Plane { width: cs as u32, height: cs as u32, fill: [PAD_VALUE; 3], tiles }, boxes)
 }
 
 /// Blends `other` into `s` (YOLO mixup): `s = r * s + (1 - r) * other` with `r ≈ Beta(32, 32)`, and concatenates

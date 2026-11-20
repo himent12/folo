@@ -10,7 +10,7 @@
 use crate::augment::resize_long_side;
 use crate::dataset::Dataset;
 use crate::error::{DataError, Result};
-use crate::image::Sample;
+use crate::image::{Image, Sample};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -314,7 +314,11 @@ impl RamCache {
                 slot.get_or_init(|| Arc::new((resize_long_side(s, self.imgsz), orig))).clone()
             }
         };
-        Ok((entry.0.clone(), entry.1))
+        let kept = &entry.0;
+        let mut data = crate::buffers::scratch(kept.image.data.len());
+        data.copy_from_slice(&kept.image.data);
+        let image = Image { width: kept.image.width, height: kept.image.height, data };
+        Ok((Sample { image, boxes: kept.boxes.clone() }, entry.1))
     }
 }
 

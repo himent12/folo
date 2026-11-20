@@ -20,7 +20,7 @@ pub use geometry::{
     transform_boxes,
 };
 pub use hsv::{apply_hsv, random_hsv};
-pub use mosaic::{mixup, mosaic4};
+pub use mosaic::{mixup, mosaic_affine, mosaic4};
 pub use pipeline::{Fetched, TrainTransform, Transformed};
 
 use serde::{Deserialize, Serialize};

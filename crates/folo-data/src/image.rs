@@ -87,7 +87,7 @@ impl Image {
         }
         let (w, h) = (self.width as usize, self.height as usize);
         let (ow, oh) = if orientation >= 5 { (h, w) } else { (w, h) };
-        let mut out = vec![0u8; ow * oh * 3];
+        let mut out = crate::buffers::scratch(ow * oh * 3);
         for y in 0..oh {
             for x in 0..ow {
                 let (sx, sy) = match orientation {
@@ -133,17 +133,72 @@ pub fn decode(bytes: &[u8]) -> Result<Image> {
 }
 
 pub(crate) fn decode_with_path(bytes: &[u8], path: &Path) -> Result<Image> {
-    let dynimg = image::load_from_memory(bytes).map_err(|e| DataError::image(path, e.to_string().trim()))?;
-    let rgb = dynimg.into_rgb8();
-    let (width, height) = rgb.dimensions();
-    if width == 0 || height == 0 {
+    let err = |e: image::ImageError| DataError::image(path, e.to_string().trim());
+    let img = match decode_jpeg(bytes) {
+        Some(img) => img.map_err(err)?,
+        None => {
+            let rgb = image::load_from_memory(bytes).map_err(err)?.into_rgb8();
+            let (width, height) = rgb.dimensions();
+            Image { width, height, data: rgb.into_raw() }
+        }
+    };
+    if img.width == 0 || img.height == 0 {
         return Err(DataError::image(path, "image has zero size"));
     }
-    let img = Image { width, height, data: rgb.into_raw() };
     match jpeg_exif_orientation(bytes) {
-        Some(o) if o != 1 => Ok(img.oriented(o)),
+        Some(o) if o != 1 => {
+            let upright = img.oriented(o);
+            crate::buffers::recycle(img.data);
+            Ok(upright)
+        }
         _ => Ok(img),
     }
+}
+
+/// `image::load_from_memory(bytes)?.into_rgb8()` for an RGB or greyscale JPEG (the same decoder, limits, bytes and
+/// errors), decoding into a buffer from [`crate::buffers`]; `None` for anything else.
+fn decode_jpeg(bytes: &[u8]) -> Option<image::ImageResult<Image>> {
+    use image::{ColorType, ImageDecoder};
+    if image::guess_format(bytes).ok()? != image::ImageFormat::Jpeg {
+        return None;
+    }
+    let open = || {
+        let mut dec = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes))?;
+        // What `ImageReader::decode` checks and sets.
+        let mut limits = image::Limits::default();
+        limits.reserve(dec.total_bytes())?;
+        dec.set_limits(limits)?;
+        Ok(dec)
+    };
+    let dec = match open() {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e)),
+    };
+    let (width, height) = dec.dimensions();
+    let n = width as usize * height as usize;
+    Some(match dec.color_type() {
+        ColorType::Rgb8 => {
+            let mut data = crate::buffers::zeroed(n * 3);
+            dec.read_image(&mut data).map(|()| Image { width, height, data })
+        }
+        ColorType::L8 => {
+            let mut luma = crate::buffers::zeroed(n);
+            dec.read_image(&mut luma).map(|()| {
+                // `into_rgb8` of a greyscale image: the level in all three channels.
+                let mut data = crate::buffers::scratch(n * 3);
+                for (px, &l) in data.as_chunks_mut::<3>().0.iter_mut().zip(&luma) {
+                    *px = [l; 3];
+                }
+                crate::buffers::recycle(luma);
+                Image { width, height, data }
+            })
+        }
+        _ => image::DynamicImage::from_decoder(dec).map(|d| {
+            let rgb = d.into_rgb8();
+            let (width, height) = rgb.dimensions();
+            Image { width, height, data: rgb.into_raw() }
+        }),
+    })
 }
 
 /// Reads and decodes an image file.
@@ -429,6 +484,43 @@ mod tests {
         assert_eq!(decode(&png).unwrap(), img);
         assert!(decode(b"not an image").is_err());
         assert!(decode(&png[..png.len() / 2]).is_err());
+    }
+
+    /// The JPEG path decodes as `image::load_from_memory` + `into_rgb8` does: colour and greyscale, 4:2:0 and
+    /// 4:4:4, whole and cut short (a cut scan still decodes), and fails where it fails.
+    #[test]
+    fn jpeg_decodes_as_the_generic_path() {
+        use image::ImageEncoder;
+        let generic = |bytes: &[u8]| {
+            image::load_from_memory(bytes).map(|d| {
+                let rgb = d.into_rgb8();
+                (rgb.width(), rgb.height(), rgb.into_raw())
+            })
+        };
+        let mut img = Image::new(61, 37, [0, 0, 0]);
+        for (i, v) in img.data.iter_mut().enumerate() {
+            *v = (i * 37 % 251) as u8;
+        }
+        let luma: Vec<u8> = img.data.chunks(3).map(|p| p[1]).collect();
+        let mut files =
+            vec![encode(&img, ImageFormat::Jpeg(90)).unwrap(), encode(&img, ImageFormat::Jpeg(100)).unwrap()];
+        let mut grey = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut grey, 85)
+            .write_image(&luma, 61, 37, image::ExtendedColorType::L8)
+            .unwrap();
+        files.push(grey);
+        for f in files {
+            for bytes in [&f[..], &f[..f.len() * 2 / 3], &f[..f.len() / 4], &f[..3]] {
+                match (decode_jpeg(bytes).unwrap(), generic(bytes)) {
+                    (Ok(a), Ok((w, h, data))) => assert_eq!((a.width, a.height, a.data), (w, h, data)),
+                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                    (a, b) => {
+                        panic!("{} of {} bytes: {:?} against {:?}", bytes.len(), f.len(), a.err(), b.err())
+                    }
+                }
+            }
+        }
+        assert!(decode_jpeg(&encode(&img, ImageFormat::Png).unwrap()).is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! discarded pass over the same files (so every stage reads from a warm page cache). Prints, per stage, the time per
 //! sample, its share, and the allocations and bytes allocated per sample.
 
-use folo_data::augment::{flip_lr, flip_ud, mosaic4, random_affine, random_hsv, resize_long_side};
+use folo_data::augment::{flip_lr, flip_ud, mosaic_affine, random_hsv, resize_long_side};
 use folo_data::{AugmentConfig, Dataset, Rng, Sample, Split, decode};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -52,12 +52,11 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-const STAGES: [&str; 9] = [
+const STAGES: [&str; 8] = [
     "file read",
     "JPEG decode",
     "resize long side",
-    "mosaic canvas",
-    "affine warp",
+    "mosaic + affine warp",
     "HSV",
     "flips",
     "collate u8",
@@ -72,7 +71,7 @@ struct Acc {
 }
 
 struct Timer<'a> {
-    acc: &'a mut [Acc; 9],
+    acc: &'a mut [Acc; 8],
 }
 
 impl Timer<'_> {
@@ -130,7 +129,7 @@ fn main() -> ExitCode {
             let _ = black_box(std::fs::read(train.image_path(i).unwrap()));
         }
     }
-    let mut acc = [Acc::default(); 9];
+    let mut acc = [Acc::default(); 8];
     let mut pixels = 0u64;
     folo_data::par::serial(|| {
         for (rng, ids) in &plan {
@@ -145,11 +144,11 @@ fn main() -> ExitCode {
                 let sample = Sample { image, boxes: train.boxes(i).to_vec() };
                 parts.push(tm.stage(2, || resize_long_side(sample, s)));
             }
-            let canvas = tm.stage(3, || mosaic4([&parts[0], &parts[1], &parts[2], &parts[3]], s, &mut rng));
-            let mut out = tm.stage(4, || random_affine(&canvas, s, s, &cfg, &mut rng));
+            let parts = [&parts[0], &parts[1], &parts[2], &parts[3]];
+            let mut out = tm.stage(3, || mosaic_affine(parts, s, &cfg, &mut rng));
             let _ = rng.chance(cfg.mixup);
-            tm.stage(5, || random_hsv(&mut out.image, cfg.hsv, &mut rng));
-            tm.stage(6, || {
+            tm.stage(4, || random_hsv(&mut out.image, cfg.hsv, &mut rng));
+            tm.stage(5, || {
                 if rng.chance(cfg.flipud) {
                     flip_ud(&mut out);
                 }
@@ -157,7 +156,7 @@ fn main() -> ExitCode {
                     flip_lr(&mut out);
                 }
             });
-            tm.stage(7, || {
+            tm.stage(6, || {
                 let plane = (s * s) as usize;
                 let mut o = vec![0u8; 3 * plane];
                 let (r, rest) = o.split_at_mut(plane);
@@ -169,13 +168,13 @@ fn main() -> ExitCode {
                 }
                 black_box(o);
             });
-            let e = &mut acc[8];
+            let e = &mut acc[7];
             e.secs += t0.elapsed().as_secs_f64();
             e.allocs += ALLOCS.load(Relaxed) - a0;
             e.bytes += BYTES.load(Relaxed) - b0;
         }
     });
-    let total = acc[8].secs;
+    let total = acc[7].secs;
     println!("mean decoded image: {:.0} kpx\n", pixels as f64 / (4 * n) as f64 / 1e3);
     println!("| stage | ms / sample | share | allocs / sample | MB allocated / sample |");
     println!("|---|---|---|---|---|");

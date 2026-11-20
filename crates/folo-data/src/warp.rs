@@ -3,9 +3,16 @@
 //! Coordinates are continuous with pixel `i` covering `[i, i + 1)`, so the same matrix maps both pixel positions
 //! and box corners. The warp inverts the matrix, steps the source position along each destination row in 16.16
 //! fixed point and samples with 11-bit bilinear weights; rows run in parallel.
+//!
+//! When the source position does not move vertically along a destination row (no rotation or shear: the default
+//! training augmentation), every pixel of a destination row reads the same two source rows, and the warp blends
+//! those two rows once into `u32` sums and then interpolates along them, without a bounds check per pixel. The
+//! products and their single rounding are those of the general path, so both give the same bytes. The warp reads
+//! its source as a [`Plane`]: images placed on a plane of one colour, so a mosaic is warped straight from its four
+//! images without painting its canvas first.
 
 use crate::image::Image;
-use crate::par::for_rows;
+use crate::par::{for_bands, for_rows};
 
 /// A 2x3 affine matrix `[a, b, c, d, e, f]` mapping `(x, y)` to `(a x + b y + c, d x + e y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,21 +97,118 @@ const FRAC: u32 = 16;
 const WBITS: u32 = 11;
 const WONE: u32 = 1 << WBITS;
 
+/// An image placed on a [`Plane`]: plane pixel `(x, y)` in `[x0, x1) x [y0, y1)` is pixel
+/// `(x - x0 + sx, y - y0 + sy)` of `img`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tile<'a> {
+    pub img: &'a Image,
+    /// The covered rectangle `[x0, y0, x1, y1]` on the plane (end-exclusive), inside `img` once offset.
+    pub dst: [i64; 4],
+    /// `[sx, sy]`: the pixel of `img` at `(x0, y0)`.
+    pub src: [i64; 2],
+}
+
+/// A warp's source: tiles on an endless plane of colour `fill`, of which `width x height` from the origin is the
+/// source image (its size for the matrix). A plane pixel no tile covers is `fill`, inside that rectangle or not.
+/// Tiles do not overlap.
+#[derive(Clone, Debug)]
+pub(crate) struct Plane<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub fill: [u8; 3],
+    pub tiles: Vec<Tile<'a>>,
+}
+
+impl<'a> Plane<'a> {
+    /// `img` with `fill` around it.
+    pub fn image(img: &'a Image, fill: [u8; 3]) -> Self {
+        let tile = Tile { img, dst: [0, 0, img.width as i64, img.height as i64], src: [0, 0] };
+        Plane { width: img.width, height: img.height, fill, tiles: vec![tile] }
+    }
+
+    /// Writes plane row `y`, columns `x0 .. x0 + out.len() / 3`, into `out` (interleaved RGB).
+    fn row(&self, y: i64, x0: i64, out: &mut [u8]) {
+        for px in out.as_chunks_mut::<3>().0.iter_mut() {
+            *px = self.fill;
+        }
+        let x1 = x0 + (out.len() / 3) as i64;
+        for t in &self.tiles {
+            let [tx0, ty0, tx1, ty1] = t.dst;
+            let (a, b) = (tx0.max(x0), tx1.min(x1));
+            if y < ty0 || y >= ty1 || a >= b {
+                continue;
+            }
+            let img = t.img;
+            let (sx, sy) = ((a - tx0 + t.src[0]) as usize, (y - ty0 + t.src[1]) as usize);
+            let n = (b - a) as usize * 3;
+            out[(a - x0) as usize * 3..][..n].copy_from_slice(&img.data[sy * img.stride() + sx * 3..][..n]);
+        }
+    }
+
+    /// The `width x height` source image itself.
+    pub fn render(&self) -> Image {
+        let mut img = Image {
+            width: self.width,
+            height: self.height,
+            data: crate::buffers::scratch(self.width as usize * self.height as usize * 3),
+        };
+        for px in img.data.as_chunks_mut::<3>().0.iter_mut() {
+            *px = self.fill;
+        }
+        let stride = img.stride();
+        for (y, row) in img.data.chunks_exact_mut(stride).enumerate() {
+            let y = y as i64;
+            if self.tiles.iter().any(|t| (t.dst[1]..t.dst[3]).contains(&y)) {
+                self.row(y, 0, row);
+            }
+        }
+        img
+    }
+}
+
 /// Warps `src` by `m` (source → destination) into a `width x height` image; uncovered pixels get `border`.
 pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8; 3]) -> Image {
-    let mut out = vec![0u8; width as usize * height as usize * 3];
+    warp_plane(&Plane::image(src, border), m, width, height)
+}
+
+/// Warps `plane` by `m` into a `width x height` image: bit for bit [`warp_affine`] of [`Plane::render`] with the
+/// plane's fill as the border, without rendering the plane when the source row does not change along a destination
+/// row.
+pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> Image {
+    let mut out = crate::buffers::scratch(width as usize * height as usize * 3);
+    let border = plane.fill;
     let Some(inv) = m.inverse() else {
         // Degenerate transform: nothing of the source is visible.
         let mut img = Image { width, height, data: out };
         img.fill_rect(0, 0, width as i64, height as i64, border);
         return img;
     };
+    if (inv.0[3] * (1i64 << FRAC) as f64).round() as i64 == 0 {
+        warp_rows(plane, &inv, width as usize, &mut out);
+    } else {
+        match plane.tiles.as_slice() {
+            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64] && t.src == [0, 0] => {
+                warp_general(t.img, &inv, width as usize, border, &mut out)
+            }
+            _ => {
+                let rendered = plane.render();
+                warp_general(&rendered, &inv, width as usize, border, &mut out);
+                crate::buffers::recycle(rendered.data);
+            }
+        }
+    }
+    Image { width, height, data: out }
+}
+
+/// The warp of `src` by the inverse matrix `inv` into `out` (rows of `width` pixels), any matrix: each pixel steps
+/// its own source position.
+fn warp_general(src: &Image, inv: &Affine, width: usize, border: [u8; 3], out: &mut [u8]) {
     let [a, b, c, d, e, f] = inv.0;
     let (sw, sh) = (src.width as i64, src.height as i64);
     let sstride = src.stride();
     let sdata = &src.data;
     let fone = (1i64 << FRAC) as f64;
-    for_rows(&mut out, width as usize * 3, |y, row| {
+    for_rows(out, width * 3, |y, row| {
         // Source position (in pixel-index space, centres at integers) of destination pixel centre (0.5, y + 0.5).
         let yc = y as f64 + 0.5;
         let u0 = a * 0.5 + b * yc + c - 0.5;
@@ -149,12 +253,75 @@ pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8
             }
         }
     });
-    Image { width, height, data: out }
+}
+
+/// The warp of `plane` by the inverse matrix `inv` into `out` (rows of `width` pixels) when the source row does not
+/// change along a destination row (`inv`'s vertical step per pixel rounds to zero). Per destination row, the two
+/// source rows `iy`, `iy + 1` over the columns the row reaches are blended into `v = top·(1 − wy) + bottom·wy`
+/// (`u32`), then each pixel is `(v[ix]·(1 − wx) + v[ix + 1]·wx + 2^21) >> 22`: the four products and the one
+/// rounding of the general path's `(t·(1 − wy) + u·wy + 2^21) >> 22`, so the same bytes. A pixel whose taps are
+/// all off the plane's source rectangle gets the fill colour, as the general path gives it the border.
+fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
+    let [a, b, c, d, e, f] = inv.0;
+    let fone = (1i64 << FRAC) as f64;
+    let du = (a * fone).round() as i64;
+    let (pw, ph) = (plane.width as i64, plane.height as i64);
+    let fill = plane.fill;
+    for_bands(out, width * 3, |y0, band| {
+        // Scratch for columns `-1 ..= pw` at most.
+        let cap = (pw as usize + 2) * 3;
+        let (mut top, mut bottom, mut v) = (vec![0u8; cap], vec![0u8; cap], vec![0u32; cap]);
+        for (i, row) in band.chunks_exact_mut(width * 3).enumerate() {
+            let yc = (y0 + i) as f64 + 0.5;
+            let u0 = a * 0.5 + b * yc + c - 0.5;
+            let v0 = d * 0.5 + e * yc + f - 0.5;
+            let fu0 = (u0 * fone).round() as i64;
+            let fv = (v0 * fone).round() as i64;
+            let iy = fv >> FRAC;
+            let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
+            // Left taps run from `ix_a` to `ix_b`; off columns `-1 ..= pw - 1` both taps are `fill`.
+            let (ix_a, ix_b) = (fu0 >> FRAC, (fu0 + du * (width as i64 - 1)) >> FRAC);
+            let lo = ix_a.min(ix_b).max(-1);
+            let hi = (ix_a.max(ix_b) + 1).min(pw);
+            if iy < -1 || iy >= ph || hi <= lo {
+                for px in row.as_chunks_mut::<3>().0.iter_mut() {
+                    *px = fill;
+                }
+                continue;
+            }
+            let n = (hi - lo + 1) as usize * 3;
+            plane.row(iy, lo, &mut top[..n]);
+            plane.row(iy + 1, lo, &mut bottom[..n]);
+            let iwy = WONE - wy;
+            for ((v, &t), &u) in v[..n].iter_mut().zip(&top[..n]).zip(&bottom[..n]) {
+                *v = t as u32 * iwy + u as u32 * wy;
+            }
+            // A pixel whose left tap is column `lo + k` reads `v[k]` and `v[k + 1]`, so needs `k < last`.
+            let last = (n / 3 - 1) as u64;
+            let mut fu = fu0;
+            for px in row.as_chunks_mut::<3>().0.iter_mut() {
+                let k = ((fu >> FRAC) - lo) as u64;
+                let wx = ((fu >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
+                fu += du;
+                if k < last {
+                    let t = &v[k as usize * 3..][..6];
+                    let iwx = WONE - wx;
+                    for ch in 0..3 {
+                        px[ch] =
+                            ((t[ch] * iwx + t[ch + 3] * wx + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
+                    }
+                } else {
+                    *px = fill;
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::Rng;
 
     fn pattern(w: u32, h: u32) -> Image {
         let mut img = Image::new(w, h, [0, 0, 0]);
@@ -196,6 +363,78 @@ mod tests {
         let out = warp_affine(&img, &flip, 20, 10, [0; 3]);
         for x in 0..20 {
             assert_eq!(out.pixel(x, 4), img.pixel(19 - x, 4));
+        }
+    }
+
+    /// Scale (mirrored sometimes, each axis its own) and translate, no rotation or shear: no vertical step.
+    fn random_upright(rng: &mut Rng, sw: u32, sh: u32) -> Affine {
+        let mut scale = || {
+            let s = rng.uniform(0.2, 3.0) as f64;
+            if rng.chance(0.2) { -s } else { s }
+        };
+        let (sx, sy) = (scale(), scale());
+        let (tx, ty) = (rng.uniform(-40.0, 90.0) as f64, rng.uniform(-40.0, 90.0) as f64);
+        Affine::translate(-(sw as f64) / 2.0, -(sh as f64) / 2.0)
+            .then(&Affine::scale(sx, sy))
+            .then(&Affine::translate(tx, ty))
+    }
+
+    #[test]
+    fn row_path_matches_the_general_path() {
+        let mut rng = Rng::new(5);
+        let images: Vec<Image> =
+            [(40, 30), (17, 53), (64, 64), (5, 3), (1, 1)].map(|(w, h)| pattern(w, h)).into();
+        for case in 0..400 {
+            let img = &images[case % images.len()];
+            let m = random_upright(&mut rng, img.width, img.height);
+            let inv = m.inverse().unwrap();
+            assert_eq!((inv.0[3] * (1 << FRAC) as f64).round(), 0.0);
+            let (w, h) = (1 + rng.below(70), 1 + rng.below(50));
+            let border = [rng.below(256) as u8, 114, 7];
+            let (mut rows, mut general) = (vec![0u8; w * h * 3], vec![0u8; w * h * 3]);
+            warp_rows(&Plane::image(img, border), &inv, w, &mut rows);
+            warp_general(img, &inv, w, border, &mut general);
+            assert_eq!(rows, general, "case {case}: {m:?} into {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn plane_warps_as_its_rendered_image() {
+        let mut rng = Rng::new(8);
+        let images: Vec<Image> = [(30, 20), (25, 41), (12, 12), (50, 9)].map(|(w, h)| pattern(w, h)).into();
+        for case in 0..200 {
+            // Four tiles in the quadrants around a centre, cropped by the plane's edges, as a mosaic places them.
+            let (pw, ph) = (40 + rng.below(30) as i64, 40 + rng.below(30) as i64);
+            let (xc, yc) = (rng.below(pw as usize) as i64, rng.below(ph as usize) as i64);
+            let mut tiles = Vec::new();
+            for (k, img) in images.iter().enumerate() {
+                let (w, h) = (img.width as i64, img.height as i64);
+                let (x0, x1) = if k % 2 == 0 { ((xc - w).max(0), xc) } else { (xc, (xc + w).min(pw)) };
+                let (y0, y1) = if k < 2 { ((yc - h).max(0), yc) } else { (yc, (yc + h).min(ph)) };
+                if x1 > x0 && y1 > y0 {
+                    let src =
+                        [if k % 2 == 0 { w - (x1 - x0) } else { 0 }, if k < 2 { h - (y1 - y0) } else { 0 }];
+                    tiles.push(Tile { img, dst: [x0, y0, x1, y1], src });
+                }
+            }
+            let plane = Plane { width: pw as u32, height: ph as u32, fill: [114; 3], tiles };
+            let rendered = plane.render();
+            let (w, h) = (1 + rng.below(60) as u32, 1 + rng.below(60) as u32);
+            let m = if case % 4 == 3 {
+                // A rotation takes the general path, through the rendered plane.
+                Affine::rotate(rng.uniform(-30.0, 30.0) as f64).then(&Affine::translate(10.0, 5.0))
+            } else {
+                random_upright(&mut rng, plane.width, plane.height)
+            };
+            assert_eq!(
+                warp_plane(&plane, &m, w, h),
+                warp_affine(&rendered, &m, w, h, [114; 3]),
+                "case {case}"
+            );
+            let inv = m.inverse().unwrap();
+            let mut general = vec![0u8; (w * h * 3) as usize];
+            warp_general(&rendered, &inv, w as usize, [114; 3], &mut general);
+            assert_eq!(warp_plane(&plane, &m, w, h).data, general, "case {case}");
         }
     }
 
