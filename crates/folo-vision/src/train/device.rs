@@ -88,18 +88,33 @@ pub(super) fn device_lost(e: &Error) -> bool {
 }
 
 /// The failure message of a run whose GPU was lost: the cause, and the checkpoint to resume from (the last one
-/// written or resumed from, with the epochs it holds) or that there is none.
+/// written or resumed from, with the epochs it holds) or that there is none. The driver's report is cut to
+/// [`LOSS_CAUSE_CHARS`] and the checkpoint's path is named once, so the message stays short and ends in the command
+/// to resume with: [`failure_log_line`] and the capped status message keep all of it.
 pub(super) fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> String {
     let resume = match last {
-        Some((p, n)) => format!(
-            "{} holds the state after epoch {n}: {}",
-            folo_api::json::path(p),
-            folo_api::json::cli_command(
-                "resume with `folo train --resume {checkpoint}`",
-                &[("checkpoint", p)]
-            )
+        Some((p, n)) => folo_api::json::cli_command(
+            &format!("resume from the state after epoch {n} with `folo train --resume {{checkpoint}}`"),
+            &[("checkpoint", p)],
         ),
         None => "no checkpoint was written yet: start the run again".into(),
     };
-    format!("the GPU device was lost ({e}); {resume}")
+    let cause = folo_api::codes::cap(&e.to_string(), LOSS_CAUSE_CHARS);
+    format!("the GPU device was lost ({cause}); {resume}")
+}
+
+/// The most of a driver's report a lost-device message quotes.
+pub(super) const LOSS_CAUSE_CHARS: usize = 120;
+
+/// Most characters of a failure's message in its log line: the line names the failure, the status carries the
+/// message, so a driver's report is not repeated in every record.
+pub(super) const LOG_MESSAGE_CHARS: usize = 120;
+
+/// The log line of a failed run: the code and the message cut to [`LOG_MESSAGE_CHARS`], except for a lost GPU
+/// (`lost`), whose message ([`device_loss_message`]) is short already and is kept whole: it ends in the command to
+/// resume with, which a cut would lose.
+pub(super) fn failure_log_line(e: &Error, lost: bool) -> String {
+    let summary = e.summary();
+    let message = if lost { summary } else { folo_api::codes::cap(&summary, LOG_MESSAGE_CHARS) };
+    format!("run failed ({}): {message}", e.code())
 }

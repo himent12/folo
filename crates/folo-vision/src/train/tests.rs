@@ -6,7 +6,7 @@ use std::path::Path;
 use folo_api::RunEvent;
 
 use super::checkpoint::{DOWNLOAD_CHUNK, download_all_chunked};
-use super::device::{device_loss_message, device_lost};
+use super::device::{device_loss_message, device_lost, failure_log_line};
 use super::epoch::{Clock, eta_s};
 use super::*;
 use crate::error::Error;
@@ -188,6 +188,28 @@ fn device_loss_is_explained() {
     assert!(m.contains(&format!("--resume {}", p.display())), "{m}");
     let m = device_loss_message(&Error::Core(lost()), None);
     assert!(m.contains("no checkpoint was written yet"), "{m}");
+}
+
+/// A failed run's log line cuts its message to 120 characters, but a lost GPU's keeps the command to resume with
+/// whole, however long the driver's report (#382: the line was cut inside the command).
+#[test]
+fn a_lost_gpus_log_line_ends_in_the_resume_command() {
+    let report = folo_core::Error::from(folo_gpu::GpuError::DeviceLost("x".repeat(40_000)));
+    let p = Path::new("D:/projects/one long folder name/runs/shapes-folo-s-640-batch-16/weights/last.folo");
+    let e = Error::Failed(device_loss_message(&Error::Core(report), Some((p, 266))));
+    let line = failure_log_line(&e, true);
+    let command =
+        format!("resume from the state after epoch 266 with `folo train --resume \"{}\"`", p.display());
+    assert!(
+        line.starts_with("run failed (training_failed): training failed: the GPU device was lost ("),
+        "{line}"
+    );
+    assert!(line.ends_with(&command), "{line}");
+    assert!(line.chars().count() < 400, "the driver's report is cut: {line}");
+    assert_eq!(e.summary(), e.to_string(), "the status message is whole too");
+    // Any other failure names itself in at most 120 characters (and an ellipsis).
+    let other = failure_log_line(&Error::Failed("y".repeat(300)), false);
+    assert_eq!(other, format!("run failed (training_failed): training failed: {}…", "y".repeat(120 - 17)));
 }
 
 /// MODEL.md §10.4: patience 2 with fitness [0.1, 0.3, 0.2, 0.2] stops after epoch 3 (best epoch 1), and a

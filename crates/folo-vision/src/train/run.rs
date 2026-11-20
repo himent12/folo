@@ -7,7 +7,7 @@ use folo_api::{LogLevel, RunEvent, RunStatus};
 use folo_nn::Module;
 use folo_nn::io::BestState;
 
-use super::device::{device_loss_message, device_lost};
+use super::device::{device_loss_message, device_lost, failure_log_line};
 use super::epoch::Clock;
 use super::{OptimizerChoice, TrainSummary, Trainer};
 use crate::error::{Error, Result};
@@ -44,22 +44,18 @@ impl Trainer {
         let r = match (r, written) {
             (Ok(s), Ok(())) => Ok(s),
             (Err(e), _) | (Ok(_), Err(e)) => Err(e),
-        }
-        .map_err(|e| self.explain_device_loss(e));
+        };
+        let lost = r.as_ref().err().is_some_and(device_lost);
+        let r = r.map_err(|e| self.explain_device_loss(e));
         // A next epoch started before the run ended (finished, stopped, stopped early or failed) is dropped, which
         // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
         self.prefetched = None;
         match &r {
             Ok(s) => self.emitter.status(s.status, None),
             Err(e) => {
-                // The status carries the (capped) message; the log line only names the failure, so a driver
-                // report is not repeated in every record.
-                let summary = e.summary();
-                self.emitter.log(
-                    LogLevel::Error,
-                    format!("run failed ({}): {}", e.code(), folo_api::codes::cap(&summary, 120)),
-                );
-                self.emitter.failed(e.code(), summary);
+                // The status carries the (capped) message; the log line names the failure.
+                self.emitter.log(LogLevel::Error, failure_log_line(e, lost));
+                self.emitter.failed(e.code(), e.summary());
             }
         }
         r

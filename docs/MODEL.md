@@ -792,7 +792,8 @@ finiteness check of the running statistics (one readback for all of them). Valid
 runs the predictor's forward + decode on the device (NMS on the host); with the one-to-many head, multi-label NMS (the default) and a positive normal `conf` (zero or a subnormal threshold uses the full decode, since a GPU may flush subnormal scores to zero) a device kernel (`folo_gpu::detect::multi_label_candidates`) also picks out the `(anchor, class, score)` pairs above `conf`, so a batch downloads those pairs and the boxes instead of every anchor's scores (an image with more pairs than the buffer holds downloads its whole decode; the buffer makes room for a quarter more than the most pairs an image had so far, and is never larger than half the decode: a batch whose pairs would not fit in that, e.g. many classes at a low `conf`, downloads its whole decode instead), with exactly the detections of the full decode; the download, NMS and scoring of a batch run on a second thread while the next batches' forward passes run, with the same result as one after the other. The numbers are the same as on the CPU up to
 float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
 bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
-and a message naming the lost device and the `--resume` command: checkpoints are written only at epoch boundaries, so
+and a message naming the lost device and the `--resume` command (the run's log line keeps it whole, cutting only the
+driver's report): checkpoints are written only at epoch boundaries, so
 `weights/last.folo` still holds the last finished epoch.
 
 **Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
