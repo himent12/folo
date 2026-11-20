@@ -842,9 +842,8 @@ connection: close
         assert!(requests.recv().unwrap().starts_with("GET /api/health "));
     }
 
-    /// Review round 1 (#308): a health answered with a redirect to a port nothing listens on. The
-    /// client followed it, the second hop timed out connecting (Windows waits out its SYN retries), and
-    /// the health request went to the server again. A redirect is not followed: one request, no server.
+    /// #308 review: a redirect to a dead port was followed, its hop timed out connecting (Windows SYN
+    /// retries), and the health request went again. A redirect is not followed: one request, no server.
     #[test]
     fn a_redirected_health_is_asked_once() {
         let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
@@ -855,8 +854,7 @@ connection: close
         let (url, requests) = canned_server(vec![redirect.into_bytes(), health]);
         assert!(!super::server::probe_through(&url, None), "a redirect is not folo serve's health");
         assert!(requests.recv().unwrap().starts_with("GET /api/health "));
-        let again = requests.recv_timeout(std::time::Duration::from_millis(300));
-        assert!(again.is_err(), "asked again: {again:?}");
+        assert!(requests.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "asked again");
     }
 
     /// The probe's second attempt (#308), with scripted answers: taken once, and only when the check saw a
