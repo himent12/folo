@@ -467,13 +467,10 @@ impl FoloApp {
                         *slot = run.clone();
                     }
                     this.changed_here(List::Runs, cx);
-                    // Told from the run as shown once it has ended (newer than the answer), else from
-                    // the answer: a list read can show it running again before the server took the
-                    // stop, and its `stopped` then brings no toast of its own.
-                    let ended = this.store.run(&run.id).filter(|r| !r.status.is_active()).cloned();
-                    let told = ended.unwrap_or(run);
-                    let dequeued = prev == Some(RunStatus::Queued) && told.cloud.is_none();
-                    if let Some((title, body)) = stop_toast(&told, dequeued) {
+                    // Told from the run as it is now shown, as Studio's is.
+                    let shown = this.store.run(&run.id).cloned().unwrap_or(run);
+                    let dequeued = prev == Some(RunStatus::Queued) && shown.cloud.is_none();
+                    if let Some((title, body)) = stop_toast(&shown, dequeued) {
                         this.toast(Tone::Neutral, title, body.map(Into::into), cx);
                     }
                 }
@@ -519,8 +516,10 @@ impl FoloApp {
     }
 }
 
-/// The toast for a stop the server took, told from run `r`: the answer, or the run as shown once the
-/// stream said it ended. A run that completed or failed had its end's own toast. A checkpoint is claimed
+/// The toast for a stop the server took, told from run `r` as it is now shown (the stream may have
+/// moved it on past the answer). A run shown completed or failed had its end's own toast, and one shown
+/// queued or running (resumed since, or a list read from before the server took the stop) gets none:
+/// its page says what the stream reports. A checkpoint is claimed
 /// only when one is known (a model, or a validated epoch); "nothing is saved" never is: an epoch whose
 /// last batch is done when the stop comes still validates and saves (folo-vision `train/run.rs`), and a
 /// stream opened again after the run stopped does not replay that epoch.

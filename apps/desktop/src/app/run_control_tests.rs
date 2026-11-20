@@ -89,25 +89,40 @@ fn a_stop_answered_with_nothing_newer_shown_applies() {
     });
 }
 
-/// A list read asked just after the stop, answered before the server took it, shows the run running
-/// again; the answer then still says what the stop did (the stream's `stopped` brings no toast).
+/// The answer comes while the run is shown running or queued again: a list read from before the server
+/// took the stop, or the run resumed after the stream said it stopped. The answer is older than that
+/// and says nothing then (with "X finished" already shown, a "Stopping X" beside it contradicted it).
 #[test]
-fn a_stop_answered_after_a_list_read_showed_the_run_running_still_says_so() {
-    let api = Arc::new(MockBackend::new(4200, true));
-    let (mut app, window) = open_with(api.clone());
-    let stop = api.hold("stop");
-    step(&mut app, window, 1, |this, cx| this.stop_run(LIVE.into(), cx));
-    stop.wait_held();
-    step(&mut app, window, 1, |this, _| {
-        let runs = this.store.runs.ready_mut().unwrap();
-        runs.iter_mut().find(|r| r.id == LIVE).unwrap().status = RunStatus::Running;
-    });
-    stop.release();
-    app.run_until_idle();
-    drive(&mut app, window, |this, _, _| {
-        let name = &this.store.run(LIVE).unwrap().name;
-        assert_eq!(titles(this), [format!("Stopped {name}")]);
-    });
+fn a_stop_answered_while_the_run_is_shown_active_again_adds_no_toast() {
+    for again in [RunStatus::Running, RunStatus::Queued] {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let (mut app, window) = open_with(api.clone());
+        let stop = api.hold("stop");
+        let list = api.hold("runs");
+        step(&mut app, window, 1, |this, cx| this.stop_run(LIVE.into(), cx));
+        stop.wait_held();
+        step(&mut app, window, 1, |this, _| {
+            let runs = this.store.runs.ready_mut().unwrap();
+            runs.iter_mut().find(|r| r.id == LIVE).unwrap().status = again;
+        });
+        stop.release();
+        // Until the answer is in: the run-list read it asks for is then held.
+        let asked = std::time::Instant::now();
+        while !list.is_held() {
+            assert!(
+                asked.elapsed() < std::time::Duration::from_secs(10),
+                "the stop's answer asked for no run list"
+            );
+            app.run_until_held(1);
+            std::thread::yield_now();
+        }
+        step(&mut app, window, 1, |this, _| {
+            assert_eq!(this.store.run(LIVE).unwrap().status, again, "what is shown stays");
+            assert!(titles(this).is_empty(), "{again:?}: {:?}", titles(this));
+        });
+        drop(list);
+        app.run_until_idle();
+    }
 }
 
 /// The toast for `status`, with or without a validated epoch.
