@@ -6,7 +6,7 @@ use std::path::Path;
 use folo_api::RunEvent;
 
 use super::checkpoint::{DOWNLOAD_CHUNK, download_all_chunked};
-use super::device::{device_loss_message, device_lost, failure_log_line};
+use super::device::{device_loss_message, device_lost};
 use super::epoch::{Clock, eta_s};
 use super::*;
 use crate::error::Error;
@@ -190,26 +190,59 @@ fn device_loss_is_explained() {
     assert!(m.contains("no checkpoint was written yet"), "{m}");
 }
 
+/// The last events of a failed run, as `Trainer::run` reports them: the error log line and the `failed` status
+/// message. `last` is the checkpoint the trainer last wrote.
+fn reported(e: Error, last: Option<(&Path, u32)>) -> (String, String) {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let opts = TrainOptions {
+        events: Some(Box::new(move |e: &RunEvent| sink.lock().unwrap().push(e.clone()))),
+        ..TrainOptions::default()
+    };
+    let mut t = micro(1, 100, opts);
+    t.last_saved = last.map(|(p, n)| (p.to_path_buf(), n));
+    assert!(t.report_end(Err(e)).is_err());
+    let events = events.lock().unwrap();
+    let line = events.iter().rev().find_map(|e| match e {
+        RunEvent::Log(l) if l.level == folo_api::LogLevel::Error => Some(l.message.clone()),
+        _ => None,
+    });
+    let status = match events.last() {
+        Some(RunEvent::Status(s)) if s.status == RunStatus::Failed => s.error.clone(),
+        other => panic!("the last event is the failed status: {other:?}"),
+    };
+    (line.expect("an error log line"), status.expect("a message"))
+}
+
 /// A failed run's log line cuts its message to 120 characters, but a lost GPU's keeps the command to resume with
-/// whole, however long the driver's report (#382: the line was cut inside the command).
+/// whole, however long the driver's report or the checkpoint's path (#382: the line was cut inside the command); a
+/// status message too short for the command says where it is.
 #[test]
 fn a_lost_gpus_log_line_ends_in_the_resume_command() {
-    let report = folo_core::Error::from(folo_gpu::GpuError::DeviceLost("x".repeat(40_000)));
+    let lost = || Error::Core(folo_core::Error::from(folo_gpu::GpuError::DeviceLost("x".repeat(40_000))));
+    let resume = |p: &Path, quote: &str| {
+        format!(
+            "resume from the state after epoch 266 with `folo train --resume {quote}{}{quote}`",
+            p.display()
+        )
+    };
     let p = Path::new("D:/projects/one long folder name/runs/shapes-folo-s-640-batch-16/weights/last.folo");
-    let e = Error::Failed(device_loss_message(&Error::Core(report), Some((p, 266))));
-    let line = failure_log_line(&e, true);
-    let command =
-        format!("resume from the state after epoch 266 with `folo train --resume \"{}\"`", p.display());
-    assert!(
-        line.starts_with("run failed (training_failed): training failed: the GPU device was lost ("),
-        "{line}"
-    );
-    assert!(line.ends_with(&command), "{line}");
+    let (line, status) = reported(lost(), Some((p, 266)));
+    let head = "run failed (training_failed): training failed: the GPU device was lost (";
+    assert!(line.starts_with(head) && line.ends_with(&resume(p, "\"")), "{line}");
     assert!(line.chars().count() < 400, "the driver's report is cut: {line}");
-    assert_eq!(e.summary(), e.to_string(), "the status message is whole too");
-    // Any other failure names itself in at most 120 characters (and an ellipsis).
-    let other = failure_log_line(&Error::Failed("y".repeat(300)), false);
-    assert_eq!(other, format!("run failed (training_failed): training failed: {}…", "y".repeat(120 - 17)));
+    assert!(line.ends_with(&status), "the status message is the whole message: {status}");
+    // A path past the status message's 500 characters (a data folder deep in long folder names).
+    let deep = format!("/data/{}runs/shapes/weights/last.folo", format!("{}/", "a".repeat(170)).repeat(3));
+    let deep = Path::new(&deep);
+    let (line, status) = reported(lost(), Some((deep, 266)));
+    assert!(line.starts_with(head) && line.ends_with(&resume(deep, "")), "{line}");
+    assert!(status.chars().count() <= folo_api::codes::MAX_MESSAGE_CHARS, "{status}");
+    assert!(status.ends_with("… (the whole command to resume with is in the run's log)"), "{status}");
+    // Any other failure names itself in at most 120 characters (and an ellipsis); its status has the message.
+    let (line, status) = reported(Error::Failed("y".repeat(300)), Some((p, 266)));
+    assert_eq!(line, format!("run failed (training_failed): training failed: {}…", "y".repeat(120 - 17)));
+    assert_eq!(status, format!("training failed: {}", "y".repeat(300)));
 }
 
 /// MODEL.md §10.4: patience 2 with fitness [0.1, 0.3, 0.2, 0.2] stops after epoch 3 (best epoch 1), and a

@@ -793,7 +793,7 @@ runs the predictor's forward + decode on the device (NMS on the host); with the 
 float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
 bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
 and a message naming the lost device and the `--resume` command (the run's log line keeps it whole, cutting only the
-driver's report): checkpoints are written only at epoch boundaries, so
+driver's report; a status message too short for it says the command is in the log): checkpoints are written only at epoch boundaries, so
 `weights/last.folo` still holds the last finished epoch.
 
 **Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
