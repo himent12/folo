@@ -76,6 +76,52 @@ fn a_stop_answered_after_the_stream_said_the_run_completed_leaves_it_completed()
     drive(&mut app, window, |this, _, _| assert_eq!(titles(this), [format!("{name} finished")]));
 }
 
+/// Review round 3: a run-list read asked after the stop and before the end, answered after the end,
+/// still showed the run active, so the late stop answer applied over it again ("Stopping X" beside
+/// "X finished"). The end drops the answers asked for before it.
+#[test]
+fn a_run_list_asked_before_the_end_does_not_undo_it() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let stop = api.hold("stop");
+    // The run-list reads, in order: the refresh's (before the end), the end's, the stop answer's.
+    let (before, end, after) = (api.hold("runs"), api.hold("runs"), api.hold("runs"));
+    let tx = step(&mut app, window, 1, |this, cx| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        this.subscriptions.insert(LIVE.into(), crate::api::Subscription::new(rx).0);
+        this.stop_run(LIVE.into(), cx);
+        tx
+    });
+    stop.wait_held();
+    step(&mut app, window, 2, |this, cx| this.refresh_runs(cx));
+    before.wait_held();
+    step(&mut app, window, 3, |this, cx| {
+        tx.send(RunEvent::Status(StatusEvent::new(RunStatus::Completed, None))).unwrap();
+        this.drain_streams(cx);
+    });
+    end.wait_held();
+    // The read from before the end lands (the demo has the run stopped by then; a server, stopping).
+    before.release();
+    app.run_until_held(2);
+    stop.release();
+    let asked = std::time::Instant::now();
+    while !after.is_held() {
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(10),
+            "the stop's answer asked for no run list"
+        );
+        app.run_until_held(2);
+        std::thread::yield_now();
+    }
+    step(&mut app, window, 2, |this, _| {
+        assert_eq!(this.store.run(LIVE).unwrap().status, RunStatus::Completed, "the end stays");
+        let titles = titles(this);
+        assert!(!titles.iter().any(|t| t.starts_with("Stop")), "no stop toast over the end's: {titles:?}");
+    });
+    drop((end, after));
+    app.run_until_idle();
+}
+
 #[test]
 fn a_stop_answered_with_nothing_newer_shown_applies() {
     let api = Arc::new(MockBackend::new(4200, true));

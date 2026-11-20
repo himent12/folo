@@ -778,6 +778,9 @@ impl FoloApp {
             _ => {}
         }
         if matches!(self.store.runs, Load::Ready(_)) {
+            // A list asked for before the end can still show the run active (stopping, running): the
+            // end is newer, so those answers are dropped, as after a change here.
+            self.list_tickets.changed(List::Runs);
             self.refresh_runs(cx);
         }
         // The stream sends at most ~10 steps a second (docs/API.md), so what a page watched live
