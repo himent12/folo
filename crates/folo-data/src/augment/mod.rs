@@ -6,7 +6,8 @@
 //!
 //! - `geometry.rs`: random affine, flips, [`resize_long_side`] and the box transform ([`transform_boxes`],
 //!   [`BoxFilter`]).
-//! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`] and [`mixup`].
+//! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`], [`mosaic_affine`] and
+//!   [`mixup`].
 //! - `pipeline.rs`: [`TrainTransform`], the training transform.
 //! - This file: [`AugmentConfig`], the parameters (`TrainConfig.augment` in docs/API.md).
 

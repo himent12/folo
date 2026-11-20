@@ -3,7 +3,7 @@
 //! The arithmetic is integer only, so it has one exact result per pixel. Two kernels compute it: a pixel at a
 //! time with branches (the hue's sector, the channel holding the maximum), and, on CPUs with AVX2, blocks of 64
 //! pixels laid out as channel arrays with every branch turned into a select and every table read into a lookup the
-//! compiler gathers, which runs about three times faster on photographs (docs/notes/hill/r6-loader.md). Tests check
+//! compiler gathers, which runs about twice as fast on photographs (docs/notes/hill/r6-loader.md). Tests check
 //! both against each other on all 2^24 colours.
 
 use crate::image::Image;
