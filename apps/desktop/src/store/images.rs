@@ -173,11 +173,16 @@ impl ImageCache {
         self.slots.insert(k.clone(), img.map_or(ImgSlot::Failed, ImgSlot::Ready));
         let mut evicted = Vec::new();
         // The image just finished stays (it is the one asked for): past the byte budget everything
-        // older goes first.
-        while self.order.len() > Self::BUDGET || (self.bytes > self.byte_budget && self.order.len() > 1) {
+        // older goes first. It keeps its place in the order asked in: moved to the back, it would
+        // count as newer than images asked for after it, and a later eviction would take one of those
+        // first (loads finish in any order: the newest image asked for was dropped so).
+        let mut kept = false;
+        while self.order.len() + usize::from(kept) > Self::BUDGET
+            || (self.bytes > self.byte_budget && self.order.len() + usize::from(kept) > 1)
+        {
             let Some(old) = self.order.pop_front() else { break };
             if old == k {
-                self.order.push_back(old);
+                kept = true;
                 continue;
             }
             self.failures.remove(&old);
@@ -186,6 +191,10 @@ impl ImageCache {
                 self.bytes -= image_bytes(&img);
                 evicted.push(img);
             }
+        }
+        if kept {
+            // Everything before it went: its place is the front.
+            self.order.push_front(k);
         }
         evicted
     }
@@ -420,6 +429,29 @@ mod tests {
         assert_eq!(c.bytes, 400);
         assert_eq!(c.clear().len(), 1);
         assert_eq!(c.bytes, 0);
+    }
+
+    /// Loads finish in any order. One kept past the budget keeps its place in the order asked in, so
+    /// the newest image asked for is never the one evicted while an older one is held (wave 6, #382:
+    /// the app test of the byte budget failed now and then on a busy machine).
+    #[test]
+    fn the_newest_asked_for_stays_whatever_order_the_loads_finish_in() {
+        // Thirty asked for in order, five fit; the app's queue starts 0..=7, then the newest waiting.
+        let mut c = ImageCache { byte_budget: 5 * 400, ..Default::default() };
+        let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Full };
+        for i in 0..30 {
+            assert!(c.begin(&key(i)));
+        }
+        for i in [1, 3, 5, 7, 29, 0, 2, 4, 6, 21] {
+            c.finish(key(i), Some(render(10, 10)));
+            assert!(c.bytes <= 5 * 400, "after {i}");
+        }
+        let ready: Vec<usize> =
+            (0..30).filter(|&i| matches!(c.get(&key(i)), Some(ImgSlot::Ready(_)))).collect();
+        assert_eq!(ready, [5, 6, 7, 21, 29], "the oldest went first");
+        // The order is still the order asked in.
+        let order: Vec<usize> = c.order.iter().map(|k| k.image.parse().unwrap()).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     }
 
     #[test]

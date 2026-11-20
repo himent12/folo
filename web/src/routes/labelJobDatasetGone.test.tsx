@@ -15,6 +15,7 @@ let target: HTMLElement;
 let c: Rendered | undefined;
 
 afterEach(() => {
+  tests++;
   c?.unmount();
   c = undefined;
   target?.remove();
@@ -24,27 +25,34 @@ afterEach(() => {
 
 // Fake timers here are plain: with `shouldAdvanceTime` the clock also follows real time, so a machine busy enough to
 // stall the test for a poll's 5 s gets an extra poll (and an extra datasets read) the test did not ask for.
-// A wait ends when its condition holds. What it waits on is work, not a timer (the mock answers at once), so its bound
-// is only for a hang: the test's own timeout (20 s in CI) usually ends one first. 4 s was exceeded on a busy machine.
-const HANG = 60_000;
+// A wait ends when its condition holds. What it waits on is work, not time (the mock answers without timers), so it has
+// no bound of its own: a hang ends at the test's timeout (`vi.waitFor`'s 4 s and 1 s were exceeded on a busy machine).
+// Under fake timers each step moves the clock by `step` ms, as `vi.waitFor` did. A wait whose test has ended (timed out)
+// stops and touches nothing more: it would otherwise read the next test's page and move the next test's clock.
+const realTimeout = globalThis.setTimeout.bind(globalThis);
+let tests = 0;
+async function until(holds: () => boolean, step = 10): Promise<void> {
+  const mine = tests;
+  for (;;) {
+    if (tests !== mine) return new Promise<void>(() => {});
+    flushSync();
+    if (holds()) return;
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(step);
+    await new Promise((r) => realTimeout(r, vi.isFakeTimers() ? 0 : step));
+  }
+}
 const made = () => target.querySelector('[data-made]');
 const link = () => made()?.querySelector('a[href^="#/datasets/"]');
 
-/** The job page of `job` (`lb_51d0`) on `api`, once `until` holds. */
-async function open(api: MockApi, until: () => boolean, job = 'lb_51d0') {
+/** The job page of `job` (`lb_51d0`) on `api`, once `ready` holds. */
+async function open(api: MockApi, ready: () => boolean, job = 'lb_51d0') {
   hub.api = api;
   hub.mode = 'mock';
   router.route = parse(`#/datasets/label/${job}`);
   target = document.createElement('div');
   document.body.appendChild(target);
   c = render(() => <LabelJob />, target);
-  await vi.waitFor(
-    () => {
-      flushSync();
-      if (!until()) throw new Error('not yet');
-    },
-    { timeout: HANG, interval: 10 },
-  );
+  await until(ready);
 }
 
 describe('a labeling job whose dataset was removed', () => {
@@ -69,13 +77,7 @@ describe('a labeling job whose dataset was removed', () => {
     expect(made()?.textContent).toBe('made a dataset');
     expect(link()).toBeNull();
     release();
-    await vi.waitFor(
-      () => {
-        flushSync();
-        if (!link()) throw new Error('not linked');
-      },
-      { timeout: HANG },
-    );
+    await until(() => !!link());
     expect(link()?.getAttribute('href')).toBe(`#/datasets/${ds.id}`);
     expect(made()?.textContent).toBe(`made ${ds.name}`);
   });
@@ -87,13 +89,7 @@ describe('a labeling job whose dataset was removed', () => {
     await open(api, () => !!link());
     await api.deleteDataset(ds.id);
     await vi.advanceTimersByTimeAsync(5000);
-    await vi.waitFor(
-      () => {
-        flushSync();
-        if (!made()?.textContent?.includes('removed')) throw new Error('still linked');
-      },
-      { timeout: HANG, interval: 10 },
-    );
+    await until(() => !!made()?.textContent?.includes('removed'));
     expect(link()).toBeNull();
   });
 
@@ -113,13 +109,7 @@ describe('a labeling job whose dataset was removed', () => {
     await api.deleteDataset(ds.id);
     good = reads.mock.calls.length + 1; // the next poll answers (without the dataset); every read after it fails
     await vi.advanceTimersByTimeAsync(5000);
-    await vi.waitFor(
-      () => {
-        flushSync();
-        if (!made()?.textContent?.includes('removed')) throw new Error('still linked');
-      },
-      { timeout: HANG, interval: 10 },
-    );
+    await until(() => !!made()?.textContent?.includes('removed'));
     expect(reads).toHaveBeenCalledTimes(good);
     await vi.advanceTimersByTimeAsync(5000); // a poll that fails
     expect(reads.mock.calls.length).toBeGreaterThan(good);
@@ -141,19 +131,19 @@ describe('a labeling job whose dataset was removed', () => {
   });
 
   it('never calls a dataset made in another tab removed: the list is read again for it', async () => {
+    vi.useFakeTimers();
     const api = new MockApi('normal', 0);
+    const reads = vi.spyOn(api, 'datasets');
     await open(api, () => !!target.querySelector('h1') && !target.querySelector('[aria-busy="true"]'));
     expect(made()).toBeNull();
     const shown: string[] = [];
+    const before = reads.mock.calls.length;
+    const at = Date.now();
+    // The export's stream event tells the page the job's new dataset (as the server's does).
     const ds = await api.createLabelDataset('lb_51d0', {});
-    await vi.waitFor(
-      () => {
-        flushSync();
-        shown.push(made()?.textContent ?? '');
-        if (!link()) throw new Error('not linked');
-      },
-      { timeout: HANG, interval: 1 },
-    );
+    await until(() => (shown.push(made()?.textContent ?? ''), !!link()), 1);
+    expect(Date.now() - at, 'linked by the read for it, before the next poll').toBeLessThan(5000);
+    expect(reads.mock.calls.length).toBeGreaterThan(before);
     expect(made()?.textContent).toBe(`made ${ds.name}`);
     expect(shown.some((t) => t.includes('removed'))).toBe(false);
   });
@@ -185,12 +175,7 @@ describe('a labeling job whose dataset was removed', () => {
     expect(look()).toBe('made a dataset');
     failing = false;
     await vi.advanceTimersByTimeAsync(5000);
-    await vi.waitFor(
-      () => {
-        if (!look() || !link()) throw new Error('not linked');
-      },
-      { timeout: HANG },
-    );
+    await until(() => !!look() && !!link());
     expect(made()?.textContent).toBe(`made ${ds.name}`);
     expect(shown.some((t) => t.includes('removed'))).toBe(false);
   });

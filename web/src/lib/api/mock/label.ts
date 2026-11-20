@@ -858,6 +858,9 @@ export class MockLabeling {
     const dsId = `ds_${(hash(name + now) & 0xffff).toString(16).padStart(4, '0')}`;
     j.datasetId = dsId;
     this.#log(j, now, 'info', `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`);
+    // As the server (`set_dataset`): the job's stream is told the job, now with its dataset.
+    const out = this.#toJob(j);
+    this.#emit(j.id, (h) => h.job?.(out));
     return {
       ...look,
       id: dsId,
