@@ -314,7 +314,8 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   run released long ago (with its final cost and terminated instance), and runs created with a GPU under Run on
   going through every phase. `MockBackend::with_cloud_runs` adds one uploading its data and one training (the
   cloud scenarios: `+cloud`, `cloud-…`, `run-cloud+…`); `+empty` scenarios have no connection and `+trouble` ones
-  a revoked key and a termination the provider hasn't confirmed.
+  a revoked key and a termination the provider hasn't confirmed. Neither it nor `folo serve --mock` resumes a run
+  (both say `mock` in their health), so on demo data a stopped or failed run's Resume is off and says why.
 
 By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`; on Windows a closed port on this
 machine is told at once, not after the probe's 0.5 s timeout, unless a proxy from the environment is used for it); if none answers it starts a

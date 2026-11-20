@@ -429,7 +429,10 @@ impl Backend for MockBackend {
                 level: LogLevel::Warn,
                 message: "stop requested; collecting the checkpoint and releasing the instance".into(),
             });
-            return Ok(Self::snapshot(f));
+            let run = Self::snapshot(f);
+            drop(runs);
+            self.hold_point("stop");
+            return Ok(run);
         }
         f.step = Self::current_step(f);
         f.live = None;
@@ -446,7 +449,11 @@ impl Backend for MockBackend {
             level: LogLevel::Info,
             message: format!("saved last checkpoint (epoch {epoch})"),
         });
-        Ok(Self::snapshot(f))
+        let run = Self::snapshot(f);
+        drop(runs);
+        // Answered once the stop is made (a test holds the answer back, as a slow server's).
+        self.hold_point("stop");
+        Ok(run)
     }
 
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {
