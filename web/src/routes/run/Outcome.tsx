@@ -69,13 +69,12 @@ const NONE: string[] = [];
  */
 export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
 
-/** `POST /api/runs` takes `resume_run_id` (docs/API.md, `features`): the mock server lists it not, and answers 501. */
-export const RESUME_FEATURE = 'run_resume';
 /**
- * Whether Resume (or Start again) is offered: not on a server that said it cannot resume (`folo serve --mock`; issue
- * #382: the palette's Resume answered 501 there). Unknown (an older server, the in-browser demo) is offered, as before.
+ * Whether Resume (or Start again) is offered: not on the mock server (`folo serve --mock`, `hub.serverMock`), which
+ * answers it `501` (issue #382: the palette's Resume did). Every real server resumes, older ones too; the in-browser
+ * demo does as well.
  */
-export const canResume = () => !hub.lacks(RESUME_FEATURE);
+export const canResume = () => hub.serverMock !== true;
 
 /**
  * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A

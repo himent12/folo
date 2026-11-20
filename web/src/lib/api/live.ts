@@ -641,14 +641,20 @@ export class LiveRun {
 
   /**
    * Stops the run through `call` (POST /api/runs/{id}/stop, or a resumed run's removal from the queue). The answer is
-   * the run as the server had it when it took the stop: a status event received meanwhile (the run completed after its
-   * last batch, say) is newer, so the view keeps what the stream says. Returns the run as the view now has it.
+   * the run as the server had it once it took the stop. A status event received meanwhile that says the run ended (it
+   * completed after its last batch, say) is newer: the view keeps it. One that says it is active (a reconnect's
+   * snapshot, a late `queued`, the stop's own `stopping`) is not: the answer's status applies, over the progress the
+   * stream has delivered. Returns the run as the view now has it.
    */
   async stop(call: () => Promise<Run | null>): Promise<Run | null> {
     const seq = this.#statusSeq;
     const r = await call();
     if (!r) return null;
-    if (this.#statusSeq === seq || !this.run) this.run = keepStepsPerEpoch(r, this.run);
+    const cur = this.run;
+    if (cur && this.#statusSeq !== seq) {
+      if (!ACTIVE.includes(cur.status)) return cur;
+      this.run = { ...cur, status: r.status, error: r.error };
+    } else this.run = keepStepsPerEpoch(r, cur);
     return this.run ?? r;
   }
 

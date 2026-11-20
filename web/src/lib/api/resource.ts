@@ -95,7 +95,7 @@ export class Resource<T> {
       }
       const ctrl = new AbortController();
       // Reactive reads inside the fetcher (before its first await) are tracked by this effect. The first one, as it
-      // mounts, may take a read another part of the screen just made (./share, MOUNT_REUSE_MS).
+      // mounts, may join a read another part of the screen has in flight (./share).
       const promise = together(() => fetcher(ctrl.signal), first).value;
       first = false;
       untrack(() => void this.#settle(promise, ctrl, false));

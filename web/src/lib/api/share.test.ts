@@ -22,6 +22,7 @@ function counting() {
     },
     run: (id: string) => (calls.push(`run ${id}`), Promise.resolve({ id })),
     stopRun: (id: string) => (calls.push(`stop ${id}`), Promise.resolve({ id })),
+    deleteRun: (id: string) => (calls.push(`delete ${id}`), new Promise<void>((resolve) => setTimeout(resolve, 5))),
   };
   return { api: api as unknown as Api, calls };
 }
@@ -117,7 +118,7 @@ describe('Resource sharing', () => {
 
   // #309 item 2: on a cold Overview the shell's run list and Overview's (and Overview's system and its machine strip's)
   // mounted a few ms apart, each with a request of its own for the same answer.
-  it('a Resource mounted just after another reads its answer instead of asking again, unless a write went out', async () => {
+  it('a Resource mounting while another has the same read out joins it; never an answer, a given-up read, or across a write', async () => {
     const { api, calls } = counting();
     hub.api = api;
     const mount = () => {
@@ -126,28 +127,39 @@ describe('Resource sharing', () => {
       flush();
       return { r: () => r, stop };
     };
+    // The answer takes 10 ms; the screen's own list mounts 4 ms in, in another task.
     const shell = mount();
-    await vi.advanceTimersByTimeAsync(10);
-    expect(calls).toEqual(['runs']);
-    // 40 ms later, in another task: the screen's own list.
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(4);
     const screen = mount();
-    await vi.advanceTimersByTimeAsync(0);
     expect(calls).toEqual(['runs']);
+    await vi.advanceTimersByTimeAsync(10);
     expect(screen.r().data).toEqual(shell.r().data);
     expect(screen.r().data).not.toBe(shell.r().data);
-    // A refresh is a request of its own; so is a mount after a write, or more than a second after the answer.
-    const refreshed = screen.r().refresh();
-    await vi.advanceTimersByTimeAsync(10);
-    await refreshed;
-    expect(calls).toEqual(['runs', 'runs']);
-    void hub.api.stopRun('x');
-    const afterWrite = mount();
-    expect(calls).toEqual(['runs', 'runs', 'stop x', 'runs']);
-    await vi.advanceTimersByTimeAsync(1100);
+    // Answered: a later mount asks.
     const later = mount();
-    expect(calls).toEqual(['runs', 'runs', 'stop x', 'runs', 'runs']);
-    for (const m of [shell, screen, afterWrite, later]) m.stop();
+    expect(calls).toEqual(['runs', 'runs']);
+    await vi.advanceTimersByTimeAsync(10);
+    // Given up (its only screen left before it answered): the next mount asks, and gets an answer.
+    const gone = mount();
+    gone.stop();
+    const next = mount();
+    expect(calls).toEqual(['runs', 'runs', 'runs', 'runs']);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(next.r().data).toHaveLength(1);
+    expect(next.r().error).toBeUndefined();
+    // A read out when a write is sent, or sent while one is out and still out once it answers, is not joined.
+    const before = mount();
+    void hub.api.stopRun('x');
+    const afterSent = mount();
+    expect(calls.slice(4)).toEqual(['runs', 'stop x', 'runs']);
+    await vi.advanceTimersByTimeAsync(10);
+    void hub.api.deleteRun('y');
+    const during = mount();
+    await vi.advanceTimersByTimeAsync(5);
+    const afterAnswer = mount();
+    expect(calls.slice(7)).toEqual(['delete y', 'runs', 'runs']);
+    await vi.advanceTimersByTimeAsync(10);
+    for (const m of [shell, screen, later, next, before, afterSent, during, afterAnswer]) m.stop();
   });
 
   it('keeps the data object when an answer is equal to it', async () => {

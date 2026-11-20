@@ -18,9 +18,6 @@ pub const FEATURE_UPLOADS: &str = "uploads";
 pub const FEATURE_RUN_CURSORS: &str = "run_cursors";
 /// [`SystemResponse::features`](crate::SystemResponse::features): `POST /api/runs` takes `checkpoint`.
 pub const FEATURE_RUN_CHECKPOINT: &str = "run_checkpoint";
-/// [`SystemResponse::features`](crate::SystemResponse::features): `POST /api/runs` takes `resume_run_id` (the mock
-/// store answers it `501 not_implemented`, so a client offers Resume only where this is listed).
-pub const FEATURE_RUN_RESUME: &str = "run_resume";
 
 /// Default of [`Compute::max_hours`].
 pub const DEFAULT_MAX_HOURS: f32 = 12.0;

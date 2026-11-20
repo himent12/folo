@@ -108,6 +108,7 @@ class Hub {
   #refused = signal<string | null>(null);
   #version = signal<string | null>(null);
   #features = signal<readonly string[] | null>(null);
+  #serverMock = signal<boolean | null>(null);
   /** The asks of `#learn` started: only the latest one may set `features`. */
   #asks = 0;
   #api = signal<Api>(placeholder());
@@ -147,6 +148,17 @@ class Hub {
   }
   set features(v: readonly string[] | null) {
     this.#features.set(v);
+  }
+  /**
+   * Whether the server in use said it is the mock server (`folo serve --mock`: `/api/health`'s `mock`), from the
+   * connect's handshake; null before it and on the in-browser demo. The mock server answers some writes `501`
+   * (resuming a run) that every real server, older ones too, can do.
+   */
+  get serverMock(): boolean | null {
+    return this.#serverMock.get();
+  }
+  set serverMock(v: boolean | null) {
+    this.#serverMock.set(v);
   }
   /**
    * Whether the server in use has said it lacks `feature`: its health listed features without it. Unknown is not
@@ -225,6 +237,7 @@ class Hub {
     this.#access.reset(null);
     this.#asks++;
     this.features = null;
+    this.#serverMock.set(null);
     if (forcedMock) {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
@@ -309,6 +322,7 @@ class Hub {
           this.#access.reset((s) => accessCheck(http.base, s));
           this.version = h.version;
           this.features = featuresOf(h);
+          this.#serverMock.set(h.mock === true);
           this.reason = null;
           this.#unreachable.set(false);
           this.#refused.set(null);

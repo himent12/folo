@@ -2,7 +2,7 @@
 // A late Stop answer (issue #382): the stream may say the run ended while the stop was on its way.
 import { createRoot, flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { stoppedToast } from '../../routes/run/StopRun';
+import { stopDescription, stoppedToast } from '../../routes/run/StopRun';
 import { toast } from '$lib/ui/toast';
 import type { Api, RunEventHandlers } from './client';
 import { hub } from './index';
@@ -83,6 +83,20 @@ describe('LiveRun.stop', () => {
     expect(live.run?.status).toBe('stopping');
     dispose();
   });
+
+  it("applies the answer over an active state the stream reported meanwhile (a reconnect's running), keeping its progress", async () => {
+    const { live, dispose } = await started();
+    const answer = deferred<Run>();
+    const pending = live.stop(() => answer.promise);
+    // The stream reconnects while the stop is out: its snapshot still says running, a step further on.
+    handlers.status?.({ status: 'running', error: null });
+    live.run = { ...live.run!, step: 5 };
+    answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
+    const now = await pending;
+    expect([now?.status, now?.step]).toEqual(['stopping', 5]);
+    expect(live.run?.status).toBe('stopping');
+    dispose();
+  });
 });
 
 describe('stoppedToast', () => {
@@ -94,5 +108,20 @@ describe('stoppedToast', () => {
     // A stop during the first epoch's validation keeps that epoch (docs/API.md); only the stop's outcome settles it.
     stoppedToast({ name: 'r', epoch: 1, status: 'stopping' }, 0);
     expect(toast.items.map((t) => t.detail)).toEqual(['No epoch had finished yet. Unless one finishes before it stops, nothing is saved.']);
+  });
+
+  it('tells a run that ended before the answer came as it ended', () => {
+    stoppedToast({ name: 'r', epoch: 1, status: 'stopped' }, 0);
+    stoppedToast({ name: 's', epoch: 0, status: 'stopped' }, 0);
+    stoppedToast({ name: 'f', epoch: 1, status: 'failed' }, 0);
+    expect(toast.items.map((t) => [t.title, t.detail])).toEqual([
+      ['Stopped r', 'The checkpoint from epoch 1 is kept.'],
+      ['Stopped s', 'No epoch had finished, so nothing is saved.'],
+      ['f failed', 'Its page has the error and the log.'],
+    ]);
+  });
+
+  it('the confirm does not promise nothing is saved either', () => {
+    expect(stopDescription({ status: 'running' }, 0)).toBe('Training stops after the current step. No epoch has finished yet: unless one finishes first, nothing is saved.');
   });
 });

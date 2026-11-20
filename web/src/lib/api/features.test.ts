@@ -171,3 +171,28 @@ describe('hub.features over an outage', () => {
     expect([hub.offline, hub.features]).toEqual([false, REAL]);
   });
 });
+
+describe('hub.serverMock (issue #382: Resume on folo serve --mock)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    prefs.serverUrl = '';
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("is the connect's health answer's `mock`, and unknown while a connect has not answered", async () => {
+    let mock = true;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/health')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock, features: MOCK });
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      return Response.json({ datasets: [] });
+    });
+    await hub.connect();
+    expect(hub.serverMock).toBe(true);
+    mock = false;
+    const again = hub.connect();
+    expect(hub.serverMock).toBeNull();
+    await again;
+    expect(hub.serverMock).toBe(false);
+  });
+});

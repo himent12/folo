@@ -156,20 +156,22 @@ describe('Outcome', () => {
     r.done();
   });
 
-  // #382: on `folo serve --mock` Resume answered 501 (its health lists no `run_resume`). Offered where the server lists
-  // it, and where the list is unknown (an older server, the in-browser demo), as before.
-  it('offers Resume only where the server can resume', () => {
+  // #382: on `folo serve --mock` Resume answered 501. Every real server resumes, also one from before any feature named
+  // it (review: a list without one must not hide it), and so does the in-browser demo (null).
+  it('offers Resume except on the mock server', () => {
     const run = failed('dataset folder D:/data/shapes-hard is gone');
-    for (const [features, labels] of [
-      [['queue_control', 'run_cursors'], ['Details']],
-      [['queue_control', 'run_resume'], ['Resume', 'Details']],
+    for (const [mock, labels] of [
+      [true, ['Details']],
+      [false, ['Resume', 'Details']],
       [null, ['Resume', 'Details']],
     ] as const) {
-      hub.features = features;
+      hub.serverMock = mock;
+      hub.features = ['queue_control', 'run_cursors'];
       const r = render(run);
-      expect(r.labels, JSON.stringify(features)).toEqual(labels);
+      expect(r.labels, JSON.stringify(mock)).toEqual(labels);
       r.done();
     }
+    hub.serverMock = null;
     hub.features = null;
   });
 
