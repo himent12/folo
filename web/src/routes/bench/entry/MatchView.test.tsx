@@ -48,8 +48,34 @@ describe('MatchView', () => {
     expect(l + w).toBeLessThanOrEqual(214);
     expect(t + h).toBeLessThanOrEqual(160);
     // The image moved in with it: the box stays on its object.
-    expect(target.querySelector<HTMLElement>('img')!.style.inset).toBe('2px');
+    expect(target.querySelector<HTMLElement>('img')!.style.inset).toBe('2.5px');
     done();
+  });
+
+  it('keeps a sliver box at the edge whole, and moves nothing for a box off the image, the large view, or a strip', () => {
+    const inset = (t: HTMLElement) => t.querySelector<HTMLElement>('img')!.style.inset;
+    // A box over the last two pixels of the image: drawn 1 px wide about its centre, its halo inside the tile.
+    const sliver = [{ class: 0, x1: 638, y1: 100, x2: 640, y2: 200 }];
+    let v = shown(216, 162, () => <MatchView src="/x.jpg" width={640} height={480} truth={sliver} detections={[]} classes={['a']} />);
+    const box = v.target.querySelector<HTMLElement>('.box')!;
+    expect(px(box.style.width)).toBe(1);
+    expect(px(box.style.left) + 1 + 2).toBeLessThanOrEqual(216);
+    v.done();
+    // A wrong detection wholly right of the image (the server takes such coordinates): no room asked.
+    const off = [{ class: 0, x1: 656, y1: 100, x2: 690, y2: 200, score: 0.9 }];
+    v = shown(216, 162, () => <MatchView src="/x.jpg" width={640} height={480} truth={[]} detections={off} classes={['a']} />);
+    expect(inset(v.target)).toBe('0px');
+    v.done();
+    // The large view is drawn as before.
+    const whole = [{ class: 0, x1: 0, y1: 0, x2: 640, y2: 480 }];
+    v = shown(640, 480, () => <MatchView src="/x.jpg" width={640} height={480} truth={whole} detections={[]} classes={['a']} full />);
+    expect(inset(v.target)).toBe('0px');
+    v.done();
+    // A 4096 × 128 strip in a 320 px tile is 10 px high: no room that would leave it nothing.
+    v = shown(320, 10, () => <MatchView src="/x.jpg" width={4096} height={128} truth={[{ class: 0, x1: 0, y1: 0, x2: 50, y2: 128 }]} detections={[]} classes={['a']} />);
+    expect(inset(v.target)).toBe('0px');
+    expect(v.target.querySelector('.box')).not.toBeNull();
+    v.done();
   });
 
   it('places full-size chips against the boxes as drawn, never one over another', () => {
