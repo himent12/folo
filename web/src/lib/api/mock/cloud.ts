@@ -272,8 +272,9 @@ export function instanceAt(c: CloudTimeline, runId: string, trainEnd: number, no
 /**
  * The hand-over's lines in the run's log as far as `now`, before and after the trainer's own. After training, the
  * real control plane's words (folo-server's `cloud/executor`): "the run ended on the worker; copying its weights",
- * then "terminating the instance". A run whose instance was terminated by hand, or stopped before it trained, has
- * nothing to copy (its release is still logged), and one on a remote FOLO server (no instance) nothing to terminate.
+ * then "terminating the instance". A run stopped before it trained, or whose instance was terminated by hand while it
+ * trained, has nothing to copy (its release is still logged); one whose instance went while its weights were copied
+ * keeps the copy line; one on a remote FOLO server (no instance) has nothing to terminate.
  */
 export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, dataset: string): LogLine[] {
   const booted = c.launchedAt + c.provisionMs;
@@ -289,9 +290,13 @@ export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, datase
   lines.push([booted + c.bootMs, 'info', `worker checked: folo 0.1.0 on ${c.offer.gpu} (vulkan); uploading ${dataset} (${bytes(c.uploadBytes)})`]);
   if (end > start) lines.push([start, 'info', 'upload done; the worker trains']);
   if (c.lost) {
-    lines.push([end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
-    // The release still asks for it (its id stays the run's), with nothing to copy: 1 ms after the loss, so after the
-    // trainer's last line and the failure, stamped at the loss at the latest. Its confirmation is the instance list's.
+    // Lost while its weights were copied (the DELETE came after training ended; `end` is then training's end): the
+    // copy had begun and says so first, as the executor's collect did. 1 ms after `end`, so after the trainer's lines.
+    const collecting = end > start && (c.endAt ?? end) - trainEnd >= 1;
+    if (collecting) lines.push([end + 1, 'info', 'the run ended on the worker; copying its weights']);
+    lines.push([collecting ? end + 1 : end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
+    // The release still asks for it (its id stays the run's): 1 ms after the loss, so after the trainer's last line
+    // and the failure, stamped at the loss at the latest. Its confirmation is the instance list's.
     if (c.instanceId) lines.push([end + 1, 'info', 'terminating the instance']);
   } else {
     if (end > start) {

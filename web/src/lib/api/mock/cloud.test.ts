@@ -2,6 +2,7 @@
 // cloud run through every phase on the clock, with its instance and its cost.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunCloud, TrainConfig } from '../types';
+import { mergeLogs } from '../live';
 import { MockApi } from './index';
 import { cloudLog, REMOTE_OFFER, RTX_4090, RUNPOD_OFFERS, trainAt, type CloudTimeline } from './cloud';
 
@@ -230,18 +231,24 @@ describe('mock cloud: runs and instances', () => {
     expect(gone).not.toContain('terminated folo-run_c7b1-9d03');
   });
 
-  it('releases an instance terminated by hand while its weights are collected after the final epoch line', async () => {
-    // The loss is stamped at the end of training (the mock's clock clamps it there): the release line follows the
-    // final epoch, never before it.
+  it('keeps the copy line of an instance terminated by hand while its weights are collected, then releases it', async () => {
+    // The loss is stamped at the end of training (the mock's clock clamps it there): the copy that had begun, then the
+    // release, follow the final epoch. A log read before the DELETE (the run page during collecting) merged with the
+    // one read after (its final history, `mergeLogs`) says each once, copying before terminating (review round 3).
     const api = new MockApi('normal', 0);
     const created = await api.createRun(await cloudConfig(api));
     vi.setSystemTime(NOW + 6000 + 600_000 + 1750);
     expect((await api.run(created.id)).cloud!.phase).toBe('collecting');
+    const before = (await api.runLogs(created.id, 5000)).lines;
+    expect(before.map((l) => l.message)).toContain(COPYING);
     const inst = (await api.cloudInstances()).find((i) => i.run_id === created.id)!;
     await api.terminateCloudInstance(inst.id);
-    const lines = (await api.runLogs(created.id, 5000)).lines.map((l) => l.message);
-    expect(lines.indexOf(TERMINATING)).toBeGreaterThan(lines.findIndex((m) => m.startsWith('epoch 10/10')));
-    expect(lines).not.toContain(COPYING);
+    const after = (await api.runLogs(created.id, 5000)).lines;
+    for (const lines of [after.map((l) => l.message), mergeLogs(after, before).map((l) => l.message)]) {
+      expect(lines.filter((m) => m === COPYING)).toHaveLength(1);
+      expect(lines.indexOf(COPYING)).toBeGreaterThan(lines.findIndex((m) => m.startsWith('epoch 10/10')));
+      expect(lines.indexOf(TERMINATING)).toBeGreaterThan(lines.indexOf(COPYING));
+    }
   });
 
   it('has no instance to terminate on a remote FOLO server, and still copies the weights home', () => {
