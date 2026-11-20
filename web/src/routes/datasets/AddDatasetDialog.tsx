@@ -5,7 +5,7 @@ import Tags from '$icons/tags';
 import { bindable, computed, createUniqueId, css, effect, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
-import { count, duration } from '$lib/format';
+import { count, duration, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import { parseSeed, seedArrows, seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
@@ -28,6 +28,8 @@ type Mode = 'folder' | 'synthetic';
 
 /** Most classes of a generated set: each class is one of the generator's 8 shapes (docs/API.md). */
 const MAX_SHAPES = 8;
+/** The most images the server generates (folo-server `MAX_SYNTHETIC_IMAGES`, docs/API.md); the least is 1. */
+const MAX_IMAGES = 100_000;
 
 export interface AddDatasetDialogProps {
   open?: boolean;
@@ -127,7 +129,8 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     const images = sImages.get();
     return {
       name: nameError(synthName.get()),
-      images: images === null || !Number.isFinite(images) || images < 10 || images > 20000 ? 'Between 10 and 20,000.' : null,
+      // The server's limits, as Desktop states them; a fraction is refused, never rounded (10.5 was sent as 11).
+      images: images === null || !Number.isInteger(images) || images < 1 || images > MAX_IMAGES ? `A whole number from 1 to ${num(MAX_IMAGES)}.` : null,
       classes: classes.get().length === 0 ? 'Add at least one class.' : null,
       seed: seedError(seed.get()),
     };
@@ -175,7 +178,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     error.set(undefined);
     if (!valid.get() || busy.get()) return;
     const m = mode.get();
-    const images = Math.round(sImages.get() ?? 0);
+    const images = sImages.get() ?? 0;
     const what = m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`;
     work.set({ what, since: Date.now() });
     const mine = { yes: true };
@@ -374,7 +377,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                 </Field>{' '}
                 <div class="row">
                   <Field label="Images" for={`${uid}-images`} error={show(errs.get().images)}>
-                    <Input id={`${uid}-images`} type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.get().images)} />
+                    <Input id={`${uid}-images`} type="number" min={1} max={MAX_IMAGES} step={1} bind:value={sImages} invalid={!!show(errs.get().images)} />
                   </Field>{' '}
                   <Field label="Seed" for={`${uid}-seed`} error={show(errs.get().seed)}>
                     <Input id={`${uid}-seed`} inputmode="numeric" bind:value={seed} onkeydown={seedArrows(seed)} invalid={!!show(errs.get().seed)} />

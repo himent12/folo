@@ -142,6 +142,21 @@ describe('resolution', () => {
 });
 
 describe('importing', () => {
+  // #382 (after #342): a zero-width name showed as an empty one and an empty "Remove " label; a control character or a
+  // bidi override showed its own way in each list. Studio's import only, for now (Desktop's twin and the shared cases
+  // follow together); a theme stored before the rule stays installed.
+  it('refuses an imported name with control or invisible characters, or with nothing visible', () => {
+    const named = (name: string) => parseThemeFile(JSON.stringify(file({ name })));
+    const hidden = 'name: must not hold control or invisible characters';
+    for (const name of ['​', 'A​B', 'A\u0007B', 'A\nB', 'A\tB', 'A‮B', 'A B', '﻿A'])
+      expect(named(name), JSON.stringify(name)).toEqual({ ok: false, error: hidden });
+    for (const name of ['‍', '́́', '⠀', 'ㅤ', 'ᅟᅠ', 'ﾠ ⠀']) expect(named(name), JSON.stringify(name)).toEqual({ ok: false, error: 'name: must have a visible character' });
+    // Joiners inside emoji sequences and scripts, variation selectors, accents, CJK and emoji stay names.
+    for (const name of ['👩‍💻 night', 'می‌خواهم', '☀️ day', 'Café', '夜班', '🌈'.repeat(40)]) expect(named(name).ok, JSON.stringify(name)).toBe(true);
+    expect(readStoredThemes([file({ name: 'A​B' })]).map((t) => t.name)).toEqual(['A​B']);
+    expect(readStoredThemes([file({ name: 'ㅤ' })]).map((t) => t.name)).toEqual(['ㅤ']);
+  });
+
   it('installs, replaces by id in place, and says why a file was refused', () => {
     const parsed = (name: string, v: unknown): ParsedFile => ({ file: name, ...parseThemeFile(JSON.stringify(v)) });
     const { themes: out, results } = importThemes([file({ id: 'a', name: 'A' }), file({ id: 'b', name: 'B' })], [
