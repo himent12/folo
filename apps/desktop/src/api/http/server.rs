@@ -118,6 +118,9 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
     }
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // `folo serve` answers its health itself: a redirect is something else's (and a hop that
+        // timed out connecting would look like the first one, so the request went again, #308).
+        .max_redirects(0)
         .timeout_connect(Some(connect))
         .timeout_global(Some(Duration::from_secs(10)))
         .proxy(proxy)
@@ -138,7 +141,8 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
 /// once more (the server takes its queue meanwhile) before nobody is said to be there. Only a failure to
 /// connect is tried again (#308): an answer is final, and so is a connection that was made and then reset,
 /// aborted or timed out, which a second attempt would only make wait as long again (a listener that accepts
-/// and resets after `t` cost `2t`) or send twice.
+/// and resets after `t` cost `2t`) or send twice. The call follows no redirect (`probe_through`), so a
+/// failure to connect is always the first hop's.
 pub(super) fn ask_health<T>(
     found: Found,
     mut call: impl FnMut() -> Result<T, ureq::Error>,

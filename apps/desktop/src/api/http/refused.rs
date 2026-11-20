@@ -22,13 +22,16 @@
 //! probe then could not connect, the probe tries once more before it says nobody is there
 //! (`server::ask_health`; only a failure to connect, never a connection that was made and then reset).
 //!
-//! Two corners stay (#308). The second attempt gets its own half second, so a server that stops listening
-//! between the check and the probe (a window of about a millisecond) is found gone after 1.0 s instead of
-//! 0.5 s. And the check's connection is not handed to the probe: on a listener with exactly one free slot
-//! in its accept queue that does not accept for longer than both attempts (a saturated port forwarder, not
-//! a `folo serve`, which keeps a queue of 1024 and accepts at once), both attempts time out connecting and
-//! the app says nobody is there. Reusing the check's socket for the health request would close that, but
-//! it would need the HTTP client to take a socket it did not open.
+//! Two corners stay (#308). The second attempt gets its own half-second connect limit, so a server that
+//! stops listening between the check and the probe (usually about a millisecond apart, longer on a loaded
+//! machine) can take up to about 1.0 s to be found gone instead of 0.5 s, when both attempts wait out their
+//! limit (Windows turns a connection away only after its SYN retries; one refused at once ends sooner). And
+//! the check's connection is not handed to the probe: on a listener whose accept queue has exactly one
+//! free slot and that takes nothing from it for longer than both attempts, both time out connecting and the
+//! app says nobody is there. A `folo serve` asks for a queue of 128 (tokio's listener, through mio, on
+//! Windows), but it binds its port before it opens its store and only accepts after: during a slow store
+//! open, other connections can fill all but one slot. Reusing the check's socket for the health request
+//! would close that, but it would need the HTTP client to take a socket it did not open.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
