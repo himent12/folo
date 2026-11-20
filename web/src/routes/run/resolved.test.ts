@@ -103,6 +103,10 @@ describe('the EMA window (PR #399, Run.resolved.ema_decay)', () => {
     expect(emaSetting({ ...r, ema_decay: 0.99 })).toEqual({ value: 'window 100 steps' });
     expect(emaSetting({ ...r, ema_decay: 1 - 1 / 350 })).toEqual({ value: 'window 350 steps' });
     expect(emaSetting({ ...r, ema_decay: 0 })).toEqual({ value: 'window 1 step' });
+    // Ties to even, as Rust's `{:.0}` writes the trainer's line: 2.5 → 2, 4.5 → 4, 3.5 → 4.
+    expect(emaSetting({ ...r, ema_decay: 0.6 })).toEqual({ value: 'window 2 steps' });
+    expect(emaSetting({ ...r, ema_decay: 1 - 1 / 4.5 })).toEqual({ value: 'window 4 steps' });
+    expect(emaSetting({ ...r, ema_decay: 1 - 1 / 3.5 })).toEqual({ value: 'window 4 steps' });
     const { ema_decay: _, ema_tau: __, ...older } = r;
     expect(emaSetting(older)).toBeNull();
     expect(emaSetting({ ...r, ema_decay: null as unknown as number })).toBeNull();

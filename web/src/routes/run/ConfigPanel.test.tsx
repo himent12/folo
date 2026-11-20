@@ -89,7 +89,9 @@ describe('ConfigPanel', () => {
   });
 
   it('has no EMA row for a run without an EMA or from a server older than the field', () => {
-    const { ema_decay: _, ema_tau: __, ...older } = resolveTrain(config, 1920, 8, 120);
+    const full = resolveTrain(config, 1920, 8, 120);
+    expect(rows(full)['EMA']?.textContent).toBe('window 10000 steps');
+    const { ema_decay: _, ema_tau: __, ...older } = full;
     expect(rows(older)['EMA']).toBeUndefined();
     expect(rows(null)['EMA']).toBeUndefined();
   });

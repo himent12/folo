@@ -101,7 +101,9 @@ export function momentumSetting(resolved: ResolvedTrain): [label: string, Settin
 export function emaSetting(resolved: ResolvedTrain): Setting | null {
   const d = resolved.ema_decay;
   if (typeof d !== 'number' || !(d < 1)) return null;
-  const n = Math.round(1 / (1 - d));
+  // The log line's `{:.0}` rounds a tie to even: a window of 2.5 steps is "2".
+  const w = 1 / (1 - d);
+  const n = w - Math.floor(w) === 0.5 && Math.floor(w) % 2 === 0 ? Math.floor(w) : Math.round(w);
   return { value: `window ${n} ${n === 1 ? 'step' : 'steps'}` };
 }
 

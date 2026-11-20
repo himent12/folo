@@ -272,8 +272,8 @@ export function instanceAt(c: CloudTimeline, runId: string, trainEnd: number, no
 /**
  * The hand-over's lines in the run's log as far as `now`, before and after the trainer's own. After training, the
  * real control plane's words (folo-server's `cloud/executor`): "the run ended on the worker; copying its weights",
- * then "terminating the instance". A run lost with its instance has nothing to copy or terminate, one stopped before
- * it trained nothing to copy, and one on a remote FOLO server (no instance) no instance to terminate.
+ * then "terminating the instance". A run whose instance was terminated by hand, or stopped before it trained, has
+ * nothing to copy (its release is still logged), and one on a remote FOLO server (no instance) nothing to terminate.
  */
 export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, dataset: string): LogLine[] {
   const booted = c.launchedAt + c.provisionMs;
@@ -288,8 +288,14 @@ export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, datase
   }
   lines.push([booted + c.bootMs, 'info', `worker checked: folo 0.1.0 on ${c.offer.gpu} (vulkan); uploading ${dataset} (${bytes(c.uploadBytes)})`]);
   if (end > start) lines.push([start, 'info', 'upload done; the worker trains']);
-  if (c.lost) lines.push([end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
-  else {
+  if (c.lost) {
+    lines.push([end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
+    // The release still asks for it (its id stays the run's): nothing to copy, and the termination is confirmed.
+    if (c.instanceId) {
+      lines.push([end, 'info', 'terminating the instance']);
+      lines.push([end + CONFIRM_MS, 'info', `terminated ${c.instanceName}`]);
+    }
+  } else {
     if (end > start) {
       // 1 ms after `end`, where the trainer's final epoch line is stamped: the log sorts by time, and this follows it.
       lines.push([end + 1, 'info', 'the run ended on the worker; copying its weights']);

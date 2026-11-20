@@ -208,7 +208,7 @@ describe('mock cloud: runs and instances', () => {
     expect(at(TERMINATING)).toBeLessThan(at('terminated folo-run_c3d5-4c1a'));
   });
 
-  it('has nothing to copy for a run stopped before it trained, nor anything after it for one that lost its instance', async () => {
+  it('has nothing to copy for a run stopped before it trained or one whose instance was terminated by hand, and releases both', async () => {
     const api = new MockApi('normal', 0);
     const created = await api.createRun(await cloudConfig(api));
     vi.setSystemTime(NOW + 3000);
@@ -223,7 +223,10 @@ describe('mock cloud: runs and instances', () => {
     const gone = (await lost.runLogs('run_c7b1')).lines.map((l) => l.message);
     expect(gone).toContain('instance folo-run_c7b1-9d03 was terminated before the run ended');
     expect(gone).not.toContain(COPYING);
-    expect(gone).not.toContain(TERMINATING);
+    // The executor's release still has the instance's id: it says so after the loss, and the termination is confirmed.
+    const lostAt = gone.indexOf('instance folo-run_c7b1-9d03 was terminated before the run ended');
+    expect(gone.indexOf(TERMINATING)).toBeGreaterThan(lostAt);
+    expect(gone.indexOf('terminated folo-run_c7b1-9d03')).toBeGreaterThan(gone.indexOf(TERMINATING));
   });
 
   it('has no instance to terminate on a remote FOLO server, and still copies the weights home', () => {
