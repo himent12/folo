@@ -2,6 +2,7 @@
 import { flush as flushSync } from 'fw';
 import { fromHTML, render as renderFw, type Rendered } from '../../../framework/testing';
 import { describe, expect, it, vi } from 'vitest';
+import { hub } from '$lib/api/index';
 import type { Run, SystemInfo, TrainConfig } from '$lib/api/types';
 import Outcome, { type OutcomeProps } from './Outcome';
 
@@ -153,6 +154,23 @@ describe('Outcome', () => {
     r.buttons[0]?.click();
     expect(onresume).toHaveBeenCalledOnce();
     r.done();
+  });
+
+  // #382: on `folo serve --mock` Resume answered 501 (its health lists no `run_resume`). Offered where the server lists
+  // it, and where the list is unknown (an older server, the in-browser demo), as before.
+  it('offers Resume only where the server can resume', () => {
+    const run = failed('dataset folder D:/data/shapes-hard is gone');
+    for (const [features, labels] of [
+      [['queue_control', 'run_cursors'], ['Details']],
+      [['queue_control', 'run_resume'], ['Resume', 'Details']],
+      [null, ['Resume', 'Details']],
+    ] as const) {
+      hub.features = features;
+      const r = render(run);
+      expect(r.labels, JSON.stringify(features)).toEqual(labels);
+      r.done();
+    }
+    hub.features = null;
   });
 
   it('says a failure in plain words by its code, links the dataset, and keeps the raw error under Details', () => {

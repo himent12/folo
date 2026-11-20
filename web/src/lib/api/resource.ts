@@ -81,6 +81,7 @@ export class Resource<T> {
 
   constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions = {}) {
     this.#fetcher = fetcher;
+    let first = true;
     effect(() => {
       if (hub.mode === 'connecting') return;
       const epoch = hub.epoch;
@@ -93,8 +94,10 @@ export class Resource<T> {
         });
       }
       const ctrl = new AbortController();
-      // Reactive reads inside the fetcher (before its first await) are tracked by this effect.
-      const promise = together(() => fetcher(ctrl.signal)).value;
+      // Reactive reads inside the fetcher (before its first await) are tracked by this effect. The first one, as it
+      // mounts, may take a read another part of the screen just made (./share, MOUNT_REUSE_MS).
+      const promise = together(() => fetcher(ctrl.signal), first).value;
+      first = false;
       untrack(() => void this.#settle(promise, ctrl, false));
       return () => {
         // Invalidate whatever is in flight (including refreshes started since), so nothing lands after cleanup.

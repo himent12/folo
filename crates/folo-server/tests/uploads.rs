@@ -542,4 +542,10 @@ async fn the_mock_has_no_uploads() {
     let sys: SystemResponse = ok(&app, bare("GET", "/api/system"), StatusCode::OK).await;
     assert!(sys.features.iter().any(|f| f == FEATURE_RUN_CURSORS));
     assert!(!sys.features.iter().any(|f| f == FEATURE_UPLOADS || f == FEATURE_RUN_CHECKPOINT));
+    // Nor resuming (its `resume_run` is the store default's 501): Studio offers Resume where this is listed (#382).
+    assert!(!sys.features.iter().any(|f| f == FEATURE_RUN_RESUME));
+    let real = TestDir::new("uploads-features");
+    let app = Server::new(Arc::new(open(&real.join("home"))), Options::default()).router();
+    let h: Health = ok(&app, bare("GET", "/api/health"), StatusCode::OK).await;
+    assert!(h.features.iter().any(|f| f == FEATURE_RUN_RESUME));
 }

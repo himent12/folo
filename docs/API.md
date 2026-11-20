@@ -84,6 +84,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
+  `run_resume` (`resume_run_id` on `POST /api/runs`; the mock server answers it `501 not_implemented` and leaves
+  it out, so a client offers Resume only where it is listed or the list is unknown),
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
   export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,

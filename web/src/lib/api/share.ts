@@ -5,7 +5,11 @@
 //   system, the models, the datasets); a reconnect refetches everything at once. Inside `together(fn)` (a Resource's
 //   fetcher, run synchronously) a read on the shared Api (`shareApi`) joins an identical read issued earlier in the same
 //   turn (before the next microtask), so they get the same answer at the same time, which is what separate requests
-//   issued at that moment would have returned. A read issued later is a request of its own, as before.
+//   issued at that moment would have returned. A read issued later is a request of its own, as before, but for one
+//   case: a Resource's first read, as it mounts (`together(fn, true)`), takes an identical read still in flight or
+//   answered within `MOUNT_REUSE_MS`, unless a write went out on that Api since. The parts of a screen mount a few
+//   milliseconds apart (the shell's run list and Overview's, Overview's system and its machine strip's: issue #309,
+//   item 2), each with a request of its own for what the other had just been told. Polls and refreshes always ask.
 // - Polls that tick together are one timer (`pollTogether`): pollers started in the same turn with the same period
 //   share an interval, so their ticks run in one task and their identical reads are one request (above). Each poller
 //   keeps the phase it started with, as a timer of its own would. While the tab is hidden the shared timer stops (the
@@ -82,18 +86,26 @@ interface Shared {
 
 /** The read keys a `together` scope saw, in order; null outside one. */
 let scope: string[] | null = null;
+/** The scope is a Resource's first read (it may take a recent answer: the top of this file). */
+let mounting = false;
+
+/** How old an answer a mounting Resource takes instead of asking again: the parts of one screen mounting, not more. */
+export const MOUNT_REUSE_MS = 1000;
 
 /**
  * Runs `fn` with reads on a shared Api grouped (see the top of this file) and returns what it returned, with the keys
  * of the reads it issued synchronously (`runs()`, `run("run_7d1e")`), joined: what identifies the data it loads.
  */
-export function together<T>(fn: () => T): { value: T; key: string } {
+export function together<T>(fn: () => T, mount = false): { value: T; key: string } {
   const prev = scope;
+  const prevMounting = mounting;
   const keys: string[] = (scope = []);
+  mounting = mount;
   try {
     return { value: fn(), key: keys.join(' ') };
   } finally {
     scope = prev;
+    mounting = prevMounting;
   }
 }
 
@@ -146,6 +158,8 @@ export function shareApi(api: Api): Api {
   let s = shared.get(api);
   if (s) return s;
   const fns = new Map<PropertyKey, unknown>();
+  /** This Api's reads in flight or answered (`at`: when), for a mounting Resource; emptied by any write. */
+  const recent = new Map<string, { entry: Shared; at: number | null }>();
   s = new Proxy(api, {
     get(target, prop) {
       const v = Reflect.get(target, prop, target);
@@ -156,12 +170,16 @@ export function shareApi(api: Api): Api {
         const name = String(prop);
         const read = READS.has(name);
         const wrapped = (...args: unknown[]) => {
+          // A write may change what any read answers: nothing before it is taken again.
+          if (!read) recent.clear();
           if (!read || scope === null) return method.apply(target, args);
           const signalAt = args.findIndex((a) => a instanceof AbortSignal);
           const signal = signalAt >= 0 ? (args[signalAt] as AbortSignal) : undefined;
           const key = `${name}(${args.map((a, i) => (i === signalAt ? '' : a === undefined ? '-' : JSON.stringify(a))).join(',')})`;
           scope.push(key);
           let entry = joinable.get(key);
+          const was = mounting && !entry ? recent.get(key) : undefined;
+          if (was && (was.at === null || Date.now() - was.at <= MOUNT_REUSE_MS)) entry = was.entry;
           if (!entry) {
             const ctrl = new AbortController();
             const call = [...args];
@@ -175,9 +193,16 @@ export function shareApi(api: Api): Api {
             }
             // Nobody may be left to see a failure (every caller gave up): never an unhandled rejection.
             promise.catch(() => {});
-            entry = { promise, ctrl, waiting: 0, callers: 0 };
+            const made: Shared = (entry = { promise, ctrl, waiting: 0, callers: 0 });
             joinable.set(key, entry);
             endOfTurn();
+            // Kept for a mounting Resource while in flight and for a moment once answered; a failure is never taken.
+            const mine = { entry: made, at: null as number | null };
+            recent.set(key, mine);
+            promise.then(
+              () => (mine.at = Date.now()),
+              () => recent.get(key) === mine && recent.delete(key),
+            );
           }
           return join(entry, signal);
         };

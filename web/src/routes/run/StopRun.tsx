@@ -21,12 +21,24 @@ export function stopDescription(r: Pick<Run, 'status' | 'cloud'>, done: number):
     : 'Training stops after the current step. The last checkpoint is kept and saved as a model.';
 }
 
-/** The toast once the server took the stop of `r` (as it now is) with `done` epochs finished. */
-export function stoppedToast(r: Pick<Run, 'name' | 'cloud' | 'epoch'>, done: number): void {
+/**
+ * The toast once the server took the stop of `r` (as it now is) with `done` epochs finished. Until the run has stopped
+ * it says what is certain: a stop after the last batch changes nothing (the run completes with all its results,
+ * docs/API.md), so "nothing is saved" is not known yet. A run the stream already reports completed says so instead.
+ */
+export function stoppedToast(r: Pick<Run, 'name' | 'cloud' | 'epoch' | 'status'>, done: number): void {
   // page-level: both callers have closed their confirm first.
+  if (r.status === 'completed') {
+    toast.info(`${r.name} completed`, 'It finished before the stop took effect, with all its results.');
+    return;
+  }
   toast.info(
     `Stopping ${r.name}`,
-    r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : done ? `The checkpoint from epoch ${done} is kept.` : 'No epoch had finished, so nothing is saved.',
+    r.cloud && r.epoch === 0
+      ? 'Its instance is released; nothing had trained yet.'
+      : done
+        ? `The checkpoint from epoch ${done} is kept.`
+        : 'No epoch had finished yet. Unless one finishes before it stops, nothing is saved.',
   );
 }
 

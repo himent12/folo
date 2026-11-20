@@ -640,6 +640,19 @@ export class LiveRun {
   }
 
   /**
+   * Stops the run through `call` (POST /api/runs/{id}/stop, or a resumed run's removal from the queue). The answer is
+   * the run as the server had it when it took the stop: a status event received meanwhile (the run completed after its
+   * last batch, say) is newer, so the view keeps what the stream says. Returns the run as the view now has it.
+   */
+  async stop(call: () => Promise<Run | null>): Promise<Run | null> {
+    const seq = this.#statusSeq;
+    const r = await call();
+    if (!r) return null;
+    if (this.#statusSeq === seq || !this.run) this.run = keepStepsPerEpoch(r, this.run);
+    return this.run ?? r;
+  }
+
+  /**
    * Drops the steps after the last finished epoch (1-based; a resumed run repeats them), moves the run there and
    * starts a replay.
    */

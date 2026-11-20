@@ -69,6 +69,14 @@ const NONE: string[] = [];
  */
 export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
 
+/** `POST /api/runs` takes `resume_run_id` (docs/API.md, `features`): the mock server lists it not, and answers 501. */
+export const RESUME_FEATURE = 'run_resume';
+/**
+ * Whether Resume (or Start again) is offered: not on a server that said it cannot resume (`folo serve --mock`; issue
+ * #382: the palette's Resume answered 501 there). Unknown (an older server, the in-browser demo) is offered, as before.
+ */
+export const canResume = () => !hub.lacks(RESUME_FEATURE);
+
 /**
  * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A
  * cloud run's is its worker's (a remote server or an instance restarted), not this server's, which ran on.
@@ -190,11 +198,12 @@ export default function Outcome(props: OutcomeProps) {
     </>
   );
   /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
-  const resumeAction = () => (
-    <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
-      {canContinue(props.run) ? 'Resume' : 'Start again'}
-    </Button>
-  );
+  const resumeAction = () =>
+    canResume() ? (
+      <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
+        {canContinue(props.run) ? 'Resume' : 'Start again'}
+      </Button>
+    ) : null;
 
   return (
     <>

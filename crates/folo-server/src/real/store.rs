@@ -65,6 +65,7 @@ impl Store for RealStore {
             folo_api::FEATURE_UPLOADS,
             folo_api::FEATURE_RUN_CURSORS,
             folo_api::FEATURE_RUN_CHECKPOINT,
+            folo_api::FEATURE_RUN_RESUME,
             folo_api::FEATURE_CLOUD,
         ]
     }
