@@ -88,7 +88,7 @@ impl FoloApp {
                         _ if never_started => "It hasn't started, so nothing is lost: it leaves the queue and the runs list, and the runs behind it move up.".to_string(),
                         _ if waiting => "It stops waiting and keeps what it trained so far. You can resume it later.".to_string(),
                         Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
-                        Some(None) => "Stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
+                        Some(None) => "Stops after the current batch. No epoch has finished yet: unless one finishes first, nothing is saved.".to_string(),
                         None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
                     }),
             );

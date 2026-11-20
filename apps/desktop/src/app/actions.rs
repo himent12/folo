@@ -456,41 +456,22 @@ impl FoloApp {
                 Ok(run) => {
                     // Keep the event subscription: the server may answer `stopping` and still send
                     // the last steps, a final validation and the terminal status.
-                    let name = run.name.clone();
-                    let epoch = run.epoch;
-                    // No checkpoint before the first epoch is validated: nothing is claimed then.
-                    let kept = run.can_continue();
-                    let stopping = run.status == RunStatus::Stopping;
-                    let dequeued = prev == Some(RunStatus::Queued) && run.cloud.is_none();
+                    // The answer applies only over the Stopping shown since the stop was sent. The
+                    // stream sends every change of status (docs/API.md), so once it said something
+                    // else (the run completed before the stop took effect, or ended, or was resumed
+                    // elsewhere), what is shown is newer than the answer, and stays.
                     if let Some(runs) = this.store.runs.ready_mut()
-                        && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
+                        && let Some(slot) =
+                            runs.iter_mut().find(|r| r.id == run.id && r.status == RunStatus::Stopping)
                     {
-                        *slot = run;
+                        *slot = run.clone();
                     }
                     this.changed_here(List::Runs, cx);
-                    let nothing = "No epoch had finished, so nothing is saved.".to_string();
-                    let (title, body) = if dequeued {
-                        // A resumed run that waited to continue: it keeps what it trained.
-                        (
-                            format!("Removed {name} from the queue"),
-                            if kept { "It keeps what it trained so far.".to_string() } else { nothing },
-                        )
-                    } else if stopping {
-                        (
-                            format!("Stopping {name}"),
-                            if kept {
-                                "Finishing the current batch; the last finished epoch's checkpoint is kept."
-                                    .to_string()
-                            } else {
-                                format!("Finishing the current batch. {nothing}")
-                            },
-                        )
-                    } else if kept {
-                        (format!("Stopped {name}"), format!("Last checkpoint kept (epoch {epoch})."))
-                    } else {
-                        (format!("Stopped {name}"), nothing)
-                    };
-                    this.toast(Tone::Neutral, title, Some(body.into()), cx);
+                    let shown = this.store.run(&run.id).cloned().unwrap_or(run);
+                    let dequeued = prev == Some(RunStatus::Queued) && shown.cloud.is_none();
+                    if let Some((title, body)) = stop_toast(&shown, dequeued) {
+                        this.toast(Tone::Neutral, title, Some(body.into()), cx);
+                    }
                 }
                 Err(e) => {
                     // Unless events moved it on meanwhile, so Stop is offered again.
@@ -531,6 +512,38 @@ impl FoloApp {
                 Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
+    }
+}
+
+/// The toast for a stop the server took, told from run `r` as it is now shown (the stream may have
+/// moved it on past the answer). A run shown completed or failed had its end's own toast, and one
+/// shown queued or running (resumed since, or its `stopping` not streamed yet) gets none: its page
+/// says what the stream reports. An epoch whose last batch is done when the stop comes still
+/// validates and saves (folo-vision `train/run.rs`), so a stop under way with no finished epoch
+/// doesn't yet know that nothing is saved.
+pub(super) fn stop_toast(r: &Run, dequeued: bool) -> Option<(String, &'static str)> {
+    let (name, kept) = (&r.name, r.can_continue());
+    let nothing = "No epoch had finished, so nothing is saved.";
+    match r.status {
+        // A resumed run that waited to continue: it keeps what it trained.
+        RunStatus::Stopping | RunStatus::Stopped if dequeued => Some((
+            format!("Removed {name} from the queue"),
+            if kept { "It keeps what it trained so far." } else { nothing },
+        )),
+        RunStatus::Stopping => Some((
+            format!("Stopping {name}"),
+            if kept {
+                "Finishing the current batch; the last finished epoch's checkpoint is kept."
+            } else {
+                "Finishing the current batch. No epoch had finished yet. Unless one finishes before it stops, \
+                 nothing is saved."
+            },
+        )),
+        // No epoch number: a stopped run's `epoch` is the one its last step was in, maybe unfinished.
+        RunStatus::Stopped => {
+            Some((format!("Stopped {name}"), if kept { "Last checkpoint kept." } else { nothing }))
+        }
+        _ => None,
     }
 }
 
