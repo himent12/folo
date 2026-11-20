@@ -842,21 +842,6 @@ connection: close
         assert!(requests.recv().unwrap().starts_with("GET /api/health "));
     }
 
-    /// #308 review: a redirect to a dead port was followed, its hop timed out connecting (Windows SYN
-    /// retries), and the health request went again. A redirect is not followed: one request, no server.
-    #[test]
-    fn a_redirected_health_is_asked_once() {
-        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let redirect = format!(
-            "HTTP/1.1 302 Found\r\nlocation: http://{gone}/api/health\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-        );
-        let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
-        let (url, requests) = canned_server(vec![redirect.into_bytes(), health]);
-        assert!(!super::server::probe_through(&url, None), "a redirect is not folo serve's health");
-        assert!(requests.recv().unwrap().starts_with("GET /api/health "));
-        assert!(requests.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "asked again");
-    }
-
     /// The probe's second attempt (#308), with scripted answers: taken once, and only when the check saw a
     /// listener and the first attempt never connected; a connection that was made and then reset, or
     /// timed out reading, is final (a listener that resets after `t` cost `2t`, and a request was sent twice).

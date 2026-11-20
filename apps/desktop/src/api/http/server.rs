@@ -341,6 +341,56 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt,
 mod tests {
     use super::*;
 
+    /// Answers each request on `listener` with `answer` until `stop`, and says how many it had (a
+    /// connection closed without a request, the probe's check, is none).
+    fn serve(listener: &std::net::TcpListener, answer: &str, stop: &std::sync::atomic::AtomicBool) -> usize {
+        use std::io::{Read, Write};
+        listener.set_nonblocking(true).unwrap();
+        let mut asked = 0;
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let Ok((mut sock, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            sock.set_nonblocking(false).unwrap();
+            let mut buf = [0u8; 4096];
+            if sock.read(&mut buf).unwrap_or(0) > 0 {
+                asked += 1;
+                let _ = sock.write_all(answer.as_bytes());
+            }
+        }
+        asked
+    }
+
+    /// #390 review: a health answered with a redirect was followed (and a hop that timed out
+    /// connecting sent the health request again). It is not: here the redirect leads to a working
+    /// health, which is never asked, and the address that redirects is no `folo serve`.
+    #[test]
+    fn a_redirected_health_is_not_followed() {
+        let (redirects, health) = (
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+        );
+        let (from, to) = (redirects.local_addr().unwrap(), health.local_addr().unwrap());
+        let moved = format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://{to}/api/health\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let body = r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#;
+        let ok = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let (found, asked) = std::thread::scope(|s| {
+            let first = s.spawn(|| serve(&redirects, &moved, &stop));
+            let second = s.spawn(|| serve(&health, &ok, &stop));
+            let found = probe_through(&format!("http://{from}"), None);
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            (found, (first.join().unwrap(), second.join().unwrap()))
+        });
+        assert_eq!((found, asked), (false, (1, 0)), "asked once, and the redirect not followed");
+    }
+
     #[test]
     fn only_this_machines_addresses_are_loopback() {
         for url in [
