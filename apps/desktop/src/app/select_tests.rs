@@ -79,8 +79,12 @@ fn new_loops_first_teacher_can_be_picked_when_none_is_set() {
     assert_eq!(teacher(&mut app, window), Some(first), "by keys");
 }
 
+/// The class stored for the open dataset (even past its classes).
 fn class_filter(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> Option<u32> {
-    drive(app, window, |this, _, _| this.ds_class)
+    drive(app, window, |this, _, _| {
+        let Route::Dataset(open) = &this.route else { return None };
+        this.ds_class.as_ref().filter(|(of, _)| of == open).map(|(_, c)| *c)
+    })
 }
 
 fn open_dataset(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, route: Route) {
@@ -114,14 +118,14 @@ fn a_class_filter_stays_with_its_dataset() {
     assert_eq!(class_filter(&mut app, window), Some(1), "the same dataset keeps its filter");
     // A class past this dataset's three (its classes changed on a re-read): "All classes" clears it.
     drive(&mut app, window, |this, _, cx| {
-        this.ds_class = Some(4);
+        this.ds_class = Some(("ds_8f2c".into(), 4));
         cx.notify();
     });
     app.frame(window.into());
     click_option(&mut app, window, "ds-class", 0);
     assert_eq!(class_filter(&mut app, window), None, "by pointer");
     drive(&mut app, window, |this, _, cx| {
-        this.ds_class = Some(4);
+        this.ds_class = Some(("ds_8f2c".into(), 4));
         cx.notify();
     });
     app.frame(window.into());

@@ -2,6 +2,8 @@
 //! keyboard actions and the overlay layers (palette, dialogs, inspector, toasts).
 
 mod actions;
+#[cfg(test)]
+mod class_filter_tests;
 mod connection;
 #[cfg(test)]
 mod connection_tests;
@@ -347,10 +349,9 @@ pub struct FoloApp {
     // Datasets
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
-    pub ds_class: Option<u32>,
-    /// The dataset whose page was open last: the class filter belongs to it, so opening another
-    /// dataset clears it (its class indices mean other classes there, or none).
-    pub ds_class_of: Option<String>,
+    /// The class filter and the dataset it was set on: a class index means another class in
+    /// another dataset, or none, so it applies only there (read it through `class_filter`).
+    pub ds_class: Option<(String, u32)>,
     /// Show only images without labels (from the Empty images tile).
     pub ds_empty_only: bool,
     pub ds_boxes: bool,
@@ -677,7 +678,6 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
-            ds_class_of: None,
             ds_empty_only: false,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.

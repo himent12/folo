@@ -79,19 +79,23 @@ impl FoloApp {
             .into_any_element()
     }
 
-    /// Images of the open dataset after the split and class filters.
+    /// The class filter of dataset `id`: one set on that dataset, while its class is one of the
+    /// dataset's classes as last read (a refreshed class list, or another server, can leave it
+    /// past them). Anywhere else none: another dataset's index means another class there.
+    pub fn class_filter(&self, id: &str) -> Option<u32> {
+        let (of, class) = self.ds_class.as_ref()?;
+        let ds =
+            self.store.dataset.get(id).and_then(|l| l.ready()).or_else(|| self.store.dataset_summary(id))?;
+        (of == id && (*class as usize) < ds.classes.len()).then_some(*class)
+    }
+
     /// Indices (into the dataset's image list) that pass the split and class filters. Cached
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
-        let key = (
-            id.to_string(),
-            self.ds_split,
-            self.ds_class,
-            self.ds_empty_only,
-            all.len(),
-            all.as_ptr() as usize,
-        );
+        let class = self.class_filter(id);
+        let key =
+            (id.to_string(), self.ds_split, class, self.ds_empty_only, all.len(), all.as_ptr() as usize);
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
             && *k == key
         {
@@ -101,7 +105,7 @@ impl FoloApp {
             all.iter()
                 .enumerate()
                 .filter(|(_, m)| self.ds_split.is_none_or(|s| m.split == s))
-                .filter(|(_, m)| self.ds_class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
+                .filter(|(_, m)| class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
                 .filter(|(_, m)| !self.ds_empty_only || m.boxes.is_empty())
                 .map(|(i, _)| i)
                 .collect(),

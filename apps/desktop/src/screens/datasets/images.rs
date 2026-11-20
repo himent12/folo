@@ -69,7 +69,7 @@ impl FoloApp {
         );
         let classes: Vec<Option<u32>> =
             std::iter::once(None).chain((0..ds.classes.len() as u32).map(Some)).collect();
-        let picked = self.ds_class.filter(|&c| (c as usize) < ds.classes.len());
+        let picked = self.class_filter(&id);
         let current: SharedString =
             picked.map_or("All classes".into(), |c| ds.classes[c as usize].clone().into());
         // The 960 px window: a narrower picker and tighter gaps, so the count keeps its room.
@@ -84,19 +84,22 @@ impl FoloApp {
                 current,
                 options,
                 &classes,
-                // The stored class, even past this dataset's classes: then no option is the
+                // The class stored for this dataset, even past its classes: then no option is the
                 // choice, and "All classes" (shown) clears it by pointer or keys.
-                self.ds_class.map_or(0, |c| c as usize + 1),
+                self.ds_class.as_ref().filter(|(of, _)| *of == id).map_or(0, |(_, c)| *c as usize + 1),
                 window,
                 cx,
-                Rc::new(|this, i, _, cx| {
-                    this.ds_class = i.checked_sub(1).map(|c| c as u32);
-                    // Empty images have no class: the two filters can't both apply.
-                    if this.ds_class.is_some() {
-                        this.ds_empty_only = false;
+                Rc::new({
+                    let id = id.clone();
+                    move |this, i, _, cx| {
+                        this.ds_class = i.checked_sub(1).map(|c| (id.clone(), c as u32));
+                        // Empty images have no class: the two filters can't both apply.
+                        if this.ds_class.is_some() {
+                            this.ds_empty_only = false;
+                        }
+                        this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                        cx.notify();
                     }
-                    this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
-                    cx.notify();
                 }),
             ));
         let boxes_on = self.ds_boxes;

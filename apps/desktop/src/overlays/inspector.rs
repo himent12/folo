@@ -32,7 +32,10 @@ impl FoloApp {
             (Some(i), _) => i,
             (None, Some(i)) => {
                 self.ds_split = None;
-                self.ds_class = None;
+                // Another dataset's class filter hid nothing here: it stays with that dataset.
+                if self.ds_class.as_ref().is_some_and(|(of, _)| *of == ds) {
+                    self.ds_class = None;
+                }
                 self.ds_empty_only = false;
                 // Unfiltered, the list is every image in order.
                 i
