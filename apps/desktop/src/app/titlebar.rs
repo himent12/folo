@@ -72,7 +72,10 @@ impl FoloApp {
                     // A caption press goes to the app first and only reaches Windows (drag, double-click
                     // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
                     // root would (focusing itself does), so the chrome hides the root from the hit
-                    // test. The crumbs above it still take their own clicks. Hidden from the root, it
+                    // test. A crumb that opens a page is not the caption (it hides the band in turn):
+                    // its press is the app's, so Windows neither drags nor maximizes from it, and a
+                    // press the page does not take (the rest of a double-click that closed a dialog)
+                    // is kept from it as from the page. Hidden from the root, it
                     // leaves keyboard mode itself, as the root does for any other press.
                     .occlude()
                     .capture_any_mouse_down(self.leave_kb(cx))
@@ -98,6 +101,7 @@ impl FoloApp {
                             Some(r) => self
                                 .bind(
                                     crumb
+                                        .occlude()
                                         .cursor_pointer()
                                         .hover(|s| s.bg(t.bg_hover))
                                         .active(|s| s.bg(t.bg_active)),

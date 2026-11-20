@@ -514,21 +514,21 @@ fn retry_asks_for_system_again_while_an_answer_hangs() {
     let held = api.hold("system");
     start(&mut app, window, 1, |this, _, cx| this.refresh_system(cx));
     held.wait_held();
-    start(&mut app, window, 1, |this, _, cx| {
+    let util = start(&mut app, window, 1, |this, _, cx| {
         this.retry_all(cx);
-        this.ensure_core(cx);
+        this.store.gpu_util.len()
     });
-    assert_eq!(api.system_calls(), asked + 2, "Retry asked");
-    let seq = start(&mut app, window, 1, |this, _, _| {
-        assert!(!this.system_out && this.store.system.ready().is_some(), "its answer is in");
-        this.system_seq
-    });
-    // The hung answer lands: it is older than what is shown, and dropped.
-    let util = start(&mut app, window, 1, |this, _, _| this.store.gpu_util.len());
+    // Round 2: the hung answer lands after Retry, before the next frame asks again: it is older
+    // than what Retry asked for, and dropped.
     drop(held);
     app.run_until_idle();
     drive(&mut app, window, move |this, _, _| {
-        assert_eq!((this.system_seq, this.store.gpu_util.len()), (seq, util), "the older answer is dropped");
-        assert!(!this.system_out);
+        assert!(matches!(this.store.system, crate::store::Load::Idle), "the older answer is dropped");
+        assert_eq!(this.store.gpu_util.len(), util);
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    assert_eq!(api.system_calls(), asked + 2, "Retry asked");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.system_out && this.store.system.ready().is_some(), "its answer is in");
     });
 }

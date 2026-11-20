@@ -167,7 +167,8 @@ for its second click) or go up · `Ctrl Enter` submit the open dialog or form ·
 The app draws its own title bar (`titlebar()` in `src/app/titlebar.rs`) and tells Windows which parts of it are caption
 areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
 FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
-and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
+and the search field in the title bar take their own clicks; a crumb that opens a page is not a caption area (it is
+`.occlude()`d over the band), so its press is the app's and never moves or maximizes the window. The top few pixels (`layout.desktop_resize_edge`)
 resize the window, as the other edges do, except when it is maximized or full screen.
 
 Two folo-ui details (both GPUI's behaviour, kept) shape this; `tools/window-check.ps1` catches a regression in

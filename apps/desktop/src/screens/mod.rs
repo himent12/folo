@@ -184,8 +184,9 @@ impl FoloApp {
         // A list's answer still out (the refresh's) would undo the request asked for now.
         self.restart_lists();
         // A `/system` answer still out is not waited for: the next one is asked now, and that
-        // older one dropped when it lands (`fetch_system`).
+        // older one dropped when it lands (`fetch_system`), also before the next is asked.
         self.system_out = false;
+        self.system_seq += 1;
         let s = &mut self.store;
         s.health = Load::Idle;
         s.system = Load::Idle;

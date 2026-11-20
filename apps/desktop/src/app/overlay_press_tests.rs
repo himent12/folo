@@ -189,3 +189,58 @@ fn the_second_press_before_a_frame_does_not_close_the_dialog_twice() {
     input(&mut app, window, BACKDROP, false, 2);
     assert!(back(&mut app), "the second press closed nothing more");
 }
+
+/// The title bar's control area at `x` (its middle row): the drag band, a caption button, or none.
+fn caption_at(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    x: f32,
+) -> Option<folo_ui::WindowControlArea> {
+    use folo_ui::{Modifiers, MouseMoveEvent, PlatformInput, point, px};
+    let position = point(px(x), px(super::titlebar::TITLEBAR / 2.));
+    let ev = MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() };
+    app.simulate_input(window.into(), PlatformInput::MouseMove(ev));
+    drive(app, window, |_, w, _| w.hit_test_window_control())
+}
+
+/// Review round 2: a breadcrumb that opens a page shared the caption's hit area, so the press
+/// guard let the rest of the double-click that closed a dialog through to it. It is not the
+/// caption: its press is the app's, and that press is kept from it.
+#[test]
+fn the_double_click_that_closed_a_dialog_does_not_reach_a_breadcrumb() {
+    use folo_ui::WindowControlArea;
+    let (mut app, window) = open();
+    let page = Route::Dataset("ds_3b91".into());
+    let to_page = |app: &mut HeadlessApp| {
+        let page = page.clone();
+        drive(app, window, move |this, w, cx| {
+            this.server_mode = ServerMode::Local;
+            this.navigate(page, w, cx);
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+    };
+    to_page(&mut app);
+    // Right of the sidebar, the first place on the band that is not the band: the "Datasets" crumb.
+    let from = crate::theme::size::SIDEBAR as i32 + 2;
+    let band = (from..1280)
+        .step_by(2)
+        .find(|&x| caption_at(&mut app, window, x as f32) == Some(WindowControlArea::Drag));
+    let band = band.expect("the title bar's drag band");
+    let crumb = (band..1280).step_by(2).find(|&x| caption_at(&mut app, window, x as f32).is_none());
+    let crumb = (crumb.expect("a crumb on the band") + 4) as f32;
+    let route = |app: &mut HeadlessApp| drive(app, window, |this, _, _| this.route.clone());
+    click(&mut app, window, (crumb, super::titlebar::TITLEBAR / 2.), 1);
+    assert_eq!(route(&mut app), Route::Datasets, "the crumb opens Datasets");
+    to_page(&mut app);
+    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    app.frame(window.into());
+    assert!(synth_open(&mut app, window));
+    // The backdrop just under the crumb dismisses the form; the double-click's second press lands
+    // on the crumb.
+    click(&mut app, window, (crumb, super::titlebar::TITLEBAR + 12.), 1);
+    assert!(!synth_open(&mut app, window), "the backdrop dismisses it");
+    click(&mut app, window, (crumb, super::titlebar::TITLEBAR / 2.), 2);
+    assert_eq!(route(&mut app), page, "the rest of that double-click is not the crumb's");
+}
