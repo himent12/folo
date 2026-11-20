@@ -90,6 +90,14 @@ const RESERVED_ID = 'system';
 const trim = (s) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
 /** Length in code points, as Rust's `chars().count()` (not UTF-16 units). */
 const length = (s) => [...s].length;
+/**
+ * What a name may not hold (as Studio's import and Desktop refuse it): control characters, line and paragraph
+ * separators, and invisible format characters, but for the zero-width joiner and non-joiner of emoji sequences and
+ * some scripts.
+ */
+const HIDDEN = /[\p{Cc}\p{Zl}\p{Zp}]|(?![‌‍])\p{Cf}/u;
+/** A character that shows: a letter, digit, punctuation or symbol, but for the Hangul fillers and the blank Braille pattern. */
+const VISIBLE = /(?![ᅟᅠㅤﾠ⠀])[\p{L}\p{N}\p{P}\p{S}]/u;
 
 /**
  * Validates a parsed custom theme file (THEMES.md, Custom themes). Returns { error } with the first error as
@@ -112,6 +120,8 @@ export function validateTheme(json) {
   if (!('name' in json)) return fail('name: required');
   const name = typeof json.name === 'string' ? trim(json.name) : '';
   if (length(name) < 1 || length(name) > 40) return fail('name: must be 1 to 40 characters');
+  if (HIDDEN.test(name)) return fail('name: must not hold control or invisible characters');
+  if (!VISIBLE.test(name)) return fail('name: must have a visible character');
   const description = typeof json.description === 'string' ? trim(json.description) : undefined;
   if ('description' in json && (description === undefined || length(description) > 120)) {
     return fail('description: must be at most 120 characters');

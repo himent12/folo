@@ -177,8 +177,8 @@ function check(raw: unknown, imported: boolean): CustomThemeFile {
   const name = need('name');
   const trimmed = typeof name === 'string' ? trim(name) : '';
   if (!trimmed || length(trimmed) > NAME_MAX) throw new Error(`name: must be 1 to ${NAME_MAX} characters`);
-  // A file being imported only: a theme stored before this rule stays installed (`readStoredThemes`). Studio's rule
-  // for now; Desktop's twin (theme/custom.rs) and design/theme-cases.json follow together.
+  // A file being imported only: a theme stored before this rule stays installed (`readStoredThemes`). The same rule
+  // as design/contrast.mjs and Desktop's theme/custom.rs, whose cases are design/theme-cases.json's.
   if (imported && HIDDEN.test(trimmed)) throw new Error('name: must not hold control or invisible characters');
   if (imported && !VISIBLE.test(trimmed)) throw new Error('name: must have a visible character');
   const rawDescription = raw.description;

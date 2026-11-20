@@ -10,6 +10,7 @@ use folo_ui::{App, BoxShadow, Global, Hsla, Rgba, point, px};
 
 pub mod catalog;
 pub mod custom;
+mod name_chars;
 
 pub use catalog::{Catalog, ModePref, ThemePrefs};
 
