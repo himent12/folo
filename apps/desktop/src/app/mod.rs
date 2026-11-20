@@ -265,6 +265,9 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
+    /// The image last shown and the class filter it was shown under: when the filter changes
+    /// underneath (the dataset's class list read again), the inspector lands on it again.
+    pub shown: Option<(String, Option<u32>)>,
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
@@ -352,8 +355,9 @@ pub struct FoloApp {
     /// The class filter and the dataset it was set on: a class index means another class in
     /// another dataset, or none, so it applies only there (read it through `class_filter`).
     pub ds_class: Option<(String, u32)>,
-    /// Show only images without labels (from the Empty images tile).
-    pub ds_empty_only: bool,
+    /// Show only images without labels (from the Empty images tile), on the dataset it was set on
+    /// (read it through `empty_only`): it and the class filter never both apply to one dataset.
+    pub ds_empty_of: Option<String>,
     pub ds_boxes: bool,
     /// Grid tiles crop to fill the cell instead of showing the whole image.
     pub ds_fill: bool,
@@ -678,7 +682,7 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
-            ds_empty_only: false,
+            ds_empty_of: None,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,

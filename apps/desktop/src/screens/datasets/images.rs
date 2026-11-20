@@ -92,10 +92,19 @@ impl FoloApp {
                 Rc::new({
                     let id = id.clone();
                     move |this, i, _, cx| {
-                        this.ds_class = i.checked_sub(1).map(|c| (id.clone(), c as u32));
-                        // Empty images have no class: the two filters can't both apply.
-                        if this.ds_class.is_some() {
-                            this.ds_empty_only = false;
+                        match i.checked_sub(1) {
+                            Some(c) => {
+                                this.ds_class = Some((id.clone(), c as u32));
+                                // Empty images have no class: the two filters can't both apply.
+                                if this.empty_only(&id) {
+                                    this.ds_empty_of = None;
+                                }
+                            }
+                            // "All classes" here clears this dataset's class, not another's.
+                            None if this.ds_class.as_ref().is_some_and(|(of, _)| *of == id) => {
+                                this.ds_class = None
+                            }
+                            None => {}
                         }
                         this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                         cx.notify();
@@ -176,8 +185,8 @@ impl FoloApp {
             .child(seg)
             // Empty images have no class, so the two filters never both apply: while "Show them"
             // (Statistics) holds the empty images, its chip takes the class picker's place.
-            .when(!self.ds_empty_only, |d| d.child(picker))
-            .when(self.ds_empty_only, |d| {
+            .when(!self.empty_only(&id), |d| d.child(picker))
+            .when(self.empty_only(&id), |d| {
                 d.child(self.chip(
                     "ds-empty-chip",
                     "Empty images ×",
@@ -187,7 +196,7 @@ impl FoloApp {
                     window,
                     cx,
                     act(|this, _, cx| {
-                        this.ds_empty_only = false;
+                        this.ds_empty_of = None;
                         cx.notify();
                     }),
                 ))

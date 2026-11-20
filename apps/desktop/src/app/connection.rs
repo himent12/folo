@@ -114,6 +114,10 @@ impl FoloApp {
         self.play_open_seq += 1;
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
+        // A dataset id names another dataset on another server (ids are unique per data dir): the
+        // filters set on one go. A recovery that reaches the same data dir puts them back.
+        self.ds_class = None;
+        self.ds_empty_of = None;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
@@ -313,7 +317,13 @@ impl FoloApp {
                                 return;
                             }
                             this.server_url.update(cx, |i, cx| i.set_text(local.clone(), cx));
+                            // The data dir's server again: its datasets, so their filters, are the same.
+                            let filters = (why == Reason::Recover)
+                                .then(|| (this.ds_class.take(), this.ds_empty_of.take()));
                             this.set_backend((connector.backend)(&local), ServerMode::Local, cx);
+                            if let Some((class, empty)) = filters {
+                                (this.ds_class, this.ds_empty_of) = (class, empty);
+                            }
                             this.local_url = Some(local.clone());
                             this.connected_url = Some(local.clone());
                             this.said_where(why, &url, &local, started, cx);

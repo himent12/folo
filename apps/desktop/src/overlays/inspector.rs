@@ -18,8 +18,20 @@ use crate::viz::{DrawBox, Fit, hit_box, image_rect, paint_image_with_boxes, to_i
 impl FoloApp {
     /// The inspector was asked for an image by id (`Inspector::want`): once the list is in, its
     /// place in the filtered list. An image the dataset page's filters hide clears them (the
-    /// inspector walks that list); one the dataset doesn't have opens the first image.
+    /// inspector walks that list); one the dataset doesn't have opens the first image. The class
+    /// filter turned on or off under the inspector (its class list read again, after its images)
+    /// moves every place: it lands on the image it showed again.
     fn land_inspector(&mut self) {
+        if let Some(i) = self.inspector.as_ref()
+            && i.want.is_none()
+            && let Some((image, class)) = &i.shown
+            && *class != self.class_filter(&i.dataset)
+        {
+            let image = image.clone();
+            let i = self.inspector.as_mut().unwrap();
+            i.want = Some(image);
+            i.shown = None;
+        }
         let Some((ds, want)) =
             self.inspector.as_ref().and_then(|i| Some((i.dataset.clone(), i.want.clone()?)))
         else {
@@ -32,11 +44,13 @@ impl FoloApp {
             (Some(i), _) => i,
             (None, Some(i)) => {
                 self.ds_split = None;
-                // Another dataset's class filter hid nothing here: it stays with that dataset.
+                // Another dataset's filters hid nothing here: they stay with that dataset.
                 if self.ds_class.as_ref().is_some_and(|(of, _)| *of == ds) {
                     self.ds_class = None;
                 }
-                self.ds_empty_only = false;
+                if self.empty_only(&ds) {
+                    self.ds_empty_of = None;
+                }
                 // Unfiltered, the list is every image in order.
                 i
             }
@@ -72,6 +86,10 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
+        let class = self.class_filter(&ds_id);
+        if let Some(i) = self.inspector.as_mut() {
+            i.shown = Some((meta.id.clone(), class));
+        }
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
         // Opened from a run's samples: this image's predictions at that epoch, if it is one of them.

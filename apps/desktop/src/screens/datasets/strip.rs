@@ -113,7 +113,7 @@ impl FoloApp {
             .child({
                 // Defects are actionable: this tile filters the grid to the images in question.
                 let empty = s.map_or(0, |s| s.empty_images);
-                let on = self.ds_empty_only;
+                let on = self.empty_only(&ds.id);
                 let el = div()
                     .id("ds-empty-tile")
                     .flex_1()
@@ -149,15 +149,21 @@ impl FoloApp {
                         0.,
                         window,
                         cx,
-                        act(|this, _, cx| {
-                            this.ds_empty_only = !this.ds_empty_only;
-                            // Empty images have no class: the two filters can't both apply.
-                            if this.ds_empty_only {
-                                this.ds_class = None;
+                        act({
+                            let id = ds.id.clone();
+                            move |this, _, cx| {
+                                this.ds_empty_of = (!this.empty_only(&id)).then(|| id.clone());
+                                // Empty images have no class: the two filters can't both apply to this
+                                // dataset (another's class filter stays with it).
+                                if this.ds_empty_of.is_some()
+                                    && this.ds_class.as_ref().is_some_and(|(of, _)| *of == id)
+                                {
+                                    this.ds_class = None;
+                                }
+                                this.ds_tab = DsTab::Images;
+                                this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                                cx.notify();
                             }
-                            this.ds_tab = DsTab::Images;
-                            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
-                            cx.notify();
                         }),
                     )
                     .into_any_element()

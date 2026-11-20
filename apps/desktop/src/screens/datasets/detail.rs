@@ -89,13 +89,18 @@ impl FoloApp {
         (of == id && (*class as usize) < ds.classes.len()).then_some(*class)
     }
 
+    /// Whether dataset `id`'s grid shows only its images without labels ("Show them").
+    pub fn empty_only(&self, id: &str) -> bool {
+        self.ds_empty_of.as_deref() == Some(id)
+    }
+
     /// Indices (into the dataset's image list) that pass the split and class filters. Cached
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
         let class = self.class_filter(id);
-        let key =
-            (id.to_string(), self.ds_split, class, self.ds_empty_only, all.len(), all.as_ptr() as usize);
+        let empty_only = self.empty_only(id);
+        let key = (id.to_string(), self.ds_split, class, empty_only, all.len(), all.as_ptr() as usize);
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
             && *k == key
         {
@@ -106,7 +111,7 @@ impl FoloApp {
                 .enumerate()
                 .filter(|(_, m)| self.ds_split.is_none_or(|s| m.split == s))
                 .filter(|(_, m)| class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
-                .filter(|(_, m)| !self.ds_empty_only || m.boxes.is_empty())
+                .filter(|(_, m)| !empty_only || m.boxes.is_empty())
                 .map(|(i, _)| i)
                 .collect(),
         );
