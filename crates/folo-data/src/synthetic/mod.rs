@@ -10,8 +10,8 @@
 //!
 //! `raster.rs` holds the anti-aliased signed-distance rasteriser and the procedural backgrounds, `math.rs` the sine,
 //! cosine and powers of two they use: built from IEEE basic operations, so a seed gives the same bytes in every
-//! build and on every machine (the generator takes no approximation from the platform's libm; `sqrt`, `floor`,
-//! `round` and a remainder are exact).
+//! build and on every machine (the generator takes no approximation from the platform's libm; `sqrt` is
+//! correctly rounded, `floor`, `ceil`, `round` and a remainder are exact).
 
 mod math;
 mod raster;

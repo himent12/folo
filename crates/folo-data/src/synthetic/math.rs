@@ -5,7 +5,8 @@
 //! compiler or from libm depended on inlining, that is on the build profile: release and debug builds drew a
 //! square 1 ulp apart and wrote different images and labels for one seed. These functions give the same bits
 //! wherever they run and however they are compiled. The generator uses no other approximation from libm: what it
-//! still calls (`sqrt`, `floor`, `round`, the remainder of `rem_euclid`) is exactly specified, the same everywhere.
+//! still calls has a result IEEE 754 specifies (`sqrt` correctly rounded; `floor`, `ceil`, `round` and the remainder
+//! of `rem_euclid` exact), the same everywhere.
 
 use std::f64::consts::{FRAC_2_PI, LN_2};
 
