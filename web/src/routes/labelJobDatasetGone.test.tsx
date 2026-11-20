@@ -134,15 +134,19 @@ describe('a labeling job whose dataset was removed', () => {
     vi.useFakeTimers();
     const api = new MockApi('normal', 0);
     const reads = vi.spyOn(api, 'datasets');
+    const jobReads = vi.spyOn(api, 'labelJob');
     await open(api, () => !!target.querySelector('h1') && !target.querySelector('[aria-busy="true"]'));
+    // The stream opens (30 ms) and the page reads the job again for it, all before the export: only the export's own
+    // stream event (as the server's) can tell the page the new dataset.
+    await until(() => jobReads.mock.calls.length >= 2);
+    await vi.advanceTimersByTimeAsync(100);
     expect(made()).toBeNull();
     const shown: string[] = [];
     const before = reads.mock.calls.length;
     const at = Date.now();
-    // The export's stream event tells the page the job's new dataset (as the server's does).
     const ds = await api.createLabelDataset('lb_51d0', {});
-    await until(() => (shown.push(made()?.textContent ?? ''), !!link()), 1);
-    expect(Date.now() - at, 'linked by the read for it, before the next poll').toBeLessThan(5000);
+    await until(() => (shown.push(made()?.textContent ?? ''), !!link() || Date.now() - at >= 5000), 1);
+    expect(link(), 'linked by the read for it, before any poll').not.toBeNull();
     expect(reads.mock.calls.length).toBeGreaterThan(before);
     expect(made()?.textContent).toBe(`made ${ds.name}`);
     expect(shown.some((t) => t.includes('removed'))).toBe(false);

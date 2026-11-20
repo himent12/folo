@@ -165,6 +165,8 @@ export class MockApi extends MockTrainingApi implements Api {
       () => {
         const spec = this.state.label.dataset(jobId, body, this.state.datasets.map((d) => d.name), Date.now());
         this.state.datasets.unshift(spec);
+        // Registered first, then told: a subscriber that reads the new dataset at once finds it.
+        this.state.label.announce(jobId, Date.now());
         return toDataset(spec, this.state.t0, true);
       },
       700,

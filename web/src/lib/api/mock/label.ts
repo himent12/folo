@@ -858,9 +858,6 @@ export class MockLabeling {
     const dsId = `ds_${(hash(name + now) & 0xffff).toString(16).padStart(4, '0')}`;
     j.datasetId = dsId;
     this.#log(j, now, 'info', `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`);
-    // As the server (`set_dataset`): the job's stream is told the job, now with its dataset.
-    const out = this.#toJob(j);
-    this.#emit(j.id, (h) => h.job?.(out));
     return {
       ...look,
       id: dsId,
@@ -880,6 +877,12 @@ export class MockLabeling {
   }
 
   // ---------- events ----------
+
+  /** Tells the job's stream the job, as the server does once a dataset made from it is registered (`set_dataset`). */
+  announce(id: string, now: number) {
+    const out = this.job(id, now);
+    this.#emit(id, (h) => h.job?.(out));
+  }
 
   /** Live events of a job; the subscriber is told the job first. */
   subscribe(id: string, h: LabelEventHandlers): () => void {
