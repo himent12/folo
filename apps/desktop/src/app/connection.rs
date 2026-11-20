@@ -250,7 +250,11 @@ impl FoloApp {
             let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
             let found = cx.background_executor().spawn(async move { (connector.probe)(&probe) }).await;
-            folo_ui::trace_point(if found == Probe::Folo { "probe-found" } else { "probe-none" });
+            folo_ui::trace_point(match found {
+                Probe::Folo => "probe-found",
+                Probe::Answered => "probe-answered",
+                Probe::Nothing => "probe-none",
+            });
             if found == Probe::Folo {
                 this.update(cx, |this, cx| {
                     if !current(this) {
