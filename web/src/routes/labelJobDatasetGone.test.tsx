@@ -135,6 +135,7 @@ describe('a labeling job whose dataset was removed', () => {
     const api = new MockApi('normal', 0);
     const reads = vi.spyOn(api, 'datasets');
     const jobReads = vi.spyOn(api, 'labelJob');
+    const rendered = Date.now(); // the page's polls come 5 s after it renders, at the earliest
     await open(api, () => !!target.querySelector('h1') && !target.querySelector('[aria-busy="true"]'));
     // The stream opens (30 ms) and the page reads the job again for it, all before the export: only the export's own
     // stream event (as the server's) can tell the page the new dataset.
@@ -143,9 +144,8 @@ describe('a labeling job whose dataset was removed', () => {
     expect(made()).toBeNull();
     const shown: string[] = [];
     const before = reads.mock.calls.length;
-    const at = Date.now();
     const ds = await api.createLabelDataset('lb_51d0', {});
-    await until(() => (shown.push(made()?.textContent ?? ''), !!link() || Date.now() - at >= 5000), 1);
+    await until(() => (shown.push(made()?.textContent ?? ''), !!link() || Date.now() - rendered >= 4900), 1);
     expect(link(), 'linked by the read for it, before any poll').not.toBeNull();
     expect(reads.mock.calls.length).toBeGreaterThan(before);
     expect(made()?.textContent).toBe(`made ${ds.name}`);
