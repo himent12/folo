@@ -92,7 +92,7 @@ impl CloudSim {
     }
 
     /// When training ended (all steps done, or stopped), if it has.
-    fn trained_at(&self) -> Option<f64> {
+    pub(super) fn trained_at(&self) -> Option<f64> {
         let natural = self.anchor.0 + self.total.saturating_sub(self.anchor.1) as f64 * self.step_dt;
         let end = self.ended.map_or(natural, |(e, _)| e.min(natural)).max(self.train_at());
         (self.elapsed() >= end).then_some(end)
@@ -151,7 +151,7 @@ impl CloudSim {
         self.base.offer.price_per_hour.map(|p| p * secs / 3600.)
     }
 
-    fn at(&self, secs: f64) -> String {
+    pub(super) fn at(&self, secs: f64) -> String {
         time::format((self.t0 + secs) as i64)
     }
 

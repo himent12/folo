@@ -13,7 +13,7 @@ use super::cloud::{
 };
 use super::predictions::fake_predictions;
 use super::throughput::with_reference;
-use super::training::{Curve, RunFixture, epoch_line, initial_logs, resolve};
+use super::training::{Curve, RunFixture, epoch_line, initial_logs, log_cloud_end, resolve};
 use super::{CPU_DEVICE, GPU_DEVICE, MOCK_NOW, MockBackend, STEP_DT};
 
 impl Backend for MockBackend {
@@ -511,11 +511,12 @@ impl Backend for MockBackend {
 
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>> {
         self.check()?;
-        let runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.lock().unwrap();
         let f = runs
-            .iter()
+            .iter_mut()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        log_cloud_end(f);
         // Epoch summaries up to now, merged with the fixture's lines in time order (a cloud run's
         // from when it started training on its instance).
         let created = time::parse(&f.run.created).unwrap_or(MOCK_NOW);

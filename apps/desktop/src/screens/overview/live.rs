@@ -144,7 +144,8 @@ impl FoloApp {
             ),
         };
         let eta_s = r.eta_s;
-        let best_line = best.map(|b| format!("best {} @ {}", f3(b.map50_95), b.epoch)).unwrap_or_default();
+        let best_line =
+            best.map(|b| format!("best {} @ {}", fmt_score(b.map50_95), b.epoch)).unwrap_or_default();
         let kpi = |label: &str, value: AnyElement, detail: Option<String>| {
             div()
                 .flex()

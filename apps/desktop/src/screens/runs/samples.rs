@@ -101,14 +101,13 @@ impl FoloApp {
                     &t,
                     "icons/image.svg",
                     "No evaluation yet",
-                    &format!(
-                        "Predictions on 8 of the 16 fixed {images} images appear after the first epoch."
-                    ),
+                    &format!("Predictions on up to 8 fixed {images} images appear after the first epoch."),
                     Tone::Neutral,
                 ))
                 .into_any_element(),
             Some(Load::Ready(s)) => {
                 let samples: Vec<crate::api::Sample> = s.samples.iter().take(8).cloned().collect();
+                let total = s.samples.len();
                 let epoch = s.epoch;
                 let view = self.sample_view;
                 let mut tiles: Vec<AnyElement> = samples
@@ -216,7 +215,8 @@ impl FoloApp {
                     .children(rows)
                     // The caption says what the tiles show, view by view.
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "Epoch {epoch} · 8 of 16 fixed {images} images · {}",
+                        "Epoch {epoch} · {} · {}",
+                        shown_of(samples.len(), total, images),
                         match view {
                             SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
                             SampleView::Truth => "ground-truth labels".to_string(),
@@ -297,9 +297,30 @@ impl FoloApp {
     }
 }
 
+/// How many of the run's fixed evaluation images the tiles show: "8 of 16 fixed validation
+/// images", or all of them when the run has eight or fewer ("3 fixed validation images"). The
+/// trainer picks up to 16 (docs/API.md, `/samples`); a small split has fewer.
+fn shown_of(shown: usize, total: usize, images: &str) -> String {
+    let noun = if total == 1 { "image" } else { "images" };
+    if shown < total {
+        format!("{shown} of {total} fixed {images} {noun}")
+    } else {
+        format!("{total} fixed {images} {noun}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sample_epochs;
+    use super::{sample_epochs, shown_of};
+
+    /// #382: the caption said "8 of 16" whatever the run had.
+    #[test]
+    fn the_caption_counts_the_images_the_run_has() {
+        assert_eq!(shown_of(8, 16, "validation"), "8 of 16 fixed validation images");
+        assert_eq!(shown_of(8, 12, "training"), "8 of 12 fixed training images");
+        assert_eq!(shown_of(3, 3, "validation"), "3 fixed validation images");
+        assert_eq!(shown_of(1, 1, "validation"), "1 fixed validation image");
+    }
 
     #[test]
     fn the_picker_offers_the_first_epoch_and_every_fifth_newest_first() {

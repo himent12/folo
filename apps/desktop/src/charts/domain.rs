@@ -56,7 +56,11 @@ pub fn unit_top(max: f32) -> f32 {
     }
     let h = max * 1.05;
     let q = 10f64.powf(h.log10().floor()) / 5.;
-    (((h / q - 1e-9).ceil() * q).min(1.) as f32 * 1e6).round() / 1e6
+    // Six significant digits, as Studio's `toPrecision(6)`: six decimal places made a top under
+    // 0.0000005 zero (and cut a smaller one's digits).
+    let top = ((h / q - 1e-9).ceil() * q).min(1.);
+    let p = 10f64.powi(5 - top.log10().floor() as i32);
+    ((top * p).round() / p) as f32
 }
 
 /// A 0–1 metric's axis on a plot `plot_px` tall: from 0 to [`unit_top`]`(max)`, ticked at the nice
@@ -115,6 +119,17 @@ mod tests {
             assert!(max / unit_domain(max, 290.).domain.1 > 0.8, "{max}");
         }
         assert_eq!(unit_top(0.99), 1.);
+    }
+
+    /// #382: the top was rounded to six decimal places, so a score under 0.0000005 got a top of 0
+    /// and a small one lost digits. Six significant digits, as Studio's `unitTop`.
+    #[test]
+    fn a_tiny_metric_keeps_its_top() {
+        let near = |a: f32, b: f32| ((a - b) / b).abs() < 1e-5;
+        assert!(near(unit_top(0.000_000_37), 0.000_000_4), "{}", unit_top(0.000_000_37));
+        assert!(near(unit_top(0.000_003_3), 0.000_003_6), "{}", unit_top(0.000_003_3));
+        assert!(near(unit_top(0.000_068), 0.000_072), "{}", unit_top(0.000_068));
+        assert!(close(unit_top(0.494), 0.52));
     }
 
     #[test]

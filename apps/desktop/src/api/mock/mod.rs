@@ -590,6 +590,12 @@ mod tests {
         );
         assert_eq!(m.cloud_connections().unwrap().len(), 1);
         assert!(m.system().unwrap().features.iter().any(|f| f == folo_api::FEATURE_CLOUD));
+        // #382: its log ends as the real control plane's does, the weights copied back before the
+        // instance goes (Studio's demo, `folo serve --mock`, says the same).
+        let log: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        let at = |s: &str| log.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}: {log:#?}"));
+        assert!(at("training on the instance") < at("copying its weights"));
+        assert!(at("copying its weights") < at("terminating the instance"));
     }
 
     #[test]

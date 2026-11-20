@@ -141,8 +141,9 @@ impl MockBackend {
                     return;
                 }
                 let (now, lines) = {
-                    let runs = runs.lock().unwrap();
-                    let Some(f) = runs.iter().find(|f| f.run.id == run_id) else { return };
+                    let mut runs = runs.lock().unwrap();
+                    let Some(f) = runs.iter_mut().find(|f| f.run.id == run_id) else { return };
+                    super::training::log_cloud_end(f);
                     (Self::snapshot(f), f.logs.get(logs..).map(<[LogLine]>::to_vec).unwrap_or_default())
                 };
                 logs += lines.len();

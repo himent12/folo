@@ -7,7 +7,7 @@ use crate::api::time;
 use crate::api::*;
 use crate::synth::Rng;
 
-use super::cloud::CloudSim;
+use super::cloud::{COLLECT_S, CloudSim, Ended};
 use super::{LIVE_ID, MOCK_NOW, MockBackend, STEP_DT};
 
 /// Shape of a run's simulated learning curves.
@@ -160,6 +160,25 @@ pub(super) fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
         "epoch {e}/{epochs} · mAP50-95 {:.3} · mAP50 {:.3} · {:.1} s",
         ep.val.map50_95, ep.val.map50, ep.duration_s
     )
+}
+
+/// A cloud run's lines after training, the weights copied back and then the instance going, in the
+/// real control plane's words (folo-server's `cloud/executor`): added to its log once the run gets
+/// there, whenever its log is read or streamed (as its phases are worked out from the clock). A run
+/// that lost its instance, or ended before it trained, has nothing to copy.
+pub(super) fn log_cloud_end(f: &mut RunFixture) {
+    let Some(sim) = &f.cloud else { return };
+    let skipped = sim.ended.is_some_and(|(e, how)| how == Ended::InstanceLost || e < sim.train_at());
+    let Some(done) = sim.trained_at().filter(|_| !skipped) else { return };
+    let lines = [
+        (done, "cloud: the run ended on the worker; copying its weights"),
+        (done + COLLECT_S, "cloud: terminating the instance"),
+    ];
+    for (at, message) in lines {
+        if sim.elapsed() >= at && !f.logs.iter().any(|l| l.message == message) {
+            f.logs.push(LogLine { t: sim.at(at), level: LogLevel::Info, message: message.into() });
+        }
+    }
 }
 
 pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {

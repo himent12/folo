@@ -89,9 +89,9 @@ impl FoloApp {
             .when(e2e, |d| d.child(e2e_tag(&t, "e2e-model-head")));
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
-                "{} px · {} classes{}{} · created {created}",
+                "{} px · {}{}{} · created {created}",
                 m.imgsz,
-                m.classes.len(),
+                counted(m.classes.len() as u64, "class", "classes"),
                 // The weights as stored (precision, fused), when the record says.
                 model_storage(&m).map_or(String::new(), |s| format!(" · {s} weights")),
                 // How it was trained, when the record says (`trained_with`; exports have none).
