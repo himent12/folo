@@ -231,8 +231,11 @@ fn the_double_click_that_closed_a_dialog_does_not_reach_a_breadcrumb() {
     let crumb = (band..1280).step_by(2).find(|&x| caption_at(&mut app, window, x as f32).is_none());
     let crumb = (crumb.expect("a crumb on the band") + 4) as f32;
     let route = |app: &mut HeadlessApp| drive(app, window, |this, _, _| this.route.clone());
+    // Round 3: in keyboard mode, a press on the crumb leaves it, as one on the band does.
+    drive(&mut app, window, |this, _, _| this.kb = true);
     click(&mut app, window, (crumb, super::titlebar::TITLEBAR / 2.), 1);
     assert_eq!(route(&mut app), Route::Datasets, "the crumb opens Datasets");
+    assert!(!drive(&mut app, window, |this, _, _| this.kb), "a press on the crumb leaves keyboard mode");
     to_page(&mut app);
     drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
     app.frame(window.into());

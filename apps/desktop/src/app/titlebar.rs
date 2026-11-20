@@ -102,6 +102,8 @@ impl FoloApp {
                                 .bind(
                                     crumb
                                         .occlude()
+                                        // Hidden from the band, it leaves keyboard mode itself.
+                                        .capture_any_mouse_down(self.leave_kb(cx))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(t.bg_hover))
                                         .active(|s| s.bg(t.bg_active)),
