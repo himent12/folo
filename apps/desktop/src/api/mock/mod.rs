@@ -676,6 +676,54 @@ mod tests {
         assert_eq!(i.ended, Some(s.at(stop + 0.5)));
     }
 
+    /// Final check (#386): Desktop's merge of a run's log (the history, and the stream's lines
+    /// buffered while it loads or added after) is left as it was; the demo's history and stream
+    /// agree as a real server's do. Read as the run ends, its last epoch and end lines show once, in
+    /// order: a line a read of the log returned is not streamed again.
+    #[test]
+    fn a_cloud_runs_log_read_as_it_ends_shows_each_line_once() {
+        use crate::store::{Load, Store};
+        let m = MockBackend::new(0, false);
+        let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        let sim = |edit: &dyn Fn(&mut CloudSim)| {
+            let mut runs = m.runs.lock().unwrap();
+            edit(runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap());
+        };
+        // Streamed from its last epoch; then trained, its weights copied and its instance gone.
+        let spe = run.steps_per_epoch;
+        sim(&|s| {
+            s.pre = [0.; 3];
+            s.anchor = (s.elapsed(), s.total - spe);
+        });
+        let rx = m.events(&run.id).unwrap();
+        sim(&|s| s.t0 -= spe as f64 * s.step_dt + COLLECT_S + RELEASE_S + 1.);
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        store.logs.insert(run.id.clone(), Load::Loading);
+        let history = m.logs(&run.id);
+        // What the stream sent before the read is buffered while the history loads, then the rest.
+        while let Ok(ev) = rx.try_recv() {
+            store.apply(&run.id, ev);
+        }
+        store.install_logs(&run.id, history);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(ev) => store.apply(&run.id, ev),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(e) => panic!("the stream did not end: {e}"),
+            }
+        }
+        let log: Vec<&str> =
+            store.logs[&run.id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        let last = format!("epoch {}/", run.epochs);
+        let at = |s: &str| {
+            let found: Vec<usize> = (0..log.len()).filter(|&i| log[i].contains(s)).collect();
+            assert_eq!(found.len(), 1, "{s}: {log:#?}");
+            found[0]
+        };
+        assert!(at(&last) < at("copying its weights"), "{log:#?}");
+        assert!(at("copying its weights") < at("terminating the instance"), "{log:#?}");
+    }
+
     #[test]
     fn cloud_runs_upload_and_train() {
         let m = MockBackend::with_cloud_runs(0, true);

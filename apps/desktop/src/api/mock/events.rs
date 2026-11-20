@@ -140,32 +140,39 @@ impl MockBackend {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let (now, lines, sim) = {
+                // Sent while the run is locked, so a read of its log comes before or after them;
+                // not what a read already returned (`CloudSim::read`).
+                let now = {
                     let mut runs = runs.lock().unwrap();
                     let Some(f) = runs.iter_mut().find(|f| f.run.id == run_id) else { return };
                     super::training::log_cloud_end(f);
-                    let lines = f.logs.get(logs..).map(<[LogLine]>::to_vec).unwrap_or_default();
-                    (Self::snapshot(f), lines, f.cloud.clone())
-                };
-                logs += lines.len();
-                while sent < now.step {
-                    sent += 1;
-                    let _ = tx.send(RunEvent::Step(curve.step(sent)));
-                    if sent.is_multiple_of(spe) {
-                        let e = (sent / spe) as u32;
-                        let ep = curve.epoch(e);
-                        // On the run's step clock, as its history stamps it.
-                        let t = sim
-                            .as_ref()
-                            .map_or_else(|| time::format(clock.now() as i64), |s| s.at(s.step_at(sent)));
-                        let line = LogLine { t, level: LogLevel::Info, message: epoch_line(e, epochs, &ep) };
-                        let _ = tx.send(RunEvent::Epoch(ep));
-                        let _ = tx.send(RunEvent::Log(line));
+                    let now = Self::snapshot(f);
+                    let sim = f.cloud.as_ref();
+                    while sent < now.step {
+                        sent += 1;
+                        let _ = tx.send(RunEvent::Step(curve.step(sent)));
+                        if sent.is_multiple_of(spe) {
+                            let e = (sent / spe) as u32;
+                            let ep = curve.epoch(e);
+                            let message = epoch_line(e, epochs, &ep);
+                            let _ = tx.send(RunEvent::Epoch(ep));
+                            if sim.is_none_or(|s| e > s.read.1) {
+                                // On the run's step clock, as its history stamps it.
+                                let t = sim.map_or_else(
+                                    || time::format(clock.now() as i64),
+                                    |s| s.at(s.step_at(sent)),
+                                );
+                                let _ = tx.send(RunEvent::Log(LogLine { t, level: LogLevel::Info, message }));
+                            }
+                        }
                     }
-                }
-                for l in lines {
-                    let _ = tx.send(RunEvent::Log(l));
-                }
+                    logs = logs.max(sim.map_or(0, |s| s.read.0));
+                    for l in f.logs.iter().skip(logs) {
+                        let _ = tx.send(RunEvent::Log(l.clone()));
+                    }
+                    logs = logs.max(f.logs.len());
+                    now
+                };
                 let phase_changed = now.cloud.as_ref().map(|c| c.phase) != cloud.as_ref().map(|c| c.phase);
                 if now.cloud != cloud && (phase_changed || cloud_at.elapsed() >= Duration::from_secs(1)) {
                     cloud.clone_from(&now.cloud);

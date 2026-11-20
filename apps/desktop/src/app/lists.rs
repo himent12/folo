@@ -236,7 +236,7 @@ impl FoloApp {
         self.store.evals.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
-        self.store.forget_logs(id);
+        self.store.logs.remove(id);
         self.forget_history(id);
         self.ds_recheck.remove(id);
         if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {

@@ -540,6 +540,10 @@ impl Backend for MockBackend {
         // Stable: an epoch and a fixture line in the same second keep that order.
         lines.extend(f.logs.iter().cloned());
         lines.sort_by(|a, b| a.t.cmp(&b.t));
+        let read = (f.logs.len(), done);
+        if let Some(sim) = f.cloud.as_mut() {
+            sim.read = read;
+        }
         Ok(lines)
     }
 

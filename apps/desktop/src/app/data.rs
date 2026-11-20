@@ -690,7 +690,7 @@ impl FoloApp {
                     this.invalidate_latest_samples(&id);
                 }
                 let had_data = this.store.run_data.remove(&id).is_some();
-                let had_logs = this.store.drop_logs(&id);
+                let had_logs = this.store.logs.remove(&id).is_some();
                 if had_data {
                     this.ensure_run_data(&id, cx);
                 }
@@ -873,7 +873,7 @@ impl FoloApp {
         self.stream_lost.remove(id);
         self.run_ended(id, status, cx);
         if matches!(self.store.logs.get(id), Some(Load::Ready(_) | Load::Loading)) {
-            self.store.drop_logs(id);
+            self.store.logs.remove(id);
             self.ensure_logs(id, cx);
         }
         self.invalidate_latest_samples(id);

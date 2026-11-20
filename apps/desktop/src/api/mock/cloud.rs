@@ -47,6 +47,11 @@ pub(super) struct CloudSim {
     pub(super) release_error: Option<String>,
     /// Since when (seconds since `t0`) the worker hasn't answered: `unanswered_since` while it trains.
     pub(super) silent_since: Option<f64>,
+    /// What the last read of the run's log returned: the fixture's lines (how many) and its last
+    /// epoch. The demo's lines are worked out from the clock when the log is read or streamed, so a
+    /// read can return one its stream has not sent yet; the stream does not send it again (the demo
+    /// has one reader), as a real server sent it when it was logged, before the read.
+    pub(super) read: (usize, u32),
 }
 
 /// Seconds of collecting the weights, then of releasing the instance.
@@ -71,6 +76,7 @@ impl CloudSim {
             lost_at: None,
             release_error: None,
             silent_since: None,
+            read: (0, 0),
         }
     }
 
