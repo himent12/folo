@@ -6,7 +6,7 @@ import { computed, css, For, Index } from 'fw';
 import type { Epoch } from '$lib/api/types';
 import { classInk } from '$lib/design/classInk';
 import { unitTop } from '$lib/charts/domain';
-import { metric } from '$lib/format';
+import { score } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import { tooltip } from '$lib/ui/tooltip';
@@ -120,7 +120,7 @@ export default function PerClass(props: PerClassProps) {
                         </span>
                       </span>
                     </td>
-                    <td class="r num">{metric(c().map50_95)}</td>
+                    <td class="r num">{score(c().map50_95)}</td>
                     <td class="r num delta" class:up={c().delta > 0.0005} class:down={c().delta < -0.0005}>
                       {Math.abs(c().delta) >= 0.0005 ? (
                         <span aria-label={`${c().delta > 0 ? 'up' : 'down'} ${Math.abs(c().delta).toFixed(3)}`}>
@@ -137,9 +137,9 @@ export default function PerClass(props: PerClassProps) {
                     </td>
                     {!compact() ? (
                       <>
-                        <td class="r num">{metric(c().map50)}</td>
-                        <td class="r num faint">{metric(c().precision)}</td>
-                        <td class="r num faint">{metric(c().recall)}</td>
+                        <td class="r num">{score(c().map50)}</td>
+                        <td class="r num faint">{score(c().precision)}</td>
+                        <td class="r num faint">{score(c().recall)}</td>
                       </>
                     ) : null}
                   </tr>

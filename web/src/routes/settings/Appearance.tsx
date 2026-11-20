@@ -116,18 +116,27 @@ export default function Appearance() {
     };
     // A closed native select cannot wrap: a theme name wider than its field (a custom one, up to 40 characters) is cut
     // there, so the row then says it whole under its description (ui/Select: say the rest under the select; issue
-    // #382). The field's text box and font are measured on every resize, as `npm run qa`'s cut-select check does.
+    // #382). The field's text box and font are measured on every resize, as `npm run qa`'s cut-select check does, and
+    // again once a web font loads: a name that fit in the fallback font may not in Geist, in a field of the same size.
     const room = signal<{ px: number; font: string } | null>(null);
     const measured = (node: HTMLElement) => {
-      const ro = new ResizeObserver(() => {
+      const measure = () => {
         const s = node.querySelector('select');
         if (!s) return;
         const cs = getComputedStyle(s);
         const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
         room.set({ px: s.clientWidth - pad, font: `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}` });
-      });
+      };
+      const ro = new ResizeObserver(measure);
       ro.observe(node);
-      return { destroy: () => ro.disconnect() };
+      const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
+      fonts?.addEventListener?.('loadingdone', measure);
+      return {
+        destroy: () => {
+          ro.disconnect();
+          fonts?.removeEventListener?.('loadingdone', measure);
+        },
+      };
     };
     const whole = computed(() => {
       const r = room.get();

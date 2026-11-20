@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { axisWhyNot, compareCaveats, contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, selfLabelReading, shortFingerprint, sourceKind, unreviewedText } from './words';
+import { axisWhyNot, calibrationNone, compareCaveats, contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, selfLabelReading, shortFingerprint, sourceKind, unreviewedText } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
@@ -45,6 +45,10 @@ describe('words', () => {
     expect(why).not.toMatch(/came without/);
     expect(compareCaveats([ext], bench).map((c) => c.text).join(' ')).toContain('x was scored without confidences: its AP comes from one');
     expect(selfLabelReading({ threshold: null, precision: 0.93, recall: 0.61, mean_iou: null, labels_per_image: 4, labels: 200, curve: [] }, false, ext)).toMatch(/^It was scored without confidences, so it has one operating point/);
+    // Compare's Calibration caption says the same as its caveat (and an agent keeps "no confidences").
+    expect(calibrationNone(ext)).toBe('scored without confidences');
+    expect(calibrationNone(agent)).toBe('no confidences');
+    expect(calibrationNone({ ...ext, scored: true })).toBe('no detection on the unchanged images reached confidence 0.1');
   });
 
   it('words where a running entry is and what it cost', () => {

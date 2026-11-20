@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { dominantAspect } from '$lib/ui/TileGrid';
-import { containFit, insideFrame, placeBox } from './frame';
+import { containFit, edgeRoom, insetFit, placeBox } from './frame';
 
 // Real photos are not square (COCO: 640×427, 427×640, panoramas): a benchmark's gallery tile, its large view and the
 // condition preview show each one whole in a frame of another shape, and every box has to land on its object.
@@ -70,17 +70,33 @@ describe('an image in a frame of another shape', () => {
 });
 
 describe('a box along the frame edge (issue #382)', () => {
-  it('keeps its line, drawn outside the box, inside the frame that clips it', () => {
+  /** Whether `r`, with marks `reach` px outside it, is drawn wholly inside the `cw × ch` frame. */
+  const inside = (r: ReturnType<typeof placeBox>, cw: number, ch: number, reach: number) =>
+    r.left >= reach - 1e-9 && r.top >= reach - 1e-9 && r.left + r.width <= cw - reach + 1e-9 && r.top + r.height <= ch - reach + 1e-9;
+
+  it('keeps room for its marks between the image and the frame, which clips', () => {
     // A whole-image box on an image that fills its 216 × 162 tile: its 1 px line and halo (2 px out) were cut off.
     const f = containFit(216, 162, 640, 480)!;
-    const whole = placeBox(f, { x1: 0, y1: 0, x2: 640, y2: 480 });
-    expect(insideFrame(whole, 216, 162, 2)).toEqual({ left: 2, top: 2, width: 212, height: 158 });
-    // A box well inside is drawn where it is.
-    const inner = placeBox(f, { x1: 64, y1: 48, x2: 320, y2: 240 });
-    expect(insideFrame(inner, 216, 162, 2)).toEqual(inner);
-    // Where the image leaves a band of the well, a whole-image box keeps its place: its line falls in the band.
+    const whole = { x1: 0, y1: 0, x2: 640, y2: 480, reach: 2 };
+    expect(edgeRoom(f, 216, 162, [whole])).toBe(2);
+    const g = insetFit(216, 162, 640, 480, 2)!;
+    expect(inside(placeBox(g, whole), 216, 162, 2)).toBe(true);
+    // A box a sliver wide at the right edge, and a wrong box (its cross reaches 5 px) in the top-left corner.
+    const sliver = { x1: 638, y1: 100, x2: 640, y2: 200, reach: 2 };
+    const wrong = { x1: 0, y1: 0, x2: 50, y2: 50, reach: 5 };
+    expect(edgeRoom(f, 216, 162, [sliver, wrong])).toBe(5);
+    const h = insetFit(216, 162, 640, 480, 5)!;
+    expect(inside(placeBox(h, sliver), 216, 162, 2)).toBe(true);
+    expect(inside(placeBox(h, wrong), 216, 162, 5)).toBe(true);
+  });
+
+  it('leaves the image as it was when no box comes near the edge', () => {
+    const f = containFit(216, 162, 640, 480)!;
+    expect(edgeRoom(f, 216, 162, [{ x1: 64, y1: 48, x2: 320, y2: 240, reach: 5 }])).toBe(0);
+    expect(insetFit(216, 162, 640, 480, 0)).toEqual(f);
+    // Where the image leaves a band of the well, the band is room enough on that side; the other side needs its own.
     const band = containFit(216, 162, 640, 427)!;
-    const wide = placeBox(band, { x1: 0, y1: 0, x2: 640, y2: 427 });
-    expect(insideFrame(wide, 216, 162, 2)).toMatchObject({ top: wide.top, height: wide.height, left: 2 });
+    expect(edgeRoom(band, 216, 162, [{ x1: 100, y1: 0, x2: 200, y2: 50, reach: 2 }])).toBe(0);
+    expect(edgeRoom(band, 216, 162, [{ x1: 0, y1: 100, x2: 50, y2: 200, reach: 2 }])).toBe(2);
   });
 });

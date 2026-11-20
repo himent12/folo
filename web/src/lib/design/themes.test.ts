@@ -150,10 +150,11 @@ describe('importing', () => {
     const hidden = 'name: must not hold control or invisible characters';
     for (const name of ['​', 'A​B', 'A\u0007B', 'A\nB', 'A\tB', 'A‮B', 'A B', '﻿A'])
       expect(named(name), JSON.stringify(name)).toEqual({ ok: false, error: hidden });
-    for (const name of ['‍', '́́']) expect(named(name), JSON.stringify(name)).toEqual({ ok: false, error: 'name: must have a visible character' });
+    for (const name of ['‍', '́́', '⠀', 'ㅤ', 'ᅟᅠ', 'ﾠ ⠀']) expect(named(name), JSON.stringify(name)).toEqual({ ok: false, error: 'name: must have a visible character' });
     // Joiners inside emoji sequences and scripts, variation selectors, accents, CJK and emoji stay names.
     for (const name of ['👩‍💻 night', 'می‌خواهم', '☀️ day', 'Café', '夜班', '🌈'.repeat(40)]) expect(named(name).ok, JSON.stringify(name)).toBe(true);
     expect(readStoredThemes([file({ name: 'A​B' })]).map((t) => t.name)).toEqual(['A​B']);
+    expect(readStoredThemes([file({ name: 'ㅤ' })]).map((t) => t.name)).toEqual(['ㅤ']);
   });
 
   it('installs, replaces by id in place, and says why a file was refused', () => {

@@ -76,7 +76,8 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   space (the White_Space property) at both ends: the same in every validator. Studio's import also refuses a name
   that holds a control character (a newline, a tab), a line or paragraph separator, or an invisible format character
   (a zero-width space, a bidi override; the zero-width joiner and non-joiner are allowed), "name: must not hold control
-  or invisible characters", and one with no letter, digit, punctuation or symbol, "name: must have a visible
+  or invisible characters", and one with no letter, digit, punctuation or symbol (the blank ones, the Hangul fillers
+  U+115F, U+1160, U+3164, U+FFA0 and the blank Braille pattern U+2800, do not count), "name: must have a visible
   character"; a theme stored before that rule stays installed. Desktop and `design/theme-cases.json` take this rule
   in a later change.
 - `mode`: `"dark"` or `"light"`. Required.

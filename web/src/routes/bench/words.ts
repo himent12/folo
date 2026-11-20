@@ -198,6 +198,9 @@ export function contestantFacts(e: Pick<BenchEntry, 'contestant' | 'scored' | 'n
  */
 export const noConfidences = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'scored without confidences' : 'no confidences');
 /** The same as a sentence's verb: "it gives no confidences", "it was scored without confidences". */
+/** Why Compare's Calibration did not measure an entry (docs/BENCH.md, Calibration): no confidences, or none reaching 0.1. */
+export const calibrationNone = (e: Pick<BenchEntry, 'contestant' | 'scored'>) =>
+  e.scored ? 'no detection on the unchanged images reached confidence 0.1' : noConfidences(e);
 export const givesNone = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'was scored without confidences' : 'gives no confidences');
 
 /** "Model", "Agent", "External": what kind of contestant, in one word. */

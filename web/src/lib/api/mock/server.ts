@@ -288,9 +288,11 @@ export class MockServer {
 
   createSyntheticDataset(body: CreateSyntheticDataset): Promise<Dataset> {
     return this.call(() => {
-      // As the real server: a count outside its limits is a 400, never clamped or rounded.
+      // As the real server: a count that is no whole number fails its body's decoding (a u64), a 422; one outside its
+      // limits is a 400; never clamped or rounded.
       const n = body.images;
-      if (!Number.isInteger(n) || n < 1 || n > 100_000) throw new ApiError(400, 'invalid_body', 'images must be in 1..=100000');
+      if (!Number.isInteger(n) || n < 0) throw new ApiError(422, 'invalid_body', 'images: invalid type: expected u64');
+      if (n < 1 || n > 100_000) throw new ApiError(400, 'invalid_body', 'images must be in 1..=100000');
       const train = Math.round(n * 0.8);
       const classes = (body.classes.length ? body.classes : ['circle', 'square', 'triangle']).slice(0, 6);
       const spec: MockDatasetSpec = {

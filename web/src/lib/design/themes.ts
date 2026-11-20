@@ -67,8 +67,11 @@ const length = (s: string) => [...s].length;
  * the zero-width joiner and non-joiner that emoji sequences and some scripts are written with (issue #382).
  */
 const HIDDEN = /[\p{Cc}\p{Zl}\p{Zp}]|(?![\u200C\u200D])\p{Cf}/u;
-/** A character that shows: a letter, digit, punctuation or symbol (a name of only combining marks does not). */
-const VISIBLE = /[\p{L}\p{N}\p{P}\p{S}]/u;
+/**
+ * A character that shows: a letter, digit, punctuation or symbol (a name of only combining marks does not), but for the
+ * blank ones Unicode files as letters or symbols: the Hangul fillers and the blank Braille pattern.
+ */
+const VISIBLE = /(?![ᅟᅠㅤﾠ⠀])[\p{L}\p{N}\p{P}\p{S}]/u;
 
 /** Orders two strings by code point (as Rust compares strings), not by UTF-16 unit or locale. */
 export function compareCodePoints(a: string, b: string): number {

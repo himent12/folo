@@ -17,12 +17,18 @@ export function num(x: number | null | undefined, digits = 0): string {
   return ok(x) ? nf(digits).format(x) : '—';
 }
 
-/**
- * 0.7412 → "0.741" (metrics like mAP stay in 0..1 with three decimals, as researchers read them). A score that is not
- * zero never reads as zero (issue #382): under 0.0005 it takes the decimals a chart fitted to it gives its legend
- * (`axisMetric` on `unitTop`: 0.00042 → "0.00042"), and under five decimals' reach it reads "<0.00001".
- */
+/** 0.7412 → "0.741" (metrics like mAP stay in 0..1 with three decimals, as researchers read them). */
 export function metric(x: number | null | undefined): string {
+  return num(x, 3);
+}
+
+/**
+ * A run's best score, as its outcome line and toast say it ("best mAP50-95 0.00042 at epoch 3"), and a class's in Per
+ * class: as `metric`, but a score that is not zero never reads as zero (issue #382). Under 0.0005 it takes the decimals
+ * a chart fitted to it gives its legend (`axisMetric` on `unitTop`: 0.00042 → "0.00042"), and under five decimals'
+ * reach it reads "<0.00001". Only where the text has room for it: a KPI tile or a "±" keeps `metric`.
+ */
+export function score(x: number | null | undefined): string {
   if (!ok(x) || x === 0 || Math.abs(x) >= 0.0005) return num(x, 3);
   const a = Math.abs(x);
   const d = scoreDecimals(unitTop(a));

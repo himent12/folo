@@ -7,7 +7,7 @@
  */
 import { computed, css, effect, For, signal } from 'fw';
 import type { Box, BenchDetection } from '$lib/api/types';
-import { containFit, insideFrame, placeBox } from '$lib/bench/frame';
+import { containFit, edgeRoom, insetFit, placeBox } from '$lib/bench/frame';
 import { matchImage } from '$lib/bench/match';
 import { placeChips } from '$lib/detect/chips';
 import { cancelOnRemove } from '$lib/detect/DetectionView';
@@ -49,7 +49,6 @@ export default function MatchView(props: MatchViewProps) {
   });
   // The whole image in the frame, whatever either's shape (a portrait photo in a landscape tile sits between two bands
   // of the well); every box goes through the same fit, so it stays on its object ($lib/bench/frame).
-  const geo = computed(() => containFit(cw.get(), ch.get(), props.width, props.height));
   const m = computed(() => matchImage(props.truth, props.detections));
   /** What is drawn: every detection, right or wrong, then every true box nothing found. */
   const marks = computed<Mark[]>(() => {
@@ -59,6 +58,15 @@ export default function MatchView(props: MatchViewProps) {
       ...props.truth.flatMap((t, i) => (mm.found[i] === null ? [{ key: `t${i}`, box: t, outcome: 'missed' as Outcome, score: undefined }] : [])),
     ];
   });
+  // A box's marks reach outside it (the CSS below): its line and halo, 2 px on a thumbnail and 4.5 px at full size
+  // (highlighted); a wrong box's cross, 5 px and 9 px. The image (and so every box) keeps that much room from the
+  // frame's edge when a box comes that close, so none is cut off (issue #382).
+  const room = computed(() => {
+    const f = containFit(cw.get(), ch.get(), props.width, props.height);
+    const reach = (o: Outcome) => (o === 'wrong' ? (full() ? 9 : 5) : full() ? 4.5 : 2);
+    return f ? edgeRoom(f, cw.get(), ch.get(), marks.get().map((k) => ({ ...k.box, reach: reach(k.outcome) }))) : 0;
+  });
+  const geo = computed(() => insetFit(cw.get(), ch.get(), props.width, props.height, room.get()));
   const name = (c: number) => props.classes[c] ?? `class ${c}`;
   const chipText = (k: Mark) =>
     k.outcome === 'missed' ? `missed ${name(k.box.class)}` : `${name(k.box.class)}${k.score !== undefined && k.score < 1 ? ` ${k.score.toFixed(2)}` : ''}`;
@@ -96,14 +104,12 @@ export default function MatchView(props: MatchViewProps) {
 
   return (
     <div class="mv" class:full={full()} class:small={cw.get() > 0 && cw.get() < 480} bind:clientWidth={cw} bind:clientHeight={ch}>
-      {props.src ? <img ref={cancelOnRemove} src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} draggable="false" onload={() => loaded.set(true)} /> : null}
+      {props.src ? <img ref={cancelOnRemove} src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} style:inset={`${room.get()}px`} style:width={`calc(100% - ${2 * room.get()}px)`} style:height={`calc(100% - ${2 * room.get()}px)`} draggable="false" onload={() => loaded.set(true)} /> : null}
       {geo.get() ? (
         <div class="layer" aria-hidden="true">
           <For each={marks.get()} key={(k) => k.key}>
             {(k, n) => {
-              // Its line and halo sit outside it (2 px on a thumbnail; at most 4.5 px at full size, highlighted): kept
-              // inside the frame, which clips, so a box along the image's edge still shows (issue #382).
-              const at = computed(() => insideFrame(placeBox(geo.get()!, k().box), cw.get(), ch.get(), full() ? 4.5 : 2));
+              const at = computed(() => placeBox(geo.get()!, k().box));
               const chip = () => chips.get()[n()];
               return (
                 <div

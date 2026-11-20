@@ -162,9 +162,12 @@ function refusing(real: Storage, key: string, refuse: () => boolean): Storage {
 
 describe('a theme name wider than its select (issue #382)', () => {
   // No layout here: a canvas that gives every character 10 px, and a select field with a 100 px text box (no padding
-  // in happy-dom), measured once when observed.
+  // in happy-dom), measured once when observed. The page keeps the first canvas it gets: `perChar` is read at each
+  // measure, so a test can change the font's width.
+  let perChar = 10;
   beforeEach(() => {
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ font: '', measureText: (t: string) => ({ width: t.length * 10 }) } as unknown as CanvasRenderingContext2D);
+    perChar = 10;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ font: '', measureText: (t: string) => ({ width: t.length * perChar }) } as unknown as CanvasRenderingContext2D);
     vi.spyOn(HTMLSelectElement.prototype, 'clientWidth', 'get').mockReturnValue(100);
     vi.stubGlobal(
       'ResizeObserver',
@@ -194,6 +197,29 @@ describe('a theme name wider than its select (issue #382)', () => {
     choose('dark', 'short');
     expect(desc().querySelector('.whole')).toBeNull();
     expect(desc().textContent).toBe('Used when the theme is Dark, or System while your system is dark.');
+  });
+
+  it('measures again when a web font loads: a name that fit in the fallback font may not', () => {
+    const fonts = new EventTarget();
+    const had = Object.getOwnPropertyDescriptor(document, 'fonts');
+    Object.defineProperty(document, 'fonts', { value: fonts, configurable: true });
+    perChar = 2;
+    try {
+      const long = 'Night shift with the long name';
+      prefs.installThemes([parsed('n.json', { ...night, name: long })]);
+      prefs.useTheme('night');
+      show();
+      const desc = () => target.querySelector('#appearance-dark-desc')!;
+      expect(desc().querySelector('.whole')).toBeNull();
+      // Geist arrives, wider: the field keeps its size, so no resize says so.
+      perChar = 10;
+      fonts.dispatchEvent(new Event('loadingdone'));
+      flush();
+      expect(desc().querySelector('.whole')?.textContent).toBe(`Chosen: ${long}`);
+    } finally {
+      if (had) Object.defineProperty(document, 'fonts', had);
+      else delete (document as { fonts?: unknown }).fonts;
+    }
   });
 });
 

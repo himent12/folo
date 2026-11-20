@@ -3,7 +3,7 @@
 // (the first poll, a page reload) is history, not a change.
 
 import type { Run } from '$lib/api/types';
-import { metric } from '$lib/format';
+import { score } from '$lib/format';
 import { isOom } from '$lib/oom';
 
 export type RunEndKind = 'completed' | 'failed' | 'oom';
@@ -36,7 +36,7 @@ export function runEnds(prev: readonly Run[] | undefined, next: readonly Run[]):
 export function runEndMessage(e: RunEnd): { tone: 'success' | 'error'; title: string; detail: string[] } {
   const { run } = e;
   if (e.kind === 'completed') {
-    const best = run.best ? `best mAP50-95 ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : `${run.epochs} epochs`;
+    const best = run.best ? `best mAP50-95 ${score(run.best.map50_95)} at epoch ${run.best.epoch}` : `${run.epochs} epochs`;
     return { tone: 'success', title: run.name, detail: ['Finished training', best] };
   }
   if (e.kind === 'oom') return { tone: 'error', title: run.name, detail: [`Ran out of GPU memory at epoch ${run.epoch}`, 'its page has smaller settings'] };

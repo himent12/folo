@@ -21,7 +21,7 @@ import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { stoppedEarly } from '$lib/api/progress';
-import { bytes, duration, metric } from '$lib/format';
+import { bytes, duration, score } from '$lib/format';
 import { fitFixes, isOom, oomCalibration, oomDetail, oomFixes, retryPath, vramForecaster, type OomFix } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
@@ -149,7 +149,7 @@ export default function Outcome(props: OutcomeProps) {
     <span>
       {props.run.best && props.run.best.map50_95 > 0 ? (
         <>
-          best mAP50-95 <span class="num">{metric(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
+          best mAP50-95 <span class="num">{score(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
         </>
       ) : (
         'no detections'
