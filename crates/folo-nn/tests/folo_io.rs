@@ -433,6 +433,38 @@ fn checkpoint_resume_is_bit_identical() {
 }
 
 #[test]
+fn a_scaled_ema_resumes_with_the_very_contract_it_saved() {
+    // 44 optimizer steps at a quarter: window 11, decay 0.9090909090909091, a decimal that serde_json's fast float
+    // path reads one ulp off.
+    let (decay, tau) = folo_nn::ema_for_run(44, 0.25);
+    assert_eq!((decay, tau), (1.0 - 1.0 / 11.0, 2.2));
+    let mut a = new_run(OptimKind::Sgd, 10);
+    a.ema = ModelEma::with_params(net(3, &mut Rng::seed(110)), &a.model, decay, tau).unwrap();
+    train_steps(&mut a, 3);
+    let path = tmp("resume-scaled-ema.folo");
+    save(&a, &path);
+    let live = a.ema.contract();
+
+    let mut b = new_run(OptimKind::Sgd, 77); // the default EMA: the contract must come from the file
+    let f = ModelFile::open(&path).unwrap();
+    f.resume(&b.model, b.opt.as_mut(), Some(&mut b.ema), Some(classes(3))).unwrap();
+    let got = b.ema.contract();
+    assert_eq!((got.decay.to_bits(), got.tau.to_bits()), (live.decay.to_bits(), live.tau.to_bits()));
+
+    // Every window the rule gives a run of up to 40,000 steps reads back to the bit.
+    for steps in 1..=40_000 {
+        let (decay, tau) = folo_nn::ema_for_run(steps, 0.25);
+        let c = folo_nn::EmaContract { decay, tau };
+        let back: folo_nn::EmaContract = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(
+            (back.decay.to_bits(), back.tau.to_bits()),
+            (decay.to_bits(), tau.to_bits()),
+            "{steps} steps"
+        );
+    }
+}
+
+#[test]
 fn musgd_weights_resume_through_the_checkpoint() {
     let w = MuSgdWeights { muon: 0.5, sgd: 0.5 };
     let mut a = new_run_with(OptimKind::MuSgd, 10, w);

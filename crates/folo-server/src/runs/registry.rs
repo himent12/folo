@@ -36,15 +36,25 @@ impl Runs {
             }
             // A copy of a run folder (a backup made next to it) is not a second run of its id (x3-server-9).
             for (d, mut file) in crate::util::one_per_id("run", files) {
-                // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
-                // numbers.
-                if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {
+                // Runs from before `Run.resolved` (or its `close_mosaic`, or its EMA pair): the trainer's config.json
+                // has the same numbers. (A run without an EMA has no pair: its config.json gives none either.)
+                if file
+                    .run
+                    .resolved
+                    .as_ref()
+                    .is_none_or(|r| r.close_mosaic.is_none() || r.ema_decay.is_none())
+                {
                     let from_config = std::fs::read(d.join("config.json"))
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
                         .and_then(|v| folo_vision::train::ResolvedOptim::from_run_config(&v));
                     match (&mut file.run.resolved, from_config) {
-                        (Some(r), Some(c)) => r.close_mosaic = c.close_mosaic,
+                        (Some(r), Some(c)) => {
+                            r.close_mosaic = r.close_mosaic.or(c.close_mosaic);
+                            if r.ema_decay.is_none() {
+                                (r.ema_decay, r.ema_tau) = (c.ema_decay, c.ema_tau);
+                            }
+                        }
                         (r @ None, c) => *r = c,
                         _ => {}
                     }

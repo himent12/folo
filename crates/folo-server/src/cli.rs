@@ -185,22 +185,26 @@ pub fn recorded_ema_run_fraction(run_dir: &std::path::Path) -> Option<f64> {
     Some(train.get("ema_run_fraction").and_then(serde_json::Value::as_f64).unwrap_or(0.0))
 }
 
-/// `cmd` with `--set ema_run_fraction=F` when a run from pretrained weights (`transfer`; the fraction changes no other
-/// run) trained with another fraction than a new run takes, so the command averages as the run did (fine-tunes made
-/// before the key: the default window, 0).
-pub fn with_ema_run_fraction(
-    mut cmd: CliCommand,
-    fraction: Option<f64>,
-    transfer: Option<bool>,
-) -> CliCommand {
+/// `cmd` with `--set ema_run_fraction=F` when the command starts from weights (`--weights`: a fine-tune, the only
+/// kind of run the fraction changes) and the run trained with another fraction than a new run takes, so the command
+/// averages as the run did (fine-tunes made before the key, also those made before `transfer` was recorded: the
+/// default window, 0). A command without `--weights` trains from scratch, whatever the run was (a run whose starting
+/// weights are no longer there), so a pin would change nothing and none is added: such a command cannot repeat a
+/// scaled EMA (docs/API.md).
+pub fn with_ema_run_fraction(mut cmd: CliCommand, fraction: Option<f64>) -> CliCommand {
     if let Some(f) = fraction
-        && transfer == Some(true)
+        && starts_from_weights(&cmd)
         && f != folo_vision::TrainConfig::default().ema_run_fraction
     {
         cmd.argv.extend(["--set".to_string(), format!("ema_run_fraction={f}")]);
         cmd.cli = shell_join(&cmd.argv);
     }
     cmd
+}
+
+/// Whether a generated command starts from weights (`--weights`).
+fn starts_from_weights(cmd: &CliCommand) -> bool {
+    cmd.argv.iter().any(|a| a == "--weights" || a.starts_with("--weights="))
 }
 
 /// Whether a run started from pretrained weights (`TrainConfig.transfer`, docs/MODEL.md §8.2) ([`recorded_train`]):
@@ -238,7 +242,7 @@ pub fn with_transfer(
         && transfer == Some(true)
         && rule.unwrap_or(current) == current
         && current >= 5
-        && !cmd.argv.iter().any(|a| a == "--weights" || a.starts_with("--weights="))
+        && !starts_from_weights(&cmd)
     {
         cmd.argv.extend(["--set".to_string(), "auto_rule=4".to_string()]);
         if let Some(w) = weights.filter(|w| *w != folo_nn::optim::MuSgdWeights::default()) {
@@ -390,13 +394,15 @@ mod tests {
         write(serde_json::json!({ "train": { "ema_run_fraction": 0.1 } }));
         assert_eq!(recorded_ema_run_fraction(&dir), Some(0.1));
         let c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
-        let base = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, None);
-        let cmd = with_ema_run_fraction(base(), Some(0.0), Some(true));
+        let tune = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, Some("folo-n-coco-v5"));
+        let cmd = with_ema_run_fraction(tune(), Some(0.0));
         assert_eq!(cmd.argv[cmd.argv.len() - 2..], ["--set", "ema_run_fraction=0"]);
         let current = folo_vision::TrainConfig::default().ema_run_fraction;
-        assert_eq!(with_ema_run_fraction(base(), Some(current), Some(true)).cli, base().cli);
-        assert_eq!(with_ema_run_fraction(base(), Some(0.0), Some(false)).cli, base().cli, "from scratch");
-        assert_eq!(with_ema_run_fraction(base(), None, None).cli, base().cli);
+        assert_eq!(with_ema_run_fraction(tune(), Some(current)).cli, tune().cli);
+        assert_eq!(with_ema_run_fraction(tune(), None).cli, tune().cli);
+        // A command from scratch: the pin would change nothing.
+        let scratch = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, None);
+        assert_eq!(with_ema_run_fraction(scratch(), Some(0.0)).cli, scratch().cli);
     }
 
     /// A run folder without `config.json` (a cloud run's) reads the recipe from `weights/last.folo`, else

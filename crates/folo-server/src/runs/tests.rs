@@ -508,6 +508,40 @@ fn a_copied_run_folder_is_loaded_once() {
     runs.shutdown(None);
 }
 
+/// A run whose `run.json` has a `resolved` object from before its EMA pair (with `close_mosaic`, or without) gets the
+/// pair from its config.json on load; the fields it already has are kept.
+#[test]
+fn an_older_resolved_gets_its_ema_pair_from_config_json() {
+    let dir = TestDir::new("runs-resolved-ema");
+    let tuned =
+        folo_vision::TrainConfig { transfer: true, epochs: 100, ..folo_vision::TrainConfig::default() };
+    let mut old_resolved = serde_json::to_value(tuned.resolved_train(205, 3)).unwrap();
+    old_resolved.as_object_mut().unwrap().retain(|k, _| !k.starts_with("ema_"));
+    let mut old_train = serde_json::to_value(&tuned).unwrap();
+    old_train.as_object_mut().unwrap().remove("ema_run_fraction");
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    for (id, close_mosaic) in [("run_cm", Some(7)), ("run_nocm", None)] {
+        let mut file = queued_file(id, config.clone());
+        let mut resolved = old_resolved.clone();
+        resolved["close_mosaic"] = serde_json::json!(close_mosaic);
+        file.run.resolved = Some(serde_json::from_value(resolved).unwrap());
+        let run_dir = dir.join(id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+        let cfg =
+            serde_json::json!({ "resolved": old_resolved, "train": old_train, "close_mosaic_epochs": 10 });
+        std::fs::write(run_dir.join("config.json"), cfg.to_string()).unwrap();
+    }
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    for (id, close_mosaic) in [("run_cm", 7), ("run_nocm", 10)] {
+        let r = runs.get(id).unwrap().run().resolved.unwrap();
+        // A fine-tune from before `ema_run_fraction` trained with the default EMA.
+        assert_eq!((r.ema_decay, r.ema_tau), (Some(folo_nn::EMA_DECAY), Some(folo_nn::EMA_TAU)), "{id}");
+        assert_eq!(r.close_mosaic, Some(close_mosaic), "{id}");
+    }
+    runs.shutdown(None);
+}
+
 /// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
 #[test]
 fn a_run_with_a_legacy_long_name_resumes() {

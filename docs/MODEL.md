@@ -849,8 +849,8 @@ more) it is the default `0.9999` / `2000` exactly. A run from scratch always tak
 run changes (COCO pretraining, the 320 px COCO proxy of docs/notes/hill/, the shapes gate of §10.6, the tests).
 Examples at 100 epochs, batch 16 (4 batches a step): BCCD (205 images, `T = 400`): window 100, decay 0.99, tau 20;
 brain-tumor (893 images, `T = 1,400`): window 350, decay 0.99714, tau 70. The pair is stored as `folo.ema`, so a
-resume continues the same average; it is in `Run.resolved` (`ema_decay`, `ema_tau`) and the run's first log line
-(`EMA window N steps`). `ema_run_fraction = 0` gives every run the default window, as configs written before the key
+resume continues the same average; it is in `Run.resolved` (`ema_decay`, `ema_tau`) and ends the run's configuration
+log line (`EMA window N steps`). `ema_run_fraction = 0` gives every run the default window, as configs written before the key
 mean (`GET /api/runs/{id}/cli` of such a fine-tune ends with `--set ema_run_fraction=0`).
 
 Why (docs/notes/hill/r6-finetune.md; folo-n from `folo-n-coco-v5`, the four sets of
@@ -859,7 +859,9 @@ minus a seeded 20% hold-out, `best.folo` chosen on that hold-out and scored on t
 saw, the window raises AP by 0.0052 over the four sets (BCCD +0.0096, brain-tumor −0.0044, signature +0.0098,
 medical-pills +0.0057; 11 of the 12 seed pairs up), and `last.folo` by 0.0064 (every set up). Under the benchmark's
 own protocol, which picks `best.folo` on the split it then scores for three of the four sets, the same window was
-0.005 lower (brain-tumor −0.033): the default's noisier per-epoch curve has a higher maximum on the scored images.
+0.005 lower (brain-tumor −0.033). A likely reason, not isolated: the default's per-epoch curve on brain-tumor's
+scored split swings about 18 times as much from epoch to epoch, so its maximum there is higher; but the hold-out runs
+also train on 80% of the images and fewer steps, so the two results differ in more than the selection.
 Not tried: other windows than `h = 0.25` with the selection-free protocol (0.1 and 0.5 lost to it on the hold-outs).
 
 ### 8.6 Data and augmentation (folo-data implements; the trainer configures)

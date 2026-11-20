@@ -13,9 +13,16 @@ use super::harness::{app, get, ok, store};
 
 /// A stopped run folder as a server writes it (`run.json`), for a dataset at `data`; no training needed.
 fn write_run(dir: &Path, id: &str, data: &Path) {
+    write_run_from(dir, id, data, None);
+}
+
+/// [`write_run`] of a run that started from `weights` (a published name), when given.
+fn write_run_from(dir: &Path, id: &str, data: &Path, weights: Option<&str>) {
     std::fs::create_dir_all(dir.join("weights")).unwrap();
-    let config: TrainConfig =
-        serde_json::from_value(json!({ "dataset_id": "ds_legacy", "epochs": 3, "imgsz": 64 })).unwrap();
+    let config: TrainConfig = serde_json::from_value(
+        json!({ "dataset_id": "ds_legacy", "epochs": 3, "imgsz": 64, "weights": weights }),
+    )
+    .unwrap();
     let run = json!({
         "id": id, "name": id, "status": "stopped", "config": config, "created": "2026-11-01T00:00:00Z",
         "epoch": 1, "epochs": 3, "step": 1, "steps_per_epoch": 1, "device": "cpu",
@@ -61,6 +68,39 @@ async fn old_runs_repeat_with_their_recipe() {
     assert_eq!(sets(&c), ["auto_rule=3", "warmup_floor=100"], "{}", c.cli);
     let c: CliCommand = ok(&app, get("/api/runs/run_cloud/cli")).await;
     assert_eq!(sets(&c), ["auto_rule=1"], "{}", c.cli);
+}
+
+/// A fine-tune recorded before `transfer` and `ema_run_fraction` existed (its config.json has neither) repeats from
+/// its weights with `--set ema_run_fraction=0`, the default EMA it trained with; one recorded with today's fraction
+/// gets no EMA pin.
+#[tokio::test(flavor = "multi_thread")]
+async fn old_fine_tunes_repeat_with_the_default_ema() {
+    let t = TestDir::new("runs-cli-ema");
+    let home = t.join("home");
+    let data = t.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    for (id, train) in [
+        ("run_old", json!({ "dataset_id": "ds_legacy", "epochs": 3, "auto_rule": 5, "warmup_floor": 0 })),
+        (
+            "run_new",
+            json!({ "dataset_id": "ds_legacy", "epochs": 3, "auto_rule": 5, "warmup_floor": 0,
+                    "transfer": true, "ema_run_fraction": 0.25 }),
+        ),
+    ] {
+        let dir = home.join("runs").join(id);
+        write_run_from(&dir, id, &data, Some("folo-n-coco-v5"));
+        std::fs::write(dir.join("config.json"), json!({ "train": train }).to_string()).unwrap();
+    }
+    let s = store(&home);
+    let app = app(&s);
+    let sets = |c: &CliCommand| -> Vec<String> {
+        c.argv.windows(2).filter(|w| w[0] == "--set").map(|w| w[1].clone()).collect()
+    };
+    let c: CliCommand = ok(&app, get("/api/runs/run_old/cli")).await;
+    assert!(c.argv.iter().any(|a| a == "--weights"), "{}", c.cli);
+    assert_eq!(sets(&c), ["ema_run_fraction=0"], "{}", c.cli);
+    let c: CliCommand = ok(&app, get("/api/runs/run_new/cli")).await;
+    assert!(sets(&c).is_empty(), "{}", c.cli);
 }
 
 /// An `auto` rule-5 run that trained as a transfer run but whose command has no `--weights` (continued from an

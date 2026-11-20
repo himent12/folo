@@ -42,9 +42,19 @@ pub fn ema_for_run(total_updates: u64, fraction: f64) -> (f64, f64) {
 #[serde(deny_unknown_fields)]
 pub struct EmaContract {
     /// Asymptotic decay.
+    #[serde(deserialize_with = "exact_f64")]
     pub decay: f64,
     /// Ramp time constant, in updates.
+    #[serde(deserialize_with = "exact_f64")]
     pub tau: f64,
+}
+
+/// A JSON number parsed by `f64::from_str` (correctly rounded), not by serde_json's fast path, which can land one ulp
+/// off a 17-digit decimal (`0.9090909090909091`, the decay of an 11-step window): the contract a checkpoint
+/// resumes with is then the very `f64` it was saved with.
+fn exact_f64<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
+    raw.get().parse::<f64>().map_err(|e| serde::de::Error::custom(format!("{}: {e}", raw.get())))
 }
 
 /// An EMA copy of a model: every parameter and floating buffer (BatchNorm running statistics) of `M`.

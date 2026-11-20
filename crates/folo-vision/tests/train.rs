@@ -885,6 +885,29 @@ fn a_resumed_fine_tune_continues_its_ema() {
     let stopped = TrainOptions { after_epoch: Some(Box::new(StopAfter(1))), ..opts(&dir_b) };
     let sum = Trainer::new(cfg, data(&ds), stopped).unwrap().run().unwrap();
     assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Stopped, 1));
+    // A checkpoint whose recipe does not give its stored pair (one made with an environment knob, its `folo.train`
+    // without the key): the run reports the pair it averages with, the stored one.
+    let knob = dir_b.join("knob.folo");
+    {
+        let file = ModelFile::open(dir_b.join("weights/last.folo")).unwrap();
+        let raw = std::fs::read(dir_b.join("weights/last.folo")).unwrap();
+        let header_len = u64::from_le_bytes(raw[..8].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&raw[8..8 + header_len]).unwrap();
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in header["__metadata__"].as_object().unwrap() {
+            map.insert(k.clone(), v.as_str().unwrap().to_string());
+        }
+        let mut train: serde_json::Value = serde_json::from_str(&map["folo.train"]).unwrap();
+        train.as_object_mut().unwrap().remove("ema_run_fraction");
+        map.insert("folo.train".into(), train.to_string());
+        let tensors: Vec<(String, folo_core::Tensor)> =
+            file.tensor_infos().iter().map(|i| (i.name.clone(), file.tensor(&i.name).unwrap())).collect();
+        folo_nn::io::safetensors::write_file(&knob, Some(&map), &tensors).unwrap();
+    }
+    let k = Trainer::resume(&knob, data(&ds), options(None).0, ResumeOverrides::default()).unwrap();
+    let r = k.resolved_train();
+    assert_eq!((r.ema_decay, r.ema_tau), (Some(0.9375), Some(3.2)));
+    drop(k);
     let mut b = Trainer::resume(
         dir_b.join("weights/last.folo"),
         data(&ds),

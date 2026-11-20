@@ -624,8 +624,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
                                // off for the last `close_mosaic` epochs; left out for runs older than the field
                                // whose config.json lacks `close_mosaic_epochs`
   "ema_decay": 0.99, "ema_tau": 20 }  // the EMA (docs/MODEL.md §8.5, `folo.ema`): 0.9999 / 2000, or a fine-tune's
-                               // shorter window (`ema_run_fraction` of its optimizer steps); left out for a run
-                               // without an EMA and by older servers
+                               // shorter window (`ema_run_fraction` of its optimizer steps; a resumed run: the
+                               // pair its checkpoint stored); left out for a run without an EMA and by older servers
 // Run.resolved is set when the trainer is built (by the time the `running` status is sent: fetch the run then),
 // recomputed on resume, and read from the run folder's config.json for runs recorded before the field; it stays
 // null for runs whose trainer never started (stopped while queued, failed to build). Mock runs fill it once they
@@ -759,8 +759,10 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   run that trained under an older `auto` rule than a new run takes (`auto_rule`, rule 1 when absent) ends with
   `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD, and a short one made before
   rule 4 with AdamW; a run made before `warmup_floor` existed (no `warmup_floor`) ends with
-  `--set warmup_floor=100`, the warmup floor it trained with; a fine-tune (`transfer`) made before
-  `ema_run_fraction` existed ends with `--set ema_run_fraction=0`, the EMA window it trained with; an `auto` rule-5 run that trained from pretrained
+  `--set warmup_floor=100`, the warmup floor it trained with; a command that starts from weights (`--weights`)
+  for a fine-tune made before `ema_run_fraction` existed ends with `--set ema_run_fraction=0`, the EMA window it
+  trained with (a command without `--weights` trains from scratch and gets no such pin, so it cannot repeat a
+  fine-tune's scaled EMA); an `auto` rule-5 run that trained from pretrained
   weights (`transfer`) but whose command has no `--weights` (a run continued from an imported checkpoint) ends with
   `--set auto_rule=4` (and `--set musgd.muon=.. --set musgd.sgd=..` when its weights were not the defaults), which
   resolves the same optimizer with the MuSGD step weights it used (docs/MODEL.md §8.2).

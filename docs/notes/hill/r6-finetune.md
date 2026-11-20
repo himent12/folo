@@ -243,8 +243,9 @@ reported-split scores were missing, and nobody had read them. P2 therefore score
 `folo val --save-json` of `best.folo` and `last.folo` on the reported split at conf 0.001, IoU 0.7, then the scorer)
 instead of training them again. The scoring was checked first: `base-bccd-s0`'s `best.folo` scores 0.61663 on
 BCCD test, the first lane's number. The rule as shipped reproduces the knob bit for bit: `ho-ema25-bccd-s0` trained
-again with the PR's build (`main` f875e5c9 + this change, no knob) has every epoch event and every tensor of
-`best.folo` and `last.folo` identical to the knob's run (`bin/bitcheck.py`; first log line "EMA window 75 steps").
+again with the PR's build (`main` f875e5c9 + this change, no knob) has, in every epoch event, the same epoch number,
+validation metrics and training losses (the epoch durations differ), and every tensor of `best.folo` and `last.folo`
+byte for byte the same as the knob's run (`bin/bitcheck.py`; its configuration log line ends "EMA window 75 steps").
 
 ### P2: AP on the reported split (three seeds, Δ paired by seed)
 
@@ -282,8 +283,11 @@ again with the PR's build (`main` f875e5c9 + this change, no knob) has every epo
 
 - Without selection on the scored images the order of the first lane's benchmark-protocol result turns around:
   there the rule was −0.0051 with brain-tumor −0.033; here it is +0.0052 with brain-tumor −0.0044, and brain-tumor's
-  `last.folo` gains as on every other set. What was not shown there is shown now: the earlier brain-tumor loss was
-  the selection, not the model.
+  `last.folo` gains as on every other set. That the earlier brain-tumor loss was the selection is a hypothesis, not
+  shown: P2 also trains on 80% of the train split (1,200 optimizer steps instead of 1,400), so the two protocols
+  differ in more than where `best.folo` is chosen. It is the likely one: on the scored split the default's
+  per-epoch curve swings 0.025 AP from epoch to epoch over epochs 51–100 against the rule's 0.0014, and its best
+  epoch there is 0.070 above its last, against 0.018 (the swing table below).
 - The margin is thin. (a) passes by 0.0002, and brain-tumor's P2 baseline spreads over 0.059 across three seeds,
   so this is a small, consistent gain (11 of 12 pairs, `last.folo` up everywhere), not a large one. Under the
   benchmark's own protocol the published table will not show it on brain-tumor.
@@ -293,3 +297,25 @@ again with the PR's build (`main` f875e5c9 + this change, no knob) has every epo
   against 0.36–0.39 on val). It still selected epochs whose val AP favours the rule on two of three seeds.
 - The best epochs on the hold-out (default / rule): BCCD 38, 97, 25 / 54, 78, 39; brain-tumor 83, 75, 93 / 88, 100,
   82; signature 84, 84, 55 / 91, 96, 83; pills 94, 50, 86 / 96, 63, 93.
+
+### The swing of the selection curve
+
+The validation curve a run chooses `best.folo` on, from the runs' `metrics.jsonl` (`bin/swing.py`, `logs/swing.out`;
+three seeds averaged). "Swing" is the mean |Δ mAP50-95| from one epoch to the next over epochs 51–100; "best − last"
+is how far the chosen epoch is above the last one on that same curve. Benchmark protocol (the first lane's `base` /
+`ema25` runs: chosen on the split they are scored on, except BCCD) and hold-out (`ho-*`: chosen on the hold-out):
+
+| dataset | curve | swing, default | swing, rule | best − last, default | best − last, rule |
+|---|---|---:|---:|---:|---:|
+| BCCD | val (scored on test) | 0.0062 | 0.0006 | 0.0096 | 0.0068 |
+| BCCD | hold-out | 0.0054 | 0.0007 | 0.0156 | 0.0124 |
+| brain-tumor | val (the scored split) | 0.0249 | 0.0014 | 0.0697 | 0.0175 |
+| brain-tumor | hold-out | 0.0169 | 0.0013 | 0.0086 | 0.0030 |
+| signature | val (the scored split) | 0.0042 | 0.0009 | 0.0065 | 0.0083 |
+| signature | hold-out | 0.0024 | 0.0005 | 0.0080 | 0.0023 |
+| medical-pills | val (the scored split) | 0.0031 | 0.0006 | 0.0031 | 0.0030 |
+| medical-pills | hold-out | 0.0056 | 0.0007 | 0.0042 | 0.0042 |
+
+The rule smooths every curve by 4 to 18 times. Brain-tumor's val curve under the default is the noisy one (both
+classes swing about equally: 0.033 and 0.028), and choosing its maximum puts `best.folo` 0.070 above the last epoch
+on the very images it is then scored on.
