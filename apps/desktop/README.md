@@ -195,6 +195,9 @@ Windows the count follows the system's double-click time and distance; the winit
 fixed 400 ms and 5 logical pixels on each axis (`ui/src/platform/winit/mouse.rs`). So double-clicking the button that opens a dialog leaves it open, and the
 second press cannot press what opened under the pointer (a confirmation's Delete); a press that starts a click of
 its own dismisses. An overlay opened by a key, a command or a timer has no such guard: every press reaches it.
+The other way round too: when a press or its release closes the last overlay (Cancel, the dimmed page), the rest
+of that click does not reach the page that was under it (`OverlayPresses::page_admits`, checked by the root's
+press tracker before anything else sees the press).
 Menus and selects are not overlays: a double-click on a select opens and closes it, as on a Windows combo box.
 The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
 `window.close`, `window.close_text`).

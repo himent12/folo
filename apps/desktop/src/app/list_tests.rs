@@ -449,3 +449,31 @@ fn a_retry_drops_the_answer_the_refresh_still_has_out() {
         assert_eq!(shown.as_deref(), Some("server_unreachable"), "{:?}", this.store.datasets);
     });
 }
+
+/// #382: the 2 s `/system` refresh sent a new request while the last was still out (20 in 51 s on
+/// a hung server), and set the answer back to loading for each, so Overview's hardware strip showed
+/// a skeleton at every refresh. One request out at a time; the last answer stays meanwhile.
+#[test]
+fn the_system_refresh_waits_for_its_last_answer_and_keeps_it_on_screen() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    assert!(drive(&mut app, window, |this, _, _| this.store.system.ready().is_some()), "answered");
+    let asked = api.system_calls();
+    // The server stops answering: the first refresh's request is made and held.
+    let held = api.hold("system");
+    start(&mut app, window, 1, |this, _, cx| this.refresh_system(cx));
+    held.wait_held();
+    for _ in 0..4 {
+        start(&mut app, window, 1, |this, _, cx| this.refresh_system(cx));
+    }
+    assert_eq!(api.system_calls(), asked + 1, "no second request while the first is out");
+    start(&mut app, window, 1, |this, _, _| {
+        assert!(this.store.system.ready().is_some(), "the last answer stays on screen");
+    });
+    // It answers: the next refresh asks again.
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, cx| this.refresh_system(cx));
+    assert_eq!(api.system_calls(), asked + 2);
+    assert!(drive(&mut app, window, |this, _, _| !this.system_out && this.store.system.ready().is_some()));
+}

@@ -60,6 +60,8 @@ pub struct MockBackend {
     fail_images_from: Mutex<Option<u32>>,
     /// Every image-list call made, in order ([`MockBackend::image_lists`]).
     image_lists: Mutex<Vec<(String, ImageQuery)>>,
+    /// `/system` calls made ([`MockBackend::system_calls`]).
+    system_calls: std::sync::atomic::AtomicUsize,
     /// Every image's pixels fail while set, as a cut-off answer would ([`MockBackend::fail_pixels`]).
     fail_pixels: std::sync::atomic::AtomicBool,
     /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
@@ -228,6 +230,12 @@ impl MockBackend {
     #[cfg(test)]
     pub fn image_lists(&self) -> Vec<(String, ImageQuery)> {
         self.image_lists.lock().unwrap().clone()
+    }
+
+    /// The `/system` calls made so far.
+    #[cfg(test)]
+    pub fn system_calls(&self) -> usize {
+        self.system_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// From now on (`true`) or no longer, every image's pixels (dataset and benchmark ones, either

@@ -33,6 +33,8 @@ pub use new_run_footer::estimate;
 /// the later presses of that same click, those whose click count goes on from the opening one's
 /// (`MouseDownEvent::click_count`, the platform's): one opened by a key, a command or a timer takes
 /// every press, and a press that starts a click of its own ends the guard. No timer is kept here.
+/// The same goes the other way: when a press or release closes the last overlay (Cancel, the
+/// backdrop), the rest of that click does not reach the page that was under it.
 #[derive(Default)]
 pub struct OverlayPresses {
     /// The overlay on top in the last frame.
@@ -41,6 +43,8 @@ pub struct OverlayPresses {
     pointer: Option<usize>,
     /// The overlay on top came up while a press or release of this click count was handled.
     opened_by: Option<usize>,
+    /// The last overlay went while a press or release of this click count was handled.
+    closed_by: Option<usize>,
 }
 
 impl OverlayPresses {
@@ -50,6 +54,9 @@ impl OverlayPresses {
         if down && self.opened_by.is_some_and(|n| click_count <= n) {
             self.opened_by = None;
         }
+        if down && self.closed_by.is_some_and(|n| click_count <= n) {
+            self.closed_by = None;
+        }
         self.pointer = Some(click_count);
     }
 
@@ -57,6 +64,7 @@ impl OverlayPresses {
     /// last frame is guarded only when a press or release was handled meanwhile.
     pub fn shown(&mut self, top: Option<&'static str>) {
         if self.top != top {
+            self.closed_by = if top.is_none() { self.top.and(self.pointer) } else { None };
             self.top = top;
             self.opened_by = top.and(self.pointer);
         }
@@ -66,6 +74,12 @@ impl OverlayPresses {
     /// Whether the overlay on top takes a press with this click count.
     pub fn admits(&self, click_count: usize) -> bool {
         self.opened_by.is_none_or(|n| click_count <= n)
+    }
+
+    /// Whether the page takes a press with this click count: not one that goes on with the click
+    /// that closed the last overlay (the second press of a double-click on Cancel).
+    pub fn page_admits(&self, click_count: usize) -> bool {
+        self.closed_by.is_none_or(|n| click_count <= n)
     }
 }
 
@@ -159,22 +173,25 @@ impl FoloApp {
 
     /// Tells `overlay_presses` of every press and release in the window, whatever is under the
     /// pointer, before the page or an overlay sees it (the root's first child: ahead of them in the
-    /// capture phase), and draws a frame after it, in which `shown` sees whether it opened one.
+    /// capture phase), and draws a frame after it, in which `shown` sees whether it opened one. A
+    /// press that goes on with the click that closed the last overlay stops here (`page_admits`).
     pub(crate) fn press_tracker(cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         let track = move |click_count, down, cx: &mut App| {
-            let _ = view.update(cx, |this: &mut Self, cx| {
+            view.update(cx, |this: &mut Self, cx| {
                 this.overlay_presses.pointer(click_count, down);
                 cx.notify();
-            });
+                this.overlay_presses.page_admits(click_count)
+            })
+            .unwrap_or(true)
         };
         canvas(
             |_, _, _| {},
             move |_, _, window, _| {
                 let up = track.clone();
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
-                        track(ev.click_count, true, cx);
+                    if phase == DispatchPhase::Capture && !track(ev.click_count, true, cx) {
+                        cx.stop_propagation();
                     }
                 });
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
@@ -392,6 +409,38 @@ mod tests {
         click(&mut p, 1);
         p.shown(Some("synth"));
         assert!(!press(&mut p, 2) && press(&mut p, 1));
+    }
+
+    /// #382: the second press of a double-click on Cancel (or the backdrop) reached the page under
+    /// the dialog it closed.
+    #[test]
+    fn the_page_takes_no_more_presses_of_the_click_that_closed_the_last_overlay() {
+        let mut p = OverlayPresses::default();
+        p.shown(Some("confirm-delete"));
+        // Closed by its first click's release (a button), then the double-click's second press.
+        click(&mut p, 1);
+        p.shown(None);
+        p.pointer(2, true);
+        assert!(!p.page_admits(2) && !p.page_admits(3), "the rest of that click");
+        assert!(press(&mut p, 1) && p.page_admits(1), "a click of its own");
+        assert!(p.page_admits(2), "and its own double-click");
+        // Closed by a press (the backdrop): the same.
+        p.shown(Some("synth"));
+        p.pointer(1, true);
+        p.shown(None);
+        p.pointer(2, true);
+        assert!(!p.page_admits(2));
+        // A dialog closed onto another keeps the other's guard (`admits`); the page has none.
+        p.pointer(1, true);
+        p.shown(Some("synth"));
+        p.shown(Some("confirm-close"));
+        click(&mut p, 1);
+        p.shown(Some("synth"));
+        assert!(!press(&mut p, 2) && p.page_admits(2));
+        // Closed by a key (no press since the last frame): every press reaches the page.
+        p.shown(Some("confirm-close"));
+        p.shown(None);
+        assert!(p.page_admits(2));
     }
 
     #[test]

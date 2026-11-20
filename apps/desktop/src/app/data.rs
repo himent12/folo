@@ -104,44 +104,9 @@ impl FoloApp {
             self.store.models = Load::Loading;
             self.fetch_list(List::Models, cx);
         }
-        if self.store.system.needs_fetch() {
+        if self.store.system.needs_fetch() && !self.system_out {
             self.store.system = Load::Loading;
-            self.fetch(
-                cx,
-                |api| api.system(),
-                |this, r, cx| {
-                    if let Ok(s) = &r
-                        && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
-                    {
-                        this.store.gpu_util.push_back(g);
-                    }
-                    let was_down = this.store.unreachable();
-                    this.store.note_reachability(r.as_ref().err());
-                    if was_down && !this.store.unreachable() {
-                        this.reconnected(cx);
-                    } else if this.store.unreachable() {
-                        // Every time, not only when it goes: a recovery that failed tries again later.
-                        this.connection_lost(cx);
-                    }
-                    // Back after being unreachable: check its health now, not in 2 s.
-                    if this.store.health.needs_fetch() {
-                        this.ensure_core(cx);
-                    }
-                    if let Ok(s) = &r {
-                        // It answers: a later loss starts over, and its data dir says whether it is ours.
-                        this.recovered();
-                        this.note_data_dir(s.data_dir.as_deref());
-                        this.store.last_gpu_count = Some(s.system.gpus.len());
-                    }
-                    let r = r.map(|s| {
-                        this.store.capabilities = s.capabilities;
-                        this.store.data_dir = s.data_dir;
-                        this.store.features = s.features;
-                        s.system
-                    });
-                    this.store.system = r.into();
-                },
-            );
+            self.fetch_system(cx);
         }
         if self.store.health.needs_fetch() {
             self.store.health = Load::Loading;
@@ -158,6 +123,61 @@ impl FoloApp {
                 },
             );
         }
+    }
+
+    /// Asks `/system` again (the 2 s refresh; an image that couldn't reach the server): not while
+    /// an answer is still out (a hung server was sent one every refresh), and the last answer, or
+    /// why there is none, stays on screen until the new one lands (Overview's hardware strip
+    /// showed a skeleton at every refresh).
+    pub(super) fn refresh_system(&mut self, cx: &mut Context<Self>) {
+        if self.system_out {
+            return;
+        }
+        if self.store.system.needs_fetch() {
+            self.store.system = Load::Loading;
+        }
+        self.fetch_system(cx);
+    }
+
+    fn fetch_system(&mut self, cx: &mut Context<Self>) {
+        self.system_out = true;
+        self.fetch(
+            cx,
+            |api| api.system(),
+            |this, r, cx| {
+                this.system_out = false;
+                if let Ok(s) = &r
+                    && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
+                {
+                    this.store.gpu_util.push_back(g);
+                }
+                let was_down = this.store.unreachable();
+                this.store.note_reachability(r.as_ref().err());
+                if was_down && !this.store.unreachable() {
+                    this.reconnected(cx);
+                } else if this.store.unreachable() {
+                    // Every time, not only when it goes: a recovery that failed tries again later.
+                    this.connection_lost(cx);
+                }
+                // Back after being unreachable: check its health now, not in 2 s.
+                if this.store.health.needs_fetch() {
+                    this.ensure_core(cx);
+                }
+                if let Ok(s) = &r {
+                    // It answers: a later loss starts over, and its data dir says whether it is ours.
+                    this.recovered();
+                    this.note_data_dir(s.data_dir.as_deref());
+                    this.store.last_gpu_count = Some(s.system.gpus.len());
+                }
+                let r = r.map(|s| {
+                    this.store.capabilities = s.capabilities;
+                    this.store.data_dir = s.data_dir;
+                    this.store.features = s.features;
+                    s.system
+                });
+                this.store.system = r.into();
+            },
+        );
     }
 
     pub fn ensure_run_data(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -581,11 +601,8 @@ impl FoloApp {
                     // an outage that confirms is noticed (`reconnected` asks for the failed images again)
                     // even when only images saw it. The image alone doesn't mark it down: one that times
                     // out on a server that answers would have its retries reset at every next answer.
-                    if err.is_some_and(|e| e.code == "server_unreachable")
-                        && !this.store.unreachable()
-                        && !this.store.system.is_loading()
-                    {
-                        this.store.system = Load::Idle;
+                    if err.is_some_and(|e| e.code == "server_unreachable") && !this.store.unreachable() {
+                        this.refresh_system(cx);
                         this.ensure_core(cx);
                     }
                     // A slot evicted while its fetch was on its way (scrolled far past) has dropped
@@ -931,7 +948,7 @@ impl FoloApp {
                             changed = true;
                         }
                         if tick.is_multiple_of(20) {
-                            this.store.system = Load::Idle;
+                            this.refresh_system(cx);
                             this.ensure_core(cx);
                         }
                         if tick.is_multiple_of(50) {

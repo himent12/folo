@@ -55,6 +55,23 @@ fn the_second_press_of_the_double_click_that_opened_a_dialog_leaves_it_open() {
     assert!(synth_open(&mut app, window), "a reopened dialog stays too");
 }
 
+/// #382: a double-click on the backdrop (or on Cancel) closes the dialog with its first press; the
+/// second went on to the page under it, here Generate synthetic, which opened the form again.
+#[test]
+fn the_second_press_of_the_double_click_that_closed_a_dialog_does_not_reach_the_page() {
+    let (mut app, window) = datasets();
+    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    app.frame(window.into());
+    assert!(synth_open(&mut app, window), "opened by a command: it takes every press");
+    click(&mut app, window, SYNTH_BUTTON, 1);
+    assert!(!synth_open(&mut app, window), "the backdrop over Generate synthetic dismisses it");
+    click(&mut app, window, SYNTH_BUTTON, 2);
+    assert!(!synth_open(&mut app, window), "the rest of that double-click is not the button's");
+    // A click of its own there is.
+    click(&mut app, window, SYNTH_BUTTON, 1);
+    assert!(synth_open(&mut app, window), "a later click on Generate synthetic opens the form");
+}
+
 #[test]
 fn a_dialog_opened_by_a_key_takes_the_next_press_of_an_earlier_click() {
     for key in ["enter", "space"] {
