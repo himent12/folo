@@ -131,6 +131,7 @@ impl FoloApp {
                         // It answers: a later loss starts over, and its data dir says whether it is ours.
                         this.recovered();
                         this.note_data_dir(s.data_dir.as_deref());
+                        this.check_filters(s.data_dir.as_deref());
                         this.store.last_gpu_count = Some(s.system.gpus.len());
                     }
                     let r = r.map(|s| {

@@ -358,6 +358,11 @@ pub struct FoloApp {
     /// Show only images without labels (from the Empty images tile), on the dataset it was set on
     /// (read it through `empty_only`): it and the class filter never both apply to one dataset.
     pub ds_empty_of: Option<String>,
+    /// The data dir the connected server last named (`/system`): the dataset filters belong to its
+    /// datasets (ids are unique per data dir), so another one drops them (`check_filters`).
+    pub ds_filters_dir: Option<String>,
+    /// The server was switched and has not yet said which data dir it serves: the filters wait.
+    pub ds_filters_unsure: bool,
     pub ds_boxes: bool,
     /// Grid tiles crop to fill the cell instead of showing the whole image.
     pub ds_fill: bool,
@@ -683,6 +688,8 @@ impl FoloApp {
             ds_split: None,
             ds_class: None,
             ds_empty_of: None,
+            ds_filters_dir: None,
+            ds_filters_unsure: false,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,

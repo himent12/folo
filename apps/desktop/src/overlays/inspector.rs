@@ -785,6 +785,8 @@ impl FoloApp {
     }
 
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
+        // From the image on screen: the class filter may have changed since it was drawn.
+        self.land_inspector();
         // Opened from a run's samples: the previous / next sample (the inspector lands on it by id).
         let next_sample = self.inspector.as_ref().and_then(|i| {
             let (run, _) = i.sample.as_ref()?;

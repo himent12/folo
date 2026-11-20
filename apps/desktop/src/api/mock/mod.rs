@@ -66,6 +66,8 @@ pub struct MockBackend {
     fail_metrics: std::sync::atomic::AtomicBool,
     /// The next run-stream open fails ([`MockBackend::fail_events_once`]).
     fail_events: std::sync::atomic::AtomicBool,
+    /// The data dir `/system` names ([`MockBackend::with_data_dir`]; none by default, as the demo).
+    data_dir: Option<String>,
     /// The next instance-list read fails ([`MockBackend::fail_instances_once`]).
     fail_instances: std::sync::atomic::AtomicBool,
     /// Datasets whose own read fails with this (code, message) until mended
@@ -94,6 +96,13 @@ impl MockBackend {
     #[allow(dead_code)]
     pub fn without_bench(mut self) -> Self {
         self.benches = Arc::new(super::mock_bench::MockBench::disabled(self.frozen, self.started));
+        self
+    }
+
+    /// `/system` names `dir` as its data dir, as a local `folo serve` does.
+    #[cfg(test)]
+    pub fn with_data_dir(mut self, dir: &str) -> Self {
+        self.data_dir = Some(dir.into());
         self
     }
 

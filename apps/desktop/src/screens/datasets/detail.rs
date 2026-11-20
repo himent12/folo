@@ -83,6 +83,9 @@ impl FoloApp {
     /// dataset's classes as last read (a refreshed class list, or another server, can leave it
     /// past them). Anywhere else none: another dataset's index means another class there.
     pub fn class_filter(&self, id: &str) -> Option<u32> {
+        if self.ds_filters_unsure {
+            return None;
+        }
         let (of, class) = self.ds_class.as_ref()?;
         let ds =
             self.store.dataset.get(id).and_then(|l| l.ready()).or_else(|| self.store.dataset_summary(id))?;
@@ -91,7 +94,7 @@ impl FoloApp {
 
     /// Whether dataset `id`'s grid shows only its images without labels ("Show them").
     pub fn empty_only(&self, id: &str) -> bool {
-        self.ds_empty_of.as_deref() == Some(id)
+        !self.ds_filters_unsure && self.ds_empty_of.as_deref() == Some(id)
     }
 
     /// Indices (into the dataset's image list) that pass the split and class filters. Cached

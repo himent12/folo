@@ -115,9 +115,8 @@ impl FoloApp {
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
         // A dataset id names another dataset on another server (ids are unique per data dir): the
-        // filters set on one go. A recovery that reaches the same data dir puts them back.
-        self.ds_class = None;
-        self.ds_empty_of = None;
+        // filters wait for the new server to say which data dir it serves (`check_filters`).
+        self.ds_filters_unsure = true;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
@@ -317,13 +316,7 @@ impl FoloApp {
                                 return;
                             }
                             this.server_url.update(cx, |i, cx| i.set_text(local.clone(), cx));
-                            // The data dir's server again: its datasets, so their filters, are the same.
-                            let filters = (why == Reason::Recover)
-                                .then(|| (this.ds_class.take(), this.ds_empty_of.take()));
                             this.set_backend((connector.backend)(&local), ServerMode::Local, cx);
-                            if let Some((class, empty)) = filters {
-                                (this.ds_class, this.ds_empty_of) = (class, empty);
-                            }
                             this.local_url = Some(local.clone());
                             this.connected_url = Some(local.clone());
                             this.said_where(why, &url, &local, started, cx);
@@ -438,6 +431,25 @@ impl FoloApp {
         {
             self.local_url = self.connected_url.clone();
         }
+    }
+
+    /// A `/system` answer names the data dir the server serves (`dir`): the dataset filters stay
+    /// while it is the one they were set under (a recovery, Connect on the same server), and go
+    /// when it is another, also one that took the same address without a switch here, or when a
+    /// switched-to server names none (a dataset id there may be any dataset).
+    pub(super) fn check_filters(&mut self, dir: Option<&str>) {
+        let keep = match (self.ds_filters_dir.as_deref(), dir) {
+            (Some(was), Some(now)) => same_dir(was, now),
+            // Not known before: the same server, unless it was switched since.
+            (None, _) => !self.ds_filters_unsure,
+            (Some(_), None) => false,
+        };
+        if !keep {
+            self.ds_class = None;
+            self.ds_empty_of = None;
+        }
+        self.ds_filters_dir = dir.map(str::to_string);
+        self.ds_filters_unsure = false;
     }
 
     /// The local server answers again: the next loss starts over without waiting.

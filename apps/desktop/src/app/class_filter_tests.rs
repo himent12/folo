@@ -155,45 +155,112 @@ fn found_local(_: std::time::Duration) -> Result<crate::api::http::Spawned, Stri
     Ok(crate::api::http::Spawned::Running("http://127.0.0.1:4100".into()))
 }
 
+/// The demo as a local `folo serve` of the data dir `D:/data`.
+fn data(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
+    std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"))
+}
+
+/// The demo as another data dir's server.
+fn other(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
+    std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/other"))
+}
+
+/// The demo: no data dir.
 fn demo(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
     std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true))
 }
 
-/// Review round 1: dataset ids are unique per data dir, so the same id on another server is
-/// another dataset (`circle` there may be `person`): a switch drops the filters. A recovery
-/// reaches the lost server's data dir again, so its datasets keep theirs.
+/// Review rounds 1 and 2: dataset ids are unique per data dir, so the same id on another server
+/// is another dataset (`circle` there may be `person`). The filters follow the data dir `/system`
+/// names: kept through a recovery and a Connect that reach the same one, dropped when another
+/// answers (also one that took the address with no switch here) or a switched-to one names none.
 #[test]
-fn another_server_drops_the_dataset_filters_and_a_recovery_keeps_them() {
+fn the_dataset_filters_follow_the_data_dir_the_server_names() {
     use super::{Connector, ServerMode};
-    let (mut app, window) = open();
-    let filters = |this: &FoloApp| (this.ds_class.clone(), this.ds_empty_of.clone());
+    use crate::store::Load;
+    let (mut app, window) = super::tests::open_with(std::sync::Arc::new(
+        crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"),
+    ));
     let set = (Some((HARD.to_string(), 4)), Some(SHAPES.to_string()));
-    let kept = set.clone();
+    let filters = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, _| {
+            (this.ds_class.clone(), this.ds_empty_of.clone(), this.class_filter(HARD))
+        })
+    };
+    let pick = |app: &mut HeadlessApp| {
+        let set = set.clone();
+        drive(app, window, move |this, _, _| (this.ds_class, this.ds_empty_of) = set)
+    };
+    let kept = (set.0.clone(), set.1.clone(), Some(4));
+    pick(&mut app);
     // The local server stops answering; the data dir's server answers at another address.
-    drive(&mut app, window, move |this, _, cx| {
-        (this.ds_class, this.ds_empty_of) = kept;
-        this.connector = Connector { probe: |_| false, start: found_local, backend: demo };
+    drive(&mut app, window, |this, _, cx| {
+        this.connector = Connector { probe: |_| false, start: found_local, backend: data };
         this.server_mode = ServerMode::Local;
         this.local_url = Some("http://127.0.0.1:4000".into());
         this.store.api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true).failing());
-        this.store.system = crate::store::Load::Idle;
+        this.store.system = Load::Idle;
         this.ensure_core(cx);
     });
-    let kept = set.clone();
-    drive(&mut app, window, move |this, _, _| {
+    drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"), "recovered");
         assert!(this.backend_gen > 0, "onto a new backend");
-        assert_eq!(filters(this), kept, "the same data dir: the filters stay");
+        this.ensure_core(cx);
     });
-    // Another server, typed in Settings.
+    assert_eq!(filters(&mut app), kept, "the same data dir after a recovery");
+    // Connect on the same server: the same data dir.
+    drive(&mut app, window, |this, _, cx| {
+        this.connector = Connector { probe: |_| true, start: found_local, backend: data };
+        this.server_url.update(cx, |i, cx| i.set_text("http://127.0.0.1:4100", cx));
+        this.switch_source(ServerMode::Local, cx);
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    assert_eq!(filters(&mut app), kept, "Connect on the same server");
+    // Another data dir's server takes the address, with no switch here (the next refresh).
+    drive(&mut app, window, |this, _, cx| {
+        this.store.api = other("");
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    assert_eq!(filters(&mut app), (None, None, None), "another data dir at the same address");
+    // A switch to a server that names none (the demo).
+    pick(&mut app);
     drive(&mut app, window, |this, _, cx| {
         this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
         this.server_url.update(cx, |i, cx| i.set_text("http://192.168.9.9:7878", cx));
         this.switch_source(ServerMode::Local, cx);
     });
+    assert_eq!(drive(&mut app, window, |this, _, _| this.class_filter(HARD)), None, "waits for its data dir");
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    assert_eq!(filters(&mut app), (None, None, None), "a server that names no data dir");
+}
+
+/// Review round 2: the class filter turned on after the inspector's image was drawn, before the
+/// next frame; Next stepped from the old place in the new list, past another image. It steps from
+/// the image on screen.
+#[test]
+fn next_steps_from_the_image_on_screen_when_the_class_filter_changed_before_a_frame() {
+    let (mut app, window) = open();
+    go(&mut app, window, Route::Dataset(HARD.into()));
+    // Hexagon images (class 4) by their place among all images.
+    let (at, from, next) = drive(&mut app, window, |this, _, _| {
+        let all = this.store.images.get(HARD).and_then(|l| l.ready()).unwrap();
+        let hex: Vec<usize> = (0..all.len()).filter(|&i| all[i].boxes.iter().any(|b| b.class == 4)).collect();
+        let k = (1..hex.len() - 1).find(|&k| hex[k] != k).expect("a hexagon image after others");
+        (hex[k], all[hex[k]].id.clone(), all[hex[k + 1]].id.clone())
+    });
+    drive(&mut app, window, move |this, w, cx| this.open_inspector(HARD.into(), at, w, cx));
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        let i = this.inspector.as_ref().unwrap();
+        assert_eq!(this.filtered_image(HARD, i.index).map(|m| m.id.clone()), Some(from));
+        this.ds_class = Some((HARD.into(), 4));
+        this.step_inspector(1, cx);
+    });
+    settle(&mut app, window);
     drive(&mut app, window, move |this, _, _| {
-        assert_eq!(this.connected_url.as_deref(), Some("http://192.168.9.9:7878"));
-        assert_eq!(filters(this), (None, None), "another server's datasets");
+        let i = this.inspector.as_ref().unwrap();
+        assert_eq!(this.filtered_image(HARD, i.index).map(|m| m.id.clone()), Some(next), "the next hexagon");
     });
 }
 
