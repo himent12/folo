@@ -84,6 +84,28 @@ describe('hub.features over an outage', () => {
     expect(s.healths - before).toBe(2);
   });
 
+  it('serverMock (review of #389, round 2): a mock server restarted at the address as a real one can resume', async () => {
+    const net = servers();
+    const s = net.at('');
+    const mock = () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: true, features: MOCK });
+    s.next.push(mock);
+    await hub.connect();
+    expect(hub.serverMock).toBe(true);
+    s.up = false;
+    await outage();
+    expect(hub.serverMock).toBeNull();
+    // Back as a real server; its health is held for a while: unknown until it answers.
+    s.up = true;
+    const h = held();
+    s.next.push(() => h.r);
+    await hub.api.datasets();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.serverMock]).toEqual([false, null]);
+    h.answer(health(REAL));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.serverMock).toBe(false);
+  });
+
   it('finding 1, the other way: restarted without labeling, its health held: unknown until it answers, then lacking', async () => {
     const net = servers();
     const s = net.at('');

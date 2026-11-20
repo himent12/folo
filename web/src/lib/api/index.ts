@@ -151,11 +151,11 @@ class Hub {
   }
   /**
    * Whether the server in use said it is the mock server (`folo serve --mock`: `/api/health`'s `mock`), from the
-   * connect's handshake; null before it and on the in-browser demo. The mock server answers some writes `501`
-   * (resuming a run) that every real server, older ones too, can do.
+   * health answer of this connection since its last outage, as `features`; null while unknown and on the in-browser
+   * demo. The mock server answers some writes `501` (resuming a run) that every real server, older ones too, can do.
    */
   get serverMock(): boolean | null {
-    return this.#serverMock.get();
+    return this.#reach.offline ? null : this.#serverMock.get();
   }
   set serverMock(v: boolean | null) {
     this.#serverMock.set(v);
@@ -396,12 +396,16 @@ class Hub {
   async #learn(base: string, attempt: number, abort: AbortSignal): Promise<void> {
     const mine = ++this.#asks;
     this.features = null;
+    this.#serverMock.set(null);
     const http = new HttpApi(base);
     const over = () => mine !== this.#asks || attempt !== this.#attempt || this.#reach.offline;
     for (let i = 0; ; i++) {
       const h: unknown = await http.health(AbortSignal.any([abort, AbortSignal.timeout(PROBE_TIMEOUT)])).catch(() => null);
       if (over()) return;
-      if (isHealth(h)) return void (this.features = featuresOf(h));
+      if (isHealth(h)) {
+        this.features = featuresOf(h);
+        return void this.#serverMock.set(h.mock === true);
+      }
       await pause(PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]!, abort);
       if (over()) return;
     }

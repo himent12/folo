@@ -5,12 +5,7 @@
 //   system, the models, the datasets); a reconnect refetches everything at once. Inside `together(fn)` (a Resource's
 //   fetcher, run synchronously) a read on the shared Api (`shareApi`) joins an identical read issued earlier in the same
 //   turn (before the next microtask), so they get the same answer at the same time, which is what separate requests
-//   issued at that moment would have returned. A read issued later is a request of its own, as before, but for one
-//   case: a Resource's first read, as it mounts (`together(fn, true)`), joins an identical read on that Api that is
-//   still in flight (and not given up), unless a write was sent on that Api since that read was. The parts of a screen
-//   mount a few milliseconds apart (the shell's run list and Overview's, Overview's system and its machine strip's:
-//   issue #309, item 2), each with a request of its own for what the other was about to be told. An answer is never
-//   taken again: polls, refreshes and a Resource mounted once a read has answered always ask.
+//   issued at that moment would have returned. A read issued later is a request of its own, as before.
 // - Polls that tick together are one timer (`pollTogether`): pollers started in the same turn with the same period
 //   share an interval, so their ticks run in one task and their identical reads are one request (above). Each poller
 //   keeps the phase it started with, as a timer of its own would. While the tab is hidden the shared timer stops (the
@@ -22,12 +17,8 @@ import type { Api } from './client';
 
 // ---------------------------------------------------------------------------------------------------------------- turns
 
-/**
- * Things that can be joined only in the turn they were made in: cleared at the next microtask. Reads are keyed by their
- * shared Api's number and the call (`3|runs()`), so two Apis never join each other's.
- */
+/** Things that can be joined only in the turn they were made in: cleared at the next microtask. */
 const joinable = new Map<string, Shared>();
-let apis = 0;
 const groups = new Map<string, PollGroup>();
 let clearing = false;
 
@@ -91,23 +82,18 @@ interface Shared {
 
 /** The read keys a `together` scope saw, in order; null outside one. */
 let scope: string[] | null = null;
-/** The scope is a Resource's first read (it may join a read in flight: the top of this file). */
-let mounting = false;
 
 /**
  * Runs `fn` with reads on a shared Api grouped (see the top of this file) and returns what it returned, with the keys
  * of the reads it issued synchronously (`runs()`, `run("run_7d1e")`), joined: what identifies the data it loads.
  */
-export function together<T>(fn: () => T, mount = false): { value: T; key: string } {
+export function together<T>(fn: () => T): { value: T; key: string } {
   const prev = scope;
-  const prevMounting = mounting;
   const keys: string[] = (scope = []);
-  mounting = mount;
   try {
     return { value: fn(), key: keys.join(' ') };
   } finally {
     scope = prev;
-    mounting = prevMounting;
   }
 }
 
@@ -160,16 +146,6 @@ export function shareApi(api: Api): Api {
   let s = shared.get(api);
   if (s) return s;
   const fns = new Map<PropertyKey, unknown>();
-  /**
-   * This Api's reads still in flight, for a mounting Resource (the top of this file). Emptied when a write is sent and
-   * again when it answers: a read sent while it was out may hold what it changes.
-   */
-  const inFlight = new Map<string, Shared>();
-  const id = `${++apis}|`;
-  const forget = () => {
-    inFlight.clear();
-    for (const k of joinable.keys()) if (k.startsWith(id)) joinable.delete(k);
-  };
   s = new Proxy(api, {
     get(target, prop) {
       const v = Reflect.get(target, prop, target);
@@ -180,27 +156,12 @@ export function shareApi(api: Api): Api {
         const name = String(prop);
         const read = READS.has(name);
         const wrapped = (...args: unknown[]) => {
-          if (!read) {
-            // A request that is no read may change what any read answers (one that is not a request, a URL or a
-            // subscription, changes nothing).
-            const out = method.apply(target, args);
-            if (out instanceof Promise) {
-              forget();
-              out.then(forget, forget);
-            }
-            return out;
-          }
-          if (scope === null) return method.apply(target, args);
+          if (!read || scope === null) return method.apply(target, args);
           const signalAt = args.findIndex((a) => a instanceof AbortSignal);
           const signal = signalAt >= 0 ? (args[signalAt] as AbortSignal) : undefined;
           const key = `${name}(${args.map((a, i) => (i === signalAt ? '' : a === undefined ? '-' : JSON.stringify(a))).join(',')})`;
           scope.push(key);
-          // A read every caller gave up on (aborted) is joined by nobody: the next caller asks again.
-          let entry = joinable.get(id + key);
-          if (entry?.ctrl.signal.aborted) entry = undefined;
-          // A mounting Resource joins an identical read still out (not one every caller gave up on), never an answer.
-          const out = mounting && !entry ? inFlight.get(key) : undefined;
-          if (out && !out.ctrl.signal.aborted) entry = out;
+          let entry = joinable.get(key);
           if (!entry) {
             const ctrl = new AbortController();
             const call = [...args];
@@ -214,13 +175,9 @@ export function shareApi(api: Api): Api {
             }
             // Nobody may be left to see a failure (every caller gave up): never an unhandled rejection.
             promise.catch(() => {});
-            const made: Shared = (entry = { promise, ctrl, waiting: 0, callers: 0 });
-            joinable.set(id + key, entry);
+            entry = { promise, ctrl, waiting: 0, callers: 0 };
+            joinable.set(key, entry);
             endOfTurn();
-            // Kept for a mounting Resource while it is out.
-            inFlight.set(key, made);
-            const done = () => void (inFlight.get(key) === made && inFlight.delete(key));
-            promise.then(done, done);
           }
           return join(entry, signal);
         };

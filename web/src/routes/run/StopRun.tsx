@@ -33,16 +33,16 @@ export function stoppedToast(r: Pick<Run, 'name' | 'cloud' | 'epoch' | 'status'>
   if (r.status === 'completed') return void toast.info(`${r.name} completed`, 'It finished before the stop took effect, with all its results.');
   if (r.status === 'failed') return void toast.info(`${r.name} failed`, 'Its page has the error and the log.');
   const stopped = r.status === 'stopped';
-  // Stopped: its own epoch count is what it finished (a waiting cloud run stops at once, before it trained).
-  const kept = stopped ? finishedEpochs(r) : done;
+  // Only `done` is known finished: a stopped run's `epoch` may be the one its last step was in, never finished. One
+  // that finished while the stop was out is not known here, so a stopped run with none known claims nothing.
   toast.info(
     `${stopped ? 'Stopped' : 'Stopping'} ${r.name}`,
     r.cloud && r.epoch === 0
       ? 'Its instance is released; nothing had trained yet.'
-      : kept
-        ? `The checkpoint from epoch ${kept} is kept.`
+      : done
+        ? `The checkpoint from epoch ${done} is kept.`
         : stopped
-          ? 'No epoch had finished, so nothing is saved.'
+          ? undefined
           : 'No epoch had finished yet. Unless one finishes before it stops, nothing is saved.',
   );
 }

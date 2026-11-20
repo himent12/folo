@@ -76,6 +76,33 @@ describe('LiveRun.stop', () => {
     dispose();
   });
 
+  it('keeps an end a snapshot brought while the stop was on its way (no status event)', async () => {
+    const { live, dispose } = await started();
+    const answer = deferred<Run>();
+    const pending = live.stop(() => answer.promise);
+    live.run = { ...live.run!, status: 'completed' };
+    answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
+    expect((await pending)?.status).toBe('completed');
+    expect(live.run?.status).toBe('completed');
+    dispose();
+  });
+
+  it('keeps a newer attempt: stopped, then resumed elsewhere, before the answer came (review of #389, round 2)', async () => {
+    const { live, dispose } = await started();
+    const answer = deferred<Run>();
+    const pending = live.stop(() => answer.promise);
+    serverStatus = 'stopped';
+    handlers.status?.({ status: 'stopped', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    serverStatus = 'running';
+    handlers.status?.({ status: 'running', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
+    expect((await pending)?.status).toBe('running');
+    expect(live.run?.status).toBe('running');
+    dispose();
+  });
+
   it('applies the answer when no status event came meanwhile', async () => {
     const { live, dispose } = await started();
     const now = await live.stop(() => Promise.resolve({ ...snapshot, status: 'stopping', step: 2 }));
@@ -110,13 +137,14 @@ describe('stoppedToast', () => {
     expect(toast.items.map((t) => t.detail)).toEqual(['No epoch had finished yet. Unless one finishes before it stops, nothing is saved.']);
   });
 
-  it('tells a run that ended before the answer came as it ended', () => {
+  it('tells a run that ended before the answer came as it ended, claiming only the epochs known finished', () => {
+    // A `stopped` event leaves the epoch its last step was in (review of #389, round 2): epoch 1, not finished.
     stoppedToast({ name: 'r', epoch: 1, status: 'stopped' }, 0);
-    stoppedToast({ name: 's', epoch: 0, status: 'stopped' }, 0);
+    stoppedToast({ name: 's', epoch: 3, status: 'stopped' }, 2);
     stoppedToast({ name: 'f', epoch: 1, status: 'failed' }, 0);
     expect(toast.items.map((t) => [t.title, t.detail])).toEqual([
-      ['Stopped r', 'The checkpoint from epoch 1 is kept.'],
-      ['Stopped s', 'No epoch had finished, so nothing is saved.'],
+      ['Stopped r', undefined],
+      ['Stopped s', 'The checkpoint from epoch 2 is kept.'],
       ['f failed', 'Its page has the error and the log.'],
     ]);
   });

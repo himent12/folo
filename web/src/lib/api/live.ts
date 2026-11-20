@@ -230,6 +230,8 @@ export class LiveRun {
   #lastCloud: RunCloud | null = null;
   /** Bumps on every rewind (resume): history requested before it describes an earlier attempt and is dropped. */
   #gen = 0;
+  /** Bumps only on a rewind: the run's attempt (each resume starts one), for a stop's late answer. */
+  #attempt = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
 
@@ -641,20 +643,21 @@ export class LiveRun {
 
   /**
    * Stops the run through `call` (POST /api/runs/{id}/stop, or a resumed run's removal from the queue). The answer is
-   * the run as the server had it once it took the stop. A status event received meanwhile that says the run ended (it
-   * completed after its last batch, say) is newer: the view keeps it. One that says it is active (a reconnect's
-   * snapshot, a late `queued`, the stop's own `stopping`) is not: the answer's status applies, over the progress the
-   * stream has delivered. Returns the run as the view now has it.
+   * the run as the server had it once it took the stop. If the view meanwhile has the run ended (a status event or a
+   * snapshot: it completed after its last batch, say), or in a newer attempt (resumed elsewhere after it stopped),
+   * that is newer: the view keeps it. A status event that says it is active (a reconnect's snapshot, a late `queued`,
+   * the stop's own `stopping`) is not: the answer's status applies, over the progress the stream has delivered.
+   * Returns the run as the view now has it.
    */
   async stop(call: () => Promise<Run | null>): Promise<Run | null> {
     const seq = this.#statusSeq;
+    const attempt = this.#attempt;
     const r = await call();
     if (!r) return null;
     const cur = this.run;
-    if (cur && this.#statusSeq !== seq) {
-      if (!ACTIVE.includes(cur.status)) return cur;
-      this.run = { ...cur, status: r.status, error: r.error };
-    } else this.run = keepStepsPerEpoch(r, cur);
+    if (cur && (attempt !== this.#attempt || !ACTIVE.includes(cur.status))) return cur;
+    if (cur && this.#statusSeq !== seq) this.run = { ...cur, status: r.status, error: r.error };
+    else this.run = keepStepsPerEpoch(r, cur);
     return this.run ?? r;
   }
 
@@ -664,6 +667,7 @@ export class LiveRun {
    */
   #rewind() {
     this.#gen++;
+    this.#attempt++;
     this.#replay = { until: this.steps[this.steps.length - 1]?.step ?? 0, steps: [], epochs: [] };
     const done = this.epochs[this.epochs.length - 1]?.epoch ?? 0;
     this.steps = this.steps.filter((s) => s.epoch <= done);
