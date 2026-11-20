@@ -56,7 +56,10 @@ def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> t
     summary = common.summarize(kept, expected_seeds=seeds)
     summary["epochs"] = epochs
     summary["ignored_other_epochs"] = ignored
-    groups = {(g["dataset"], g["tool"], g["model"], g["variant"]): g for g in summary["groups"]}
+    # The holdout variant chooses its best checkpoint by another protocol: summary.json has it, the tables do not.
+    groups = {
+        (g["dataset"], g["tool"], g["model"], g["variant"]): g for g in summary["groups"] if g["variant"] != "holdout"
+    }
     lines = []
 
     names = [m["name"] for m in metas] or sorted({g[0] for g in groups})

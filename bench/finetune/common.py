@@ -4,7 +4,9 @@ A run is one (tool, model, dataset, variant, seed): tool `folo` or `ultralytics`
 (`folo-n`, `folo-s`, ... for FOLO; the checkpoint's stem, `yolo26n`, `yolo26s`, ... for Ultralytics), variant
 `pretrained` (fine-tuned from COCO weights) or `scratch` (no weights: the control). Its result is one JSON file,
 `<model>-<dataset>-<variant>-s<seed>.json`, written atomically once the run is scored; a runner skips every run whose
-file exists, so a matrix can be stopped and started again. Models of the same size letter (folo-n and yolo26n,
+file exists, so a matrix can be stopped and started again. Variant `holdout` (FOLO only) is `pretrained` trained on the
+train split minus a seeded hold-out and choosing its best checkpoint there (holdout.py), so the scored split is one
+it never selected on; the published tables leave it out. Models of the same size letter (folo-n and yolo26n,
 folo-s and yolo26s) are compared in one table.
 """
 
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TOOLS = ("folo", "ultralytics")
-VARIANTS = ("pretrained", "scratch")
+VARIANTS = ("pretrained", "scratch", "holdout")
 RESULT_VERSION = 1
 
 
@@ -46,6 +48,11 @@ class RunKey:
 
     def result_path(self, results_dir: Path) -> Path:
         return Path(results_dir) / f"{self.stem}.json"
+
+
+def from_weights(variant: str) -> bool:
+    """Whether runs of `variant` start from the --weights checkpoint (every variant but the scratch control)."""
+    return variant != "scratch"
 
 
 def size_of(model: str) -> str:
@@ -111,7 +118,8 @@ def result_record(key: RunKey, **fields) -> dict:
         "batch": None,
         "weights": None,  # what the run started from: a name / file and its sha256, or None from scratch
         "eval_split": None,
-        "metrics": None,  # scorer.score(): the common pycocotools numbers
+        "metrics": None,  # scorer.score(): the common pycocotools numbers, of the best checkpoint
+        "metrics_last": None,  # the same of the last epoch's checkpoint (no selection), where the runner has it
         "tool_reported": None,  # the tool's own validation of its best checkpoint, for reference only
         "train_wall_s": None,
         "gpu": None,
@@ -179,6 +187,9 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
                 "ap": _stat(metric("ap")),
                 "ap50": _stat(metric("ap50")),
                 "ap75": _stat(metric("ap75")),
+                "ap_last": _stat(
+                    [r["metrics_last"]["ap"] for r in rs if (r.get("metrics_last") or {}).get("ap") is not None]
+                ),
                 # Training time of runs that had their GPU to themselves; runs trained side by side on one GPU
                 # (`compute.concurrent_jobs` > 1) are counted apart, since they share it.
                 "train_wall_s": _stat([r["train_wall_s"] for r in rs if r.get("train_wall_s") is not None and not shared(r)]),

@@ -17,8 +17,14 @@ For each (dataset, variant, seed) of --arch it registers the dataset (`POST /api
 `pretrained` variant, none for `scratch`, and `compute` for a cloud run), follows it to the end, then evaluates the
 run's best model (`Run.model_id`, its `weights/best.folo`) on the evaluation split with this machine's `folo val
 --save-json` (conf 0.001, iou 0.7, at most 300 detections, the model's 640 px) against the dataset's
-annotations/instances_<split>.json, and scores the detections with pycocotools (scorer.py). FOLO's patience
+annotations/instances_<split>.json, and scores the detections with pycocotools (scorer.py); the run's last checkpoint
+(its `last.folo`, the model `m_<run>-last` on the server) is scored the same way into `metrics_last`. FOLO's patience
 (100 epochs, not settable through the API) cannot stop a run of at most 100 epochs early.
+
+`--variants holdout` adds runs from --weights that train on the train split minus a seeded hold-out (holdout.py,
+`--holdout-seed`, `--holdout-fraction`; carved into <work-dir>/holdout and registered as its own dataset), so the
+server chooses `best.folo` on the hold-out; both checkpoints are then scored on the evaluation split, which the run
+never saw.
 
 Restartable: a run whose result file exists is skipped; a run started before is followed again instead of started
 twice. Each work dir has an owner id and each run a name that carries it and the fingerprint of its configuration
@@ -51,6 +57,7 @@ sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 import datasets  # noqa: E402
 import folo_api  # noqa: E402
+import holdout  # noqa: E402
 import run_state  # noqa: E402
 import scorer  # noqa: E402
 from folo_api import Api  # noqa: E402
@@ -86,7 +93,7 @@ def train_config(
         "seed": key.seed,
         "device": "auto" if compute else args.device,
     }
-    if key.variant == "pretrained":
+    if common.from_weights(key.variant):
         cfg["weights"] = weights_id or args.weights
     if compute:
         cfg["compute"] = compute
@@ -129,6 +136,7 @@ class Matrix(Ownership):
         self.lock = threading.Lock()
         self.dataset_ids: dict[str, str] = {}
         self.layouts: dict[str, str] = {}  # dataset -> layout digest, hashed from its files once per invocation
+        self.holdouts: dict[str, dict] = {}  # dataset -> the meta of its carved hold-out (the holdout variant)
         self.spent: dict[str, float] = {}  # run id -> cloud cost so far
         self.unsettled = False  # a worker outlived `settle`: the work dir's lock is kept
         self.finished: set[str] = set()  # run ids that completed (their cost is a full run's)
@@ -164,6 +172,26 @@ class Matrix(Ownership):
     def data_dir(self, name: str) -> Path:
         return (Path(self.args.data_root) / name).resolve()
 
+    def holdout_meta(self, name: str) -> dict:
+        """The hold-out split of dataset `name` (holdout.carve into <work-dir>/holdout, once per invocation; a folder
+        there from before is kept when it is the same carve)."""
+        with self.lock:
+            if name in self.holdouts:
+                return self.holdouts[name]
+        meta = holdout.carve(
+            datasets.SPECS[name], self.data_dir(name), self.work / "holdout", self.args.holdout_seed,
+            self.args.holdout_fraction,
+        )
+        with self.lock:
+            self.holdouts[name] = meta
+        return meta
+
+    def train_dir(self, key: common.RunKey) -> Path:
+        """The folder `key`'s run trains (and chooses its best checkpoint) on: the dataset, or its hold-out split."""
+        if key.variant == "holdout":
+            return (self.work / "holdout" / self.holdout_meta(key.dataset)["name"]).resolve()
+        return self.data_dir(key.dataset)
+
     def layout(self, name: str) -> str:
         """The layout digest of dataset `name`, hashed from its files (datasets.verify_layout) the first time."""
         with self.lock:
@@ -189,7 +217,10 @@ class Matrix(Ownership):
             "compute": self.compute,
             "weights": None,
         }
-        if key.variant == "pretrained":
+        if key.variant == "holdout":
+            h = self.holdout_meta(key.dataset)
+            spec["selection"] = {"seed": h["seed"], "fraction": h["fraction"], "layout_sha256": h["layout_sha256"]}
+        if common.from_weights(key.variant):
             b = self.base_model()
             # The file's sha256 when the server's files are on this machine, else its model id on the server.
             spec["weights"] = {"name": self.args.weights, "sha256": b["sha256"]} if b["sha256"] else {
@@ -251,16 +282,19 @@ class Matrix(Ownership):
         with self.lock:
             self.reserved.pop(stem, None)
 
-    def dataset_id(self, name: str) -> str:
+    def dataset_id(self, key: common.RunKey) -> str:
+        """The server's id of the folder `key`'s run trains on (registered once per invocation)."""
+        path = self.train_dir(key)
+        label = f"ft-{key.dataset}" if key.variant != "holdout" else f"ft-{path.name}"
         with self.lock:
-            if name in self.dataset_ids:
-                return self.dataset_ids[name]
-        ds = self.api.post("/api/datasets", {"name": f"ft-{name}", "path": str(self.data_dir(name)), "format": "yolo"})
-        want = list(datasets.SPECS[name].classes)
+            if str(path) in self.dataset_ids:
+                return self.dataset_ids[str(path)]
+        ds = self.api.post("/api/datasets", {"name": label, "path": str(path), "format": "yolo"})
+        want = list(datasets.SPECS[key.dataset].classes)
         if ds["classes"] != want:
-            raise RuntimeError(f"{name}: the server reads classes {ds['classes']}, expected {want}")
+            raise RuntimeError(f"{key.dataset}: the server reads classes {ds['classes']}, expected {want}")
         with self.lock:
-            self.dataset_ids[name] = ds["id"]
+            self.dataset_ids[str(path)] = ds["id"]
         return ds["id"]
 
     # ---------------------------------------------------------------------------------------------------------
@@ -347,8 +381,8 @@ class Matrix(Ownership):
             self.log(f"{key.stem}: not started: the budget would not cover it")
             return None
         try:
-            weights_id = self.base_model()["id"] if key.variant == "pretrained" else None
-            cfg = train_config(key, self.dataset_id(key.dataset), self.args, self.compute, name, weights_id)
+            weights_id = self.base_model()["id"] if common.from_weights(key.variant) else None
+            cfg = train_config(key, self.dataset_id(key), self.args, self.compute, name, weights_id)
             self.state.set_intent(key.stem, name, fp, spec)
             run = self.submit(key, name, cfg)
             self.register(run["id"], key.stem, name)
@@ -413,26 +447,25 @@ class Matrix(Ownership):
         model = self.api.get(f"/api/models/{run['model_id']}")
         if model.get("arch") != key.model:
             raise RuntimeError(f"{key.stem}: the run trained a {model.get('arch')}, not {key.model}")
-        weights = Path(model.get("path") or "")
-        if not weights.is_file():
-            weights = self.work / key.stem / "best.folo"
-            weights.parent.mkdir(parents=True, exist_ok=True)
-            r = self.api.s.get(f"{self.api.base}/api/models/{run['model_id']}/weights", timeout=600)
-            r.raise_for_status()
-            weights.write_bytes(r.content)
+        weights = self.model_file(model, key.stem, "best.folo")
         out_dir = self.work / key.stem
         out_dir.mkdir(parents=True, exist_ok=True)
-        det_path = out_dir / f"detections-{spec.eval_split}.json"
-        cmd = [
-            self.args.folo, "val", "--model", str(weights), "--data", str(data_dir), "--split", spec.eval_split,
-            "--conf", "0.001", "--iou", "0.7", "--device", self.args.val_device, "--save-json", str(det_path), "--json",
-        ]
-        p = subprocess.run(cmd, capture_output=True, text=True)
-        if p.returncode != 0:
-            raise RuntimeError(f"folo val failed ({p.returncode}): {p.stderr[-2000:]}")
-        val = json.loads(p.stdout.strip().splitlines()[-1])
         gt = json.loads(gt_path.read_text())
-        metrics = scorer.score(gt, json.loads(det_path.read_text()))
+        det_path = out_dir / f"detections-{spec.eval_split}.json"
+        val, metrics = self.score_weights(weights, data_dir, spec.eval_split, det_path, gt)
+        # The last epoch's checkpoint (no selection): the run's `m_<run>-last` model, when the server lists one.
+        metrics_last = None
+        try:
+            last_model = self.api.get(f"/api/models/{run['model_id']}-last")
+        except folo_api.ApiError as e:
+            if e.status != 404:
+                raise
+            last_model = None
+        if last_model is not None:
+            last = self.model_file(last_model, key.stem, "last.folo")
+            _, metrics_last = self.score_weights(
+                last, data_dir, spec.eval_split, out_dir / f"detections-last-{spec.eval_split}.json", gt
+            )
         system = self.api.get("/api/system")
         rec = common.result_record(
             key,
@@ -442,11 +475,12 @@ class Matrix(Ownership):
             batch=run["config"]["batch"],
             weights=(
                 {"name": self.args.weights, "sha256": self.base_model()["sha256"]}
-                if key.variant == "pretrained"
+                if common.from_weights(key.variant)
                 else None
             ),
             eval_split=spec.eval_split,
             metrics=metrics,
+            metrics_last=metrics_last,
             tool_reported={
                 "map50_95": val["map50_95"],
                 "map50": val["map50"],
@@ -461,6 +495,7 @@ class Matrix(Ownership):
                 "folo_cli": subprocess.run([self.args.folo, "--version"], capture_output=True, text=True).stdout.strip(),
                 "dataset_layout_sha256": layout,
                 "resolved": run.get("resolved"),
+                **({"selection": self.run_spec(key)["selection"]} if key.variant == "holdout" else {}),
             },
             compute=(
                 {
@@ -478,6 +513,31 @@ class Matrix(Ownership):
         rec["run_id"] = run["id"]
         rec["detections_file"] = str(det_path)
         return rec
+
+    def model_file(self, model: dict, stem: str, file_name: str) -> Path:
+        """The weights file of a server model: its `path` when that is on this machine, else downloaded
+        (`GET /api/models/{id}/weights`) into <work-dir>/<stem>/<file_name>."""
+        weights = Path(model.get("path") or "")
+        if not weights.is_file():
+            weights = self.work / stem / file_name
+            weights.parent.mkdir(parents=True, exist_ok=True)
+            r = self.api.s.get(f"{self.api.base}/api/models/{model['id']}/weights", timeout=600)
+            r.raise_for_status()
+            weights.write_bytes(r.content)
+        return weights
+
+    def score_weights(self, weights: Path, data_dir: Path, split: str, det_path: Path, gt: dict) -> tuple[dict, dict]:
+        """`folo val --save-json` of `weights` on `split` of `data_dir`, scored by scorer.py: (folo val's JSON, the
+        common metrics)."""
+        cmd = [
+            self.args.folo, "val", "--model", str(weights), "--data", str(data_dir), "--split", split,
+            "--conf", "0.001", "--iou", "0.7", "--device", self.args.val_device, "--save-json", str(det_path), "--json",
+        ]
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"folo val failed ({p.returncode}): {p.stderr[-2000:]}")
+        val = json.loads(p.stdout.strip().splitlines()[-1])
+        return val, scorer.score(gt, json.loads(det_path.read_text()))
 
     def one(self, key: common.RunKey) -> str:
         if self.stop.is_set():
@@ -509,8 +569,9 @@ class Matrix(Ownership):
             return f"{run['status']} ({run.get('error_code')}: {run.get('error')})"
         rec = self.evaluate(key, run, spec["dataset_layout_sha256"])
         common.write_json_atomic(key.result_path(self.results), rec)
-        m = rec["metrics"]
-        self.log(f"{key.stem}: AP {m['ap']:.4f} AP50 {m['ap50']:.4f} (folo val {rec['tool_reported']['map50_95']:.4f})")
+        m, ml = rec["metrics"], rec["metrics_last"]
+        last = f", last.folo AP {ml['ap']:.4f}" if ml else ""
+        self.log(f"{key.stem}: AP {m['ap']:.4f} AP50 {m['ap50']:.4f}{last} (folo val {rec['tool_reported']['map50_95']:.4f})")
         return "completed"
 
 
@@ -535,8 +596,16 @@ def main(argv: list[str] | None = None) -> int:
         "on a shared GPU by default; cloud runs always use auto (the pod's GPU)",
     )
     ap.add_argument("--datasets", default=",".join(datasets.SPECS))
-    ap.add_argument("--variants", default="pretrained,scratch")
-    ap.add_argument("--seeds", default="0,1,2", help="seeds of the pretrained variant")
+    ap.add_argument(
+        "--variants",
+        default="pretrained,scratch",
+        help="pretrained, scratch (the control) and holdout (pretrained, the best checkpoint chosen on a hold-out)",
+    )
+    ap.add_argument("--seeds", default="0,1,2", help="seeds of the pretrained and holdout variants")
+    ap.add_argument("--holdout-seed", type=int, default=0, help="the hold-out split's seed (holdout variant)")
+    ap.add_argument(
+        "--holdout-fraction", type=float, default=holdout.DEFAULT_FRACTION, help="the share of train images held out"
+    )
     ap.add_argument("--scratch-seeds", default="0", help="seeds of the scratch control")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--imgsz", type=int, default=640)
@@ -588,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     # Variant by variant in the order given, seed-major: a matrix cut short (a spent budget) still has every dataset.
     keys = []
     for v in variants:
-        for seed in common.parse_seeds(args.seeds if v == "pretrained" else args.scratch_seeds):
+        for seed in common.parse_seeds(args.scratch_seeds if v == "scratch" else args.seeds):
             for name in names:
                 keys.append(common.RunKey("folo", args.arch, name, v, seed))
     if args.compute and args.device not in (None, "auto"):
@@ -603,10 +672,28 @@ def main(argv: list[str] | None = None) -> int:
         m.release()
 
 
+def check_selection(key: common.RunKey, selection: dict, results: Path) -> None:
+    """A holdout result file already in `results` must come from this hold-out split: its name has no hold-out seed,
+    so a run of another split would otherwise be skipped as done."""
+    path = key.result_path(results)
+    if not path.is_file():
+        return
+    got = (json.loads(path.read_text()).get("versions") or {}).get("selection")
+    if got != selection:
+        raise SystemExit(
+            f"{path} was chosen on another hold-out ({got}, not {selection}): use another --results folder per "
+            "--holdout-seed / --holdout-fraction"
+        )
+
+
 def run_matrix(m: Matrix, keys: list[common.RunKey], variants: list[str]) -> int:
     args = m.args
-    if "pretrained" in variants:
+    if any(common.from_weights(v) for v in variants):
         m.base_model()  # fail before anything starts on a wrong --weights / --arch
+    for k in keys:
+        if k.variant == "holdout":
+            m.holdout_meta(k.dataset)  # carved (and checked) before anything starts
+            check_selection(k, m.run_spec(k)["selection"], m.results)
     todo = [k for k in keys if not k.result_path(m.results).is_file()]
     # Runs already active on the server (a restart) are followed first, before anything new is launched.
     live = {r["id"] for r in m.api.get("/api/runs")["runs"] if r["status"] not in TERMINAL}

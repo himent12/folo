@@ -11,6 +11,7 @@ an `s` row, and the renderer pairs models by size letter (folo-n with yolo26n, f
 |---|---|
 | `datasets.py` | fetch (cached, sha256-checked), convert and lay out the datasets; `datasets.json` is its metadata |
 | `scorer.py` | the common scorer: COCO detections JSON against `annotations/instances_<split>.json`, pycocotools |
+| `holdout.py` | carves a seeded selection split out of a dataset's train split (the `holdout` variant) |
 | `run_ultralytics.py` | Ultralytics runs (one subprocess each), scored by `scorer.py`; self-contained for a pod |
 | `run_ultralytics_pod.sh` | the Ultralytics matrix on a plain PyTorch GPU pod: installs, fetches, runs, packs `results.tgz` |
 | `run_folo.py` | FOLO runs through a running `folo serve` (local GPU or cloud pods), evaluated with `folo val --save-json` |
@@ -23,6 +24,7 @@ an `s` row, and the renderer pairs models by size letter (folo-n with yolo26n, f
 | `test_finetune.py` | bookkeeping tests: `python -m unittest discover -s bench/finetune -p "test_*.py"` |
 | `test_run_folo.py` | `run_folo.py` against a fake server (`fake_folo.py`): run ownership, creation, the budget, clean-up |
 | `test_run_folo_failures.py` | the same under partial failure: late commits, launches in flight at shutdown, a server that cannot list, a shared work dir |
+| `test_holdout.py` | the hold-out split, the `holdout` variant's runs, and `last.folo` scored next to `best.folo` |
 
 ## Datasets
 
@@ -74,7 +76,17 @@ it differently). Nothing but the code and `datasets.json` is committed.
   mapped onto the ground truth's ids by file name, since it writes numeric stems as integers and categories as
   `class + 1`). Both are scored by pycocotools against the same `instances_<split>.json`: AP@[.5:.95], AP50, AP75
   (COCO's protocol: at most 100 detections per image and category count). Each tool's own number is kept in
-  `tool_reported` for reference and never compared.
+  `tool_reported` for reference and never compared. `run_folo.py` also scores each FOLO run's last checkpoint
+  (`last.folo`, the server's model `m_<run>-last`) the same way, into `metrics_last` (`ap_last` in
+  `summary.json`): the number with no checkpoint selection at all.
+- **Choosing on the scored split.** Three of the four sets have no test split, so FOLO's best epoch (and
+  Ultralytics' `best.pt`) is chosen on the very split the table scores; with a val curve that swings from epoch
+  to epoch, that picks the luckiest epoch. The published tables keep this protocol, the one both tools have out
+  of the box. To compare FOLO settings without it, `run_folo.py --variants holdout` trains on the train split
+  minus a seeded 20% (`holdout.py`: the same split on every machine, recorded in the result's
+  `versions.selection`), lets the server choose `best.folo` on that hold-out, and scores both checkpoints on the
+  evaluation split, which the run never saw. These runs have the variant `holdout`; `summary.json` has them and
+  the tables leave them out.
 - **Training time** is the wall time of training (all epochs, with the per-epoch validation both tools run): FOLO
   from the run's `started` to `finished`, Ultralytics around `train()`.
 - **Hardware**: the matrix below ran on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod
@@ -98,6 +110,10 @@ python bench/finetune/run_folo.py --server http://127.0.0.1:7979 --data-root dat
 # a CPU smoke run on that server instead (into a scratch results folder)
 python bench/finetune/run_folo.py ... --results runs/finetune/smoke --datasets medical-pills --seeds 0 \
     --epochs 2 --imgsz 320 --device cpu --val-device cpu
+# best.folo chosen on a hold-out of train (carved into <work-dir>/holdout), three seeds, on a local GPU
+python bench/finetune/run_folo.py ... --variants holdout --seeds 0,1,2 --holdout-seed 0 --device cuda
+# the hold-out folders alone
+python bench/finetune/holdout.py --root datasets/finetune --dest datasets/finetune-ho --seed 0
 
 # Ultralytics: on a pod, with run_ultralytics_pod.sh next to this folder's .py files (WEIGHTS=yolo26s.pt: an s row)
 SEEDS=0,1,2 EPOCHS=100 SERVE_PORT=8888 bash run_ultralytics_pod.sh /workspace/finetune
