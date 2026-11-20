@@ -165,6 +165,11 @@ folo weights pull folo-n-coco-v5                                  # into ~/.folo
 folo train --data my-data --weights folo-n-coco-v5 --epochs 20    # takes the weights' architecture (folo-n)
 ```
 
+`folo-n-coco-v5` is the documented start, but no published file fine-tunes best on every dataset. On the four sets
+of the fine-tuning benchmark, v5 is level with v2 and v4 on three. On brain-tumor (893 MRI images, the largest) the
+older `folo-n-coco-v2` came out 0.030 AP ahead of v5, three seeds a side (examples/coco, [Fine-tuning from
+v5](../examples/coco/README.md#publish-v5)). If a fine-tune falls short, run it once more from `folo-n-coco-v2`.
+
 The weights are published GitHub releases, and `folo weights pull` downloads them over HTTPS: the `folo` binary is
 all it takes. `train` never downloads by itself: without the pull it stops with
 `weights_not_found` and the hint to run `folo weights pull folo-n-coco-v5` first.

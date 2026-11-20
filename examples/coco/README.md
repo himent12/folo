@@ -676,6 +676,28 @@ inside the bar on all three, so v5 is the recommended start for fine-tuning. It 
 three (on every set by less than the spread between v5's two seeds): the better COCO model is not a better fine-tuning
 start here, and two seeds on three small test sets can show neither a gain nor a loss of this size.
 
+**Brain-tumor, checked afterwards** (wave 6, [docs/notes/hill/r6-finetune.md](../../docs/notes/hill/r6-finetune.md),
+"Part B"). The v4 and v5 checks never ran brain-tumor, the fourth set of the benchmark and the largest (893 train
+images, 1,400 optimizer steps). Same protocol, three seeds, `main` 71284767, val AP of `best.folo` (and of
+`last.folo`):
+
+| start | seeds 0 / 1 / 2 | mean | `last.folo` mean |
+|---|---|---:|---:|
+| v2 | 0.4575 / 0.4592 / 0.4381 | 0.4516 | 0.3983 |
+| v3 | 0.4130 / 0.4213 / 0.4207 | 0.4183 | 0.3640 |
+| v4 | 0.4568 / 0.4177 / 0.4567 | 0.4437 | 0.3852 |
+| v5 | 0.4287 / 0.4295 / 0.4072 | 0.4218 | 0.3522 |
+
+On brain-tumor the longer-trained file of each lineage is the worse start: v3 is below v2, with the seed ranges
+apart, and v5 is below v4. v5 would have failed the 0.010 bar against v4 there (−0.022). BCCD does not show the
+pattern: v2 0.6207, v3 0.6160, v5 0.6245, all inside the seed spread. v5 stays the documented start, and QUICKSTART
+says to try v2 when a fine-tune falls short.
+
+**The starting-point check of the next weights release** runs all four sets of bench/finetune, brain-tumor
+included, with three seeds a side and the 0.010 bar on every set, and scores `last.folo` as well as `best.folo`.
+Brain-tumor scores on the same split it chooses `best.folo` on, and its per-epoch val curve swings, so for brain-tumor
+the `last.folo` column must clear the bar too (`run_folo.py` records it as `metrics_last`).
+
 ## folo-s: 56 epochs on a rented GPU
 
 folo-s (9,458,736 parameters, 21.59 GFLOPs at 640; docs/MODEL.md) trained **from scratch** on COCO train2017 at
