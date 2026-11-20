@@ -87,6 +87,98 @@ async fn static_files_spa_fallback() {
     err(&embedded, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
 }
 
+/// `folo serve --web-dir` caches as the embedded app does (issue #309): Vite's hashed `assets/` for a year, everything
+/// else revalidated (`no-cache` with `Last-Modified`), and an asset name that is no file falls back to `index.html`
+/// without being kept.
+#[tokio::test]
+async fn web_dir_cache_headers() {
+    let dir = TestDir::new("web-cache");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><title>Studio</title>").unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c.js"), "console.log(1)").unwrap();
+    std::fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
+    let app = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
+    )
+    .router();
+    let cache = |h: &axum::http::HeaderMap| h[header::CACHE_CONTROL].to_str().unwrap().to_string();
+    let immutable = "public, max-age=31536000, immutable";
+
+    let (s, h, b) = send(&app, get("/assets/app-1a2b3c.js")).await;
+    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"console.log(1)".as_slice()));
+    assert_eq!(cache(&h), immutable);
+    for path in [
+        "/",
+        "/index.html",
+        "/runs/run_1a01",
+        "/favicon.svg",
+        "/assets/app-old999.js",
+        "/assets/../index.html",
+    ] {
+        let (s, h, _) = send(&app, get(path)).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        assert_eq!(cache(&h), "no-cache", "{path}");
+        assert!(h.contains_key(header::LAST_MODIFIED), "{path} has a validator");
+    }
+
+    // A source map is named after its chunk's hash, not its own: revalidated, also asked for percent-encoded (review of
+    // #393, round 2: `ServeDir` decodes it).
+    std::fs::write(dir.join("assets/app-1a2b3c.js.map"), "{}").unwrap();
+    for path in ["/assets/app-1a2b3c.js.map", "/assets/app-1a2b3c.js%2Emap", "/assets/app%2D1a2b3c.js"] {
+        let (s, h, _) = send(&app, get(path)).await;
+        assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"), "{path}");
+    }
+    // Round 3: names a case-insensitive or Windows volume resolves to that map or to the chunk (`.MAP`, a trailing dot)
+    // are never kept for a year, whatever this volume answers.
+    for path in ["/assets/app-1a2b3c.js.MAP", "/assets/app-1a2b3c.js.", "/assets/APP-1A~1.JS"] {
+        let (s, h, _) = send(&app, get(path)).await;
+        if s.is_success() {
+            assert_eq!(cache(&h), "no-cache", "{path}");
+        }
+    }
+    // A folder under `assets/` with an `index.html`: `ServeDir` redirects to the slash and serves that file there.
+    std::fs::create_dir_all(dir.join("assets/help")).unwrap();
+    std::fs::write(dir.join("assets/help/index.html"), "<p>help</p>").unwrap();
+    let (s, _, _) = send(&app, get("/assets/help")).await;
+    assert!(s.is_redirection(), "{s}");
+    let (s, h, b) = send(&app, get("/assets/help/")).await;
+    assert_eq!(
+        (s, cache(&h).as_str(), b.as_slice()),
+        (StatusCode::OK, "no-cache", b"<p>help</p>".as_slice())
+    );
+
+    // Review of #393, round 1: a browser caches the fallback under an asset's name before that asset exists, then the
+    // asset is restored from a build older than the fallback's date. Revalidating with the fallback's date gets the
+    // asset in full, not a 304 that would keep the HTML under the asset's name for a year; `index.html` is sent in
+    // full the same way (a rollback to an older file).
+    let (s, h, b) = send(&app, get("/assets/app-later7.js")).await;
+    assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
+    assert!(b.starts_with(b"<!doctype html>"));
+    let since = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
+    let restored = dir.join("assets/app-later7.js");
+    std::fs::write(&restored, "console.log(7)").unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+    std::fs::File::options().write(true).open(&restored).unwrap().set_modified(old).unwrap();
+    for (path, body) in
+        [("/assets/app-later7.js", "console.log(7)"), ("/", "<!doctype html><title>Studio</title>")]
+    {
+        let req = Request::builder()
+            .uri(path)
+            .header(header::IF_MODIFIED_SINCE, &since)
+            .body(Body::empty())
+            .unwrap();
+        let (s, _, b) = send(&app, req).await;
+        assert_eq!((s, b.as_slice()), (StatusCode::OK, body.as_bytes()), "{path}");
+    }
+    let (_, h, _) = send(&app, get("/assets/app-later7.js")).await;
+    assert_eq!(cache(&h), immutable);
+    // An API answer is not the web app's to cache.
+    let (_, h, _) = send(&app, get("/api/health")).await;
+    assert_ne!(h.get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap()), Some(immutable));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[tokio::test]
 async fn cors_and_gzip() {
     let (server, _) = mock();

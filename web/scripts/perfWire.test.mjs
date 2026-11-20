@@ -93,6 +93,25 @@ describe('what went over the network by a moment', () => {
   });
 });
 
+describe('a document before, by its loader', () => {
+  it("leaves out an event stream of the document before that receives after this navigation started (issue #309)", () => {
+    const { cdp } = fake();
+    const w = wireOf(cdp);
+    const emit = (/** @type {string} */ name, /** @type {any} */ e) => cdp.emit(`Network.${name}`, e);
+    emit('requestWillBeSent', { ...sent('L1', 1.0), loaderId: 'L1' });
+    emit('requestWillBeSent', { ...sent('s', 1.5, 'http://x/api/runs/run_1/events'), loaderId: 'L1' });
+    emit('responseReceived', response('s', 1.6, 200, 'text/event-stream'));
+    w.reset();
+    // This navigation starts at 5.0 and commits at 5.3; the old document's stream still receives at 5.2.
+    emit('requestWillBeSent', { ...sent('L2', 5.1), loaderId: 'L2' });
+    emit('dataReceived', { requestId: 's', timestamp: 5.2, encodedDataLength: 400 });
+    emit('responseReceived', response('L2', 5.3, 300, 'text/html'));
+    // A request without a loader (a worker's, say) is this document's.
+    emit('requestWillBeSent', sent('w', 5.4));
+    expect(w.upTo(6, 5.0)).toEqual({ bytes: 300, requests: 2, urls: ['http://x/L2', 'http://x/w'] });
+  });
+});
+
 describe('the warm-up waits for the network to go quiet', () => {
   it('waits the whole quiet window after a request that started and ended between two looks', async () => {
     const f = fake();
