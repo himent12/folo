@@ -220,13 +220,13 @@ CPU results are bitwise identical from run to run and for every rayon thread cou
 
 Release and debug builds are not checked against each other for training. Rust never contracts or reorders float
 operations at any optimisation level, and one short CPU run (`folo train`, folo-n, 2 epochs at 128 px, seed 3, on
-Windows) wrote the same metrics and weights with both builds once timestamps were set aside. What can still make a
-build differ is a libm call (`exp`, `ln`, `tanh`, `sin`, ...): where inlining lets the compiler see its argument,
-it may fold the call into the correctly rounded value, elsewhere the platform's libm computes it, and the two can
-differ in the last bit (the synthetic generator drew its squares this way until its sine and cosine stopped coming from libm). The
-platform's libm also differs between operating systems, so two systems need not agree. The synthetic datasets
-([DATA.md](DATA.md#synthetic-shapes)) and benchmark variants ([BENCH.md](BENCH.md)) take no approximation from libm
-and are the same everywhere.
+Windows) wrote the same losses, validation metrics and weights with both builds (timestamps and timings, such as
+images per second, ETA and epoch time, aside). What can still make a build differ is a libm call (`exp`, `ln`, `tanh`,
+`sin`, ...): where inlining lets the compiler see its argument, it may fold the call into the correctly rounded value,
+elsewhere the platform's libm computes it, and the two can differ in the last bit (the synthetic generator drew its
+squares this way until its sine and cosine stopped coming from libm). The platform's libm also differs between
+operating systems, so two systems need not agree. The synthetic datasets ([DATA.md](DATA.md#synthetic-shapes)) and
+benchmark variants ([BENCH.md](BENCH.md)) take no approximation from libm and are the same everywhere.
 
 ## Autograd
 - Define-by-run, reverse mode. An op whose input requires grad records a node (inputs, their storage versions, a
