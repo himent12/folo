@@ -137,7 +137,7 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
 /// What is wrong with a (trimmed) name that no list could show as written, in the words of every
 /// validator (design/THEMES.md; Studio's `HIDDEN` and `VISIBLE`): it holds a control character, a
 /// line or paragraph separator or an invisible format character (not the zero-width joiner and
-/// non-joiner, which emoji sequences and some scripts need), or it has no letter, digit, punctuation
+/// non-joiner, which emoji sequences and some scripts need), or it has no letter, number, punctuation
 /// or symbol (the Hangul fillers and the blank Braille pattern count as none). An unassigned code
 /// point counts as visible here; the JavaScript validators know no more than their engine's Unicode.
 fn name_problem(name: &str) -> Option<&'static str> {
@@ -151,7 +151,7 @@ fn name_problem(name: &str) -> Option<&'static str> {
     if name.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || format(c)) {
         return Some("name: must not hold control or invisible characters");
     }
-    // Not a letter, digit, punctuation or symbol: a mark, a space, a joiner, a private-use character
+    // Not a letter, number, punctuation or symbol: a mark, a space, a joiner, a private-use character
     // (the controls and other format characters are refused above), or a blank one Unicode files as a
     // letter or symbol.
     let blank = |c: char| {
@@ -366,8 +366,10 @@ mod tests {
         let hidden = Some("name: must not hold control or invisible characters");
         assert_eq!(name_problem("\u{00AD}"), hidden);
         assert_eq!(name_problem("A\u{E007F}"), hidden);
-        assert_eq!(name_problem("\u{02FF}\u{0370}"), None);
-        assert_eq!(name_problem("Night shift"), None);
+        // Each neighbour on its own (review r1: together, one could hide the other).
+        for visible in ["\u{02FF}", "\u{0370}", "\u{00AC}", "\u{00AE}", "A\u{E0080}", "Night shift"] {
+            assert_eq!(name_problem(visible), None, "{visible:?}");
+        }
     }
 
     /// What only a file (not a JSON value) can get wrong.

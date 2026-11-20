@@ -96,7 +96,7 @@ const length = (s) => [...s].length;
  * some scripts.
  */
 const HIDDEN = /[\p{Cc}\p{Zl}\p{Zp}]|(?![‌‍])\p{Cf}/u;
-/** A character that shows: a letter, digit, punctuation or symbol, but for the Hangul fillers and the blank Braille pattern. */
+/** A character that shows: a letter, number, punctuation or symbol, but for the Hangul fillers and the blank Braille pattern. */
 const VISIBLE = /(?![ᅟᅠㅤﾠ⠀])[\p{L}\p{N}\p{P}\p{S}]/u;
 
 /**

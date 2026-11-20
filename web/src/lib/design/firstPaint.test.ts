@@ -128,21 +128,23 @@ describe('the first-paint script', () => {
   // (review r5: `--help` passed the script's old id check unseen). A raw case that only its text makes invalid (too deep,
   // a number out of range, a lone surrogate: what json-scan.mjs finds) parses to an entry with none of that, which both
   // show: as a stored entry it is valid. So is a name only the import refuses (control or invisible characters, nothing
-  // visible): a theme stored before that rule stays installed.
+  // visible): a theme stored before that rule stays installed. Such an entry is stored on midnight, so applying it and
+  // falling back to the mode's default differ (review r1).
   const IMPORT_ONLY = ['name: must not hold control or invisible characters', 'name: must have a visible character'];
   const marked = (valid: boolean, entry: Record<string, unknown>) =>
     !valid && entry !== null && typeof entry === 'object' && !Array.isArray(entry) && !('color' in entry) ? { ...entry, color: { bg: { app: '#010203' } } } : entry;
   const entries = [...cases.invalid.map((c) => ({ ...c, valid: false })), ...cases.valid.map((c) => ({ ...c, valid: true }))]
     .filter((c) => (c as { hex?: string }).hex === undefined)
     .map((c) => {
-      const valid = c.valid || (c.text !== undefined && jsonProblem(c.text) !== undefined) || IMPORT_ONLY.includes((c as { error?: string }).error ?? '');
-      return {
-        what: c.what,
-        valid,
-        entry: marked(valid, (c.text !== undefined ? JSON.parse(c.text.replace(/^\uFEFF/, '')) : c.theme) as Record<string, unknown>),
-      };
+      const importOnly = IMPORT_ONLY.includes((c as { error?: string }).error ?? '');
+      const valid = c.valid || (c.text !== undefined && jsonProblem(c.text) !== undefined) || importOnly;
+      const parsed = (c.text !== undefined ? JSON.parse(c.text.replace(/^\uFEFF/, '')) : c.theme) as Record<string, unknown>;
+      return { what: c.what, valid, entry: importOnly ? { ...parsed, base: 'midnight' } : marked(valid, parsed) };
     });
   it('has the shared format cases to replay', () => expect(entries.length).toBeGreaterThan(50));
+  it('stores the names only the import refuses on a base of their own', () => {
+    expect(entries.filter((e) => e.valid && e.entry?.base === 'midnight' && e.what.startsWith('raw: name with')).length).toBe(14);
+  });
   it('marks the invalid ones that have no colours of their own', () => {
     expect(entries.filter((e) => !e.valid && (e.entry?.color as { bg?: { app?: string } } | undefined)?.bg?.app === '#010203').length).toBeGreaterThan(20);
   });

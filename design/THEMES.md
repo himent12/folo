@@ -76,7 +76,7 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   space (the White_Space property) at both ends: the same in every validator. A name that holds a control character
   (a newline, a tab), a line or paragraph separator, or an invisible format character (a zero-width space, a bidi
   override, U+FEFF; the zero-width joiner and non-joiner, which emoji sequences and some scripts need, are allowed) is
-  refused, "name: must not hold control or invisible characters", and so is one with no letter, digit, punctuation or
+  refused, "name: must not hold control or invisible characters", and so is one with no letter, number, punctuation or
   symbol (only marks or spaces; the blank ones, the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 and the blank Braille
   pattern U+2800, do not count), "name: must have a visible character". Every validator checks this
   (`design/theme-cases.json`, "raw: name with ..."); Studio checks it on import only, so a theme stored there before
