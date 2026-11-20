@@ -21,7 +21,7 @@ the determinism rules.
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
-| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
+| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
 | `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |

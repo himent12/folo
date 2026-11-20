@@ -1,5 +1,6 @@
 //! Anti-aliased signed-distance rasterisation and procedural backgrounds for the synthetic shapes dataset.
 
+use super::math;
 use crate::image::Image;
 use crate::rng::{Rng, mix_seed};
 
@@ -19,8 +20,8 @@ impl Prim {
     #[inline]
     fn sdf(&self, x: f32, y: f32) -> f32 {
         match self {
-            Prim::Disc { c, r } => ((x - c[0]).hypot(y - c[1])) - r,
-            Prim::Annulus { c, mid, half } => ((x - c[0]).hypot(y - c[1]) - mid).abs() - half,
+            Prim::Disc { c, r } => dist(x - c[0], y - c[1]) - r,
+            Prim::Annulus { c, mid, half } => (dist(x - c[0], y - c[1]) - mid).abs() - half,
             Prim::Poly(v) => sd_polygon(v, x, y),
         }
     }
@@ -40,10 +41,17 @@ impl Prim {
     }
 }
 
+/// Length of `(dx, dy)` from basic operations (`hypot` is libm's, and differs between systems in its last bit).
+#[inline]
+fn dist(dx: f32, dy: f32) -> f32 {
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// Exact signed distance to a simple polygon (Inigo Quilez's formulation).
 fn sd_polygon(v: &[[f32; 2]], x: f32, y: f32) -> f32 {
     let n = v.len();
-    let mut d = (x - v[0][0]).powi(2) + (y - v[0][1]).powi(2);
+    let (dx, dy) = (x - v[0][0], y - v[0][1]);
+    let mut d = dx * dx + dy * dy;
     let mut s = 1.0f32;
     let mut j = n - 1;
     for i in 0..n {
@@ -275,7 +283,7 @@ impl Background {
     pub(crate) fn paint(&self, canvas: &mut Canvas) {
         let (w, h) = (canvas.w, canvas.h);
         let diag = ((w * w + h * h) as f32).sqrt();
-        let (sa, ca) = self.angle.sin_cos();
+        let (sa, ca) = math::sin_cos(self.angle);
         let (octaves, cell) = match self.kind {
             3 => (3, self.scale * 0.15),
             _ => (4, self.scale),
@@ -299,7 +307,7 @@ impl Background {
                     // Soft stripes warped by noise.
                     2 => {
                         let phase = (fx * -sa + fy * ca) * self.stripe_freq + n * 6.0;
-                        let s = 0.5 + 0.5 * phase.sin();
+                        let s = 0.5 + 0.5 * math::sin_cos(phase).0;
                         c = lerp3(c, self.colors[2], s * self.strength);
                     }
                     // Fine fabric / paper grain.
