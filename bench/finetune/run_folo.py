@@ -453,14 +453,20 @@ class Matrix(Ownership):
         gt = json.loads(gt_path.read_text())
         det_path = out_dir / f"detections-{spec.eval_split}.json"
         val, metrics = self.score_weights(weights, data_dir, spec.eval_split, det_path, gt)
-        # The last epoch's checkpoint (no selection): the run's `m_<run>-last` model, when the server lists one.
+        # The last epoch's checkpoint (no selection): the run's `m_<run>-last` model, when the server lists one. A run
+        # whose best model is that file already (a resumed run that never improved on its checkpoint) is scored once.
         metrics_last = None
-        try:
-            last_model = self.api.get(f"/api/models/{run['model_id']}-last")
-        except folo_api.ApiError as e:
-            if e.status != 404:
-                raise
+        last_id = last_model_id(run["id"])
+        if run["model_id"] == last_id:
             last_model = None
+            metrics_last = metrics
+        else:
+            try:
+                last_model = self.api.get(f"/api/models/{last_id}")
+            except folo_api.ApiError as e:
+                if e.status != 404:
+                    raise
+                last_model = None
         if last_model is not None:
             last = self.model_file(last_model, key.stem, "last.folo")
             _, metrics_last = self.score_weights(
@@ -659,7 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     for v in variants:
         for seed in common.parse_seeds(args.scratch_seeds if v == "scratch" else args.seeds):
             for name in names:
-                keys.append(common.RunKey("folo", args.arch, name, v, seed))
+                split = holdout.split_label(args.holdout_seed, args.holdout_fraction) if v == "holdout" else ""
+                keys.append(common.RunKey("folo", args.arch, name, v, seed, split))
     if args.compute and args.device not in (None, "auto"):
         raise SystemExit("--device is for local runs; a cloud run trains on its pod's GPU (device auto)")
     if not args.compute and args.device is None:
@@ -672,31 +679,42 @@ def main(argv: list[str] | None = None) -> int:
         m.release()
 
 
-def check_selection(key: common.RunKey, selection: dict, results: Path) -> None:
-    """Every holdout result file of `key`'s model and dataset already in `results`, of any seed, must come from this
-    hold-out split: the file names carry no hold-out seed, so a run of another split would be skipped as done, and
-    the summary would pool runs of two splits as the seeds of one."""
-    for path in sorted(Path(results).glob(f"{key.model}-{key.dataset}-holdout-s*.json")):
+def last_model_id(run_id: str) -> str:
+    """The id of a run's `last.folo` model (docs/API.md, Models: `m_<run id suffix>-last`)."""
+    return f"m_{run_id.removeprefix('run_')}-last"
+
+
+def check_results(keys: list[common.RunKey], selections: dict[str, dict], results: Path) -> None:
+    """The result files already in `results` for `keys` (which a matrix skips as done) must be readable results, and
+    a holdout run's must come from the hold-out split of this invocation (`selections`, by stem): the same seed and
+    fraction (they are in the file name) carved from the same files (the folder's layout digest), so the summary never
+    pools runs of two splits as the seeds of one."""
+    for key in keys:
+        path = key.result_path(results)
+        if not path.is_file():
+            continue
         try:
             r = json.loads(path.read_text())
-        except json.JSONDecodeError:
-            continue
-        got = (r.get("versions") or {}).get("selection")
-        if got != selection:
-            raise SystemExit(
-                f"{path} was chosen on another hold-out ({got}, not {selection}): use another --results folder per "
-                "--holdout-seed / --holdout-fraction"
-            )
+        except (OSError, json.JSONDecodeError) as e:
+            raise SystemExit(f"{path}: not a readable result file ({e}): remove it to run {key.stem} again") from None
+        if not isinstance(r, dict) or r.get("version") != common.RESULT_VERSION or r.get("metrics") is None:
+            raise SystemExit(f"{path}: not a result file of this harness: remove it to run {key.stem} again")
+        if key.stem in selections:
+            got = (r.get("versions") or {}).get("selection")
+            if got != selections[key.stem]:
+                raise SystemExit(
+                    f"{path} was chosen on another carve of the hold-out ({got}, not {selections[key.stem]}): the "
+                    "dataset's files changed since; remove it (or use another --results folder) to run it again"
+                )
 
 
 def run_matrix(m: Matrix, keys: list[common.RunKey], variants: list[str]) -> int:
     args = m.args
     if any(common.from_weights(v) for v in variants):
         m.base_model()  # fail before anything starts on a wrong --weights / --arch
-    for k in keys:
-        if k.variant == "holdout":
-            m.holdout_meta(k.dataset)  # carved (and checked) before anything starts
-            check_selection(k, m.run_spec(k)["selection"], m.results)
+    # Hold-outs carved (and checked) and the result files there checked before anything starts.
+    selections = {k.stem: m.run_spec(k)["selection"] for k in keys if k.variant == "holdout"}
+    check_results(keys, selections, m.results)
     todo = [k for k in keys if not k.result_path(m.results).is_file()]
     # Runs already active on the server (a restart) are followed first, before anything new is launched.
     live = {r["id"] for r in m.api.get("/api/runs")["runs"] if r["status"] not in TERMINAL}

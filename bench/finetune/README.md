@@ -86,8 +86,9 @@ it differently). Nothing but the code and `datasets.json` is committed.
   minus a seeded 20% (`holdout.py`: the same split on every machine, recorded in the result's
   `versions.selection`), lets the server choose `best.folo` on that hold-out, and scores both checkpoints on the
   evaluation split, which the run never saw. These runs have the variant `holdout`; `summary.json` has them (one
-  group per hold-out split, `selection`) and the tables leave them out. Result file names carry no hold-out seed,
-  so a `--results` folder holds one hold-out split: a runner given another refuses to start.
+  group per hold-out split and carve, `selection`) and the tables leave them out. Their result files name the split
+  (`folo-n-bccd-holdout-ho0-s0.json`; `ho1-f0.3` for seed 1 at another fraction); one of the same split carved from
+  other files, or a result file that does not read, makes the runner refuse to start rather than count it as done.
 - **Training time** is the wall time of training (all epochs, with the per-epoch validation both tools run): FOLO
   from the run's `started` to `finished`, Ultralytics around `train()`.
 - **Hardware**: the matrix below ran on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod
@@ -163,7 +164,8 @@ idempotency key on `POST /api/runs` (a repeat of the same key answers the run it
 
 Smoke runs belong in a scratch results folder:
 the renderer leaves out runs of another epoch count anyway. Result files are named
-`<model>-<dataset>-<variant>-s<seed>.json` (`folo-n-bccd-pretrained-s0.json`, `yolo26n-bccd-pretrained-s0.json`).
+`<model>-<dataset>-<variant>-s<seed>.json` (`folo-n-bccd-pretrained-s0.json`, `yolo26n-bccd-pretrained-s0.json`;
+the holdout variant's carry the split: `folo-n-bccd-holdout-ho0-s0.json`).
 
 ## The 2026-11-11 matrix
 

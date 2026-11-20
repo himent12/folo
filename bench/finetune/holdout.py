@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import random
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -47,6 +48,11 @@ def folder_name(dataset: str, seed: int) -> str:
     return f"{dataset}-ho{seed}"
 
 
+def split_label(seed: int, fraction: float = DEFAULT_FRACTION) -> str:
+    """The name of a hold-out split in result file names: `ho<seed>`, with `-f<fraction>` when not the default."""
+    return f"ho{seed}" if fraction == DEFAULT_FRACTION else f"ho{seed}-f{fraction:g}"
+
+
 def _link(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
@@ -61,8 +67,10 @@ def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: 
     """Lay out `spec`'s hold-out split from the dataset in `src` (checked against its recorded layout digest first)
     under `dest_root`; returns its meta. A folder already there with the same source digest, seed, fraction and
     files is kept as it is; any other folder there (another carve, changed files, or no `meta.json`) is refused.
-    The folder is built next to its place (`.<name>.partial`, removed first if an interrupted carve left one) and
-    renamed into it once complete, so a carve cut short leaves nothing that looks like one."""
+    The folder is built in a staging folder of this call's own next to its place (`.<name>.partial-<pid>-<random>`)
+    and renamed into it once complete, so a carve cut short leaves nothing that looks like one (only its staging
+    folder, which nothing reads), and of two carves at once the second to finish finds the first's folder and checks
+    it as above instead of replacing it."""
     source_digest = datasets.verify_layout(spec, src)
     dest = dest_root / folder_name(spec.name, seed)
     meta_path = dest / "meta.json"
@@ -83,9 +91,7 @@ def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: 
         raise SystemExit(
             f"{spec.name}: a hold-out of {fraction} takes all {len(imgs)} train images, leaving none to train on"
         )
-    final, dest = dest, dest_root / f".{folder_name(spec.name, seed)}.partial"
-    if dest.exists():
-        shutil.rmtree(dest)
+    final, dest = dest, dest_root / f".{folder_name(spec.name, seed)}.partial-{os.getpid()}-{secrets.token_hex(4)}"
     classes = list(spec.classes)
     val, n_train = [], 0
     for img in imgs:
@@ -116,7 +122,13 @@ def carve(spec: datasets.Spec, src: Path, dest_root: Path, seed: int, fraction: 
         "layout_sha256": datasets.layout_digest(dest),
     }
     (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", newline="\n")
-    os.replace(dest, final)
+    try:
+        os.rename(dest, final)  # refused when `final` exists: another carve finished first
+    except OSError:
+        if not final.exists():
+            raise
+        shutil.rmtree(dest)
+        return carve(spec, src, dest_root, seed, fraction)  # checks the other carve's folder
     return meta
 
 

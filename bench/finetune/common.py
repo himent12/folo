@@ -33,18 +33,24 @@ class RunKey:
     dataset: str
     variant: str
     seed: int
+    # The hold-out split a `holdout` run chooses its best checkpoint on (holdout.split_label: `ho0`), part of its file
+    # name; empty for the other variants.
+    split: str = ""
 
     def __post_init__(self):
         if self.tool not in TOOLS:
             raise ValueError(f"tool {self.tool!r} is not one of {TOOLS}")
         if self.variant not in VARIANTS:
             raise ValueError(f"variant {self.variant!r} is not one of {VARIANTS}")
+        if (self.variant == "holdout") != bool(self.split):
+            raise ValueError(f"variant {self.variant!r} with split {self.split!r}: a split is the holdout variant's")
         if (self.tool == "folo") != self.model.startswith("folo-") or not self.model:
             raise ValueError(f"model {self.model!r} does not belong to tool {self.tool!r}")
 
     @property
     def stem(self) -> str:
-        return f"{self.model}-{self.dataset}-{self.variant}-s{self.seed}"
+        split = f"-{self.split}" if self.split else ""
+        return f"{self.model}-{self.dataset}-{self.variant}{split}-s{self.seed}"
 
     def result_path(self, results_dir: Path) -> Path:
         return Path(results_dir) / f"{self.stem}.json"
@@ -165,9 +171,10 @@ def shared(r: dict) -> bool:
 
 
 def selection_of(r: dict) -> tuple | None:
-    """The hold-out a `holdout` run chose its best checkpoint on, as (seed, fraction); None for the other variants."""
+    """The hold-out a `holdout` run chose its best checkpoint on, as (seed, fraction, layout digest of the carved
+    folder); None for the other variants."""
     s = (r.get("versions") or {}).get("selection") if r.get("variant") == "holdout" else None
-    return (s.get("seed"), s.get("fraction")) if s else None
+    return (s.get("seed"), s.get("fraction"), s.get("layout_sha256")) if s else None
 
 
 def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
@@ -188,7 +195,11 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
                 "tool": tool,
                 "model": model,
                 "variant": variant,
-                **({"selection": {"seed": selection[0], "fraction": selection[1]}} if selection else {}),
+                **(
+                    {"selection": dict(zip(("seed", "fraction", "layout_sha256"), selection))}
+                    if selection
+                    else {}
+                ),
                 "seeds": [r["seed"] for r in rs],
                 "complete": len(rs) >= want,
                 "eval_split": rs[0].get("eval_split"),

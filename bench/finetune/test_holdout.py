@@ -112,12 +112,12 @@ class Carve(unittest.TestCase):
         self.assertEqual(holdout.carve(TOY, src, self.t / "elsewhere", 0)["layout_sha256"], meta["layout_sha256"])
 
     def test_an_interrupted_carve_is_never_taken_for_one(self):
-        # What a carve cut short leaves (its staging folder, with links of another fraction) is removed and rebuilt.
-        partial = self.dest / ".toy-ho0.partial"
+        # What a carve cut short leaves (its own staging folder, with links of another fraction) is never read.
+        partial = self.dest / ".toy-ho0.partial-1-dead"
         (partial / "images" / "train").mkdir(parents=True)
         (partial / "images" / "train" / "000.jpg").write_bytes(b"stale")
         meta = holdout.carve(TOY, self.src, self.dest, 0)
-        self.assertFalse(partial.exists())
+        self.assertTrue(partial.exists(), "left alone: it may be another carve's, still running")
         self.assertEqual(meta["layout_sha256"], datasets.layout_digest(self.dest / "toy-ho0"))
         self.assertNotIn("000.jpg", [p.name for p in (self.dest / "toy-ho0" / "images" / "train").iterdir()])
         # A folder in the carve's place without meta.json is refused, not completed or blessed.
@@ -125,6 +125,27 @@ class Carve(unittest.TestCase):
         (bare / "toy-ho0" / "images" / "train").mkdir(parents=True)
         with self.assertRaises(SystemExit):
             holdout.carve(TOY, self.src, bare, 0)
+
+    def test_of_two_carves_at_once_the_second_checks_the_first(self):
+        real = holdout.os.rename
+
+        def race(fraction, dest):
+            # Another carve finishes just before this one renames its staging folder into place.
+            def rename(a, b):
+                holdout.os.rename = real
+                holdout.carve(TOY, self.src, dest, 0, fraction)
+                return real(a, b)
+            return rename
+
+        with mock.patch.object(holdout.os, "rename", race(0.2, self.dest)):
+            meta = holdout.carve(TOY, self.src, self.dest, 0)
+        self.assertEqual(meta["layout_sha256"], datasets.layout_digest(self.dest / "toy-ho0"), "the same carve: kept")
+        self.assertEqual(sorted(p.name for p in self.dest.iterdir()), ["toy-ho0"], "its own staging folder removed")
+        other = self.t / "other"
+        real = holdout.os.rename
+        with mock.patch.object(holdout.os, "rename", race(0.4, other)), self.assertRaises(SystemExit):
+            holdout.carve(TOY, self.src, other, 0)  # the first published another fraction: refused, not mixed
+        self.assertEqual(json.loads((other / "toy-ho0" / "meta.json").read_text())["fraction"], 0.4)
 
     def test_a_holdout_that_leaves_nothing_to_train_on_is_refused_before_any_file(self):
         with self.assertRaises(SystemExit):
@@ -134,8 +155,12 @@ class Carve(unittest.TestCase):
 
 class Variant(unittest.TestCase):
     def test_holdout_is_a_variant_from_weights_and_summarized_with_last(self):
-        key = common.RunKey("folo", "folo-n", "bccd", "holdout", 2)
-        self.assertEqual(key.stem, "folo-n-bccd-holdout-s2")
+        key = common.RunKey("folo", "folo-n", "bccd", "holdout", 2, holdout.split_label(0))
+        self.assertEqual(key.stem, "folo-n-bccd-holdout-ho0-s2")
+        self.assertEqual(holdout.split_label(1, 0.3), "ho1-f0.3")
+        for bad in (("holdout", ""), ("pretrained", "ho0")):
+            with self.assertRaises(ValueError):
+                common.RunKey("folo", "folo-n", "bccd", bad[0], 0, bad[1])
         self.assertEqual([common.from_weights(v) for v in common.VARIANTS], [True, False, True])
 
         class A:
@@ -145,7 +170,7 @@ class Variant(unittest.TestCase):
         sel = {"seed": 0, "fraction": 0.2, "layout_sha256": "ab"}
         recs = [
             common.result_record(
-                common.RunKey("folo", "folo-n", "bccd", "holdout", s), metrics={"ap": 0.6 + s / 100},
+                common.RunKey("folo", "folo-n", "bccd", "holdout", s, "ho0"), metrics={"ap": 0.6 + s / 100},
                 metrics_last={"ap": 0.5 + s / 100} if s < 2 else None, epochs_planned=100,
                 versions={"selection": sel},
             )
@@ -153,7 +178,7 @@ class Variant(unittest.TestCase):
         ]
         [g] = common.summarize(recs)["groups"]
         self.assertEqual((g["variant"], g["complete"], g["ap"]["n"], g["ap_last"]["n"]), ("holdout", True, 3, 2))
-        self.assertEqual(g["selection"], {"seed": 0, "fraction": 0.2})
+        self.assertEqual(g["selection"], sel)
         self.assertAlmostEqual(g["ap_last"]["mean"], 0.505)
         self.assertIsNone(common.result_record(key)["metrics_last"])
         # Seeds of two hold-out splits are two groups, neither complete, not one group of three.
@@ -161,11 +186,17 @@ class Variant(unittest.TestCase):
         groups = common.summarize(recs)["groups"]
         self.assertEqual(sorted((g["selection"]["seed"], g["seeds"], g["complete"]) for g in groups),
                          [(0, [0, 1], False), (1, [2], False)])
+        # So are seeds of one seed and fraction carved from different files (another layout digest).
+        recs[2]["versions"] = {"selection": dict(sel, layout_sha256="cd")}
+        self.assertEqual(len(common.summarize(recs)["groups"]), 2)
 
     def test_the_published_tables_leave_holdout_runs_out(self):
         from test_finetune import Render, result
 
-        held = [result("folo", "bccd", "holdout", s, 0.9) for s in range(3)]
+        held = [
+            dict(result("folo", "bccd", "pretrained", s, 0.9), variant="holdout", versions={"selection": {"seed": 0}})
+            for s in range(3)
+        ]
         held[0]["gpu"] = "a CPU"
         held[1]["epochs_planned"] = 3
         rs = [result("folo", "bccd", "pretrained", 0, 0.5)] + held
@@ -236,7 +267,7 @@ class Runner(fake_folo.Case):
 
     def test_a_holdout_run_trains_on_the_carved_split_and_scores_the_eval_split(self):
         m = self.matrix_toy()
-        ho = common.RunKey("folo", "folo-n", "toy", "holdout", 0)
+        ho = common.RunKey("folo", "folo-n", "toy", "holdout", 0, "ho0")
         pre = common.RunKey("folo", "folo-n", "toy", "pretrained", 0)
         carved = (self.root / "a" / "holdout" / "toy-ho0").resolve()
         self.assertEqual(m.train_dir(ho), carved)
@@ -284,23 +315,32 @@ class Runner(fake_folo.Case):
         m.api = FakeModels(best, last, ApiError(500, '{"error": {"code": "internal"}}'))
         with self.assertRaises(ApiError):
             m.evaluate(pre, run, spec["dataset_layout_sha256"])
+        # A run whose best model is its last.folo already (resumed, never improved on the checkpoint): scored once.
+        scored.clear()
+        m.api = FakeModels(last, None)
+        m.api.get = lambda path: {"id": "m_1-last", "arch": "folo-n", "path": str(last)}
+        rec = m.evaluate(pre, dict(run, model_id="m_1-last"), spec["dataset_layout_sha256"])
+        self.assertEqual([s[0] for s in scored], ["last.folo"])
+        self.assertEqual(rec["metrics_last"], rec["metrics"])
 
-    def test_results_of_another_holdout_are_refused_before_anything_starts(self):
+    def test_result_files_that_cannot_count_as_done_are_refused_before_anything_starts(self):
         m = self.matrix_toy()
-        keys = [common.RunKey("folo", "folo-n", "toy", "holdout", s) for s in (1, 2)]
+        keys = [common.RunKey("folo", "folo-n", "toy", "holdout", s, "ho0") for s in (0, 1)]
         results = Path(m.args.results)
         results.mkdir(parents=True, exist_ok=True)
-        # Seed 0 of the same model and dataset, chosen on hold-out seed 1: not a key of this matrix, still refused.
-        other = dict(m.run_spec(keys[0])["selection"], seed=1)
-        done = common.RunKey("folo", "folo-n", "toy", "holdout", 0)
-        common.write_json_atomic(done.result_path(results), common.result_record(done, versions={"selection": other}))
-        with self.assertRaises(SystemExit):
-            run_folo.run_matrix(m, keys, ["holdout"])
-        self.assertEqual((self.server.registered, self.server.created), ([], []))
-        # The same split: accepted.
         same = m.run_spec(keys[0])["selection"]
-        common.write_json_atomic(done.result_path(results), common.result_record(done, versions={"selection": same}))
-        run_folo.check_selection(keys[0], same, results)
+        path = keys[0].result_path(results)
+        self.assertEqual(path.name, "folo-n-toy-holdout-ho0-s0.json", "the split is in the file name")
+        ok = common.result_record(keys[0], metrics={"ap": 0.5}, versions={"selection": same})
+        # Of this split but carved from other files (another layout digest), or not a readable result: refused.
+        for bad in (dict(ok, versions={"selection": dict(same, layout_sha256="00")}), "{", {"version": 0}):
+            path.write_text(bad if isinstance(bad, str) else json.dumps(bad))
+            with self.assertRaises(SystemExit):
+                run_folo.run_matrix(m, keys, ["holdout"])
+            self.assertEqual((self.server.registered, self.server.created), ([], []))
+        # The same split's result: done (only seed 1 is left to run).
+        common.write_json_atomic(path, ok)
+        run_folo.check_results(keys, {k.stem: same for k in keys}, results)
 
 
 if __name__ == "__main__":
