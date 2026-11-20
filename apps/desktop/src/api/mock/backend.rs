@@ -39,6 +39,7 @@ impl Backend for MockBackend {
     }
 
     fn system(&self) -> ApiResult<SystemResponse> {
+        self.system_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.check()?;
         let t = self.started.elapsed().as_secs_f32();
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
@@ -86,6 +87,7 @@ impl Backend for MockBackend {
             features.push(folo_api::FEATURE_VISION_BENCH.into());
             features.push(folo_api::FEATURE_AGENT_LABELING.into());
         }
+        self.hold_point("system");
         Ok(SystemResponse {
             system,
             data_dir: None,

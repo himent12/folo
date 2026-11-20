@@ -151,9 +151,14 @@ impl HeadlessDispatcher {
     /// Moves the clock forward by `duration`, stepping through each timer deadline on the way: at each, the
     /// due timers run and the queues are pumped until idle.
     pub fn advance_clock(&self, duration: Duration) {
+        self.advance_clock_held(duration, 0);
+    }
+
+    /// `advance_clock`, pumping with `run_until_held(held)`: the jobs a test holds back stay out.
+    pub fn advance_clock_held(&self, duration: Duration, held: usize) {
         let target = self.shared.state.lock().now + duration;
         loop {
-            self.run_until_idle();
+            self.run_until_held(held);
             let mut state = self.shared.state.lock();
             let next = state.delayed.iter().map(|(due, _)| *due).filter(|due| *due <= target).min();
             match next {

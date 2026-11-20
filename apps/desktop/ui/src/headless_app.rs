@@ -119,6 +119,12 @@ impl HeadlessApp {
         self.run_until_idle();
     }
 
+    /// `advance_clock` with `held` background jobs held back on purpose (`run_until_held`).
+    pub fn advance_clock_held(&mut self, duration: Duration, held: usize) {
+        self.dispatcher().advance_clock_held(duration, held);
+        self.run_until_held(held);
+    }
+
     /// The fake clock's time.
     pub fn now(&self) -> Instant {
         crate::PlatformDispatcher::now(self.dispatcher().as_ref())

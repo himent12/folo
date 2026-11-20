@@ -129,8 +129,9 @@ Where the tests are:
 | `examples/win_smoke/`, `examples/winit_smoke.rs`, `examples/text_probe.rs` | real-window checks of the Win32 and winit backends; DirectWrite layout and masks for comparison with GPUI captures (below) |
 
 A test opens a window on the headless platform through `HeadlessApp` (`src/headless_app.rs`): build state with
-`update`, feed input with `simulate_input`, move the fake clock with `advance_clock`, pump with `run_until_idle`,
-then draw with `frame` (the framebuffer) or read the `scene`. `open` in `src/window/tests/mod.rs` is the smallest
+`update`, feed input with `simulate_input`, move the fake clock with `advance_clock` (`advance_clock_held` while
+the test holds background jobs back), pump with `run_until_idle`, then draw with `frame` (the framebuffer) or read
+the `scene`. `open` in `src/window/tests/mod.rs` is the smallest
 example: a `HeadlessApp` with `HeadlessOptions { size, scale_factor, text: TextBackend::Fixed }`, one window
 whose view renders a closure, and its first frame drawn. The app's own tests use the same harness
 (`apps/desktop/src/app/tests.rs`). File dialogs answer at once with what `HeadlessPlatform::answer_prompts` set

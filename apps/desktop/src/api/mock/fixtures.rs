@@ -552,6 +552,7 @@ impl MockBackend {
             holds: Default::default(),
             fail_images_from: Default::default(),
             image_lists: Default::default(),
+            system_calls: Default::default(),
             fail_pixels: Default::default(),
             fail_metrics: Default::default(),
             fail_events: Default::default(),

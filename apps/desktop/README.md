@@ -167,7 +167,8 @@ for its second click) or go up · `Ctrl Enter` submit the open dialog or form ·
 The app draws its own title bar (`titlebar()` in `src/app/titlebar.rs`) and tells Windows which parts of it are caption
 areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
 FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
-and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
+and the search field in the title bar take their own clicks; a crumb that opens a page is not a caption area (it is
+`.occlude()`d over the band), so its press is the app's and never moves or maximizes the window. The top few pixels (`layout.desktop_resize_edge`)
 resize the window, as the other edges do, except when it is maximized or full screen.
 
 Two folo-ui details (both GPUI's behaviour, kept) shape this; `tools/window-check.ps1` catches a regression in
@@ -195,6 +196,11 @@ Windows the count follows the system's double-click time and distance; the winit
 fixed 400 ms and 5 logical pixels on each axis (`ui/src/platform/winit/mouse.rs`). So double-clicking the button that opens a dialog leaves it open, and the
 second press cannot press what opened under the pointer (a confirmation's Delete); a press that starts a click of
 its own dismisses. An overlay opened by a key, a command or a timer has no such guard: every press reaches it.
+The other way round too: when a press or its release closes the last overlay (Cancel, the dimmed page), the rest
+of that click does not reach the page that was under it (`OverlayPresses::page_admits`, checked by the root's
+press tracker before anything else sees the press). Which press or release closed it is told right after its
+dispatch, so one that arrives before the next frame is stopped too, and an overlay closed by a key between a press
+and its release guards nothing. A press on the title bar's caption areas is always the window's.
 Menus and selects are not overlays: a double-click on a select opens and closes it, as on a Windows combo box.
 The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
 `window.close`, `window.close_text`).

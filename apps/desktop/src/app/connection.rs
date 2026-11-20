@@ -104,6 +104,8 @@ impl FoloApp {
         self.stream_lost.clear();
         self.history_retry.clear();
         self.store.clear_pending();
+        // The old server's `/system` answer is dropped (`fetch`): the new one is asked at once.
+        self.system_out = false;
         // Reads still out on the old server never answer here (`fetch` drops them): their tickets
         // go (the numbers keep counting up, so none is handed out twice). An Open image still on its
         // way (its picker open) is the old server's too.
