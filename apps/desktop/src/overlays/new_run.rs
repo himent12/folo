@@ -425,8 +425,8 @@ impl FoloApp {
                     div().flex_1().child({
                         let summary = ds.as_ref().map(|d| {
                             format!(
-                                "{} classes · train {} · val {}",
-                                d.classes.len(),
+                                "{} · train {} · val {}",
+                                counted(d.classes.len() as u64, "class", "classes"),
                                 int(d.splits.train),
                                 int(d.splits.val)
                             )

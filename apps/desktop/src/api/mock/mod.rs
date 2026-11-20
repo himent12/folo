@@ -598,6 +598,138 @@ mod tests {
         );
         assert_eq!(m.cloud_connections().unwrap().len(), 1);
         assert!(m.system().unwrap().features.iter().any(|f| f == folo_api::FEATURE_CLOUD));
+        // #382: its log ends as the real control plane's does, the weights copied back before the
+        // instance goes (Studio's demo, `folo serve --mock`, says the same).
+        let log: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        let at = |s: &str| log.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}: {log:#?}"));
+        assert!(at("training on the instance") < at("copying its weights"));
+        // Review round 1: its epochs were stamped on another clock than the end's lines, so the
+        // last two came after the instance went. Each end line once, after the final epoch.
+        let last = log.iter().rposition(|l| l.starts_with("epoch ")).unwrap_or_else(|| panic!("{log:#?}"));
+        assert!(log[last].starts_with(&format!("epoch {}/", released.epochs)), "{}", log[last]);
+        assert!(last < at("copying its weights"), "{log:#?}");
+        let again: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        for end in ["copying its weights", "terminating the instance"] {
+            assert_eq!(again.iter().filter(|l| l.contains(end)).count(), 1, "{end}");
+        }
+        assert!(at("copying its weights") < at("terminating the instance"));
+    }
+
+    /// Review round 1 (#382): the end of a cloud run's log follows its instance. On a remote FOLO
+    /// server there is none: the weights are copied back, nothing is terminated. One terminated by
+    /// hand while its weights were copied says so after "copying", whether its log was read before.
+    #[test]
+    fn a_cloud_runs_end_lines_follow_its_instance() {
+        for (remote, read_first) in [(true, false), (false, false), (false, true)] {
+            let m = MockBackend::new(0, true);
+            let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+            let instance = {
+                let mut runs = m.runs.lock().unwrap();
+                let s = runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap();
+                // Trained at once, and half way through copying the weights back.
+                s.pre = [0., 0., 0.];
+                s.anchor = (0., s.total);
+                s.t0 -= if remote { COLLECT_S + 1. } else { COLLECT_S / 2. };
+                if remote {
+                    s.base.instance_id = None;
+                }
+                s.base.instance_id.clone()
+            };
+            let log = || -> Vec<String> { m.logs(&run.id).unwrap().into_iter().map(|l| l.message).collect() };
+            if read_first {
+                log();
+            }
+            if let Some(id) = &instance {
+                m.terminate_instance(id).unwrap();
+            }
+            let lines = log();
+            let at = |s: &str| lines.iter().position(|l| l.contains(s));
+            let case = format!("remote {remote}, read first {read_first}: {lines:#?}");
+            assert!(at("copying its weights").is_some(), "{case}");
+            assert_eq!(at("terminating the instance"), None, "{case}");
+            if !remote {
+                assert!(at("copying its weights") < at("terminated by hand"), "{case}");
+            }
+        }
+    }
+
+    /// Review round 2: terminating the instance of a run stopped while its checkpoint is copied
+    /// keeps the step the run stopped at.
+    #[test]
+    fn terminating_a_stopped_runs_instance_keeps_its_stop() {
+        let m = MockBackend::new(0, true);
+        let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        let ended = || {
+            let runs = m.runs.lock().unwrap();
+            runs.iter().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_ref()).unwrap().ended
+        };
+        let (instance, stop) = {
+            let mut runs = m.runs.lock().unwrap();
+            let s = runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap();
+            s.pre = [0., 0., 0.];
+            s.t0 -= 30.;
+            let stop = s.elapsed();
+            s.ended = Some((stop, Ended::Stopped));
+            // Half a second later, still copying.
+            s.t0 -= 0.5;
+            (s.base.instance_id.clone().unwrap(), stop)
+        };
+        m.terminate_instance(&instance).unwrap();
+        assert_eq!(ended(), Some((stop, Ended::InstanceLost)));
+        // Its instance ended at the termination, not at the stop.
+        let i = m.cloud_instances().unwrap().into_iter().find(|i| i.id == instance).unwrap();
+        assert_eq!(i.status, CloudInstanceStatus::Terminated);
+        let runs = m.runs.lock().unwrap();
+        let s = runs.iter().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_ref()).unwrap();
+        assert_eq!(i.ended, Some(s.at(stop + 0.5)));
+    }
+
+    /// Final check (#386): Desktop's merge of a run's log (the history, and the stream's lines
+    /// buffered while it loads or added after) is left as it was; the demo's history and stream
+    /// agree as a real server's do. Read as the run ends, its last epoch and end lines show once, in
+    /// order: a line a read of the log returned is not streamed again.
+    #[test]
+    fn a_cloud_runs_log_read_as_it_ends_shows_each_line_once() {
+        use crate::store::{Load, Store};
+        let m = MockBackend::new(0, false);
+        let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        let sim = |edit: &dyn Fn(&mut CloudSim)| {
+            let mut runs = m.runs.lock().unwrap();
+            edit(runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap());
+        };
+        // Streamed from its last epoch; then trained, its weights copied and its instance gone.
+        let spe = run.steps_per_epoch;
+        sim(&|s| {
+            s.pre = [0.; 3];
+            s.anchor = (s.elapsed(), s.total - spe);
+        });
+        let rx = m.events(&run.id).unwrap();
+        sim(&|s| s.t0 -= spe as f64 * s.step_dt + COLLECT_S + RELEASE_S + 1.);
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        store.logs.insert(run.id.clone(), Load::Loading);
+        let history = m.logs(&run.id);
+        // What the stream sent before the read is buffered while the history loads, then the rest.
+        while let Ok(ev) = rx.try_recv() {
+            store.apply(&run.id, ev);
+        }
+        store.install_logs(&run.id, history);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(ev) => store.apply(&run.id, ev),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(e) => panic!("the stream did not end: {e}"),
+            }
+        }
+        let log: Vec<&str> =
+            store.logs[&run.id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        let last = format!("epoch {}/", run.epochs);
+        let at = |s: &str| {
+            let found: Vec<usize> = (0..log.len()).filter(|&i| log[i].contains(s)).collect();
+            assert_eq!(found.len(), 1, "{s}: {log:#?}");
+            found[0]
+        };
+        assert!(at(&last) < at("copying its weights"), "{log:#?}");
+        assert!(at("copying its weights") < at("terminating the instance"), "{log:#?}");
     }
 
     #[test]
