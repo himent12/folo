@@ -7,6 +7,7 @@ import { metric } from '$lib/format';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import RunCompare, { COMPARE_POLL_MS } from './RunCompare';
+import { emaSetting } from './run/resolved';
 
 /** Port of `mount(RunCompare, { target })`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof RunCompare, o: { target: HTMLElement }) => render(() => <RunCompare />, o.target);
@@ -162,6 +163,28 @@ describe('Compare: the side by side reads against its baseline', () => {
       for (const td of cells.slice(1)) expect(td.classList.contains('diff') !== td.classList.contains('same')).toBe(true);
     }
     expect(table.querySelector('td.cfg.same')).toBeTruthy();
+  });
+});
+
+describe('Compare: how many settings differ', () => {
+  it('says one setting in the singular (#382, the twin of "AP for each of 1 classes")', async () => {
+    // A copy of a run that trained at another image size: that is the one setting the two differ in.
+    const api = hub.api as MockApi;
+    const a = (await api.runs()).find((r) => r.status === 'completed' && !r.cloud)!;
+    const twin = { ...a, id: 'run_twin', name: 'twin', config: { ...a.config, imgsz: a.config.imgsz + 32 } };
+    const runs = api.runs.bind(api);
+    api.runs = async (...rest) => [...(await runs(...rest)), twin];
+    const metrics = api.runMetrics.bind(api);
+    api.runMetrics = (id, ...rest) => metrics(id === twin.id ? a.id : id, ...rest);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${a.id},${twin.id}`);
+    c = mount(RunCompare, { target });
+    const meta = await until(() => target.querySelector('#cmp-table .meta'), 'the side by side');
+    expect(meta.textContent).toBe('1 setting differs');
+    // The EMA is a resolved setting like the warmup: its row is there, the same for both (PR #399).
+    target.querySelector<HTMLButtonElement>('#cmp-table tr.fold button')!.click();
+    const ema = await until(() => [...target.querySelectorAll('#cmp-table tbody tr')].find((tr) => tr.querySelector('td.k')?.textContent === 'EMA'), 'the EMA row');
+    expect([...ema!.querySelectorAll('td.cfg')].map((td) => td.textContent)).toEqual([emaSetting(a.resolved!)!.value, emaSetting(a.resolved!)!.value]);
   });
 });
 

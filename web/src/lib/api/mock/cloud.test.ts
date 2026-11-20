@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunCloud, TrainConfig } from '../types';
 import { MockApi } from './index';
-import { RTX_4090, RUNPOD_OFFERS } from './cloud';
+import { cloudLog, REMOTE_OFFER, RTX_4090, RUNPOD_OFFERS, trainAt, type CloudTimeline } from './cloud';
 
 const NOW = Date.parse('2026-11-08T14:30:00Z');
 
@@ -187,6 +187,66 @@ describe('mock cloud: runs and instances', () => {
     const uploads = events.filter((e) => e.phase === 'syncing');
     expect(uploads.length).toBeGreaterThanOrEqual(2);
     expect(uploads.length).toBeLessThanOrEqual(3);
+  });
+
+  // #382 (Desktop's demo since #386): the real control plane's two lines after training.
+  const COPYING = 'the run ended on the worker; copying its weights';
+  const TERMINATING = 'terminating the instance';
+  it("logs the weights copied home and the instance terminated after the final epoch, in the control plane's words", async () => {
+    const api = new MockApi('normal', 0);
+    const messages = (await api.runLogs('run_c3d5', 5000)).lines.map((l) => l.message);
+    const at = (m: string) => {
+      expect(messages.filter((x) => x === m), m).toHaveLength(1);
+      return messages.indexOf(m);
+    };
+    const final = messages.findIndex((m) => m.startsWith('epoch 100/100'));
+    const copied = messages.findIndex((m) => m.startsWith('copied best.folo and last.folo'));
+    expect(final).toBeGreaterThan(at('upload done; the worker trains'));
+    expect(at(COPYING)).toBeGreaterThan(final);
+    expect(at(COPYING)).toBeLessThan(copied);
+    expect(copied).toBeLessThan(at(TERMINATING));
+    expect(at(TERMINATING)).toBeLessThan(at('terminated folo-run_c3d5-4c1a'));
+  });
+
+  it('has nothing to copy for a run stopped before it trained, nor anything after it for one that lost its instance', async () => {
+    const api = new MockApi('normal', 0);
+    const created = await api.createRun(await cloudConfig(api));
+    vi.setSystemTime(NOW + 3000);
+    await api.stopRun(created.id);
+    vi.setSystemTime(NOW + 6000);
+    const stopped = (await api.runLogs(created.id)).lines.map((l) => l.message);
+    expect(stopped).not.toContain(COPYING);
+    expect(stopped).toContain(TERMINATING);
+    const lost = new MockApi('cloud-training', 0);
+    await lost.terminateCloudInstance('ci_9d03');
+    vi.setSystemTime(NOW + 10_000);
+    const gone = (await lost.runLogs('run_c7b1')).lines.map((l) => l.message);
+    expect(gone).toContain('instance folo-run_c7b1-9d03 was terminated before the run ended');
+    expect(gone).not.toContain(COPYING);
+    expect(gone).not.toContain(TERMINATING);
+  });
+
+  it('has no instance to terminate on a remote FOLO server, and still copies the weights home', () => {
+    const remote: CloudTimeline = {
+      connectionId: 'cc_r',
+      provider: 'remote',
+      offer: REMOTE_OFFER,
+      maxHours: 2,
+      instanceId: null,
+      instanceName: 'folo-run_r-0001',
+      providerRef: 'r',
+      launchedAt: NOW,
+      provisionMs: 0,
+      bootMs: 2000,
+      syncMs: 2000,
+      uploadBytes: 1000,
+      weightsBytes: 1000,
+    };
+    const trainEnd = trainAt(remote) + 60_000;
+    const lines = cloudLog(remote, trainEnd, trainEnd + 60_000, 'shapes').map((l) => l.message);
+    expect(lines).toContain(COPYING);
+    expect(lines).not.toContain(TERMINATING);
+    expect(lines.some((m) => m.startsWith('terminated '))).toBe(false);
   });
 
   it('never holds the local training slot', async () => {

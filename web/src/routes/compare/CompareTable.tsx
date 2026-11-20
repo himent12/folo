@@ -10,12 +10,13 @@ import { bestMark, bestWord } from '$lib/bestMark';
 import { trainingSeconds } from '$lib/api/progress';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Run, RunMetrics } from '$lib/api/types';
-import { conf, deviceName, duration, metric } from '$lib/format';
+import { conf, count, deviceName, duration, metric } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
 import {
   batchSetting,
   effectiveBatchSetting,
   closeMosaicSetting,
+  emaSetting,
   headSetting,
   lrSetting,
   optimizerSetting,
@@ -99,6 +100,7 @@ export default function CompareTable(props: CompareTableProps) {
       ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
       ['LR', (r) => lrSetting(r.config, r.resolved)],
       ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
+      ['EMA', (r) => (r.resolved ? emaSetting(r.resolved) : null) ?? plain('—')],
       ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
       ['Close mosaic', (r) => closeMosaicSetting(r)],
       ['Precision', (r) => precisionSetting(r.config)],
@@ -219,7 +221,7 @@ export default function CompareTable(props: CompareTableProps) {
   const rangeText = (t: { first: number; last: number }) => (t.first === t.last ? `Run ${t.first}` : `Runs ${t.first}–${t.last}`);
 
   return (
-    <Panel title="Side by side" meta={sameRows.get().length ? `${diffRows.get().length} settings differ` : undefined} pad="none" id="cmp-table">
+    <Panel title="Side by side" meta={sameRows.get().length ? `${count(diffRows.get().length, 'setting')} ${diffRows.get().length === 1 ? 'differs' : 'differ'}` : undefined} pad="none" id="cmp-table">
       {pairMode.get() && other.get() ? (
         // Phones: the baseline and one run beside it; the pager steps through the others. The pager and the pair's
         // head row (both names, Baseline, Swap) hold under the top bar while the table is in view, so the names

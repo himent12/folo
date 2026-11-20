@@ -34,7 +34,14 @@ type Tier = 'wide' | 'tablet' | 'phone';
 /** Opens a run's page at a tier (a tablet: 768–1023 px; a phone: under 768), the run changed by `change`. */
 async function open(
   pick: (rs: RunT[]) => RunT,
-  { change = {}, tier = 'wide', nothing = false, ready = '#chart-map .legend', splits }: { change?: Partial<RunT>; tier?: Tier; nothing?: boolean; ready?: string; splits?: Partial<Dataset['splits']> | null } = {},
+  {
+    change = {},
+    tier = 'wide',
+    nothing = false,
+    ready = '#chart-map .legend',
+    splits,
+    classes,
+  }: { change?: Partial<RunT>; tier?: Tier; nothing?: boolean; ready?: string; splits?: Partial<Dataset['splits']> | null; classes?: string[] } = {},
 ) {
   const narrow = (q: string) => (q.includes('max-width: 767px') ? tier === 'phone' : q.includes('max-width: 1023px') ? tier !== 'wide' : false);
   window.matchMedia = ((q: string) => ({ matches: narrow(q), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
@@ -47,6 +54,7 @@ async function open(
   const mine = (d: Dataset) => d.id === run.config.dataset_id;
   if (splits === null) api.datasets = async () => (await datasets()).filter((d) => !mine(d));
   else if (splits) api.datasets = async () => (await datasets()).map((d) => (mine(d) ? { ...d, splits: splits as Dataset['splits'] } : d));
+  else if (classes) api.datasets = async () => (await datasets()).map((d) => (mine(d) ? { ...d, classes } : d));
   // A model that detected nothing: every epoch scored 0 (the page takes the best from the epochs it loads).
   const metrics = api.runMetrics.bind(api);
   if (nothing)
@@ -201,5 +209,24 @@ describe('a queued run', () => {
   });
   it('says "validation" not at all once its dataset is removed', async () => {
     expect(await samplesLine(null)).not.toContain('validation');
+  });
+  // #382: "AP for each of 1 classes" on a one-class dataset.
+  const perClassLine = async (classes: string[]) => {
+    await open((rs) => rs.find((r) => r.status === 'queued' && !r.cloud)!, { ready: '.waiting #later', classes });
+    let line = '';
+    await vi.waitFor(() => {
+      flushSync();
+      const li = [...target.querySelectorAll('#later li')].find((l) => l.querySelector('.l-name')?.textContent === 'Per class');
+      line = li?.querySelector('.l-what')?.textContent ?? '';
+      expect(line).toContain('AP for');
+    });
+    c?.unmount();
+    c = undefined;
+    target.remove();
+    return line;
+  };
+  it('names one class in the singular, more as a count', async () => {
+    expect(await perClassLine(['pill'])).toBe('AP for its one class');
+    expect(await perClassLine(['pill', 'capsule'])).toBe('AP for each of 2 classes');
   });
 });

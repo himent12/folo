@@ -269,7 +269,12 @@ export function instanceAt(c: CloudTimeline, runId: string, trainEnd: number, no
   };
 }
 
-/** The hand-over's lines in the run's log as far as `now`, before and after the trainer's own. */
+/**
+ * The hand-over's lines in the run's log as far as `now`, before and after the trainer's own. After training, the
+ * real control plane's words (folo-server's `cloud/executor`): "the run ended on the worker; copying its weights",
+ * then "terminating the instance". A run lost with its instance has nothing to copy or terminate, one stopped before
+ * it trained nothing to copy, and one on a remote FOLO server (no instance) no instance to terminate.
+ */
 export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, dataset: string): LogLine[] {
   const booted = c.launchedAt + c.provisionMs;
   const start = trainAt(c);
@@ -285,8 +290,15 @@ export function cloudLog(c: CloudTimeline, trainEnd: number, now: number, datase
   if (end > start) lines.push([start, 'info', 'upload done; the worker trains']);
   if (c.lost) lines.push([end, 'error', `instance ${c.instanceName} was terminated before the run ended`]);
   else {
-    if (end > start) lines.push([end + COLLECT_MS, 'info', `copied best.folo and last.folo (${bytes(c.weightsBytes)})`]);
-    lines.push([released, c.stuck ? 'warn' : 'info', c.stuck ? `could not confirm that ${c.instanceName} is terminated: ${c.stuck}; retrying every 30 s` : `terminated ${c.instanceName}`]);
+    if (end > start) {
+      // 1 ms after `end`, where the trainer's final epoch line is stamped: the log sorts by time, and this follows it.
+      lines.push([end + 1, 'info', 'the run ended on the worker; copying its weights']);
+      lines.push([end + COLLECT_MS, 'info', `copied best.folo and last.folo (${bytes(c.weightsBytes)})`]);
+    }
+    if (c.instanceId) {
+      lines.push([released - RELEASE_MS, 'info', 'terminating the instance']);
+      lines.push([released, c.stuck ? 'warn' : 'info', c.stuck ? `could not confirm that ${c.instanceName} is terminated: ${c.stuck}; retrying every 30 s` : `terminated ${c.instanceName}`]);
+    }
   }
   return lines.filter(([t]) => t <= now).map(([t, level, message]) => ({ t: new Date(t).toISOString(), level, message }));
 }
