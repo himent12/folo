@@ -224,8 +224,9 @@ fn batches_from_files_are_golden() {
     check(file_dataset(&dir, 14), &FILES, "FILES");
 }
 
-/// At imgsz 192 from the files: decoded images, resized tiles, letterboxes and warped samples are all large enough
-/// for the loader's buffer pool (64 KiB and up), which imgsz 96 leaves to plain allocations.
+/// At imgsz 192 from the files: the letterboxes, the warped samples, most resized tiles and the larger decoded images
+/// are large enough for the loader's buffer pool (64 KiB and up; the 50 x 90 image and its resized tile are not),
+/// where imgsz 96 leaves all but the mosaic canvas to plain allocations.
 const LARGE: [[u64; 3]; 4] = [
     [0xa4efaa43906f678b, 0xf00810c7dd3675e8, 0x80eacf6d3e6c7bd0], // mosaic
     [0x26f1f3d83c43b64d, 0x24b33b064b006555, 0x8779b930596dfee4], // mosaic rotate shear

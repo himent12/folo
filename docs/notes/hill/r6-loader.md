@@ -17,8 +17,9 @@ free commit memory was often 2-4 GB. "Load" below is the whole machine's CPU bus
 3 batches of epoch 1, for each path of the transform: mosaic (u8 and f32 output), mosaic with rotation and shear,
 mosaic with mixup and up-down flips, letterbox + affine (mosaic 0), letterbox with rotation, and validation. The
 digests were blessed on `origin/main`'s code; every later commit passes unchanged. After the review a second set
-was added, blessed the same way: from the files at imgsz 192 (where decoded images, resized tiles, letterboxes and
-warped samples are all 64 KiB or more, so the loader's buffer pool serves them) for mosaic, rotation + shear,
+was added, blessed the same way: from the files at imgsz 192 (where the letterboxes, the warped samples, most
+resized tiles and the larger decoded images are 64 KiB or more, so the loader's buffer pool serves them; the 50 x 90
+image and its resized tile stay below) for mosaic, rotation + shear,
 letterbox + affine and validation, with no workers (no pool) and with 3 workers, both against the same digests. The existing determinism tests
 (batches independent of the worker count) stay green, and each new kernel has a test against the kernel it
 replaces (below).
@@ -143,7 +144,7 @@ Medians:
 
 The 8-worker target (1.25x) is met on the median pair; the weakest 8-worker pair is 1.23x. The CPU cost per image
 falls by about a quarter at every worker count, with less spread than the wall rates. The machine was busy (load
-37-100%), so the wall rates move by up to 1.7x between rounds of the same arm, the 4-worker ones most.
+37-100%), so the wall rates move by up to 2.1x between rounds of the same arm (new at 4 workers: 96.4-200.2 img/s).
 
 ## Real training
 

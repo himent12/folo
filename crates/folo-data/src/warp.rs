@@ -186,7 +186,9 @@ pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> 
         img.fill_rect(0, 0, width as i64, height as i64, border);
         return img;
     };
-    if (inv.0[3] * (1i64 << FRAC) as f64).round() as i64 == 0 {
+    if (inv.0[3] * (1i64 << FRAC) as f64).round() as i64 == 0
+        && rows_fit(&inv, width as usize, height as usize)
+    {
         warp_rows(plane, &inv, width as usize, &mut out);
     } else {
         match plane.tiles.as_slice() {
@@ -263,6 +265,21 @@ fn warp_general(src: &Image, inv: &Affine, width: usize, border: [u8; 3], out: &
     });
 }
 
+/// Whether every horizontal position [`warp_rows`] samples, `fu0 + k·du` for `k < width` in each of `height` rows,
+/// fits in `i64`. Then the general path's running sums reach them without wrapping; otherwise (steps of `2^47`
+/// source pixels and more) the general path runs, whose `i64` sums wrap in a release build exactly as they always
+/// did.
+fn rows_fit(inv: &Affine, width: usize, height: usize) -> bool {
+    let [a, b, c, ..] = inv.0;
+    let fone = (1i64 << FRAC) as f64;
+    let du = (a * fone).round() as i64 as i128;
+    (0..height).all(|y| {
+        let yc = y as f64 + 0.5;
+        let fu0 = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64 as i128;
+        i64::try_from(fu0 + du * (width.max(1) as i128 - 1)).is_ok()
+    })
+}
+
 /// The warp of `plane` by the inverse matrix `inv` into `out` (rows of `width` pixels) when the source row does not
 /// change along a destination row (`inv`'s vertical step per pixel rounds to zero). Per destination row, the two
 /// source rows `iy`, `iy + 1` over the columns the row reaches are blended into `v = top·(1 − wy) + bottom·wy`
@@ -288,11 +305,9 @@ fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
             let iy = fv >> FRAC;
             let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
             // Left taps run from `ix_a` to `ix_b`; off columns `-1 ..= pw - 1` both taps are `fill`. The last
-            // position in `i128`: the per-pixel steps below stay in `i64` as the general path's do, but the product
-            // `du · (width - 1)` alone can overflow where the running sum does not.
+            // position fits in `i64` ([`rows_fit`]), but the product `du · (width - 1)` alone may not: `i128`.
             let last_fu = fu0 as i128 + du as i128 * (width as i128 - 1);
-            let ix_a = fu0 >> FRAC;
-            let ix_b = (last_fu >> FRAC).clamp(i64::MIN as i128 / 2, i64::MAX as i128 / 2) as i64;
+            let (ix_a, ix_b) = (fu0 >> FRAC, (last_fu >> FRAC) as i64);
             let lo = ix_a.min(ix_b).max(-1);
             let hi = (ix_a.max(ix_b) + 1).min(pw);
             if iy < -1 || iy >= ph || hi <= lo {
@@ -498,6 +513,27 @@ mod tests {
         let mut general = vec![0u8; 257 * 3];
         warp_general(&src, &inv, 257, [114; 3], &mut general);
         assert_eq!(warp_affine(&src, &m, 257, 1, [114; 3]).data, general);
+    }
+
+    /// A step whose sampled positions leave `i64` takes the general path, whose sums wrap (release build) as before:
+    /// here column 511's position wraps round to -0.5, half border, half image.
+    #[test]
+    fn positions_beyond_i64_take_the_general_path() {
+        let m = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(-0.5, 0.0));
+        let inv = m.inverse().unwrap();
+        assert!(!rows_fit(&inv, 512, 1));
+        assert!(rows_fit(&inv, 1, 1));
+        let fits = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(128.5, 0.0));
+        assert!(rows_fit(&fits.inverse().unwrap(), 257, 1));
+        // The sums overflow, which a build with overflow checks stops at; compare the bytes where they wrap.
+        #[cfg(not(debug_assertions))]
+        {
+            let src = Image::new(1, 1, [0; 3]);
+            let mut general = vec![0u8; 512 * 3];
+            warp_general(&src, &inv, 512, [114; 3], &mut general);
+            assert_eq!(&general[511 * 3..], &[57; 3]);
+            assert_eq!(warp_affine(&src, &m, 512, 1, [114; 3]).data, general);
+        }
     }
 
     #[test]
