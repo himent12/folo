@@ -353,6 +353,8 @@ mod tests {
                 continue;
             };
             sock.set_nonblocking(false).unwrap();
+            // A connection that sends nothing cannot keep the test from stopping.
+            sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut buf = [0u8; 4096];
             if sock.read(&mut buf).unwrap_or(0) > 0 {
                 asked += 1;
@@ -381,11 +383,19 @@ mod tests {
             body.len()
         );
         let stop = std::sync::atomic::AtomicBool::new(false);
+        // Sets `stop` when dropped: the workers end however the scope is left (a spawn that fails).
+        struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         let (found, asked) = std::thread::scope(|s| {
+            let guard = Stop(&stop);
             let first = s.spawn(|| serve(&redirects, &moved, &stop));
             let second = s.spawn(|| serve(&health, &ok, &stop));
             let found = probe_through(&format!("http://{from}"), None);
-            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(guard);
             (found, (first.join().unwrap(), second.join().unwrap()))
         });
         assert_eq!((found, asked), (false, (1, 0)), "asked once, and the redirect not followed");
