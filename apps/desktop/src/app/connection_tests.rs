@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::tests::{drive, open};
 use super::{Connector, ServerMode};
 use crate::api::Backend;
-use crate::api::http::Spawned;
+use crate::api::http::{Probe, Spawned};
 use crate::api::mock::MockBackend;
 use crate::store::Load;
 
@@ -28,7 +28,7 @@ fn titles(this: &super::FoloApp) -> Vec<String> {
 fn a_typed_address_nothing_answers_says_where_the_app_went_instead() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| false, start: found_local, backend: demo };
+        this.connector = Connector { probe: |_| Probe::Nothing, start: found_local, backend: demo };
         this.server_url.update(cx, |i, cx| i.set_text("http://127.0.0.1:1", cx));
         this.switch_source(ServerMode::Local, cx);
     });
@@ -39,6 +39,42 @@ fn a_typed_address_nothing_answers_says_where_the_app_went_instead() {
     });
 }
 
+static PAGE_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+/// #382 (seen in #365): with automatic start-up on, a typed address that answered with a web page
+/// was taken for nothing there, so the app went to the local server and said "Nothing answered".
+/// It is connected as typed, as with start-up off, and its own answer says what is wrong. At launch
+/// such an answer still falls through to the local server.
+#[test]
+fn a_typed_address_that_answers_but_not_as_folo_is_kept_and_starts_nothing() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        this.connector = Connector {
+            probe: |_| Probe::Answered,
+            start: |t| {
+                PAGE_STARTS.fetch_add(1, Ordering::SeqCst);
+                found_local(t)
+            },
+            backend: demo,
+        };
+        this.server_url.update(cx, |i, cx| i.set_text("http://127.0.0.1:4100/subpath", cx));
+        this.switch_source(ServerMode::Local, cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(PAGE_STARTS.load(Ordering::SeqCst), 0, "no local server in its place");
+        assert_eq!(this.server_url.read(cx).text(), "http://127.0.0.1:4100/subpath");
+        assert_eq!(this.connected_url.as_deref(), Some("http://127.0.0.1:4100/subpath"));
+        assert_eq!(this.local_url, None);
+        assert!(!titles(this).iter().any(|t| t.starts_with("Nothing answered")), "{:?}", titles(this));
+        // At launch the same answer falls through, as on main: the app starts (here finds) its own.
+        this.autoconnect("http://127.0.0.1:7878".into(), true, super::Reason::Launch, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(PAGE_STARTS.load(Ordering::SeqCst), 1);
+        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"));
+    });
+}
+
 static REMOTE_STARTS: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
@@ -46,7 +82,7 @@ fn another_machines_address_is_kept_and_no_local_server_takes_its_place() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, _, cx| {
         this.connector = Connector {
-            probe: |_| false,
+            probe: |_| Probe::Nothing,
             start: |t| {
                 REMOTE_STARTS.fetch_add(1, Ordering::SeqCst);
                 found_local(t)
@@ -75,7 +111,7 @@ fn a_local_address_that_is_not_one_is_kept_and_starts_nothing() {
         drive(&mut app, window, move |this, _, cx| {
             assert!(this.spawn_server, "the default: start a local server when nothing answers");
             this.connector = Connector {
-                probe: |_| false,
+                probe: |_| Probe::Nothing,
                 start: |t| {
                     BAD_STARTS.fetch_add(1, Ordering::SeqCst);
                     found_local(t)
@@ -105,7 +141,7 @@ fn a_local_address_that_is_not_one_is_kept_and_starts_nothing() {
 /// The local server stops answering (the window that started it closed, or it crashed): the 2 s
 /// refresh sees it, and the app finds or starts one again instead of retrying a dead port.
 fn lose_the_server(local: Option<&str>) -> (folo_ui::HeadlessApp, folo_ui::WindowHandle<super::FoloApp>) {
-    lose_the_server_with(local, Connector { probe: |_| false, start: found_local, backend: demo })
+    lose_the_server_with(local, Connector { probe: |_| Probe::Nothing, start: found_local, backend: demo })
 }
 
 fn lose_the_server_with(
@@ -152,7 +188,7 @@ fn a_recovery_that_fails_tries_again_later_and_says_so_once() {
     let (mut app, window) = lose_the_server_with(
         Some("http://127.0.0.1:4000"),
         Connector {
-            probe: |_| false,
+            probe: |_| Probe::Nothing,
             start: |_| {
                 FAILED_STARTS.fetch_add(1, Ordering::SeqCst);
                 Err("folo serve did not start in time".into())
@@ -182,7 +218,7 @@ fn a_recovery_that_fails_tries_again_later_and_says_so_once() {
 fn a_slow_local_server_is_kept_as_it_is() {
     let (mut app, window) = lose_the_server_with(
         Some("http://127.0.0.1:4000"),
-        Connector { probe: |_| true, start: found_local, backend: demo },
+        Connector { probe: |_| Probe::Folo, start: found_local, backend: demo },
     );
     drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.backend_gen, 0, "no backend switch: live views and drafts stay");
@@ -198,7 +234,7 @@ fn a_server_serving_the_local_data_dir_is_the_local_one_again() {
     let (mut app, window) = open();
     let connect = |app: &mut folo_ui::HeadlessApp, url: &'static str| {
         drive(app, window, move |this, _, cx| {
-            this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
+            this.connector = Connector { probe: |_| Probe::Folo, start: found_local, backend: demo };
             this.server_url.update(cx, |i, cx| i.set_text(url, cx));
             this.switch_source(ServerMode::Local, cx);
         })
@@ -242,7 +278,7 @@ fn the_lost_server_answering_the_data_dirs_address_is_kept_as_it_is() {
     // The probe gave up, but starting finds the data dir's server at the very same address.
     let (mut app, window) = lose_the_server_with(
         Some("http://127.0.0.1:4100"),
-        Connector { probe: |_| false, start: found_local, backend: demo },
+        Connector { probe: |_| Probe::Nothing, start: found_local, backend: demo },
     );
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.backend_gen, 0, "no backend switch");
@@ -319,7 +355,7 @@ fn the_reason_the_local_server_did_not_start_stays_on_the_error_panels() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, _, cx| {
         this.connector = Connector {
-            probe: |_| false,
+            probe: |_| Probe::Nothing,
             start: |_| Err("FOLO_BIN names D:\\nope\\folo.exe, which isn't a file".into()),
             backend: |_| Arc::new(MockBackend::new(4200, true).failing()),
         };

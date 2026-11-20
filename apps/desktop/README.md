@@ -325,7 +325,8 @@ window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If 
 window that started it closed, or it crashed), the app finds or starts one again the same way and says so. Why a
 local server couldn't start stays on the pages' error panels. `--server URL` and `--mock` pick a source explicitly;
 Settings › Connection switches at runtime: an address on this machine that doesn't answer falls back to the local
-server with a note saying so, and another machine's address is never replaced by the local server. A server started
+server with a note saying so; one that answers, but not as a FOLO server (a web page, a wrong path), is kept, and
+its answer says so, as with the automatic start off; another machine's address is never replaced by the local server. A server started
 with `--token` shows as needing one (the app can't send a token); the server the app starts itself never inherits a
 `FOLO_TOKEN` from the app's environment, so it is always one the app can use. A run's live event stream that stays
 silent for 45 s (three of the server's 15 s keep-alives) counts as dropped: the app opens it again and reads the history

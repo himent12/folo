@@ -224,7 +224,7 @@ impl FoloApp {
                         )
                     });
                 if broken > 0 {
-                    let cmd = format!("folo dataset check \"{}\"", ds.path);
+                    let cmd = check_command(&ds.path);
                     self.bind(
                         el,
                         "ds-broken-tile",
@@ -236,7 +236,7 @@ impl FoloApp {
                             this.toast(
                                 Tone::Neutral,
                                 "Copied the check command",
-                                Some(format!("Run `{cmd}` in a terminal to list the broken labels.").into()),
+                                Some(format!("Run it in a terminal to list the broken labels: {cmd}").into()),
                                 cx,
                             );
                         }),
@@ -253,6 +253,13 @@ impl FoloApp {
 /// The Broken labels tile's tooltip: the health finding's words for what the count is, then the tile's action.
 fn broken_tip() -> String {
     format!("{} Click to copy the terminal command that lists them.", super::health::BROKEN_LABELS_DETAIL)
+}
+
+/// The Broken labels tile's command for the dataset at `path` (on the server's machine), quoted as
+/// the CLI prints it (`folo_api::json::cli_command`): a path with spaces in double quotes, and one
+/// that a shell changes inside them (`"`, `$`, `%`, a backtick) as `<dataset>`, the path after it.
+fn check_command(path: &str) -> String {
+    folo_api::json::cli_command("folo dataset check {dataset}", &[("dataset", std::path::Path::new(path))])
 }
 
 /// Under the broken-label count: the check command to copy, or that every label is valid.
@@ -304,5 +311,16 @@ mod tests {
         assert!(tip.starts_with(super::super::health::BROKEN_LABELS_DETAIL), "{tip}");
         assert!(tip.ends_with("Click to copy the terminal command that lists them."), "{tip}");
         assert!(!tip.contains("label files") && !tip.contains("images are skipped"), "{tip}");
+    }
+
+    /// #382: the tile wrapped the path in double quotes itself, so a quote in it ended the argument
+    /// and a `$` in it was expanded by PowerShell; now it is quoted as the CLI quotes its commands.
+    #[test]
+    fn the_check_command_quotes_its_path_as_the_cli_does() {
+        assert_eq!(super::check_command("D:/data/shapes"), "folo dataset check D:/data/shapes");
+        assert_eq!(super::check_command("D:/my data/shapes"), "folo dataset check \"D:/my data/shapes\"");
+        let odd = super::check_command("D:/O\"Brien/$set");
+        assert!(odd.starts_with("folo dataset check <dataset>. "), "{odd}");
+        assert!(odd.ends_with(": D:/O\"Brien/$set"), "{odd}");
     }
 }

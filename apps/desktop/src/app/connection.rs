@@ -65,7 +65,7 @@ pub enum Reason {
 /// and the backend for an address. Real HTTP and processes; the tests put fakes in.
 #[derive(Clone, Copy)]
 pub struct Connector {
-    pub probe: fn(&str) -> bool,
+    pub probe: fn(&str) -> crate::api::http::Probe,
     pub start: fn(std::time::Duration) -> Result<crate::api::http::Spawned, String>,
     pub backend: fn(&str) -> Arc<dyn Backend>,
 }
@@ -232,7 +232,7 @@ impl FoloApp {
     /// somewhere else than the address typed in Settings, or one that brings a lost local server back,
     /// says so.
     pub fn autoconnect(&mut self, url: String, spawn: bool, why: Reason, cx: &mut Context<Self>) {
-        use crate::api::http::Spawned;
+        use crate::api::http::{Probe, Spawned};
         let connector = self.connector;
         // A recovery keeps what is on screen (the server may only be slow); a launch or a switch shows
         // the pages loading.
@@ -250,8 +250,8 @@ impl FoloApp {
             let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
             let found = cx.background_executor().spawn(async move { (connector.probe)(&probe) }).await;
-            folo_ui::trace_point(if found { "probe-found" } else { "probe-none" });
-            if found {
+            folo_ui::trace_point(if found == Probe::Folo { "probe-found" } else { "probe-none" });
+            if found == Probe::Folo {
                 this.update(cx, |this, cx| {
                     if !current(this) {
                         return;
@@ -272,6 +272,11 @@ impl FoloApp {
                 .ok();
                 return;
             }
+            // An address typed in Settings that answers, but not as folo serve (a web page, a proxy's
+            // sign-in, a server's error): it is connected as typed, as with automatic start-up off, so
+            // its own answer says what is wrong there; no local server takes its place under "Nothing
+            // answered". At launch and on a recovery such an answer still falls through to one.
+            let spawn = spawn && !(why == Reason::Typed && found == Probe::Answered);
             let mut spawn_err = None;
             if spawn {
                 let go_on = this
