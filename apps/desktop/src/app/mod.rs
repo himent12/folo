@@ -37,6 +37,8 @@ mod revision_tests;
 #[cfg(test)]
 mod run_charts_tests;
 #[cfg(test)]
+mod run_control_tests;
+#[cfg(test)]
 mod run_page_tests;
 #[cfg(test)]
 mod select_driving;
