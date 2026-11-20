@@ -1349,6 +1349,16 @@ as YOLO26n on three of the four datasets and lost on one:
   YOLO26s is level with or below YOLO26n. Why was not investigated (the datasets are small and have one to three
   classes; no recipe was tuned per size).
 
+**Re-measured with today's `main` and `folo-n-coco-v5` (2026-11-20, wave 6; not the table's protocol: this PC's
+RTX 4080 SUPER instead of an A40, v5 instead of v2 weights; [notes/hill/r6-finetune.md](notes/hill/r6-finetune.md)).**
+folo-n fine-tuned AP, three seeds: BCCD 0.625 (0.617–0.636), brain-tumor 0.422 (0.407–0.430), signature 0.987
+(0.985–0.988), medical pills 0.805 (0.803–0.807). BCCD is now level with YOLO26n's 0.626 (`auto` rules 4 and 5 and
+the newer weights). Brain-tumor is 0.030 lower than the table, and that is the weights: the same build from
+`folo-n-coco-v2` scores 0.452 (0.438–0.459), every seed above every v5 seed, so the better COCO model is the worse
+fine-tuning start there. No default changed: an EMA that averages over the last quarter of a short run gives a
+better final model (+0.009 AP over the four sets, scored at the last epoch) but not a better best epoch as this
+protocol picks it (−0.005), and a lower backbone LR was level.
+
 ## FOLO on the GPU
 
 `cargo bench -p folo-vision --bench gpu` ([`crates/folo-vision/benches/gpu.rs`](../crates/folo-vision/benches/gpu.rs);
