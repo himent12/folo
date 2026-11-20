@@ -93,13 +93,29 @@ export function momentumSetting(resolved: ResolvedTrain): [label: string, Settin
   return resolved.betas ? ['Betas', { value: resolved.betas.join(' · ') }] : ['Momentum', { value: String(resolved.momentum) }];
 }
 
-/** The resolved rows a run's Config adds after its request: decay, warmup, momentum and the scaled weight decay. */
+/**
+ * The EMA's nominal window `1 / (1 − decay)` in optimizer steps, as the trainer's configuration log line says it
+ * ("EMA window 100 steps"; Desktop's Config row has the same words): "window 100 steps". Null for a run without an
+ * EMA and from servers older than `resolved.ema_decay`.
+ */
+export function emaSetting(resolved: ResolvedTrain): Setting | null {
+  const d = resolved.ema_decay;
+  if (typeof d !== 'number' || !(d < 1)) return null;
+  // The log line's `{:.0}` rounds a tie to even: a window of 2.5 steps is "2".
+  const w = 1 / (1 - d);
+  const n = w - Math.floor(w) === 0.5 && Math.floor(w) % 2 === 0 ? Math.floor(w) : Math.round(w);
+  return { value: `window ${n} ${n === 1 ? 'step' : 'steps'}` };
+}
+
+/** The resolved rows a run's Config adds after its request: decay, warmup, momentum, the scaled weight decay, the EMA. */
 export function resolvedRows(resolved: ResolvedTrain): [label: string, Setting][] {
+  const ema = emaSetting(resolved);
   return [
     ['LR decay', decaySetting(resolved)],
     ['Warmup', warmupSetting(resolved)],
     momentumSetting(resolved),
     ['Weight decay', { value: String(resolved.weight_decay) }],
+    ...(ema ? [['EMA', ema] as [string, Setting]] : []),
   ];
 }
 

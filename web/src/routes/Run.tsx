@@ -305,7 +305,7 @@ export default function Run() {
     // Up to the trainer's 16 (docs/API.md `/samples`), never a count: it reopens the folder when the run starts. The
     // split is "validation" only on a dataset that has one; else (none, not reported, removed) a word true either way.
     { name: 'Samples', what: `Predictions on up to 16 ${(dataset.get()?.splits.val ?? 0) > 0 ? 'validation' : 'evaluation'} images after every epoch` },
-    { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
+    { name: 'Per class', what: classes.get().length === 1 ? 'AP for its one class' : `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
 
