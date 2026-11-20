@@ -587,10 +587,16 @@ fn a_run_left_training_ends_when_it_last_trained() {
         e.persist(&st);
         st.alive_written = std::time::Instant::now().checked_sub(ALIVE_EVERY);
     }
+    let before = std::time::Instant::now();
     e.on_event(&log);
     near_now(on_disk());
     {
         let mut st = e.state.lock().unwrap();
+        // The write is recorded when it happens. Moved an hour ahead, it stays recent however long this machine
+        // takes to reach the next report (a busy CI runner has taken longer than ALIVE_EVERY).
+        let written = st.alive_written.expect("the write is recorded");
+        assert!(written >= before, "alive_written is the time of the write");
+        st.alive_written = Some(written + std::time::Duration::from_secs(3600));
         st.file.alive_at = Some(t - 50.0);
         e.persist(&st);
     }
