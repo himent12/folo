@@ -37,11 +37,15 @@ service, the one under `real/` connects it to `RealStore`.
    (`folo serve --token`);
 2. the web app as the fallback: a built `web/dist`-style folder, or the copy compiled in by the `embed-web` feature;
    both cache the same way (`web::cache_control`): Vite's content-hashed `assets/` for a year (`public,
-   max-age=31536000, immutable`), everything else `no-cache` (`index.html`, the SPA fallback for any other path, an
-   asset name that is no file, source maps, the unhashed files of `public/`), so a new build shows on the next load.
-   The embedded copy revalidates by `ETag`. The folder ignores `If-Modified-Since`, since a date from another file
-   (the fallback's, a newer build's before a rollback) could get a `304` for this one. Only a plain path under
-   `assets/` (no percent-encoding, no `.`, `..` or empty segment, not a folder) is kept for a year;
+   max-age=31536000, immutable`), and `no-cache` (stored, revalidated before every use) for `index.html`, the SPA
+   fallback for any other path (an asset name that is no file included), source maps (any case of `.map`) and the
+   unhashed files of `public/`, so a new build shows on the next load. This assumes `assets/` holds only Vite's
+   hashed output (`web/public` has no `assets/` folder). The embedded copy revalidates by `ETag`. On the folder, a
+   `200` or `206` gets the year only for a plain path (its leading `/`s trimmed: ASCII letters, digits, `.`, `_`, `-`
+   and `/` only, no empty, `.` or `..` segment, none ending in `.`), so the file sent is the one the path names, also
+   on a case-insensitive volume; any other path's is `no-cache`. Other answers (a redirect to a folder's `/`, an
+   error) carry no `Cache-Control`. The folder ignores `If-Modified-Since`, since a date from another file (the
+   fallback's, a newer build's before a rollback) could get a `304` for this one;
 3. the origin guard, compression (not for `application/octet-stream`: weights files are sent as they are), and CORS
    (loopback origins only unless the server was started to allow any);
 4. the Host guard when the server listens on loopback (no bind address given, or a loopback one), so nothing runs for

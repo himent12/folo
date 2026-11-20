@@ -129,6 +129,14 @@ async fn web_dir_cache_headers() {
         let (s, h, _) = send(&app, get(path)).await;
         assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"), "{path}");
     }
+    // Round 3: names a case-insensitive or Windows volume resolves to that map or to the chunk (`.MAP`, a trailing dot)
+    // are never kept for a year, whatever this volume answers.
+    for path in ["/assets/app-1a2b3c.js.MAP", "/assets/app-1a2b3c.js.", "/assets/APP-1A~1.JS"] {
+        let (s, h, _) = send(&app, get(path)).await;
+        if s.is_success() {
+            assert_eq!(cache(&h), "no-cache", "{path}");
+        }
+    }
     // A folder under `assets/` with an `index.html`: `ServeDir` redirects to the slash and serves that file there.
     std::fs::create_dir_all(dir.join("assets/help")).unwrap();
     std::fs::write(dir.join("assets/help/index.html"), "<p>help</p>").unwrap();

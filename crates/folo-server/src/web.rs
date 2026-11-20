@@ -75,13 +75,12 @@ pub(crate) fn content_type(path: &str) -> &'static str {
 /// disk (`--web-dir`): Vite content-hashes everything under `assets/`, so those never change under the same name and
 /// are cached for a year; everything else (`index.html`, the SPA fallback, the unhashed files of `public/`) is
 /// revalidated on every use, so a new build is picked up at once. A source map is named after its chunk's hash, not
-/// its own, so a change to a comment changes the map under the same name: it is revalidated too.
+/// its own, so a change to a comment changes the map under the same name: it is revalidated too, whatever the case of
+/// its extension (a case-insensitive volume serves `.MAP` from `.map`). The rule assumes `assets/` holds only Vite's
+/// hashed output: `web/public` has no `assets/` folder, whose files Vite would copy there under their own names.
 pub(crate) fn cache_control(path: &str) -> &'static str {
-    if path.starts_with("assets/") && !path.ends_with(".map") {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    }
+    let map = path.get(path.len().saturating_sub(4)..).is_some_and(|e| e.eq_ignore_ascii_case(".map"));
+    if path.starts_with("assets/") && !map { "public, max-age=31536000, immutable" } else { "no-cache" }
 }
 
 /// Whether the request's `If-None-Match` matches `etag` (`None` without the header). It uses the weak comparison
