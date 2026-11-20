@@ -97,13 +97,6 @@ impl FoloApp {
             self.reload_cloud();
         }
         self.after_bench_navigate();
-        // Another dataset's page: a class filter set on the last one doesn't carry over.
-        if let Route::Dataset(d) = &self.route
-            && self.ds_class_of.as_ref() != Some(d)
-        {
-            self.ds_class = None;
-            self.ds_class_of = Some(d.clone());
-        }
         // The pages with dataset cards show each dataset's health as the server has it now: a
         // folder moved away (or put back) since it was read says so on the next visit.
         if matches!(self.route, Route::Overview | Route::Datasets | Route::Dataset(_)) {

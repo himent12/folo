@@ -878,6 +878,12 @@ export class MockLabeling {
 
   // ---------- events ----------
 
+  /** Tells the job's stream the job, as the server does once a dataset made from it is registered (`set_dataset`). */
+  announce(id: string, now: number) {
+    const out = this.job(id, now);
+    this.#emit(id, (h) => h.job?.(out));
+  }
+
   /** Live events of a job; the subscriber is told the job first. */
   subscribe(id: string, h: LabelEventHandlers): () => void {
     const subs = this.#subs.get(id) ?? new Set<LabelEventHandlers>();

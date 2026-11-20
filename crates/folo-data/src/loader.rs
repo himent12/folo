@@ -7,6 +7,7 @@
 //! channel; dropping the epoch iterator stops and joins all threads.
 
 use crate::augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
+use crate::buffers;
 use crate::dataset::{Dataset, Issue, IssueKind};
 use crate::error::{DataError, Result};
 use crate::par;
@@ -367,13 +368,15 @@ fn spawn(
         let handle = std::thread::Builder::new()
             .name(format!("folo-data-{w}"))
             .spawn(move || {
-                par::serial(|| {
-                    while let Some(pos) = gate.claim(total, window) {
-                        let out = shared.produce(&transform, epoch, pos, order[pos]);
-                        if tx.send((pos, out)).is_err() {
-                            break;
+                buffers::pooled(|| {
+                    par::serial(|| {
+                        while let Some(pos) = gate.claim(total, window) {
+                            let out = shared.produce(&transform, epoch, pos, order[pos]);
+                            if tx.send((pos, out)).is_err() {
+                                break;
+                            }
                         }
-                    }
+                    })
                 })
             })
             .expect("failed to spawn a data loader thread");
@@ -385,31 +388,33 @@ fn spawn(
         std::thread::Builder::new()
             .name("folo-data-collate".into())
             .spawn(move || {
-                let bs = shared.cfg.batch_size;
-                let collate_serial = shared.cfg.workers <= 1;
-                let mut pending: HashMap<usize, Result<Transformed>> = HashMap::new();
-                for b in 0..num_batches {
-                    let (lo, hi) = (b * bs, ((b + 1) * bs).min(total));
-                    while (lo..hi).any(|p| !pending.contains_key(&p)) {
-                        match sample_rx.recv() {
-                            Ok((p, s)) => {
-                                pending.insert(p, s);
+                buffers::pooled(|| {
+                    let bs = shared.cfg.batch_size;
+                    let collate_serial = shared.cfg.workers <= 1;
+                    let mut pending: HashMap<usize, Result<Transformed>> = HashMap::new();
+                    for b in 0..num_batches {
+                        let (lo, hi) = (b * bs, ((b + 1) * bs).min(total));
+                        while (lo..hi).any(|p| !pending.contains_key(&p)) {
+                            match sample_rx.recv() {
+                                Ok((p, s)) => {
+                                    pending.insert(p, s);
+                                }
+                                Err(_) => return, // workers stopped
                             }
-                            Err(_) => return, // workers stopped
+                        }
+                        let items: Vec<Result<Transformed>> =
+                            (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
+                        let batch = if collate_serial {
+                            par::serial(|| collate(items, &shared.cfg))
+                        } else {
+                            collate(items, &shared.cfg)
+                        };
+                        gate.advance(hi);
+                        if batch_tx.send(batch).is_err() {
+                            return;
                         }
                     }
-                    let items: Vec<Result<Transformed>> =
-                        (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
-                    let batch = if collate_serial {
-                        par::serial(|| collate(items, &shared.cfg))
-                    } else {
-                        collate(items, &shared.cfg)
-                    };
-                    gate.advance(hi);
-                    if batch_tx.send(batch).is_err() {
-                        return;
-                    }
-                }
+                })
             })
             .expect("failed to spawn the data loader collator")
     };
@@ -457,6 +462,10 @@ fn collate(items: Vec<Result<Transformed>>, cfg: &LoaderConfig) -> Result<Batch>
         (planar(&items, s, |v| lut[v as usize]), Vec::new())
     };
     debug_assert_eq!(images.len().max(images_u8.len()), n * 3 * plane);
+    let mut items = items;
+    for t in &mut items {
+        buffers::recycle(std::mem::take(&mut t.sample.image.data));
+    }
     let mut targets = Vec::new();
     let mut meta = Vec::with_capacity(n);
     for (k, t) in items.iter().enumerate() {

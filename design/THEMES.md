@@ -73,7 +73,13 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   Desktop, of two files in the folder with one id, the later file name (in name order) wins. Required.
 - `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters after trimming.
   Both are stored trimmed. Lengths count Unicode code points (an emoji is one), and trimming removes Unicode white
-  space (the White_Space property) at both ends: the same in every validator.
+  space (the White_Space property) at both ends: the same in every validator. Studio's import also refuses a name
+  that holds a control character (a newline, a tab), a line or paragraph separator, or an invisible format character
+  (a zero-width space, a bidi override; the zero-width joiner and non-joiner are allowed), "name: must not hold control
+  or invisible characters", and one with no letter, digit, punctuation or symbol (the blank ones, the Hangul fillers
+  U+115F, U+1160, U+3164, U+FFA0 and the blank Braille pattern U+2800, do not count), "name: must have a visible
+  character"; a theme stored before that rule stays installed. Desktop and `design/theme-cases.json` take this rule
+  in a later change.
 - `mode`: `"dark"` or `"light"`. Required.
 - `base`: optional, a **built-in** theme id of the same mode; default: the mode's default (`dark` or `light`). The
   palette is the base theme's resolved palette with `color` merged over it.
@@ -154,7 +160,8 @@ Settings → Appearance holds four rows (`UNIFIED.md` §4, Settings):
    description says what it follows now ("Follows your operating system, currently dark.").
 2. **Dark theme**: a select of every dark theme, built-ins in the order above, then custom themes by name: by the
    lower-cased name, then by id, both compared by code point (no locale collation, so both apps list them alike).
-   Description: "Used when the theme is Dark, or System while your system is dark."
+   Description: "Used when the theme is Dark, or System while your system is dark." A closed select cannot wrap: in
+   Studio, when the chosen theme's name is wider than the select, the description ends with "Chosen: <the whole name>".
 3. **Light theme**: the same for light themes.
 4. **Custom themes**: as above, per app.
 

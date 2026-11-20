@@ -13,7 +13,7 @@ use super::cloud::{
 };
 use super::predictions::fake_predictions;
 use super::throughput::with_reference;
-use super::training::{Curve, RunFixture, epoch_line, initial_logs, resolve};
+use super::training::{Curve, RunFixture, epoch_line, initial_logs, log_cloud_end, resolve};
 use super::{CPU_DEVICE, GPU_DEVICE, MOCK_NOW, MockBackend, STEP_DT};
 
 impl Backend for MockBackend {
@@ -39,6 +39,7 @@ impl Backend for MockBackend {
     }
 
     fn system(&self) -> ApiResult<SystemResponse> {
+        self.system_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.check()?;
         let t = self.started.elapsed().as_secs_f32();
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
@@ -86,9 +87,10 @@ impl Backend for MockBackend {
             features.push(folo_api::FEATURE_VISION_BENCH.into());
             features.push(folo_api::FEATURE_AGENT_LABELING.into());
         }
+        self.hold_point("system");
         Ok(SystemResponse {
             system,
-            data_dir: None,
+            data_dir: self.data_dir.clone(),
             features,
             capabilities: Some(capabilities),
             gpu_pool: None,
@@ -511,27 +513,39 @@ impl Backend for MockBackend {
 
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>> {
         self.check()?;
-        let runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.lock().unwrap();
         let f = runs
-            .iter()
+            .iter_mut()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        log_cloud_end(f);
         // Epoch summaries up to now, merged with the fixture's lines in time order (a cloud run's
         // from when it started training on its instance).
         let created = time::parse(&f.run.created).unwrap_or(MOCK_NOW);
-        let trains_at = created + f.cloud.as_ref().map_or(10, |s| s.train_at() as i64 + 10);
+        let trains_at = created + 10;
         let done = (Self::current_step(f) / f.run.steps_per_epoch) as u32;
         let per_epoch = (f.run.steps_per_epoch as f64 * STEP_DT) as i64 + 1;
-        let mut lines = f.logs.clone();
         let from = done.saturating_sub(60) + 1;
-        for e in from..=done {
-            lines.push(LogLine {
-                t: time::format(trains_at + e as i64 * per_epoch),
+        // A cloud run's epochs on its own step clock, as its stream stamps them, so its last one
+        // comes before the weights are copied.
+        let stamp = |e: u32| match &f.cloud {
+            Some(sim) => sim.at(sim.step_at(e as u64 * f.run.steps_per_epoch)),
+            None => time::format(trains_at + e as i64 * per_epoch),
+        };
+        let mut lines: Vec<LogLine> = (from..=done)
+            .map(|e| LogLine {
+                t: stamp(e),
                 level: LogLevel::Info,
                 message: epoch_line(e, f.run.epochs, &f.curve.epoch(e)),
-            });
-        }
+            })
+            .collect();
+        // Stable: an epoch and a fixture line in the same second keep that order.
+        lines.extend(f.logs.iter().cloned());
         lines.sort_by(|a, b| a.t.cmp(&b.t));
+        let read = (f.logs.len(), done);
+        if let Some(sim) = f.cloud.as_mut() {
+            sim.read = read;
+        }
         Ok(lines)
     }
 
@@ -671,7 +685,6 @@ impl Backend for MockBackend {
 
     fn terminate_instance(&self, id: &str) -> ApiResult<CloudInstance> {
         self.check()?;
-        let now = time::format(self.sim_now());
         let mut runs = self.runs.lock().unwrap();
         let f = runs
             .iter_mut()
@@ -681,13 +694,22 @@ impl Backend for MockBackend {
         if let Some(sim) =
             f.cloud.as_mut().filter(|s| s.instance(&run_id).is_some_and(|i| i.status.is_alive()))
         {
-            let at = sim.elapsed();
+            // One clock sample: the lines said before and the loss are stamped on it.
+            let now = sim.elapsed();
             // The provider confirms at once; a run still using it fails.
             sim.release_error = None;
-            if sim.released_at().is_none() {
+            if sim.released_by(now).is_none() {
+                // What the run reached before (its weights being copied) is said first, as the
+                // control plane did; then the loss.
+                super::training::log_cloud_end_at(f, now);
+                let sim = f.cloud.as_mut().unwrap();
+                // A run stopped before keeps the step it stopped at; its instance ends now.
+                let at = sim.ended.map_or(now, |(e, _)| e.min(now));
                 sim.ended = Some((at, Ended::InstanceLost));
+                sim.lost_at = Some(now);
+                let t = sim.at(now);
                 f.logs.push(LogLine {
-                    t: now,
+                    t,
                     level: LogLevel::Error,
                     message: format!("cloud: instance {id} was terminated by hand"),
                 });

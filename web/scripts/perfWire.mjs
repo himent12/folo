@@ -11,7 +11,7 @@ export const isStream = (/** @type {string} */ u) => {
   }
 };
 
-/** @typedef {{ id: string, hop: number, ts: number, url: string, kind: 'sent' | 'bytes', n: number }} WireEvent */
+/** @typedef {{ id: string, hop: number, ts: number, url: string, kind: 'sent' | 'bytes', n: number, loader: string }} WireEvent */
 /**
  * @typedef {object} Wire
  * @property {Set<string>} cached the hops the cache answered (never on the network), as `<request id>#<hop>`: a redirect's
@@ -20,8 +20,12 @@ export const isStream = (/** @type {string} */ u) => {
  * @property {Map<string, string>} inflight requests not finished (id → URL)
  * @property {Set<string>} streams requests that are event streams
  * @property {number} last when (`now()`) a request that is not a stream last sent or received anything
+ * @property {Set<string>} stale the loader ids (CDP's `loaderId`, one per document) of the documents before the last
+ *   `reset`
  * @property {(t: number, from?: number) => { bytes: number, requests: number, urls: string[] }} upTo what went over the
- *   network by `t` (and from `from`: an event of the document before, delivered late, is not this one's)
+ *   network by `t` (and from `from`: an event of the document before, delivered late, is not this one's), leaving out
+ *   the requests of the documents before (`stale`): an event stream of the one before can still receive after this
+ *   navigation started and before it committed
  * @property {() => void} reset forgets what came before (a new document)
  */
 
@@ -43,12 +47,13 @@ export function wireOf(cdp, now = Date.now) {
     inflight: new Map(),
     streams: new Set(),
     last: now(),
+    stale: new Set(),
     upTo(t, from = -Infinity) {
       let bytes = 0;
       /** @type {string[]} */
       const urls = [];
       for (const e of this.events) {
-        if (e.ts > t || e.ts < from || this.cached.has(`${e.id}#${e.hop}`)) continue;
+        if (e.ts > t || e.ts < from || this.stale.has(e.loader) || this.cached.has(`${e.id}#${e.hop}`)) continue;
         if (e.kind === 'sent') urls.push(e.url);
         else bytes += e.n;
       }
@@ -57,6 +62,7 @@ export function wireOf(cdp, now = Date.now) {
     reset() {
       this.cached.clear();
       this.events.length = 0;
+      for (const l of loaderOf.values()) if (l) this.stale.add(l);
     },
   };
   /** @type {Map<string, string>} */
@@ -64,13 +70,16 @@ export function wireOf(cdp, now = Date.now) {
   /** The hop each request is on (0, then one more for each redirect). */
   /** @type {Map<string, number>} */
   const hopOf = new Map();
+  /** The loader (document) each request belongs to: `requestWillBeSent`'s `loaderId`, '' when it has none. */
+  /** @type {Map<string, string>} */
+  const loaderOf = new Map();
   const hopKey = (/** @type {string} */ id) => `${id}#${hopOf.get(id) ?? 0}`;
   const touch = (/** @type {string} */ id) => {
     const u = urlOf.get(id);
     if (u === undefined || !(wire.streams.has(id) || isStream(u))) wire.last = now();
   };
   const push = (/** @type {string} */ id, /** @type {number} */ ts, /** @type {'sent' | 'bytes'} */ kind, /** @type {number} */ n) =>
-    wire.events.push({ id, hop: hopOf.get(id) ?? 0, ts, url: urlOf.get(id) ?? '', kind, n });
+    wire.events.push({ id, hop: hopOf.get(id) ?? 0, ts, url: urlOf.get(id) ?? '', kind, n, loader: loaderOf.get(id) ?? '' });
   cdp.on('Network.requestWillBeSent', (e) => {
     if (!/^https?:/.test(e.request.url)) return;
     // A redirect: the hop's response (headers and body) came in, and the next hop goes out under the same id.
@@ -81,6 +90,7 @@ export function wireOf(cdp, now = Date.now) {
       hopOf.set(e.requestId, (hopOf.get(e.requestId) ?? 0) + 1);
     }
     urlOf.set(e.requestId, e.request.url);
+    loaderOf.set(e.requestId, e.loaderId ?? '');
     wire.inflight.set(e.requestId, e.request.url);
     touch(e.requestId);
     push(e.requestId, e.timestamp, 'sent', 1);

@@ -21,7 +21,7 @@ import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { stoppedEarly } from '$lib/api/progress';
-import { bytes, duration, metric } from '$lib/format';
+import { bytes, duration, score } from '$lib/format';
 import { fitFixes, isOom, oomCalibration, oomDetail, oomFixes, retryPath, vramForecaster, type OomFix } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
@@ -68,6 +68,13 @@ const NONE: string[] = [];
  * epoch finished, so its checkpoint was written).
  */
 export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
+
+/**
+ * Whether Resume (or Start again) is offered: not on the mock server (`folo serve --mock`, `hub.serverMock`), which
+ * answers it `501` (issue #382: the palette's Resume did), and not in the in-browser demo, which answers the same.
+ * Every real server resumes, older ones too.
+ */
+export const canResume = () => hub.serverMock !== true && hub.mode !== 'mock';
 
 /**
  * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A
@@ -149,7 +156,7 @@ export default function Outcome(props: OutcomeProps) {
     <span>
       {props.run.best && props.run.best.map50_95 > 0 ? (
         <>
-          best mAP50-95 <span class="num">{metric(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
+          best mAP50-95 <span class="num">{score(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
         </>
       ) : (
         'no detections'
@@ -190,11 +197,12 @@ export default function Outcome(props: OutcomeProps) {
     </>
   );
   /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
-  const resumeAction = () => (
-    <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
-      {canContinue(props.run) ? 'Resume' : 'Start again'}
-    </Button>
-  );
+  const resumeAction = () =>
+    canResume() ? (
+      <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
+        {canContinue(props.run) ? 'Resume' : 'Start again'}
+      </Button>
+    ) : null;
 
   return (
     <>

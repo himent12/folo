@@ -3,9 +3,10 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
-use super::cells::bar_row;
+use super::cells::{bar_row, partial_badge};
 use super::format::{
-    axis_name, axis_text, calibration_none, calibration_why_not, contestant_line, entry_frac, pct, prf_label,
+    axis_name, axis_text, calibration_none, calibration_why_not, contestant_line, entry_frac, partial_why,
+    pct, prf_label,
 };
 use crate::api::{Bench, BenchAxis, BenchEntryStatus, BenchReadiness, BenchResult, Label, time};
 use crate::app::{FoloApp, Route, act};
@@ -72,7 +73,7 @@ impl FoloApp {
                 format!("entry-{}", e.id),
             ));
         if e.score.as_ref().is_some_and(|s| s.partial) {
-            title = title.child(badge(&t, "partial", Tone::Neutral));
+            title = title.child(partial_badge(&t, partial_why(&e, &b), format!("entry-partial-{}", e.id)));
         }
         let finished = e
             .finished

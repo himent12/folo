@@ -55,3 +55,15 @@ describe('PerClass with a long class name', () => {
     expect(name.getAttribute('title')).toBe(long);
   });
 });
+
+describe('PerClass with a tiny AP', () => {
+  it('never writes a class that scored as 0.000 (issue #382)', () => {
+    const e: Epoch = { ...validated, val: { ...validated.val, per_class: [{ class: 0, map50: 0.0009, map50_95: 0.00042, precision: 0.0002, recall: 0.4 }] } };
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <PerClass classes={['cell']} epochs={[e]} version={0} loading={false} />, target);
+    flushSync();
+    const cells = [...target.querySelectorAll('td.num')].map((td) => td.textContent?.trim());
+    expect(cells).toEqual(['0.00042', '·', '0.001', '0.00020', '0.400']);
+  });
+});

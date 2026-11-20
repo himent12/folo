@@ -2,6 +2,7 @@
 import { flush as flushSync } from 'fw';
 import { fromHTML, render as renderFw, type Rendered } from '../../../framework/testing';
 import { describe, expect, it, vi } from 'vitest';
+import { hub } from '$lib/api/index';
 import type { Run, SystemInfo, TrainConfig } from '$lib/api/types';
 import Outcome, { type OutcomeProps } from './Outcome';
 
@@ -153,6 +154,31 @@ describe('Outcome', () => {
     r.buttons[0]?.click();
     expect(onresume).toHaveBeenCalledOnce();
     r.done();
+  });
+
+  // #382: on `folo serve --mock` Resume answered 501. Every real server resumes, also one from before any feature named
+  // it (review: a list without one must not hide it). The in-browser demo answers it 501 too (review round 3).
+  it('offers Resume except on the mock server and in the demo', () => {
+    const run = failed('dataset folder D:/data/shapes-hard is gone');
+    for (const [mock, labels] of [
+      [true, ['Details']],
+      [false, ['Resume', 'Details']],
+      [null, ['Resume', 'Details']],
+    ] as const) {
+      hub.serverMock = mock;
+      hub.features = ['queue_control', 'run_cursors'];
+      const r = render(run);
+      expect(r.labels, JSON.stringify(mock)).toEqual(labels);
+      r.done();
+    }
+    const mode = hub.mode;
+    hub.serverMock = null;
+    hub.mode = 'mock';
+    const demo = render(run);
+    expect(demo.labels).toEqual(['Details']);
+    demo.done();
+    hub.mode = mode;
+    hub.features = null;
   });
 
   it('says a failure in plain words by its code, links the dataset, and keeps the raw error under Details', () => {

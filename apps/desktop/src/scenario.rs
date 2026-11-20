@@ -188,7 +188,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             app.route = Route::Dataset("ds_3b91".into());
             if s.has("filter") {
                 app.ds_split = Some(crate::api::Split::Val);
-                app.ds_class = Some(3);
+                app.ds_class = Some(("ds_3b91".into(), 3));
             }
             // The Statistics tab: the health line over the KPI strip and the charts.
             if s.has("stats") {

@@ -7,7 +7,9 @@ use folo_ui::{
 };
 
 use super::cells::{name_with_badges, num_cell};
-use super::format::{agent_name, axis_short, axis_text, contestant_line, entry_frac, pct, ranks, score_text};
+use super::format::{
+    agent_name, axis_short, axis_text, contestant_line, entry_frac, partial_why, pct, ranks, score_text,
+};
 use crate::api::{Bench, BenchAxis, BenchEntry, BenchEntryStatus, Label};
 use crate::app::{FoloApp, Route, act};
 use crate::bench::{Contender, model_fits};
@@ -200,13 +202,13 @@ impl FoloApp {
         let axis = |a: BenchAxis| {
             e.score.as_ref().and_then(|s| s.axes.iter().find(|x| x.axis == a)).and_then(|x| x.value)
         };
-        let mut badges: Vec<(&str, Tone)> = Vec::new();
+        let mut badges: Vec<(&str, Tone, Option<String>)> = Vec::new();
         let status = (!done).then(|| (StatusKind::of_entry(e.status), e.status.label()));
         if e.score.as_ref().is_some_and(|s| s.partial) {
-            badges.push(("partial", Tone::Neutral));
+            badges.push(("partial", Tone::Neutral, Some(partial_why(e, b))));
         }
         if stale {
-            badges.push(("earlier version", Tone::Warning));
+            badges.push(("earlier version", Tone::Warning, None));
         }
         let name_line = name_with_badges(&t, window, &e.name, status, &badges, name_w, &key);
         // The second line: who it is, or how far it is, or why it failed.

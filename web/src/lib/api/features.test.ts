@@ -84,6 +84,28 @@ describe('hub.features over an outage', () => {
     expect(s.healths - before).toBe(2);
   });
 
+  it('serverMock (review of #389, round 2): a mock server restarted at the address as a real one can resume', async () => {
+    const net = servers();
+    const s = net.at('');
+    const mock = () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: true, features: MOCK });
+    s.next.push(mock);
+    await hub.connect();
+    expect(hub.serverMock).toBe(true);
+    s.up = false;
+    await outage();
+    expect(hub.serverMock).toBeNull();
+    // Back as a real server; its health is held for a while: unknown until it answers.
+    s.up = true;
+    const h = held();
+    s.next.push(() => h.r);
+    await hub.api.datasets();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.serverMock]).toEqual([false, null]);
+    h.answer(health(REAL));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.serverMock).toBe(false);
+  });
+
   it('finding 1, the other way: restarted without labeling, its health held: unknown until it answers, then lacking', async () => {
     const net = servers();
     const s = net.at('');
@@ -169,5 +191,30 @@ describe('hub.features over an outage', () => {
     end();
     await vi.advanceTimersByTimeAsync(0);
     expect([hub.offline, hub.features]).toEqual([false, REAL]);
+  });
+});
+
+describe('hub.serverMock (issue #382: Resume on folo serve --mock)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    prefs.serverUrl = '';
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("is the connect's health answer's `mock`, and unknown while a connect has not answered", async () => {
+    let mock = true;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/health')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock, features: MOCK });
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      return Response.json({ datasets: [] });
+    });
+    await hub.connect();
+    expect(hub.serverMock).toBe(true);
+    mock = false;
+    const again = hub.connect();
+    expect(hub.serverMock).toBeNull();
+    await again;
+    expect(hub.serverMock).toBe(false);
   });
 });

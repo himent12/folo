@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApps } from './entries.mjs';
+import { referenceGaps } from './loadFaultsRef.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -235,6 +236,8 @@ try {
     if (!showing(sc.title)(s)) throw new Error(`a clean load of ${sc.hash} never showed: ${JSON.stringify(s)}`);
     const at = await page.evaluate((t) => /** @type {any} */ (window).__atShow[t], sc.title);
     if (!at?.length) throw new Error(`a clean load of ${sc.hash}: no stylesheet loaded when it showed`);
+    const gaps = referenceGaps(sc.title, at);
+    if (gaps.length) throw new Error(`a clean load of ${sc.hash}: ${gaps.join(' and ')} had not loaded when it showed (${at.join(', ')})`);
     clean[sc.hash] = at;
     await ctx.close();
   }

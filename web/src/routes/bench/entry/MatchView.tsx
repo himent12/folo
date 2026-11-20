@@ -7,7 +7,7 @@
  */
 import { computed, css, effect, For, signal } from 'fw';
 import type { Box, BenchDetection } from '$lib/api/types';
-import { containFit, placeBox } from '$lib/bench/frame';
+import { containFit, edgeRoom, insetFit, placeBox } from '$lib/bench/frame';
 import { matchImage } from '$lib/bench/match';
 import { placeChips } from '$lib/detect/chips';
 import { cancelOnRemove } from '$lib/detect/DetectionView';
@@ -49,7 +49,6 @@ export default function MatchView(props: MatchViewProps) {
   });
   // The whole image in the frame, whatever either's shape (a portrait photo in a landscape tile sits between two bands
   // of the well); every box goes through the same fit, so it stays on its object ($lib/bench/frame).
-  const geo = computed(() => containFit(cw.get(), ch.get(), props.width, props.height));
   const m = computed(() => matchImage(props.truth, props.detections));
   /** What is drawn: every detection, right or wrong, then every true box nothing found. */
   const marks = computed<Mark[]>(() => {
@@ -59,6 +58,21 @@ export default function MatchView(props: MatchViewProps) {
       ...props.truth.flatMap((t, i) => (mm.found[i] === null ? [{ key: `t${i}`, box: t, outcome: 'missed' as Outcome, score: undefined }] : [])),
     ];
   });
+  // A thumbnail's box marks reach outside it (the CSS below): its line and halo 2 px, a wrong box's cross 5 px, and half
+  // a pixel more for a box drawn at the 1 px minimum about its centre (below). The
+  // image (and so every box) keeps that much room from the tile's edge when a box on the image comes that close, so
+  // none is cut off (issue #382). A box wholly off the image asks for none and is drawn with the plain fit, where it
+  // was before (mostly cut off), and the large view, which has room around its image, is drawn as before.
+  const on = (b: Box) => b.x2 > 0 && b.y2 > 0 && b.x1 < props.width && b.y1 < props.height;
+  const plain = computed(() => containFit(cw.get(), ch.get(), props.width, props.height));
+  const room = computed(() => {
+    const f = plain.get();
+    if (!f || full()) return 0;
+    const r = edgeRoom(f, cw.get(), ch.get(), marks.get().flatMap((k) => (on(k.box) ? [{ ...k.box, reach: k.outcome === 'wrong' ? 5.5 : 2.5 }] : [])));
+    // Never so much that the image is gone (a long strip in a short tile).
+    return 4 * r < Math.min(cw.get(), ch.get()) ? r : 0;
+  });
+  const geo = computed(() => insetFit(cw.get(), ch.get(), props.width, props.height, room.get()));
   const name = (c: number) => props.classes[c] ?? `class ${c}`;
   const chipText = (k: Mark) =>
     k.outcome === 'missed' ? `missed ${name(k.box.class)}` : `${name(k.box.class)}${k.score !== undefined && k.score < 1 ? ` ${k.score.toFixed(2)}` : ''}`;
@@ -96,12 +110,21 @@ export default function MatchView(props: MatchViewProps) {
 
   return (
     <div class="mv" class:full={full()} class:small={cw.get() > 0 && cw.get() < 480} bind:clientWidth={cw} bind:clientHeight={ch}>
-      {props.src ? <img ref={cancelOnRemove} src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} draggable="false" onload={() => loaded.set(true)} /> : null}
+      {props.src ? <img ref={cancelOnRemove} src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} style:inset={`${room.get()}px`} style:width={`calc(100% - ${2 * room.get()}px)`} style:height={`calc(100% - ${2 * room.get()}px)`} draggable="false" onload={() => loaded.set(true)} /> : null}
       {geo.get() ? (
         <div class="layer" aria-hidden="true">
           <For each={marks.get()} key={(k) => k.key}>
             {(k, n) => {
-              const at = computed(() => placeBox(geo.get()!, k().box));
+              // A box under a pixel wide or high is drawn 1 px: on a thumbnail about its centre, so it stays inside the
+              // room kept for it; in the large view from its corner, where its chip was placed (as before).
+              const at = computed(() => {
+                const off = room.get() > 0 && !on(k().box);
+                const r = placeBox(off ? plain.get()! : geo.get()!, k().box);
+                const w = Math.max(1, r.width);
+                const h = Math.max(1, r.height);
+                const c = full() ? 0 : 0.5;
+                return { left: r.left - (w - r.width) * c, top: r.top - (h - r.height) * c, width: w, height: h };
+              });
               const chip = () => chips.get()[n()];
               return (
                 <div
@@ -110,8 +133,8 @@ export default function MatchView(props: MatchViewProps) {
                   class:dim={active() !== null && active() !== k().key}
                   style:left={`${at.get().left}px`}
                   style:top={`${at.get().top}px`}
-                  style:width={`${Math.max(1, at.get().width)}px`}
-                  style:height={`${Math.max(1, at.get().height)}px`}
+                  style:width={`${at.get().width}px`}
+                  style:height={`${at.get().height}px`}
                 >
                   {k().outcome === 'wrong' ? <span class="x"></span> : null}
                   {full() && chip() && (!chip()!.hidden || active() === k().key) ? (

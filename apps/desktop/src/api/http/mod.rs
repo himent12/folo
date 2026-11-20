@@ -830,6 +830,8 @@ connection: close
     /// the queue full (Windows turns it away; it times out). The check saw a listener, so the probe tries
     /// once more and finds the server, which took its queue meanwhile (here 200 ms in, inside the first
     /// attempt's half second). With one attempt the app said nobody was there and started its own server.
+    /// On a loaded machine this can pass without the second attempt (the check unsure, or a pause before
+    /// the probe): `only_a_connection_never_made_is_asked_again` pins the rule itself.
     #[cfg(windows)]
     #[test]
     fn a_server_whose_queue_the_check_filled_is_still_found() {
@@ -838,6 +840,42 @@ connection: close
         let (url, requests) = canned_server_on(listener, std::time::Duration::from_millis(200), vec![health]);
         assert!(super::server::probe_through(&url, None));
         assert!(requests.recv().unwrap().starts_with("GET /api/health "));
+    }
+
+    /// The probe's second attempt (#308), with scripted answers: taken once, and only when the check saw a
+    /// listener and the first attempt never connected; a connection that was made and then reset, or
+    /// timed out reading, is final (a listener that resets after `t` cost `2t`, and a request was sent twice).
+    #[test]
+    fn only_a_connection_never_made_is_asked_again() {
+        use super::refused::Found;
+        use super::server::ask_health;
+        use std::io::{Error as IoError, ErrorKind};
+        type Answer = Result<&'static str, ureq::Error>;
+        let scripted = |first: fn() -> Answer| {
+            let mut calls = 0;
+            move || {
+                calls += 1;
+                if calls == 1 { first() } else { Ok("health") }
+            }
+        };
+        let connect_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::Connect));
+        let failed: fn() -> Answer = || Err(ureq::Error::ConnectionFailed);
+        for first in [connect_timeout, failed] {
+            let (answer, calls) = ask_health(Found::Listener, scripted(first));
+            assert_eq!((answer.ok(), calls), (Some("health"), 2), "a queue the check filled: once more");
+            let (answer, calls) = ask_health(Found::Unsure, scripted(first));
+            assert!(answer.is_err() && calls == 1, "the check saw no listener: no second attempt");
+        }
+        let reset: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionReset)));
+        let aborted: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionAborted)));
+        let refused: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionRefused)));
+        let read_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse));
+        for first in [reset, aborted, refused, read_timeout] {
+            let (answer, calls) = ask_health(Found::Listener, scripted(first));
+            assert!(answer.is_err() && calls == 1, "{:?}: one attempt", answer);
+        }
+        let (answer, calls) = ask_health(Found::Listener, scripted(|| Ok("health")));
+        assert_eq!((answer.ok(), calls), (Some("health"), 1));
     }
 
     #[test]

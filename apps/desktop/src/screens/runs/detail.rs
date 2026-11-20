@@ -507,12 +507,12 @@ impl FoloApp {
                 } else {
                     "mAP50-95 · last evaluated"
                 },
-                last.map_or("–".into(), |e| f3(e.val.map50_95)),
+                last.map_or("–".into(), |e| fmt_score(e.val.map50_95)),
                 big,
                 delta.or_else(|| {
                     r.best
                         .as_ref()
-                        .map(|b| kpi_note(&t).child(format!("best {} @ {}", f3(b.map50_95), b.epoch)))
+                        .map(|b| kpi_note(&t).child(format!("best {} @ {}", fmt_score(b.map50_95), b.epoch)))
                 }),
             ),
             div()

@@ -116,6 +116,19 @@ describe('mock runs', () => {
     expect(model?.classes).toEqual(['a', 'b']);
   });
 
+  it("refuses a synthetic count the real server refuses, as it does, and makes the counts at its limits (issue #382)", async () => {
+    const api = new MockApi('normal', 0);
+    await idle(api);
+    const body = { name: 'n', classes: ['a'], imgsz: 320, seed: 0 };
+    await expect(api.createSyntheticDataset({ ...body, images: 10.5 })).rejects.toMatchObject({ status: 422, code: 'invalid_body' });
+    await expect(api.createSyntheticDataset({ ...body, images: -1 })).rejects.toMatchObject({ status: 422, code: 'invalid_body' });
+    for (const images of [0, 100_001]) await expect(api.createSyntheticDataset({ ...body, images })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+    for (const images of [1, 100_000]) {
+      const ds = await api.createSyntheticDataset({ ...body, name: `n${images}`, images });
+      expect(Object.values(ds.splits).reduce((x, y) => x + y, 0)).toBe(images);
+    }
+  });
+
   it('keeps synthetic classes, weights and samples consistent', async () => {
     const api = new MockApi('normal', 0);
     await idle(api);

@@ -37,13 +37,21 @@ pub(super) struct CloudSim {
     /// Where the training clock is anchored: (seconds since `t0`, steps done then).
     pub(super) anchor: (f64, u64),
     /// The run's length in steps.
-    total: u64,
+    pub(super) total: u64,
     /// Ended early: when, and how.
     pub(super) ended: Option<(f64, Ended)>,
+    /// When the instance was terminated by hand: later than `ended` for a run stopped before (its
+    /// training ended at the stop, its instance at the termination).
+    pub(super) lost_at: Option<f64>,
     /// Why the provider hasn't confirmed the termination (the instance stays `terminating`).
     pub(super) release_error: Option<String>,
     /// Since when (seconds since `t0`) the worker hasn't answered: `unanswered_since` while it trains.
     pub(super) silent_since: Option<f64>,
+    /// What the last read of the run's log returned: the fixture's lines (how many) and its last
+    /// epoch. The demo's lines are worked out from the clock when the log is read or streamed, so a
+    /// read can return one its stream has not sent yet; the stream does not send it again (the demo
+    /// has one reader), as a real server sent it when it was logged, before the read.
+    pub(super) read: (usize, u32),
 }
 
 /// Seconds of collecting the weights, then of releasing the instance.
@@ -65,8 +73,10 @@ impl CloudSim {
             anchor: (pre.iter().sum(), 0),
             total,
             ended: None,
+            lost_at: None,
             release_error: None,
             silent_since: None,
+            read: (0, 0),
         }
     }
 
@@ -91,19 +101,38 @@ impl CloudSim {
         self.steps_at(self.elapsed())
     }
 
+    /// When training step `step` was done, in seconds since `t0`, on the clock that counts the
+    /// steps (an epoch's log line is stamped at its last step, so it comes before the end's lines).
+    pub(super) fn step_at(&self, step: u64) -> f64 {
+        self.anchor.0 + (step as f64 - self.anchor.1 as f64) * self.step_dt
+    }
+
     /// When training ended (all steps done, or stopped), if it has.
-    fn trained_at(&self) -> Option<f64> {
+    pub(super) fn trained_at(&self) -> Option<f64> {
+        self.trained_by(self.elapsed())
+    }
+
+    /// [`Self::trained_at`] as of `now` seconds into the instance's life.
+    pub(super) fn trained_by(&self, now: f64) -> Option<f64> {
         let natural = self.anchor.0 + self.total.saturating_sub(self.anchor.1) as f64 * self.step_dt;
         let end = self.ended.map_or(natural, |(e, _)| e.min(natural)).max(self.train_at());
-        (self.elapsed() >= end).then_some(end)
+        (now >= end).then_some(end)
     }
 
     /// When the instance was released: right away for a run that ended before training or lost its
     /// instance, else after collecting the weights.
     pub(super) fn released_at(&self) -> Option<f64> {
+        self.released_by(self.elapsed())
+    }
+
+    /// [`Self::released_at`] as of `now` seconds into the instance's life.
+    pub(super) fn released_by(&self, now: f64) -> Option<f64> {
+        if self.lost_at.is_some() {
+            return self.lost_at;
+        }
         match self.ended {
             Some((e, how)) if how == Ended::InstanceLost || e < self.train_at() => Some(e),
-            _ => self.trained_at().map(|t| t + COLLECT_S + RELEASE_S).filter(|r| self.elapsed() >= *r),
+            _ => self.trained_by(now).map(|t| t + COLLECT_S + RELEASE_S).filter(|r| now >= *r),
         }
     }
 
@@ -151,7 +180,7 @@ impl CloudSim {
         self.base.offer.price_per_hour.map(|p| p * secs / 3600.)
     }
 
-    fn at(&self, secs: f64) -> String {
+    pub(super) fn at(&self, secs: f64) -> String {
         time::format((self.t0 + secs) as i64)
     }
 

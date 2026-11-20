@@ -5,7 +5,7 @@ use crate::bbox::BBox;
 use crate::image::Sample;
 use crate::letterbox::PAD_VALUE;
 use crate::rng::Rng;
-use crate::warp::{Affine, warp_affine};
+use crate::warp::{Affine, Plane, warp_affine, warp_plane};
 
 /// Rules for dropping boxes that an augmentation made useless.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,6 +113,27 @@ pub fn random_affine(s: &Sample, out_w: u32, out_h: u32, cfg: &AugmentConfig, rn
     affine_sample(s, &m, out_w, out_h, &cfg.box_filter())
 }
 
+/// [`random_affine`] of the sample whose image is `plane`'s source image ([`Plane::render`]) and whose boxes are
+/// `boxes`, without rendering it (mosaic tiles are warped where they lie).
+pub(crate) fn random_affine_plane(
+    plane: &Plane,
+    boxes: &[BBox],
+    out_w: u32,
+    out_h: u32,
+    cfg: &AugmentConfig,
+    rng: &mut Rng,
+) -> Sample {
+    let (w, h) = (plane.width, plane.height);
+    let m = random_affine_matrix(w, h, out_w, out_h, cfg, rng);
+    if m.is_identity() && (w, h) == (out_w, out_h) {
+        return Sample { image: plane.render(), boxes: boxes.to_vec() };
+    }
+    Sample {
+        image: warp_plane(plane, &m, out_w, out_h),
+        boxes: transform_boxes(boxes, w, h, &m, out_w, out_h, &cfg.box_filter()),
+    }
+}
+
 /// Mirrors a sample left to right in place.
 pub fn flip_lr(s: &mut Sample) {
     let stride = s.image.stride();
@@ -154,5 +175,7 @@ pub fn resize_long_side(s: Sample, long: u32) -> Sample {
     if (nw, nh) == (w, h) {
         return s;
     }
-    Sample { image: crate::resize::resize(&s.image, nw, nh), boxes: s.boxes }
+    let image = crate::resize::resize(&s.image, nw, nh);
+    crate::buffers::recycle(s.image.data);
+    Sample { image, boxes: s.boxes }
 }

@@ -174,6 +174,7 @@ impl FoloApp {
             drag_from: None,
             hover_box: None,
             want: None,
+            shown: None,
             sample: None,
         });
         self.inspector_return = window.focused(cx);

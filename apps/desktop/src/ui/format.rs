@@ -287,6 +287,18 @@ pub fn f3(v: f32) -> String {
     format!("{v:.3}")
 }
 
+/// A 0–1 score standing alone (a KPI tile, its "best … @" note): three decimals, as [`f3`], but a
+/// score above zero never reads as zero. Under 0.0005 it takes the decimals its own size needs, as a
+/// chart fitted to it would ([`score_decimals`], at most five); one that still rounds to zero there
+/// reads `<0.00001`.
+pub fn fmt_score(v: f32) -> String {
+    if !(v > 0. && v < 0.000_5) {
+        return f3(v);
+    }
+    let s = fmt_score_on(v, v);
+    if s.bytes().all(|c| c == b'0' || c == b'.') { "<0.00001".into() } else { s }
+}
+
 /// A 0–1 score in the legend of a chart whose y axis is fitted to `top` (charts::domain::unit_top),
 /// as Studio's `axisMetric` writes it (#338): three decimals down to a top of 0.01, then one more per
 /// power of ten, at most five ([`score_decimals`]).
@@ -319,6 +331,20 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    /// #382: the final-score tile read a one-epoch run's mAP50-95 of 0.000068 as "0.000". A score
+    /// above zero never reads as zero; from 0.0005 up, and zero itself, it keeps three decimals.
+    #[test]
+    fn a_score_above_zero_never_reads_as_zero() {
+        assert_eq!(fmt_score(0.000_068), "0.00007");
+        assert_eq!(fmt_score(0.000_39), "0.00039");
+        assert_eq!(fmt_score(0.000_499), "0.00050");
+        assert_eq!(fmt_score(0.000_001), "<0.00001");
+        assert_eq!(fmt_score(0.000_5), "0.001");
+        assert_eq!(fmt_score(0.412), "0.412");
+        assert_eq!(fmt_score(0.), "0.000");
+        assert_eq!(fmt_score(1.), "1.000");
     }
 
     /// #338: a legend score's decimals follow its axis's fitted top. Studio's `format.test.ts` has the

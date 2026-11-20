@@ -43,7 +43,15 @@ const stayed = () => {
   held = [];
   for (const f of run) f();
 };
-if (typeof window !== 'undefined') {
+let listening = false;
+/**
+ * Starts telling a leave from a failure, once: on the first dataset this tab asks for (`generationStarted`), the only
+ * request whose failure asks `pageLeaving`. Not on import: this module is in the shared chunk, so every first screen
+ * would add these listeners (issue #309, item 5).
+ */
+function listenForLeave(): void {
+  if (listening || typeof window === 'undefined') return;
+  listening = true;
   // From `beforeunload`: Chrome drops the page's requests (and runs their failure handlers) before `pagehide`. A page
   // still here a while later was not left after all (a leave cancelled at another screen's unsaved-work prompt).
   let stay: ReturnType<typeof setTimeout> | undefined;
@@ -70,6 +78,7 @@ export function whenStaying(f: () => void): void {
 const GIVE_UP_MS = 30 * 60_000;
 
 export function generationStarted(g: Generation): void {
+  listenForLeave();
   try {
     sessionStorage.setItem(KEY, JSON.stringify(g));
   } catch {

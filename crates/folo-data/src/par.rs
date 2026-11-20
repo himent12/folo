@@ -37,18 +37,31 @@ where
     T: Send,
     F: Fn(usize, &mut [T]) + Sync + Send,
 {
+    for_bands(buf, row_len, |y0, band| {
+        for (i, r) in band.chunks_mut(row_len).enumerate() {
+            f(y0 + i, r);
+        }
+    });
+}
+
+/// Calls `f(y0, band)` for bands of whole `row_len`-sized rows of `buf` (`y0` is the band's first row), in parallel
+/// when it is worth it: one band holding every row on a [`serial`] thread or for a small buffer, else bands of
+/// about 16 KiB. For kernels that keep scratch buffers across the rows of a band.
+pub(crate) fn for_bands<T, F>(buf: &mut [T], row_len: usize, f: F)
+where
+    T: Send,
+    F: Fn(usize, &mut [T]) + Sync + Send,
+{
     if row_len == 0 {
         return;
     }
     if std::mem::size_of_val(buf) < PAR_THRESHOLD_BYTES || is_serial() {
-        buf.chunks_mut(row_len).enumerate().for_each(|(y, r)| f(y, r));
+        f(0, buf);
     } else {
         // Group rows so each task does a reasonable amount of work.
         let rows_per_task = (16 * 1024 / (row_len * std::mem::size_of::<T>())).max(1);
-        buf.par_chunks_mut(row_len * rows_per_task).enumerate().for_each(|(t, chunk)| {
-            for (i, r) in chunk.chunks_mut(row_len).enumerate() {
-                f(t * rows_per_task + i, r);
-            }
-        });
+        buf.par_chunks_mut(row_len * rows_per_task)
+            .enumerate()
+            .for_each(|(t, chunk)| f(t * rows_per_task, chunk));
     }
 }
