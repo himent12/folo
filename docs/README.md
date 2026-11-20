@@ -67,7 +67,7 @@ different thing: vision benchmarks that grade models on your own images.
 | doc | what it answers |
 |---|---|
 | [CONTRIBUTING](../CONTRIBUTING.md) | How do I build FOLO, and what must a pull request pass? |
-| [AGENTS](../AGENTS.md) | What are the rules every contributor, agent or person, follows, and what is the layout? |
+| [AGENTS](../AGENTS.md) | What rules every contributor follows, how the agentic subagent team is organized, and what is the repo layout? |
 | [CI](CI.md) | What does each CI workflow run, on which runners, and how are the tests kept fast? |
 | [RELEASE](RELEASE.md) | How is a release cut: versioning, the tag to draft release workflow, the install scripts? |
 | [ROADMAP](ROADMAP.md) | What is done, in progress and next? |

@@ -1,43 +1,68 @@
 # AGENTS.md — how to work on FOLO
 
-FOLO is built almost entirely by AI coding agents, and every change lands as a reviewed pull request. These rules
-apply to every contributor, agent or human. Read this file, then [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then
-the README of the crate you are touching. [CONTRIBUTING.md](CONTRIBUTING.md) is the short version for a first pull
-request.
+FOLO is built almost entirely by a team of specialized AI coding agents, and every change lands as a reviewed pull
+request. These rules apply to every contributor, agent or human. Read this file, then
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then the README of the crate or folder you are touching.
+[CONTRIBUTING.md](CONTRIBUTING.md) is the short version for a first pull request.
 
 ## Finding your way
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the map of the repository and the crates, the main flows, and the
-  "Where do I change ...?" table from a change to the files it touches.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the map of the repository and crates, the main execution flows, and
+  the **"Where do I change ...?"** table from a change to the exact files it touches.
 - [crates/README.md](crates/README.md): the crates in dependency order and the dependency rules; each
   `crates/<name>/README.md` maps that crate's modules to what they hold. Most top-level folders have a README too
-  (listed under Layout).
-- [docs/README.md](docs/README.md): every doc, grouped by what you want to do.
+  (listed under [Layout](#layout)).
+- [docs/README.md](docs/README.md): every doc, grouped by what you want to do, with a reading order for newcomers.
 
 ## What FOLO is
-A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
-with two front ends sharing one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
-app on its own UI framework, folo-ui (`apps/desktop/`), for datasets, training runs and live inference. It is meant to
-be pleasant for people and easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
+A from-scratch, real-time vision framework in Rust (a YOLO-style object detector with its own tensors, autograd, CPU
+and WGSL GPU kernels, training, evaluation, benchmarking, and export) with two front ends sharing one design language:
+**FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native app on its own UI framework, `folo-ui`
+(`apps/desktop/`). It is built to be pleasant for people and effortless for agents to drive (`--json` everywhere,
+`folo mcp`, stable exit codes).
+
+## Agentic team & subagents
+
+FOLO is developed agentically in T3 Code using four specialized roles. The main orchestrator coordinates work and
+delegates to dedicated subagents so implementation, play-testing/review, and writing each run on the model best
+suited for the job:
+
+| Role | Model & settings | Harness / provider | What they own |
+|---|---|---|---|
+| **Main orchestrator** | **Claude Opus 5.5** (`effort: high`) or **Claude Fable 5.2** (`effort: high`) | `claudeAgent` (`claude-opus-5-5` / `claude-fable-5-2`) | Top-level planning, breaking work into focused PRs, dispatching subagents, tracking CI/reviews/play-testing, merging approved PRs, and updating `docs/ROADMAP.md`. |
+| **Main code implementer & doer** *(subagent)* | **Claude Opus 5.5** (`effort: high`) | `claudeAgent` (`claude-opus-5-5`) | The primary builder and doer: implements engine, CLI, server, and UI code, writes tests, runs checks, opens PRs, and fixes review and play-test findings. |
+| **App play-tester & reviewer** *(subagent)* | **GPT-6.2 Sol** (`reasoningEffort: high`, **fast** / `serviceTier: priority`) or **GPT-6.2 Astra** (`reasoningEffort: high`, **standard — not fast** / `serviceTier: default`) | `codex` (`gpt-6.2-sol` / `gpt-6.2-astra`) | Play-tests the real app end to end (FOLO Studio, FOLO Desktop, CLI, MCP, edge cases, live states) like a demanding user, and runs independent code/PR reviews against `origin/main`. |
+| **Writer & creative writer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) | Devin CLI in T3 Code (`acpRegistry_devin`, `gemini-4-neon-high`) | Owns documentation clarity, `README.md` storytelling, user guides, release notes, changelogs, and creative/UX copy so the project is clear and pleasant to read. |
+
+Subagent guidelines:
+- Delegate by role rather than having one model do everything: let **Opus 5.5** implement and fix code, **GPT-6.2 Sol
+  (high, fast)** or **GPT-6.2 Astra (high, standard — not fast)** play-test the app and review diffs, and **Gemini 4
+  Neon** (via Devin CLI in T3 Code) write and polish docs and creative copy.
+- Keep worktrees disjoint when running subagents in parallel so two subagents never edit the same checkout or files.
+- Never grade your own PR: code review and app play-testing always run on a fresh play-tester/reviewer subagent.
+- [docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code `delegate_task` target configs, prompts, and
+  PR review loop.
 
 ## Ground rules
 - **Rust stable, edition 2024.** `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo test --workspace` must pass before you open a PR. CI runs the same on Linux and Windows.
 - **Custom where it matters.** The ML stack is ours: tensors, kernels, autograd, layers, optimizers, the detector,
-  losses, assigners, NMS, metrics, augmentation and the GPU kernels. Do **not** pull in ML frameworks (candle, burn, tch,
-  ndarray-based NN crates, ort, ...). Commodity crates are fine for commodity jobs: `image`/`zune-jpeg` (decoding),
-  `wgpu` (GPU access), `rayon` (threads), `serde`/`serde_json`, `axum`/`tokio` (server), `clap` (CLI), `bytemuck`,
-  `thiserror`/`anyhow`. Add a dependency only to the crate that needs it and declare it in `[workspace.dependencies]`.
+  losses, assigners, NMS, metrics, augmentation and the GPU kernels. Do **not** pull in ML frameworks (candle, burn,
+  tch, ndarray-based NN crates, ort, ...). Commodity crates are fine for commodity jobs: `image`/`zune-jpeg`
+  (decoding), `wgpu` (GPU access), `rayon` (threads), `serde`/`serde_json`, `axum`/`tokio` (server), `clap` (CLI),
+  `bytemuck`, `thiserror`/`anyhow`. Add a dependency only to the crate that needs it and declare it in
+  `[workspace.dependencies]`.
 - **Fast is a feature.** No per-element allocations in hot loops, no needless clones of tensor storage, prefer
   contiguous `&[f32]` loops the compiler can vectorise, parallelise with rayon above a size threshold. Benchmarks live
   in `crates/<crate>/benches` (plain `harness = false` binaries are fine) and PRs that touch hot paths report numbers.
-- **Correct first.** Every op has tests; every differentiable op has a finite-difference gradient check; GPU kernels are
-  tested against the CPU reference within a stated tolerance. Tests must be deterministic (seeded RNG) and quick:
+- **Correct first.** Every op has tests; every differentiable op has a finite-difference gradient check; GPU kernels
+  are tested against the CPU reference within a stated tolerance. Tests must be deterministic (seeded RNG) and quick:
   about a second each at most (the smallest model, a few small images, a few steps, no fixed sleeps), and each one
   there because it protects something that matters (docs/CI.md, Keeping CI fast). `#[ignore]` is for a test that
   needs what CI does not have, or a documented manual acceptance run, not for a slow one.
-- **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching file
-  in `docs/` in the same PR. A change that adds, moves or removes a module updates that crate's (or folder's) README
-  in the same PR, and `docs/ARCHITECTURE.md` when the map or the change table no longer matches.
+- **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching
+  file in `docs/` in the same PR. A change that adds, moves or removes a module updates that crate's (or folder's)
+  README in the same PR, and `docs/ARCHITECTURE.md` when the map or the change table no longer matches. For any
+  Markdown change, run `cd site && npm run check` to verify every link, anchor, and image.
 - **No god files.** A source file stays under 1000 lines, every line counted (`bash tools/file-size.sh`, which CI runs
   on every pull request; docs and data are exempt). Before a file gets there, split it by responsibility
   into a folder of modules named for what they hold (`runs.rs` → `runs/mod.rs` + `runs/queue.rs`, a route's parts in
@@ -46,18 +71,18 @@ be pleasant for people and easy for agents to drive (`--json` everywhere, an MCP
 - **No secrets in the repo, ever.** Keys live outside the repo (for example under `~/.folo/`). Never print them.
 
 ## Workflow (every change is a PR)
-1. Work on a branch named `<area>/<short-topic>` (e.g. `core/autograd`, `ui/run-view`), in your own git worktree when
-   several agents share a machine.
+1. Work on a branch named `<area>/<short-topic>` (e.g. `core/autograd`, `ui/run-view`, `docs/readme-polish`), in your
+   own git worktree when several agents share a machine.
 2. Keep PRs focused and reviewable; a big feature can be a stack of PRs.
 3. Commit messages and PR titles: `area: imperative summary` (e.g. `core: add broadcasting binary ops`).
 4. Open the PR against `main` with a description: what, why, how it was tested, benchmark numbers if relevant.
-5. Review: every PR is reviewed for bugs before it merges, and the findings are fixed or answered. Repeat until the
-   reviewer has no blocking findings.
-6. A maintainer merges (squash) once CI is green and review is clean. Do not merge your own PR unless your task says so.
+5. Play-test & review: app-facing changes are play-tested and every PR is reviewed for bugs before it merges; findings
+   are fixed or answered until the reviewer has no blocking findings.
+6. The orchestrator or a maintainer merges (squash) once CI is green and review is clean. Do not merge your own PR
+   unless your task says so.
 7. Rebase on `main` if you fall behind; never force-push someone else's branch.
 
-The maintainers' agents run this loop with a fixed pair of models, one that implements and one that reviews:
-`docs/notes/PROCESS.md` has their exact procedure.
+[docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code subagent procedure.
 
 ## Tests and temp dirs
 - Tests put their scratch folders (`folo-*`) under `FOLO_TEST_TMP` when it is set, else the system temp dir, and

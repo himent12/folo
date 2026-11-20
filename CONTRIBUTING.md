@@ -79,9 +79,11 @@ it focused; a large feature can be a stack of pull requests. Every pull request 
 
 ## Using AI tools
 
-Most of FOLO was written by coding agents, and contributions made with them are welcome on the same terms as any
-other: you have read the change, it passes the checks above, and the pull request says how it was tested. `AGENTS.md`
-is written to be read by an agent; point yours at it.
+Most of FOLO is built by a team of specialized coding agents (orchestration, implementation, app play-testing and
+review, and writing), and contributions made with AI tools are welcome on the same terms as any other: you have read
+the change, it passes the checks above, and the pull request says how it was tested. [AGENTS.md](AGENTS.md) holds
+the rules and subagent role breakdown; point your agent at it (and see [docs/notes/PROCESS.md](docs/notes/PROCESS.md)
+for the maintainers' T3 Code subagent loop).
 
 ## Licence
 
