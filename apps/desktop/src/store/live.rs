@@ -126,6 +126,18 @@ impl RunData {
     }
 }
 
+/// Takes one copy of `l` from a run's history lines the stream has not sent yet: false when there
+/// is none left (`l` is a new line).
+fn take_unsent(unsent: &mut std::collections::HashMap<(String, String), u32>, l: &LogLine) -> bool {
+    match unsent.get_mut(&(l.t.clone(), l.message.clone())) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    }
+}
+
 impl Store {
     /// Install a run's metric history, merging live events that arrived while it loaded.
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
@@ -153,17 +165,20 @@ impl Store {
     pub fn install_logs(&mut self, run_id: &str, lines: ApiResult<Vec<LogLine>>) {
         let mut load: Load<Vec<LogLine>> = lines.into();
         if let Load::Ready(lines) = &mut load {
-            let mut seen: std::collections::HashSet<(String, String)> =
-                lines.iter().map(|l| (l.t.clone(), l.message.clone())).collect();
+            let mut unsent: std::collections::HashMap<(String, String), u32> = Default::default();
+            for l in lines.iter() {
+                *unsent.entry((l.t.clone(), l.message.clone())).or_default() += 1;
+            }
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 if let RunEvent::Log(l) = ev
-                    && seen.insert((l.t.clone(), l.message.clone()))
+                    && !take_unsent(&mut unsent, l)
                 {
                     lines.push(l.clone());
                 }
             }
             // RFC 3339 UTC timestamps sort lexically; stable, so equal times keep arrival order.
             lines.sort_by(|a, b| a.t.cmp(&b.t));
+            self.log_unsent.insert(run_id.to_string(), unsent);
         }
         self.logs.insert(run_id.to_string(), load);
         self.log_rev += 1;
@@ -177,12 +192,14 @@ impl Store {
         self.logs.remove(run_id);
         self.samples.remove(run_id);
         self.pending.remove(run_id);
+        self.log_unsent.remove(run_id);
         self.resumed.insert(run_id.to_string());
     }
 
     /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+        self.log_unsent.clear();
         self.resumed.clear();
         self.lengths.clear();
     }
@@ -283,8 +300,9 @@ impl Store {
                 if let Some(Load::Ready(lines)) = self.logs.get_mut(run_id) {
                     // A line the loaded history already has (it was read after the line was
                     // logged, and the stream sent it after that): once, as `install_logs` merges.
-                    let later = lines.iter().rev().take_while(|x| x.t >= l.t);
-                    if later.into_iter().any(|x| x.t == l.t && x.message == l.message) {
+                    // Counted, not looked for: lines may stream out of time order, and two alike
+                    // are two lines.
+                    if self.log_unsent.get_mut(run_id).is_some_and(|u| take_unsent(u, &l)) {
                         return;
                     }
                     lines.push(l);
@@ -634,6 +652,35 @@ mod tests {
         store.apply(id, RunEvent::Log(line(6, "copying")));
         let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
         assert_eq!(got, ["a", "copying", "epoch 9", "copying"]);
+    }
+
+    /// Review round 2: a line streamed out of time order, then a history line streamed again; and
+    /// two lines alike, both streamed live and both shown.
+    #[test]
+    fn the_stream_repeats_a_history_line_once_and_live_lines_alike_both_show() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_x";
+        let line = |t: i64, m: &str| LogLine {
+            t: crate::api::time::format(1_000 + t),
+            level: LogLevel::Info,
+            message: m.into(),
+        };
+        store.logs.insert(id.into(), Load::Loading);
+        store.install_logs(id, Ok(vec![line(0, "a"), line(11, "b")]));
+        for l in [line(10, "x"), line(11, "b"), line(12, "same"), line(12, "same")] {
+            store.apply(id, RunEvent::Log(l));
+        }
+        let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(got, ["a", "b", "x", "same", "same"]);
+        // Buffered while the history loaded: the same.
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        store.logs.insert(id.into(), Load::Loading);
+        for l in [line(11, "b"), line(12, "same"), line(12, "same")] {
+            store.apply(id, RunEvent::Log(l));
+        }
+        store.install_logs(id, Ok(vec![line(0, "a"), line(11, "b")]));
+        let got: Vec<_> = store.logs[id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(got, ["a", "b", "same", "same"]);
     }
 
     #[test]

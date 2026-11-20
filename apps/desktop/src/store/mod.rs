@@ -99,6 +99,9 @@ pub struct Store {
     pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
+    /// Per run, how many of each loaded history line (time, message) the stream has not sent yet:
+    /// the stream may send a line the history already has, and that copy is dropped (`apply`).
+    log_unsent: HashMap<String, HashMap<(String, String), u32>>,
     /// Runs resumed and still active: every history load is cut back to the last finished epoch.
     resumed: std::collections::HashSet<String>,
     /// Each run's length as its live events last reported it (steps per epoch, epochs; 0 where
@@ -136,6 +139,7 @@ impl Store {
             logs: HashMap::new(),
             log_rev: 0,
             pending: HashMap::new(),
+            log_unsent: HashMap::new(),
             resumed: Default::default(),
             lengths: HashMap::new(),
             images_px: ImageCache::default(),

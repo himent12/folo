@@ -40,6 +40,9 @@ pub(super) struct CloudSim {
     pub(super) total: u64,
     /// Ended early: when, and how.
     pub(super) ended: Option<(f64, Ended)>,
+    /// When the instance was terminated by hand: later than `ended` for a run stopped before (its
+    /// training ended at the stop, its instance at the termination).
+    pub(super) lost_at: Option<f64>,
     /// Why the provider hasn't confirmed the termination (the instance stays `terminating`).
     pub(super) release_error: Option<String>,
     /// Since when (seconds since `t0`) the worker hasn't answered: `unanswered_since` while it trains.
@@ -65,6 +68,7 @@ impl CloudSim {
             anchor: (pre.iter().sum(), 0),
             total,
             ended: None,
+            lost_at: None,
             release_error: None,
             silent_since: None,
         }
@@ -107,6 +111,9 @@ impl CloudSim {
     /// When the instance was released: right away for a run that ended before training or lost its
     /// instance, else after collecting the weights.
     pub(super) fn released_at(&self) -> Option<f64> {
+        if self.lost_at.is_some() {
+            return self.lost_at;
+        }
         match self.ended {
             Some((e, how)) if how == Ended::InstanceLost || e < self.train_at() => Some(e),
             _ => self.trained_at().map(|t| t + COLLECT_S + RELEASE_S).filter(|r| self.elapsed() >= *r),

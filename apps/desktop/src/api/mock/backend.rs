@@ -679,7 +679,6 @@ impl Backend for MockBackend {
 
     fn terminate_instance(&self, id: &str) -> ApiResult<CloudInstance> {
         self.check()?;
-        let now = time::format(self.sim_now());
         let mut runs = self.runs.lock().unwrap();
         let f = runs
             .iter_mut()
@@ -689,17 +688,22 @@ impl Backend for MockBackend {
         if let Some(sim) =
             f.cloud.as_mut().filter(|s| s.instance(&run_id).is_some_and(|i| i.status.is_alive()))
         {
-            let at = sim.elapsed();
+            // One clock sample: the lines said before and the loss are stamped on it.
+            let now = sim.elapsed();
             // The provider confirms at once; a run still using it fails.
             sim.release_error = None;
             if sim.released_at().is_none() {
                 // What the run reached before (its weights being copied) is said first, as the
                 // control plane did; then the loss.
-                super::training::log_cloud_end(f);
+                super::training::log_cloud_end_at(f, now);
                 let sim = f.cloud.as_mut().unwrap();
+                // A run stopped before keeps the step it stopped at; its instance ends now.
+                let at = sim.ended.map_or(now, |(e, _)| e.min(now));
                 sim.ended = Some((at, Ended::InstanceLost));
+                sim.lost_at = Some(now);
+                let t = sim.at(now);
                 f.logs.push(LogLine {
-                    t: now,
+                    t,
                     level: LogLevel::Error,
                     message: format!("cloud: instance {id} was terminated by hand"),
                 });

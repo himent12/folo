@@ -7,7 +7,7 @@ use crate::api::time;
 use crate::api::*;
 use crate::synth::Rng;
 
-use super::cloud::{COLLECT_S, CloudSim, Ended};
+use super::cloud::{COLLECT_S, CloudSim};
 use super::{LIVE_ID, MOCK_NOW, MockBackend, STEP_DT};
 
 /// Shape of a run's simulated learning curves.
@@ -170,18 +170,26 @@ pub(super) fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
 /// instance says only what came before; a run with no instance (a remote FOLO server) has none to
 /// terminate (the executor says so only with an instance id).
 pub(super) fn log_cloud_end(f: &mut RunFixture) {
+    if let Some(now) = f.cloud.as_ref().map(|s| s.elapsed()) {
+        log_cloud_end_at(f, now);
+    }
+}
+
+/// [`log_cloud_end`] at `now` seconds into the instance's life (one clock sample for a caller that
+/// also stamps its own line).
+pub(super) fn log_cloud_end_at(f: &mut RunFixture, now: f64) {
     let Some(sim) = &f.cloud else { return };
     if sim.ended.is_some_and(|(e, _)| e < sim.train_at()) {
         return;
     }
     let Some(done) = sim.trained_at() else { return };
-    let lost = sim.ended.filter(|(_, how)| *how == Ended::InstanceLost).map_or(f64::INFINITY, |(e, _)| e);
+    let lost = sim.lost_at.unwrap_or(f64::INFINITY);
     let mut lines = vec![(done, "cloud: the run ended on the worker; copying its weights")];
     if sim.base.instance_id.is_some() {
         lines.push((done + COLLECT_S, "cloud: terminating the instance"));
     }
     for (at, message) in lines {
-        if sim.elapsed() >= at && at < lost && !f.logs.iter().any(|l| l.message == message) {
+        if now >= at && at < lost && !f.logs.iter().any(|l| l.message == message) {
             f.logs.push(LogLine { t: sim.at(at), level: LogLevel::Info, message: message.into() });
         }
     }

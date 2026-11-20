@@ -645,6 +645,37 @@ mod tests {
         }
     }
 
+    /// Review round 2: terminating the instance of a run stopped while its checkpoint is copied
+    /// keeps the step the run stopped at.
+    #[test]
+    fn terminating_a_stopped_runs_instance_keeps_its_stop() {
+        let m = MockBackend::new(0, true);
+        let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        let ended = || {
+            let runs = m.runs.lock().unwrap();
+            runs.iter().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_ref()).unwrap().ended
+        };
+        let (instance, stop) = {
+            let mut runs = m.runs.lock().unwrap();
+            let s = runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap();
+            s.pre = [0., 0., 0.];
+            s.t0 -= 30.;
+            let stop = s.elapsed();
+            s.ended = Some((stop, Ended::Stopped));
+            // Half a second later, still copying.
+            s.t0 -= 0.5;
+            (s.base.instance_id.clone().unwrap(), stop)
+        };
+        m.terminate_instance(&instance).unwrap();
+        assert_eq!(ended(), Some((stop, Ended::InstanceLost)));
+        // Its instance ended at the termination, not at the stop.
+        let i = m.cloud_instances().unwrap().into_iter().find(|i| i.id == instance).unwrap();
+        assert_eq!(i.status, CloudInstanceStatus::Terminated);
+        let runs = m.runs.lock().unwrap();
+        let s = runs.iter().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_ref()).unwrap();
+        assert_eq!(i.ended, Some(s.at(stop + 0.5)));
+    }
+
     #[test]
     fn cloud_runs_upload_and_train() {
         let m = MockBackend::with_cloud_runs(0, true);

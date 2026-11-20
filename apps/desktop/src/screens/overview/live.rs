@@ -198,10 +198,7 @@ impl FoloApp {
                 kpi(
                     // Named as on the run's dashboard.
                     "mAP50-95 · latest",
-                    text(KPI_VALUE, t.text_primary)
-                        .tnum()
-                        .child(map_now.map_or("–".into(), fmt_score))
-                        .into_any_element(),
+                    text(KPI_VALUE, t.text_primary).tnum().child(latest_score(map_now)).into_any_element(),
                     Some(best_line),
                 ),
             ))
@@ -346,5 +343,22 @@ impl FoloApp {
             ))
             .child(meter("Memory".into(), format!("{used} / {total} {unit}"), mem, t.text_tertiary));
         Some(row.into_any_element())
+    }
+}
+
+/// The latest mAP tile's number: a score as small as a chart shows it (`fmt_score`), `–` before one.
+fn latest_score(v: Option<f32>) -> String {
+    v.map_or("–".into(), fmt_score)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review round 2: a score under 0.0005 read `0.000` in the tile while the chart showed it.
+    #[test]
+    fn the_latest_score_tile_shows_a_small_score() {
+        assert_eq!(super::latest_score(None), "–");
+        assert_eq!(super::latest_score(Some(0.0003)), "0.00030");
+        assert_eq!(super::latest_score(Some(0.000_068)), "0.00007");
+        assert_eq!(super::latest_score(Some(0.4561)), "0.456");
     }
 }
