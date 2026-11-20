@@ -170,10 +170,11 @@ fn demo(_: &str) -> std::sync::Arc<dyn crate::api::Backend> {
     std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true))
 }
 
-/// Review rounds 1 and 2: dataset ids are unique per data dir, so the same id on another server
-/// is another dataset (`circle` there may be `person`). The filters follow the data dir `/system`
-/// names: kept through a recovery and a Connect that reach the same one, dropped when another
-/// answers (also one that took the address with no switch here) or a switched-to one names none.
+/// Review rounds 1 to 3: dataset ids are unique per data dir, so the same id on another server
+/// is another dataset (`circle` there may be `person`). The filters follow the store `/system`
+/// names (host and data dir): kept through a recovery and a Connect that reach the same one,
+/// dropped when another answers (the same path on another host, one that took the address with no
+/// switch here) or a switched-to one names none.
 #[test]
 fn the_dataset_filters_follow_the_data_dir_the_server_names() {
     use super::{Connector, ServerMode};
@@ -192,6 +193,12 @@ fn the_dataset_filters_follow_the_data_dir_the_server_names() {
         drive(app, window, move |this, _, _| (this.ds_class, this.ds_empty_of) = set)
     };
     let kept = (set.0.clone(), set.1.clone(), Some(4));
+    // Connected at the local server's address; it names its store.
+    drive(&mut app, window, |this, _, cx| {
+        this.connected_url = Some("http://127.0.0.1:4000".into());
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
     pick(&mut app);
     // The local server stops answering; the data dir's server answers at another address.
     drive(&mut app, window, |this, _, cx| {
@@ -216,6 +223,15 @@ fn the_dataset_filters_follow_the_data_dir_the_server_names() {
     });
     drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
     assert_eq!(filters(&mut app), kept, "Connect on the same server");
+    // The same path on another machine: another store.
+    drive(&mut app, window, |this, _, cx| {
+        this.connector = Connector { probe: |_| true, start: found_local, backend: data };
+        this.server_url.update(cx, |i, cx| i.set_text("http://192.168.9.9:7878", cx));
+        this.switch_source(ServerMode::Local, cx);
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    assert_eq!(filters(&mut app), (None, None, None), "the same path on another host");
+    pick(&mut app);
     // Another data dir's server takes the address, with no switch here (the next refresh).
     drive(&mut app, window, |this, _, cx| {
         this.store.api = other("");
@@ -328,4 +344,87 @@ fn a_sample_the_split_hides_clears_the_split_but_not_another_datasets_class() {
         assert_eq!(this.ds_split, None, "the split hid it: cleared");
         assert_eq!(this.ds_class, Some((HARD.to_string(), 4)), "shapes-hard's class stays");
     });
+}
+
+/// Review round 3: a filter picked on a switched-to server before its `/system` answer applies at
+/// once and stays when that answer names another store than the old filters'.
+#[test]
+fn a_filter_picked_before_a_switched_servers_answer_applies_and_stays() {
+    let (mut app, window) = super::tests::open_with(std::sync::Arc::new(
+        crate::api::mock::MockBackend::new(4200, true).with_data_dir("D:/data"),
+    ));
+    go(&mut app, window, Route::Dataset(HARD.into()));
+    click_option(&mut app, window, "ds-class", 5);
+    drive(&mut app, window, |this, _, cx| {
+        this.set_backend(other(""), super::ServerMode::Local, cx);
+        this.connected_url = Some("http://127.0.0.1:4100".into());
+        assert_eq!(this.ds_class, None, "the old server's filter is put aside");
+        this.ds_class = Some((HARD.into(), 4));
+        this.ds_empty_of = None;
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    go(&mut app, window, Route::Dataset(HARD.into()));
+    assert_eq!(drive(&mut app, window, |this, _, _| this.class_filter(HARD)), Some(4));
+}
+
+/// Review round 3: `/system` answers can land out of order at one address (a proxy pointed at
+/// another store in between): an older one does not take the filters back to its store.
+#[test]
+fn an_older_system_answer_landing_late_leaves_the_filters_alone() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        this.connected_url = Some("http://127.0.0.1:4100".into());
+        let (a, b) = (this.system_asked(), this.system_asked());
+        this.check_filters(b, Some("D:/other"));
+        this.ds_class = Some((HARD.into(), 4));
+        this.check_filters(a, Some("D:/data"));
+        assert_eq!(this.ds_class, Some((HARD.into(), 4)));
+        assert_eq!(this.ds_filters_store, Some(("loopback".into(), "D:/other".into())));
+    });
+}
+
+/// Review round 3: the store a server names is its host (every loopback address one) and its data
+/// dir, case-blind only between Windows paths.
+#[test]
+fn a_store_is_its_host_and_data_dir() {
+    use super::connection::{same_store_dir, url_host};
+    assert!(!same_store_dir("/srv/Data", "/srv/data"));
+    assert!(same_store_dir("/srv/data/", "/srv/data"));
+    assert!(same_store_dir(r"D:\Data\", "d:/data"));
+    assert_eq!(url_host("http://LOCALHOST:4100"), url_host("http://127.0.0.1:7000"));
+    assert_ne!(url_host("http://10.0.0.2:7878"), url_host("http://10.0.0.3:7878"));
+}
+
+/// Review round 3: the empty-images filter put aside under the open inspector (a server switch)
+/// moves every place, as the class filter does: it stays on the image it showed.
+#[test]
+fn the_inspector_keeps_its_image_when_the_empty_images_filter_goes() {
+    let (mut app, window) = open();
+    go(&mut app, window, Route::Dataset(HARD.into()));
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_empty_of = Some(HARD.into());
+        cx.notify();
+    });
+    settle(&mut app, window);
+    let (image, at) = drive(&mut app, window, |this, _, _| {
+        let all = this.store.images.get(HARD).and_then(|l| l.ready()).unwrap();
+        let f = this.filtered_indices(HARD);
+        let (at, &i) = f.iter().enumerate().find(|(k, i)| **i != *k).expect("an empty image after others");
+        (all[i].id.clone(), at)
+    });
+    drive(&mut app, window, move |this, w, cx| this.open_inspector(HARD.into(), at, w, cx));
+    settle(&mut app, window);
+    let on = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, _| {
+            let i = this.inspector.as_ref().expect("the inspector is open");
+            this.filtered_image(HARD, i.index).map(|m| m.id.clone())
+        })
+    };
+    assert_eq!(on(&mut app).as_deref(), Some(image.as_str()));
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_empty_of = None;
+        cx.notify();
+    });
+    settle(&mut app, window);
+    assert_eq!(on(&mut app).as_deref(), Some(image.as_str()), "still on its image");
 }

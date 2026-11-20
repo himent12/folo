@@ -50,6 +50,34 @@ pub(super) fn same_dir(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+/// The host of a server address, lowercase; every loopback address is one host (this machine).
+pub(super) fn url_host(url: &str) -> String {
+    if crate::api::http::is_loopback(url) {
+        return "loopback".into();
+    }
+    let rest = url.trim().split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Whether two data dirs a server named are one store's for the dataset filters: `/` and `\`
+/// alike, a trailing separator ignored, and case only between two Windows paths (a drive letter
+/// or a `\`), whatever this machine runs: `/srv/Data` and `/srv/data` are two folders.
+pub(super) fn same_store_dir(a: &str, b: &str) -> bool {
+    let windows = |p: &str| p.contains('\\') || p.as_bytes().get(1) == Some(&b':');
+    let fold = windows(a) && windows(b);
+    let norm = |p: &str| {
+        let p = p.replace('\\', "/").trim_end_matches('/').to_string();
+        if fold { p.to_lowercase() } else { p }
+    };
+    norm(a) == norm(b)
+}
+
 /// Who asked for a connection ([`FoloApp::autoconnect`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
@@ -115,8 +143,10 @@ impl FoloApp {
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
         // A dataset id names another dataset on another server (ids are unique per data dir): the
-        // filters wait for the new server to say which data dir it serves (`check_filters`).
-        self.ds_filters_unsure = true;
+        // filters are put aside until the new server names its store (`check_filters`). Ones picked
+        // on a server switched away from before it named its store go.
+        let picked = (self.ds_class.take(), self.ds_empty_of.take());
+        self.ds_filters_carried.get_or_insert(picked);
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
@@ -433,23 +463,39 @@ impl FoloApp {
         }
     }
 
-    /// A `/system` answer names the data dir the server serves (`dir`): the dataset filters stay
-    /// while it is the one they were set under (a recovery, Connect on the same server), and go
-    /// when it is another, also one that took the same address without a switch here, or when a
-    /// switched-to server names none (a dataset id there may be any dataset).
-    pub(super) fn check_filters(&mut self, dir: Option<&str>) {
-        let keep = match (self.ds_filters_dir.as_deref(), dir) {
-            (Some(was), Some(now)) => same_dir(was, now),
-            // Not known before: the same server, unless it was switched since.
-            (None, _) => !self.ds_filters_unsure,
+    /// A `/system` request goes out: its number, for [`Self::check_filters`].
+    pub(super) fn system_asked(&mut self) -> u64 {
+        self.ds_filters_seq.0 += 1;
+        self.ds_filters_seq.0
+    }
+
+    /// The answer to `/system` request `seq` names the data dir the server serves (`dir`), on the
+    /// host it was reached at: its store. Filters put aside at a switch come back when it is the
+    /// store they were set under (a recovery, Connect on the same server) and nothing was picked
+    /// since; else they go. With no switch, another store at the same address drops the filters.
+    /// An answer older than one already applied is not the store the server serves now.
+    pub(super) fn check_filters(&mut self, seq: u64, dir: Option<&str>) {
+        if seq <= self.ds_filters_seq.1 {
+            return;
+        }
+        self.ds_filters_seq.1 = seq;
+        let host = self.connected_url.as_deref().map(url_host);
+        let now = dir.map(|d| (host.unwrap_or_default(), d.to_string()));
+        let same = match (&self.ds_filters_store, &now) {
+            (Some((h0, d0)), Some((h1, d1))) => h0 == h1 && same_store_dir(d0, d1),
+            // Not named before: the server the filters were picked on, unless switched since.
+            (None, _) => self.ds_filters_carried.is_none(),
             (Some(_), None) => false,
         };
-        if !keep {
+        if let Some((class, empty)) = self.ds_filters_carried.take() {
+            if same && self.ds_class.is_none() && self.ds_empty_of.is_none() {
+                (self.ds_class, self.ds_empty_of) = (class, empty);
+            }
+        } else if !same {
             self.ds_class = None;
             self.ds_empty_of = None;
         }
-        self.ds_filters_dir = dir.map(str::to_string);
-        self.ds_filters_unsure = false;
+        self.ds_filters_store = now;
     }
 
     /// The local server answers again: the next loss starts over without waiting.

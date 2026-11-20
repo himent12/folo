@@ -106,10 +106,11 @@ impl FoloApp {
         }
         if self.store.system.needs_fetch() {
             self.store.system = Load::Loading;
+            let seq = self.system_asked();
             self.fetch(
                 cx,
                 |api| api.system(),
-                |this, r, cx| {
+                move |this, r, cx| {
                     if let Ok(s) = &r
                         && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
                     {
@@ -131,7 +132,7 @@ impl FoloApp {
                         // It answers: a later loss starts over, and its data dir says whether it is ours.
                         this.recovered();
                         this.note_data_dir(s.data_dir.as_deref());
-                        this.check_filters(s.data_dir.as_deref());
+                        this.check_filters(seq, s.data_dir.as_deref());
                         this.store.last_gpu_count = Some(s.system.gpus.len());
                     }
                     let r = r.map(|s| {

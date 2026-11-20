@@ -24,8 +24,8 @@ impl FoloApp {
     fn land_inspector(&mut self) {
         if let Some(i) = self.inspector.as_ref()
             && i.want.is_none()
-            && let Some((image, class)) = &i.shown
-            && *class != self.class_filter(&i.dataset)
+            && let Some((image, class, empty)) = &i.shown
+            && (*class, *empty) != (self.class_filter(&i.dataset), self.empty_only(&i.dataset))
         {
             let image = image.clone();
             let i = self.inspector.as_mut().unwrap();
@@ -86,9 +86,9 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
-        let class = self.class_filter(&ds_id);
+        let (class, empty) = (self.class_filter(&ds_id), self.empty_only(&ds_id));
         if let Some(i) = self.inspector.as_mut() {
-            i.shown = Some((meta.id.clone(), class));
+            i.shown = Some((meta.id.clone(), class, empty));
         }
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.

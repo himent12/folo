@@ -254,6 +254,10 @@ pub struct Toast {
     pub action: Option<(SharedString, Action)>,
 }
 
+/// The dataset filters: the class filter and the dataset it was set on, and the dataset whose
+/// empty images only are shown.
+pub type DsFilters = (Option<(String, u32)>, Option<String>);
+
 /// The image inspector over a dataset grid.
 pub struct Inspector {
     pub dataset: String,
@@ -265,9 +269,9 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
-    /// The image last shown and the class filter it was shown under: when the filter changes
-    /// underneath (the dataset's class list read again), the inspector lands on it again.
-    pub shown: Option<(String, Option<u32>)>,
+    /// The image last shown and the filters it was shown under (class, empty images only): when
+    /// they change underneath (the class list read again, a server switch), it lands on it again.
+    pub shown: Option<(String, Option<u32>, bool)>,
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
@@ -358,11 +362,16 @@ pub struct FoloApp {
     /// Show only images without labels (from the Empty images tile), on the dataset it was set on
     /// (read it through `empty_only`): it and the class filter never both apply to one dataset.
     pub ds_empty_of: Option<String>,
-    /// The data dir the connected server last named (`/system`): the dataset filters belong to its
-    /// datasets (ids are unique per data dir), so another one drops them (`check_filters`).
-    pub ds_filters_dir: Option<String>,
-    /// The server was switched and has not yet said which data dir it serves: the filters wait.
-    pub ds_filters_unsure: bool,
+    /// The store the connected server last named (`/system`: its host and data dir): the dataset
+    /// filters belong to its datasets (ids are unique per data dir), so another drops them
+    /// (`check_filters`).
+    pub ds_filters_store: Option<(String, String)>,
+    /// The filters set before a server switch, off until the new server names its store: back if
+    /// it is the same one and nothing was picked since, else dropped.
+    pub ds_filters_carried: Option<DsFilters>,
+    /// `/system` requests sent and the latest one whose answer was applied to the filters: an
+    /// older answer landing late is not the store the server serves now.
+    pub ds_filters_seq: (u64, u64),
     pub ds_boxes: bool,
     /// Grid tiles crop to fill the cell instead of showing the whole image.
     pub ds_fill: bool,
@@ -688,8 +697,9 @@ impl FoloApp {
             ds_split: None,
             ds_class: None,
             ds_empty_of: None,
-            ds_filters_dir: None,
-            ds_filters_unsure: false,
+            ds_filters_store: None,
+            ds_filters_carried: None,
+            ds_filters_seq: (0, 0),
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,
