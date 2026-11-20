@@ -1351,13 +1351,13 @@ as YOLO26n on three of the four datasets and lost on one:
 
 **Re-measured with today's `main` and `folo-n-coco-v5` (2026-11-20, wave 6; not the table's protocol: this PC's
 RTX 4080 SUPER instead of an A40, v5 instead of v2 weights; [notes/hill/r6-finetune.md](notes/hill/r6-finetune.md)).**
-folo-n fine-tuned AP, three seeds: BCCD 0.625 (0.617–0.636), brain-tumor 0.422 (0.407–0.430), signature 0.987
-(0.985–0.988), medical pills 0.805 (0.803–0.807). BCCD is now level with YOLO26n's 0.626 (`auto` rules 4 and 5 and
-the newer weights). Brain-tumor is 0.030 lower than the table, and that is the weights: the same build from
-`folo-n-coco-v2` scores 0.452 (0.438–0.459), every seed above every v5 seed, so the better COCO model is the worse
-fine-tuning start there. No default changed: an EMA that averages over the last quarter of a short run gives a
-better final model (+0.009 AP over the four sets, scored at the last epoch) but not a better best epoch as this
-protocol picks it (−0.005), and a lower backbone LR was level.
+folo-n fine-tuned AP, three seeds: BCCD 0.624 (0.617–0.636), brain-tumor 0.422 (0.407–0.430), signature 0.987
+(0.985–0.988), medical pills 0.805 (0.803–0.807). BCCD is now about level with YOLO26n's 0.626 (`auto` rules 4 and
+5 took it there in hill-climb 2). Brain-tumor is 0.030 lower than the table, and that is the weights: the same build
+from `folo-n-coco-v2` scores 0.452 (0.438–0.459), the lowest v2 seed above the highest v5 seed, so the better COCO
+model is the worse fine-tuning start there. No default changed: an EMA scaled to the run's length (nominal window a
+quarter of its optimizer steps) gives a better last-epoch model (+0.009 AP over the four sets) but a worse best
+checkpoint as this protocol picks it, on the split it then scores (−0.005), and a lower backbone LR was level.
 
 ## FOLO on the GPU
 
