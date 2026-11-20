@@ -10,11 +10,12 @@
 //! - Handlers: `info.rs` (`folo_info`), `datasets.rs` (the dataset tools), `models.rs` (`list_models`, `val`,
 //!   `predict`, `predict_batch`, `export`), `runs.rs` (`train`, `run_status`, `list_runs`, `stop_run`,
 //!   `reorder_run`, `compare_runs`), `cloud.rs` (the `cloud_*` tools), `label.rs` (the labeling tools, on
-//!   [`crate::label::Labels`]).
+//!   [`crate::label::Labels`]), `bench.rs` (the vision-benchmark tools, on [`crate::bench::Benchmarks`]).
 //! - `tests.rs`: unit tests, including the tool count the docs state; `label_tests.rs`: the labeling tools in
-//!   process and through a `folo serve`, with a scripted agent.
+//!   process and through a `folo serve`, with a scripted agent; `bench_tests.rs`: the benchmark tools likewise.
 
 mod arguments;
+mod bench;
 mod cloud;
 mod datasets;
 mod dispatch;
@@ -298,6 +299,64 @@ pub const TOOLS: &[ToolDef] = &[
         input: terse_input::<ExportLabelDatasetArgs>,
         output: terse_output::<LabelDatasetResult>,
     },
+    ToolDef {
+        name: "bench_catalog",
+        description: "The benchmark conditions (id, what each simulates), the default plan and the score's axes.",
+        mutating: false,
+        input: terse_input::<NoArgs>,
+        output: terse_output::<BenchCatalogResult>,
+    },
+    ToolDef {
+        name: "list_benchmarks",
+        description: "Lists vision benchmarks with their best entry. Paged.",
+        mutating: false,
+        input: terse_input::<PageArgs>,
+        output: terse_output::<Page<BenchSummary>>,
+    },
+    ToolDef {
+        name: "get_benchmark",
+        description: "A benchmark: source, classes, plan and its leaderboard (best first).",
+        mutating: false,
+        input: terse_input::<BenchmarkIdArgs>,
+        output: terse_output::<BenchDetail>,
+    },
+    ToolDef {
+        name: "create_benchmark",
+        description: "Freezes a benchmark from a dataset split or a labeling job, with a plan of conditions.",
+        mutating: true,
+        input: terse_input::<CreateBenchmarkArgs>,
+        output: terse_output::<BenchSummary>,
+    },
+    ToolDef {
+        name: "delete_benchmark",
+        description: "Deletes a benchmark and its entries.",
+        mutating: true,
+        input: terse_input::<BenchmarkIdArgs>,
+        output: terse_output::<BenchDeleted>,
+    },
+    ToolDef {
+        name: "start_bench_entry",
+        description: "Enters a model (runs in the background: follow it with bench_entry) or a file of \
+                      predictions made elsewhere (scored at once).",
+        mutating: true,
+        input: terse_input::<StartBenchEntryArgs>,
+        output: terse_output::<BenchEntryBrief>,
+    },
+    ToolDef {
+        name: "bench_entry",
+        description: "An entry's progress, or once done its score: five axes, mAP with a 95% interval, per \
+                      condition [severity, mAP50-95, retention]. wait: seconds to wait for the end.",
+        mutating: false,
+        input: terse_input::<BenchEntryArgs>,
+        output: terse_output::<BenchEntryState>,
+    },
+    ToolDef {
+        name: "stop_bench_entry",
+        description: "Stops a running entry.",
+        mutating: true,
+        input: terse_input::<BenchEntryIdArgs>,
+        output: terse_output::<BenchEntryBrief>,
+    },
 ];
 
 impl ToolDef {
@@ -306,7 +365,7 @@ impl ToolDef {
         let annotations = ToolAnnotations::new()
             .read_only(!self.mutating)
             .destructive(false)
-            .idempotent(!self.mutating || self.name == "stop_run")
+            .idempotent(!self.mutating || matches!(self.name, "stop_run" | "stop_bench_entry"))
             .open_world(false);
         Tool::new(self.name, self.description, (self.input)())
             .with_raw_output_schema((self.output)())
@@ -342,6 +401,8 @@ pub fn describe() -> Value {
     )
 }
 
+#[cfg(test)]
+mod bench_tests;
 #[cfg(test)]
 mod label_tests;
 #[cfg(test)]

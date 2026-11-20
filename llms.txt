@@ -8,13 +8,16 @@
 > Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
 
 Fastest path for an agent:
-- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 32 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 40 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
   run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
   cloud_connections, cloud_offers, cloud_instances, cloud_terminate, and for labeling with a Claude Code or Codex
   agent list_label_jobs, create_label_job, start_labeling, stop_labeling, label_status, list_label_images,
   view_label_image (the image with its boxes drawn and numbered, boxes in pixels of that view),
-  set_label_boxes, review_label_images and export_label_dataset.
+  set_label_boxes, review_label_images and export_label_dataset, and for vision benchmarks bench_catalog,
+  list_benchmarks, get_benchmark (with the leaderboard), create_benchmark, delete_benchmark, start_bench_entry (a
+  model, or a file of predictions made elsewhere), bench_entry (progress, or the five-axis score; wait follows it)
+  and stop_bench_entry.
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented or
   not supported on this machine.
@@ -56,7 +59,8 @@ Fastest path for an agent:
   coding agent or externally made predictions, scored 0 to 100 on five axes (accuracy, robustness, self-labeling,
   calibration, localization), each defined exactly; a self-improvement loop has a model label a pool, trains a
   student on those labels alone and grades it. HTTP API under `/api/bench` (feature `vision_bench`); the engine is
-  `crates/folo-bench`; `folo bench` drives them from the command line (docs/CLI.md, Vision benchmarks). Not the
+  `crates/folo-bench`; `folo bench` drives them from the command line (docs/CLI.md, Vision benchmarks), the MCP benchmark tools
+  from an agent (docs/MCP.md, Benchmarks). Not the
   speed benchmark (docs/BENCHMARKS.md, `cargo bench`)
 - [Cloud compute](docs/CLOUD.md): training runs on a rented GPU (RunPod) or on another FOLO server
   (`TrainConfig.compute`, `folo cloud`, MCP `cloud_*`). It has the lifecycle of a cloud run, how instances are

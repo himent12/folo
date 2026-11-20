@@ -1,7 +1,7 @@
 # folo-mcp
 
 `folo mcp`: a Model Context Protocol server over stdio, so agents can label images, build datasets, train,
-evaluate, predict and export through FOLO. The protocol layer is the `rmcp` SDK; this crate adds the FOLO tools, `folo://` resources and
+evaluate, predict, export and benchmark models through FOLO. The protocol layer is the `rmcp` SDK; this crate adds the FOLO tools, `folo://` resources and
 prompts on top of folo-server's `Store` trait. It depends on folo-api (with its `schema` feature), folo-server,
 folo-data and folo-client. folo-cli is the only crate that depends on it: `crates/folo-cli/src/mcp.rs` builds the
 server from the `folo mcp` flags, `folo describe` includes the tool schemas, `folo label`
@@ -18,7 +18,7 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 | `src/tools/` | The tools; see below |
 | `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views); `src/types/bench.rs`: the compact benchmark results (catalog, summaries, a benchmark with its leaderboard, an entry's state and score) |
 | `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
-| `src/bench/` | Vision benchmarks for `folo bench`: `Benchmarks` (`mod.rs`, a store's `Benches` in this process, or `/api/bench` of a `folo serve` that lists `vision_bench`), the operations (`ops.rs`: the compact results, starting an entry of a model or of a file of predictions sent in parts and removed again when refused or interrupted, following an entry; errors without hints; its tests are `ops_tests.rs`) and the hints in each front end's words (`hints.rs`) |
+| `src/bench/` | Vision benchmarks for the benchmark tools and `folo bench`: `Benchmarks` (`mod.rs`, a store's `Benches` in this process, or `/api/bench` of a `folo serve` that lists `vision_bench`), the operations (`ops.rs`: the compact results, starting an entry of a model or of a file of predictions sent in parts and removed again when refused or interrupted, following an entry; errors without hints; its tests are `ops_tests.rs`) and the hints in each front end's words (`hints.rs`) |
 | `src/resources.rs` | `folo://` URIs (`FoloUri`), the resource listing and templates, JSON snapshots |
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
 | `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |
@@ -44,8 +44,10 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
 | `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |
+| `bench.rs` | The eight benchmark tools on `crate::bench::Benchmarks`: argument checks, the path of a predictions file, `--confine` of a benchmark's source, `bench_entry`'s `wait`, MCP hints and one-line summaries |
 | `tests.rs` | Unit tests, including the tool count the docs state |
 | `label_tests.rs` | The labeling tools with a scripted agent: in process, through a loopback `folo serve` (also an older one without the image filters and revisions), revisions against a gated run, `--confine` |
+| `bench_tests.rs` | The benchmark tools in process and through a loopback `folo serve` (a benchmark, a file of predictions scored, the refusals), and the mock without benchmarks |
 
 ### How the flags are applied
 
@@ -87,13 +89,13 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 
 ```sh
 cargo test -p folo-mcp                  # unit tests: schemas, arguments, paging, URIs, paths, an unreachable --server,
-                                        # the labeling tools (scripted agent, loopback folo serve)
+                                        # the labeling tools (scripted agent, loopback folo serve), the benchmark tools
 cargo test -p folo-cli --test mcp       # end to end: spawns `folo mcp` and speaks raw JSON-RPC
 ```
 
 - The end-to-end tests live in `crates/folo-cli/tests/mcp/` because they run the `folo` binary: `harness.rs`
   (JSON-RPC client, schema checks), `protocol.rs` (each supported revision, size limits), `real_store.rs` (the
-  real store on the CPU), `proxy.rs` (against `folo serve --mock`, with a token), `confine.rs` (`--read-only`
+  real store on the CPU), `bench.rs` (a published model's benchmark entry, followed to its score), `proxy.rs` (against `folo serve --mock`, with a token), `confine.rs` (`--read-only`
   and `--confine`). docs/MCP.md, Tests, lists what they cover.
 - Nothing needs a GPU; `real_store.rs` runs with `--device cpu`. No test is `#[ignore]`d. No benchmarks.
 

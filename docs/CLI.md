@@ -387,7 +387,7 @@ folo label export lb_3f9a --json
 ## Vision benchmarks
 
 `folo bench` makes vision benchmarks ([BENCH.md](BENCH.md)), runs contestants on them and reads their scores without
-Studio. It is the command-line form of the MCP benchmark operations (`folo_mcp::bench`) and runs the same code, so
+Studio. It runs the same operations as the MCP benchmark tools (`folo_mcp::bench`; docs/MCP.md, Benchmarks), so
 `--json` prints the same records. Every command takes `--data-dir` (as `folo serve`: `$FOLO_DATA_DIR`, else
 `$FOLO_HOME` or `~/.folo`), `--server URL` (a `folo serve`; `--token` or `FOLO_TOKEN` for one started with
 `--token`) and `--json`.

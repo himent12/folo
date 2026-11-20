@@ -19,7 +19,7 @@ a native Desktop app, and first-class agent tooling.
   vision benchmarks, and export to `.folo` or ONNX.
 - **Built for agents.** Every command accepts `--json` with stable exit codes and structured error hints,
   `folo describe --json` exposes the entire CLI and MCP schema surface, and `folo mcp` gives Claude Code, Codex,
-  Devin, or any MCP client 32 tools.
+  Devin, or any MCP client 40 tools.
 - **Runs in the browser.** The same Rust detector compiles to WebAssembly and runs directly in the page on WebGPU or
   wasm CPU (about 14 ms for `folo-n` at 640×640 in Chrome).
 
@@ -254,9 +254,10 @@ Desktop lives in its own cargo workspace (the app and `folo-ui`), so engine buil
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28
-and 2025-11-25). It exposes 32 tools covering the full vision lifecycle: build, register, and check datasets; label
+and 2025-11-25). It exposes 40 tools covering the full vision lifecycle: build, register, and check datasets; label
 images with a coding agent and review boxes; train locally or on a cloud GPU; follow, stop, reorder, and resume runs;
-evaluate, predict, export, compare runs; and manage cloud connections and instances. It also serves `folo://`
+evaluate, predict, export, compare runs; stress-test models on vision benchmarks; and manage cloud connections and
+instances. It also serves `folo://`
 resources (dataset images, live run status and metrics, validation sample grids, and docs) plus three prompts, running
 against the real engine in `--data-dir` (default `$FOLO_HOME` or `~/.folo`).
 

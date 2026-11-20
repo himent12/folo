@@ -49,6 +49,8 @@ pub struct Inner {
     pub(crate) proxy: Option<Arc<HttpStore>>,
     /// The labeling jobs: the store's, or the proxied server's.
     pub(crate) labels: crate::label::Labels,
+    /// The vision benchmarks: the store's, or the proxied server's.
+    pub(crate) benchmarks: crate::bench::Benchmarks,
     pub(crate) mock: bool,
     pub(crate) opts: Options,
     pub(crate) paths: PathPolicy,
@@ -261,11 +263,16 @@ impl FoloMcp {
             Some(http) => crate::label::Labels::Http(http.clone()),
             None => crate::label::Labels::Store(store.clone()),
         };
+        let benchmarks = match &proxy {
+            Some(http) => crate::bench::Benchmarks::Http(http.clone()),
+            None => crate::bench::Benchmarks::Store(store.clone()),
+        };
         FoloMcp {
             inner: Arc::new(Inner {
                 store,
                 proxy,
                 labels,
+                benchmarks,
                 mock,
                 opts,
                 confinement: Confinement::new(paths.clone()),
