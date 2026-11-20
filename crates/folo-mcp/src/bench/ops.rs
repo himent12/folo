@@ -3,12 +3,13 @@
 //! one).
 
 use std::io::BufReader;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use folo_api::{
     Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchEntry, BenchPlan, BenchPrediction,
-    BenchPredictions, BenchResult, CreateBench, StartBenchEntry,
+    BenchResult, CreateBench, StartBenchEntry,
 };
 use http::StatusCode;
 use serde_json::Value;
@@ -21,6 +22,15 @@ use crate::types::bench::*;
 pub const MAX_PART_BOXES: usize = 200_000;
 /// Most records in one part.
 const MAX_PART_RECORDS: usize = 20_000;
+
+/// How large a part of a file of predictions may be.
+#[derive(Clone, Copy, Debug)]
+struct PartLimits {
+    records: usize,
+    boxes: usize,
+}
+
+const PARTS: PartLimits = PartLimits { records: MAX_PART_RECORDS, boxes: MAX_PART_BOXES };
 /// Class names a [`BenchDetail`] lists.
 const DETAIL_CLASSES: usize = 100;
 
@@ -156,8 +166,20 @@ impl Benchmarks {
     /// and finished (scored). A file that does not parse, or a part the server refuses, stops and deletes the
     /// entry, so none is left half-filled; the error says so.
     fn submit(&self, id: &str, name: String, scored: bool, path: &Path) -> Result<BenchEntry, Error> {
-        let mut records = read_predictions(path)?;
-        let first = next_part(&mut records)?;
+        self.submit_in(id, name, scored, path, PARTS)
+    }
+
+    /// [`Benchmarks::submit`] in parts of at most `limits`.
+    fn submit_in(
+        &self,
+        id: &str,
+        name: String,
+        scored: bool,
+        path: &Path,
+        limits: PartLimits,
+    ) -> Result<BenchEntry, Error> {
+        let mut records = read_predictions(path)?.peekable();
+        let first = next_part(&mut records, limits)?;
         if first.is_empty() {
             return Err(invalid_arguments(format!("{} holds no predictions", folo_api::json::path(path))));
         }
@@ -166,7 +188,7 @@ impl Benchmarks {
         let entry = self.start_entry(id, req)?;
         let sent = (|| {
             loop {
-                let part = next_part(&mut records)?;
+                let part = next_part(&mut records, limits)?;
                 if part.is_empty() {
                     return self.finish(id, &entry.id);
                 }
@@ -176,9 +198,14 @@ impl Benchmarks {
         sent.map_err(|e| self.undo(id, &entry.id, e))
     }
 
-    /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went.
+    /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went. An entry
+    /// that is no longer open (stopped from elsewhere, which may be why `e` happened) is deleted as it is.
     fn undo(&self, id: &str, entry_id: &str, e: Error) -> Error {
-        let what = match self.stop_entry(id, entry_id).and_then(|_| self.delete_entry(id, entry_id)) {
+        let stopped = match self.stop_entry(id, entry_id) {
+            Err(s) if s.body.code == "bench_entry_not_active" => Ok(()),
+            other => other.map(|_| ()),
+        };
+        let what = match stopped.and_then(|_| self.delete_entry(id, entry_id)) {
             Ok(()) => format!("entry {entry_id} was stopped and deleted"),
             Err(u) => {
                 format!("entry {entry_id} could not be removed ({}): delete it by hand", u.body.message)
@@ -192,10 +219,10 @@ impl Benchmarks {
     }
 }
 
-/// The records of a file of predictions, in order: JSON Lines of `BenchPrediction` records (what
-/// `examples/bench_external.py` sends, `{"image", "condition"?, "severity"?, "boxes": [...]}`), or JSON documents
-/// that hold them (an array of records, or a `{"predictions": [...]}` body of the HTTP API), one after the other.
-/// The file is read as the records are taken, so a large file is never held whole.
+/// The records of a file of predictions, in order: JSON Lines of `BenchPrediction` records (`{"image",
+/// "condition"?, "severity"?, "boxes": [{"class", "score", "x1", "y1", "x2", "y2"}]}`, the records
+/// `examples/bench_external.py` sends). The file is read as the records are taken, one at a time, so a large file
+/// is never held whole.
 pub fn read_predictions(
     path: &Path,
 ) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + use<>, Error> {
@@ -207,52 +234,37 @@ pub fn read_predictions(
         _ => Error::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", format!("reading {shown}: {e}")),
     })?;
     let values = serde_json::Deserializer::from_reader(BufReader::new(file)).into_iter::<Value>();
-    let mut n = 0usize;
     let bad = move |what: String| invalid_arguments(format!("{shown}: {what}"));
-    Ok(values.flat_map(move |v| -> Vec<Result<BenchPrediction, Error>> {
-        let v = match v {
-            Ok(v) => v,
-            Err(e) => {
-                return vec![Err(bad(format!("not JSON at line {}, column {}: {e}", e.line(), e.column())))];
-            }
-        };
-        let records = match v {
-            Value::Array(a) => a,
-            Value::Object(o) if o.contains_key("predictions") => {
-                match serde_json::from_value::<BenchPredictions>(Value::Object(o)) {
-                    Ok(p) => {
-                        return p
-                            .predictions
-                            .into_iter()
-                            .map(|r| {
-                                n += 1;
-                                Ok(r)
-                            })
-                            .collect();
-                    }
-                    Err(e) => return vec![Err(bad(format!("a `predictions` document: {e}")))],
-                }
-            }
-            other => vec![other],
-        };
-        records
-            .into_iter()
-            .map(|r| {
-                n += 1;
-                serde_json::from_value::<BenchPrediction>(r).map_err(|e| bad(format!("record {n}: {e}")))
-            })
-            .collect()
+    Ok(values.enumerate().map(move |(i, v)| {
+        let n = i + 1;
+        let v = v.map_err(|e| bad(format!("not JSON at line {}, column {}: {e}", e.line(), e.column())))?;
+        if !v.is_object() || v.get("predictions").is_some() {
+            return Err(bad(format!(
+                "record {n} is not a record: the file holds one {{\"image\", \"boxes\", ...}} record per line \
+                 (JSON Lines), not arrays or documents of them"
+            )));
+        }
+        serde_json::from_value::<BenchPrediction>(v).map_err(|e| bad(format!("record {n}: {e}")))
     }))
 }
 
-/// The next part of `records`: up to [`MAX_PART_BOXES`] boxes or [`MAX_PART_RECORDS`] records (empty at the end).
+/// The next part of `records`: whole records, at most `limits.records` of them and `limits.boxes` boxes (one
+/// record alone may have more, up to the server's limit per record); empty at the end.
 fn next_part(
-    records: &mut impl Iterator<Item = Result<BenchPrediction, Error>>,
+    records: &mut Peekable<impl Iterator<Item = Result<BenchPrediction, Error>>>,
+    limits: PartLimits,
 ) -> Result<Vec<BenchPrediction>, Error> {
     let (mut part, mut boxes) = (Vec::new(), 0usize);
-    while part.len() < MAX_PART_RECORDS && boxes < MAX_PART_BOXES {
-        let Some(r) = records.next() else { break };
-        let r = r?;
+    while part.len() < limits.records {
+        let fits = match records.peek() {
+            None => break,
+            Some(Ok(r)) => part.is_empty() || boxes + r.boxes.len() <= limits.boxes,
+            Some(Err(_)) => true,
+        };
+        if !fits {
+            break;
+        }
+        let r = records.next().expect("peeked")?;
         boxes += r.boxes.len();
         part.push(r);
     }
@@ -385,18 +397,20 @@ mod tests {
     }
 
     #[test]
-    fn a_file_of_predictions_is_records_or_documents_of_them() {
+    fn a_file_of_predictions_is_json_lines_of_records() {
         let r = |image: &str| {
             format!(r#"{{"image":"{image}","boxes":[{{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}}]}}"#)
         };
-        // JSON Lines, an array, an API body, and all three in one file, in order.
         let lines = format!("{}\n{}\n", r("1"), r("2"));
-        assert_eq!(records(&lines).unwrap().len(), 2);
-        let mixed = format!("{}\n[{}, {}]\n{{\"predictions\": [{}]}}\n", r("1"), r("2"), r("3"), r("4"));
-        let got: Vec<String> = records(&mixed).unwrap().into_iter().map(|p| p.image).collect();
-        assert_eq!(got, ["1", "2", "3", "4"]);
-        assert_eq!(records(&format!("{{\"predictions\": [{}]}}", r("9"))).unwrap()[0].boxes[0].score, 1.0);
+        let got: Vec<String> = records(&lines).unwrap().into_iter().map(|p| p.image).collect();
+        assert_eq!(got, ["1", "2"]);
+        assert_eq!(records(&r("9")).unwrap()[0].boxes[0].score, 1.0);
         assert!(records("").unwrap().is_empty());
+        // Arrays and API bodies are not records (they would be read whole).
+        for doc in [format!("[{}]", r("1")), format!("{{\"predictions\": [{}]}}", r("1"))] {
+            let e = records(&format!("{}\n{doc}\n", r("1"))).unwrap_err();
+            assert!(e.body.message.contains("record 2 is not a record"), "{e:?}");
+        }
         // Bad JSON says where; a bad record says which.
         let e = records(&format!("{}\n{{\"image\": ", r("1"))).unwrap_err();
         assert!(e.body.code == "invalid_arguments" && e.body.message.contains("line 2"), "{e:?}");
@@ -406,21 +420,130 @@ mod tests {
         assert_eq!(missing.body.code, "path_not_found");
     }
 
-    #[test]
-    fn parts_hold_whole_records_up_to_the_box_budget() {
-        let record = |boxes: usize| BenchPrediction {
-            image: "1".into(),
+    fn record(image: &str, boxes: usize) -> BenchPrediction {
+        BenchPrediction {
+            image: image.into(),
             condition: None,
             severity: None,
             boxes: vec![
                 folo_api::BenchDetection { class: 0, score: 1.0, x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
                 boxes
             ],
-        };
-        let mut it = [1000, MAX_PART_BOXES - 1000, 1, 5].map(|b| Ok(record(b))).into_iter();
+        }
+    }
+
+    #[test]
+    fn parts_hold_whole_records_within_the_limits() {
         let sizes = |p: Vec<BenchPrediction>| p.iter().map(|r| r.boxes.len()).collect::<Vec<_>>();
-        assert_eq!(sizes(next_part(&mut it).unwrap()), [1000, MAX_PART_BOXES - 1000]);
-        assert_eq!(sizes(next_part(&mut it).unwrap()), [1, 5]);
-        assert!(next_part(&mut it).unwrap().is_empty());
+        // Boxes: a record that would cross the limit starts the next part.
+        let limits = PartLimits { records: 100, boxes: 10 };
+        let mut it = [4, 5, 2, 10, 11, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [4, 5]);
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [2]);
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [10]);
+        // One record over the limit goes alone (the server's limit per record is lower than a part's).
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [11]);
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [0]);
+        assert!(next_part(&mut it, limits).unwrap().is_empty());
+        // Records, empty ones too.
+        let limits = PartLimits { records: 2, boxes: 10 };
+        let mut it = [0, 0, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
+        assert_eq!(next_part(&mut it, limits).unwrap().len(), 2);
+        assert_eq!(next_part(&mut it, limits).unwrap().len(), 1);
+        // The real limits: 199,999 boxes and then 1,000 make two parts.
+        let mut it = [MAX_PART_BOXES - 1, 1000].map(|b| Ok(record("1", b))).into_iter().peekable();
+        assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [MAX_PART_BOXES - 1]);
+        assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [1000]);
+    }
+
+    /// A store with a benchmark of 4 synthetic images and haze 2 in its plan; its id.
+    fn bench_store(home: &Path) -> (std::sync::Arc<folo_server::RealStore>, String) {
+        use folo_server::Store;
+        let store = std::sync::Arc::new(folo_server::RealStore::open(home.to_path_buf()).device("cpu"));
+        let req = folo_api::SyntheticDataset {
+            name: "shapes".into(),
+            images: 20,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 3,
+        };
+        let ds = store.create_synthetic(req).unwrap();
+        let plan = BenchPlan {
+            conditions: vec![folo_api::BenchPlanCondition {
+                condition: "haze".into(),
+                severities: vec![2],
+                weight: 1.0,
+                why: None,
+            }],
+            rationale: None,
+            designed_by: None,
+        };
+        let req = CreateBench {
+            name: "shapes".into(),
+            description: String::new(),
+            source: folo_api::BenchSource::Dataset { dataset_id: ds.id, split: None },
+            max_images: None,
+            seed: 0,
+            plan: Some(plan),
+        };
+        let bench = Benchmarks::Store(store.clone()).create_bench(req).unwrap();
+        assert_eq!(bench.images, 4);
+        (store, bench.id)
+    }
+
+    /// A file of predictions in several parts: the parts after the first (the condition's records here) are sent
+    /// and scored; a later part refused removes the entry.
+    fn parts(b: &Benchmarks, id: &str, dir: &Path) {
+        // Nothing found anywhere: 4 records of the unchanged images, then 4 of haze 2.
+        let file = dir.join("p.jsonl");
+        let write = |haze_image: &str| {
+            let mut lines: Vec<String> =
+                (1..=4).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
+            lines.extend(
+                ["1", "2", "3", haze_image]
+                    .map(|i| format!(r#"{{"image":"{i}","condition":"haze","severity":2,"boxes":[]}}"#)),
+            );
+            std::fs::write(&file, lines.join("\n")).unwrap();
+        };
+        let three = PartLimits { records: 3, boxes: 10 };
+        write("4");
+        let e = b.submit_in(id, "parts".into(), true, &file, three).unwrap();
+        let state = b.state_of(e).unwrap();
+        assert_eq!((state.status, state.done), (folo_api::BenchEntryStatus::Done, 8), "{state:?}");
+        let r = state.result.unwrap();
+        assert_eq!((r.conditions.len(), r.conditions[0].points.len()), (1, 1), "{:?}", r.conditions);
+        // The third part names an image the benchmark does not have: refused, and the entry is gone.
+        write("99");
+        let e = b.submit_in(id, "refused".into(), true, &file, three).unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.message.contains("99") && hint.contains("stopped and deleted"), "{e:?}");
+        assert_eq!(b.entries(id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn predictions_go_in_parts_in_process() {
+        let home = folo_test_support::TestDir::new("mcp-bench-parts");
+        let (store, id) = bench_store(home.path());
+        parts(&Benchmarks::Store(store.clone()), &id, home.path());
+        folo_server::Store::shutdown(&*store);
+    }
+
+    #[test]
+    fn predictions_go_in_parts_through_a_server() {
+        let home = folo_test_support::TestDir::new("mcp-bench-parts-http");
+        let (store, id) = bench_store(&home.join("server"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = folo_server::Server::new(store.clone(), folo_server::Options::default());
+        let serving = rt.spawn(server.serve(listener, async move {
+            let _ = stopped.await;
+        }));
+        let http = std::sync::Arc::new(crate::proxy::HttpStore::new(&url, None));
+        parts(&Benchmarks::Http(http), &id, home.path());
+        let _ = stop.send(());
+        rt.block_on(serving).unwrap().unwrap();
+        folo_server::Store::shutdown(&*store);
     }
 }

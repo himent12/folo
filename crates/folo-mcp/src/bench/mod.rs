@@ -56,6 +56,12 @@ impl Benchmarks {
         })
     }
 
+    /// Fails as every call does where there are no benchmarks (the mock, a server without `vision_bench`): for a
+    /// command to check before it changes anything else.
+    pub fn check(&self) -> Result<(), Error> {
+        self.via().map(|_| ())
+    }
+
     /// `GET /api/bench/catalog`.
     pub fn catalog(&self) -> Result<BenchCatalog, Error> {
         match self.via()? {

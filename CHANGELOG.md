@@ -3,6 +3,13 @@
 All notable changes to FOLO. Versions follow [Semantic Versioning](https://semver.org); the release process is in
 [docs/RELEASE.md](docs/RELEASE.md).
 
+## Unreleased
+
+### Added
+- `folo bench`: vision benchmarks from the command line, in process or through a `folo serve` (catalog, list,
+  create, show, delete, run a model or a file of predictions, follow an entry, stop it; docs/CLI.md, Vision
+  benchmarks). It replaces 0.1.0's placeholder, which answered `not_implemented` (#387).
+
 ## 0.1.0 (2026-11)
 
 The first public release: a from-scratch Rust vision framework with a YOLO-style detector, its own tensors, autograd,
@@ -427,5 +434,5 @@ A map for newcomers to the code, and two moves that make the code match it.
 - No macOS build yet: `install.sh` stops on macOS. Build from source there.
 - COCO accuracy is behind the incumbent's published models, which had more data and longer schedules
   ([README, Accuracy](README.md#accuracy)); a comparison at an equal COCO budget has not been run.
-- `folo bench` exists but answers `not_implemented`; the speed numbers come from `cargo bench`
-  ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
+- `folo bench` exists but answers `not_implemented` in this release (it runs vision benchmarks since; see
+  Unreleased); the speed numbers come from `cargo bench` ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)).

@@ -154,6 +154,8 @@ pub(super) fn state(s: &BenchEntryState, out: Out) {
             points.join("  ")
         ));
     }
+    let measured = |v: Option<f32>| v.map_or("not measured".into(), |v| format!("{v:.3}"));
+    out.human(format!("ECE {}  mean IoU {}", measured(r.ece), measured(r.mean_iou)));
     let sl = &r.self_labeling;
     let threshold = sl.threshold.map_or("none".into(), |t| format!("{t:.2}"));
     let readiness = match sl.readiness {

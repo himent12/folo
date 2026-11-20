@@ -143,6 +143,8 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
         (Some(dataset_id), _, _) => BenchSource::Dataset { dataset_id, split },
         (_, Some(path), _) => {
             let path = crate::label::paths(&[path], a.conn.server.is_some())?.remove(0);
+            // Not a dataset registered for a benchmark that cannot be made.
+            s.benchmarks.check().map_err(api_error)?;
             let req = RegisterDataset { name: None, path, format: DatasetFormat::Auto };
             let ds = s.store.register_dataset(req).map_err(api_error)?;
             out.human(format!("dataset {} '{}' ({})", ds.id, ds.name, ds.path));
@@ -225,7 +227,8 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
     if !model || !(a.wait || in_process) {
         out.record(&state);
         print::state(&state, out);
-        return Ok(());
+        // A file of predictions is scored at once, and scoring can fail.
+        return failure(state.status, state.error.clone(), state.hint.clone());
     }
     let mut record = folo_api::json::to_value(&state).unwrap_or_default();
     record["event"] = json!("started");
@@ -309,15 +312,20 @@ fn follow(s: &Session, first: BenchEntry, stop: Option<&AtomicBool>, out: Out) -
     record["event"] = json!("finished");
     out.record(&record);
     print::state(&state, out);
-    if status == BenchEntryStatus::Failed {
-        let err = CliError::new(
-            ExitCode::Runtime,
-            "bench_entry_failed",
-            error.unwrap_or_else(|| "the benchmark entry failed".into()),
-        );
-        return Err(err.hint(hint.unwrap_or_else(|| "see `folo bench status BENCH ENTRY`".into())));
+    failure(status, error, hint)
+}
+
+/// An entry that ended `failed` is the error `bench_entry_failed`, with the entry's error and hint.
+fn failure(status: BenchEntryStatus, error: Option<String>, hint: Option<String>) -> Result<(), CliError> {
+    if status != BenchEntryStatus::Failed {
+        return Ok(());
     }
-    Ok(())
+    let err = CliError::new(
+        ExitCode::Runtime,
+        "bench_entry_failed",
+        error.unwrap_or_else(|| "the benchmark entry failed".into()),
+    );
+    Err(err.hint(hint.unwrap_or_else(|| "see `folo bench status BENCH ENTRY`".into())))
 }
 
 /// A store or server error as the CLI reports it, with a hint in its words: the same code (the API's and the

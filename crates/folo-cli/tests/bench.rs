@@ -183,14 +183,12 @@ fn bench_in_this_process() {
     assert_eq!(s(&error(&["show", &b], &d, 3)["code"]), "bench_not_found");
 }
 
-#[test]
-fn bench_through_a_folo_serve() {
-    let t = TestDir::new("cli-bench-serve");
-    let home = t.join("home");
-    fixture(&t.join("shapes"), &home);
+/// A `folo serve` child on `home` (with `extra` flags) on a free port: the child, its URL and a client.
+fn serve(home: &Path, extra: &[&str]) -> (ChildGuard, String, folo_client::Client) {
     let mut serve: ChildGuard = folo()
         .args(["serve", "--port", "0", "--json", "--device", "cpu", "--data-dir"])
-        .arg(&home)
+        .arg(home)
+        .args(extra)
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -208,6 +206,15 @@ fn bench_through_a_folo_serve() {
     let url = serde_json::from_str::<Value>(&first).unwrap()["url"].as_str().unwrap().to_string();
     let client = folo_client::Client::with_timeouts(&url, Duration::from_secs(5), DEADLINE);
     client.get::<Value>("/system").expect("folo serve answers /api/system");
+    (serve, url, client)
+}
+
+#[test]
+fn bench_through_a_folo_serve() {
+    let t = TestDir::new("cli-bench-serve");
+    let home = t.join("home");
+    fixture(&t.join("shapes"), &home);
+    let (_serve, url, client) = serve(&home, &[]);
 
     // The data dir's server is found through its lock.
     let d = ["--data-dir", home.to_str().unwrap()];
@@ -253,4 +260,18 @@ fn bench_through_a_folo_serve() {
     assert_eq!(truth["result"]["accuracy"]["map50_95"].as_f64(), Some(1.0), "{truth}");
     let shown = ok(&["show", &b], &srv);
     assert_eq!(s(&shown["leaderboard"][0]["name"]), "truth", "{shown}");
+}
+
+/// A server without benchmarks (`--mock`) refuses `create --data` before it registers the folder.
+#[test]
+fn a_server_without_benchmarks_registers_nothing() {
+    let t = TestDir::new("cli-bench-mock");
+    let shapes = t.join("shapes");
+    fixture(&shapes, &t.join("unused"));
+    let (_serve, url, client) = serve(&t.join("home"), &["--mock"]);
+    let before: Value = client.get("/datasets").unwrap();
+    let e = error(&["create", "x", "--data", shapes.to_str().unwrap()], &["--server", url.as_str()], 4);
+    assert_eq!(s(&e["code"]), "not_implemented", "{e}");
+    let after: Value = client.get("/datasets").unwrap();
+    assert_eq!(after, before);
 }
