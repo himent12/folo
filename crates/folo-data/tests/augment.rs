@@ -217,3 +217,14 @@ fn no_augmentation_matches_validation() {
     assert_eq!(none.sample, val.sample);
     assert_eq!(none.sample.boxes.len(), 2);
 }
+
+/// A mosaic of size 0 is an empty image, alone and through its affine.
+#[test]
+fn an_empty_mosaic_is_empty() {
+    let parts: Vec<_> = (0..4).map(|k| random_rect_sample(k, 40, 30, 2)).collect();
+    let parts = [&parts[0], &parts[1], &parts[2], &parts[3]];
+    let m = mosaic4(parts, 0, &mut Rng::new(1));
+    assert_eq!((m.image.width, m.image.height, m.image.data.len()), (0, 0, 0));
+    let m = folo_data::augment::mosaic_affine(parts, 0, &AugmentConfig::default(), &mut Rng::new(1));
+    assert_eq!((m.image.width, m.image.height, m.image.data.len()), (0, 0, 0));
+}

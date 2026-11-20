@@ -86,7 +86,9 @@ impl Letterbox {
     pub fn apply(&self, img: &Image, pad_value: u8) -> Image {
         assert_eq!([img.width, img.height], self.orig, "letterbox geometry computed for another size");
         let [ow, oh] = self.out;
-        let mut out = Image::new(ow, oh, [pad_value; 3]);
+        let mut out =
+            Image { width: ow, height: oh, data: crate::buffers::scratch(ow as usize * oh as usize * 3) };
+        out.data.fill(pad_value);
         let stride = out.stride();
         let top = self.pad[1] as usize;
         resize_into(

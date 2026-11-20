@@ -181,7 +181,10 @@ keeps one, as the YOLO reader drops duplicate label lines.
   `ratio = [new_w / w, new_h / h]` and `pad = [left, top]`: original `x` maps to `x * ratio[0] + pad[0]`.
   `unmap_xyxy` / `unmap_box` (and `ImageMeta::unmap_xyxy` on batches) map predictions back.
 - `warp_affine` inverts the matrix and steps through each output row in 16.16 fixed point with 11-bit bilinear
-  weights; boxes go through the same matrix by their four corners.
+  weights; boxes go through the same matrix by their four corners. When the source row does not change along an
+  output row (no rotation or shear, as in the default augmentation), each output row blends its two source rows once
+  into `u32` sums and interpolates along them, with the same products and the one rounding of the general path, so
+  the same bytes.
 
 ## Augmentation
 `AugmentConfig` deserialises from `TrainConfig.augment` (missing fields take the defaults):
@@ -199,7 +202,11 @@ keeps one, as the YOLO reader drops duplicate label lines.
 | `min_box_px`, `min_area_ratio`, `max_aspect` | 2, 0.1, 100 | boxes narrower than 2 px, keeping < 10 % of their area, or thinner than 1:100 after a geometric op are dropped |
 
 `TrainTransform` runs, per sample: mosaic (4 images resized to long side `s`) or letterbox to `s x s` → random affine
-(centre, rotate + scale, shear, translate) to `s x s` → mixup → HSV (integer hexcone HSV with LUTs) → flips. With
+(centre, rotate + scale, shear, translate) to `s x s` → mixup → HSV (integer hexcone HSV with LUTs) → flips. The
+mosaic and its affine run as one step (`mosaic_affine`, bit for bit `random_affine` of `mosaic4`): the warp reads the
+four tiles where they lie on the `2s x 2s` canvas instead of painting the canvas first (with rotation or shear the
+canvas is painted and warped as before). HSV runs on blocks of 64 pixels without branches on CPUs with AVX2, the
+same integer arithmetic as the per-pixel kernel used elsewhere (both checked on all 2^24 colours). With
 `augment: None` (validation) it only letterboxes and records the geometry.
 
 ## DataLoader and determinism
@@ -232,6 +239,14 @@ keeps one, as the YOLO reader drops duplicate label lines.
 - In-flight work is bounded (a window of positions plus `prefetch_batches` finished batches). Dropping the epoch
   iterator stops and joins every thread. `EpochIter::throughput()` reports images/s.
 - Inside workers, image kernels run single-threaded (`folo_data::par::serial`); outside, they split rows with rayon.
+- The workers and the collator reuse image-sized buffers (decoded, resized and warped images; `src/buffers.rs`): a
+  fresh buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost 0.5-1 ms
+  per buffer on our test machine against 0.05-0.1 ms reused. Buffers are zeroed where `vec![0; n]` was and otherwise
+  overwritten whole, so the bytes do not depend on the reuse. The pool keeps at most 512 MB of free buffers and is
+  emptied when the loader's threads stop.
+- `tests/golden.rs` pins the digests of the first batches for each path of the transform (mosaic, rotation and
+  shear, mixup and up-down flips, letterbox + affine, validation), from memory and from JPEG and PNG files: a change
+  that alters a batch's bytes fails there.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
@@ -251,4 +266,8 @@ next unclaimed shape (at most 8 classes).
 
 ## Benchmark
 `cargo bench -p folo-data --bench pipeline [-- --images N]` writes a synthetic 640 px JPEG dataset and reports stage
-timings and loader images/s with 1, N/2 and N workers.
+timings and loader images/s with 1, N/2 and N workers. `--data PATH` measures a real dataset (`SCAN_CACHE=DIR` opens
+it through the scan cache), `--same-epoch` measures every round on epoch 1 after a warm-up pass over the same batches
+(so two builds compared one after the other read equally warm files). `cargo run --release -p folo-data --example
+loader_profile -- PATH [N]` splits a mosaic sample's time and allocations into its stages (file read, decode, resize,
+mosaic + affine, HSV, flips, collate) on a real dataset; docs/notes/hill/r6-loader.md has the numbers.

@@ -42,6 +42,8 @@ Round 5 (2026-11-17; round summary in [BENCHMARKS, Hill-climb 5](../BENCHMARKS.m
 - [The trainer's host side: a sync-free AMP optimizer window, a decode-once mosaic window](hill/r5-trainer.md) (its
   PR #298 was closed, not merged)
 
+Wave 6 (2026-11-20): [The data loader: faster training samples with the same bytes](hill/r6-loader.md).
+
 ## Design review logs
 
 The two apps were refined in rounds too: screenshots of every screen, two independent design reviews against a fixed
