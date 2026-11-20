@@ -109,8 +109,9 @@ pub fn quote_path(p: &str) -> Option<String> {
 }
 
 /// What PowerShell (`"` `$` `` ` `` and the typographic double quotes, which it reads as `"`), cmd (`%`, `!` with
-/// delayed expansion) or a POSIX shell (`$` `` ` `` `\`, `!` when interactive) changes inside double quotes. On
-/// Windows [`path`] has turned every `\` into `/`.
+/// delayed expansion) or a POSIX shell (`$` `` ` `` `\`, `!` when interactive) changes inside double quotes. In
+/// [`cli_command`] on Windows, [`path`] has turned every `\` into `/` first; a path given to [`quote_path`] as written
+/// keeps its `\`, and is then shown, not quoted.
 const UNQUOTABLE: &str = "\"$`%!\\\u{201C}\u{201D}\u{201E}\u{201F}\u{2033}";
 
 /// A duration in milliseconds as FOLO reports it: rounded to 0.1 µs, so a sum of stage times reads `10.5163` rather
