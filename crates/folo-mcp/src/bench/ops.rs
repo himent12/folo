@@ -194,8 +194,8 @@ impl Benchmarks {
     }
 
     /// An external entry from the file at `path`, in parts of at most `limits`: opened with the file's first part,
-    /// sent the rest part by part and finished (scored). Whatever fails once the entry exists goes to
-    /// [`Benchmarks::clean_up`].
+    /// sent the rest part by part and finished (scored). A failure before the finish was sent goes to
+    /// [`Benchmarks::clean_up`]; one after it to [`Benchmarks::after_finish`], which never stops or deletes.
     fn submit_in(
         &self,
         id: &str,
