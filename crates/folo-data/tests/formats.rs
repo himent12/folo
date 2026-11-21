@@ -575,3 +575,40 @@ fn utf8_bom_is_ignored() {
     write(&r.join("labels/classes.txt"), format!("{BOM}person\r\ncar\r\n"));
     assert_eq!(open(r).unwrap().classes, ["person", "car"]);
 }
+
+/// An empty or whitespace split path (`test: ""`, `val: "  "`, `train: ["images/train", ""]`) leaves that source
+/// unset like `null`, rather than resolving `root.join("")` to the dataset root and walking every split's images.
+#[test]
+fn yolo_empty_split_paths_do_not_scan_dataset_root() {
+    let t = TempDir::new("yolo-empty-split");
+    let r = t.path();
+    write_png(&r.join("images/train/a.png"), 16, 16, [10, 20, 30]);
+    write(&r.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n");
+    write_png(&r.join("images/val/v.png"), 16, 16, [30, 20, 10]);
+    write(&r.join("labels/val/v.txt"), "0 0.5 0.5 0.4 0.4\n");
+    write(
+        &r.join("data.yaml"),
+        "path: \"   \"\ntrain: [images/train, \"\", \"   \"]\nval: images/val\ntest: \"\"\nnames: [thing]\n",
+    );
+
+    let ds = open(r).unwrap();
+    assert_eq!(ds.split_sizes(), [1, 1, 0], "{:#?}", ds.report);
+    assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
+    let report = folo_data::check::check(r, &folo_data::check::CheckOptions::default()).unwrap();
+    assert_eq!(report.splits, [1, 1, 0]);
+    assert!(report.is_clean(), "{:?}", report.issues);
+
+    // Whitespace val leaves val empty without leaking train images into it.
+    write(&r.join("data.yaml"), "train: images/train\nval: \"   \"\ntest: [\"\"]\nnames: [thing]\n");
+    let ds = open(r).unwrap();
+    assert_eq!(ds.split_sizes(), [1, 0, 0], "{:#?}", ds.report);
+    assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
+
+    // An explicit `.` split path still walks the dataset folder when intended.
+    let flat = TempDir::new("yolo-dot-split");
+    write_png(&flat.join("a.png"), 16, 16, [10, 20, 30]);
+    write(&flat.join("a.txt"), "0 0.5 0.5 0.4 0.4\n");
+    write(&flat.join("data.yaml"), "train: .\ntest: \"\"\nnames: [thing]\n");
+    let ds = open(flat.path()).unwrap();
+    assert_eq!(ds.split_sizes(), [1, 0, 0], "{:#?}", ds.report);
+}
