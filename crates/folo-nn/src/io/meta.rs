@@ -10,8 +10,17 @@ use crate::{Error, Result};
 pub const FORMAT_VERSION: &str = "1";
 
 /// Keys only checkpoints carry. They are dropped when a checkpoint's metadata is reused for a weights file.
-pub(crate) const CHECKPOINT_KEYS: [&str; 7] =
-    ["folo.train", "folo.optim", "folo.sched", "folo.ema", "folo.rng", "folo.epoch", "folo.best"];
+pub(crate) const CHECKPOINT_KEYS: [&str; 9] = [
+    "folo.train",
+    "folo.optim",
+    "folo.sched",
+    "folo.ema",
+    "folo.rng",
+    "folo.epoch",
+    "folo.best",
+    "folo.amp",
+    "folo.nonfinite_streak",
+];
 
 /// `folo.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,5 +424,39 @@ mod tests {
         map.insert("folo.format".into(), "2".into());
         assert!(Metadata::from_map(&map).unwrap_err().to_string().contains("not supported"));
         assert!(Metadata::from_map(&BTreeMap::new()).unwrap_err().to_string().contains("import"));
+    }
+
+    #[test]
+    fn for_weights_drops_all_checkpoint_keys_and_keeps_unknown() {
+        let mut m = Metadata::new(
+            FileKind::Checkpoint,
+            ModelConfig::new("n", 2).unwrap(),
+            vec!["a".into(), "b".into()],
+            64,
+        )
+        .unwrap();
+        m.created = Some("2026-11-21T00:00:00Z".into());
+        for k in [
+            "folo.train",
+            "folo.optim",
+            "folo.sched",
+            "folo.ema",
+            "folo.rng",
+            "folo.epoch",
+            "folo.best",
+            "folo.amp",
+            "folo.nonfinite_streak",
+        ] {
+            m.extra.insert(k.into(), "1".into());
+        }
+        m.extra.insert("folo.custom".into(), "keep".into());
+
+        let w = m.for_weights();
+        assert_eq!(w.kind, FileKind::Weights);
+        assert_eq!(w.created.as_deref(), Some("2026-11-21T00:00:00Z"));
+        assert_eq!(w.extra.get("folo.custom").map(String::as_str), Some("keep"));
+        for k in ["folo.amp", "folo.nonfinite_streak", "folo.train", "folo.optim", "folo.best"] {
+            assert!(!w.extra.contains_key(k), "checkpoint key `{k}` leaked into weights metadata");
+        }
     }
 }

@@ -123,3 +123,68 @@ fn export_weights_preserves_metadata() {
         assert!(!meta.extra.contains_key(k), "checkpoint key `{k}` must be dropped");
     }
 }
+
+/// Exporting or quantizing a training checkpoint drops `folo.amp` and `folo.nonfinite_streak` across every
+/// export format (`folo`, `folo-f16`, `weights`, `onnx`) and `folo quantize` while preserving unknown `folo.*` keys.
+#[test]
+fn export_and_quantize_strip_checkpoint_only_keys() {
+    let tiny = tiny_run();
+    let root = TestDir::new("cli-strip-ckpt-keys");
+    let src = root.join("best.folo");
+    std::fs::copy(tiny.run.join("weights/best.folo"), &src).unwrap();
+    insert_meta_keys(
+        &src,
+        &[
+            (
+                "folo.amp",
+                r#"{"scale":16384.0,"growth_factor":2.0,"backoff_factor":0.5,"growth_interval":2000,"growth_tracker":0,"skipped_steps":0,"skip_streak":0}"#,
+            ),
+            ("folo.nonfinite_streak", "2"),
+            ("folo.custom", "keep-me"),
+        ],
+    );
+
+    for (fmt, name) in [("folo", "a-fused.folo"), ("folo-f16", "a-f16.folo"), ("weights", "a-weights.folo")] {
+        let out = root.join(name);
+        let (code, _, stderr) =
+            folo(&["export", "--json", "--model", s(&src), "--format", fmt, "--output", s(&out)]);
+        assert_eq!(code, 0, "{fmt}: {stderr}");
+        let meta = folo_nn::io::ModelFile::open(&out).unwrap().metadata().clone();
+        assert!(!meta.extra.contains_key("folo.amp"), "{fmt} leaked folo.amp");
+        assert!(!meta.extra.contains_key("folo.nonfinite_streak"), "{fmt} leaked folo.nonfinite_streak");
+        assert_eq!(meta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "{fmt}");
+    }
+
+    let onnx = root.join("a.onnx");
+    let (code, _, stderr) =
+        folo(&["export", "--json", "--model", s(&src), "--format", "onnx", "--output", s(&onnx)]);
+    assert_eq!(code, 0, "onnx: {stderr}");
+    let onnx_bytes = std::fs::read(&onnx).unwrap();
+    let has = |needle: &[u8]| onnx_bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(!has(b"folo.amp"), "onnx leaked folo.amp");
+    assert!(!has(b"folo.nonfinite_streak"), "onnx leaked folo.nonfinite_streak");
+    assert!(has(b"folo.custom"), "onnx dropped unknown folo.custom");
+
+    let quant = root.join("a-int8.folo");
+    let (code, _, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&src),
+        "--data",
+        s(&tiny.data),
+        "--images",
+        "2",
+        "--batch",
+        "2",
+        "--workers",
+        "1",
+        "--output",
+        s(&quant),
+    ]);
+    assert_eq!(code, 0, "quantize: {stderr}");
+    let qmeta = folo_nn::io::ModelFile::open(&quant).unwrap().metadata().clone();
+    assert!(!qmeta.extra.contains_key("folo.amp"), "quantize leaked folo.amp");
+    assert!(!qmeta.extra.contains_key("folo.nonfinite_streak"), "quantize leaked folo.nonfinite_streak");
+    assert_eq!(qmeta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "quantize");
+}
