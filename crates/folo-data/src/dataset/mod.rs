@@ -379,8 +379,9 @@ pub(crate) enum Source {
 }
 
 /// Finds the dataset at `path` (rules of [`open_with`]) without reading any labels or images. A folder a writer has
-/// not finished ([`crate::unfinished`]) is refused once found: the YAML's folder (and the root its `path:` gives,
-/// `yolo::scan_yaml`), the folder images resolve against, or a COCO JSON's own folder or the one above it.
+/// not finished ([`crate::unfinished`]) is refused: `path` itself when it is a directory (before format detection),
+/// then the YAML's folder (and the root its `path:` gives, `yolo::scan_yaml`), the folder images resolve against, or
+/// a COCO JSON's own folder or the one above it.
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     if !path.exists() {
         return Err(DataError::io(

@@ -175,4 +175,13 @@ fn an_interrupted_convert_folder_is_refused_as_unfinished() {
     let bare = t.join("bare");
     write(&bare.join(MARKER), "");
     assert_unfinished(&bare);
+
+    // Without the marker, an empty folder is still undetected and a missing path is still NotFound.
+    let empty = t.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(detect_format(&empty, Format::Auto).unwrap_err().to_string().contains(folo_data::UNDETECTED));
+    assert!(matches!(
+        detect_format(t.join("nope"), Format::Auto).unwrap_err(),
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound
+    ));
 }
