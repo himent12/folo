@@ -160,6 +160,26 @@ describe('MockApi agent labeling: edits and datasets', () => {
     expect(await api.reviewLabelImage('lb_51d0', img.id, false, boxRevision([]))).toMatchObject({ boxes: [], reviewed: false });
   });
 
+  it('refuses reviewed on unlabeled images without claiming waiting ones, and returns 409 for in-call images', async () => {
+    const api = new MockApi('normal', 0);
+    const pending = (await api.labelImages('lb_7c21', { status: 'pending', limit: 1 })).images[0]!;
+    await expect(api.reviewLabelImage('lb_7c21', pending.id, false)).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+    await expect(api.reviewLabelImage('lb_7c21', pending.id, true)).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+
+    const before = (await api.labelJob('lb_3f9a')).run!;
+    const busy = (await api.labelImages('lb_3f9a', { status: 'labeling', limit: 1 })).images[0]!;
+    await expect(api.reviewLabelImage('lb_3f9a', busy.id, false)).rejects.toMatchObject({ status: 409, code: 'label_job_active' });
+    await expect(api.reviewLabelImage('lb_3f9a', busy.id, true)).rejects.toMatchObject({ status: 409, code: 'label_job_active' });
+
+    const waiting = (await api.labelImages('lb_3f9a', { status: 'pending' })).images.at(-1)!;
+    await expect(api.reviewLabelImage('lb_3f9a', waiting.id, false)).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+    expect((await api.labelJob('lb_3f9a')).run!.total).toBe(before.total);
+
+    const labeled = (await api.labelImages('lb_51d0', { status: 'labeled', limit: 1 })).images[0]!;
+    expect(await api.reviewLabelImage('lb_51d0', labeled.id, false)).toMatchObject({ reviewed: false });
+    expect(await api.reviewLabelImage('lb_51d0', labeled.id, true)).toMatchObject({ reviewed: true });
+  });
+
   it('takes an image that waits for its call out of the run when it is labeled by hand', async () => {
     const api = new MockApi('normal', 0);
     const before = (await api.labelJob('lb_3f9a')).run!;

@@ -572,7 +572,9 @@ export class MockLabeling {
     this.advance(j, now);
     const im = this.#image(j, imageId);
     this.#expect(im, expect);
-    if (reviewed && im.status !== 'labeled')
+    if (im.status === 'labeling')
+      throw new ApiError(409, 'label_job_active', `${im.file} is with the agent right now.`, 'Change it once that call is done, or stop the run.');
+    if (im.status !== 'labeled')
       throw new ApiError(400, 'invalid_body', `image '${imageId}' has no labels to mark reviewed: save its boxes instead`);
     this.#claim(j, im);
     im.reviewed = reviewed;
