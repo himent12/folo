@@ -10,7 +10,7 @@ Related: the [root README](../README.md), [docs/ARCHITECTURE.md](../docs/ARCHITE
 server and the engine), [framework/README.md](framework/README.md) (fw), [design/README.md](../design/README.md)
 (tokens, type, colour) and [FOLO Desktop](../apps/desktop/README.md), the native app with the same design language
 and main screens (Overview, Datasets, Runs, Models, Benchmarks, Playground and Settings; agent labeling, run compare,
-benchmark compare and external predictions stay in Studio).
+benchmark compare and importing external predictions stay in Studio).
 
 ## Commands
 

@@ -40,8 +40,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   `--token` no header is needed (the default: the server listens on loopback). docs/CLOUD.md, *Securing a server*.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
   builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
-  ETag. For both embedded files and `--web-dir` (plain paths), Vite's content-hashed `assets/` (except `.map` source
-  maps) are `Cache-Control: public, max-age=31536000, immutable`, everything else `no-cache`.
+  ETag. For files served from the embedded copy or from `--web-dir` (plain paths), Vite's content-hashed `assets/`
+  (except `.map` source maps) are `Cache-Control: public, max-age=31536000, immutable`; every other served file
+  and the SPA fallback are `no-cache`.
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.
@@ -61,7 +62,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one; 32 MiB for `PUT /api/uploads/{id}/parts/{n}`, `max_part_bytes`; 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
-| 500 | `internal`, `io_error`, `data_error`, `training_failed` | a bug or unexpected failure (`internal`), a file read/write failure (`io_error`), a dataset read failure while training or validating (`data_error`), or a diverged / unusable training run (`training_failed`, `Run.error_code`) |
+| 500 | `internal`, `io_error`, `data_error` | a bug or unexpected failure (`internal`), a file read/write failure (`io_error`), a dataset read failure while validating (`data_error`). A run that fails while it trains is not an HTTP error: `POST /api/runs` has answered `201` by then, and the run carries the code in `Run.error_code` (`training_failed`, `data_error`, ...) |
 | 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
 | 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway`, `agent_failed` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API; a coding agent's call fails or its answer is not usable (designing a benchmark plan). As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
 | 503 | `shutting_down` | the server is shutting down (new or resumed runs refused). As `Run.error_code` of a `stopped` run also `interrupted` (the server stopped or restarted while the run trained or waited) |
@@ -1352,7 +1353,8 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   content: when this server already holds a finished upload of that kind with it (and the dataset is still
   registered, the model still listed), the answer is `200 { "upload": null, "existing": { "dataset": Dataset } }`
   (or `{ "model": Model }`) and there is nothing to send. `bytes` is an optional stream length accepted on creation
-  (ignored by the server and not returned in `Upload`). `400 invalid_body`: a blank `name`, a `format` with `kind: model`, a longer fingerprint.
+  (ignored by the server and not returned in `Upload`). `400 invalid_body`: a blank `name`, a `format` with
+  `kind: model`, a longer fingerprint.
 - `PUT /api/uploads/{id}/parts/{n}` body: the next bytes of the stream (`Content-Type:
   application/octet-stream`, at most `max_part_bytes`, else `413 payload_too_large`) → `Upload`. `n` must be
   `Upload.part`. Sending part `n - 1` again (a retry after a lost answer) is accepted when it has the length of the

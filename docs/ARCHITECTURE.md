@@ -365,7 +365,8 @@ screens. See [web/README.md](../web/README.md).
 ### FOLO Desktop
 `apps/desktop/`: a native Rust app on folo-ui, its own UI framework (below), with the same design language and main
 screens as Studio (Overview, Datasets, Runs, Models, Benchmarks, Playground and Settings; agent labeling, run compare,
-benchmark compare and external predictions stay in Studio). It talks to a local `folo serve` over the same API (it can spawn one), so the engine and the UI stay
+benchmark compare and importing external predictions stay in Studio). It talks to a local `folo serve` over the same API
+(it can spawn one), so the engine and the UI stay
 decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches the f16
 weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on folo-gpu or
 the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the server would.

@@ -3,7 +3,8 @@
 The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
 CPU; the UI uses no GPU). Same design language and main screens as FOLO Studio ([web/](../../web/README.md)):
 Overview, Datasets, Runs (with a live training dashboard), Models, Benchmarks, Playground and Settings (agent
-labeling, run compare, benchmark compare and external predictions stay in Studio), plus a command palette,
+labeling, run compare, benchmark compare and importing external predictions stay in Studio), plus a command
+palette,
 keyboard navigation, toasts, and the theme system of [design/THEMES.md](../../design/THEMES.md) (Dark, Light or
 System, a theme per mode, custom themes).
 

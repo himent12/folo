@@ -237,8 +237,8 @@ folo serve                      # http://127.0.0.1:7878
 
 The desktop app (`apps/desktop`, `cargo run --release` there) shows the main screens natively (Overview, Datasets,
 Runs, Models, Benchmarks, Playground and Settings) and connects to the same server
-([apps/desktop/README.md](../apps/desktop/README.md)); agent labeling, run compare, benchmark compare and external
-predictions stay in Studio.
+([apps/desktop/README.md](../apps/desktop/README.md)); agent labeling, run compare, benchmark compare and
+importing external predictions stay in Studio.
 
 ## 8. Run the model in a browser
 
