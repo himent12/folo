@@ -4,7 +4,7 @@ mod common;
 
 use common::Rng;
 use folo_vision::boxes::box_iou;
-use folo_vision::fusion::BoxFusion;
+use folo_vision::fusion::{BoxFusion, CONSENSUS_IOU, ScoreRule};
 use folo_vision::nms::{batched_nms, nms_detections, non_max_suppression, non_max_suppression_with};
 use folo_vision::{Detection, NmsConfig, Xyxy};
 
@@ -88,7 +88,8 @@ fn large_bucket_parallel_suppression_matches_naive() {
 /// Reference for the full post-process built from the naive NMS, with box fusion (docs/MODEL.md §9.4) written out:
 /// each kept box's sides become the `f64` weighted means over every candidate of its class (any class when
 /// agnostic) with IoU `>= fusion_iou`, weights score times the anchor's side precision (`prec`, 1 when `None` or
-/// voting), skipping weights that are not `> 0`.
+/// voting), skipping weights that are not `> 0`; and with the consensus score each kept box's score from the `f64`
+/// score mass of the unfused candidates at IoU `>= 0.75` with it (itself included), then a stable sort by it.
 fn naive_post(
     boxes: &[Xyxy],
     scores: &[f32],
@@ -161,12 +162,34 @@ fn naive_post(
         }
         out
     };
-    kept.into_iter()
+    let rescore = |k: usize| {
+        if cfg.score == ScoreRule::None {
+            return cands[k].score;
+        }
+        let mass: f64 = cands
+            .iter()
+            .enumerate()
+            .filter(|(j, d)| {
+                *j == k
+                    || ((cfg.agnostic || d.class == cands[k].class)
+                        && box_iou(&cands[k].bbox, &d.bbox) >= CONSENSUS_IOU)
+            })
+            .map(|(_, d)| d.score as f64)
+            .sum();
+        let s = cands[k].score as f64;
+        (s * (mass / s).min(10.0).sqrt() / 10f64.sqrt()) as f32
+    };
+    let mut out: Vec<Detection> = kept
+        .into_iter()
         .map(|k| {
             let [x1, y1, x2, y2] = fuse(k);
-            Detection { bbox: Xyxy::new(x1, y1, x2, y2), ..cands[k] }
+            Detection { bbox: Xyxy::new(x1, y1, x2, y2), score: rescore(k), class: cands[k].class }
         })
-        .collect()
+        .collect();
+    if cfg.score != ScoreRule::None {
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    }
+    out
 }
 
 #[test]
@@ -187,6 +210,7 @@ fn post_process_matches_naive() {
             multi_label: case % 2 == 1,
             fusion: [BoxFusion::None, BoxFusion::Vote, BoxFusion::Dfl][(case / 3) % 3],
             fusion_iou: [0.75, 0.5][(case / 4) % 2],
+            score: [ScoreRule::None, ScoreRule::Consensus][(case / 5) % 2],
         };
         // Side precisions spanning three orders of magnitude, and some zeros.
         let prec: Vec<[f32; 4]> = (0..a)
@@ -216,4 +240,46 @@ fn post_process_matches_naive() {
             assert_eq!(nms_detections(&all, &cfg), want, "case {case}: nms_detections");
         }
     }
+}
+
+/// The consensus score changes the scores and their order and nothing else: the same boxes and classes are kept,
+/// with or without box fusion; each score lies in `[s / √10, s]` of the class score; the list is sorted by it. Off,
+/// the output is the plain post-process, bit for bit.
+#[test]
+fn consensus_changes_only_the_scores() {
+    let key = |d: &Detection| (d.bbox.to_array().map(f32::to_bits), d.class);
+    let mut rng = Rng::new(0xC05E);
+    let mut changed = 0;
+    for case in 0..24 {
+        let (a, nc) = ([300, 2000][case % 2], [1, 5][(case / 2) % 2]);
+        // Boxes in a small area so clusters form.
+        let boxes: Vec<Xyxy> = (0..a).map(|_| rng.bbox(160.0, 30.0, 60.0)).collect();
+        let scores: Vec<f32> = (0..a * nc).map(|_| rng.f32().powi(3)).collect();
+        let off = NmsConfig {
+            conf: 0.01,
+            multi_label: case % 3 == 0,
+            agnostic: case % 5 == 4,
+            fusion: [BoxFusion::None, BoxFusion::Vote][case % 2],
+            ..NmsConfig::default()
+        };
+        let plain = non_max_suppression(&boxes, &scores, nc, &off);
+        assert_eq!(plain, naive_post(&boxes, &scores, None, nc, &off), "case {case}: off");
+        let on = NmsConfig { score: ScoreRule::Consensus, ..off.clone() };
+        let got = non_max_suppression(&boxes, &scores, nc, &on);
+        let (mut p, mut g): (Vec<_>, Vec<_>) =
+            (plain.iter().map(key).collect(), got.iter().map(key).collect());
+        p.sort_unstable();
+        g.sort_unstable();
+        assert_eq!(p, g, "case {case}: the same boxes and classes");
+        assert!(got.windows(2).all(|w| w[0].score >= w[1].score), "case {case}: sorted by the new score");
+        for d in &got {
+            let was = plain.iter().find(|q| key(q) == key(d)).unwrap().score;
+            assert!(
+                d.score <= was && d.score as f64 >= was as f64 / 10f64.sqrt() * (1.0 - 1e-6),
+                "case {case}"
+            );
+            changed += usize::from(d.score != was);
+        }
+    }
+    assert!(changed > 100, "only {changed} scores moved: the test cannot see the rule");
 }

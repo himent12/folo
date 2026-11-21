@@ -18,7 +18,7 @@ use folo_core::{DType, Device, Tensor, no_grad};
 use folo_nn::Module;
 use folo_nn::io::ModelFile;
 use folo_test_support::TestFile;
-use folo_vision::fusion::BoxFusion;
+use folo_vision::fusion::{BoxFusion, ScoreRule};
 use folo_vision::model::{FoloModel, HeadMode, ImageCandidates, ModelConfig};
 use folo_vision::nms::{Detection, NmsConfig};
 
@@ -102,10 +102,10 @@ fn check_precisions(
     }
 }
 
-/// Candidate-first against dense on `x` with the box fusion `fusion`, at thresholds picked from the dense scores:
-/// none passing, the top 1%, 5% and 30% of all anchors, and every anchor. Returns how many detections were
-/// compared.
-fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion) -> usize {
+/// Candidate-first against dense on `x` with the box fusion `fusion` and the score rule `score`, at thresholds picked
+/// from the dense scores: none passing, the top 1%, 5% and 30% of all anchors, and every anchor. Returns how many
+/// detections were compared.
+fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreRule) -> usize {
     let _g = no_grad();
     let dense = m.forward(x).unwrap();
     let (b, nc, a) = (dense.batch(), dense.num_classes, dense.num_anchors());
@@ -127,6 +127,7 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion) -> usize {
             max_det: usize::MAX,
             max_candidates: usize::MAX,
             fusion,
+            score,
             ..NmsConfig::default()
         };
         assert!(m.candidates_first_applies(x.device(), &nms), "{what}: candidate-first applies");
@@ -174,7 +175,7 @@ fn gpu_candidates_first_matches_dense_bit_for_bit() {
             // 320²: P3 has more pixels than its site list, so "every anchor" overflows; 384×640 is rectangular.
             for (dims, seed) in [([2, 3, 320, 320], 1), ([1, 3, 384, 640], 2), ([3, 3, 128, 96], 3)] {
                 let what = format!("{head} {dtype:?} tensor cores {on} {dims:?}");
-                let n = check(&m, &input(dims, seed, dev, dtype), &what, BoxFusion::None);
+                let n = check(&m, &input(dims, seed, dev, dtype), &what, BoxFusion::None, ScoreRule::None);
                 assert!(n > 0, "{what}: nothing compared");
             }
             assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
@@ -203,8 +204,11 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
             // 320²: every anchor passing overflows P3's site list; 384×640 is rectangular.
             for (dims, seed) in [([2, 3, 320, 320], 4), ([1, 3, 384, 640], 5)] {
                 let what = format!("{fusion:?} {dtype:?} tensor cores {on} {dims:?}");
-                let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion);
+                let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::None);
                 assert!(n > 0, "{what}: nothing compared");
+                // The consensus score runs on the host after NMS, on the same candidates.
+                let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::Consensus);
+                assert!(n > 0, "{what}, consensus: nothing compared");
             }
         }
         // The fusion moves boxes, so the comparison above sees the precisions.

@@ -23,11 +23,23 @@ binary, and its detections are byte-identical to hill 4's `dets-teacher.json`.
 | `folo-s-coco` (published, the start) | 0.4162 | 0.5798 | 0.4519 | 0.2289 | 0.4594 | 0.5845 | 679,000 |
 | **continued, epoch 48, f32** | **0.4224** | 0.5916 | 0.4572 | 0.2478 | 0.4670 | 0.5850 | 725,952 |
 | continued, fused f16 (`--half`) | 0.4225 | 0.5916 | 0.4571 | 0.2479 | 0.4669 | 0.5851 | 726,869 |
+| continued, `best.folo` (epoch 40, f32, CPU; **picked on this split**, see below) | 0.4259 | 0.5944 | 0.4608 | 0.2482 | 0.4728 | 0.5896 | 735,834 |
 
 Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1,000 resamples, seed 0, `logs/bootstrap.log`):
 **continued − published = +0.0062, 95% interval [+0.0034, +0.0090]**, P(diff ≤ 0) 0.000. By object size, from the
 unrounded scores: AP_S +0.0189, AP_M +0.0076, AP_L +0.0006. Each size is scored on its own, so these do not say how
 much each one contributed to the overall AP.
+
+**`best.folo`, scored once afterwards** (wave 6 lane `consensus`, `D:/folo-wave6/lanes/consensus/best/`; sha256
+`bc0a63a4…7c96`, the checkpoint of epoch 40, EMA weights). `folo val --coco --save-json --device cpu --workers 8` at
+this notebook's protocol (640 px, f32), pycocotools. All twelve numbers: AP 0.4259, AP50 0.5944, AP75 0.4608, AP_S
+0.2482, AP_M 0.4728, AP_L 0.5896, AR1 0.3422, AR10 0.5687, AR100 0.6238, AR_S 0.4345, AR_M 0.6779, AR_L 0.7899.
+Paired bootstrap against `eval/dets-cont.json` (the epoch 48 row above; 1,000 resamples, seed 0): **+0.0036, 95%
+interval [+0.0019, +0.0048]**. As a control, the epoch 48 weights through the same CPU command give as many
+detections as that GPU file (725,952) and all twelve numbers within 4e-7 of it, so the difference is not the device.
+**This number is optimistic by an amount not measured:** the trainer picked epoch 40 as the best of 48 by its mAP on
+val2017, the split scored here, and the interval covers the sampling of the images, not that choice. Nothing was
+published or exported from it.
 
 | file | bytes | sha256 |
 |---|---:|---|
@@ -153,7 +165,8 @@ pycocotools here (the published model: 0.4120 internal, 0.4162 pycocotools; the 
 round to the same 0.4215) and fell to 0.41796 at epoch 48, a drop of 0.0036. Over the last ten epochs mosaic was off
 and the learning rate was annealing. One curve shows when the drop happened, not what caused it. The exported
 weights are epoch 48's as the brief fixed; `best.folo` (epoch 40, picked by the trainer's own validation on the scored
-split) was not exported and not scored in the standalone COCO evaluation.
+split) was not exported. Scored afterwards in the standalone COCO evaluation it reads AP 0.4259, +0.0036 [+0.0019,
++0.0048] over epoch 48, with the selection caveat under [Result](#result).
 
 ## Wall-clock and throughput
 

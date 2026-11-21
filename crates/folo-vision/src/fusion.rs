@@ -12,6 +12,11 @@
 //! every candidate that entered NMS (after the confidence filter and the candidate cap) with its class (any class
 //! under `agnostic`) whose IoU with the kept box is `>= iou`, the kept candidate included. Lane `fusion` of
 //! hill-climb 3 chose the rule and the weights on 5000 train2017 images (docs/notes/hill/r3-fusion.md).
+//!
+//! [`ScoreRule::Consensus`], opt-in through [`crate::nms::NmsConfig::score`], uses the same clusters for the other
+//! half of a detection: it scales each kept box's score by the score mass of its cluster and re-sorts
+//! ([`consensus_scores`], docs/MODEL.md §9.4, docs/notes/hill/r6-consensus.md). Boxes, classes and the kept set do
+//! not change.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +27,115 @@ pub const DFL_FUSION_EPS: f32 = 0.1;
 
 /// Default cluster IoU of [`crate::nms::NmsConfig::fusion_iou`].
 pub const FUSION_IOU: f32 = 0.75;
+
+/// The cluster IoU `τ` of [`ScoreRule::Consensus`]. Fixed: it does not follow `fusion_iou`.
+pub const CONSENSUS_IOU: f32 = 0.75;
+
+/// The cap `R` of [`ScoreRule::Consensus`]: a cluster carrying this many times the kept box's score keeps the score.
+pub const CONSENSUS_CAP: f64 = 10.0;
+
+/// How the boxes NMS keeps are scored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScoreRule {
+    /// The class score (the default; every published number).
+    #[default]
+    None,
+    /// The class score scaled by the score mass of the box's cluster ([`consensus_scores`]). The score scale
+    /// changes: a box that fired alone is divided by up to `√10`, so a threshold on it means something else.
+    Consensus,
+}
+
+impl ScoreRule {
+    /// The name used by the CLI and in JSON (`none`, `consensus`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScoreRule::None => "none",
+            ScoreRule::Consensus => "consensus",
+        }
+    }
+}
+
+/// The candidates grouped by class (stable: candidate order inside a class), so a cluster scans one bucket; with
+/// `agnostic`, one bucket of every candidate.
+struct Buckets<'a> {
+    order: Vec<u32>,
+    classes: &'a [u32],
+    agnostic: bool,
+}
+
+impl<'a> Buckets<'a> {
+    fn new(classes: &'a [u32], agnostic: bool) -> Self {
+        let mut order: Vec<u32> = (0..classes.len() as u32).collect();
+        if !agnostic {
+            order.sort_by_key(|&i| classes[i as usize]);
+        }
+        Buckets { order, classes, agnostic }
+    }
+
+    fn of(&self, c: u32) -> &[u32] {
+        if self.agnostic {
+            return &self.order;
+        }
+        let lo = self.order.partition_point(|&i| self.classes[i as usize] < c);
+        let hi = self.order.partition_point(|&i| self.classes[i as usize] <= c);
+        &self.order[lo..hi]
+    }
+}
+
+/// IoU of `b` (of area `ba`) and `c`, in the arithmetic of `nms::nms_sorted` (and `boxes::box_iou`).
+#[inline]
+fn overlap(b: &Xyxy, ba: f32, c: &Xyxy) -> f32 {
+    let w = (b.x2.min(c.x2) - b.x1.max(c.x1)).max(0.0);
+    let h = (b.y2.min(c.y2) - b.y1.max(c.y1)).max(0.0);
+    let inter = w * h;
+    let union = ba + c.area() - inter;
+    if union > 0.0 { inter / union } else { 0.0 }
+}
+
+/// The consensus scores of the `kept` candidates (indices into `boxes` / `scores` / `classes`, the candidates that
+/// entered NMS), in `kept`'s order:
+///
+/// ```text
+/// M_k  = Σ s_j over the candidates j of k's class with IoU(b_k, b_j) >= τ      (j = k always included)
+/// s'_k = s_k · min(M_k / s_k, R)^a / R^a                                       τ = 0.75, a = 0.5, R = 10
+/// ```
+///
+/// The sum runs in `f64` in candidate order, so the result does not depend on threads or on other classes'
+/// candidates (any class counts under `agnostic`, as for the fusion). A member whose score is not `> 0` or whose box
+/// is not finite adds nothing, and a kept score that is not `> 0` stays as it is.
+pub fn consensus_scores(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    agnostic: bool,
+) -> Vec<f32> {
+    let buckets = Buckets::new(classes, agnostic);
+    kept.iter()
+        .map(|&k| {
+            if scores[k].is_nan() || scores[k] <= 0.0 {
+                return scores[k];
+            }
+            let b = boxes[k];
+            let ba = b.area();
+            let mut mass = 0f64;
+            for &j in buckets.of(classes[k]) {
+                let j = j as usize;
+                let c = &boxes[j];
+                // A NaN box can reach any IoU from f32 min / max, so a member's box must be finite.
+                let member = j == k
+                    || (overlap(&b, ba, c) >= CONSENSUS_IOU && c.to_array().iter().all(|v| v.is_finite()));
+                if member && scores[j] > 0.0 {
+                    mass += scores[j] as f64;
+                }
+            }
+            let s = scores[k] as f64;
+            // a = 0.5: a square root, which IEEE 754 rounds exactly on every platform.
+            (s * (mass / s).min(CONSENSUS_CAP).sqrt() / CONSENSUS_CAP.sqrt()) as f32
+        })
+        .collect()
+}
 
 /// How kept boxes are refined from their NMS cluster.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,34 +176,17 @@ pub fn fuse_boxes(
     iou: f32,
     precision: Option<&dyn Fn(usize) -> [f32; 4]>,
 ) -> Vec<Xyxy> {
-    // Candidates grouped by class (stable: candidate order inside a class), so a cluster scans one bucket.
-    let mut order: Vec<u32> = (0..boxes.len() as u32).collect();
-    if !agnostic {
-        order.sort_by_key(|&i| classes[i as usize]);
-    }
-    let bucket = |c: u32| -> &[u32] {
-        if agnostic {
-            return &order;
-        }
-        let lo = order.partition_point(|&i| classes[i as usize] < c);
-        let hi = order.partition_point(|&i| classes[i as usize] <= c);
-        &order[lo..hi]
-    };
+    let buckets = Buckets::new(&classes[..boxes.len()], agnostic);
     kept.iter()
         .map(|&k| {
             let b = boxes[k];
             let ba = b.area();
             let mut acc = [0f64; 4];
             let mut sum = [0f64; 4];
-            for &j in bucket(classes[k]) {
+            for &j in buckets.of(classes[k]) {
                 let j = j as usize;
                 let c = &boxes[j];
-                // The arithmetic of `nms::nms_sorted` (and `boxes::box_iou`).
-                let w = (b.x2.min(c.x2) - b.x1.max(c.x1)).max(0.0);
-                let h = (b.y2.min(c.y2) - b.y1.max(c.y1)).max(0.0);
-                let inter = w * h;
-                let union = ba + c.area() - inter;
-                let o = if union > 0.0 { inter / union } else { 0.0 };
+                let o = overlap(&b, ba, c);
                 if o.is_nan() || o < iou {
                     continue;
                 }
@@ -236,6 +333,53 @@ mod tests {
         assert!((m - 15.0).abs() < 1e-4 && v < 1e-4, "{m} {v}");
         let p = side_precision(m, v, 8.0);
         assert!((p * 64.0 * DFL_FUSION_EPS - 1.0).abs() < 1e-3, "{p}");
+    }
+
+    /// Hand-computed consensus scores: a lonely box (`M = s`, divided by `√10`), a cluster above the cap (the score
+    /// stays, bit for bit), a cluster between (`M/s = 2.5`), a member just below the IoU, another class's box on top.
+    #[test]
+    fn consensus_scores_by_hand() {
+        let boxes = [
+            // Lonely: nothing else of class 0 near it; candidate 1 is the same box in class 1.
+            b(0.0, 0.0, 10.0, 10.0),
+            b(0.0, 0.0, 10.0, 10.0),
+            // Between: kept 0.4 + a member at IoU 0.75 exactly (0.6); the third is at IoU 0.7, out.
+            b(100.0, 0.0, 110.0, 10.0),
+            b(100.0, 0.0, 110.0, 7.5),
+            b(100.0, 0.0, 110.0, 7.0),
+            // Above the cap: kept 0.1 with four members of 0.5 on the same box, M/s = 21.
+            b(200.0, 0.0, 210.0, 10.0),
+            b(200.0, 0.0, 210.0, 10.0),
+            b(200.0, 0.0, 210.0, 10.0),
+            b(200.0, 0.0, 210.0, 10.0),
+            b(200.0, 0.0, 210.0, 10.0),
+        ];
+        let scores = [0.8f32, 0.9, 0.4, 0.6, 0.9, 0.1, 0.5, 0.5, 0.5, 0.5];
+        let classes = [0u32, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+        let got = consensus_scores(&[0, 2, 5], &boxes, &scores, &classes, false);
+        assert_eq!(got[0], (0.8f32 as f64 / 10f64.sqrt()) as f32, "lonely: s / sqrt(10)");
+        let mass = 0.4f32 as f64 + 0.6f32 as f64;
+        let want = 0.4f32 as f64 * (mass / 0.4f32 as f64).sqrt() / 10f64.sqrt();
+        assert_eq!(got[1], want as f32, "between: M/s = 2.5");
+        assert!((got[1] - 0.2).abs() < 1e-6, "0.4 * sqrt(2.5 / 10) = 0.2, got {}", got[1]);
+        assert_eq!(got[2].to_bits(), 0.1f32.to_bits(), "at the cap the score stays");
+        // Agnostic: candidate 1 (another class, the same box) joins the lonely box's cluster.
+        let agn = consensus_scores(&[0], &boxes, &scores, &classes, true)[0];
+        let m = 0.8f32 as f64 + 0.9f32 as f64;
+        assert_eq!(agn, (0.8f32 as f64 * (m / 0.8f32 as f64).sqrt() / 10f64.sqrt()) as f32);
+    }
+
+    /// A kept box is in its own cluster even when its IoU with itself is not defined (zero area); a member with a
+    /// NaN box or a score that is not positive adds nothing; a kept score that is not positive stays.
+    #[test]
+    fn consensus_edge_cases() {
+        let flat = [b(5.0, 5.0, 5.0, 9.0)];
+        let got = consensus_scores(&[0], &flat, &[0.5], &[0], false)[0];
+        assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32);
+        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
+        let got = consensus_scores(&[0], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0], false)[0];
+        assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32, "the NaN box and the zero score add nothing");
+        assert_eq!(consensus_scores(&[2], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0], false), [0.0]);
     }
 
     /// The same inputs give the same boxes, bit for bit.

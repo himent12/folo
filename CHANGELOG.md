@@ -199,6 +199,10 @@ fixes.
   box's edges to a weighted mean of the candidates of its class that overlap it (IoU at least `--fusion-iou`),
   `dfl` weighting each side by the certainty of its DFL distribution. `--fusion dfl --iou 0.65 --max-det 1000` adds
   0.0025 to 0.0043 COCO AP on the published weights (`folo-n-coco-v3` 0.340 → 0.343). Off by default.
+- **Consensus score, opt-in** (`--score consensus` on `folo val` and `folo predict`, with or without `--fusion`): scales
+  each kept box's score by the score mass of its same-class cluster. +0.0021 COCO AP on `folo-n-coco-v5` (+0.0019 on top
+  of the fusion), +0.0012 on `folo-s-coco`, whose AP_L falls. The score scale changes, so `conf` means something else
+  with it on. Off by default.
 - The validation metrics score boxes clipped to the image (the trainer's internal mAP; COCO numbers unchanged).
 - **The CPU buffer cache evicts lengths that have gone unused** when it is full. Before, a process that had filled it
   (1 GiB) allocated every buffer of a later workload fresh on each call: with the rect batches, folo-s single

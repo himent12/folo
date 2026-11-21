@@ -343,6 +343,24 @@ impl From<FusionArg> for folo_vision::fusion::BoxFusion {
     }
 }
 
+/// How the boxes NMS keeps are scored (docs/MODEL.md §9.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ScoreArg {
+    /// The class score.
+    None,
+    /// The class score scaled by the score mass of the box's cluster.
+    Consensus,
+}
+
+impl From<ScoreArg> for folo_vision::fusion::ScoreRule {
+    fn from(s: ScoreArg) -> Self {
+        match s {
+            ScoreArg::None => folo_vision::fusion::ScoreRule::None,
+            ScoreArg::Consensus => folo_vision::fusion::ScoreRule::Consensus,
+        }
+    }
+}
+
 /// Dataset split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SplitArg {
@@ -450,6 +468,11 @@ pub struct ValArgs {
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
+    /// Score of each kept box (docs/MODEL.md §9.4): `consensus` scales it by the score mass of its cluster and
+    /// re-sorts. Boxes and the kept set do not change, but the score scale does (a box that fired alone is divided
+    /// by up to 3.16). Off by default.
+    #[arg(long, value_enum, default_value_t = ScoreArg::None)]
+    pub score: ScoreArg,
     /// Head to evaluate [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
     /// evaluates such a model's one-to-many branch with NMS.
     #[arg(long, value_enum)]
@@ -508,6 +531,11 @@ pub struct PredictArgs {
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
+    /// Score of each kept box (docs/MODEL.md §9.4): `consensus` scales it by the score mass of its cluster (the
+    /// candidates above --conf) and re-sorts. Boxes and the kept set do not change, but the score scale does (a box
+    /// that fired alone is divided by up to 3.16), and --conf still applies to the class score. Off by default.
+    #[arg(long, value_enum, default_value_t = ScoreArg::None)]
+    pub score: ScoreArg,
     /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
     /// uses such a model's one-to-many branch with NMS.
     #[arg(long, value_enum)]

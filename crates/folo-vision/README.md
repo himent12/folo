@@ -20,7 +20,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
 | `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs` |
 | `src/nms.rs` | Class-aware batched NMS, the full post-process, and the top-k of the `o2o` head |
-| `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) |
+| `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) and the consensus score (opt-in through `NmsConfig::score`) |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
 | `src/train/` | `mod.rs` (`Trainer`), `config.rs` (`TrainConfig`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `tests.rs` |

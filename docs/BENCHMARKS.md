@@ -1207,6 +1207,26 @@ by default and 6–14 s with the flags in these single runs (not an A/B; lane fu
 notebook), since the flags keep up to 1000 detections per image and read back each candidate's side moments. The
 server, Studio, ONNX export and the wasm build do not offer it yet ([Next optimisations](#next-optimisations)).
 
+**Consensus score, an option** (wave 6; docs/MODEL.md §9.4, [notes/hill/r6-consensus.md](notes/hill/r6-consensus.md)):
+`--score consensus` on `folo val` and `folo predict` scales each kept box's score by the score mass of the candidates
+of its class that overlap it (IoU at least 0.75), and sorts by the new score. Boxes, classes and which boxes are kept
+do not change. It is off by default and every other table here is without it. **The score scale changes** (a box that
+fired alone is divided by 3.16), so a `conf` threshold means something else with it on. CPU, f32, val2017, pycocotools;
+the gain is a paired bootstrap over the 5,000 images (1,000 resamples, seed 0, 95% interval):
+
+| weights, post-process | without: AP / AP50 / AP75 | with `--score consensus` | gain [95% interval] | AP_L without → with |
+|---|---|---|---:|---|
+| `folo-n-coco-v5`, default | 0.3701 / 0.5250 / 0.4000 | **0.3721** / 0.5269 / 0.4035 | +0.0021 [+0.0015, +0.0027] | 0.5396 → 0.5425 |
+| `folo-n-coco-v5`, fusion flags | 0.3730 / 0.5305 / 0.4006 | **0.3749** / 0.5318 / 0.4039 | +0.0019 [+0.0013, +0.0025] | 0.5423 → 0.5452 |
+| `folo-s-coco`, default | 0.4162 / 0.5798 / 0.4519 | **0.4174** / 0.5812 / 0.4544 | +0.0012 [+0.0002, +0.0021] | 0.5845 → **0.5812** |
+| `folo-s-coco`, fusion flags | 0.4186 / 0.5840 / 0.4537 | **0.4198** / 0.5849 / 0.4560 | +0.0011 [+0.0001, +0.0020] | 0.5874 → **0.5839** |
+
+Read the folo-s rows with care: the rule's τ 0.75 was picked after reading val2017 on these same folo-s weights, so
+their gain is optimistic, and folo-s loses on large objects. The folo-n v5 rows are on weights that played no part in
+that choice, on the same images. At validation's settings the rule adds a median of 0.02–0.04 ms per image on the CPU
+(mean 0.08–0.17 ms, p99 up to 1.9 ms; shared PC, 20–26% busy). The gain was measured at validation's `conf` 0.001 only.
+The server, Studio, ONNX export and the wasm build do not offer it.
+
 **Equal budget on a COCO proxy** (the hill-climb's learn agent, [notes/hill/learn.md](notes/hill/learn.md)): 20,000 train2017 /
 2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
 scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed for the last 5; COCO AP
