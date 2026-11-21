@@ -576,8 +576,9 @@ fn utf8_bom_is_ignored() {
     assert_eq!(open(r).unwrap().classes, ["person", "car"]);
 }
 
-/// An empty or whitespace split path (`test: ""`, `val: "  "`, `train: ["images/train", ""]`) leaves that source
-/// unset like `null`, rather than resolving `root.join("")` to the dataset root and walking every split's images.
+/// An empty split path (`test: ""`, `val: [""]`, `train: ["images/train", ""]`) leaves that source unset like
+/// `null`, rather than resolving `root.join("")` to the dataset root and walking every split's images. A
+/// whitespace-only path keeps the "does not exist" warning, and an explicit `.` still walks the dataset folder.
 #[test]
 fn yolo_empty_split_paths_do_not_scan_dataset_root() {
     let t = TempDir::new("yolo-empty-split");
@@ -588,7 +589,7 @@ fn yolo_empty_split_paths_do_not_scan_dataset_root() {
     write(&r.join("labels/val/v.txt"), "0 0.5 0.5 0.4 0.4\n");
     write(
         &r.join("data.yaml"),
-        "path: \"   \"\ntrain: [images/train, \"\", \"   \"]\nval: images/val\ntest: \"\"\nnames: [thing]\n",
+        "path: \"\"\ntrain: [images/train, \"\"]\nval: images/val\ntest: \"\"\nnames: [thing]\n",
     );
 
     let ds = open(r).unwrap();
@@ -598,11 +599,26 @@ fn yolo_empty_split_paths_do_not_scan_dataset_root() {
     assert_eq!(report.splits, [1, 1, 0]);
     assert!(report.is_clean(), "{:?}", report.issues);
 
-    // Whitespace val leaves val empty without leaking train images into it.
-    write(&r.join("data.yaml"), "train: images/train\nval: \"   \"\ntest: [\"\"]\nnames: [thing]\n");
+    // Empty sequence entry leaves test unset; a non-existent split path keeps its "does not exist" warning.
+    // On Unix, a whitespace-only path also fails `exists()` and warns (on Windows, Win32 strips trailing spaces
+    // in `exists()`/`is_dir()`, so `dir/   ` looks like a directory whose walk fails with 0 images).
+    write(
+        &r.join("data.yaml"),
+        "train: images/train\nval: missing_split\ntest: [\"\", \"   \"]\nnames: [thing]\n",
+    );
     let ds = open(r).unwrap();
     assert_eq!(ds.split_sizes(), [1, 0, 0], "{:#?}", ds.report);
-    assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
+    assert!(
+        ds.report.issues.iter().any(|i| i.kind == IssueKind::Other && i.message.contains("missing_split")),
+        "{:#?}",
+        ds.report
+    );
+    #[cfg(not(windows))]
+    assert!(
+        ds.report.issues.iter().any(|i| i.kind == IssueKind::Other && i.message.contains("\"   \"")),
+        "{:#?}",
+        ds.report
+    );
 
     // An explicit `.` split path still walks the dataset folder when intended.
     let flat = TempDir::new("yolo-dot-split");

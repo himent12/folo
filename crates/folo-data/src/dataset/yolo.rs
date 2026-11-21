@@ -92,7 +92,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     let mut report = LoadReport::default();
     let mut deps = vec![yaml.to_path_buf()];
     let root = match v.get("path").and_then(scalar_string) {
-        Some(p) if !p.trim().is_empty() => {
+        Some(p) if !p.is_empty() => {
             let p = PathBuf::from(p);
             let candidate = if p.is_absolute() { p } else { yaml_dir.join(p) };
             if candidate.is_dir() {
@@ -127,7 +127,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
         };
         let mut images = Vec::new();
         for src in sources {
-            if src.trim().is_empty() {
+            if src.is_empty() {
                 continue;
             }
             match resolve(&root, &yaml_dir, &src) {
@@ -312,21 +312,15 @@ fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
 
 /// Resolves a split source relative to the root; tolerates the `../train/images` paths Roboflow exports.
 fn resolve(root: &Path, yaml_dir: &Path, src: &str) -> Option<PathBuf> {
-    if src.trim().is_empty() {
-        return None;
-    }
     let p = Path::new(src);
     if p.is_absolute() {
         return p.exists().then(|| p.to_path_buf());
     }
     let stripped: PathBuf =
         p.components().skip_while(|c| matches!(c, Component::ParentDir | Component::CurDir)).collect();
-    let mut cands = vec![root.join(p), yaml_dir.join(p)];
-    if !stripped.as_os_str().is_empty() {
-        cands.push(root.join(&stripped));
-        cands.push(yaml_dir.join(&stripped));
-    }
-    cands.into_iter().find(|c| c.exists())
+    [root.join(p), yaml_dir.join(p), root.join(&stripped), yaml_dir.join(&stripped)]
+        .into_iter()
+        .find(|c| c.exists())
 }
 
 /// Adds images from a directory (recursively), a `.txt` list, or a single image file.
