@@ -329,18 +329,21 @@ async fn a_confined_session_refuses_the_benchmark_tools() {
     assert_eq!(err(&both, "get_benchmark", bench).await.body.code, "not_supported");
 }
 
-/// Runs `f`, a call to a server that never answers on `listener` (its connections wait in the backlog), on a thread.
-/// Without a deadline the call would hold for the HTTP client's 10-minute timeout: the watchdog fails the test then,
-/// and closing the listener ends the call, so no thread outlives the test.
-fn ends_by_its_deadline<T: Send>(listener: std::net::TcpListener, f: impl FnOnce() -> T + Send) -> T {
+/// Runs `call` on a thread and fails the test if it has not answered in a minute (a call that lost its deadline would
+/// hold far longer); `release` then ends the call, so no thread outlives the test.
+fn bounded<T: Send>(call: impl FnOnce() -> T + Send, release: impl FnOnce()) -> T {
     std::thread::scope(|scope| {
         let (done, answer) = std::sync::mpsc::channel();
         scope.spawn(move || {
-            let _ = done.send(f());
+            let _ = done.send(call());
         });
-        let got = answer.recv_timeout(std::time::Duration::from_secs(60));
-        drop(listener);
-        got.expect("the deadline did not end the call")
+        match answer.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(r) => r,
+            Err(_) => {
+                release();
+                panic!("the call did not end by its deadline");
+            }
+        }
     })
 }
 
@@ -357,9 +360,11 @@ fn a_wait_ends_when_the_server_stops_answering() {
             if known { http.assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]) } else { http };
         let b = crate::bench::Benchmarks::Http(Arc::new(http));
         let (poll, grace) = (Duration::from_millis(10), Duration::from_millis(50));
-        let r = ends_by_its_deadline(listener, || {
-            super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, grace, || {})
-        });
+        // The connections wait in the listener's backlog; closing it ends a call still held.
+        let r = bounded(
+            || super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, grace, |_| {}),
+            move || drop(listener),
+        );
         let e = r.unwrap_err();
         assert_eq!(e.body.code, "server_unreachable", "known features: {known}, {e:?}");
         assert!(e.body.hint.as_deref().unwrap_or_default().contains("bench_entry"), "{e:?}");
@@ -398,20 +403,29 @@ fn a_wait_follows_an_entry_until_it_ends() {
     let s = FoloMcp::new(store.clone(), None, options(home.path()));
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let args = |wait: u32| json!({ "benchmark_id": bench, "entry_id": entry, "wait": wait });
-    let now = rt.block_on(ok(&s, "bench_entry", args(0)));
+    // Finishing the entry ends a call that lost its deadline.
+    let release = || {
+        let _ = b.finish(&bench, &entry);
+    };
+    let now = bounded(|| rt.block_on(ok(&s, "bench_entry", args(0))), release);
     assert_eq!(now["status"], "running", "{now}");
     let start = Instant::now();
-    let held = rt.block_on(ok(&s, "bench_entry", args(1)));
+    let held = bounded(|| rt.block_on(ok(&s, "bench_entry", args(1))), release);
     assert_eq!(held["status"], "running", "{held}");
     // The tool polls every 100 ms and does not start a sleep that would pass the end of its wait.
     assert!(start.elapsed() >= Duration::from_millis(900), "{:?}", start.elapsed());
 
     let (poll, long, grace) = (Duration::from_millis(5), Duration::from_secs(30), Duration::from_secs(1));
+    let after_end = std::sync::atomic::AtomicUsize::new(0);
+    let counter = &after_end;
     let (ended, took) = std::thread::scope(|scope| {
         let (seen, polled) = std::sync::mpsc::channel();
         let waiter = scope.spawn(|| {
             let start = Instant::now();
-            let r = super::bench::wait_state(&b, &bench, &entry, poll, long, grace, move || {
+            let r = super::bench::wait_state(&b, &bench, &entry, poll, long, grace, move |e| {
+                if !e.status.is_active() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = seen.send(());
             });
             (r, start.elapsed())
@@ -421,6 +435,11 @@ fn a_wait_follows_an_entry_until_it_ends() {
         waiter.join().unwrap()
     });
     assert_eq!(ended.unwrap().status, BenchEntryStatus::Done);
+    assert_eq!(
+        after_end.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the wait went on after the entry ended"
+    );
     assert!(took < long, "the wait ran to its end: {took:?}");
     store.shutdown();
 }

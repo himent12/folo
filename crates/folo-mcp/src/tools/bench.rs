@@ -192,7 +192,7 @@ impl Inner {
         let poll = if self.proxy.is_some() { POLL_SERVER } else { POLL_HERE };
         let wait = Duration::from_secs(a.wait.into());
         let (id, entry) = (a.benchmark_id, a.entry_id);
-        let mut r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE, || {})).await?;
+        let mut r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE, |_| {})).await?;
         let cut = fit_state(&mut r);
         let summary = fitted_summary(&r, cut);
         out(&r, summary)
@@ -208,7 +208,7 @@ impl Inner {
 
 /// An entry's state once it has ended or `wait` has passed. Through a server, every request ends by `grace` after
 /// the wait, so a server that stops answering cannot hold the call (or this thread) for the client's long timeout.
-/// `seen` runs each time the entry is read still active.
+/// `seen` runs with each read of the entry that the wait goes on from.
 pub(super) fn wait_state(
     b: &Benchmarks,
     id: &str,
@@ -216,12 +216,12 @@ pub(super) fn wait_state(
     poll: Duration,
     wait: Duration,
     grace: Duration,
-    mut seen: impl FnMut(),
+    mut seen: impl FnMut(&folo_api::BenchEntry),
 ) -> Result<BenchEntryState, Error> {
     let deadline = Instant::now() + wait;
     let b = b.until(deadline + grace);
-    let keep_going = |_: &folo_api::BenchEntry| {
-        seen();
+    let keep_going = |e: &folo_api::BenchEntry| {
+        seen(e);
         Instant::now() + poll <= deadline
     };
     b.follow(id, entry, poll, keep_going).and_then(|e| b.state_of(e)).map_err(|mut e| {
