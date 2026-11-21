@@ -58,24 +58,13 @@ pub(super) fn enqueue_model(
 
 /// Stops entry `id` of `slot` if it is active: one that waits is taken out of the queue and is `stopped` at once,
 /// and so is an open external entry (what it received is dropped); one that runs is `stopping` until its work
-/// ends. Returns the entry, or `409 bench_entry_not_active`, also for an external entry being scored: its finish took
-/// it first, and its score stands. The entry's file is written before it changes in memory.
+/// ends. Returns the entry, or `409 bench_entry_not_active`. The entry's file is written before it changes in
+/// memory.
 pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<BenchEntry> {
     let mut state = slot.live()?;
     let e = state.entry(id)?;
     let mut entry = e.entry.clone();
-    let claimed = e.open.clone();
-    let ends = if let Some(fill) = &claimed {
-        // Claimed under the filling's lock: a finish that got there first is scoring, one that comes later is refused.
-        let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if f.closed {
-            return Err(Error::conflict(
-                "bench_entry_not_active",
-                format!("entry '{id}' is being scored: it cannot be stopped"),
-            )
-            .hint("GET /api/bench/benchmarks/{id}/entries/{entry_id} has it once it is done"));
-        }
-        f.closed = true;
+    let ends = if e.open.is_some() {
         entry.status = BenchEntryStatus::Stopped;
         true
     } else {
@@ -101,16 +90,12 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
     if ends {
         entry.finished = Some(rfc3339(unix_now()));
     }
-    if let Err(failed) = slot.save_entry(&state, &entry, None) {
-        // Not stopped after all: the entry stays open.
-        if let Some(fill) = &claimed {
-            fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = false;
-        }
-        return Err(failed);
-    }
+    slot.save_entry(&state, &entry, None)?;
     let e = state.entry_mut(id).expect("looked up above, under the same lock");
     e.cancel.store(true, Ordering::SeqCst);
-    e.open = None;
+    if let Some(fill) = e.open.take() {
+        fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
+    }
     e.entry = entry.clone();
     slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
     if ends {
@@ -415,59 +400,4 @@ fn done_entry(slot: &Slot, entry_id: &str) -> Result<BenchEntry> {
         ));
     }
     Ok(e.entry.clone())
-}
-
-#[cfg(test)]
-mod tests {
-    use folo_api::{BenchPlan, BenchPrediction, BenchSource, CreateBench, SyntheticDataset};
-    use folo_test_support::TestDir;
-
-    use super::*;
-    use crate::RealStore;
-
-    /// A stop that arrives after a finish has taken the entry, while it is scored, is refused and the score is saved.
-    #[test]
-    fn a_stop_leaves_an_entry_being_scored() {
-        let home = TestDir::new("bench-stop-scoring");
-        let store = RealStore::open(home.path().to_path_buf()).device("cpu");
-        let classes = vec!["circle".to_string(), "square".to_string()];
-        let req = SyntheticDataset { name: "shapes".into(), images: 20, classes, imgsz: 64, seed: 3 };
-        let ds = store.create_synthetic(req).unwrap();
-        let b = store.benches().unwrap();
-        let plan = BenchPlan { conditions: vec![], rationale: None, designed_by: None };
-        let req = CreateBench {
-            name: "b".into(),
-            description: String::new(),
-            source: BenchSource::Dataset { dataset_id: ds.id, split: None },
-            max_images: None,
-            seed: 0,
-            plan: Some(plan),
-        };
-        let bench = b.create(&store, req).unwrap();
-        let predictions = b
-            .images(&bench.id, 0, 1000, None)
-            .unwrap()
-            .images
-            .iter()
-            .map(|im| BenchPrediction {
-                image: im.id.clone(),
-                condition: None,
-                severity: None,
-                boxes: vec![],
-            })
-            .collect();
-        let contestant = BenchContestantSpec::External { scored: true, open: true, predictions };
-        let req = StartBenchEntry { contestant, name: Some("e".into()), max_images: None, conditions: None };
-        let entry = b.start_entry(&store, &bench.id, req).unwrap();
-        let slot = b.slot(&bench.id).unwrap();
-
-        let fill = external::open_entry(&slot, &entry.id).unwrap();
-        let taken = external::take_finished(&slot, &entry.id, &fill).unwrap();
-        let refused = b.stop_entry(&bench.id, &entry.id).unwrap_err();
-        assert_eq!(refused.body.code, "bench_entry_not_active");
-        let saved = external::save_finished(&slot, &entry.id, &fill, taken).unwrap();
-        assert_eq!(saved.status, BenchEntryStatus::Done);
-        assert!(saved.score.is_some());
-        store.shutdown();
-    }
 }

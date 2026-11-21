@@ -4,6 +4,10 @@
 use crate::errors::Error;
 pub use crate::label::hints::Front;
 
+/// Stands in an upload's hint for the commands that show and stop its entry: [`decorate`] puts them in the front end's
+/// words.
+pub(super) const ENTRY_COMMANDS: &str = "<entry commands>";
+
 /// `e` with a hint in `front`'s words (an error whose code has nothing to add keeps its hint).
 pub fn decorate(mut e: Error, front: Front) -> Error {
     let mcp = front == Front::Mcp;
@@ -40,6 +44,14 @@ pub fn decorate(mut e: Error, front: Front) -> Error {
     if let Some(h) = hint {
         e.body.hint = Some(h.to_string());
     }
+    if let Some(h) = &mut e.body.hint {
+        let commands = if mcp {
+            "bench_entry shows it and stop_bench_entry stops it"
+        } else {
+            "`folo bench status BENCH ENTRY` shows it and `folo bench stop BENCH ENTRY` stops it"
+        };
+        *h = h.replace(ENTRY_COMMANDS, commands);
+    }
     e
 }
 
@@ -55,5 +67,8 @@ mod tests {
         assert!(decorate(e(), Front::Cli).body.hint.unwrap().contains("folo bench stop"));
         let other = Error::conflict("bench_frozen", "x").hint("kept");
         assert_eq!(decorate(other, Front::Cli).body.hint.unwrap(), "kept");
+        let left = || Error::conflict("x", "y").hint(format!("entry left; {ENTRY_COMMANDS}"));
+        assert!(decorate(left(), Front::Mcp).body.hint.unwrap().ends_with("stop_bench_entry stops it"));
+        assert!(decorate(left(), Front::Cli).body.hint.unwrap().contains("`folo bench stop BENCH ENTRY`"));
     }
 }

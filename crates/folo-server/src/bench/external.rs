@@ -459,7 +459,7 @@ pub(super) fn start(
 }
 
 /// The filling of the open external entry `entry_id`, or `409 bench_entry_not_open`.
-pub(super) fn open_entry(slot: &Slot, entry_id: &str) -> Result<Arc<Mutex<Filling>>> {
+fn open_entry(slot: &Slot, entry_id: &str) -> Result<Arc<Mutex<Filling>>> {
     let state = slot.live()?;
     let e = state.entry(entry_id)?;
     e.open.clone().ok_or_else(|| not_open(entry_id, &e.entry))
@@ -503,41 +503,19 @@ pub(super) fn add(slot: &Slot, entry_id: &str, predictions: Vec<BenchPrediction>
 /// saying what is missing leaves it open.
 pub(super) fn finish(slot: &Slot, entry_id: &str) -> Result<BenchEntry> {
     let fill = open_entry(slot, entry_id)?;
-    let taken = take_finished(slot, entry_id, &fill)?;
-    save_finished(slot, entry_id, &fill, taken)
-}
-
-/// What a finish took from a filling, closing it: the records to grade, whether they are scored, how many arrived
-/// and the benchmark.
-pub(super) type Taken = (Finished, bool, u64, BenchFile);
-
-/// The first half of [`finish`]: checks the entry is whole and closes it, so nothing else can take it.
-pub(super) fn take_finished(slot: &Slot, entry_id: &str, fill: &Arc<Mutex<Filling>>) -> Result<Taken> {
     // As in `add`: the filling's lock is let go before the benchmark's is asked for.
     let taken = {
-        let mut f = lock(fill);
+        let mut f = lock(&fill);
         if f.closed { None } else { Some((f.finish()?, f.scored(), f.received, f.file().clone())) }
     };
-    match taken {
-        Some(t) => Ok(t),
-        None => {
-            let state = slot.live()?;
-            Err(not_open(entry_id, &state.entry(entry_id)?.entry))
-        }
-    }
-}
-
-/// The second half of [`finish`]: grades what was taken and saves the score.
-pub(super) fn save_finished(
-    slot: &Slot,
-    entry_id: &str,
-    fill: &Arc<Mutex<Filling>>,
-    (finished, scored, received, file): Taken,
-) -> Result<BenchEntry> {
+    let Some((finished, scored, received, file)) = taken else {
+        let state = slot.live()?;
+        return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
+    };
     let graded = grade(&file, scored, &finished);
     let mut state = slot.live()?;
     let e = state.entry(entry_id)?;
-    if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, fill)) {
+    if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, &fill)) {
         // Stopped, expired or the server shut down while it was scored.
         return Err(not_open(entry_id, &e.entry));
     }

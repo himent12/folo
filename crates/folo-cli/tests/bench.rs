@@ -167,18 +167,24 @@ fn bench_in_this_process() {
     assert_eq!(s(&error(&["run", &b, "--predictions", &file], &d, 2)["code"]), "usage", "a name is required");
     let done = ok(&["run", &b, "--predictions", &file, "--name", "nothing"], &d);
     assert_eq!((s(&done["status"]), done["result"]["partial"].as_bool()), ("done", Some(true)), "{done}");
-    // A record the server refuses makes no entry; a file it cannot finish (image 4 is missing) leaves none.
+    // A record the server refuses makes no entry. A file it cannot finish (image 4 is missing) had a finish sent, so
+    // its entry is left and named; this process ends with it, and an open entry ends `failed` with its process.
     let unknown = predictions(&t, "unknown.jsonl", &[json!({ "image": "99", "boxes": [] })]);
     let e = error(&["run", &b, "--predictions", &unknown, "--name", "bad"], &d, 2);
     assert!(s(&e["message"]).contains("'99'"), "{e}");
     let short = predictions(&t, "short.jsonl", &empty[..3]);
     let e = error(&["run", &b, "--predictions", &short, "--name", "short"], &d, 2);
-    assert!(s(&e["message"]).contains("'4'") && s(&e["hint"]).contains("was removed"), "{e}");
+    assert!(
+        s(&e["message"]).contains("'4'")
+            && s(&e["hint"]).contains("'short'")
+            && s(&e["hint"]).contains("was left"),
+        "{e}"
+    );
 
     let shown = ok(&["show", &b], &d);
     let board: Vec<&str> = shown["leaderboard"].as_array().unwrap().iter().map(|e| s(&e["name"])).collect();
-    assert_eq!(board.len(), 2, "{shown}");
-    assert!(board.contains(&"shapes") && board.contains(&"nothing"), "{board:?}");
+    assert_eq!(board.len(), 3, "{shown}");
+    assert!(board.contains(&"shapes") && board.contains(&"nothing") && board.contains(&"short"), "{board:?}");
     assert_eq!(ok(&["delete", &b], &d)["deleted"], true);
     assert_eq!(s(&error(&["show", &b], &d, 3)["code"]), "bench_not_found");
 }

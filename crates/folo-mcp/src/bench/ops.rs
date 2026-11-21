@@ -17,6 +17,7 @@ use http::StatusCode;
 use serde_json::Value;
 
 use super::Benchmarks;
+use super::hints::ENTRY_COMMANDS;
 use crate::errors::{Error, invalid_arguments};
 use crate::types::bench::*;
 
@@ -108,8 +109,9 @@ impl Benchmarks {
         self.start_unless(id, who, name, &AtomicBool::new(false))
     }
 
-    /// [`Benchmarks::start`], with `stop` (Ctrl+C) ending the sending of a file of predictions before or after a read
-    /// of a part: the error is `interrupted`, and [`Benchmarks::clean_up`] decides what becomes of the entry.
+    /// [`Benchmarks::start`], with `stop` (Ctrl+C) ending the sending of a file of predictions before the next record
+    /// is read or the next request is sent: the error is `interrupted`, and [`Benchmarks::clean_up`] decides what
+    /// becomes of the entry.
     pub fn start_unless(
         &self,
         id: &str,
@@ -126,7 +128,14 @@ impl Benchmarks {
                 let name = name.filter(|n| !n.trim().is_empty()).ok_or_else(|| {
                     invalid_arguments("an entry of predictions needs a name for the leaderboard")
                 })?;
-                self.submit_in(id, name, scored, &path, PARTS, stop)?
+                let entry = self.submit_in(id, name, scored, &path, PARTS, stop)?;
+                let who = named(&entry);
+                return self.state_of(entry).map_err(|e| {
+                    with_hint(
+                        e,
+                        format!("{who} was scored, but its result could not be read; {ENTRY_COMMANDS}"),
+                    )
+                });
             }
         };
         self.state_of(entry)
@@ -212,10 +221,15 @@ impl Benchmarks {
         limits: PartLimits,
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
-        let mut records = records.peekable();
-        // Before a read (it can take long, or wait on a pipe) and after it (a request or the finish comes next).
+        let mut source = records;
+        // Before each record is read, so a pipe that gave one record after Ctrl+C is not read again.
+        let mut records = std::iter::from_fn(|| match check_interrupt(stop) {
+            Ok(()) => source.next(),
+            Err(e) => Some(Err(e)),
+        })
+        .peekable();
+        // And after a part is read: a request or the finish comes next.
         let mut read = || {
-            check_interrupt(stop)?;
             let part = next_part(&mut records, limits)?;
             check_interrupt(stop)?;
             Ok::<_, Error>(part)
@@ -239,51 +253,42 @@ impl Benchmarks {
             }
         })();
         if let Err(e) = sent {
-            let (what, _) = self.clean_up(id, &entry);
+            let what = self.clean_up(id, &entry);
             return Err(with_hint(e, what));
         }
-        match self.finish(id, &entry.id) {
-            Ok(done) => Ok(done),
-            Err(e) => {
-                // No answer, or another client finished it: a result the server saved is this upload's answer.
-                let says_nothing = e.status.is_server_error() || e.body.code == "bench_entry_not_open";
-                let (what, now) = self.clean_up(id, &entry);
-                match now {
-                    Some(end)
-                        if says_nothing
-                            && matches!(end.status, BenchEntryStatus::Done | BenchEntryStatus::Failed) =>
-                    {
-                        Ok(end)
-                    }
-                    _ => Err(with_hint(e, what)),
-                }
-            }
-        }
+        self.finish(id, &entry.id).or_else(|e| self.after_finish(id, &entry, e))
     }
 
-    /// The one cleanup of a failed upload, whatever failed. The server is asked what the entry is: only one still
-    /// open is stopped (the server refuses to stop one being scored) and then deleted. Any other state is left alone
-    /// and reported, and an entry whose state cannot be read is named as possibly left. Returns what to tell the
-    /// user, and the entry as last read if it is still there.
-    fn clean_up(&self, id: &str, opened: &BenchEntry) -> (String, Option<BenchEntry>) {
-        let who = format!("entry '{}' ({})", opened.name, opened.id);
+    /// A failure before any finish was sent. The entry is read: one still open is stopped and removed; one in any other
+    /// state, or that cannot be read, is left and named. Returns what to tell the user.
+    fn clean_up(&self, id: &str, opened: &BenchEntry) -> String {
+        let who = named(opened);
         let stopped = match self.entry(id, &opened.id) {
             // A stop whose answer was lost may have worked: the entry's state says.
             Ok(e) if e.status == BenchEntryStatus::Running => {
                 self.stop_entry(id, &opened.id).or_else(|_| self.entry(id, &opened.id))
             }
-            Ok(e) => return (left(&who, &e), Some(e)),
-            Err(e) => Err(e),
+            Ok(e) => return left(&who, &e),
+            Err(_) => return unread(&who),
         };
         match stopped {
             Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
-                Ok(()) => (format!("{who} was removed"), None),
-                Err(u) => {
-                    (format!("{who} is stopped but could not be removed ({})", u.body.message), Some(e))
-                }
+                Ok(()) => format!("{who} was removed"),
+                Err(u) => format!("{who} is stopped but could not be removed ({})", u.body.message),
             },
-            Ok(e) => (left(&who, &e), Some(e)),
-            Err(_) => (format!("{who} may be left on the server: read it by its id"), None),
+            Ok(e) => left(&who, &e),
+            Err(_) => unread(&who),
+        }
+    }
+
+    /// A finish that did not answer with the entry: it may be scoring, so nothing here stops or deletes it, on any
+    /// server. The entry is read once: scored is the result; anything else is `e`, with a hint naming the entry.
+    fn after_finish(&self, id: &str, sent: &BenchEntry, e: Error) -> Result<BenchEntry, Error> {
+        let who = named(sent);
+        match self.entry(id, &sent.id) {
+            Ok(now) if now.status == BenchEntryStatus::Done => Ok(now),
+            Ok(now) => Err(with_hint(e, left(&who, &now))),
+            Err(_) => Err(with_hint(e, unread(&who))),
         }
     }
 }
@@ -295,6 +300,11 @@ fn with_hint(e: Error, what: String) -> Error {
         None => what,
     };
     e.hint(hint)
+}
+
+/// An entry as the hints name it: as the server lists it, and its id.
+fn named(e: &BenchEntry) -> String {
+    format!("entry '{}' ({})", e.name, e.id)
 }
 
 /// The `interrupted` error once `stop` (Ctrl+C) is set.
@@ -309,15 +319,19 @@ fn check_interrupt(stop: &AtomicBool) -> Result<(), Error> {
     ))
 }
 
-/// What the hint says of an entry `clean_up` left as it is.
+/// What the hint says of an entry this upload leaves as it is.
 fn left(who: &str, e: &BenchEntry) -> String {
-    if e.status.is_active() {
-        format!(
-            "{who} was left: it is running and may be being scored; read it by its id (left open, it expires)"
-        )
+    let state = if e.status.is_active() {
+        "open or being scored".to_string()
     } else {
-        format!("{who} was left: it is {}", format!("{:?}", e.status).to_lowercase())
-    }
+        format!("{:?}", e.status).to_lowercase()
+    };
+    format!("{who} was left: it is {state}; {ENTRY_COMMANDS}")
+}
+
+/// What the hint says of an entry whose state could not be read.
+fn unread(who: &str) -> String {
+    format!("{who} may be left on the server: its state could not be read; {ENTRY_COMMANDS}")
 }
 
 /// The request that opens an entry failed: when the answer may be what was lost, the entry may exist, and its id is
