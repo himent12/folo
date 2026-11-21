@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-use folo_data::{CocoGroundTruth, CocoImage, Dataset, FileDataset, Split};
+use folo_data::{CocoGroundTruth, CocoImage, FileDataset, Split};
 use folo_vision::Detection;
 use folo_vision::cocoeval::{CocoEval, CocoStats, CocoTruth};
 
@@ -400,13 +400,7 @@ mod tests {
         let part = folo_data::FileDataset::new(
             folo_data::Split::Val,
             two_classes,
-            vec![folo_data::ImageEntry {
-                image: img,
-                label: None,
-                width: 64,
-                height: 64,
-                boxes: vec![(1, [10.0 / 64.0, 10.0 / 64.0, 30.0 / 64.0, 30.0 / 64.0])],
-            }],
+            vec![folo_data::ImageEntry { image: img, label: None, size: Some((64, 64)), boxes: Vec::new() }],
         );
         let dets = vec![(
             0usize,
