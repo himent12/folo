@@ -35,9 +35,10 @@ produces plain buffers that the trainer wraps in tensors.
   normalised.
 
 ### COCO
-- A file's split comes from the whole words of its name, then of its folder's name (`instances_val2017.json`,
-  `valid/_annotations.coco.json`); with neither it is `train`, so a dataset in a folder called `valves` or `latest` is
-  a training set.
+- A file's split is the first of `train`, `val`, `test` found anywhere in its name, then in its folder's name
+  (`instances_val2017.json`, `valsubset.json`, `valid/_annotations.coco.json`); with neither it is `train`. A short
+  list of ordinary words that contain `val` or `test` (`valves`, `festival`, `latest`, `contest`, `protest`, ...) does
+  not count when it is a whole run of letters; an unlisted word (`rival` is listed, `strain` is not) still matches.
 - `images[].file_name` is resolved against the first folder that has the files: the JSON's folder, `images/<tag>`,
   `<tag>` (where `instances_train2017.json` has tag `train2017`), `images/<split>`, `<split>`, `images/`, the root.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. Crowd annotations (`iscrowd` of `1`, `1.0` or

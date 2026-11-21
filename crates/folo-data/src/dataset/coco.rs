@@ -8,50 +8,56 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Guesses the split from a JSON file name or its folder (`instances_val2017.json`, `valid/_annotations.coco.json`),
-/// by whole words: a dataset in a folder called `valves` or `latest` is not a validation or test set.
+/// Ordinary words that contain `val` or `test` and name no split, so a dataset in a folder called `valves` or `latest`
+/// is not a validation or test set.
+const NOT_A_SPLIT: &[&str] = &[
+    "approval",
+    "arrival",
+    "arrivals",
+    "carnival",
+    "carnivals",
+    "contest",
+    "contests",
+    "fastest",
+    "festival",
+    "festivals",
+    "greatest",
+    "interval",
+    "intervals",
+    "latest",
+    "medieval",
+    "protest",
+    "protests",
+    "removal",
+    "retrieval",
+    "rival",
+    "rivals",
+    "survival",
+    "valley",
+    "valleys",
+    "value",
+    "values",
+    "valve",
+    "valves",
+];
+
+/// Guesses the split from a JSON file name, then its folder's (`instances_val2017.json`,
+/// `valid/_annotations.coco.json`).
 pub(crate) fn guess_split(path: &Path) -> Split {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let parent = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("");
     split_in_name(stem).or_else(|| split_in_name(parent)).unwrap_or(Split::Train)
 }
 
-/// The split a name's words give (`train` before `val` before `test`). Words end at anything but a letter and where
-/// a lower-case letter meets an upper-case one (`valAnnotations`).
+/// The first of `train`, `val`, `test` found anywhere in a name (`valsubset`, `instances_myval`), ignoring the runs of
+/// letters that are exactly a [`NOT_A_SPLIT`] word.
 fn split_in_name(name: &str) -> Option<Split> {
-    // What these names glue to a split word: `valannotations`, `cocotrain`, `testset`.
-    const FILLER: [&str; 9] =
-        ["annotations", "annotation", "anns", "ann", "labels", "label", "coco", "data", "set"];
-    let mut words = vec![String::new()];
-    let mut after_lower = false;
-    for c in name.chars() {
-        if !c.is_alphabetic() || (after_lower && c.is_uppercase()) {
-            words.push(String::new());
-        }
-        after_lower = c.is_lowercase();
-        if c.is_alphabetic() {
-            words.last_mut().expect("starts with one word").extend(c.to_lowercase());
-        }
-    }
-    let mut found = [false; 3];
-    for word in &words {
-        let mut w = word.as_str();
-        while let Some(rest) = FILLER
-            .iter()
-            .find_map(|f| w.strip_prefix(f).or_else(|| w.strip_suffix(f)))
-            .filter(|rest| !rest.is_empty())
-        {
-            w = rest;
-        }
-        match w {
-            "train" | "training" | "trainval" => found[Split::Train as usize] = true,
-            "val" | "valid" | "validate" | "validation" | "eval" | "evaluation" | "minival"
-            | "valminusminival" => found[Split::Val as usize] = true,
-            "test" | "tests" | "testing" | "testdev" => found[Split::Test as usize] = true,
-            _ => {}
-        }
-    }
-    Split::ALL.into_iter().find(|&s| found[s as usize])
+    let name = name.to_ascii_lowercase();
+    let words = name.split(|c: char| !c.is_alphabetic()).filter(|w| !NOT_A_SPLIT.contains(w));
+    let has = |part: &str| words.clone().any(|w| w.contains(part));
+    [(Split::Train, "train"), (Split::Val, "val"), (Split::Test, "test")]
+        .into_iter()
+        .find_map(|(split, part)| has(part).then_some(split))
 }
 
 fn json_files(dir: &Path) -> Vec<PathBuf> {

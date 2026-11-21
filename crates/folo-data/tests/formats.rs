@@ -254,47 +254,82 @@ fn labels_beside_images_below_a_folder_called_images() {
     assert_eq!(open(mirrored.join("images/set")).unwrap().train.boxes(0).len(), 1);
 }
 
-/// A COCO file's split comes from whole words of its name, then of its folder's: every name COCO, Roboflow and CVAT
-/// write keeps its split, and a word that merely contains `val`, `test` or `train` is not one.
-#[test]
-fn coco_split_comes_from_whole_words() {
-    let t = TempDir::new("coco-split");
+/// Opens a one-image COCO file at each `(path, split)` and checks the image lands in that split.
+fn assert_coco_splits(tag: &str, cases: &[(&str, Split)]) {
+    let t = TempDir::new(tag);
     let doc = serde_json::json!({
         "images": [{"id": 1, "file_name": "a.png", "width": 8, "height": 8}],
         "annotations": [{"image_id": 1, "category_id": 1, "bbox": [1, 1, 4, 4]}],
         "categories": [{"id": 1, "name": "thing"}]
     });
-    let cases = [
-        ("annotations/instances_train2017.json", Split::Train),
-        ("annotations/instances_val2017.json", Split::Val),
-        ("annotations/instances_minival2014.json", Split::Val),
-        ("annotations/instances_valminusminival2014.json", Split::Val),
-        ("annotations/instances_trainval35k.json", Split::Train),
-        ("annotations/image_info_test-dev2017.json", Split::Test),
-        ("annotations/instances_Validation.json", Split::Val),
-        ("annotations/instances_default.json", Split::Train),
-        ("valid/_annotations.coco.json", Split::Val),
-        ("test/_annotations.coco.json", Split::Test),
-        ("d/valAnnotations.json", Split::Val),
-        ("d/valannotations.json", Split::Val),
-        ("d/cocotest.json", Split::Test),
-        ("d/train_val.json", Split::Train),
-        ("coco_val/annotations.json", Split::Val),
-        // A folder or file named for what it holds.
-        ("valves/annotations.json", Split::Train),
-        ("festival/_annotations.coco.json", Split::Train),
-        ("latest/annotations.json", Split::Train),
-        ("contest-2024/annotations.json", Split::Train),
-        ("d/valves.json", Split::Train),
-        ("d/protest_coco.json", Split::Train),
-    ];
-    for (i, (path, split)) in cases.into_iter().enumerate() {
+    for (i, &(path, split)) in cases.iter().enumerate() {
         let json = t.join(i.to_string()).join(path);
         write_png(&json.with_file_name("a.png"), 8, 8, [0; 3]);
         write(&json, serde_json::to_vec(&doc).unwrap());
         let ds = open(&json).unwrap();
         assert_eq!(ds.split(split).len(), 1, "{path} should be {split}: {:?}", ds.split_sizes());
     }
+}
+
+/// Names that read the same as before the ordinary-word list: a split word anywhere in a name still counts.
+#[test]
+fn coco_split_names_that_keep_their_split() {
+    assert_coco_splits(
+        "coco-split-keep",
+        &[
+            ("annotations/instances_train2017.json", Split::Train),
+            ("annotations/instances_val2017.json", Split::Val),
+            ("annotations/instances_minival2014.json", Split::Val),
+            ("annotations/instances_valminusminival2014.json", Split::Val),
+            ("annotations/instances_trainval35k.json", Split::Train),
+            ("annotations/image_info_test-dev2017.json", Split::Test),
+            ("annotations/instances_Validation.json", Split::Val),
+            ("annotations/instances_default.json", Split::Train),
+            ("valid/_annotations.coco.json", Split::Val),
+            ("test/_annotations.coco.json", Split::Test),
+            ("d/valAnnotations.json", Split::Val),
+            ("d/valannotations.json", Split::Val),
+            ("d/cocotest.json", Split::Test),
+            ("d/train_val.json", Split::Train),
+            ("coco_val/annotations.json", Split::Val),
+            // Glued names.
+            ("annotations/instances_VALSubset.json", Split::Val),
+            ("d/valsplit.json", Split::Val),
+            ("d/trainsplit.json", Split::Train),
+            ("annotations/instances_myval.json", Split::Val),
+            ("d/valimages.json", Split::Val),
+            ("d/valsubset.json", Split::Val),
+            ("d/testa.json", Split::Test),
+            ("evaluate/annotations.json", Split::Val),
+            ("valsubset/annotations.json", Split::Val),
+            ("myval/annotations.json", Split::Val),
+            ("testa/annotations.json", Split::Test),
+            // An ordinary word beside a split word.
+            ("festival_val/annotations.json", Split::Val),
+            ("val/festival.json", Split::Val),
+            ("d/latest_train.json", Split::Train),
+        ],
+    );
+}
+
+/// An ordinary word that merely contains `val` or `test` names no split: the name's folder decides, else `train`.
+#[test]
+fn coco_split_ordinary_words_are_not_splits() {
+    assert_coco_splits(
+        "coco-split-words",
+        &[
+            ("valves/annotations.json", Split::Train),
+            ("festival/_annotations.coco.json", Split::Train),
+            ("latest/annotations.json", Split::Train),
+            ("contest-2024/annotations.json", Split::Train),
+            ("protest/annotations.json", Split::Train),
+            ("Intervals/annotations.json", Split::Train),
+            ("d/valves.json", Split::Train),
+            ("d/protest_coco.json", Split::Train),
+            ("test/valves.json", Split::Test),
+            ("train/latest.json", Split::Train),
+        ],
+    );
 }
 
 /// An integral float id is the integer: `"image_id": 1.0` names the image `"id": 1` (and the other way round).
