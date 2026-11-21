@@ -214,8 +214,8 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.stats().class_counts, vec![1, 1, 2]);
 }
 
-/// A folder called `images` above a dataset is not part of its layout: labels beside the images are read whichever
-/// way the path is spelled, by the loader and the checker. The layouts that pair `images/` with `labels/` keep working.
+/// A folder called `images` above a dataset is not part of its layout unless the dataset's own mirror exists: labels
+/// beside the images are read by the loader and the checker, also next to another dataset's `labels` folder.
 #[test]
 fn labels_beside_images_below_a_folder_called_images() {
     let t = TempDir::new("labels-beside");
@@ -228,9 +228,21 @@ fn labels_beside_images_below_a_folder_called_images() {
     let ds = open(&beside).unwrap();
     assert_eq!(ds.train.boxes(0).len(), 1, "labels beside the image");
     assert_eq!(ds.train.entries()[0].label.as_deref(), Some(beside.join("train/a.txt").as_path()));
-    assert!(ds.sources.contains(&t.join("labels")), "a labels folder created later changes the dataset");
+    assert!(ds.sources.contains(&t.join("labels/birds")), "creating the mirror changes the dataset");
     let report = folo_data::check::check(&beside, &Default::default()).unwrap();
     assert!(report.issues.is_empty(), "{:#?}", report.issues);
+
+    // Another dataset's labels next to the same `images` folder change nothing.
+    write(&t.join("labels/dogs/train/b.txt"), line);
+    assert_eq!(open(&beside).unwrap().train.boxes(0).len(), 1, "an unrelated labels folder");
+}
+
+/// The layouts that pair `images/` with `labels/` read as before, and a stray `.txt` beside an image of a mirrored
+/// dataset is not its label.
+#[test]
+fn label_layouts_that_pair_images_with_labels() {
+    let t = TempDir::new("labels-paired");
+    let line = "0 0.5 0.5 0.2 0.2\n";
 
     // The standard layout, inside a folder called `images`.
     let standard = t.join("images/standard");
@@ -252,6 +264,12 @@ fn labels_beside_images_below_a_folder_called_images() {
     write(&mirrored.join("labels/set/train/a.txt"), line);
     write(&mirrored.join("images/set/data.yaml"), "train: train\nnames: [x]\n");
     assert_eq!(open(mirrored.join("images/set")).unwrap().train.boxes(0).len(), 1);
+
+    // One image of it has no label in the mirror, only a stray file beside it: a background image.
+    write_png(&mirrored.join("images/set/train/b.png"), 8, 8, [0; 3]);
+    write(&mirrored.join("images/set/train/b.txt"), line);
+    let ds = open(mirrored.join("images/set")).unwrap();
+    assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 0), "the stray file is not read");
 }
 
 /// Opens a one-image COCO file at each `(path, split)` and checks the image lands in that split.

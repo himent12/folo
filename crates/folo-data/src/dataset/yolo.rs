@@ -16,13 +16,8 @@ use std::path::{Component, Path, PathBuf};
 /// becomes `.txt` (`ds/images/train/a.jpg` → `ds/labels/train/a.txt`). Without an `images` component the label sits
 /// next to the image.
 pub fn label_path_for(image: &Path) -> PathBuf {
-    label_path_from(image, 0)
-}
-
-/// [`label_path_for`] where only an `images` component at index `first` or later counts.
-fn label_path_from(image: &Path, first: usize) -> PathBuf {
     let comps: Vec<Component> = image.components().collect();
-    let pos = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images")).filter(|&p| p >= first);
+    let pos = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images"));
     let mut out = PathBuf::new();
     for (i, c) in comps.iter().enumerate() {
         if Some(i) == pos && i + 1 < comps.len() {
@@ -36,32 +31,41 @@ fn label_path_from(image: &Path, first: usize) -> PathBuf {
 }
 
 /// The label files of one dataset's images: [`label_path_for`], except that a folder called `images` at or above the
-/// dataset root says nothing about the dataset's layout, so the same dataset reads the same labels however its path
-/// is spelled. Such a folder counts only with a `labels` folder next to it (`path: images` in a YAML beside
-/// `labels/`); without one, a label sits next to its image.
+/// dataset root counts only if the root's mirror exists (`x/labels/birds` for `x/images/birds`, `x/labels` for
+/// `x/images`). Without it, the labels of the images below the root sit next to them. Paths are compared absolute, so
+/// the answer does not depend on how the root or an image list entry is spelled.
 pub(crate) struct LabelPaths {
+    /// The dataset root, absolute.
     root: PathBuf,
-    /// Components of `root`, whose `images` do not count; 0 when they do.
-    skip: usize,
-    /// The `labels` folder whose creation would make them count.
+    /// The root's mirror when it has one and it does not exist: creating it changes the dataset.
     absent: Option<PathBuf>,
 }
 
 impl LabelPaths {
     pub(crate) fn new(root: &Path) -> Self {
+        // `.` first: a dataset named by a bare `data.yaml` has an empty root.
+        let root = crate::paths::normalize(&Path::new(".").join(root));
         let comps: Vec<Component> = root.components().collect();
         let absent = comps
             .iter()
             .rposition(|c| c.as_os_str() == OsStr::new("images"))
-            .map(|i| comps[..i].iter().collect::<PathBuf>().join("labels"))
-            .filter(|labels| !labels.is_dir());
-        let skip = if absent.is_some() { comps.len() } else { 0 };
-        LabelPaths { root: root.to_path_buf(), skip, absent }
+            .map(|i| {
+                let mut mirror: PathBuf = comps[..i].iter().collect();
+                mirror.push("labels");
+                mirror.extend(&comps[i + 1..]);
+                mirror
+            })
+            .filter(|mirror| !mirror.is_dir());
+        LabelPaths { root, absent }
     }
 
     /// The label file of `image`. An image outside the root follows [`label_path_for`].
     pub(crate) fn of(&self, image: &Path) -> PathBuf {
-        label_path_from(image, if image.starts_with(&self.root) { self.skip } else { 0 })
+        let beside = self.absent.is_some()
+            && crate::paths::normalize(&Path::new(".").join(image))
+                .strip_prefix(&self.root)
+                .is_ok_and(|below| !below.components().any(|c| c.as_os_str() == OsStr::new("images")));
+        if beside { image.with_extension("txt") } else { label_path_for(image) }
     }
 }
 
