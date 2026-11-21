@@ -276,13 +276,18 @@ impl Labeler {
         let boxes = match &req.boxes {
             Some(boxes) => Some(check_boxes(boxes, classes, (record.width, record.height))?),
             None if req.reviewed.is_none() => return Err(invalid("give `boxes`, `reviewed` or both")),
-            // Only labels can be right: an image without them is saved with its boxes (none: a background image).
-            None if req.reviewed == Some(true) && record.status != LabelImageStatus::Labeled => {
-                return Err(invalid(format!(
-                    "image '{image_id}' has no labels to mark reviewed: save its boxes instead"
-                )));
+            None => {
+                // Report `409 label_job_active` first when the image is in an agent call (or export),
+                // without pulling a waiting image out of the active run before checking eligibility.
+                state.check_editable(image_id)?;
+                // Only labels can be checked: an image without them is saved with its boxes (none: a background image).
+                if record.status != LabelImageStatus::Labeled {
+                    return Err(invalid(format!(
+                        "image '{image_id}' has no labels to mark reviewed: save its boxes instead"
+                    )));
+                }
+                None
             }
-            None => None,
         };
         // What the change replaces, to put back when it cannot be saved ([`State::claim`] takes the image out of
         // a run waiting for it).
@@ -339,7 +344,8 @@ impl Labeler {
                 if let Some(expect) = req.expect.get(image_id) {
                     check_revision(image_id, &r.boxes, expect)?;
                 }
-                if req.reviewed && r.status != LabelImageStatus::Labeled {
+                state.check_editable(image_id)?;
+                if r.status != LabelImageStatus::Labeled {
                     return Err(invalid(format!("image '{image_id}' has no labels to mark reviewed")));
                 }
                 Ok(r.reviewed)

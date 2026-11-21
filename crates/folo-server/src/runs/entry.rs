@@ -33,6 +33,7 @@ impl RunEntry {
             state: Mutex::new(RunState {
                 file,
                 tail: Vec::new(),
+                attempt: 0,
                 claimed: false,
                 outcome: None,
                 deleted: false,

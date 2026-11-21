@@ -134,6 +134,8 @@ struct RunState {
     file: RunFile,
     /// Steps since the last `epoch` event (`metrics.jsonl` is flushed at every epoch).
     tail: Vec<Step>,
+    /// Incremented on every resume ([`Runs::restart`]) so [`Runs::metrics`] never mixes two attempts.
+    attempt: u64,
     /// The worker took the run off the queue (a stop now goes through the trainer).
     claimed: bool,
     /// The trainer's final status, error message and error code, published once the worker has let go of the run

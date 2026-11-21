@@ -132,6 +132,7 @@ impl Runs {
         r.error_code = None;
         r.eta_s = None;
         st.tail.clear();
+        st.attempt += 1;
         e.stop.store(false, Ordering::Relaxed);
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));

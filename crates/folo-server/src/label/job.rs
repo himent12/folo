@@ -204,10 +204,9 @@ impl State {
         Ok(())
     }
 
-    /// Takes image `image_id` for a change by hand. `409 label_job_active` while it is in an agent call; an image
-    /// that only waits for one leaves the run instead (the run then has one image less to label), so work done by
-    /// hand is never overwritten by a call that had not started.
-    pub fn claim(&mut self, image_id: &str) -> Result<()> {
+    /// `409 label_job_active` while `image_id` is in an agent call or a dataset is being written from the job,
+    /// without removing a waiting image from the active run.
+    pub fn check_editable(&self, image_id: &str) -> Result<()> {
         // A dataset being written has the images as they were when it began: changing one now would either be
         // missing from it without a word, or take a file away under the copy.
         if self.exporting {
@@ -219,14 +218,22 @@ impl State {
                 ),
             ));
         }
-        let Some(active) = self.active.as_mut() else { return Ok(()) };
-        if active.in_call.contains(image_id) {
+        if self.active.as_ref().is_some_and(|a| a.in_call.contains(image_id)) {
             return Err(Error::conflict(
                 "label_job_active",
                 format!("image '{image_id}' is with the agent right now; change it once that call is done"),
             )
             .hint("the image is `labeling`; POST /api/label/jobs/{id}/stop ends the run"));
         }
+        Ok(())
+    }
+
+    /// Takes image `image_id` for a change by hand. `409 label_job_active` while it is in an agent call; an image
+    /// that only waits for one leaves the run instead (the run then has one image less to label), so work done by
+    /// hand is never overwritten by a call that had not started.
+    pub fn claim(&mut self, image_id: &str) -> Result<()> {
+        self.check_editable(image_id)?;
+        let Some(active) = self.active.as_mut() else { return Ok(()) };
         if active.waiting.remove(image_id)
             && let Some(run) = self.file.run.as_mut()
         {

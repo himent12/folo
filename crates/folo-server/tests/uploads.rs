@@ -543,3 +543,99 @@ async fn the_mock_has_no_uploads() {
     assert!(sys.features.iter().any(|f| f == FEATURE_RUN_CURSORS));
     assert!(!sys.features.iter().any(|f| f == FEATURE_UPLOADS || f == FEATURE_RUN_CHECKPOINT));
 }
+
+/// On Windows, tar entries that fail with `500 io_error` or write to `\Device\Null` (`< > " | ? *`, ASCII control
+/// chars, dot/space-only components, bare `NUL` with optional trailing dots/spaces, and parent folders ending in
+/// spaces or multiple dots/spaces) are refused with `422 invalid_upload`, while names that unpack cleanly on
+/// Windows 11 (`CON.png`, `NUL.png`, `aux/`, bare `CON`, files with a trailing dot/space, `foo./a.png`) stay
+/// accepted. On non-Windows OSes, all of these names stay accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn entries_with_windows_unsafe_names_are_refused() {
+    let t = TestDir::new("uploads-windows-unsafe");
+    let home = t.join("home");
+    let app = app(open(&home));
+    let pack = |entries: &[(&str, &[u8])]| {
+        let mut b = tar::Builder::new(Vec::new());
+        for &(entry, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, entry, data).unwrap();
+        }
+        b.into_inner().unwrap()
+    };
+
+    let refused_on_windows = [
+        "images/train/a?b.png",
+        "images/train/a*b.png",
+        "images/train/a<b.png",
+        "images/train/a>b.png",
+        "images/train/a\"b.png",
+        "images/train/a|b.png",
+        "images/train/Icon\r",
+        "images/train/a\tb.png",
+        "images/train/NUL",
+        "images/train/nul.",
+        "images/train/NUL ",
+        "NUL/a.png",
+        "NUL./a.png",
+        "images/train/...",
+        "images/train/   ",
+        ".../a.png",
+        "foo /a.png",
+        "foo../a.png",
+        "foo ./a.png",
+    ];
+    for name in refused_on_windows {
+        let bytes = pack(&[("data.yaml", b"names: [x]\n"), (name, b"one")]);
+        let u = start(&app, json!({ "kind": "dataset", "name": "unsafe" })).await;
+        let req = put(&format!("/api/uploads/{}/parts/0", u.id), bytes);
+        if cfg!(windows) {
+            err(&app, req, StatusCode::UNPROCESSABLE_ENTITY, "invalid_upload").await;
+            err(
+                &app,
+                bare("GET", &format!("/api/uploads/{}", u.id)),
+                StatusCode::NOT_FOUND,
+                "upload_not_found",
+            )
+            .await;
+            assert!(staging(&home).is_empty(), "{name}: {:?}", staging(&home));
+        } else {
+            ok::<Upload>(&app, req, StatusCode::OK).await;
+            let (status, _) = send(&app, bare("DELETE", &format!("/api/uploads/{}", u.id))).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{name}");
+        }
+    }
+
+    // Names that unpack cleanly on Windows 11 (and every other OS) stay accepted on every OS.
+    let accepted_everywhere = [
+        "images/train/CON.png",
+        "images/train/NUL.png",
+        "images/train/aux/a.png",
+        "images/train/CON",
+        "images/train/aux .txt",
+        "com1/a.png",
+        "images/train/foo.",
+        "images/train/bar ",
+        "images/train/dir./a.png",
+    ];
+    let mut entries: Vec<(&str, &[u8])> = vec![("data.yaml", b"names: [x]\n")];
+    for name in accepted_everywhere {
+        entries.push((name, b"one"));
+    }
+    let u = start(&app, json!({ "kind": "dataset", "name": "safe-names" })).await;
+    ok::<Upload>(&app, put(&format!("/api/uploads/{}/parts/0", u.id), pack(&entries)), StatusCode::OK).await;
+    let stage = home.join("uploads").join(&u.id);
+    for expected in [
+        "images/train/CON.png",
+        "images/train/NUL.png",
+        "images/train/aux/a.png",
+        "images/train/CON",
+        "com1/a.png",
+    ] {
+        assert_eq!(std::fs::read(stage.join(expected)).unwrap(), b"one", "{expected}");
+    }
+    let (status, _) = send(&app, bare("DELETE", &format!("/api/uploads/{}", u.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(staging(&home).is_empty());
+}

@@ -28,8 +28,19 @@ impl Runs {
     /// on without a gap: a poller that continues after the last step it got never misses one.
     pub fn metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics> {
         let e = self.get(id)?;
-        let mut m = read_metrics(&e.dir.join("metrics.jsonl"));
-        let tail = e.state.lock().unwrap().tail.clone();
+        let path = e.dir.join("metrics.jsonl");
+        let (mut m, tail) = loop {
+            let (attempt, tail, epochs_done, waiting_resume) = {
+                let st = e.state.lock().unwrap();
+                (st.attempt, st.tail.clone(), st.file.epochs_done, st.file.resumed_at.is_some())
+            };
+            let m = read_metrics_for(&path, epochs_done, waiting_resume);
+            // If the run resumed while `metrics.jsonl` was read, `tail` belongs to the previous attempt;
+            // re-read so steps from two attempts are never mixed.
+            if e.state.lock().unwrap().attempt == attempt {
+                break (m, tail);
+            }
+        };
         let mut last = m.steps.last().map_or(0, |s| s.step);
         for s in tail {
             if s.step <= last {
@@ -108,8 +119,24 @@ fn last_trained(file: &RunFile, dir: &Path) -> Option<f64> {
 /// Parses `metrics.jsonl`. A resumed run appends the steps of the epoch it repeats again: a step or epoch number
 /// at or below the last one seen replaces everything from it on.
 pub(super) fn read_metrics(path: &Path) -> RunMetrics {
+    read_metrics_for(path, 0, false)
+}
+
+/// [`read_metrics`], also dropping discarded steps past `epochs_done` while a resumed run is waiting to start
+/// (`waiting_resume`) or has started (`status: running`) without flushing any new step to `metrics.jsonl` yet.
+///
+/// Known limits (behaving as before until a persisted resume boundary exists):
+/// - After a server crash mid-epoch, `metrics.jsonl` has no terminal `status` line, so the previous attempt's
+///   `status: running` line suppresses the `waiting_resume` filter while a queued resume waits to start.
+/// - On a cloud resume, the mirror clears `resumed_at` when reporting `running` before fetching the worker's
+///   metrics and writes no `status: running` line to the local `metrics.jsonl`.
+/// - A torn last line in `metrics.jsonl` without a trailing newline can swallow the resumed session's
+///   `status: running` line.
+fn read_metrics_for(path: &Path, epochs_done: u32, waiting_resume: bool) -> RunMetrics {
     let mut m = RunMetrics { steps: Vec::new(), epochs: Vec::new() };
     let Ok(text) = std::fs::read_to_string(path) else { return m };
+    let mut last_status: Option<String> = None;
+    let mut resumed_unflushed = false;
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         match v.get("event").and_then(|e| e.as_str()) {
@@ -120,16 +147,30 @@ pub(super) fn read_metrics(path: &Path) -> RunMetrics {
                     }
                     m.epochs.retain(|e| e.epoch < s.epoch);
                     m.steps.push(s);
+                    resumed_unflushed = false;
                 }
             }
             Some("epoch") => {
                 if let Ok(e) = serde_json::from_value::<Epoch>(v) {
                     m.epochs.retain(|x| x.epoch < e.epoch);
                     m.epochs.push(e);
+                    resumed_unflushed = false;
+                }
+            }
+            Some("status") => {
+                if let Some(status) = v.get("status").and_then(|s| s.as_str()) {
+                    if status == "running" && !m.steps.is_empty() {
+                        resumed_unflushed = true;
+                    }
+                    last_status = Some(status.to_string());
                 }
             }
             _ => {}
         }
+    }
+    if resumed_unflushed || (waiting_resume && last_status.as_deref() != Some("running")) {
+        let completed = epochs_done.max(m.epochs.last().map_or(0, |e| e.epoch));
+        m.steps.retain(|s| s.epoch <= completed);
     }
     m
 }
