@@ -22,7 +22,7 @@
 //! cost is therefore `O(n log n + max_det * n)` instead of the `O(n²)` worst case of textbook greedy NMS.
 
 use crate::boxes::Xyxy;
-use crate::fusion::{BoxFusion, FUSION_IOU, fuse_boxes};
+use crate::fusion::{BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, fuse_boxes};
 use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,9 @@ pub struct NmsConfig {
     /// The cluster of a kept box for [`NmsConfig::fusion`]: the candidates of its class (any class with
     /// `agnostic`) whose IoU with it is `>=` this.
     pub fusion_iou: f32,
+    /// How the kept boxes are scored ([`ScoreRule`], docs/MODEL.md §9.4). Off by default: the consensus score
+    /// changes the score scale. Not used by the NMS-free `o2o` selection, which has no clusters.
+    pub score: ScoreRule,
 }
 
 impl Default for NmsConfig {
@@ -88,6 +91,7 @@ impl Default for NmsConfig {
             multi_label: false,
             fusion: BoxFusion::None,
             fusion_iou: FUSION_IOU,
+            score: ScoreRule::None,
         }
     }
 }
@@ -250,7 +254,8 @@ pub type Precisions<'a> = Option<&'a [[f32; 4]]>;
 
 /// Cap the candidates (given in `(idx, class)` order) at the `cap` best by score, ties to the earlier candidate,
 /// then run batched NMS, fuse the kept boxes when [`NmsConfig::fusion`] asks for it (with `precision`, indexed by
-/// source index, for [`BoxFusion::Dfl`]), and build the detections.
+/// source index, for [`BoxFusion::Dfl`]), re-score them when [`NmsConfig::score`] does (from the unfused boxes, then
+/// sorted by the new score, ties in NMS's order), and build the detections. Every NMS path of every device ends here.
 fn finish(
     mut cands: Vec<Cand>,
     cfg: &NmsConfig,
@@ -285,14 +290,23 @@ fn finish(
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
         }
     };
-    kept.iter()
+    let mut dets: Vec<Detection> = kept
+        .iter()
         .enumerate()
         .map(|(i, &k)| Detection {
             bbox: fused.as_ref().map_or(boxes[k], |f| f[i]),
             score: scores[k],
             class: classes[k],
         })
-        .collect()
+        .collect();
+    if cfg.score == ScoreRule::Consensus {
+        for (d, s) in dets.iter_mut().zip(consensus_scores(&kept, &boxes, &scores, &classes)) {
+            d.score = s;
+        }
+        // Stable: equal new scores stay in NMS's order.
+        dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+    }
+    dets
 }
 
 pub(crate) fn class_allowed(cfg: &NmsConfig, c: u32) -> bool {

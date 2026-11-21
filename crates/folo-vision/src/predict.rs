@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
-use crate::fusion::{BoxFusion, FUSION_IOU};
+use crate::fusion::{BoxFusion, FUSION_IOU, ScoreRule};
 use crate::model::{FoloModel, HeadMode, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
 
@@ -63,6 +63,9 @@ pub struct PredictConfig {
     pub fusion: BoxFusion,
     /// The cluster IoU of [`PredictConfig::fusion`] ([`NmsConfig::fusion_iou`]).
     pub fusion_iou: f32,
+    /// How the kept boxes are scored ([`NmsConfig::score`]; off by default). The cluster is the candidates above
+    /// `conf`, so at a high `conf` it holds fewer of them than at validation's 0.001.
+    pub score: ScoreRule,
 }
 
 impl Default for PredictConfig {
@@ -76,6 +79,7 @@ impl Default for PredictConfig {
             head: None,
             fusion: BoxFusion::None,
             fusion_iou: FUSION_IOU,
+            score: ScoreRule::None,
         }
     }
 }
@@ -110,6 +114,7 @@ impl PredictConfig {
             max_det: self.max_det,
             fusion: self.fusion,
             fusion_iou: self.fusion_iou,
+            score: self.score,
             ..NmsConfig::default()
         }
     }

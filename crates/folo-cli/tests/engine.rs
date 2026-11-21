@@ -10,6 +10,9 @@ use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
+#[path = "engine/score.rs"]
+mod score;
+
 /// Runs `folo` with `args`; engine commands get `--device cpu` (their `auto` would pick a GPU when there is one).
 fn folo(args: &[&str]) -> (i32, Vec<Value>, String) {
     folo_with(args, None)
@@ -188,6 +191,7 @@ fn train_val_predict_export_with_json() {
     );
     assert!(v["map50"].as_f64().unwrap() >= 0.0 && v["per_class"].is_array());
     assert_eq!(v["device"], "cpu");
+    assert_eq!(v["score"], "none", "the score rule is recorded, off by default");
 
     // predict: one record per image plus `done`; --save writes annotated copies.
     let saved = root.join("pred");

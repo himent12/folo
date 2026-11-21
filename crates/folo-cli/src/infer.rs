@@ -186,6 +186,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             max_det: args.max_det.max(1) as usize,
             fusion: args.fusion.into(),
             fusion_iou: args.fusion_iou,
+            score: args.score.into(),
             ..NmsConfig::val()
         },
         samples: 0,
@@ -251,6 +252,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "dtype": precision,
         "head": head,
         "fusion": cfg.nms.fusion.as_str(),
+        "score": cfg.nms.score.as_str(),
         "seconds": r.seconds,
         "coco": coco,
     }));
@@ -451,6 +453,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         head: args.head.map(Into::into),
         fusion: args.fusion.into(),
         fusion_iou: args.fusion_iou,
+        score: args.score.into(),
     };
     let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
     let destinations = match &args.save {

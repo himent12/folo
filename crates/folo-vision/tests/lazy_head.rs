@@ -7,7 +7,7 @@
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_nn::Module;
-use folo_vision::fusion::BoxFusion;
+use folo_vision::fusion::{BoxFusion, ScoreRule};
 use folo_vision::model::{FoloModel, HeadMode, HeadOutput, ModelConfig};
 use folo_vision::nms::{Candidate, Detection, NmsConfig};
 use folo_vision::{PredictConfig, Predictor};
@@ -268,6 +268,39 @@ fn box_fusion_matches_dense() {
                     );
                     assert_ne!(fused, plain, "{fusion:?} at {frac} moved no box: the test cannot see it");
                 }
+            }
+        }
+    }
+}
+
+/// The consensus score (MODEL.md §9.4), alone and on top of DFL fusion, gives the dense path's detections bit for
+/// bit; the top-k head has no clusters and ignores it.
+#[test]
+fn consensus_score_matches_dense() {
+    for (head, seed) in [("o2m", 16), ("o2o", 17)] {
+        let m = model("n", 4, head, seed);
+        let x = input(2, 288, 352, seed + 100);
+        let out = {
+            let _g = no_grad();
+            m.forward(&x).unwrap()
+        };
+        let best = dense_best(&out);
+        let conf = conf_for(&out, &best, 0.3);
+        for fusion in [BoxFusion::None, BoxFusion::Dfl] {
+            let plain = NmsConfig { conf, iou: 0.3, fusion, ..NmsConfig::default() };
+            let nms = NmsConfig { score: ScoreRule::Consensus, ..plain.clone() };
+            let n = check(&m, &x, &nms);
+            assert!(n.iter().all(|&n| n > 0), "{head} {fusion:?}: no candidates");
+            let (on, off) =
+                (m.predict_detections(&x, &nms).unwrap(), m.predict_detections(&x, &plain).unwrap());
+            if head == "o2m" {
+                assert_ne!(
+                    det_bits(&on),
+                    det_bits(&off),
+                    "{fusion:?}: no score moved, the test cannot see it"
+                );
+            } else {
+                assert_eq!(det_bits(&on), det_bits(&off), "the top-k head ignores the score rule");
             }
         }
     }

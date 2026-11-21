@@ -1149,6 +1149,37 @@ val2017 it adds +0.0043 (folo-n-coco), +0.0034 (folo-n-coco-v2) and +0.0025 (fol
 voting alone gives most; the DFL weights add +0.0003 to +0.0010 over voting (paired bootstrap intervals in the note).
 Cost per image at batch 1: ~0.01–0.15 ms on the CPU (conf 0.25 / 0.001), ~0.3 ms on a GPU (the moments readback).
 
+**Consensus score (opt-in).** Off by default (`NmsConfig::score = none`; every published number is without it).
+`folo val` / `folo predict` `--score consensus` build a cluster of their own for the score: the one-to-many head
+trains several anchors per object, so a real object tends to light up several candidates that agree, and NMS throws
+that agreement away. For each kept candidate `k`, with `C(k)` the candidates of `k`'s **own class** (also under
+`agnostic`) at IoU at least a **fixed** `τ = 0.75` (it does not follow `fusion_iou`, so this need not be the fusion's
+cluster), on the boxes as NMS saw them (before any fusion):
+
+    M_k  = Σ_{j ∈ C(k)} s_j
+    s'_k = s_k · min(M_k / s_k, R)^a / R^a,      a = 0.5, R = 10
+
+summed in f64 in candidate order, rounded to f32. `k` is always in its own cluster; a member whose score is not `> 0`
+or whose box is not finite adds nothing, and a kept box that is not finite has no other member. The detections are
+then sorted by `s'` (stable: ties stay in NMS's order). Boxes, classes and which candidates are kept do not change;
+`conf`, NMS and `max_det` all act on the class score, before this step, so `max_det` picks the boxes and the rule only
+re-ranks them. It works with and without `--fusion`.
+
+**The score scale changes.** `s' ∈ [s / √10, s]`: a box whose cluster carries ten times its score keeps it, and a box
+that fired alone is divided by 3.16. `conf` still filters the class score, so a box of score 0.50 passes `conf` 0.25
+and can come back at 0.158. A threshold on the **returned** score means something else with this on, and that
+includes `folo val`'s precision, recall, best-F1 confidence and confusion matrix. The cluster holds only the candidates above
+`conf`, so the same box gets a different `s'` at `predict`'s `conf` 0.25 than at validation's 0.001; the gain below
+was measured at validation's settings only. The NMS-free `o2o` selection has no clusters and ignores it. ONNX export,
+the server, Studio and the wasm build do not offer it. It runs on the host in the one step every NMS path ends in, so
+the CPU and GPU paths give the same output for the same candidates.
+
+Measured on val2017 with the published weights (paired bootstrap over images, docs/notes/hill/r6-consensus.md):
+folo-n v5 +0.0021 AP over §9.3 and +0.0019 on top of the fusion, folo-s +0.0012 and +0.0011. τ, a and R were fixed
+before those runs, but τ 0.75 had itself been read on val2017, on folo-n v3 and on this same folo-s (where the τ 0.70
+fixed in advance gave +0.0007, not significant). So the folo-s numbers are optimistic, and only the folo-n v5 ones are
+on weights that played no part in the choice, on the same images.
+
 ### 9.5 Candidate-first evaluation
 Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
 `conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and
