@@ -103,14 +103,7 @@ impl Inner {
                 PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
             }
             (None, Some(b64), None, None) => {
-                if b64.len() as u64 > MAX_IMAGE_BYTES * 4 / 3 + 4 {
-                    return Err(invalid_arguments("image_base64 is larger than 64 MiB"));
-                }
-                let decode = move || {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64.trim())
-                        .map_err(|e| invalid_arguments(format!("image_base64 is not valid base64: {e}")))
-                };
+                let decode = move || decode_image_base64(&b64, MAX_IMAGE_BYTES);
                 PredictSource::Upload(tokio::task::spawn_blocking(decode).await.map_err(join)??)
             }
             (None, None, Some(dataset_id), Some(image_id)) => {
@@ -290,11 +283,33 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
         return Err(invalid_arguments(format!("{} is not a file", folo_api::json::path(path))));
     }
     if meta.len() > MAX_IMAGE_BYTES {
-        return Err(Error::new(
-            http::StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            format!("{} is larger than 64 MiB", folo_api::json::path(path)),
-        ));
+        return Err(too_large(&folo_api::json::path(path)));
     }
     std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))
+}
+
+/// `payload_too_large` for an image over [`MAX_IMAGE_BYTES`], `what` being a file or the argument.
+fn too_large(what: &str) -> Error {
+    Error::new(
+        http::StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        format!("{what} is larger than 64 MiB"),
+    )
+}
+
+/// The bytes of an `image_base64`, refused as too large over `max` of them. A string longer than `max` bytes can
+/// encode is refused without decoding it; its length cannot tell the last two bytes apart (padding), so the decoded
+/// length is checked too.
+pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error> {
+    let b64 = b64.trim();
+    if b64.len() as u64 > max.div_ceil(3) * 4 {
+        return Err(too_large("image_base64"));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| invalid_arguments(format!("image_base64 is not valid base64: {e}")))?;
+    if bytes.len() as u64 > max {
+        return Err(too_large("image_base64"));
+    }
+    Ok(bytes)
 }

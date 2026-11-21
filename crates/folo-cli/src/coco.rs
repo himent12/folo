@@ -96,6 +96,29 @@ pub fn evaluate(
     Ok(CocoResult { stats: ev.compute(), missing_images: missing })
 }
 
+/// Creates the folder of a `--save-json` file before the evaluation (as `predict --save` and `train --project` do)
+/// and refuses three things: a folder that cannot be created, a folder in the file's place, and a path whose lookup
+/// fails with an error other than "not found". The path itself is only looked up (`metadata`), never opened, so
+/// nothing is tried about whether the file can be written: [`write_results`] reports that after the evaluation.
+pub fn prepare_results(path: &Path) -> Result<(), CliError> {
+    let io = |e: std::io::Error| {
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", folo_api::json::path(path)),
+        )
+    };
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => Err(io(std::io::ErrorKind::IsADirectory.into())),
+        // A lookup that fails for another reason than "not there" (a name too long, a loop of links).
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        // Something that is not a folder, or nothing yet (also a link to a file not there yet): the writer's to try.
+        _ => Ok(()),
+    }
+}
+
 /// Write `detections` as a COCO results file (`[{"image_id", "category_id", "bbox": [x, y, w, h], "score"}]`),
 /// the input of pycocotools' `COCO.loadRes`. Coordinates keep full f32 precision (`w = x2 - x1` in f64, so
 /// `x + w` is `x2` again). Returns the number of detections written.
@@ -159,5 +182,51 @@ mod tests {
         assert_eq!(e.code, "usage");
         let hint = e.hint.unwrap();
         assert!(!hint.contains("  "), "{hint}");
+    }
+
+    /// `val --save-json` in a new folder works, and a path that can be seen to fail is refused before the evaluation.
+    #[test]
+    fn a_results_file_is_prepared_before_the_evaluation() {
+        let dir = TestDir::new("coco-prepare");
+        // A folder that does not exist yet is created, and nothing is written into it.
+        let new = dir.join("eval").join("deep").join("dets.json");
+        super::prepare_results(&new).unwrap();
+        assert!(new.parent().unwrap().is_dir() && !new.exists());
+        assert_eq!(std::fs::read_dir(new.parent().unwrap()).unwrap().count(), 0, "no file is created");
+        // Nor into a folder that holds other files: they stay as they are, and no file is added.
+        let folder = dir.join("held");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("other.tmp"), b"old").unwrap();
+        super::prepare_results(&folder.join("dets.json")).unwrap();
+        assert_eq!(std::fs::read(folder.join("other.tmp")).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "no file is created");
+        // A link to a file not written yet is left for the writer, which creates its target.
+        #[cfg(unix)]
+        {
+            let link = dir.join("eval").join("latest.json");
+            std::os::unix::fs::symlink("run-2.json", &link).unwrap();
+            super::prepare_results(&link).unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link).is_ok() && !dir.join("eval").join("run-2.json").exists()
+            );
+        }
+        // A name the system refuses is refused now, not after the evaluation.
+        #[cfg(unix)]
+        {
+            let long = dir.join("x".repeat(256));
+            assert_eq!(super::prepare_results(&long).unwrap_err().code, "io_error");
+            let looped = dir.join("eval").join("loop.json");
+            std::os::unix::fs::symlink("loop.json", &looped).unwrap();
+            assert_eq!(super::prepare_results(&looped).unwrap_err().code, "io_error");
+        }
+        // An earlier results file keeps its content until the new one is written.
+        std::fs::write(&new, b"[]").unwrap();
+        super::prepare_results(&new).unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), b"[]");
+        // A folder in the file's place, and a file in the folder's place, are refused now.
+        let e = super::prepare_results(new.parent().unwrap()).unwrap_err();
+        assert_eq!(e.code, "io_error");
+        let e = super::prepare_results(&new.join("dets.json")).unwrap_err();
+        assert!(e.code == "io_error" && e.message.starts_with("cannot write "), "{}", e.message);
     }
 }

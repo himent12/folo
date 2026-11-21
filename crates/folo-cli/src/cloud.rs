@@ -145,9 +145,6 @@ fn connect(args: CloudConnectArgs, out: Out) -> Result<(), CliError> {
     let c = cloud.connect(req).map_err(api_error)?;
     out.record(&c);
     connections_table(std::slice::from_ref(&c), out);
-    if let Some(note) = &c.note {
-        out.human(format!("note: {note}"));
-    }
     Ok(())
 }
 
@@ -204,9 +201,14 @@ fn providers_table(providers: &[CloudProvider], out: Out) {
 }
 
 fn connections_table(list: &[CloudConnection], out: Out) {
+    out.human(connections_text(list));
+}
+
+/// The connections as a table, then a line for each one's `note` (below the table: a note is a sentence or two). With
+/// several connections a note names its connection.
+fn connections_text(list: &[CloudConnection]) -> String {
     if list.is_empty() {
-        out.human("no connections; make one with `folo cloud connect <provider>`");
-        return;
+        return "no connections; make one with `folo cloud connect <provider>`".into();
     }
     let rows = list
         .iter()
@@ -225,7 +227,15 @@ fn connections_table(list: &[CloudConnection], out: Out) {
             ]
         })
         .collect();
-    out.human(table(&["ID", "PROVIDER", "NAME", "ACCOUNT", "BALANCE", "STATUS"], rows));
+    let mut text = table(&["ID", "PROVIDER", "NAME", "ACCOUNT", "BALANCE", "STATUS"], rows);
+    for c in list {
+        match &c.note {
+            Some(note) if list.len() == 1 => text.push_str(&format!("\nnote: {note}")),
+            Some(note) => text.push_str(&format!("\nnote ({}): {note}", c.id)),
+            None => {}
+        }
+    }
+    text
 }
 
 fn offers_table(offers: &[CloudOffer], out: Out) {
@@ -268,6 +278,34 @@ fn instances_table(list: &[CloudInstance], out: Out) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connections_note_is_printed_below_the_table() {
+        let conn = |id: &str, note: Option<&str>| CloudConnection {
+            id: id.into(),
+            provider: "remote".into(),
+            name: "lab".into(),
+            created: "2026-11-20T10:00:00Z".into(),
+            status: folo_api::CloudConnectionStatus::Ok,
+            account: None,
+            balance_usd: None,
+            error: None,
+            note: note.map(str::to_string),
+            checked: None,
+            values: BTreeMap::new(),
+        };
+        // One connection (`connect`, `check`): the note alone. No note: only the table.
+        let one = connections_text(&[conn("c_1", Some("reached over http://"))]);
+        assert_eq!(one.lines().last(), Some("note: reached over http://"), "{one}");
+        assert_eq!(connections_text(&[conn("c_1", None)]).lines().count(), 2);
+        // Several (`connections`): each note names its connection, and a row without one adds no line.
+        let list = [conn("c_1", None), conn("c_2", Some("reached over http://")), conn("c_3", None)];
+        let text = connections_text(&list);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "{text}");
+        assert!(lines[1..4].iter().all(|l| !l.contains("note")), "{text}");
+        assert_eq!(lines[4], "note (c_2): reached over http://");
+    }
 
     #[test]
     fn tables_align_and_secrets_stay_off_the_command_line() {

@@ -9,7 +9,7 @@ use folo_nn::io::{FloatDType, ModelFile};
 use folo_vision::export::onnx::{self, OnnxOptions, OnnxValue, proto::Dim};
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
-use folo_vision::val::{ValConfig, val_metrics, validate};
+use folo_vision::val::{ValConfig, check_config, val_metrics, validate};
 use folo_vision::{FoloModel, NmsConfig, Precision, PredictConfig, Predictor};
 use serde_json::json;
 
@@ -197,6 +197,12 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let device = model.device().to_string();
     let precision = precision_of(&model);
     let head = cfg.head.unwrap_or(model.head_mode());
+    // After every check of the request, so a mistyped one leaves no new folder, and before the evaluation (the split
+    // is open by now, which may have read image headers).
+    if let Some(path) = &args.save_json {
+        check_config(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
+        crate::coco::prepare_results(path)?;
+    }
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);
     let names = model.classes();
@@ -506,13 +512,13 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         }
         out.record(&json!({
             "event": "prediction",
-            "file": folo_api::json::path(path),
+            "file": crate::output::record_path(path),
             "image": { "width": p.width, "height": p.height },
             "boxes": p.scored_boxes(&classes),
             "timing": ti.to_api(),
             "device": device,
             "dtype": precision,
-            "saved": saved.as_ref().map(folo_api::json::path),
+            "saved": saved.as_ref().map(crate::output::record_path),
         }));
         let summary: Vec<String> =
             p.scored_boxes(&classes).iter().take(6).map(|b| format!("{} {:.2}", b.name, b.score)).collect();
@@ -534,7 +540,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
         "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
-        "saved_to": args.save,
+        "saved_to": args.save.as_ref().map(crate::output::record_path),
     }));
     out.human(format!(
         "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
