@@ -164,9 +164,9 @@ split) was not exported and not scored in the standalone COCO evaluation.
 
 ## Speed
 
-The architecture is the same, so the forward pass costs the same. End-to-end time can still differ, because NMS
-works on the candidates a model emits (679,000 detections against 725,952 in the two f32 evaluations). No speed row
-was measured again. The first alternated `folo val` timing (four rounds, always
+The architecture is the same, so the forward pass does the same work at the same settings. End-to-end time also
+includes NMS, whose work depends on the candidates a model emits, so it could differ. Neither was measured: no speed
+row of docs/BENCHMARKS.md was run again. The first alternated `folo val` timing (four rounds, always
 published then continued) read the continued weights at 2.2x the time (medians about 9.7 s and 21.4 s). Two more
 trials, with the order reversed in blocks, were also noisy: most single runs took about 10 s or 15–29 s, and two took
 about 11.8 s. A last test with **fresh byte-identical copies of both files**, 24 runs in one order shuffled with
