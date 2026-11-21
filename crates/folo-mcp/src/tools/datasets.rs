@@ -182,6 +182,14 @@ impl Inner {
     }
 
     pub(super) async fn register_dataset(&self, a: RegisterArgs) -> Result<Output, Error> {
+        if self.opts.confine && self.proxy.is_some() {
+            return Err(Error::new(
+                http::StatusCode::NOT_IMPLEMENTED,
+                "not_supported",
+                "registering a dataset is not available with --confine through `folo serve` (the server reads the dataset files without the confinement guard)",
+            )
+            .hint("run `folo mcp --confine` on the data dir itself (no server), or without --confine"));
+        }
         if let Some(n) = &a.name {
             check_name("name", n)?;
         }

@@ -82,9 +82,8 @@ impl Confinement {
             return r.clone();
         }
         let r = self.scan(store, id).map_err(map_denied);
-        // Only cache settled confinement outcomes: unknown datasets may be registered later and transient store
-        // errors should not stick in the cache.
-        if r.as_ref().err().is_none_or(|e| e.body.code == "path_outside_data_dir") {
+        // Unknown datasets are not cached: they may be registered later under that id.
+        if r.as_ref().err().is_none_or(|e| e.body.code != "dataset_not_found") {
             self.cache.lock().unwrap().insert(id.to_string(), r.clone());
         }
         r

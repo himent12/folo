@@ -170,16 +170,49 @@ fn proxy_mode_sends_the_token() {
     assert_eq!(empty.code(), Some(2));
 }
 
+/// Reads one line from `r` within `timeout`, failing cleanly instead of hanging if the child never answers.
+fn read_line_within(r: impl std::io::Read + Send + 'static, timeout: std::time::Duration) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(r).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    rx.recv_timeout(timeout).expect("child wrote a line before the deadline")
+}
+
 /// In proxy mode (`--server`), `folo serve` owns and reads datasets, so `--confine` confines only files the MCP
-/// process reads itself (`predict.image_path`, `predict_batch`) and never hides or refuses the server's datasets.
+/// process reads itself (`predict.image_path`, `predict_batch`), never hides or refuses the server's datasets, and
+/// refuses `register_dataset` (and image-reading labeling tools) with `not_supported` instead of letting the server
+/// read unguarded dataset folders.
 #[test]
 fn proxy_mode_with_confine_serves_remote_datasets_and_confines_local_reads() {
+    use std::time::Duration;
     let root = tmp_dir("proxy-confine");
     let server_dir = root.join("server");
     let client_dir = root.join("client");
     std::fs::create_dir_all(&client_dir).unwrap();
     let outside_img = root.join("outside.jpg");
     std::fs::write(&outside_img, b"x").unwrap();
+    let inside_img = client_dir.join("inside.png");
+    image::RgbImage::new(8, 8).save(&inside_img).unwrap();
+
+    // A dataset inside `client_dir` whose `data.yaml` points outside `client_dir`, and one wholly inside it.
+    let outside_ds_imgs = root.join("outside_imgs");
+    std::fs::create_dir_all(&outside_ds_imgs).unwrap();
+    image::RgbImage::new(8, 8).save(outside_ds_imgs.join("a.png")).unwrap();
+    let escaping_ds = client_dir.join("escaping");
+    std::fs::create_dir_all(&escaping_ds).unwrap();
+    std::fs::write(
+        escaping_ds.join("data.yaml"),
+        "path: ..\ntrain: outside_imgs\nval: outside_imgs\nnames: [box]\n",
+    )
+    .unwrap();
+    let local_ds = client_dir.join("local");
+    std::fs::create_dir_all(local_ds.join("images/train")).unwrap();
+    image::RgbImage::new(8, 8).save(local_ds.join("images/train/a.png")).unwrap();
+    std::fs::write(local_ds.join("data.yaml"), "train: images/train\nval: images/train\nnames: [box]\n")
+        .unwrap();
 
     let mut serve: ChildGuard = folo_cmd()
         .args([
@@ -199,16 +232,19 @@ fn proxy_mode_with_confine_serves_remote_datasets_and_confines_local_reads() {
         .spawn()
         .unwrap()
         .into();
-    let mut first = String::new();
-    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
-    let listening: Value = serde_json::from_str(&first).unwrap();
+    let first = read_line_within(serve.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&first).unwrap_or_else(|e| panic!("{e}: {first:?}"));
     let url = listening["url"].as_str().unwrap().to_string();
+    folo_client::Client::with_timeouts(&url, Duration::from_secs(5), Duration::from_secs(60))
+        .get::<Value>("/system")
+        .unwrap();
 
     let mut c = spawn(&["--server", &url, "--confine", "--data-dir", client_dir.to_str().unwrap()], None);
     init_old(&mut c);
     let ds = c.ok("create_synthetic_dataset", json!({ "name": "tiny", "images": 6, "imgsz": 64 }));
     let ds_id = ds["id"].as_str().unwrap().to_string();
 
+    // Server-side datasets are visible and readable through proxy mode.
     let list = c.ok("list_datasets", json!({}));
     assert_eq!(list["total"], 1, "{list}");
     assert_eq!(list["items"][0]["id"], ds_id, "{list}");
@@ -220,12 +256,23 @@ fn proxy_mode_with_confine_serves_remote_datasets_and_confines_local_reads() {
     let read = c.result("resources/read", json!({ "uri": format!("folo://datasets/{ds_id}") }));
     assert!(read["contents"][0]["text"].as_str().unwrap().contains(&ds_id), "{read}");
 
-    // Files the MCP process reads itself stay confined to its own --data-dir.
+    // `register_dataset` is refused under `--server --confine` before the server touches the files.
+    c.tool_error("register_dataset", json!({ "path": escaping_ds }), "not_supported");
+    c.tool_error("register_dataset", json!({ "path": local_ds }), "not_supported");
+    assert_eq!(c.ok("list_datasets", json!({}))["total"], 1);
+    c.tool_error(
+        "create_label_job",
+        json!({ "name": "x", "classes": ["a"], "paths": [inside_img] }),
+        "not_supported",
+    );
+
+    // Files the MCP process reads itself stay confined to its own --data-dir (outside refused, inside allowed).
     c.tool_error(
         "predict",
         json!({ "model_id": "m_none", "image_path": outside_img }),
         "path_outside_data_dir",
     );
+    c.tool_error("predict", json!({ "model_id": "m_none", "image_path": inside_img }), "model_not_found");
     c.finish();
     let _ = serve.kill();
     let _ = serve.wait();
