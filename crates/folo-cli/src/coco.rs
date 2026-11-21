@@ -43,17 +43,40 @@ pub struct CocoResult {
     pub missing_images: usize,
 }
 
-/// Category id of each class (`classes[i]` must be the name of `categories[i]`, sorted by id).
-pub fn category_ids(gt: &CocoGroundTruth, classes: &[String]) -> Result<Vec<u64>, CliError> {
-    let names: Vec<&str> = gt.categories.iter().map(|c| c.1.as_str()).collect();
-    if names != classes.iter().map(String::as_str).collect::<Vec<_>>() {
-        return Err(CliError::new(
+/// Category id of each class in `classes`, or `None` for classes declared only in another split of the dataset.
+/// When `gt.categories` matches `classes` 1:1 (same names in order) every class gets its id; when `gt.categories`
+/// is a subset (e.g. a `val` split omitting a class present in `train`), every category must appear once in
+/// `classes` in strictly ascending order so its class index is unambiguous.
+pub fn category_ids(gt: &CocoGroundTruth, classes: &[String]) -> Result<Vec<Option<u64>>, CliError> {
+    let mismatch = || {
+        CliError::new(
             ExitCode::Runtime,
             "invalid_dataset",
             format!("{}: its categories do not match the dataset's classes", folo_api::json::path(&gt.path)),
-        ));
+        )
+    };
+    if gt.categories.len() == classes.len()
+        && gt.categories.iter().zip(classes).all(|((_, name), c)| name == c)
+    {
+        return Ok(gt.categories.iter().map(|&(id, _)| Some(id)).collect());
     }
-    Ok(gt.categories.iter().map(|c| c.0).collect())
+    if gt.categories.len() >= classes.len() {
+        return Err(mismatch());
+    }
+    let mut out = vec![None; classes.len()];
+    let mut prev: Option<usize> = None;
+    for (id, name) in &gt.categories {
+        let mut matches = classes.iter().enumerate().filter_map(|(i, c)| (c == name).then_some(i));
+        let (Some(idx), None) = (matches.next(), matches.next()) else {
+            return Err(mismatch());
+        };
+        if prev.is_some_and(|p| idx <= p) {
+            return Err(mismatch());
+        }
+        out[idx] = Some(*id);
+        prev = Some(idx);
+    }
+    Ok(out)
 }
 
 /// pycocotools-exact evaluation: every GT image of the split (in id order), crowd regions, annotation areas.
@@ -63,7 +86,8 @@ pub fn evaluate(
     detections: &[(usize, Vec<Detection>)],
 ) -> Result<CocoResult, CliError> {
     let cats = category_ids(gt, part.class_names())?;
-    let class_of: HashMap<u64, u32> = cats.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
+    let class_of: HashMap<u64, u32> =
+        cats.iter().enumerate().filter_map(|(i, c)| c.map(|id| (id, i as u32))).collect();
     let images = by_path(gt, part);
     let mut dets_of: HashMap<u64, &[Detection]> = HashMap::new();
     for (index, d) in detections {
@@ -147,7 +171,7 @@ pub fn write_results(
             continue;
         }
         for d in dets {
-            let Some(&cat) = cats.get(d.class as usize) else { continue };
+            let Some(Some(cat)) = cats.get(d.class as usize).copied() else { continue };
             let (x1, y1) = (d.bbox.x1 as f64, d.bbox.y1 as f64);
             let (w, h) = (d.bbox.x2 as f64 - x1, d.bbox.y2 as f64 - y1);
             let sep = if n == 0 { "" } else { "," };
@@ -228,5 +252,37 @@ mod tests {
         assert_eq!(e.code, "io_error");
         let e = super::prepare_results(&new.join("dets.json")).unwrap_err();
         assert!(e.code == "io_error" && e.message.starts_with("cannot write "), "{}", e.message);
+    }
+
+    #[test]
+    fn subset_categories_map_to_dataset_classes_and_reject_mismatches() {
+        let classes: Vec<String> = ["circle", "square", "triangle"].into_iter().map(String::from).collect();
+        let make = |cats: &[(u64, &str)]| folo_data::CocoGroundTruth {
+            path: std::path::PathBuf::from("instances_val.json"),
+            images: Vec::new(),
+            categories: cats.iter().map(|&(id, n)| (id, n.to_string())).collect(),
+        };
+        assert_eq!(
+            super::category_ids(&make(&[(1, "circle"), (2, "square"), (3, "triangle")]), &classes).unwrap(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        // Subset of train's categories: `square` absent from val maps to None, `triangle` keeps class 2.
+        assert_eq!(
+            super::category_ids(&make(&[(1, "circle"), (3, "triangle")]), &classes).unwrap(),
+            vec![Some(1), None, Some(3)]
+        );
+        // Out of order, unknown category, and ambiguous duplicate name are refused.
+        for bad in [
+            make(&[(1, "triangle"), (3, "circle")]),
+            make(&[(1, "circle"), (2, "unknown")]),
+            make(&[(1, "triangle"), (2, "square"), (3, "circle")]),
+        ] {
+            assert_eq!(super::category_ids(&bad, &classes).unwrap_err().code, "invalid_dataset");
+        }
+        let dup_classes: Vec<String> = ["a", "a"].into_iter().map(String::from).collect();
+        assert_eq!(
+            super::category_ids(&make(&[(1, "a")]), &dup_classes).unwrap_err().code,
+            "invalid_dataset"
+        );
     }
 }

@@ -63,11 +63,8 @@ fn predict_skips_directory_link_cycles() {
 
     let (code, lines, stderr) = folo(&["predict", "--json", "--model", s(&best), s(&input)]);
     assert_eq!(code, 0, "{stderr}");
-    let preds: Vec<&str> = lines
-        .iter()
-        .filter(|l| l["event"] == "prediction")
-        .map(|l| l["file"].as_str().unwrap())
-        .collect();
+    let preds: Vec<&str> =
+        lines.iter().filter(|l| l["event"] == "prediction").map(|l| l["file"].as_str().unwrap()).collect();
     assert_eq!(preds.len(), 2, "expected 2 images (a.png and extra/b.png), got {preds:?}");
     assert!(preds.iter().any(|p| p.ends_with("/a.png")), "{preds:?}");
     assert!(preds.iter().any(|p| p.ends_with("/extra/b.png")), "{preds:?}");
@@ -187,4 +184,94 @@ fn export_and_quantize_strip_checkpoint_only_keys() {
     assert!(!qmeta.extra.contains_key("folo.amp"), "quantize leaked folo.amp");
     assert!(!qmeta.extra.contains_key("folo.nonfinite_streak"), "quantize leaked folo.nonfinite_streak");
     assert_eq!(qmeta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "quantize");
+}
+
+/// `folo val --coco` / `--save-json` works on a multi-split COCO dataset whose `val` JSON declares only a subset of
+/// `train`'s categories (mapping each category to its dataset class index), and rejects a genuine category mismatch
+/// before creating `--save-json`'s output folder.
+#[test]
+fn val_coco_handles_subset_val_categories_and_fails_early_on_mismatch() {
+    let tiny = tiny_run();
+    let best = tiny.run.join("weights/best.folo");
+    let root = TestDir::new("cli-val-coco-subset");
+
+    let coco = root.join("coco-sub");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&tiny.data), s(&coco), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    // Keep only the second category (`square`, id 2 -> dataset class 1) in `instances_val.json` while `train` keeps both.
+    let val_json = coco.join("annotations/instances_val.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&val_json).unwrap()).unwrap();
+    let kept_id = doc["categories"][1]["id"].as_u64().unwrap();
+    doc["categories"] = serde_json::json!([doc["categories"][1].clone()]);
+    doc["annotations"] = serde_json::Value::Array(
+        doc["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["category_id"].as_u64() == Some(kept_id))
+            .cloned()
+            .collect(),
+    );
+    std::fs::write(&val_json, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    let dets_path = root.join("sub-out/dets.json");
+    let (code, lines, stderr) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&coco),
+        "--workers",
+        "1",
+        "--conf",
+        "0.001",
+        "--coco",
+        "--save-json",
+        s(&dets_path),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let c = &lines[0]["coco"];
+    assert_eq!((c["images"].as_u64(), c["missing_images"].as_u64()), (Some(4), Some(0)), "{c}");
+    let dets: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&dets_path).unwrap()).unwrap();
+    for d in &dets {
+        assert_eq!(d["category_id"].as_u64(), Some(kept_id), "unexpected category_id in {d}");
+    }
+
+    // Genuine mismatch: YOLO `data.yaml` with reversed classes alongside COCO annotations fails before creating
+    // `--save-json`'s output folder.
+    let mismatch = root.join("mismatch");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&mismatch), "--to", "yolo", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::create_dir_all(mismatch.join("annotations")).unwrap();
+    std::fs::copy(&val_json, mismatch.join("annotations/instances_val.json")).unwrap();
+    let yaml = mismatch.join("data.yaml");
+    let text =
+        std::fs::read_to_string(&yaml).unwrap().replace("circle", "other").replace("square", "another");
+    assert!(text.contains("another"), "expected class names in data.yaml: {text}");
+    std::fs::write(&yaml, text).unwrap();
+
+    let refused = root.join("never-created/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&mismatch),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused),
+    ]);
+    assert_eq!(code, 1, "{lines:?}");
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(
+        !refused.parent().unwrap().exists(),
+        "mismatched categories must fail before creating --save-json dir"
+    );
 }

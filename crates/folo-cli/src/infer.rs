@@ -173,9 +173,12 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         ));
     }
     let imgsz = args.imgsz.unwrap_or(model.imgsz());
-    // Read the COCO ground truth first, so a non-COCO dataset fails before the (long) evaluation.
+    // Read and check the COCO ground truth first, so a non-COCO or mismatched dataset fails before the (long)
+    // evaluation (and before `--save-json` creates its output folder).
     let coco_gt = if args.coco || args.save_json.is_some() {
-        Some(crate::coco::ground_truth(&args.data, split)?)
+        let gt = crate::coco::ground_truth(&args.data, split)?;
+        crate::coco::category_ids(&gt, part.class_names())?;
+        Some(gt)
     } else {
         None
     };
