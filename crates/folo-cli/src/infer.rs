@@ -293,21 +293,28 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
 /// Every image under `sources` (folders recursively, in name order), with its path relative to the folder it was
 /// found in (just the file name for a file source).
 fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
-    fn walk(
-        dir: &Path,
-        visited: &mut std::collections::HashSet<PathBuf>,
-        out: &mut Vec<PathBuf>,
-    ) -> std::io::Result<()> {
+    fn walk(dir: &Path, ancestors: &mut Vec<PathBuf>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let mut entries: Vec<PathBuf> =
             std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                // Skip directories already visited (symlink/junction cycles or duplicate links inside the source),
-                // while still following non-cyclic links to external folders.
-                let Ok(canon) = std::fs::canonicalize(&p) else { continue };
-                if visited.insert(canon) {
-                    walk(&p, visited, out)?;
+                match std::fs::canonicalize(&p) {
+                    Ok(canon) => {
+                        // Skip only real cycles (a directory already among the ancestors on the current walk),
+                        // so non-cyclic links to the same folder (e.g. `latest -> run-3` beside `run-3/`) are
+                        // still walked as before.
+                        if ancestors.contains(&canon) {
+                            continue;
+                        }
+                        ancestors.push(canon);
+                        let res = walk(&p, ancestors, out);
+                        ancestors.pop();
+                        res?;
+                    }
+                    // When identity cannot be established (e.g. a share whose ancestor metadata cannot be
+                    // queried), walk it as before rather than silently dropping its images.
+                    Err(_) => walk(&p, ancestors, out)?,
                 }
             } else if folo_data::is_image_path(&p) {
                 out.push(p);
@@ -318,12 +325,9 @@ fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliErr
     let mut out = Vec::new();
     for s in sources {
         if s.is_dir() {
-            let mut visited = std::collections::HashSet::new();
-            if let Ok(canon) = std::fs::canonicalize(s) {
-                visited.insert(canon);
-            }
+            let mut ancestors: Vec<PathBuf> = std::fs::canonicalize(s).into_iter().collect();
             let mut found = Vec::new();
-            walk(s, &mut visited, &mut found).map_err(|e| {
+            walk(s, &mut ancestors, &mut found).map_err(|e| {
                 CliError::new(
                     ExitCode::Runtime,
                     "io_error",

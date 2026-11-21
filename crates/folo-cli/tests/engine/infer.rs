@@ -40,9 +40,9 @@ impl Drop for DirLink {
     }
 }
 
-/// `folo predict` on a folder containing a self-referencing directory link visits each real directory once
-/// (instead of looping until the OS symlink/reparse limit and emitting duplicate predictions) while still following
-/// a non-cyclic link to an external folder.
+/// `folo predict` skips a directory link that points to one of its own ancestors (so cycles do not loop or emit
+/// 64 duplicates), while still walking non-cyclic repeated links to the same folder (e.g. `latest -> run-3`
+/// beside `run-3/`) and non-cyclic external links, as on `main`.
 #[test]
 fn predict_skips_directory_link_cycles() {
     let tiny = tiny_run();
@@ -51,25 +51,33 @@ fn predict_skips_directory_link_cycles() {
 
     let root = TestDir::new("cli-predict-cycle");
     let input = root.join("input");
+    let run3 = input.join("run-3");
     let external = root.join("external");
-    std::fs::create_dir_all(&input).unwrap();
+    std::fs::create_dir_all(&run3).unwrap();
     std::fs::create_dir_all(&external).unwrap();
     std::fs::copy(&src_img, input.join("a.png")).unwrap();
-    std::fs::copy(&src_img, external.join("b.png")).unwrap();
+    std::fs::copy(&src_img, run3.join("b.png")).unwrap();
+    std::fs::copy(&src_img, external.join("c.png")).unwrap();
 
-    // Self-loop plus a legitimate non-cyclic link to an external folder.
+    // Real cycle (`loop -> input`), sibling repeated link (`latest -> run-3` beside `run-3/`), and external link.
     let _self_loop = DirLink::new(&input, input.join("loop"));
+    let _sibling_link = DirLink::new(&run3, input.join("latest"));
     let _ext_link = DirLink::new(&external, input.join("extra"));
 
     let (code, lines, stderr) = folo(&["predict", "--json", "--model", s(&best), s(&input)]);
     assert_eq!(code, 0, "{stderr}");
     let preds: Vec<&str> =
         lines.iter().filter(|l| l["event"] == "prediction").map(|l| l["file"].as_str().unwrap()).collect();
-    assert_eq!(preds.len(), 2, "expected 2 images (a.png and extra/b.png), got {preds:?}");
-    assert!(preds.iter().any(|p| p.ends_with("/a.png")), "{preds:?}");
-    assert!(preds.iter().any(|p| p.ends_with("/extra/b.png")), "{preds:?}");
+    assert_eq!(
+        preds.len(),
+        4,
+        "expected 4 images (a.png, extra/c.png, latest/b.png, run-3/b.png), got {preds:?}"
+    );
+    for suffix in ["/a.png", "/extra/c.png", "/latest/b.png", "/run-3/b.png"] {
+        assert!(preds.iter().any(|p| p.ends_with(suffix)), "missing {suffix} in {preds:?}");
+    }
     let done = lines.last().unwrap();
-    assert_eq!((done["event"].as_str(), done["images"].as_u64()), (Some("done"), Some(2)), "{done}");
+    assert_eq!((done["event"].as_str(), done["images"].as_u64()), (Some("done"), Some(4)), "{done}");
 }
 
 /// Inserts string key-value pairs into a `.folo` file's `__metadata__` header without touching tensor bytes.
