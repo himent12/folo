@@ -10,17 +10,8 @@ use crate::{Error, Result};
 pub const FORMAT_VERSION: &str = "1";
 
 /// Keys only checkpoints carry. They are dropped when a checkpoint's metadata is reused for a weights file.
-pub(crate) const CHECKPOINT_KEYS: [&str; 9] = [
-    "folo.train",
-    "folo.optim",
-    "folo.sched",
-    "folo.ema",
-    "folo.rng",
-    "folo.epoch",
-    "folo.best",
-    "folo.amp",
-    "folo.nonfinite_streak",
-];
+pub(crate) const CHECKPOINT_KEYS: [&str; 8] =
+    ["folo.train", "folo.optim", "folo.sched", "folo.ema", "folo.rng", "folo.epoch", "folo.best", "folo.amp"];
 
 /// `folo.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,18 +439,28 @@ mod tests {
             "folo.epoch",
             "folo.best",
             "folo.amp",
-            "folo.nonfinite_streak",
         ] {
             m.extra.insert(k.into(), "1".into());
         }
+        m.extra.insert("folo.nonfinite_streak".into(), "2".into());
         m.extra.insert("folo.custom".into(), "keep".into());
 
         let w = m.for_weights();
         assert_eq!(w.kind, FileKind::Weights);
         assert_eq!(w.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(w.created.as_deref(), Some("2026-11-21T00:00:00Z"));
+        assert_eq!(w.extra.get("folo.nonfinite_streak").map(String::as_str), Some("2"));
         assert_eq!(w.extra.get("folo.custom").map(String::as_str), Some("keep"));
-        for k in ["folo.amp", "folo.nonfinite_streak", "folo.train", "folo.optim", "folo.best"] {
+        for k in [
+            "folo.amp",
+            "folo.train",
+            "folo.optim",
+            "folo.sched",
+            "folo.ema",
+            "folo.rng",
+            "folo.epoch",
+            "folo.best",
+        ] {
             assert!(!w.extra.contains_key(k), "checkpoint key `{k}` leaked into weights metadata");
         }
     }

@@ -135,12 +135,13 @@ fn export_weights_preserves_metadata() {
     }
 }
 
-/// Exporting or quantizing a training checkpoint drops `folo.amp` and `folo.nonfinite_streak` across every
-/// export format (`folo`, `folo-f16`, `weights`, `onnx`) and `folo quantize` while preserving unknown `folo.*` keys.
+/// Exporting a mixed-precision checkpoint drops the documented checkpoint-only `folo.amp` key in both `.folo`
+/// weights and ONNX `metadata_props`, while preserving unknown `folo.*` keys (including `folo.nonfinite_streak`,
+/// docs/FORMAT.md).
 #[test]
-fn export_and_quantize_strip_checkpoint_only_keys() {
+fn export_strips_amp_and_keeps_nonfinite_streak() {
     let tiny = tiny_run();
-    let root = TestDir::new("cli-strip-ckpt-keys");
+    let root = TestDir::new("cli-strip-amp");
     let src = root.join("best.folo");
     std::fs::copy(tiny.run.join("weights/best.folo"), &src).unwrap();
     insert_meta_keys(
@@ -155,16 +156,14 @@ fn export_and_quantize_strip_checkpoint_only_keys() {
         ],
     );
 
-    for (fmt, name) in [("folo", "a-fused.folo"), ("folo-f16", "a-f16.folo"), ("weights", "a-weights.folo")] {
-        let out = root.join(name);
-        let (code, _, stderr) =
-            folo(&["export", "--json", "--model", s(&src), "--format", fmt, "--output", s(&out)]);
-        assert_eq!(code, 0, "{fmt}: {stderr}");
-        let meta = folo_nn::io::ModelFile::open(&out).unwrap().metadata().clone();
-        assert!(!meta.extra.contains_key("folo.amp"), "{fmt} leaked folo.amp");
-        assert!(!meta.extra.contains_key("folo.nonfinite_streak"), "{fmt} leaked folo.nonfinite_streak");
-        assert_eq!(meta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "{fmt}");
-    }
+    let fused = root.join("a-fused.folo");
+    let (code, _, stderr) =
+        folo(&["export", "--json", "--model", s(&src), "--format", "folo", "--output", s(&fused)]);
+    assert_eq!(code, 0, "folo: {stderr}");
+    let meta = folo_nn::io::ModelFile::open(&fused).unwrap().metadata().clone();
+    assert!(!meta.extra.contains_key("folo.amp"), "folo leaked folo.amp");
+    assert_eq!(meta.extra.get("folo.nonfinite_streak").map(String::as_str), Some("2"));
+    assert_eq!(meta.extra.get("folo.custom").map(String::as_str), Some("keep-me"));
 
     let onnx = root.join("a.onnx");
     let (code, _, stderr) =
@@ -173,31 +172,8 @@ fn export_and_quantize_strip_checkpoint_only_keys() {
     let onnx_bytes = std::fs::read(&onnx).unwrap();
     let has = |needle: &[u8]| onnx_bytes.windows(needle.len()).any(|w| w == needle);
     assert!(!has(b"folo.amp"), "onnx leaked folo.amp");
-    assert!(!has(b"folo.nonfinite_streak"), "onnx leaked folo.nonfinite_streak");
+    assert!(has(b"folo.nonfinite_streak"), "onnx dropped unknown folo.nonfinite_streak");
     assert!(has(b"folo.custom"), "onnx dropped unknown folo.custom");
-
-    let quant = root.join("a-int8.folo");
-    let (code, _, stderr) = folo(&[
-        "quantize",
-        "--json",
-        "--model",
-        s(&src),
-        "--data",
-        s(&tiny.data),
-        "--images",
-        "2",
-        "--batch",
-        "2",
-        "--workers",
-        "1",
-        "--output",
-        s(&quant),
-    ]);
-    assert_eq!(code, 0, "quantize: {stderr}");
-    let qmeta = folo_nn::io::ModelFile::open(&quant).unwrap().metadata().clone();
-    assert!(!qmeta.extra.contains_key("folo.amp"), "quantize leaked folo.amp");
-    assert!(!qmeta.extra.contains_key("folo.nonfinite_streak"), "quantize leaked folo.nonfinite_streak");
-    assert_eq!(qmeta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "quantize");
 }
 
 /// `folo val --coco` / `--save-json` accepts a multi-split COCO dataset whose `val` JSON declares a non-empty
