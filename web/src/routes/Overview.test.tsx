@@ -28,6 +28,7 @@ afterEach(() => {
   target?.remove();
   watched.runs = undefined;
   watched.since = null;
+  hub.features = null;
 });
 
 function open(api: MockApi) {
@@ -516,5 +517,143 @@ describe('Overview', () => {
     });
     expect(card.querySelector('header .meta')?.textContent).toContain('Ryzen 9 7950X');
     expect(card.querySelector('.foot')).toBeNull();
+  });
+
+  // Issue #309 item 2: on a cold Overview, RunWatch and Overview must not issue two GET /api/runs requests even when
+  // Overview mounts in a later turn (after its chunk loads) or before RunWatch in the same render pass.
+  it('reuses RunWatch for the run list instead of fetching /api/runs a second time (issue #309)', async () => {
+    const api = new MockApi('normal', 0);
+    const runsSpy = vi.spyOn(api, 'runs');
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/');
+    const shell = document.body.appendChild(document.createElement('div'));
+    const watch = render(() => <RunWatch />, shell);
+    onTestFinished(() => {
+      watch.unmount();
+      shell.remove();
+    });
+    flush();
+    // Next turn (simulating Overview's chunk arriving after hub.connect() settled and RunWatch already started).
+    await Promise.resolve();
+    open(api);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelectorAll('#recent-runs tbody tr.link').length).toBeGreaterThan(0);
+    });
+    expect(runsSpy).toHaveBeenCalledTimes(1);
+
+    // Same render pass with Overview before RunWatch (App's JSX order when the chunk is already loaded).
+    c!.unmount();
+    watch.unmount();
+    runsSpy.mockClear();
+    const both = render(
+      () => (
+        <>
+          <Overview />
+          <RunWatch />
+        </>
+      ),
+      target,
+    );
+    onTestFinished(() => both.unmount());
+    flush();
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelectorAll('#recent-runs tbody tr.link').length).toBeGreaterThan(0);
+    });
+    expect(runsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports RunWatch /api/runs failure on Overview and recovers on Retry (issue #309)', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await idleRuns();
+    let fail = true;
+    const runsSpy = vi.spyOn(api, 'runs').mockImplementation(async () => {
+      if (fail) throw new ApiError(500, 'internal', 'the run index could not be read');
+      return list;
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/');
+    const shell = document.body.appendChild(document.createElement('div'));
+    const watch = render(() => <RunWatch />, shell);
+    onTestFinished(() => {
+      watch.unmount();
+      shell.remove();
+    });
+    flush();
+    await Promise.resolve();
+    open(api);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.textContent).toContain('Could not load recent runs');
+      expect(target.textContent).toContain('Could not check what is training');
+    });
+    expect(runsSpy).toHaveBeenCalledTimes(1);
+
+    fail = false;
+    const retry = target.querySelector<HTMLButtonElement>('.live button');
+    expect(retry?.textContent).toContain('Retry');
+    retry!.click();
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelectorAll('#recent-runs tbody tr.link').length).toBeGreaterThan(0);
+    });
+    expect(runsSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // Issue #309 item 2: when /api/health already supplied features (`hub.features`), Overview does not issue its own
+  // /api/system call, leaving only MachineFoot's single call when a local run is training (and zero when idle).
+  it('reads features from hub.features instead of duplicating MachineFoot /api/system (issue #309)', async () => {
+    const api = new MockApi('normal', 0);
+    const sysSpy = vi.spyOn(api, 'system');
+    const [job] = await api.labelJobs();
+    api.labelJobs = async () => [{ ...job!, status: 'running', run: { ...job!.run!, finished: null, total: 10, done: 3 } }];
+    api.benches = async () => [];
+    api.cloudInstances = async () => [];
+    hub.features = ['queue_control', 'agent_labeling', 'vision_bench', 'cloud'];
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (!el?.querySelector('.foot') || !target.querySelector('.activity')) throw new Error('still waiting for live card and activity');
+      return el;
+    });
+    expect(card.querySelector('.foot')?.textContent).toContain('Memory');
+    expect(target.querySelector('.activity')?.textContent).toContain(job!.name);
+    // Only MachineFoot asked for /api/system; Overview used hub.features.
+    expect(sysSpy).toHaveBeenCalledTimes(1);
+
+    // On a fresh install with hub.features known, Onboard uses it without calling /api/system at all.
+    c!.unmount();
+    target.remove();
+    const empty = new MockApi('empty', 0);
+    const emptySys = vi.spyOn(empty, 'system');
+    hub.features = ['queue_control', 'agent_labeling'];
+    open(empty);
+    const link = await vi.waitFor(() => {
+      flush();
+      const a = [...target.querySelectorAll<HTMLAnchorElement>('.onboard a')].find((x) => x.textContent?.includes('Label them with an agent'));
+      if (!a) throw new Error('still waiting for onboarding link');
+      return a;
+    });
+    expect(link.getAttribute('href')).toBe('#/datasets/label');
+    expect(emptySys).toHaveBeenCalledTimes(0);
+
+    // A brief outage clears `hub.features`, yet Overview keeps the connection's last known features and does not fire
+    // a fallback `/api/system` until a reconnect (`hub.epoch`) drops them.
+    hub.features = null;
+    flush();
+    expect(target.querySelector('.onboard a[href="#/datasets/label"]')).not.toBeNull();
+    expect(emptySys).toHaveBeenCalledTimes(0);
+
+    // Reconnecting to an older server without `/api/health` features falls back to `/api/system`.
+    hub.epoch++;
+    flush();
+    await vi.waitFor(() => {
+      flush();
+      expect(emptySys).toHaveBeenCalledTimes(1);
+    });
   });
 });

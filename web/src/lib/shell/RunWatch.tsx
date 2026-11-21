@@ -3,17 +3,21 @@
  * it finishes, fails or runs out of GPU memory (./runWatch). Not on that run's own page, whose banner already says
  * so. Renders nothing; the sidebar's live card reads the same list (./runList).
  */
-import { effect, untrack } from 'fw';
+import { effect, onCleanup, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Run } from '$lib/api/types';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
-import { watched } from './runList';
+import { setWatchedResource, watched, watchedResource } from './runList';
 import { runEndMessage, runEnds } from './runWatch';
 
 export default function RunWatch(): JSX.Element {
   const runs = new Resource((s) => hub.api.runs(s), { poll: 2000 });
+  setWatchedResource(runs);
+  onCleanup(() => {
+    if (untrack(watchedResource) === runs) setWatchedResource(null);
+  });
   let prev: Run[] | undefined;
   // A different server (reconnect, mock): its list is not a change from the last one.
   effect(() => {

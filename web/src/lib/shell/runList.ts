@@ -5,10 +5,24 @@
 import { signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { streamedRun } from '$lib/api/live';
+import type { Resource } from '$lib/api/resource';
 import type { Run } from '$lib/api/types';
 
 const runs = signal<{ v: Run[] | undefined; epoch: number }>({ v: undefined, epoch: -1 });
 const since = signal<{ v: number | null; epoch: number }>({ v: null, epoch: -1 });
+const resource = signal<Resource<Run[]> | null>(null);
+
+/**
+ * The Resource behind `watched` while `RunWatch` is mounted (the app shell), or null in standalone tests that mount a
+ * screen without `RunWatch`. Overview reads it directly instead of issuing a second `GET /api/runs`.
+ */
+export function watchedResource(): Resource<Run[]> | null {
+  return resource.get();
+}
+
+export function setWatchedResource(r: Resource<Run[]> | null): void {
+  resource.set(r);
+}
 
 /** `since`: when the list last arrived, while its polls fail (the list is then a snapshot, not the current state). */
 export const watched = {

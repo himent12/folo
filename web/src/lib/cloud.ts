@@ -2,17 +2,17 @@
 // line, the offer New run preselects, the default time limit, the states of an instance. One module, so Settings, New
 // run and the run page say the same thing with the same numbers.
 
-import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, SystemInfo, TransferProgress } from './api/types';
+import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, TransferProgress } from './api/types';
 import { bytes, deviceName, hoursText, pct, pricePerHour, usd } from './format';
 
 /** The `Run.error_code`s of a collection that failed (docs/CLOUD.md): a copy that failed, or the instance gone while it copied. Any other failure in `collecting` is the worker's. */
 const COLLECT_FAILURES: readonly string[] = ['cloud_sync_failed', 'cloud_instance_lost'];
 
 /**
- * Whether the server has cloud compute (`/api/system`'s `cloud` feature): without it no cloud control renders and no
- * request carries `compute`.
+ * Whether the server has cloud compute (`/api/health` or `/api/system`'s `cloud` feature): without it no cloud control
+ * renders and no request carries `compute`.
  */
-export const hasCloud = (sys: SystemInfo | null | undefined): boolean => !!sys?.features?.includes('cloud');
+export const hasCloud = (sys: { features?: readonly string[] } | null | undefined): boolean => !!sys?.features?.includes('cloud');
 
 /** Every phase of a cloud run, in order (`CloudPhase`). */
 export const PHASES: readonly CloudPhase[] = ['provisioning', 'booting', 'syncing', 'training', 'collecting', 'releasing', 'released'];

@@ -3,7 +3,7 @@ import Activity from '$icons/activity';
 import Plus from '$icons/plus';
 import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
-import { computed, css, Key, signal } from 'fw';
+import { computed, css, effect, Key, signal, untrack } from 'fw';
 import { readDatasets } from '$lib/api/datasetReads';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
@@ -15,7 +15,7 @@ import { runDatasetLabel } from '$lib/runDataset';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
-import { watched } from '$lib/shell/runList';
+import { watched, watchedResource } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -37,7 +37,35 @@ import { asOf, Now } from '$lib/api/freshness';
 export default function Overview() {
   setCrumbs({ label: 'Overview' });
 
-  const runs = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  // When the shell's RunWatch is mounted (the real app), reuse its run list Resource (polled every 2 s) so a cold
+  // Overview never issues a second GET /api/runs or a separate 5 s poll. Standalone tests mount Overview without
+  // RunWatch, where it polls on its own.
+  const ownRuns = signal<Resource<Run[]> | null>(null);
+  effect(() => {
+    if (watchedResource()) {
+      ownRuns.set(null);
+      return;
+    }
+    ownRuns.set(new Resource((s) => hub.api.runs(s), { poll: 5000 }));
+  });
+  const activeRuns = () => watchedResource() ?? ownRuns.get();
+  const runs = {
+    get data(): Run[] | undefined {
+      return activeRuns()?.data;
+    },
+    get error(): unknown {
+      return activeRuns()?.error;
+    },
+    get stale(): unknown {
+      return activeRuns()?.stale;
+    },
+    get updated(): number | null {
+      return activeRuns()?.updated ?? null;
+    },
+    refresh(): Promise<void> {
+      return activeRuns()?.refresh() ?? Promise.resolve();
+    },
+  };
   // Kept current as runs end or go (lib/api/models), as on every screen that lists models.
   const models = modelsResource();
   // The list endpoint has no stats; each dataset is read for its class balance (a missing folder is marked, and not
@@ -46,8 +74,29 @@ export default function Overview() {
   // The header's first step (./firstStep) follows it: read again after a dataset action and when the tab is shown again
   // (the first dataset added, or the last one deleted, in another tab).
   refreshOnDatasetChange(datasets);
-  // Which optional features the server has (labeling, benchmarks): what else Overview can point to.
-  const system = new Resource((s) => hub.api.system(s));
+  // Which optional features the server has (labeling, benchmarks, cloud): what else Overview can point to. Current
+  // servers include them in /api/health (`hub.features`), so Overview avoids a separate /api/system call (and never
+  // duplicates MachineFoot's). Keep the last known list across a brief outage, reset on reconnect (`hub.epoch`), and
+  // fall back to /api/system when the server in use did not list features in /api/health (older servers, or the demo).
+  const healthFeatures = signal<readonly string[] | null>(untrack(() => hub.features));
+  let featuresEpoch = untrack(() => hub.epoch);
+  effect(() => {
+    const ep = hub.epoch;
+    if (hub.mode === 'connecting' || ep !== featuresEpoch) {
+      featuresEpoch = ep;
+      healthFeatures.set(null);
+    }
+    if (hub.features !== null) healthFeatures.set(hub.features);
+  });
+  const needSystem = computed(() => hub.features === null && healthFeatures.get() === null);
+  const system = new Resource((s) => (needSystem.get() ? hub.api.system(s) : Promise.resolve(undefined)));
+  const features = computed(
+    () => {
+      const f = hub.features ?? healthFeatures.get();
+      return f !== null ? { features: f } : system.data;
+    },
+    { equals: (a, b) => a === b || (!!a && !!b && a.features === b.features) },
+  );
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
   // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
   // stopped refreshing.
@@ -147,9 +196,9 @@ export default function Overview() {
       {fresh.get() ? (
         // A fresh install: one path forward instead of a page of empty panels.
         <>
-          <Onboard system={system.data} systemError={system.error} />{' '}
+          <Onboard system={features.get()} systemError={system.error} />{' '}
           {/* A labeling job can run before there is any dataset (it makes one). */}
-          <AlsoRunning system={system.data} />
+          <AlsoRunning system={features.get()} />
         </>
       ) : down.get() ? (
         // Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
@@ -242,7 +291,7 @@ export default function Overview() {
               </Panel>
             )}
           </div>{' '}
-          <AlsoRunning system={system.data} />{' '}
+          <AlsoRunning system={features.get()} />{' '}
           <div class="cols">
             <div class="col-main">
               <RecentRuns all={runList.get()} recent={recent.get()} failed={runsFailed.get()} error={runs.error} retry={() => runs.refresh()} dsLabel={dsLabel} />

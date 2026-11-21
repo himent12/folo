@@ -13,7 +13,7 @@ import { computed, css, For } from 'fw';
 import { hub } from '$lib/api/index';
 import { hasFeature } from '$lib/api/queue';
 import { Resource } from '$lib/api/resource';
-import type { Bench, BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
+import type { Bench, BenchEntry, BenchLoop, CloudInstance } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
 import { hasCloud } from '$lib/cloud';
 import { count, num } from '$lib/format';
@@ -35,7 +35,7 @@ interface Item {
   path: string;
 }
 
-export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
+export default function AlsoRunning(props: { system: { features?: readonly string[] } | undefined }) {
   // Polled with the run list (the same period, so one timer): a job or entry that starts shows within seconds.
   const jobs = new Resource((s) => (hasFeature(props.system, LABEL_FEATURE) ? hub.api.labelJobs(s) : Promise.resolve([])), { poll: 5000 });
   const benches = new Resource((s) => (hasFeature(props.system, BENCH_FEATURE) ? hub.api.benches(s) : Promise.resolve([])), { poll: 5000 });

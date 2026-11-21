@@ -18,17 +18,18 @@ afterEach(() => {
   target?.remove();
 });
 
-async function mount(edit: (r: Run) => Run): Promise<{ sys: SystemInfo }> {
+async function mount(edit: (r: Run) => Run): Promise<{ api: MockApi; sys: SystemInfo; sysSpy: ReturnType<typeof vi.spyOn> }> {
   const api = new MockApi('normal', 0);
   hub.api = api;
   hub.mode = 'mock';
   const run = edit((await api.runs()).find((r) => r.status === 'running')!);
   const sys = await api.system();
+  const sysSpy = vi.spyOn(api, 'system');
   target = document.createElement('div');
   document.body.appendChild(target);
   c = render(() => <MachineFoot run={run} />, target);
   flush();
-  return { sys };
+  return { api, sys, sysSpy };
 }
 
 const foot = () =>
@@ -64,9 +65,10 @@ describe('MachineFoot', () => {
   });
 
   it("has no foot for a cloud run: this server has no readings of the rented machine", async () => {
-    await mount((r) => ({ ...r, cloud: { provider: 'runpod' } as unknown as Run['cloud'] }));
-    await new Promise((ok) => setTimeout(ok, 50));
+    const { sysSpy } = await mount((r) => ({ ...r, cloud: { provider: 'runpod' } as unknown as Run['cloud'] }));
+    await Promise.resolve();
     flush();
     expect(target.querySelector('.foot')).toBeNull();
+    expect(sysSpy).not.toHaveBeenCalled();
   });
 });

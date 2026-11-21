@@ -154,8 +154,10 @@ the stylesheet is gone, as before), and the stylesheet applies when it arrives. 
   history again (`reconnect`). `LiveRun` (`live.ts`, a run's
   `GET /api/runs/{id}/events`), `LiveLabelJob` (`liveLabel.ts`) and `LiveBench` (`liveBench.ts`) subscribe before they
   fetch history and merge the two; `LiveRun` publishes new steps once per animation frame (`version`).
-- **Run list:** the shell polls it every 2 s (`src/lib/shell/RunWatch.tsx`, `runList.ts`) for the sidebar's live row
-  and the toast when a run ends.
+- **Run list:** the shell polls it every 2 s (`src/lib/shell/RunWatch.tsx`, `runList.ts`) for the sidebar's live row,
+  Overview (which reuses that Resource instead of polling `/api/runs` a second time, and reads optional server features
+  from `/api/health`'s `hub.features` when present instead of issuing a second `/api/system` beside `MachineFoot`) and
+  the toast when a run ends.
 - **Offline:** `src/lib/api/reach.ts` hears every request and stream and sets `hub.offline`; screens then show what
   they had as a last known state (`src/lib/api/freshness.ts`).
 

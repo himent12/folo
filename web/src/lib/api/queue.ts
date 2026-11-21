@@ -1,10 +1,10 @@
 // The training queue (docs/API.md, POST /api/runs/{id}/queue): one pure rule for a move, shared by the mock (its queue
 // of run ids) and the screens (their optimistic order before the server answers), and the words for a place in it.
 
-import type { QueueRequest, Run, SystemInfo } from './types';
+import type { QueueRequest, Run } from './types';
 
-/** Whether the server lists an optional API feature (`queue_control`, `weights_onnx`, ...) in `/api/system`. */
-export function hasFeature(system: SystemInfo | undefined | null, name: string): boolean {
+/** Whether the server lists an optional API feature (`queue_control`, `weights_onnx`, ...) in `/api/health` or `/api/system`. */
+export function hasFeature(system: { features?: readonly string[] } | undefined | null, name: string): boolean {
   return !!system?.features?.includes(name);
 }
 

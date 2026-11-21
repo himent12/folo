@@ -1,13 +1,12 @@
 /** A fresh install's Overview (no datasets, no runs, no models of the user's own): one path forward in three steps. */
 import Plus from '$icons/plus';
 import { css } from 'fw';
-import type { SystemInfo } from '$lib/api/types';
 import { hasFeature } from '$lib/api/queue';
 import { LABEL_FEATURE } from '$lib/label';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 
-export default function Onboard(props: { system: SystemInfo | undefined; systemError: unknown }) {
+export default function Onboard(props: { system: { features?: readonly string[] } | undefined; systemError: unknown }) {
   return (
     <section class="onboard" aria-labelledby="onboard-title">
       <div class="ob-head">
