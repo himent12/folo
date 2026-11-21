@@ -377,10 +377,12 @@ impl Metadata {
         m
     }
 
-    /// This metadata as a `weights` file's: kind `weights`, checkpoint-only keys dropped, unknown keys kept.
+    /// This metadata as a `weights` file's: kind `weights`, `folo.version` stamped with this writer's version,
+    /// checkpoint-only keys dropped, unknown keys kept.
     pub fn for_weights(&self) -> Metadata {
         let mut m = self.clone();
         m.kind = FileKind::Weights;
+        m.version = Some(env!("CARGO_PKG_VERSION").to_string());
         m.extra.retain(|k, _| !CHECKPOINT_KEYS.contains(&k.as_str()));
         m
     }
@@ -436,6 +438,7 @@ mod tests {
         )
         .unwrap();
         m.created = Some("2026-11-21T00:00:00Z".into());
+        m.version = Some("0.0.1".into());
         for k in [
             "folo.train",
             "folo.optim",
@@ -453,6 +456,7 @@ mod tests {
 
         let w = m.for_weights();
         assert_eq!(w.kind, FileKind::Weights);
+        assert_eq!(w.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(w.created.as_deref(), Some("2026-11-21T00:00:00Z"));
         assert_eq!(w.extra.get("folo.custom").map(String::as_str), Some("keep"));
         for k in ["folo.amp", "folo.nonfinite_streak", "folo.train", "folo.optim", "folo.best"] {

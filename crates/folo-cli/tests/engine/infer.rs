@@ -100,17 +100,18 @@ fn insert_meta_keys(path: &Path, pairs: &[(&str, &str)]) {
 }
 
 /// `folo export --format weights` preserves `folo.metrics`, `folo.created` and unknown `folo.*` keys
-/// (docs/FORMAT.md), matching `--format folo`, `--format folo-f16` and `--format onnx`.
+/// (docs/FORMAT.md), drops checkpoint-only keys, and stamps `folo.version` with the exporter's version.
 #[test]
 fn export_weights_preserves_metadata() {
     let tiny = tiny_run();
     let root = TestDir::new("cli-export-weights-meta");
     let src = root.join("best.folo");
     std::fs::copy(tiny.run.join("weights/best.folo"), &src).unwrap();
-    insert_meta_keys(&src, &[("folo.custom", "keep-me")]);
+    insert_meta_keys(&src, &[("folo.custom", "keep-me"), ("folo.version", "0.0.1")]);
     let src_meta = folo_nn::io::ModelFile::open(&src).unwrap().metadata().clone();
     assert!(src_meta.metrics.is_some(), "fixture checkpoint has folo.metrics");
     assert!(src_meta.created.is_some(), "fixture checkpoint has folo.created");
+    assert_eq!(src_meta.version.as_deref(), Some("0.0.1"));
 
     let out = root.join("weights.folo");
     let (code, _, stderr) =
@@ -121,6 +122,11 @@ fn export_weights_preserves_metadata() {
     let meta = file.metadata();
     assert_eq!(meta.kind, folo_nn::io::FileKind::Weights);
     assert!(!meta.fused);
+    assert_eq!(
+        meta.version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "folo.version must be the exporter's"
+    );
     assert_eq!(meta.metrics, src_meta.metrics, "folo.metrics must be preserved");
     assert_eq!(meta.created, src_meta.created, "folo.created must be preserved");
     assert_eq!(meta.extra.get("folo.custom").map(String::as_str), Some("keep-me"));
