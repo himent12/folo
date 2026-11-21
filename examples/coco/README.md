@@ -86,12 +86,14 @@ cargo folo train --data datasets/coco --model folo-n --imgsz 640 --batch 16 --ep
 cargo folo train --resume runs-coco/coco-folo-n/weights/last.folo --workers 16 --device gpu:0
 ```
 
-The MODEL.md §8 recipe: SGD (`auto` picks it: 92,450 optimizer steps > 10,000) at lr0 0.01, momentum 0.9, nominal
-batch 64 (batch 16 × accumulate 4), 3 warmup epochs, weight decay 5e-4, EMA, mosaic + affine + HSV + flips, mosaic
-closed for the last 10 epochs. No mixup, copy-paste, multi-scale or distillation. Two choices fit the budget: the
-epoch count, and cosine decay (`--cos-lr`) so the schedule reaches `lr0 · lrf` exactly at the last epoch. A first
-5-minute probe measured 195 img/s, about 10.5 min per epoch with validation, so 50 epochs ≈ 9 h was the budget.
-`--patience 1000` keeps early stopping from cutting the schedule short.
+The MODEL.md §8 recipe as `auto` resolved it for this run: SGD (`auto_rule` 1, when 92,450 optimizer steps > 10,000
+picked SGD) at lr0 0.01, momentum 0.9, nominal batch 64 (batch 16 × accumulate 4), 3 warmup epochs, weight decay
+5e-4, EMA, mosaic + affine + HSV + flips, mosaic closed for the last 10 epochs. No mixup, copy-paste, multi-scale or
+distillation. Two choices fit the budget: the epoch count, and cosine decay (`--cos-lr`) so the schedule reaches
+`lr0 · lrf` exactly at the last epoch. A first 5-minute probe measured 195 img/s, about 10.5 min per epoch with
+validation, so 50 epochs ≈ 9 h was the budget. `--patience 1000` keeps early stopping from cutting the schedule short.
+Today `auto` (rule 5) resolves this command to MuSGD at momentum 0.937 with step weights 0.5 / 0.5; pass
+`--set auto_rule=1` to repeat v1's SGD.
 
 ### Run
 
@@ -188,6 +190,7 @@ Per class (AP / AP50, f32): large, distinctive objects do well; small, thin or a
 ## Publish
 
 ```sh
+mkdir -p out
 cargo folo export --model runs-coco/coco-folo-n/weights/best.folo --format weights \
   --output out/folo-n-coco.folo                                     # EMA, unfused, f32, no optimizer state
 cargo folo export --model out/folo-n-coco.folo --format folo-f16 --output out/folo-n-coco-f16.folo
@@ -235,8 +238,9 @@ folo train --data datasets/coco --model folo-n --imgsz 640 --batch 16 --epochs 3
   --patience 1000 --workers 16 --device gpu:0 --seed 0 --project runs-coco --name coco-folo-n-long
 ```
 
-**Recipe.** MODEL.md §8 as in v1 (SGD lr0 0.01, momentum 0.9, nominal batch 64, 3 warmup epochs, weight decay
-5e-4, EMA, mosaic + affine + HSV + flips, mosaic closed for the last 10 epochs, cosine decay to `lr0 · lrf`). Two
+**Recipe.** MODEL.md §8 as in v1, under the `auto` rule of that date (SGD lr0 0.01, momentum 0.9, nominal batch 64,
+3 warmup epochs, weight decay 5e-4, EMA, mosaic + affine + HSV + flips, mosaic closed for the last 10 epochs, cosine
+decay to `lr0 · lrf`; pass `--set auto_rule=1` to repeat SGD on current `main`, where `auto` rule 5 picks MuSGD). Two
 things change: the epoch count, and mixed precision (`--amp`, MODEL.md §8.8), which is a speed change, checked
 against f32 below. No augmentation or optimizer setting changed: there is no evidence on this data that another one
 helps, and each would need its own ablation.
@@ -477,7 +481,8 @@ folo train --resume runs-coco/n-r5-kd-e32/weights/last.folo --teacher folo-s-coc
   --data datasets/coco --format coco --workers 16 --device gpu:0
 ```
 
-**What the runs resolved to** (`config.json`): MuSGD (muon 0.2, sgd 1.0, class-head lr × 3), lr0 0.01 decaying
+**What the runs resolved to** (`config.json` and the first log line): MuSGD (muon 0.5, sgd 0.5 from scratch under
+`auto` rule 5, class-head lr × 3), lr0 0.01 decaying
 linearly to `lr0 · lrf` (lrf 0.01), momentum 0.937, weight decay 5e-4, 3 warmup epochs, batch 16 × accumulate 4
 (nominal 64), 1849 optimizer steps per epoch, EMA, mosaic 1.0 closed for the last 10 epochs, the default
 augmentation, AMP, seed 0. The fork's `distill` block: teacher `folo-s-coco`, class gain 0.5, DFL gain 1.5,
@@ -781,6 +786,7 @@ cannot be split into those causes.
 
 ```sh
 # on the pod
+mkdir -p /data/out
 folo export --model /data/runs/coco-folo-s/weights/best.folo --format weights \
   --output /data/out/folo-s-coco.folo                               # EMA, unfused, f32, no optimizer state
 folo export --model /data/out/folo-s-coco.folo --format folo-f16 --output /data/out/folo-s-coco-f16.folo

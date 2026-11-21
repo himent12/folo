@@ -143,6 +143,14 @@ def main(path: str) -> None:
     render(json.load(open(path, encoding="utf-8")))
 
 
+# FOLO learnable params (nc = 80) and GFLOPs at 640x640, from docs/MODEL.md, keyed by incumbent model.
+FOLO_MODEL_SIZE = {
+    "yolo26n": ("2,624,064", "6.54"),
+    "yolo26s": ("9,458,736", "21.59"),
+    "yolo26m": ("20,114,672", "68.10"),
+}
+
+
 def render(d: dict) -> None:
     present = [s for s in SECTIONS if s in d]
     envs = {s: env_rows(section_meta(d, s)[0]) for s in present}
@@ -162,7 +170,14 @@ def render(d: dict) -> None:
             table(
                 ["model", "params", "GFLOPs", "fused params", "fused GFLOPs", "FOLO params", "FOLO GFLOPs"],
                 [
-                    [m, f"{p['params']:,}", f(p["gflops_640"], 1), f"{p['fused_params']:,}", f(p["fused_gflops_640"], 1), "", ""]
+                    [
+                        m,
+                        f"{p['params']:,}",
+                        f(p["gflops_640"], 1),
+                        f"{p['fused_params']:,}",
+                        f(p["fused_gflops_640"], 1),
+                        *FOLO_MODEL_SIZE.get(m, ("", "")),
+                    ]
                     for m, p in d["params"].items()
                 ],
             )
