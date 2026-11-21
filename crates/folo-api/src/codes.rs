@@ -235,7 +235,8 @@ pub const CODES: &[Code] = &[
         "interrupted",
         503,
         1,
-        "the server stopped (or restarted) while the run trained or waited; Run.error_code of a stopped run",
+        "the server stopped (or restarted) while the run trained or waited; Run.error_code of a stopped run; also \
+         Ctrl+C while `folo bench run --predictions` sends a file (CLI)",
     ),
     c("runtime", 500, 1, "the async runtime could not start (CLI)"),
     c("bind_failed", 500, 1, "`folo serve` could not bind its address (CLI)"),

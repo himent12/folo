@@ -2,15 +2,17 @@
 //! answers with a result of [`crate::types::bench`]. Their errors carry no front end's hint ([`super::hints`] adds
 //! one).
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Read};
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use folo_api::{
-    Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchEntry, BenchPlan, BenchPrediction,
-    BenchResult, CreateBench, StartBenchEntry,
+    Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchEntry, BenchEntryStatus, BenchPlan,
+    BenchPrediction, BenchResult, CreateBench, StartBenchEntry,
 };
+use folo_server::bench::MAX_BOXES;
 use http::StatusCode;
 use serde_json::Value;
 
@@ -22,6 +24,9 @@ use crate::types::bench::*;
 pub const MAX_PART_BOXES: usize = 200_000;
 /// Most records in one part.
 const MAX_PART_RECORDS: usize = 20_000;
+/// Longest line of a file of predictions: far more than a record of [`MAX_BOXES`] boxes takes, and all of a line that
+/// is read before it is judged.
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 /// How large a part of a file of predictions may be.
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +100,18 @@ impl Benchmarks {
     /// Starts an entry. A model's entry runs in the background (follow it with [`Benchmarks::follow`]); a file of
     /// predictions is read and sent here, and the entry comes back scored. `name` is required for predictions.
     pub fn start(&self, id: &str, who: Contestant, name: Option<String>) -> Result<BenchEntryState, Error> {
+        self.start_unless(id, who, name, &AtomicBool::new(false))
+    }
+
+    /// [`Benchmarks::start`], with `stop` (Ctrl+C) ending the sending of a file of predictions between its parts:
+    /// the entry is then removed and the error is `interrupted`.
+    pub fn start_unless(
+        &self,
+        id: &str,
+        who: Contestant,
+        name: Option<String>,
+        stop: &AtomicBool,
+    ) -> Result<BenchEntryState, Error> {
         let entry = match who {
             Contestant::Model { model_id, max_images, conditions } => {
                 let contestant = BenchContestantSpec::Model { model_id };
@@ -104,7 +121,7 @@ impl Benchmarks {
                 let name = name.filter(|n| !n.trim().is_empty()).ok_or_else(|| {
                     invalid_arguments("an entry of predictions needs a name for the leaderboard")
                 })?;
-                self.submit(id, name, scored, &path)?
+                self.submit_in(id, name, scored, &path, PARTS, stop)?
             }
         };
         self.state_of(entry)
@@ -162,14 +179,10 @@ impl Benchmarks {
         }
     }
 
-    /// An external entry from the file at `path`: opened with the file's first part, sent the rest part by part
-    /// and finished (scored). A file that does not parse, or a part the server refuses, stops and deletes the
-    /// entry, so none is left half-filled; the error says so.
-    fn submit(&self, id: &str, name: String, scored: bool, path: &Path) -> Result<BenchEntry, Error> {
-        self.submit_in(id, name, scored, path, PARTS)
-    }
-
-    /// [`Benchmarks::submit`] in parts of at most `limits`.
+    /// An external entry from the file at `path`, in parts of at most `limits`: opened with the file's first part,
+    /// sent the rest part by part and finished (scored). A file that does not parse, a part the server refuses, or
+    /// `stop` stops and deletes the entry, so none is left half-filled; the error says so. A finish that got no
+    /// answer may have worked, so it never deletes what the server may have scored ([`Benchmarks::after_lost_finish`]).
     fn submit_in(
         &self,
         id: &str,
@@ -177,6 +190,7 @@ impl Benchmarks {
         scored: bool,
         path: &Path,
         limits: PartLimits,
+        stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
         let mut records = read_predictions(path)?.peekable();
         let first = next_part(&mut records, limits)?;
@@ -188,14 +202,48 @@ impl Benchmarks {
         let entry = self.start_entry(id, req)?;
         let sent = (|| {
             loop {
+                if stop.load(Ordering::Relaxed) {
+                    let message = "interrupted while sending the predictions";
+                    return Err(Error::new(StatusCode::SERVICE_UNAVAILABLE, "interrupted", message));
+                }
                 let part = next_part(&mut records, limits)?;
                 if part.is_empty() {
-                    return self.finish(id, &entry.id);
+                    return Ok(());
                 }
                 self.add_predictions(id, &entry.id, part)?;
             }
         })();
-        sent.map_err(|e| self.undo(id, &entry.id, e))
+        if let Err(e) = sent {
+            return Err(self.undo(id, &entry.id, e));
+        }
+        match self.finish(id, &entry.id) {
+            Err(e) if e.status.is_server_error() => self.after_lost_finish(id, &entry.id, e),
+            Err(e) => Err(self.undo(id, &entry.id, e)),
+            ok => ok,
+        }
+    }
+
+    /// After finish answered `e`, a failure that says nothing of what the server did (the answer may be what was
+    /// lost): an entry that ended scored is the result; one stopped from elsewhere is removed; one still open, or
+    /// that cannot be read, may yet be scored, so it is kept and the error names it.
+    fn after_lost_finish(&self, id: &str, entry_id: &str, e: Error) -> Result<BenchEntry, Error> {
+        match self.entry(id, entry_id) {
+            Ok(entry) if matches!(entry.status, BenchEntryStatus::Done | BenchEntryStatus::Failed) => {
+                Ok(entry)
+            }
+            Ok(entry) if !entry.status.is_active() => Err(self.undo(id, entry_id, e)),
+            _ => {
+                let what = format!(
+                    "entry {entry_id} was kept, as it may still be scored: read it by its id (left open, it \
+                     expires on its own)"
+                );
+                let hint = match e.body.hint.as_deref() {
+                    Some(h) => format!("{what}; {h}"),
+                    None => what,
+                };
+                Err(e.hint(hint))
+            }
+        }
     }
 
     /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went. An entry
@@ -221,8 +269,8 @@ impl Benchmarks {
 
 /// The records of a file of predictions, in order: JSON Lines of `BenchPrediction` records (`{"image",
 /// "condition"?, "severity"?, "boxes": [{"class", "score", "x1", "y1", "x2", "y2"}]}`, the records
-/// `examples/bench_external.py` sends). The file is read as the records are taken, one at a time, so a large file
-/// is never held whole.
+/// `examples/bench_external.py` sends), one per line. The file is read as the records are taken, a line of at most
+/// [`MAX_RECORD_BYTES`] at a time, so neither a large file nor one long line (an array, a document) is held whole.
 pub fn read_predictions(
     path: &Path,
 ) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + use<>, Error> {
@@ -233,23 +281,70 @@ pub fn read_predictions(
         }
         _ => Error::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", format!("reading {shown}: {e}")),
     })?;
-    let values = serde_json::Deserializer::from_reader(BufReader::new(file)).into_iter::<Value>();
-    let bad = move |what: String| invalid_arguments(format!("{shown}: {what}"));
-    Ok(values.enumerate().map(move |(i, v)| {
-        let n = i + 1;
-        let v = v.map_err(|e| bad(format!("not JSON at line {}, column {}: {e}", e.line(), e.column())))?;
-        if !v.is_object() || v.get("predictions").is_some() {
-            return Err(bad(format!(
-                "record {n} is not a record: the file holds one {{\"image\", \"boxes\", ...}} record per line \
-                 (JSON Lines), not arrays or documents of them"
-            )));
+    let mut reader = BufReader::new(file);
+    let mut n = 0usize;
+    Ok(std::iter::from_fn(move || {
+        let bad = |what: String| invalid_arguments(format!("{shown}: {what}"));
+        loop {
+            n += 1;
+            let mut line = Vec::new();
+            // One byte over the limit tells a line that is too long from one that just fits.
+            let limit = MAX_RECORD_BYTES as u64 + 1;
+            match (&mut reader).take(limit).read_until(b'\n', &mut line) {
+                Ok(0) => return None,
+                Ok(_) => {}
+                Err(e) => return Some(Err(bad(format!("reading line {n}: {e}")))),
+            }
+            let text = line.trim_ascii();
+            if text.is_empty() {
+                continue;
+            }
+            return Some(parse_record(
+                text,
+                line.len() > MAX_RECORD_BYTES && !line.ends_with(b"\n"),
+                n,
+                &bad,
+            ));
         }
-        serde_json::from_value::<BenchPrediction>(v).map_err(|e| bad(format!("record {n}: {e}")))
     }))
 }
 
-/// The next part of `records`: whole records, at most `limits.records` of them and `limits.boxes` boxes (one
-/// record alone may have more, up to the server's limit per record); empty at the end.
+/// The record on line `n` of a file of predictions (`text`, trimmed; `cut` when the line was longer than can be read).
+fn parse_record(
+    text: &[u8],
+    cut: bool,
+    n: usize,
+    bad: &dyn Fn(String) -> Error,
+) -> Result<BenchPrediction, Error> {
+    let not_a_record = || {
+        bad(format!(
+            "line {n} is not a record: the file holds one {{\"image\", \"boxes\", ...}} record per line (JSON \
+             Lines), not arrays or documents of them"
+        ))
+    };
+    if text[0] != b'{' {
+        return Err(not_a_record());
+    }
+    if cut {
+        return Err(bad(format!("line {n} is longer than the {MAX_RECORD_BYTES} bytes a record may take")));
+    }
+    let v: Value = serde_json::from_slice(text)
+        .map_err(|e| bad(format!("line {n} is not JSON (column {}): {e}", e.column())))?;
+    if v.get("predictions").is_some() {
+        return Err(not_a_record());
+    }
+    let r: BenchPrediction = serde_json::from_value(v).map_err(|e| bad(format!("line {n}: {e}")))?;
+    if r.boxes.len() > MAX_BOXES {
+        return Err(bad(format!(
+            "line {n} has {} boxes; a record carries at most {MAX_BOXES}",
+            r.boxes.len()
+        )));
+    }
+    Ok(r)
+}
+
+/// The next part of `records`: whole records, at most `limits.records` of them and `limits.boxes` boxes; empty at
+/// the end. A record that could never fit is an error (an empty part would read as the end of the file).
 fn next_part(
     records: &mut Peekable<impl Iterator<Item = Result<BenchPrediction, Error>>>,
     limits: PartLimits,
@@ -258,7 +353,14 @@ fn next_part(
     while part.len() < limits.records {
         let fits = match records.peek() {
             None => break,
-            Some(Ok(r)) => part.is_empty() || boxes + r.boxes.len() <= limits.boxes,
+            Some(Ok(r)) if r.boxes.len() > limits.boxes => {
+                let n = r.boxes.len();
+                return Err(invalid_arguments(format!(
+                    "a record has {n} boxes, over a part's {}",
+                    limits.boxes
+                )));
+            }
+            Some(Ok(r)) => boxes + r.boxes.len() <= limits.boxes,
             Some(Err(_)) => true,
         };
         if !fits {
@@ -406,18 +508,47 @@ mod tests {
         assert_eq!(got, ["1", "2"]);
         assert_eq!(records(&r("9")).unwrap()[0].boxes[0].score, 1.0);
         assert!(records("").unwrap().is_empty());
-        // Arrays and API bodies are not records (they would be read whole).
+        // Blank lines are skipped, and line numbers still count them.
+        let e = records(&format!("{}\n\n{{\"image\":\"3\"}}\n", r("1"))).unwrap_err();
+        assert!(e.body.message.contains("line 3") && e.body.message.contains("boxes"), "{e:?}");
+        // Arrays and API bodies are not records.
         for doc in [format!("[{}]", r("1")), format!("{{\"predictions\": [{}]}}", r("1"))] {
             let e = records(&format!("{}\n{doc}\n", r("1"))).unwrap_err();
-            assert!(e.body.message.contains("record 2 is not a record"), "{e:?}");
+            assert!(e.body.message.contains("line 2 is not a record"), "{e:?}");
         }
         // Bad JSON says where; a bad record says which.
         let e = records(&format!("{}\n{{\"image\": ", r("1"))).unwrap_err();
         assert!(e.body.code == "invalid_arguments" && e.body.message.contains("line 2"), "{e:?}");
         let e = records(&format!("{}\n{{\"image\":\"2\"}}\n", r("1"))).unwrap_err();
-        assert!(e.body.message.contains("record 2") && e.body.message.contains("boxes"), "{e:?}");
+        assert!(e.body.message.contains("line 2") && e.body.message.contains("boxes"), "{e:?}");
         let missing = read_predictions(Path::new("no/such/predictions.jsonl")).err().unwrap();
         assert_eq!(missing.body.code, "path_not_found");
+    }
+
+    /// A line is judged after at most [`MAX_RECORD_BYTES`]: one array or object on a single huge line is refused
+    /// without being read whole, and a line of exactly the limit is still a record.
+    #[test]
+    fn a_long_line_is_refused_before_it_is_read_whole() {
+        let array = format!("[{}]", "0,".repeat(MAX_RECORD_BYTES));
+        assert!(records(&array).unwrap_err().body.message.contains("line 1 is not a record"));
+        let object = format!("{{\"image\":\"{}\",\"boxes\":[]}}", "x".repeat(MAX_RECORD_BYTES));
+        let e = records(&object).unwrap_err();
+        assert!(e.body.message.contains("line 1 is longer"), "{e:?}");
+        let head = "{\"image\":\"";
+        let tail = "\",\"boxes\":[]}";
+        let exact = format!("{head}{}{tail}", "x".repeat(MAX_RECORD_BYTES - head.len() - tail.len()));
+        assert_eq!(exact.len(), MAX_RECORD_BYTES);
+        assert_eq!(records(&format!("{exact}\n")).unwrap().len(), 1);
+    }
+
+    /// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.
+    #[test]
+    fn a_record_over_the_box_limit_is_refused() {
+        let boxes = |n: usize| vec![r#"{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}"#; n].join(",");
+        let line = |n: usize| format!("{{\"image\":\"1\",\"boxes\":[{}]}}\n", boxes(n));
+        assert_eq!(records(&line(MAX_BOXES)).unwrap()[0].boxes.len(), MAX_BOXES);
+        let e = records(&line(MAX_BOXES + 1)).unwrap_err();
+        assert!(e.body.message.contains("has 1001 boxes"), "{e:?}");
     }
 
     fn record(image: &str, boxes: usize) -> BenchPrediction {
@@ -437,14 +568,14 @@ mod tests {
         let sizes = |p: Vec<BenchPrediction>| p.iter().map(|r| r.boxes.len()).collect::<Vec<_>>();
         // Boxes: a record that would cross the limit starts the next part.
         let limits = PartLimits { records: 100, boxes: 10 };
-        let mut it = [4, 5, 2, 10, 11, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
+        let mut it = [4, 5, 2, 10, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
         assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [4, 5]);
         assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [2]);
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [10]);
-        // One record over the limit goes alone (the server's limit per record is lower than a part's).
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [11]);
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [0]);
+        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [10, 0]);
         assert!(next_part(&mut it, limits).unwrap().is_empty());
+        // A record that fits no part is an error, not an empty part (which would end the file there).
+        let mut it = [11].map(|b| Ok(record("1", b))).into_iter().peekable();
+        assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("11 boxes"));
         // Records, empty ones too.
         let limits = PartLimits { records: 2, boxes: 10 };
         let mut it = [0, 0, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
@@ -507,17 +638,57 @@ mod tests {
         };
         let three = PartLimits { records: 3, boxes: 10 };
         write("4");
-        let e = b.submit_in(id, "parts".into(), true, &file, three).unwrap();
+        let go = AtomicBool::new(false);
+        let e = b.submit_in(id, "parts".into(), true, &file, three, &go).unwrap();
         let state = b.state_of(e).unwrap();
         assert_eq!((state.status, state.done), (folo_api::BenchEntryStatus::Done, 8), "{state:?}");
         let r = state.result.unwrap();
         assert_eq!((r.conditions.len(), r.conditions[0].points.len()), (1, 1), "{:?}", r.conditions);
         // The third part names an image the benchmark does not have: refused, and the entry is gone.
         write("99");
-        let e = b.submit_in(id, "refused".into(), true, &file, three).unwrap_err();
+        let e = b.submit_in(id, "refused".into(), true, &file, three, &go).unwrap_err();
         let hint = e.body.hint.clone().unwrap_or_default();
         assert!(e.body.message.contains("99") && hint.contains("stopped and deleted"), "{e:?}");
         assert_eq!(b.entries(id).unwrap().len(), 1);
+        // Ctrl+C after the first part: the entry is removed, and the error says it was interrupted.
+        write("4");
+        let e = b.submit_in(id, "stopped".into(), true, &file, three, &AtomicBool::new(true)).unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.code == "interrupted" && hint.contains("stopped and deleted"), "{e:?}");
+        assert_eq!(b.entries(id).unwrap().len(), 1);
+    }
+
+    /// A finish whose answer was lost: what the server did decides, and a score it saved is never deleted.
+    #[test]
+    fn a_lost_finish_answer_keeps_what_the_server_did() {
+        let home = folo_test_support::TestDir::new("mcp-bench-lost-finish");
+        let (store, id) = bench_store(home.path());
+        let b = Benchmarks::Store(store.clone());
+        let lost = || Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", "no answer");
+        let open = |name: &str| {
+            let predictions = (1..=4).map(|i| record(&i.to_string(), 0)).collect();
+            let contestant = BenchContestantSpec::External { scored: true, open: true, predictions };
+            let req =
+                StartBenchEntry { contestant, name: Some(name.into()), max_images: None, conditions: None };
+            b.start_entry(&id, req).unwrap().id
+        };
+        // Scored before the answer was lost: the result, and the entry stays.
+        let scored = open("scored");
+        b.finish(&id, &scored).unwrap();
+        let got = b.after_lost_finish(&id, &scored, lost()).unwrap();
+        assert_eq!(got.status, BenchEntryStatus::Done);
+        assert_eq!(b.entry(&id, &scored).unwrap().status, BenchEntryStatus::Done);
+        // Still open: kept, and the error names it.
+        let kept = open("kept");
+        let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
+        assert!(e.body.hint.as_deref().unwrap_or_default().contains(&kept), "{e:?}");
+        assert!(b.entry(&id, &kept).unwrap().status.is_active());
+        // Stopped from elsewhere: removed as any failed upload is.
+        b.stop_entry(&id, &kept).unwrap();
+        let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
+        assert!(e.body.hint.as_deref().unwrap_or_default().contains("stopped and deleted"), "{e:?}");
+        assert!(b.entry(&id, &kept).is_err());
+        folo_server::Store::shutdown(&*store);
     }
 
     #[test]

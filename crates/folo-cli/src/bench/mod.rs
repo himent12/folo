@@ -216,6 +216,12 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
             stop.clone(),
             "stopping the benchmark entry (interrupt again to abort)…",
         );
+    } else if !model {
+        // Here or through a server: an entry left half-filled would block deleting the benchmark.
+        crate::train::watch_interrupt(
+            stop.clone(),
+            "stopping the upload and removing its entry (interrupt again to abort)…",
+        );
     }
     let who = match who {
         Contestant::Model { model_id, max_images, conditions } => {
@@ -223,7 +229,7 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
         }
         other => other,
     };
-    let state = s.benchmarks.start(&a.bench, who, a.name).map_err(api_error)?;
+    let state = s.benchmarks.start_unless(&a.bench, who, a.name, &stop).map_err(api_error)?;
     if !model || !(a.wait || in_process) {
         out.record(&state);
         print::state(&state, out);
