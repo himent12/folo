@@ -1150,19 +1150,20 @@ voting alone gives most; the DFL weights add +0.0003 to +0.0010 over voting (pai
 Cost per image at batch 1: ~0.01–0.15 ms on the CPU (conf 0.25 / 0.001), ~0.3 ms on a GPU (the moments readback).
 
 **Consensus score (opt-in).** Off by default (`NmsConfig::score = none`; every published number is without it).
-`folo val` / `folo predict` `--score consensus` use the same clusters for the score: the one-to-many head trains
-several anchors per object, so a real object tends to light up several candidates that agree, and NMS throws that
-agreement away. For each kept candidate `k`, with `C(k)` the candidates of `k`'s **own class** (also under `agnostic`)
-at IoU at least a **fixed** `τ = 0.75` (it does not follow `fusion_iou`), on the boxes as NMS saw them (before any
-fusion):
+`folo val` / `folo predict` `--score consensus` build a cluster of their own for the score: the one-to-many head
+trains several anchors per object, so a real object tends to light up several candidates that agree, and NMS throws
+that agreement away. For each kept candidate `k`, with `C(k)` the candidates of `k`'s **own class** (also under
+`agnostic`) at IoU at least a **fixed** `τ = 0.75` (it does not follow `fusion_iou`, so this need not be the fusion's
+cluster), on the boxes as NMS saw them (before any fusion):
 
     M_k  = Σ_{j ∈ C(k)} s_j
     s'_k = s_k · min(M_k / s_k, R)^a / R^a,      a = 0.5, R = 10
 
 summed in f64 in candidate order, rounded to f32. `k` is always in its own cluster; a member whose score is not `> 0`
-or whose box is not finite adds nothing, and a kept box that is not finite has no other member. The detections are then sorted by `s'` (stable: ties stay in NMS's order).
-Boxes, classes and which candidates are kept do not change; `conf`, NMS and `max_det` all act on the class score, before
-this step. It works with and without `--fusion`.
+or whose box is not finite adds nothing, and a kept box that is not finite has no other member. The detections are
+then sorted by `s'` (stable: ties stay in NMS's order). Boxes, classes and which candidates are kept do not change;
+`conf`, NMS and `max_det` all act on the class score, before this step, so `max_det` picks the boxes and the rule only
+re-ranks them. It works with and without `--fusion`.
 
 **The score scale changes.** `s' ∈ [s / √10, s]`: a box whose cluster carries ten times its score keeps it, and a box
 that fired alone is divided by 3.16. `conf` still filters the class score, so a box of score 0.50 passes `conf` 0.25
