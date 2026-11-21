@@ -627,9 +627,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "close_mosaic": 7,            // close-mosaic epochs after the cap at half the run (docs/MODEL.md §8.4): mosaic is
                                // off for the last `close_mosaic` epochs; left out for runs older than the field
                                // whose config.json lacks `close_mosaic_epochs`
-  "ema_decay": 0.99, "ema_tau": 20 }  // the EMA (docs/MODEL.md §8.5, `folo.ema`): 0.9999 / 2000, or a fine-tune's
+  "ema_decay": 0.99, "ema_tau": 20,  // the EMA (docs/MODEL.md §8.5, `folo.ema`): 0.9999 / 2000, or a fine-tune's
                                // shorter window (`ema_run_fraction` of its optimizer steps; a resumed run: the
                                // pair its checkpoint stored); left out for a run without an EMA and by older servers
+  "musgd": { "muon": 0.5, "sgd": 0.5, "cls_lr": 3 } }  // MuSGD only: the step weights the run trains with (`auto`
+                               // rule 5: 0.5 / 0.5 from scratch, else the configured `musgd`, 0.2 / 1.0 by default)
+                               // and the class-head LR factor; left out by older servers and for runs recorded
+                               // before the field
 // Run.resolved is set when the trainer is built (by the time the `running` status is sent: fetch the run then),
 // recomputed on resume, and read from the run folder's config.json for runs recorded before the field; it stays
 // null for runs whose trainer never started (stopped while queued, failed to build). Mock runs fill it once they
@@ -720,7 +724,8 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   same ordinal (a data dir moved to another machine, a new GPU) stay listed next to the reference; estimates never
   use them.
 - `POST /api/runs/estimate` body `TrainConfig` (as for `POST /api/runs`, with the same checks and errors:
-  `dataset_not_found`, `model_not_found`, `invalid_config`, `device_not_found`, `422 invalid_body`; nothing is
+  `dataset_not_found`, `model_not_found`, `invalid_config`, `device_not_found`, `not_supported`, `422 invalid_body`;
+  only a name over 64 characters is not refused here, so a form can ask while the name is being typed; nothing is
   created) → `RunEstimate`: wall time per epoch and in total with a range, from the training row of the device the run
   would use. The basis is the measured row with the run's arch, imgsz, batch and amp; else the nearest measured row
   on that device by compute and batch (the same amp preferred), carried over by the reference's ratio between the two

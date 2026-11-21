@@ -101,6 +101,10 @@ impl FoloApp {
             // server older than the field.
             .when_some(crate::ui::fmt_ema_window(r.resolved.as_ref().and_then(|s| s.ema_decay)), |d, w| {
                 d.child(kv(&t, "EMA", mono_v(w)))
+            })
+            // MuSGD's step weights (`Run.resolved.musgd`): none for another optimizer or an older run.
+            .when_some(r.resolved.as_ref().and_then(|s| s.musgd), |d, m| {
+                d.child(kv(&t, "MuSGD steps", mono_v(format!("muon {} · sgd {}", m.muon, m.sgd))))
             });
         // Augmentation, one setting per row, under the training settings.
         let col3 = div()

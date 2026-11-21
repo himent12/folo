@@ -90,6 +90,8 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
     };
     let (v, stderr) = report();
     assert_eq!(v["web_source"], "dir", "--web-dir wins over an embedded Studio");
+    // The folder as given holds `\` on Windows; its record does not.
+    assert!(!v["web_dist"]["path"].as_str().unwrap().contains('\\'), "{v}");
     assert_eq!(v["web_dist"]["folo_wasm"], false);
     assert_eq!(v["web_folo_wasm"], false);
     assert!(v["web_embedded"]["folo_wasm"].is_boolean());
@@ -325,6 +327,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let listening: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(listening["event"], "listening", "{line}");
+    assert!(!listening["data_dir"].as_str().unwrap().contains('\\'), "{line}");
     let reported = std::path::PathBuf::from(listening["data_dir"].as_str().unwrap());
     assert!(reported.is_absolute(), "{line}");
     assert_eq!(std::fs::canonicalize(&reported).unwrap(), std::fs::canonicalize(&data).unwrap());

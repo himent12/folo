@@ -280,7 +280,10 @@ async fn queue_moves_and_resolved_config() {
     }
     let s = store(&home);
     let app = self::app(&s);
-    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", a.id))).await.resolved, Some(resolved));
+    // A file that old does not say which MuSGD step weights the run trained with, so `resolved` does not either.
+    assert!(resolved.musgd.is_some());
+    let old = folo_api::ResolvedTrain { musgd: None, ..resolved };
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", a.id))).await.resolved, Some(old));
     let d_run: Run = ok(&app, get(&format!("/api/runs/{d}"))).await;
     assert_eq!((d_run.resolved, d_run.queue_position), (None, None), "stopped before its trainer was built");
 }

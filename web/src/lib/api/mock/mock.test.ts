@@ -457,6 +457,15 @@ describe('mock: the final fields of server PR #140', () => {
     await expect(new MockApi('normal', 0).createRun(c)).resolves.toMatchObject({ config: { amp: true } });
   });
 
+  it('refuses an estimate as it refuses the run, without the simulated restart', async () => {
+    const normal = new MockApi('normal', 0);
+    const c = { ...(await normal.run('run_31aa')).config, name: 'amp', device: 'cpu' as const, amp: true };
+    await expect(normal.estimateRun(c)).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    const restarted = new MockApi('amp-refused', 0);
+    await expect(restarted.estimateRun({ ...c, device: 'auto' })).resolves.toBeTruthy();
+    expect((await restarted.system()).capabilities?.amp.available).toBe(true);
+  });
+
   it('amp-refused: says amp is available, refuses it at POST, then says it is not', async () => {
     const api = new MockApi('amp-refused', 0);
     expect((await api.system()).capabilities?.amp.available).toBe(true);

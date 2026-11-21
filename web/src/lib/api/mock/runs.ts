@@ -318,7 +318,7 @@ export function warmupIters(epochs: number, stepsPerEpoch: number, warmupEpochs 
 export function resolveTrain(c: TrainConfig, images: number, classes: number, stepsPerEpoch: number): ResolvedTrain {
   const nbs = 64;
   const acc = accumulate(c.batch);
-  // docs/MODEL.md §8.2, `auto_rule` 5: MuSGD at 0.01 for every run (its step weights are not part of `resolved`).
+  // docs/MODEL.md §8.2, `auto_rule` 5: MuSGD at 0.01 for every run, at step weights 0.5 / 0.5 from scratch.
   const kind: ResolvedTrain['optimizer'] = c.optimizer === 'auto' ? 'musgd' : c.optimizer;
   const lr0 = c.optimizer === 'auto' ? 0.01 : c.lr0;
   const momentum = 0.937;
@@ -347,6 +347,7 @@ export function resolveTrain(c: TrainConfig, images: number, classes: number, st
     close_mosaic: closeMosaicEpochs(c.augment.close_mosaic, c.epochs),
     ema_decay: emaDecay,
     ema_tau: emaTau,
+    ...(kind === 'musgd' ? { musgd: { ...(c.optimizer === 'auto' && !c.weights ? { muon: 0.5, sgd: 0.5 } : { muon: 0.2, sgd: 1 }), cls_lr: 3 } } : {}),
   };
 }
 

@@ -7,6 +7,7 @@ use folo_server::store::IssueQuery;
 
 use super::arguments::unknown_argument;
 use super::datasets::list_issues_compat;
+use super::models::decode_image_base64;
 use super::results::{MAX_RESULT_BYTES, MAX_SUMMARY_CHARS, cursor_at, json_len, out, page_of};
 use super::runs::{MAX_WARNINGS, config_diff, log_warnings};
 use crate::errors::Error;
@@ -26,6 +27,27 @@ fn docs_name_every_tool() {
     for t in TOOLS {
         assert!(list.contains(t.name), "llms.txt's tool list leaves out {}", t.name);
     }
+}
+
+/// An oversized `image_base64` answers as an oversized image file does (docs/MCP.md). The limit is a parameter, so
+/// the boundary is tested on a few bytes rather than 64 MiB: padding makes 4, 5 and 6 bytes the same 8 characters.
+#[test]
+fn an_oversized_base64_image_is_payload_too_large() {
+    const MAX: u64 = 4;
+    assert_eq!(decode_image_base64("AAAAAA==", MAX).unwrap().len(), 4);
+    assert_eq!(
+        decode_image_base64("  AAAAAA==\r\n", MAX).unwrap().len(),
+        4,
+        "whitespace around it is not counted"
+    );
+    for over in ["AAAAAAA=", "AAAAAAAA", " AAAAAAA= ", "AAAAAAAAAAAA"] {
+        let e = decode_image_base64(over, MAX).unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (413, "payload_too_large"), "{over}");
+        assert_eq!(e.body.message, "image_base64 is larger than 64 MiB");
+    }
+    // Not base64 is still its own error, and an over-long string is refused before it is decoded.
+    assert_eq!(decode_image_base64("not base64!", 64).unwrap_err().body.code, "invalid_arguments");
+    assert_eq!(decode_image_base64(&"!".repeat(13), MAX).unwrap_err().body.code, "payload_too_large");
 }
 
 #[test]

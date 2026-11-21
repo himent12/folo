@@ -15,9 +15,22 @@ use crate::cloud::{self, Job, Mode};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{Index, absolute};
+use crate::models::ModelRef;
 use crate::runs::{Ended, RunEntry};
 
 use super::RealStore;
+
+/// `invalid_config` for a dataset a run cannot train on (`POST /api/runs` and its estimate).
+pub(super) fn check_trainable(idx: &Index) -> Result<()> {
+    let bad = |m: &str| Err(Error::new(StatusCode::BAD_REQUEST, "invalid_config", m));
+    if idx.classes.is_empty() {
+        return bad("the dataset has no classes");
+    }
+    if idx.splits.train == 0 {
+        return bad("the dataset has no training images");
+    }
+    Ok(())
+}
 
 impl RealStore {
     /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
@@ -29,14 +42,9 @@ impl RealStore {
         crate::store::check_run_name(&config.name)?;
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
-        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
-        if idx.classes.is_empty() {
-            return Err(bad("the dataset has no classes".into()));
-        }
-        if idx.splits.train == 0 {
-            return Err(bad("the dataset has no training images".into()));
-        }
+        check_trainable(&idx)?;
         let (weights, target) = self.run_settings(&mut config)?;
+        let weights = weights.map(|m| m.path);
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {
             config.name = crate::store::default_run_name(&ds.name, config.arch);
@@ -63,12 +71,12 @@ impl RealStore {
     /// rejected config never initialises a GPU), and where the run would train: a cloud run's target, else the
     /// device, with `amp` checked as `folo train --amp` checks it (the same answer `/api/system`'s
     /// `capabilities.amp` gives). Returns the weights file and the target.
-    pub(super) fn run_settings(&self, config: &mut TrainConfig) -> Result<(Option<PathBuf>, RunTarget)> {
+    pub(super) fn run_settings(&self, config: &mut TrainConfig) -> Result<(Option<ModelRef>, RunTarget)> {
         let weights = match &config.weights {
             Some(w) => {
                 let m = self.model(w)?;
                 config.arch = m.model.arch;
-                Some(m.path)
+                Some(m)
             }
             None => None,
         };
