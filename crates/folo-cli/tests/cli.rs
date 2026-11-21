@@ -371,14 +371,45 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
 }
 
-/// `folo serve --host 0.0.0.0` records a connectable loopback URL in `serve.json` so `folo mcp` can auto-proxy
-/// to it (connecting to `0.0.0.0` fails on Windows and macOS).
+/// Reads one line from `r` within `timeout`, failing cleanly instead of hanging if the child never answers.
+fn read_line_within(r: impl std::io::Read + Send + 'static, timeout: std::time::Duration) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(r).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    rx.recv_timeout(timeout).expect("child wrote a line before the deadline")
+}
+
+/// Reads lines from `r` until one matches `pred`, within `timeout`.
+fn find_line_within(
+    r: impl std::io::Read + Send + 'static,
+    timeout: std::time::Duration,
+    pred: fn(&str) -> bool,
+) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(r).lines().map_while(Result::ok) {
+            if pred(&line) {
+                let _ = tx.send(line);
+                break;
+            }
+        }
+    });
+    rx.recv_timeout(timeout).expect("child answered before the deadline")
+}
+
+/// A `serve.json` written by an older server bound to `0.0.0.0` is normalized to loopback when read, so a second
+/// `folo serve` reports a connectable URL and `folo mcp` auto-proxies to the owner without binding a wildcard
+/// listener in the test.
 #[test]
-fn serve_on_wildcard_host_allows_mcp_auto_proxy() {
+fn mcp_auto_proxies_through_a_wildcard_serve_json_record() {
     use std::io::Write;
-    let dir = TestDir::new("serve-wildcard-host");
+    use std::time::Duration;
+    let dir = TestDir::new("serve-wildcard-record");
     let mut server: ChildGuard = folo_cmd()
-        .args(["--json", "serve", "--host", "0.0.0.0", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
         .env("FOLO_GPU_BACKEND", "webgpu")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -386,14 +417,39 @@ fn serve_on_wildcard_host_allows_mcp_auto_proxy() {
         .spawn()
         .unwrap()
         .into();
-    let mut line = String::new();
-    BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();
-    let listening: Value = serde_json::from_str(&line).unwrap();
+    let line = read_line_within(server.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
     assert_eq!(listening["event"], "listening", "{line}");
-    let port = listening["url"].as_str().unwrap().rsplit(':').next().unwrap();
+    let url = listening["url"].as_str().unwrap().to_string();
+    let port = url.rsplit(':').next().unwrap();
+
+    // Warm `/api/system` before `folo mcp` checks the owner so the first hardware sample never races `serves()`.
+    folo_client::Client::with_timeouts(&url, Duration::from_secs(5), Duration::from_secs(60))
+        .get::<Value>("/system")
+        .unwrap();
 
     let serve_json: Value = serde_json::from_slice(&std::fs::read(dir.join("serve.json")).unwrap()).unwrap();
     assert_eq!(serve_json["url"], format!("http://127.0.0.1:{port}"), "{serve_json}");
+
+    // Simulate a `serve.json` written by an older server bound to `0.0.0.0`.
+    std::fs::write(
+        dir.join("serve.json"),
+        serde_json::to_vec(&serde_json::json!({ "url": format!("http://0.0.0.0:{port}"), "pid": 1 }))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let second = folo_cmd()
+        .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(1));
+    let first_line = String::from_utf8_lossy(&second.stdout).lines().next().unwrap_or_default().to_string();
+    let in_use: Value = serde_json::from_str(&first_line).unwrap_or_else(|e| panic!("{e}: {first_line:?}"));
+    assert_eq!(in_use["event"], "data_dir_in_use", "{in_use}");
+    assert_eq!(in_use["url"], format!("http://127.0.0.1:{port}"), "{in_use}");
 
     let mut mcp: ChildGuard = folo_cmd()
         .args(["mcp", "--data-dir", dir.to_str().unwrap()])
@@ -412,11 +468,8 @@ fn serve_on_wildcard_host_allows_mcp_auto_proxy() {
     ] {
         writeln!(stdin, "{msg}").unwrap();
     }
-    let info = BufReader::new(mcp.stdout.take().unwrap())
-        .lines()
-        .map_while(Result::ok)
-        .find(|l| l.contains(r#""id":2"#))
-        .expect("folo_info answered");
+    let info =
+        find_line_within(mcp.stdout.take().unwrap(), Duration::from_secs(30), |l| l.contains(r#""id":2"#));
     drop(stdin);
     assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
 }
