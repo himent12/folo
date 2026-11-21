@@ -194,8 +194,9 @@ impl Benchmarks {
     }
 
     /// An external entry from the file at `path`, in parts of at most `limits`: opened with the file's first part,
-    /// sent the rest part by part and finished (scored). A failure before the finish was sent goes to
-    /// [`Benchmarks::clean_up`]; one after it to [`Benchmarks::after_finish`], which never stops or deletes.
+    /// sent the rest part by part and finished (scored). A failure before the finish, or a finish the server
+    /// [`refused`], goes to [`Benchmarks::clean_up`]; any other failed finish to [`Benchmarks::after_finish`], which
+    /// never stops or deletes.
     fn submit_in(
         &self,
         id: &str,
@@ -252,15 +253,19 @@ impl Benchmarks {
                 self.add_predictions(id, &entry.id, part)?;
             }
         })();
-        if let Err(e) = sent {
+        let failed = |e: Error| {
             let what = self.clean_up(id, &entry);
-            return Err(with_hint(e, what));
+            with_hint(e, what)
+        };
+        if let Err(e) = sent {
+            return Err(failed(e));
         }
-        self.finish(id, &entry.id).or_else(|e| self.after_finish(id, &entry, e))
+        self.finish(id, &entry.id)
+            .or_else(|e| if refused(&e) { Err(failed(e)) } else { self.after_finish(id, &entry, e) })
     }
 
-    /// A failure before any finish was sent. The entry is read: one still open is stopped and removed; one in any other
-    /// state, or that cannot be read, is left and named. Returns what to tell the user.
+    /// A failure while the server has not taken the entry for scoring. The entry is read: one still open is stopped
+    /// and removed; one in any other state, or that cannot be read, is left and named. Returns what to tell the user.
     fn clean_up(&self, id: &str, opened: &BenchEntry) -> String {
         let who = named(opened);
         let stopped = match self.entry(id, &opened.id) {
@@ -281,8 +286,8 @@ impl Benchmarks {
         }
     }
 
-    /// A finish that did not answer with the entry: it may be scoring, so nothing here stops or deletes it, on any
-    /// server. The entry is read once: scored is the result; anything else is `e`, with a hint naming the entry.
+    /// A finish with no answer, a `5xx` or a `409`: the entry may be scoring, so nothing here stops or deletes it, on
+    /// any server. The entry is read once: scored is the result; anything else is `e`, with a hint naming the entry.
     fn after_finish(&self, id: &str, sent: &BenchEntry, e: Error) -> Result<BenchEntry, Error> {
         let who = named(sent);
         match self.entry(id, &sent.id) {
@@ -291,6 +296,12 @@ impl Benchmarks {
             Err(_) => Err(with_hint(e, unread(&who))),
         }
     }
+}
+
+/// True when the server answered a finish and did not take the entry for scoring. A `409` is not that: it also answers
+/// a finish while another one scores the entry, which still reads `running`, so a stop would cancel that score.
+fn refused(e: &Error) -> bool {
+    e.status.is_client_error() && e.status != StatusCode::CONFLICT
 }
 
 /// `e` with `what` before the hint it has.
