@@ -5,6 +5,7 @@
 import { signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { streamedRun } from '$lib/api/live';
+import type { Resource } from '$lib/api/resource';
 import type { Run } from '$lib/api/types';
 
 const runs = signal<{ v: Run[] | undefined; epoch: number }>({ v: undefined, epoch: -1 });
@@ -12,6 +13,8 @@ const since = signal<{ v: number | null; epoch: number }>({ v: null, epoch: -1 }
 
 /** `since`: when the list last arrived, while its polls fail (the list is then a snapshot, not the current state). */
 export const watched = {
+  /** RunWatch's Resource while it is mounted: a page that reads the same list starts from it (`startFrom`). */
+  source: undefined as Resource<Run[]> | undefined,
   get runs(): Run[] | undefined {
     const r = runs.get();
     return r.epoch === hub.epoch ? r.v : undefined;

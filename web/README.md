@@ -147,7 +147,10 @@ the stylesheet is gone, as before), and the stylesheet applies when it arrives. 
 - **Server data:** `new Resource((signal) => hub.api.x(signal), { poll? })` in a component body
   (`src/lib/api/resource.ts`). It fetches again when a reactive value it read changes, drops its data when the hub
   reconnects (`hub.epoch`), and retries or refreshes when the server answers again after an outage (`hub.back`).
-  Identical reads issued in the same turn are one request (`src/lib/api/share.ts`).
+  Identical reads issued in the same turn are one request (`src/lib/api/share.ts`). `startFrom` names another Resource
+  that reads the same thing: the first fetch takes the answer it is loading, or one under 2 s old, and asks for itself
+  when that read fails or has not answered by its first poll (Overview's run list from the shell, the machine foot's
+  system info from Overview).
 - **Live updates (SSE):** `openEventStream` (`src/lib/api/sse.ts`) reads the stream with `fetch` (EventSource hides
   the server's 15 s keep-alive comments) and reopens, with exponential backoff, a stream that ended, failed, was refused
   or passed no byte for `STREAM_SILENCE_MS` (45 s: three keep-alives missed); each reopening asks its view to read the

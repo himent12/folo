@@ -184,6 +184,50 @@ describe('Overview', () => {
     expect(shell.textContent).not.toContain(run.name);
   });
 
+  it('asks once for the run list and the system info on a cold load, with the shell and the live card (#309)', async () => {
+    vi.useFakeTimers(); // no poll can fire: the clock moves only when this test says so
+    onTestFinished(() => void vi.useRealTimers());
+    const api = new MockApi('normal', 0);
+    // The run list answers when this test says: reads a turn apart are not joined by `together`, as on a real load.
+    let answer!: () => void;
+    const held = new Promise<void>((open) => (answer = open));
+    const list = api.runs.bind(api);
+    const runs = vi.spyOn(api, 'runs').mockImplementation(async () => {
+      await held;
+      return list();
+    });
+    const system = vi.spyOn(api, 'system');
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/');
+    // The shell first, as on a load: the screen's chunk arrives while the shell's read is out.
+    const shell = document.body.appendChild(document.createElement('div'));
+    const view = render(() => <RunWatch />, shell);
+    onTestFinished(() => {
+      view.unmount();
+      shell.remove();
+    });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runs).toHaveBeenCalledTimes(1);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <Overview />, target);
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(system).toHaveBeenCalledTimes(1);
+    // The list lands, the live card and its machine foot mount: a turn after the page asked for the system info.
+    answer();
+    const foot = () => target.querySelector('footer[aria-label="Machine"]');
+    for (let i = 0; i < 100 && !foot(); i++) {
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+    }
+    expect(foot(), 'the live card and its machine foot').not.toBeNull();
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(system).toHaveBeenCalledTimes(1);
+  });
+
   it('with no dataset left, its actions open Add dataset rather than a New run that cannot start', async () => {
     watched.runs = await idleRuns();
     const api = new MockApi('normal', 0);

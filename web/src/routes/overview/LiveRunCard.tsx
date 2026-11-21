@@ -3,7 +3,8 @@ import ArrowRight from '$icons/arrow-right';
 import { bindable, computed, css, effect, MediaQuery } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import { LiveRun } from '$lib/api/live';
-import type { Dataset, Run } from '$lib/api/types';
+import type { Resource } from '$lib/api/resource';
+import type { Dataset, Run, SystemInfo } from '$lib/api/types';
 import LineChart from '$lib/charts/LineChart';
 import { UNIT_ZOOM_NOTE, unitZoomed } from '$lib/charts/domain';
 import { ETA_PENDING, etaSettled, progressText, runProgress, trainingSeconds } from '$lib/api/progress';
@@ -30,6 +31,8 @@ export interface LiveRunCardProps {
   /** The dataset as people know it (lib/runDataset): undefined while loading (a placeholder), null to leave it out. */
   datasetName?: string | null;
   lost?: number | null;
+  /** The page's system info, which the machine foot starts from (./MachineFoot). */
+  system?: Resource<SystemInfo>;
 }
 
 /**
@@ -209,7 +212,7 @@ export default function LiveRunCard(props: LiveRunCardProps) {
           </div>
         </div>
       </div>
-      <MachineFoot run={r()} />
+      <MachineFoot run={r()} system={props.system} />
     </section>
   );
 }

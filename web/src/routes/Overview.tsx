@@ -37,7 +37,8 @@ import { asOf, Now } from '$lib/api/freshness';
 export default function Overview() {
   setCrumbs({ label: 'Overview' });
 
-  const runs = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  // Its first read is the shell's when that one is out or just answered (the same list, asked ~20 ms apart on a load).
+  const runs = new Resource((s) => hub.api.runs(s), { poll: 5000, startFrom: () => watched.source });
   // Kept current as runs end or go (lib/api/models), as on every screen that lists models.
   const models = modelsResource();
   // The list endpoint has no stats; each dataset is read for its class balance (a missing folder is marked, and not
@@ -212,6 +213,7 @@ export default function Overview() {
                         : undefined
                   }
                   datasetName={dsLabel(live.get()!)}
+                  system={system}
                   bind:lost={streamLost}
                 />
               </Key>

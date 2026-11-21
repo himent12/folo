@@ -28,6 +28,7 @@ it.
 | `src/uploads.rs` | Upload sessions (`/api/uploads`): streams in parts into `<data dir>/uploads/<id>/` |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |
+| `src/web_dir.rs` | Studio from a folder (`--web-dir`, `web/dist`): what is kept for a year, content `ETag`s, `304`s |
 | `src/probe.rs` | `POST /api/system/benchmark`: a short training and inference probe |
 | `src/cli.rs` | The `folo train` command of a run (`GET /api/runs/{id}/cli`) |
 | `src/system.rs`, `src/stats.rs`, `src/raster.rs`, `src/util.rs` | Host CPU and memory (the CPU counters are set up on a thread of their own, so `serve` listens without waiting ~150 ms for them; the first `/api/system` starts a preparation of its slow parts, side by side, that the server owns and every request waits for, so a request that goes away cancels nothing; no CPU reading is measured over less than sysinfo's minimum interval: one asked sooner gives the last again), dataset statistics, the mock's rasteriser, small helpers |
@@ -74,7 +75,8 @@ A cloud run takes the same first two steps, then `Runs::create_cloud` registers 
   through the cloud methods of `Store` (`cloud_providers`, `cloud_offers`, `terminate_instance`, ...). The mock
   store simulates the cloud (`src/mock/cloud.rs`) and has no labeler and no benches (`501 not_implemented`).
 - **The web app**: outside `/api` the router serves `WebSource::Dir` (`folo serve --web-dir`, else `web/dist` when
-  it has an `index.html`) or `WebSource::Embedded` (built with the `embed-web` feature, `src/web.rs` and `build.rs`).
+  it has an `index.html`; `src/web_dir.rs`) or `WebSource::Embedded` (built with the `embed-web` feature, `src/web.rs`
+  and `build.rs`).
 - **Errors**: handlers return `error::Error`, which answers with its status and the JSON envelope (`IntoResponse` in
   `src/error.rs`). The `Api*` extractors turn axum's rejections into the same envelope, `engine::engine_error` maps
   engine errors, and `routes/mod.rs` answers unknown paths with `route_not_found`. Every code is listed in
