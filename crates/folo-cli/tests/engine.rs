@@ -947,24 +947,18 @@ fn weights_names_export_and_coco_val() {
     let (code, _, stderr) =
         folo_with(&["dataset", "convert", s(data), s(&coco), "--to", "coco", "--json"], Some(&cache));
     assert_eq!(code, 0, "{stderr}");
+    let val = ["val", "--json", "--model", s(&exported), "--data", s(&coco), "--workers", "1"];
+    // A request the validator refuses answers that error and creates no folder for its results.
+    let refused = root.join("refused").join("dets.json");
+    let args = [&val[..], &["--imgsz", "33", "--save-json", s(&refused)]].concat();
+    let (code, lines, _) = folo_with(&args, Some(&cache));
+    assert_ne!(code, 0);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config", "{lines:?}");
+    assert!(!refused.parent().unwrap().exists(), "a refused request leaves no folder");
     // In a folder that does not exist yet: `val` creates it (examples/coco/README.md runs it this way).
     let results = root.join("eval").join("dets.json");
-    let (code, lines, stderr) = folo_with(
-        &[
-            "val",
-            "--json",
-            "--model",
-            s(&exported),
-            "--data",
-            s(&coco),
-            "--workers",
-            "1",
-            "--coco",
-            "--save-json",
-            s(&results),
-        ],
-        Some(&cache),
-    );
+    let args = [&val[..], &["--coco", "--save-json", s(&results)]].concat();
+    let (code, lines, stderr) = folo_with(&args, Some(&cache));
     assert_eq!(code, 0, "{stderr}");
     let c = &lines[0]["coco"];
     assert_eq!(

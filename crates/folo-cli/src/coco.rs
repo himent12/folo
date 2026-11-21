@@ -96,9 +96,10 @@ pub fn evaluate(
     Ok(CocoResult { stats: ev.compute(), missing_images: missing })
 }
 
-/// Makes sure `--save-json`'s file can be written, before the evaluation it would otherwise fail after: creates its
-/// folder (as `predict --save` and `train --project` do) and opens the file for writing. An existing file keeps its
-/// content until [`write_results`] replaces it, and a new one is not left behind.
+/// Refuses, before the evaluation, a `--save-json` file that plainly cannot be written, and creates its folder (as
+/// `predict --save` and `train --project` do). Best effort: the final name is never created or removed here, so an
+/// existing file keeps its content and a link keeps its target, and a new file is only tried under a temporary name
+/// in the same folder. [`write_results`] can still fail (a full disk, a folder that changed meanwhile).
 pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     let io = |e: std::io::Error| {
         CliError::new(
@@ -107,18 +108,19 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
             format!("cannot write {}: {e}", folo_api::json::path(path)),
         )
     };
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(io)?;
-    }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => {
-            drop(file);
-            std::fs::remove_file(path).map_err(io)
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => Err(io(std::io::ErrorKind::IsADirectory.into())),
+        // Not truncated: an earlier results file stays until the new one is written.
+        Ok(_) => std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io),
+        // A link to a file not there yet: the writer creates its target.
+        Err(_) if std::fs::symlink_metadata(path).is_ok() => Ok(()),
+        Err(_) => {
+            let tmp = folo_nn::io::temp_path(dir).map_err(io)?;
+            let _ = std::fs::remove_file(&tmp);
+            Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io)
-        }
-        Err(e) => Err(io(e)),
     }
 }
 
@@ -195,6 +197,17 @@ mod tests {
         let new = dir.join("eval").join("deep").join("dets.json");
         super::prepare_results(&new).unwrap();
         assert!(new.parent().unwrap().is_dir() && !new.exists());
+        assert_eq!(std::fs::read_dir(new.parent().unwrap()).unwrap().count(), 0, "no temporary file stays");
+        // A link to a file not written yet is left for the writer, which creates its target.
+        #[cfg(unix)]
+        {
+            let link = dir.join("eval").join("latest.json");
+            std::os::unix::fs::symlink("run-2.json", &link).unwrap();
+            super::prepare_results(&link).unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link).is_ok() && !dir.join("eval").join("run-2.json").exists()
+            );
+        }
         // An earlier results file keeps its content until the new one is written.
         std::fs::write(&new, b"[]").unwrap();
         super::prepare_results(&new).unwrap();

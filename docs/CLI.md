@@ -48,7 +48,8 @@ A global flag. With it, **stdout carries only JSON, one object per line** (JSON 
 tables, hints, logs) goes to **stderr**. Without it, human text goes to stdout and errors to stderr. Logs from the
 server (`tracing`) always go to stderr; tune them with `RUST_LOG` (default `info`).
 
-Paths in records use `/` separators (also on Windows, which accepts them), and floats are written as they were
+Paths in records use `/` separators (also on Windows, which accepts them; a `\\?\Volume{GUID}\` path stays as it is,
+since it is not absolute without that prefix), and floats are written as they were
 stored: `0.01`, not the `0.009999999776482582` an f32 widened to f64 would print.
 
 Long-running commands emit one record per event, each with an `"event"` field (e.g. `folo serve --json` prints

@@ -149,45 +149,9 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
 /// their capacity), so the tests can tell that path ran.
 fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Result<(ValResult, usize)> {
     let t0 = Instant::now();
-    if model.is_training() {
-        return Err(Error::Config("validate: the model is in training mode; call eval() first".into()));
-    }
-    let n = &cfg.nms;
-    let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
-    if !unit(n.conf)
-        || !unit(n.iou)
-        || !unit(n.fusion_iou)
-        || !unit(cfg.sample_conf)
-        || n.max_det == 0
-        || n.max_candidates == 0
-    {
-        return Err(Error::Config(format!(
-            "validation needs conf, iou, fusion_iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got \
-             conf {} iou {} fusion_iou {} sample_conf {} max_det {} max_candidates {}",
-            n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
-        )));
-    }
+    check_config(model, ds.class_names().len(), cfg)?;
     let head = cfg.head.unwrap_or(model.head_mode());
-    if head == HeadMode::O2o && !model.has_o2o() {
-        return Err(Error::Config(format!(
-            "validation with head o2o needs a model with the one-to-one head; {} has head `{}`",
-            model.arch(),
-            model.config().head
-        )));
-    }
     let nc = model.num_classes();
-    if ds.class_names().len() > nc {
-        return Err(Error::Dataset(format!(
-            "the dataset has {} classes but the model only {nc}",
-            ds.class_names().len()
-        )));
-    }
-    if !cfg.imgsz.is_multiple_of(32) || cfg.imgsz == 0 || cfg.batch == 0 {
-        return Err(Error::Config(format!(
-            "validation needs imgsz a positive multiple of 32 and batch >= 1, got imgsz {} batch {}",
-            cfg.imgsz, cfg.batch
-        )));
-    }
     let ev = Evaluator::new(nc);
     let samples = Vec::new();
     if ds.is_empty() {
@@ -265,6 +229,47 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
     })?;
     let seconds = t0.elapsed().as_secs_f64();
     Ok((ValResult { report: ev.compute(), samples, detections: kept, seconds }, from_pairs))
+}
+
+/// What [`validate`] refuses before it reads an image, for a dataset of `classes` classes: a caller with something
+/// to prepare for the results (a folder) checks this first, so a refused request leaves nothing behind.
+pub fn check_config(model: &FoloModel, classes: usize, cfg: &ValConfig) -> Result<()> {
+    if model.is_training() {
+        return Err(Error::Config("validate: the model is in training mode; call eval() first".into()));
+    }
+    let n = &cfg.nms;
+    let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
+    if !unit(n.conf)
+        || !unit(n.iou)
+        || !unit(n.fusion_iou)
+        || !unit(cfg.sample_conf)
+        || n.max_det == 0
+        || n.max_candidates == 0
+    {
+        return Err(Error::Config(format!(
+            "validation needs conf, iou, fusion_iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got \
+             conf {} iou {} fusion_iou {} sample_conf {} max_det {} max_candidates {}",
+            n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
+        )));
+    }
+    if cfg.head.unwrap_or(model.head_mode()) == HeadMode::O2o && !model.has_o2o() {
+        return Err(Error::Config(format!(
+            "validation with head o2o needs a model with the one-to-one head; {} has head `{}`",
+            model.arch(),
+            model.config().head
+        )));
+    }
+    let nc = model.num_classes();
+    if classes > nc {
+        return Err(Error::Dataset(format!("the dataset has {classes} classes but the model only {nc}")));
+    }
+    if !cfg.imgsz.is_multiple_of(32) || cfg.imgsz == 0 || cfg.batch == 0 {
+        return Err(Error::Config(format!(
+            "validation needs imgsz a positive multiple of 32 and batch >= 1, got imgsz {} batch {}",
+            cfg.imgsz, cfg.batch
+        )));
+    }
+    Ok(())
 }
 
 /// One batch's decoded outputs and ground truth, on their way to [`Post`].

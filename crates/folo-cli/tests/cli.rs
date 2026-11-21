@@ -37,7 +37,6 @@ fn doctor_json() {
     assert!(v["cpu"]["threads"].as_u64().unwrap() >= 1);
     assert!(v["memory"]["total_bytes"].as_u64().unwrap() > 0);
     assert!(v["web_dist"]["exists"].is_boolean());
-    assert!(!v["web_dist"]["path"].as_str().unwrap().contains('\\'), "{v}");
     assert_eq!(v["gpu_detection"], "wgpu");
     for g in v["gpus"].as_array().unwrap() {
         assert!(g["name"].is_string() && g["backend"].is_string() && g["shader_f16"].is_boolean(), "{g}");
@@ -91,6 +90,8 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
     };
     let (v, stderr) = report();
     assert_eq!(v["web_source"], "dir", "--web-dir wins over an embedded Studio");
+    // The folder as given holds `\` on Windows; its record does not.
+    assert!(!v["web_dist"]["path"].as_str().unwrap().contains('\\'), "{v}");
     assert_eq!(v["web_dist"]["folo_wasm"], false);
     assert_eq!(v["web_folo_wasm"], false);
     assert!(v["web_embedded"]["folo_wasm"].is_boolean());

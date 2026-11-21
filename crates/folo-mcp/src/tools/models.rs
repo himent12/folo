@@ -103,12 +103,7 @@ impl Inner {
                 PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
             }
             (None, Some(b64), None, None) => {
-                check_base64_len(b64.len())?;
-                let decode = move || {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64.trim())
-                        .map_err(|e| invalid_arguments(format!("image_base64 is not valid base64: {e}")))
-                };
+                let decode = move || decode_image_base64(&b64, MAX_IMAGE_BYTES);
                 PredictSource::Upload(tokio::task::spawn_blocking(decode).await.map_err(join)??)
             }
             (None, None, Some(dataset_id), Some(image_id)) => {
@@ -302,10 +297,19 @@ fn too_large(what: &str) -> Error {
     )
 }
 
-/// Refuses an `image_base64` of `len` characters whose image would be over [`MAX_IMAGE_BYTES`], before decoding it.
-pub(super) fn check_base64_len(len: usize) -> Result<(), Error> {
-    if len as u64 > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+/// The bytes of an `image_base64`, refused as too large over `max` of them. A string longer than `max` bytes can
+/// encode is refused without decoding it; its length cannot tell the last two bytes apart (padding), so the decoded
+/// length is checked too.
+pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error> {
+    let b64 = b64.trim();
+    if b64.len() as u64 > max.div_ceil(3) * 4 {
         return Err(too_large("image_base64"));
     }
-    Ok(())
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| invalid_arguments(format!("image_base64 is not valid base64: {e}")))?;
+    if bytes.len() as u64 > max {
+        return Err(too_large("image_base64"));
+    }
+    Ok(bytes)
 }

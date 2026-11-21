@@ -9,7 +9,7 @@ use folo_nn::io::{FloatDType, ModelFile};
 use folo_vision::export::onnx::{self, OnnxOptions, OnnxValue, proto::Dim};
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
-use folo_vision::val::{ValConfig, val_metrics, validate};
+use folo_vision::val::{ValConfig, check_config, val_metrics, validate};
 use folo_vision::{FoloModel, NmsConfig, Precision, PredictConfig, Predictor};
 use serde_json::json;
 
@@ -197,8 +197,9 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let device = model.device().to_string();
     let precision = precision_of(&model);
     let head = cfg.head.unwrap_or(model.head_mode());
-    // Last of the checks, so a mistyped model or dataset leaves no new folder, and before any image is read.
+    // After every check of the request, so a mistyped one leaves no new folder, and before any image is read.
     if let Some(path) = &args.save_json {
+        check_config(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
         crate::coco::prepare_results(path)?;
     }
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;

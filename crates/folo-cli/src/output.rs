@@ -161,10 +161,11 @@ mod tests {
     }
 
     /// docs/CLI.md promises `/` in the paths of records on every OS, which a raw `PathBuf` breaks on Windows only. So
-    /// this reads the source, on every OS: a `"key": value` in a `json!` whose key names a path must build its value
-    /// with `folo_api::json::path` (or `rel`, the dataset-relative form). It cannot see a path under a key not named
-    /// like one, a value on the line after its key, or a `Serialize` struct holding a `PathBuf` (none reaches a
-    /// record today).
+    /// this reads the source, on every OS: a `"key": value` in a `json!`, or a `record["key"] = value`, whose key
+    /// names a path must build its value with `folo_api::json::path` (or `rel`, the dataset-relative form). It is a
+    /// text scan and only a net for the next field; the runtime assertions in `tests/` hold the four known ones. It
+    /// cannot see a path under a key not named like one, a value on the line after its key, or a `Serialize` struct
+    /// holding a `PathBuf` (none reaches a record today), and text in a string that looks like a field trips it.
     #[test]
     fn json_records_spell_paths_with_forward_slashes() {
         // Not raw paths: a command's words, and a string `json::path` made a few lines above.
@@ -180,15 +181,17 @@ mod tests {
             let text = std::fs::read_to_string(file).unwrap();
             let code = text.split("#[cfg(test)]").next().unwrap();
             for line in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
-                for (before, after) in line.split("\": ").zip(line.split("\": ").skip(1)) {
-                    let key = before.rsplit('"').next().unwrap();
-                    let value = after.split(", \"").next().unwrap();
-                    if names_a_path(key)
-                        && !value.contains("json::path")
-                        && !value.starts_with("rel(")
-                        && !FINE.contains(&(name.as_str(), key))
-                    {
-                        raw.push(format!("{name}: \"{key}\": {value}"));
+                for sep in ["\": ", "\"] = "] {
+                    for (before, after) in line.split(sep).zip(line.split(sep).skip(1)) {
+                        let key = before.rsplit('"').next().unwrap();
+                        let value = after.split(", \"").next().unwrap();
+                        if names_a_path(key)
+                            && !value.contains("json::path")
+                            && !value.starts_with("rel(")
+                            && !FINE.contains(&(name.as_str(), key))
+                        {
+                            raw.push(format!("{name}: \"{key}\": {value}"));
+                        }
                     }
                 }
             }
