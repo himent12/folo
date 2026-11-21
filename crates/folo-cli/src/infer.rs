@@ -511,13 +511,13 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         }
         out.record(&json!({
             "event": "prediction",
-            "file": folo_api::json::path(path),
+            "file": crate::output::record_path(path),
             "image": { "width": p.width, "height": p.height },
             "boxes": p.scored_boxes(&classes),
             "timing": ti.to_api(),
             "device": device,
             "dtype": precision,
-            "saved": saved.as_ref().map(folo_api::json::path),
+            "saved": saved.as_ref().map(crate::output::record_path),
         }));
         let summary: Vec<String> =
             p.scored_boxes(&classes).iter().take(6).map(|b| format!("{} {:.2}", b.name, b.score)).collect();
@@ -539,7 +539,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
         "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
-        "saved_to": args.save.as_deref().map(folo_mcp::label::wire_path),
+        "saved_to": args.save.as_ref().map(crate::output::record_path),
     }));
     out.human(format!(
         "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",

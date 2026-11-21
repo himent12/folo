@@ -83,7 +83,7 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         "gpu_detection": "wgpu",
         "gpu_selected": selected_json,
         "capabilities": capabilities,
-        "web_dist": { "path": folo_mcp::label::wire_path(&web_dir), "exists": web_exists, "index_html": web_ready, "folo_wasm": web_wasm },
+        "web_dist": { "path": crate::output::record_path(&web_dir), "exists": web_exists, "index_html": web_ready, "folo_wasm": web_wasm },
         "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0), "folo_wasm": embedded_wasm },
         "web_source": web_source,
         "web_folo_wasm": served_wasm,

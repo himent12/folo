@@ -6,6 +6,21 @@ use std::io::Write;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+/// A path for a record: [`folo_api::json::path`], unless dropping a `\\?\` prefix would make Windows open something
+/// else. A volume path (`\\?\Volume{GUID}\out`) is relative without it, and a name ending in a dot or a space loses
+/// that ending. Windows' own path normalization decides, and such a path stays as it was given.
+pub fn record_path(p: impl AsRef<std::path::Path>) -> String {
+    let p = p.as_ref();
+    let shown = folo_api::json::path(p);
+    let raw = p.to_string_lossy();
+    if !cfg!(windows) || !raw.starts_with(r"\\?\") {
+        return shown;
+    }
+    let native = shown.replace('/', r"\");
+    let same = std::path::absolute(&native).is_ok_and(|a| a.as_os_str() == native.as_str());
+    if same { shown } else { raw.into_owned() }
+}
+
 /// Stable process exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -151,6 +166,24 @@ mod tests {
         }
     }
 
+    /// What Windows opens is what the record names: the prefix goes only where that does not change it.
+    #[test]
+    fn a_verbatim_path_keeps_its_prefix_where_it_matters() {
+        assert_eq!(super::record_path("runs/a"), "runs/a");
+        if cfg!(windows) {
+            assert_eq!(super::record_path(r"C:\data\x"), "C:/data/x");
+            assert_eq!(super::record_path(r"\\?\C:\data\x"), "C:/data/x");
+            assert_eq!(super::record_path(r"\\?\UNC\server\share\x"), "//server/share/x");
+            for kept in [
+                r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\out",
+                r"\\?\C:\studio\dist.",
+                r"\\?\C:\data\b ",
+            ] {
+                assert_eq!(super::record_path(kept), kept);
+            }
+        }
+    }
+
     /// A JSON key that holds a file or folder in the CLI's records.
     fn names_a_path(key: &str) -> bool {
         matches!(
@@ -162,7 +195,7 @@ mod tests {
 
     /// docs/CLI.md promises `/` in the paths of records on every OS, which a raw `PathBuf` breaks on Windows only. So
     /// this reads the source, on every OS: a `"key": value` in a `json!`, or a `record["key"] = value`, whose key
-    /// names a path must build its value with `folo_api::json::path`, `wire_path` or `rel` (the dataset-relative
+    /// names a path must build its value with `folo_api::json::path`, `record_path` or `rel` (the dataset-relative
     /// form). It is a text scan and only a net for the next field; the runtime assertions in `tests/` hold the four
     /// known ones. It cannot see a path under a key not named like one, a value on the line after its key, or a
     /// `Serialize` struct holding a `PathBuf` (none reaches a record today), and text in a string that looks like a
@@ -188,7 +221,7 @@ mod tests {
                         let value = after.split(", \"").next().unwrap();
                         if names_a_path(key)
                             && !value.contains("json::path")
-                            && !value.contains("wire_path")
+                            && !value.contains("record_path")
                             && !value.starts_with("rel(")
                             && !FINE.contains(&(name.as_str(), key))
                         {

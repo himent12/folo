@@ -62,7 +62,7 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             Ok(serve_lock::Acquire::InUse { url }) => {
                 out.record(&json!({
                     "event": "data_dir_in_use",
-                    "data_dir": folo_mcp::label::wire_path(&data_dir),
+                    "data_dir": crate::output::record_path(&data_dir),
                     "url": url,
                 }));
                 return Err(data_dir_in_use(&data_dir, url.as_deref()));
@@ -154,9 +154,9 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             "api": format!("{url}/api"),
             "mock": args.mock,
             "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
-            "web_dir": web_dir.as_ref().map(|d| folo_mcp::label::wire_path(d)),
+            "web_dir": web_dir.as_ref().map(crate::output::record_path),
             "web_ready": web_ready,
-            "data_dir": (!args.mock).then(|| folo_mcp::label::wire_path(&data_dir)),
+            "data_dir": (!args.mock).then(|| crate::output::record_path(&data_dir)),
             "token": token_set,
         }));
         server

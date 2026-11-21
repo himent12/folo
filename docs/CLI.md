@@ -49,8 +49,8 @@ tables, hints, logs) goes to **stderr**. Without it, human text goes to stdout a
 server (`tracing`) always go to stderr; tune them with `RUST_LOG` (default `info`).
 
 Paths in records use `/` separators (also on Windows, which accepts them; `serve`, `doctor` and `predict` keep a
-`\\?\Volume{GUID}\` path as it is, since it is not absolute without that prefix), and floats are written as they were
-stored: `0.01`, not the `0.009999999776482582` an f32 widened to f64 would print.
+`\\?\` path as it is where it would name something else without that prefix, such as `\\?\Volume{GUID}\`), and
+floats are written as they were stored: `0.01`, not the `0.009999999776482582` an f32 widened to f64 would print.
 
 Long-running commands emit one record per event, each with an `"event"` field (e.g. `folo serve --json` prints
 `{"event":"listening","url":"http://127.0.0.1:7878",...}` once bound and `{"event":"stopped"}` on shutdown).

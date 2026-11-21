@@ -99,7 +99,7 @@ pub fn evaluate(
 /// Refuses, before the evaluation, a `--save-json` file that plainly cannot be written, and creates its folder (as
 /// `predict --save` and `train --project` do). Best effort: the final name is never created or removed here, so an
 /// existing file keeps its content and a link keeps its target, and a new file is only tried under another name
-/// in the same folder ([`probe_path`]). [`write_results`] can still fail (a full disk, a folder that changed
+/// in the same folder ([`probe_name`]). [`write_results`] can still fail (a full disk, a folder that changed
 /// meanwhile).
 pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     let io = |e: std::io::Error| {
@@ -120,27 +120,27 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
         // A link to a file not there yet: the writer creates its target.
         Err(_) if std::fs::symlink_metadata(path).is_ok() => Ok(()),
         Err(_) => {
-            let probe = probe_path(dir, path);
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(&probe);
-                    Ok(())
+            // A name already taken says nothing about the folder (a read-only one can hold a stale probe): the next.
+            let mut n = 0;
+            loop {
+                let probe = dir.join(probe_name(path, n));
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&probe);
+                        return Ok(());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                    Err(e) => return Err(io(e)),
                 }
-                // Another process's probe: the folder takes new files.
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                Err(e) => Err(io(e)),
             }
         }
     }
 }
 
-/// A file name in `dir` to try creating, never the name of `path` (also where case does not count).
-fn probe_path(dir: &Path, path: &Path) -> std::path::PathBuf {
-    let mut name = format!(".folo-probe-{}.tmp", std::process::id());
-    if path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&name)) {
-        name.insert(0, '.');
-    }
-    dir.join(name)
+/// The `n`th file name to try creating beside `path`, never the name of `path` (also where case does not count).
+fn probe_name(path: &Path, n: u64) -> String {
+    let name = format!(".folo-probe-{}-{n}.tmp", std::process::id());
+    if path.file_name().is_some_and(|f| f.eq_ignore_ascii_case(&name)) { format!(".{name}") } else { name }
 }
 
 /// Write `detections` as a COCO results file (`[{"image_id", "category_id", "bbox": [x, y, w, h], "score"}]`),
@@ -228,13 +228,16 @@ mod tests {
             );
         }
         // The probe is never the file asked for, whatever it is called.
-        let same = dir.join(format!(".FOLO-PROBE-{}.TMP", std::process::id()));
-        assert!(
-            !super::probe_path(&dir, &same)
-                .file_name()
-                .unwrap()
-                .eq_ignore_ascii_case(same.file_name().unwrap())
-        );
+        let same = dir.join(format!(".FOLO-PROBE-{}-0.TMP", std::process::id()));
+        assert!(!same.file_name().unwrap().eq_ignore_ascii_case(super::probe_name(&same, 0)));
+        // A stale probe is stepped over, and left alone.
+        let folder = dir.join("stale");
+        std::fs::create_dir_all(&folder).unwrap();
+        let stale = folder.join(super::probe_name(&folder.join("dets.json"), 0));
+        std::fs::write(&stale, b"old").unwrap();
+        super::prepare_results(&folder.join("dets.json")).unwrap();
+        assert_eq!(std::fs::read(&stale).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "the next probe was removed");
         // A name the system refuses is refused now, not after the evaluation.
         #[cfg(unix)]
         {
