@@ -24,6 +24,9 @@ use crate::types::bench::*;
 pub const MAX_PART_BOXES: usize = 200_000;
 /// Most records in one part.
 const MAX_PART_RECORDS: usize = 20_000;
+/// Most bytes of JSON in one part (a request takes 64 MiB), so a file of long strings cannot fill this process's
+/// memory or a request.
+const MAX_PART_BYTES: usize = 32 * 1024 * 1024;
 /// Longest line of a file of predictions: far more than a record of [`MAX_BOXES`] boxes takes, and all of a line that
 /// is read before it is judged.
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -33,9 +36,11 @@ const MAX_RECORD_BYTES: usize = 1024 * 1024;
 struct PartLimits {
     records: usize,
     boxes: usize,
+    bytes: usize,
 }
 
-const PARTS: PartLimits = PartLimits { records: MAX_PART_RECORDS, boxes: MAX_PART_BOXES };
+const PARTS: PartLimits =
+    PartLimits { records: MAX_PART_RECORDS, boxes: MAX_PART_BOXES, bytes: MAX_PART_BYTES };
 /// Class names a [`BenchDetail`] lists.
 const DETAIL_CLASSES: usize = 100;
 
@@ -197,16 +202,20 @@ impl Benchmarks {
         if first.is_empty() {
             return Err(invalid_arguments(format!("{} holds no predictions", folo_api::json::path(path))));
         }
+        if stop.load(Ordering::Relaxed) {
+            return Err(interrupted());
+        }
+        let shown = name.clone();
         let contestant = BenchContestantSpec::External { scored, open: true, predictions: first };
         let req = StartBenchEntry { contestant, name: Some(name), max_images: None, conditions: None };
-        let entry = self.start_entry(id, req)?;
+        let entry = self.start_entry(id, req).map_err(|e| lost_start(e, &shown))?;
         let sent = (|| {
             loop {
-                if stop.load(Ordering::Relaxed) {
-                    let message = "interrupted while sending the predictions";
-                    return Err(Error::new(StatusCode::SERVICE_UNAVAILABLE, "interrupted", message));
-                }
                 let part = next_part(&mut records, limits)?;
+                // After the read: reading a part can take long, and what comes next is a request or the finish.
+                if stop.load(Ordering::Relaxed) {
+                    return Err(interrupted());
+                }
                 if part.is_empty() {
                     return Ok(());
                 }
@@ -217,15 +226,18 @@ impl Benchmarks {
             return Err(self.undo(id, &entry.id, e));
         }
         match self.finish(id, &entry.id) {
-            Err(e) if e.status.is_server_error() => self.after_lost_finish(id, &entry.id, e),
+            // The answer was lost, or another client finished it: the entry's state says what happened.
+            Err(e) if e.status.is_server_error() || e.body.code == "bench_entry_not_open" => {
+                self.after_lost_finish(id, &entry.id, e)
+            }
             Err(e) => Err(self.undo(id, &entry.id, e)),
             ok => ok,
         }
     }
 
-    /// After finish answered `e`, a failure that says nothing of what the server did (the answer may be what was
-    /// lost): an entry that ended scored is the result; one stopped from elsewhere is removed; one still open, or
-    /// that cannot be read, may yet be scored, so it is kept and the error names it.
+    /// After finish answered `e`, which says nothing of what became of the entry (its answer was lost, or another
+    /// client is finishing it): an entry that ended scored is the result; one stopped from elsewhere is removed;
+    /// one still open, or that cannot be read, may yet be scored, so it is kept and the error names it.
     fn after_lost_finish(&self, id: &str, entry_id: &str, e: Error) -> Result<BenchEntry, Error> {
         match self.entry(id, entry_id) {
             Ok(entry) if matches!(entry.status, BenchEntryStatus::Done | BenchEntryStatus::Failed) => {
@@ -237,34 +249,62 @@ impl Benchmarks {
                     "entry {entry_id} was kept, as it may still be scored: read it by its id (left open, it \
                      expires on its own)"
                 );
-                let hint = match e.body.hint.as_deref() {
-                    Some(h) => format!("{what}; {h}"),
-                    None => what,
-                };
-                Err(e.hint(hint))
+                Err(with_hint(e, what))
             }
         }
     }
 
-    /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went. An entry
-    /// that is no longer open (stopped from elsewhere, which may be why `e` happened) is deleted as it is.
+    /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went. Only an entry
+    /// the server says is stopped is deleted: one that ended otherwise (scored by another client, expired) is kept.
     fn undo(&self, id: &str, entry_id: &str, e: Error) -> Error {
         let stopped = match self.stop_entry(id, entry_id) {
-            Err(s) if s.body.code == "bench_entry_not_active" => Ok(()),
-            other => other.map(|_| ()),
+            Err(s) if s.body.code == "bench_entry_not_active" => self.entry(id, entry_id),
+            other => other,
         };
-        let what = match stopped.and_then(|_| self.delete_entry(id, entry_id)) {
-            Ok(()) => format!("entry {entry_id} was stopped and deleted"),
+        let what = match stopped {
+            Ok(entry) if entry.status == BenchEntryStatus::Stopped => match self.delete_entry(id, entry_id) {
+                Ok(()) => format!("entry {entry_id} was stopped and deleted"),
+                Err(u) => {
+                    format!("entry {entry_id} could not be removed ({}): delete it by hand", u.body.message)
+                }
+            },
+            Ok(entry) => format!("entry {entry_id} was kept: it is {:?}", entry.status).to_lowercase(),
             Err(u) => {
-                format!("entry {entry_id} could not be removed ({}): delete it by hand", u.body.message)
+                format!(
+                    "entry {entry_id} could not be stopped ({}): stop and delete it by hand",
+                    u.body.message
+                )
             }
         };
-        let hint = match e.body.hint.as_deref() {
-            Some(h) => format!("{what}; {h}"),
-            None => what,
-        };
-        e.hint(hint)
+        with_hint(e, what)
     }
+}
+
+/// `e` with `what` before the hint it has.
+fn with_hint(e: Error, what: String) -> Error {
+    let hint = match e.body.hint.as_deref() {
+        Some(h) => format!("{what}; {h}"),
+        None => what,
+    };
+    e.hint(hint)
+}
+
+/// The error of an upload stopped by Ctrl+C.
+fn interrupted() -> Error {
+    Error::new(StatusCode::SERVICE_UNAVAILABLE, "interrupted", "interrupted while sending the predictions")
+}
+
+/// The request that opens an entry failed: when the answer may be what was lost, the entry may exist, and its id is
+/// not known here.
+fn lost_start(e: Error, name: &str) -> Error {
+    if !e.status.is_server_error() {
+        return e;
+    }
+    let what = format!(
+        "the server may have opened an entry named '{name}': if the benchmark lists it as running, stop it by its \
+         id (left open, it expires on its own)"
+    );
+    with_hint(e, what)
 }
 
 /// The records of a file of predictions, in order: JSON Lines of `BenchPrediction` records (`{"image",
@@ -281,32 +321,36 @@ pub fn read_predictions(
         }
         _ => Error::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", format!("reading {shown}: {e}")),
     })?;
-    let mut reader = BufReader::new(file);
+    Ok(records_of(BufReader::new(file), shown))
+}
+
+/// The records of `reader`, one per line. At most a record and its line ending are read of any line.
+fn records_of<R: BufRead>(
+    mut reader: R,
+    shown: String,
+) -> impl Iterator<Item = Result<BenchPrediction, Error>> {
     let mut n = 0usize;
-    Ok(std::iter::from_fn(move || {
+    std::iter::from_fn(move || {
         let bad = |what: String| invalid_arguments(format!("{shown}: {what}"));
         loop {
             n += 1;
             let mut line = Vec::new();
-            // One byte over the limit tells a line that is too long from one that just fits.
-            let limit = MAX_RECORD_BYTES as u64 + 1;
-            match (&mut reader).take(limit).read_until(b'\n', &mut line) {
+            match (&mut reader).take(MAX_RECORD_BYTES as u64 + 2).read_until(b'\n', &mut line) {
                 Ok(0) => return None,
                 Ok(_) => {}
                 Err(e) => return Some(Err(bad(format!("reading line {n}: {e}")))),
             }
-            let text = line.trim_ascii();
-            if text.is_empty() {
+            let body = line.strip_suffix(b"\n").unwrap_or(&line);
+            let body = body.strip_suffix(b"\r").unwrap_or(body);
+            // Judged before a blank line is skipped: the rest of a long line must not pass as the next line.
+            let long = body.len() > MAX_RECORD_BYTES;
+            let text = body.trim_ascii();
+            if text.is_empty() && !long {
                 continue;
             }
-            return Some(parse_record(
-                text,
-                line.len() > MAX_RECORD_BYTES && !line.ends_with(b"\n"),
-                n,
-                &bad,
-            ));
+            return Some(parse_record(text, long, n, &bad));
         }
-    }))
+    })
 }
 
 /// The record on line `n` of a file of predictions (`text`, trimmed; `cut` when the line was longer than can be read).
@@ -322,7 +366,7 @@ fn parse_record(
              Lines), not arrays or documents of them"
         ))
     };
-    if text[0] != b'{' {
+    if text.first() != Some(&b'{') {
         return Err(not_a_record());
     }
     if cut {
@@ -343,31 +387,38 @@ fn parse_record(
     Ok(r)
 }
 
-/// The next part of `records`: whole records, at most `limits.records` of them and `limits.boxes` boxes; empty at
-/// the end. A record that could never fit is an error (an empty part would read as the end of the file).
+/// The next part of `records`: whole records, at most `limits.records` of them, `limits.boxes` boxes and
+/// `limits.bytes` of JSON; empty at the end. A record that could never fit is an error (an empty part would read as
+/// the end of the file).
 fn next_part(
     records: &mut Peekable<impl Iterator<Item = Result<BenchPrediction, Error>>>,
     limits: PartLimits,
 ) -> Result<Vec<BenchPrediction>, Error> {
-    let (mut part, mut boxes) = (Vec::new(), 0usize);
+    let (mut part, mut boxes, mut bytes) = (Vec::new(), 0usize, 0usize);
     while part.len() < limits.records {
-        let fits = match records.peek() {
+        let size = match records.peek() {
             None => break,
-            Some(Ok(r)) if r.boxes.len() > limits.boxes => {
-                let n = r.boxes.len();
-                return Err(invalid_arguments(format!(
-                    "a record has {n} boxes, over a part's {}",
-                    limits.boxes
-                )));
+            Some(Ok(r)) => {
+                // With the comma between records.
+                let size = serde_json::to_vec(r).map_or(0, |b| b.len()) + 1;
+                if r.boxes.len() > limits.boxes || size > limits.bytes {
+                    return Err(invalid_arguments(format!(
+                        "a record of {} boxes and {size} bytes is over a part's {} boxes and {} bytes",
+                        r.boxes.len(),
+                        limits.boxes,
+                        limits.bytes
+                    )));
+                }
+                if boxes + r.boxes.len() > limits.boxes || bytes + size > limits.bytes {
+                    break;
+                }
+                size
             }
-            Some(Ok(r)) => boxes + r.boxes.len() <= limits.boxes,
-            Some(Err(_)) => true,
+            Some(Err(_)) => 0,
         };
-        if !fits {
-            break;
-        }
         let r = records.next().expect("peeked")?;
         boxes += r.boxes.len();
+        bytes += size;
         part.push(r);
     }
     Ok(part)
@@ -488,233 +539,5 @@ fn score(e: &BenchEntry, r: BenchResult) -> BenchScoreResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use folo_test_support::TestFile;
-
-    fn records(text: &str) -> Result<Vec<BenchPrediction>, Error> {
-        let f = TestFile::new("bench-predictions", "p.jsonl");
-        std::fs::write(&f, text).unwrap();
-        read_predictions(&f)?.collect()
-    }
-
-    #[test]
-    fn a_file_of_predictions_is_json_lines_of_records() {
-        let r = |image: &str| {
-            format!(r#"{{"image":"{image}","boxes":[{{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}}]}}"#)
-        };
-        let lines = format!("{}\n{}\n", r("1"), r("2"));
-        let got: Vec<String> = records(&lines).unwrap().into_iter().map(|p| p.image).collect();
-        assert_eq!(got, ["1", "2"]);
-        assert_eq!(records(&r("9")).unwrap()[0].boxes[0].score, 1.0);
-        assert!(records("").unwrap().is_empty());
-        // Blank lines are skipped, and line numbers still count them.
-        let e = records(&format!("{}\n\n{{\"image\":\"3\"}}\n", r("1"))).unwrap_err();
-        assert!(e.body.message.contains("line 3") && e.body.message.contains("boxes"), "{e:?}");
-        // Arrays and API bodies are not records.
-        for doc in [format!("[{}]", r("1")), format!("{{\"predictions\": [{}]}}", r("1"))] {
-            let e = records(&format!("{}\n{doc}\n", r("1"))).unwrap_err();
-            assert!(e.body.message.contains("line 2 is not a record"), "{e:?}");
-        }
-        // Bad JSON says where; a bad record says which.
-        let e = records(&format!("{}\n{{\"image\": ", r("1"))).unwrap_err();
-        assert!(e.body.code == "invalid_arguments" && e.body.message.contains("line 2"), "{e:?}");
-        let e = records(&format!("{}\n{{\"image\":\"2\"}}\n", r("1"))).unwrap_err();
-        assert!(e.body.message.contains("line 2") && e.body.message.contains("boxes"), "{e:?}");
-        let missing = read_predictions(Path::new("no/such/predictions.jsonl")).err().unwrap();
-        assert_eq!(missing.body.code, "path_not_found");
-    }
-
-    /// A line is judged after at most [`MAX_RECORD_BYTES`]: one array or object on a single huge line is refused
-    /// without being read whole, and a line of exactly the limit is still a record.
-    #[test]
-    fn a_long_line_is_refused_before_it_is_read_whole() {
-        let array = format!("[{}]", "0,".repeat(MAX_RECORD_BYTES));
-        assert!(records(&array).unwrap_err().body.message.contains("line 1 is not a record"));
-        let object = format!("{{\"image\":\"{}\",\"boxes\":[]}}", "x".repeat(MAX_RECORD_BYTES));
-        let e = records(&object).unwrap_err();
-        assert!(e.body.message.contains("line 1 is longer"), "{e:?}");
-        let head = "{\"image\":\"";
-        let tail = "\",\"boxes\":[]}";
-        let exact = format!("{head}{}{tail}", "x".repeat(MAX_RECORD_BYTES - head.len() - tail.len()));
-        assert_eq!(exact.len(), MAX_RECORD_BYTES);
-        assert_eq!(records(&format!("{exact}\n")).unwrap().len(), 1);
-    }
-
-    /// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.
-    #[test]
-    fn a_record_over_the_box_limit_is_refused() {
-        let boxes = |n: usize| vec![r#"{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}"#; n].join(",");
-        let line = |n: usize| format!("{{\"image\":\"1\",\"boxes\":[{}]}}\n", boxes(n));
-        assert_eq!(records(&line(MAX_BOXES)).unwrap()[0].boxes.len(), MAX_BOXES);
-        let e = records(&line(MAX_BOXES + 1)).unwrap_err();
-        assert!(e.body.message.contains("has 1001 boxes"), "{e:?}");
-    }
-
-    fn record(image: &str, boxes: usize) -> BenchPrediction {
-        BenchPrediction {
-            image: image.into(),
-            condition: None,
-            severity: None,
-            boxes: vec![
-                folo_api::BenchDetection { class: 0, score: 1.0, x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
-                boxes
-            ],
-        }
-    }
-
-    #[test]
-    fn parts_hold_whole_records_within_the_limits() {
-        let sizes = |p: Vec<BenchPrediction>| p.iter().map(|r| r.boxes.len()).collect::<Vec<_>>();
-        // Boxes: a record that would cross the limit starts the next part.
-        let limits = PartLimits { records: 100, boxes: 10 };
-        let mut it = [4, 5, 2, 10, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [4, 5]);
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [2]);
-        assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [10, 0]);
-        assert!(next_part(&mut it, limits).unwrap().is_empty());
-        // A record that fits no part is an error, not an empty part (which would end the file there).
-        let mut it = [11].map(|b| Ok(record("1", b))).into_iter().peekable();
-        assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("11 boxes"));
-        // Records, empty ones too.
-        let limits = PartLimits { records: 2, boxes: 10 };
-        let mut it = [0, 0, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
-        assert_eq!(next_part(&mut it, limits).unwrap().len(), 2);
-        assert_eq!(next_part(&mut it, limits).unwrap().len(), 1);
-        // The real limits: 199,999 boxes and then 1,000 make two parts.
-        let mut it = [MAX_PART_BOXES - 1, 1000].map(|b| Ok(record("1", b))).into_iter().peekable();
-        assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [MAX_PART_BOXES - 1]);
-        assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [1000]);
-    }
-
-    /// A store with a benchmark of 4 synthetic images and haze 2 in its plan; its id.
-    fn bench_store(home: &Path) -> (std::sync::Arc<folo_server::RealStore>, String) {
-        use folo_server::Store;
-        let store = std::sync::Arc::new(folo_server::RealStore::open(home.to_path_buf()).device("cpu"));
-        let req = folo_api::SyntheticDataset {
-            name: "shapes".into(),
-            images: 20,
-            classes: vec!["circle".into(), "square".into()],
-            imgsz: 64,
-            seed: 3,
-        };
-        let ds = store.create_synthetic(req).unwrap();
-        let plan = BenchPlan {
-            conditions: vec![folo_api::BenchPlanCondition {
-                condition: "haze".into(),
-                severities: vec![2],
-                weight: 1.0,
-                why: None,
-            }],
-            rationale: None,
-            designed_by: None,
-        };
-        let req = CreateBench {
-            name: "shapes".into(),
-            description: String::new(),
-            source: folo_api::BenchSource::Dataset { dataset_id: ds.id, split: None },
-            max_images: None,
-            seed: 0,
-            plan: Some(plan),
-        };
-        let bench = Benchmarks::Store(store.clone()).create_bench(req).unwrap();
-        assert_eq!(bench.images, 4);
-        (store, bench.id)
-    }
-
-    /// A file of predictions in several parts: the parts after the first (the condition's records here) are sent
-    /// and scored; a later part refused removes the entry.
-    fn parts(b: &Benchmarks, id: &str, dir: &Path) {
-        // Nothing found anywhere: 4 records of the unchanged images, then 4 of haze 2.
-        let file = dir.join("p.jsonl");
-        let write = |haze_image: &str| {
-            let mut lines: Vec<String> =
-                (1..=4).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
-            lines.extend(
-                ["1", "2", "3", haze_image]
-                    .map(|i| format!(r#"{{"image":"{i}","condition":"haze","severity":2,"boxes":[]}}"#)),
-            );
-            std::fs::write(&file, lines.join("\n")).unwrap();
-        };
-        let three = PartLimits { records: 3, boxes: 10 };
-        write("4");
-        let go = AtomicBool::new(false);
-        let e = b.submit_in(id, "parts".into(), true, &file, three, &go).unwrap();
-        let state = b.state_of(e).unwrap();
-        assert_eq!((state.status, state.done), (folo_api::BenchEntryStatus::Done, 8), "{state:?}");
-        let r = state.result.unwrap();
-        assert_eq!((r.conditions.len(), r.conditions[0].points.len()), (1, 1), "{:?}", r.conditions);
-        // The third part names an image the benchmark does not have: refused, and the entry is gone.
-        write("99");
-        let e = b.submit_in(id, "refused".into(), true, &file, three, &go).unwrap_err();
-        let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(e.body.message.contains("99") && hint.contains("stopped and deleted"), "{e:?}");
-        assert_eq!(b.entries(id).unwrap().len(), 1);
-        // Ctrl+C after the first part: the entry is removed, and the error says it was interrupted.
-        write("4");
-        let e = b.submit_in(id, "stopped".into(), true, &file, three, &AtomicBool::new(true)).unwrap_err();
-        let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(e.body.code == "interrupted" && hint.contains("stopped and deleted"), "{e:?}");
-        assert_eq!(b.entries(id).unwrap().len(), 1);
-    }
-
-    /// A finish whose answer was lost: what the server did decides, and a score it saved is never deleted.
-    #[test]
-    fn a_lost_finish_answer_keeps_what_the_server_did() {
-        let home = folo_test_support::TestDir::new("mcp-bench-lost-finish");
-        let (store, id) = bench_store(home.path());
-        let b = Benchmarks::Store(store.clone());
-        let lost = || Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", "no answer");
-        let open = |name: &str| {
-            let predictions = (1..=4).map(|i| record(&i.to_string(), 0)).collect();
-            let contestant = BenchContestantSpec::External { scored: true, open: true, predictions };
-            let req =
-                StartBenchEntry { contestant, name: Some(name.into()), max_images: None, conditions: None };
-            b.start_entry(&id, req).unwrap().id
-        };
-        // Scored before the answer was lost: the result, and the entry stays.
-        let scored = open("scored");
-        b.finish(&id, &scored).unwrap();
-        let got = b.after_lost_finish(&id, &scored, lost()).unwrap();
-        assert_eq!(got.status, BenchEntryStatus::Done);
-        assert_eq!(b.entry(&id, &scored).unwrap().status, BenchEntryStatus::Done);
-        // Still open: kept, and the error names it.
-        let kept = open("kept");
-        let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
-        assert!(e.body.hint.as_deref().unwrap_or_default().contains(&kept), "{e:?}");
-        assert!(b.entry(&id, &kept).unwrap().status.is_active());
-        // Stopped from elsewhere: removed as any failed upload is.
-        b.stop_entry(&id, &kept).unwrap();
-        let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
-        assert!(e.body.hint.as_deref().unwrap_or_default().contains("stopped and deleted"), "{e:?}");
-        assert!(b.entry(&id, &kept).is_err());
-        folo_server::Store::shutdown(&*store);
-    }
-
-    #[test]
-    fn predictions_go_in_parts_in_process() {
-        let home = folo_test_support::TestDir::new("mcp-bench-parts");
-        let (store, id) = bench_store(home.path());
-        parts(&Benchmarks::Store(store.clone()), &id, home.path());
-        folo_server::Store::shutdown(&*store);
-    }
-
-    #[test]
-    fn predictions_go_in_parts_through_a_server() {
-        let home = folo_test_support::TestDir::new("mcp-bench-parts-http");
-        let (store, id) = bench_store(&home.join("server"));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = folo_server::Server::new(store.clone(), folo_server::Options::default());
-        let serving = rt.spawn(server.serve(listener, async move {
-            let _ = stopped.await;
-        }));
-        let http = std::sync::Arc::new(crate::proxy::HttpStore::new(&url, None));
-        parts(&Benchmarks::Http(http), &id, home.path());
-        let _ = stop.send(());
-        rt.block_on(serving).unwrap().unwrap();
-        folo_server::Store::shutdown(&*store);
-    }
-}
+#[path = "ops_tests.rs"]
+mod tests;
