@@ -100,6 +100,11 @@ pub struct TrainConfig {
     /// `head = "o2o"` only: for the first this many epochs the one-to-one branch's inputs are not detached, so its
     /// loss trains the backbone and neck as well (MODEL.md §6.6); `0` (the default) detaches them throughout.
     pub o2o_attached_epochs: u32,
+    /// `head = "o2o"` only: the one-to-one branch's assigner takes `loss.tal`'s `alpha`, `beta`, `eps` and
+    /// `min_box_size` (its `topk = 7` and `topk2 = 1` are fixed, MODEL.md §6.6). Missing in configs from before it:
+    /// `false`, the §7.3 defaults those runs trained that branch with, so they resume bit-exactly.
+    #[serde(default = "legacy_o2o_keeps_tal")]
+    pub o2o_keeps_tal: bool,
     /// Stop after this many epochs without a fitness gain.
     pub patience: u32,
     /// Seed of the initial weights, the epoch order and the augmentation.
@@ -177,6 +182,7 @@ impl Default for TrainConfig {
             amp: false,
             head: HeadMode::O2m,
             o2o_attached_epochs: 0,
+            o2o_keeps_tal: true,
             patience: 100,
             seed: 0,
             workers: default_workers(),
@@ -203,6 +209,11 @@ fn legacy_warmup_floor() -> u64 {
 /// The `ema_run_fraction` of settings written before the key existed: the default window for every run.
 fn legacy_ema_run_fraction() -> f64 {
     0.0
+}
+
+/// The `o2o_keeps_tal` of settings written before the key existed: the one-to-one branch ignored `loss.tal`.
+fn legacy_o2o_keeps_tal() -> bool {
+    false
 }
 
 /// The `auto_rule` of settings written before the key existed.
@@ -681,6 +692,17 @@ mod tests {
         old.as_object_mut().unwrap().remove("warmup_floor");
         let old: TrainConfig = serde_json::from_value(old).unwrap();
         assert_eq!(old.warmup_floor, 100);
+    }
+
+    /// `o2o_keeps_tal`: on for a new run; a config from before the key trained the one-to-one branch with the §7.3
+    /// defaults and keeps doing so when it resumes.
+    #[test]
+    fn o2o_keeps_tal_versions() {
+        let cfg = TrainConfig::default();
+        assert!(cfg.o2o_keeps_tal);
+        let mut old = serde_json::to_value(cfg).unwrap();
+        old.as_object_mut().unwrap().remove("o2o_keeps_tal");
+        assert!(!serde_json::from_value::<TrainConfig>(old).unwrap().o2o_keeps_tal);
     }
 
     /// `ema_run_fraction`: 0.25 by default, so a fine-tune of 400 optimizer steps averages over 100 (decay 0.99,

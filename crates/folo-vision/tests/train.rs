@@ -781,6 +781,38 @@ fn o2o_attached_epochs_switch_at_the_boundary() {
     assert!(detached(&t), "epoch 3 is past the 2 attached epochs");
 }
 
+/// `loss.tal.*` reach the one-to-one branch (docs/MODEL.md §6.6). After one optimizer step the branch's weights
+/// depend only on its own loss (its inputs are detached, the backbone has not moved yet and no global clipping
+/// couples it to the other branch), so they change with `beta` exactly when its assigner reads it; a config from
+/// before `o2o_keeps_tal` keeps the §7.3 values.
+#[test]
+fn o2o_branch_takes_the_runs_assigner_settings() {
+    use folo_vision::assign::TalConfig;
+    use folo_vision::loss::LossConfig;
+    use folo_vision::model::HeadMode;
+    let ds = shapes(4, 1, 64);
+    let base = TrainConfig {
+        head: HeadMode::O2o,
+        device: "cpu".into(),
+        batch: 4,
+        nbs: 4,
+        ema: false,
+        clip_grad_norm: 0.0,
+        ..micro_config(1)
+    };
+    let o2o_weights = |cfg: TrainConfig| {
+        let mut t = Trainer::new(cfg, data(&ds), options(None).0).unwrap();
+        t.run().unwrap();
+        let weights = t.model().named_tensors().into_iter().filter(|x| x.name.starts_with("head.o2o."));
+        weights.map(|x| x.tensor.to_vec::<f32>().unwrap()).collect::<Vec<_>>()
+    };
+    let loss = LossConfig { tal: TalConfig { beta: 0.0, ..TalConfig::default() }, ..base.loss };
+    let custom = TrainConfig { loss, ..base.clone() };
+    let plain = o2o_weights(base);
+    assert_ne!(o2o_weights(custom.clone()), plain, "the branch ignored loss.tal.beta");
+    assert_eq!(o2o_weights(TrainConfig { o2o_keeps_tal: false, ..custom }), plain, "an old run's branch");
+}
+
 /// `auto` rule 5 (docs/MODEL.md §8.2): MuSGD with the scratch step weights 0.5 / 0.5 for a run from scratch, the
 /// configured 0.2 / 1.0 for one that starts from weights (`transfer`, which the trainer sets from
 /// `TrainOptions::weights` whatever the config says, and which a resume keeps). Checked on the optimizer itself

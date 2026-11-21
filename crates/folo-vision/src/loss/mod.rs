@@ -97,6 +97,14 @@ impl LossConfig {
     pub fn o2o() -> Self {
         Self { tal: TalConfig::o2o(), ..Self::default() }
     }
+
+    /// The one-to-one branch's loss of a run with this config: the same gains and `reg_max`, and this assigner with
+    /// the one-to-one selection ([`TalConfig::one_to_one`]). With `keeps_tal` off (`TrainConfig.o2o_keeps_tal` of a
+    /// run started before the key) the assigner is [`TalConfig::o2o`], as that run trained.
+    pub fn o2o_branch(&self, keeps_tal: bool) -> Self {
+        let tal = if keeps_tal { self.tal.one_to_one() } else { TalConfig::o2o() };
+        Self { tal, ..*self }
+    }
 }
 
 /// The weight `w_m` of the one-to-many loss after `completed` epochs of a run of `epochs` (MODEL.md §6.6):
