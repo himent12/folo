@@ -55,8 +55,8 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
 - [x] agent labeling: unlabeled images → boxes by Claude Code or Codex (one tool-free model request per batch) →
-  review in Studio → a registered YOLO dataset (`/api/label`, docs/LABELING.md; #165). Next: the same screen in FOLO
-  Desktop, `folo label` and MCP tools
+  review in Studio, `folo label` or MCP tools → a registered YOLO dataset (`/api/label`, `folo label`, 10 MCP tools,
+  docs/LABELING.md; #165). Next: the same screen in FOLO Desktop
 
 - [x] vision benchmarks: a frozen set of labeled images plus a plan of stress conditions, any vision model as a
   contestant (FOLO models, Claude Code / Codex, external predictions), a five-axis score with exact definitions,
@@ -68,9 +68,8 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 - [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
   server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;
   docs/CLOUD.md). The worker side is plain API: `folo serve --token`, `/api/uploads`, run cursors, weight ranges.
-  Next: check the RunPod provider against a live account (`crates/folo-cloud/tests/runpod_live.rs`) once a
-  release with this is published for workers to install; TLS on the worker, then providers that expose a raw
-  port (Vast.ai, Lambda); spot instances with automatic resume
+  Next: TLS on the worker, then providers that expose a raw port (Vast.ai, Lambda); spot instances with automatic
+  resume
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71)

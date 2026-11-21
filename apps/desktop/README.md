@@ -1,8 +1,10 @@
 # FOLO Desktop
 
 The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
-CPU; the UI uses no GPU). Same screens and design language as FOLO Studio ([web/](../../web/README.md)): Overview,
-Datasets, Runs (with a live training dashboard), Models, Benchmarks, Playground and Settings, plus a command palette,
+CPU; the UI uses no GPU). Same design language and main screens as FOLO Studio ([web/](../../web/README.md)):
+Overview, Datasets, Runs (with a live training dashboard), Models, Benchmarks, Playground and Settings (agent
+labeling, run compare, benchmark compare and importing external predictions stay in Studio), plus a command
+palette,
 keyboard navigation, toasts, and the theme system of [design/THEMES.md](../../design/THEMES.md) (Dark, Light or
 System, a theme per mode, custom themes).
 
@@ -246,7 +248,7 @@ on your desktop take the request and open their window on your screen.
 - `name-chars.mjs` (Node): writes `src/theme/name_chars.rs`, the Mark and Format ranges a custom theme's name is
   checked against, from Node's Unicode data.
 - `shoot.ps1`: one headless screenshot (`folo-desktop --scenario … --shot`; Screenshots, below).
-- `shoot-all.ps1`: every review scenario headless, in parallel (109 PNGs in a few seconds on a release build),
+- `shoot-all.ps1`: every review scenario headless, in parallel (111 PNGs in a few seconds on a release build),
   as `<Dir>\<W>x<H>\<scenario>.png`: all scenarios at 1280 x 800, the densest at 960 x 620 and 1680 x 1050.
 - `parity.py` (Python with numpy and Pillow): compares two such trees pixel by pixel (the per-pixel difference
   is the largest channel difference): per pair the share of pixels above `--tol`, the largest difference, the
@@ -429,7 +431,7 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
 with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` prints the review set.
 
 ```powershell
-tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (109 PNGs in <W>x<H> folders; a few seconds on a release build)
+tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (111 PNGs in <W>x<H> folders; a few seconds on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
 tools\shoot.ps1 -Scenario settings+bottom -Out shots\appearance.png -ExtraArgs "--theme midnight"   # any theme
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
@@ -447,7 +449,8 @@ harness pumps the app's queues and waits for its background requests before it d
 stream is read up to that point. Checked against `folo serve --mock`: a live run's page, Runs and Overview show
 their data; an unreachable server shows the unreachable state. Always give `--server` or `--mock` with
 `-Scenario none`; without them the app looks for, or starts, a local `folo serve`, as a normal launch does.
-`tools\capture.ps1` takes the same arguments for a real window off screen.
+`tools\capture.ps1` takes the same arguments except `-Scale` (it captures at the display's scale factor) and adds
+`-DelayMs` (default `2200`), for a real window off screen.
 
 ### Window check
 

@@ -1,5 +1,5 @@
-// Visits every Studio route against a running FOLO server and reports page errors, console errors and failed API
-// calls. Use it to check the client against the real contract:
+// Visits Studio's core routes (not Labeling or Benchmarks) against a running FOLO server and reports page errors,
+// console errors and failed API calls. Use it to check the client against the real contract:
 //   folo serve --mock --port 7979 &
 //   FOLO_API=http://127.0.0.1:7979 npm run smoke
 import { createServer } from 'vite';

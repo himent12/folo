@@ -266,7 +266,8 @@ next unclaimed shape (at most 8 classes).
 
 ## Benchmark
 `cargo bench -p folo-data --bench pipeline [-- --images N]` writes a synthetic 640 px JPEG dataset and reports stage
-timings and loader images/s with 1, N/2 and N workers. `--data PATH` measures a real dataset (`SCAN_CACHE=DIR` opens
+timings and loader images/s with 1, `min(8, cores)` and `cores` workers (override with `--workers A,B,...`).
+`--data PATH` measures a real dataset (`SCAN_CACHE=DIR` opens
 it through the scan cache), `--same-epoch` measures every round on epoch 1 after a warm-up pass over the same batches
 (so two builds compared one after the other read equally warm files). `cargo run --release -p folo-data --example
 loader_profile -- PATH [N]` splits a mosaic sample's time and allocations into its stages (file read, decode, resize,
