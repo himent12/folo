@@ -208,6 +208,7 @@ fn train_val_predict_export_with_json() {
     }
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done");
+    assert!(!done["saved_to"].as_str().unwrap().contains('\\'), "{done}");
     // Timings are rounded to 0.1 µs, so they print with at most 4 decimals (no f64 noise).
     let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"], &done["first_timing"]]);
     // The first image (pipeline warm-up) is reported apart and left out of the mean.
@@ -946,7 +947,8 @@ fn weights_names_export_and_coco_val() {
     let (code, _, stderr) =
         folo_with(&["dataset", "convert", s(data), s(&coco), "--to", "coco", "--json"], Some(&cache));
     assert_eq!(code, 0, "{stderr}");
-    let results = root.join("dets.json");
+    // In a folder that does not exist yet: `val` creates it (examples/coco/README.md runs it this way).
+    let results = root.join("eval").join("dets.json");
     let (code, lines, stderr) = folo_with(
         &[
             "val",

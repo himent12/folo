@@ -154,9 +154,9 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             "api": format!("{url}/api"),
             "mock": args.mock,
             "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
-            "web_dir": web_dir,
+            "web_dir": web_dir.as_ref().map(folo_api::json::path),
             "web_ready": web_ready,
-            "data_dir": if args.mock { None } else { Some(&data_dir) },
+            "data_dir": (!args.mock).then(|| folo_api::json::path(&data_dir)),
             "token": token_set,
         }));
         server

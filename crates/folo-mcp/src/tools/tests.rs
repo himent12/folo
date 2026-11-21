@@ -7,6 +7,7 @@ use folo_server::store::IssueQuery;
 
 use super::arguments::unknown_argument;
 use super::datasets::list_issues_compat;
+use super::models::check_base64_len;
 use super::results::{MAX_RESULT_BYTES, MAX_SUMMARY_CHARS, cursor_at, json_len, out, page_of};
 use super::runs::{MAX_WARNINGS, config_diff, log_warnings};
 use crate::errors::Error;
@@ -26,6 +27,16 @@ fn docs_name_every_tool() {
     for t in TOOLS {
         assert!(list.contains(t.name), "llms.txt's tool list leaves out {}", t.name);
     }
+}
+
+/// An oversized `image_base64` answers as an oversized image file does (docs/MCP.md), checked on the length alone.
+#[test]
+fn an_oversized_base64_image_is_payload_too_large() {
+    // 64 MiB of image is 89,478,488 characters of base64.
+    assert!(check_base64_len(89_478_488).is_ok());
+    let e = check_base64_len(89_478_490).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (413, "payload_too_large"));
+    assert_eq!(e.body.message, "image_base64 is larger than 64 MiB");
 }
 
 #[test]

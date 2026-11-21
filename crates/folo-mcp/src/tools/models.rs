@@ -103,9 +103,7 @@ impl Inner {
                 PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
             }
             (None, Some(b64), None, None) => {
-                if b64.len() as u64 > MAX_IMAGE_BYTES * 4 / 3 + 4 {
-                    return Err(invalid_arguments("image_base64 is larger than 64 MiB"));
-                }
+                check_base64_len(b64.len())?;
                 let decode = move || {
                     base64::engine::general_purpose::STANDARD
                         .decode(b64.trim())
@@ -290,11 +288,24 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
         return Err(invalid_arguments(format!("{} is not a file", folo_api::json::path(path))));
     }
     if meta.len() > MAX_IMAGE_BYTES {
-        return Err(Error::new(
-            http::StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            format!("{} is larger than 64 MiB", folo_api::json::path(path)),
-        ));
+        return Err(too_large(&folo_api::json::path(path)));
     }
     std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))
+}
+
+/// `payload_too_large` for an image over [`MAX_IMAGE_BYTES`], `what` being a file or the argument.
+fn too_large(what: &str) -> Error {
+    Error::new(
+        http::StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        format!("{what} is larger than 64 MiB"),
+    )
+}
+
+/// Refuses an `image_base64` of `len` characters whose image would be over [`MAX_IMAGE_BYTES`], before decoding it.
+pub(super) fn check_base64_len(len: usize) -> Result<(), Error> {
+    if len as u64 > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+        return Err(too_large("image_base64"));
+    }
+    Ok(())
 }

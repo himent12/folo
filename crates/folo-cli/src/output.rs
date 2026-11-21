@@ -134,3 +134,65 @@ impl Out {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// Every `.rs` file under `dir`.
+    fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                sources(&p, out);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// A JSON key that holds a file or folder in the CLI's records.
+    fn names_a_path(key: &str) -> bool {
+        matches!(
+            key,
+            "path" | "root" | "file" | "yaml" | "input" | "output" | "model" | "data" | "annotations"
+        ) || key == "saved"
+            || ["_dir", "_path", "_file", "_to"].iter().any(|s| key.ends_with(s))
+    }
+
+    /// docs/CLI.md promises `/` in the paths of records on every OS, which a raw `PathBuf` breaks on Windows only. So
+    /// this reads the source, on every OS: a `"key": value` in a `json!` whose key names a path must build its value
+    /// with `folo_api::json::path` (or `rel`, the dataset-relative form). It cannot see a path under a key not named
+    /// like one, a value on the line after its key, or a `Serialize` struct holding a `PathBuf` (none reaches a
+    /// record today).
+    #[test]
+    fn json_records_spell_paths_with_forward_slashes() {
+        // Not raw paths: a command's words, and a string `json::path` made a few lines above.
+        const FINE: [(&str, &str); 2] = [("describe.rs", "path"), ("stop.rs", "run_dir")];
+        let mut files = Vec::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut raw = Vec::new();
+        for file in &files {
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            if name == "tests.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).unwrap();
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            for line in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                for (before, after) in line.split("\": ").zip(line.split("\": ").skip(1)) {
+                    let key = before.rsplit('"').next().unwrap();
+                    let value = after.split(", \"").next().unwrap();
+                    if names_a_path(key)
+                        && !value.contains("json::path")
+                        && !value.starts_with("rel(")
+                        && !FINE.contains(&(name.as_str(), key))
+                    {
+                        raw.push(format!("{name}: \"{key}\": {value}"));
+                    }
+                }
+            }
+        }
+        assert!(raw.is_empty(), "use folo_api::json::path for: {raw:#?}");
+    }
+}

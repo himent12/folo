@@ -96,6 +96,32 @@ pub fn evaluate(
     Ok(CocoResult { stats: ev.compute(), missing_images: missing })
 }
 
+/// Makes sure `--save-json`'s file can be written, before the evaluation it would otherwise fail after: creates its
+/// folder (as `predict --save` and `train --project` do) and opens the file for writing. An existing file keeps its
+/// content until [`write_results`] replaces it, and a new one is not left behind.
+pub fn prepare_results(path: &Path) -> Result<(), CliError> {
+    let io = |e: std::io::Error| {
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", folo_api::json::path(path)),
+        )
+    };
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => {
+            drop(file);
+            std::fs::remove_file(path).map_err(io)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io)
+        }
+        Err(e) => Err(io(e)),
+    }
+}
+
 /// Write `detections` as a COCO results file (`[{"image_id", "category_id", "bbox": [x, y, w, h], "score"}]`),
 /// the input of pycocotools' `COCO.loadRes`. Coordinates keep full f32 precision (`w = x2 - x1` in f64, so
 /// `x + w` is `x2` again). Returns the number of detections written.
@@ -159,5 +185,24 @@ mod tests {
         assert_eq!(e.code, "usage");
         let hint = e.hint.unwrap();
         assert!(!hint.contains("  "), "{hint}");
+    }
+
+    /// `val --save-json` in a new folder works, and one that cannot be written fails before the evaluation.
+    #[test]
+    fn a_results_file_is_prepared_before_the_evaluation() {
+        let dir = TestDir::new("coco-prepare");
+        // A folder that does not exist yet is created, and no empty results file stays in it.
+        let new = dir.join("eval").join("deep").join("dets.json");
+        super::prepare_results(&new).unwrap();
+        assert!(new.parent().unwrap().is_dir() && !new.exists());
+        // An earlier results file keeps its content until the new one is written.
+        std::fs::write(&new, b"[]").unwrap();
+        super::prepare_results(&new).unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), b"[]");
+        // A folder in the file's place, and a file in the folder's place, are refused now.
+        let e = super::prepare_results(new.parent().unwrap()).unwrap_err();
+        assert_eq!(e.code, "io_error");
+        let e = super::prepare_results(&new.join("dets.json")).unwrap_err();
+        assert!(e.code == "io_error" && e.message.starts_with("cannot write "), "{}", e.message);
     }
 }

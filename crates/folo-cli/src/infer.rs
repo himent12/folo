@@ -197,6 +197,10 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let device = model.device().to_string();
     let precision = precision_of(&model);
     let head = cfg.head.unwrap_or(model.head_mode());
+    // Last of the checks, so a mistyped model or dataset leaves no new folder, and before any image is read.
+    if let Some(path) = &args.save_json {
+        crate::coco::prepare_results(path)?;
+    }
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);
     let names = model.classes();
@@ -534,7 +538,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
         "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
-        "saved_to": args.save,
+        "saved_to": args.save.as_ref().map(folo_api::json::path),
     }));
     out.human(format!(
         "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
