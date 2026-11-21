@@ -133,6 +133,7 @@ impl FoloApp {
             Invalid,
             NoDataset,
             Rejected(String),
+            AmpRefused(String),
             Local,
         }
         // The last answer stands in only for the same kind of device (CPU, GPU, a cloud GPU).
@@ -156,6 +157,9 @@ impl FoloApp {
                 Some((_, crate::store::Load::Ready(e))) => Est::Server(Box::new(e.clone()), false),
                 Some((_, crate::store::Load::Failed(e))) if no_estimator(&e.code, amp && cloud.is_none()) => {
                     Est::Local
+                }
+                Some((_, crate::store::Load::Failed(e))) if e.code == "not_supported" => {
+                    Est::AmpRefused(e.message.clone())
                 }
                 Some((_, crate::store::Load::Failed(e))) => Est::Rejected(e.message.clone()),
                 _ => match &self.nr_estimate_last {
@@ -205,6 +209,11 @@ impl FoloApp {
             Est::Rejected(msg) => (
                 "No estimate for this config".into(),
                 "The server couldn't estimate it".into(),
+                Some(msg.clone()),
+            ),
+            Est::AmpRefused(msg) => (
+                "Mixed precision isn't available".into(),
+                "Turn it off to train on this device".into(),
                 Some(msg.clone()),
             ),
             Est::Local if cpu => {

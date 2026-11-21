@@ -573,8 +573,9 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
   it('says an estimate refused for mixed precision at the field, before Start', async () => {
     hub.api = api = new MockApi('normal', 0);
     const real = api.estimateRun.bind(api);
+    let refuse = true;
     vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
-      if (b.amp) throw new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores');
+      if (b.amp && refuse) throw new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores');
       return real(b);
     });
     await open();
@@ -586,6 +587,17 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     sw.click();
     flushSync();
     expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+    // On again, and the server can now: the next estimate's answer lets Start go.
+    sw.click();
+    flushSync();
+    await until(() => target.querySelector('#amp-error'), 'the refusal again');
+    refuse = false;
+    const seed = target.querySelector<HTMLInputElement>('input#seed')!;
+    seed.value = '5';
+    seed.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await until(() => !target.querySelector('#amp-error'), 'the refusal answered');
     expect(target.querySelector('#start-why')).toBeNull();
   });
 
