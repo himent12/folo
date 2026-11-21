@@ -38,8 +38,9 @@ much each one contributed to the overall AP.
 - One training seed: the interval covers the sampling of the evaluation images, not the training seed.
 - val2017 was not fully untouched. The early-failure rule read the trainer's val2017 mAP at epoch 6 and that reading
   sent the lane from run 1 to run 2. The rule and its threshold were fixed before any run, and the exported weights
-  are epoch 48's, also fixed in advance, never `best.folo`. How much that one reading flatters the result is not
-  measured: the bootstrap covers neither it nor the training seed.
+  are epoch 48's, also fixed in advance, never `best.folo`. Run 1 ended at the gate, so what it would have
+  scored is unknown, and so are the size and the direction of that choice's effect on the result. The bootstrap covers
+  neither it nor the training seed.
 - Run 1 was stopped at epoch 6, so "0.3x LR is better than the default LR for this continuation" is not measured.
 
 ## Recipe
@@ -150,9 +151,9 @@ pycocotools here (the published model: 0.4120 internal, 0.4162 pycocotools; the 
 
 **After epoch 40 the run lost ground on the trainer's own metric.** It peaked at epoch 40 (0.42154; epochs 38 and 41
 round to the same 0.4215) and fell to 0.41796 at epoch 48, a drop of 0.0036. Over the last ten epochs mosaic was off
-and the learning rate was annealing, so the curve does not say which of the two did it. The exported weights are
-epoch 48's as the brief fixed; `best.folo` (epoch 40) would be chosen on the scored split and was not used or
-evaluated.
+and the learning rate was annealing. One curve shows when the drop happened, not what caused it. The exported
+weights are epoch 48's as the brief fixed; `best.folo` (epoch 40, picked by the trainer's own validation on the scored
+split) was not exported and not scored in the standalone COCO evaluation.
 
 ## Wall-clock and throughput
 
@@ -163,7 +164,9 @@ evaluated.
 
 ## Speed
 
-Same architecture, so no speed row should move, but the first alternated `folo val` timing (four rounds, always
+The architecture is the same, so the forward pass costs the same. End-to-end time can still differ, because NMS
+works on the candidates a model emits (679,000 detections against 725,952 in the two f32 evaluations). No speed row
+was measured again. The first alternated `folo val` timing (four rounds, always
 published then continued) read the continued weights at 2.2x the time (medians about 9.7 s and 21.4 s). Two more
 trials, with the order reversed in blocks, were also noisy: most single runs took about 10 s or 15–29 s, and two took
 about 11.8 s. A last test with **fresh byte-identical copies of both files**, 24 runs in one order shuffled with
