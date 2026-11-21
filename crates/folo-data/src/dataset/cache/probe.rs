@@ -76,23 +76,21 @@ impl Probes {
 
     /// Whether results for `path`, last seen with `stamp`, may be cached.
     pub fn cacheable(&self, path: &Path, stamp: Option<Stamp>) -> Option<Stamp> {
+        let dir = path.parent()?;
         // Names that are not UTF-8 are not cached.
         let _name = path.file_name()?.to_str()?;
-        let dir = crate::paths::parent_dir(path);
         stamp.filter(|s| self.dirs.contains_key(dir) && s.settled(self.now))
     }
 
     /// The cached header probe of `path`, when its stamp still matches.
     pub fn image(&self, path: &Path, stamp: Stamp) -> Option<&ImageProbe> {
-        let name = path.file_name()?.to_str()?;
-        let (s, p) = self.dirs.get(crate::paths::parent_dir(path))?.images.get(name)?;
+        let (s, p) = self.dirs.get(path.parent()?)?.images.get(path.file_name()?.to_str()?)?;
         (*s == stamp).then_some(p)
     }
 
     /// The cached parse of the label file `path`, when its stamp and the number of classes still match.
     pub fn label(&self, path: &Path, stamp: Stamp, num_classes: Option<usize>) -> Option<&LabelParse> {
-        let name = path.file_name()?.to_str()?;
-        let (s, nc, p) = self.dirs.get(crate::paths::parent_dir(path))?.labels.get(name)?;
+        let (s, nc, p) = self.dirs.get(path.parent()?)?.labels.get(path.file_name()?.to_str()?)?;
         (*s == stamp && *nc == num_classes.map(|n| n as u64)).then_some(p)
     }
 
@@ -108,8 +106,7 @@ impl Probes {
             let (path, name) = match &f {
                 Fresh::Image(p, ..) | Fresh::Label(p, ..) => (p, p.file_name().and_then(|n| n.to_str())),
             };
-            let Some(name) = name else { continue };
-            let dir = crate::paths::parent_dir(path);
+            let (Some(dir), Some(name)) = (path.parent(), name) else { continue };
             let name = name.to_string();
             let d = match touched.get_mut(dir) {
                 Some(d) => d,

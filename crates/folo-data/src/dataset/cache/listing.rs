@@ -37,8 +37,8 @@ impl Listing {
         }
         let mut counts: HashMap<&Path, usize> = HashMap::new();
         for f in files {
-            if f.file_name().is_some() {
-                *counts.entry(crate::paths::parent_dir(f)).or_default() += 1;
+            if let Some(d) = f.parent() {
+                *counts.entry(d).or_default() += 1;
             }
         }
         let wanted: Vec<&Path> =
@@ -56,8 +56,8 @@ impl Listing {
     /// or folder, else from the file system (a link, a name in another case on a case-insensitive disk, a missing
     /// file). `None` when nothing is there.
     pub fn stat(&self, path: &Path) -> Option<Entry> {
-        if let Some(name) = path.file_name()
-            && let Some(e) = self.dirs.get(crate::paths::parent_dir(path)).and_then(|m| m.get(name))
+        if let (Some(dir), Some(name)) = (path.parent(), path.file_name())
+            && let Some(e) = self.dirs.get(dir).and_then(|m| m.get(name))
         {
             return Some(*e);
         }
