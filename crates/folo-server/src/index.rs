@@ -20,9 +20,9 @@ use crate::util::fnv1a;
 /// Most classes a dataset may have.
 pub const MAX_CLASSES: usize = 4096;
 
-/// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 5: the cached
-/// check reports YOLO label files whose image is gone (`missing_image`).
-pub const INDEX_VERSION: u32 = 5;
+/// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: folo-data
+/// reads COCO splits, float category ids and crowd flags, and labels below a folder called `images`, differently.
+pub const INDEX_VERSION: u32 = 6;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
