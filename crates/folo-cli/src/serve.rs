@@ -87,9 +87,10 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
         let url = format!("http://{addr}");
+        let lock_url = serve_lock::local_url(addr);
         // Before the store opens (it can take a while): a second start can say where this one is.
         if let Some(lock) = &serve_lock
-            && let Err(e) = lock.publish(&url)
+            && let Err(e) = lock.publish(&lock_url)
         {
             tracing::warn!("could not record the address in the data dir: {e}");
         }

@@ -5,7 +5,20 @@
 //! `folo mcp` goes through it). The address is a hint: a reader checks that the server there serves this data dir.
 
 use std::fs::{File, OpenOptions, TryLockError};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+
+/// The local URL another process on this machine can connect to for a listener bound to `addr`: unspecified
+/// wildcard hosts (`0.0.0.0`, `::`) become loopback (`127.0.0.1`, `[::1]`) because connecting to a wildcard
+/// address fails on Windows and macOS.
+pub fn local_url(addr: SocketAddr) -> String {
+    let ip = match addr.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        other => other,
+    };
+    format!("http://{}", SocketAddr::new(ip, addr.port()))
+}
 
 /// The data dir's serve lock, held until dropped; dropping it also removes `serve.json`.
 pub struct ServeLock {
@@ -156,5 +169,14 @@ mod tests {
         let ms = Duration::from_millis;
         assert!(!serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(50)));
         assert!(serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(5000)));
+    }
+
+    #[test]
+    fn wildcard_bind_addresses_publish_loopback_urls() {
+        assert_eq!(local_url("0.0.0.0:8080".parse().unwrap()), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::]:8080".parse().unwrap()), "http://[::1]:8080");
+        assert_eq!(local_url("127.0.0.1:8080".parse().unwrap()), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::1]:8080".parse().unwrap()), "http://[::1]:8080");
+        assert_eq!(local_url("192.168.1.5:8080".parse().unwrap()), "http://192.168.1.5:8080");
     }
 }

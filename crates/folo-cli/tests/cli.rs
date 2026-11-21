@@ -371,6 +371,56 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
 }
 
+/// `folo serve --host 0.0.0.0` records a connectable loopback URL in `serve.json` so `folo mcp` can auto-proxy
+/// to it (connecting to `0.0.0.0` fails on Windows and macOS).
+#[test]
+fn serve_on_wildcard_host_allows_mcp_auto_proxy() {
+    use std::io::Write;
+    let dir = TestDir::new("serve-wildcard-host");
+    let mut server: ChildGuard = folo_cmd()
+        .args(["--json", "serve", "--host", "0.0.0.0", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut line = String::new();
+    BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let listening: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(listening["event"], "listening", "{line}");
+    let port = listening["url"].as_str().unwrap().rsplit(':').next().unwrap();
+
+    let serve_json: Value = serde_json::from_slice(&std::fs::read(dir.join("serve.json")).unwrap()).unwrap();
+    assert_eq!(serve_json["url"], format!("http://127.0.0.1:{port}"), "{serve_json}");
+
+    let mut mcp: ChildGuard = folo_cmd()
+        .args(["mcp", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut stdin = mcp.stdin.take().unwrap();
+    for msg in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+    ] {
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    let info = BufReader::new(mcp.stdout.take().unwrap())
+        .lines()
+        .map_while(Result::ok)
+        .find(|l| l.contains(r#""id":2"#))
+        .expect("folo_info answered");
+    drop(stdin);
+    assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
+}
+
 /// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
 /// stderr, not an error envelope on stdout. So is a usage error clap reports, wherever `--json` is; other commands
 /// keep their JSON usage error.
