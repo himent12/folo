@@ -14,6 +14,10 @@ import { runEndMessage, runEnds } from './runWatch';
 
 export default function RunWatch(): JSX.Element {
   const runs = new Resource((s) => hub.api.runs(s), { poll: 2000 });
+  watched.source = runs;
+  effect(() => () => {
+    if (watched.source === runs) watched.source = undefined;
+  });
   let prev: Run[] | undefined;
   // A different server (reconnect, mock): its list is not a change from the last one.
   effect(() => {

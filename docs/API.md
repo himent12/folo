@@ -40,9 +40,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   `--token` no header is needed (the default: the server listens on loopback). docs/CLOUD.md, *Securing a server*.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
   builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
-  ETag. For files served from the embedded copy or from `--web-dir` (plain paths), Vite's content-hashed `assets/`
-  (except `.map` source maps) are `Cache-Control: public, max-age=31536000, immutable`; every other served file
-  and the SPA fallback are `no-cache`.
+  ETag. Vite's content-hashed `assets/` (except `.map` source maps) are `Cache-Control: public, max-age=31536000,
+  immutable`: all of them in the embedded copy, and from `--web-dir` a plain path with Vite's hashed name while the
+  folder's `index.html` is a Vite page. Every other served file and the SPA fallback are `no-cache`.
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.

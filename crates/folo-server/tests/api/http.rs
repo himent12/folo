@@ -87,15 +87,17 @@ async fn static_files_spa_fallback() {
     err(&embedded, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
 }
 
-/// `folo serve --web-dir` caches as the embedded app does (issue #309): Vite's hashed `assets/` for a year, everything
-/// else revalidated (`no-cache` with `Last-Modified`), and an asset name that is no file falls back to `index.html`
-/// without being kept.
+/// A Vite build's `index.html`: its entry is a module with a hashed name under `assets/`.
+const VITE_PAGE: &str = r#"<!doctype html><title>Studio</title><script type="module" crossorigin src="/assets/app-1a2b3c4d.js"></script>"#;
+
+/// `folo serve --web-dir` on a Vite build (issue #309): the hashed `assets/` for a year, everything else revalidated
+/// (`no-cache`), and an asset name that is no file falls back to `index.html` without being kept.
 #[tokio::test]
 async fn web_dir_cache_headers() {
     let dir = TestDir::new("web-cache");
     std::fs::create_dir_all(dir.join("assets")).unwrap();
-    std::fs::write(dir.join("index.html"), "<!doctype html><title>Studio</title>").unwrap();
-    std::fs::write(dir.join("assets/app-1a2b3c.js"), "console.log(1)").unwrap();
+    std::fs::write(dir.join("index.html"), VITE_PAGE).unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c4d.js"), "console.log(1)").unwrap();
     std::fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
     let app = Server::new(
         Arc::new(MockStore::new()),
@@ -105,7 +107,7 @@ async fn web_dir_cache_headers() {
     let cache = |h: &axum::http::HeaderMap| h[header::CACHE_CONTROL].to_str().unwrap().to_string();
     let immutable = "public, max-age=31536000, immutable";
 
-    let (s, h, b) = send(&app, get("/assets/app-1a2b3c.js")).await;
+    let (s, h, b) = send(&app, get("/assets/app-1a2b3c4d.js")).await;
     assert_eq!((s, b.as_slice()), (StatusCode::OK, b"console.log(1)".as_slice()));
     assert_eq!(cache(&h), immutable);
     for path in [
@@ -113,7 +115,7 @@ async fn web_dir_cache_headers() {
         "/index.html",
         "/runs/run_1a01",
         "/favicon.svg",
-        "/assets/app-old999.js",
+        "/assets/app-old99999.js",
         "/assets/../index.html",
     ] {
         let (s, h, _) = send(&app, get(path)).await;
@@ -124,14 +126,15 @@ async fn web_dir_cache_headers() {
 
     // A source map is named after its chunk's hash, not its own: revalidated, also asked for percent-encoded (review of
     // #393, round 2: `ServeDir` decodes it).
-    std::fs::write(dir.join("assets/app-1a2b3c.js.map"), "{}").unwrap();
-    for path in ["/assets/app-1a2b3c.js.map", "/assets/app-1a2b3c.js%2Emap", "/assets/app%2D1a2b3c.js"] {
+    std::fs::write(dir.join("assets/app-1a2b3c4d.js.map"), "{}").unwrap();
+    for path in ["/assets/app-1a2b3c4d.js.map", "/assets/app-1a2b3c4d.js%2Emap", "/assets/app%2D1a2b3c4d.js"]
+    {
         let (s, h, _) = send(&app, get(path)).await;
         assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"), "{path}");
     }
     // Round 3: names a case-insensitive or Windows volume resolves to that map or to the chunk (`.MAP`, a trailing dot)
     // are never kept for a year, whatever this volume answers.
-    for path in ["/assets/app-1a2b3c.js.MAP", "/assets/app-1a2b3c.js.", "/assets/APP-1A~1.JS"] {
+    for path in ["/assets/app-1a2b3c4d.js.MAP", "/assets/app-1a2b3c4d.js.", "/assets/APP-1A~1.JS"] {
         let (s, h, _) = send(&app, get(path)).await;
         if s.is_success() {
             assert_eq!(cache(&h), "no-cache", "{path}");
@@ -152,17 +155,15 @@ async fn web_dir_cache_headers() {
     // asset is restored from a build older than the fallback's date. Revalidating with the fallback's date gets the
     // asset in full, not a 304 that would keep the HTML under the asset's name for a year; `index.html` is sent in
     // full the same way (a rollback to an older file).
-    let (s, h, b) = send(&app, get("/assets/app-later7.js")).await;
+    let (s, h, b) = send(&app, get("/assets/app-later777.js")).await;
     assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
     assert!(b.starts_with(b"<!doctype html>"));
     let since = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
-    let restored = dir.join("assets/app-later7.js");
+    let restored = dir.join("assets/app-later777.js");
     std::fs::write(&restored, "console.log(7)").unwrap();
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
     std::fs::File::options().write(true).open(&restored).unwrap().set_modified(old).unwrap();
-    for (path, body) in
-        [("/assets/app-later7.js", "console.log(7)"), ("/", "<!doctype html><title>Studio</title>")]
-    {
+    for (path, body) in [("/assets/app-later777.js", "console.log(7)"), ("/", VITE_PAGE)] {
         let req = Request::builder()
             .uri(path)
             .header(header::IF_MODIFIED_SINCE, &since)
@@ -171,11 +172,67 @@ async fn web_dir_cache_headers() {
         let (s, _, b) = send(&app, req).await;
         assert_eq!((s, b.as_slice()), (StatusCode::OK, body.as_bytes()), "{path}");
     }
-    let (_, h, _) = send(&app, get("/assets/app-later7.js")).await;
+    let (s, h, b) = send(&app, get("/assets/app-later777.js")).await;
+    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"console.log(7)".as_slice()));
     assert_eq!(cache(&h), immutable);
     // An API answer is not the web app's to cache.
     let (_, h, _) = send(&app, get("/api/health")).await;
     assert_ne!(h.get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap()), Some(immutable));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A folder need not be a Vite build: nothing in a hand-made one is kept for a year, whatever its files are called, and
+/// neither is a file of a Vite build whose name has no hash.
+#[tokio::test]
+async fn web_dir_keeps_only_a_vite_builds_hashed_files() {
+    let dir = TestDir::new("web-plain");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), r#"<!doctype html><script src="/assets/app.js"></script>"#)
+        .unwrap();
+    for f in ["assets/app.js", "assets/hero-Banner01.png", "assets/logo.svg"] {
+        std::fs::write(dir.join(f), "x").unwrap();
+    }
+    let app = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
+    )
+    .router();
+    for path in ["/assets/app.js", "/assets/hero-Banner01.png", "/assets/logo.svg"] {
+        let (s, h, _) = send(&app, get(path)).await;
+        assert_eq!((s, h[header::CACHE_CONTROL].to_str().unwrap()), (StatusCode::OK, "no-cache"), "{path}");
+    }
+    // The folder is rebuilt with Vite while the server runs: its hashed files are kept from then on, the others are not.
+    std::fs::write(dir.join("index.html"), VITE_PAGE).unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c4d.js"), "x").unwrap();
+    for (path, want) in
+        [("/assets/app-1a2b3c4d.js", "public, max-age=31536000, immutable"), ("/assets/logo.svg", "no-cache")]
+    {
+        let (_, h, _) = send(&app, get(path)).await;
+        assert_eq!(h[header::CACHE_CONTROL], want, "{path}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Only the start of `index.html` is read: a module tag that ends at the bound makes a Vite page, one a byte later does
+/// not, and the folder's hashed file is then only revalidated.
+#[tokio::test]
+async fn web_dir_reads_a_bounded_head_of_the_page() {
+    let dir = TestDir::new("web-head");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c4d.js"), "x").unwrap();
+    std::fs::write(dir.join("index.html"), VITE_PAGE).unwrap();
+    let app = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
+    )
+    .router();
+    let tag = r#"<script type="module" crossorigin src="/assets/app-1a2b3c4d.js">"#;
+    let at_bound = folo_server::web::VITE_HEAD_BYTES - tag.len();
+    for (pad, want) in [(at_bound, "public, max-age=31536000, immutable"), (at_bound + 1, "no-cache")] {
+        std::fs::write(dir.join("index.html"), format!("{}{tag}</script>", " ".repeat(pad))).unwrap();
+        let (s, h, _) = send(&app, get("/assets/app-1a2b3c4d.js")).await;
+        assert_eq!((s, h[header::CACHE_CONTROL].to_str().unwrap()), (StatusCode::OK, want), "pad {pad}");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

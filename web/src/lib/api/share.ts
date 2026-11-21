@@ -97,7 +97,7 @@ export function together<T>(fn: () => T): { value: T; key: string } {
   }
 }
 
-const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
+export const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
 
 function join<T>(entry: Shared, signal: AbortSignal | undefined): Promise<T> {
   const first = entry.callers++ === 0;
@@ -128,7 +128,7 @@ function join<T>(entry: Shared, signal: AbortSignal | undefined): Promise<T> {
 }
 
 /** A JSON-like answer copied (plain objects and arrays); anything else is given as it is. */
-function copy<T>(v: T): T {
+export function copy<T>(v: T): T {
   if (Array.isArray(v)) return v.map(copy) as T;
   if (v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
     const out: Record<string, unknown> = {};
