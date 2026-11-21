@@ -143,6 +143,19 @@ fn resumed_mid_epoch_metrics_prefer_live_tail_over_discarded_steps() {
         runs.metrics(e.id(), &MetricsQuery { after_step: Some(2), ..MetricsQuery::default() }).unwrap();
     assert_eq!(polled.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [3]);
 
+    // Once resumed epoch 2 flushes to `metrics.jsonl` and completes, the flushed steps and epoch replace the old ones.
+    append_line(&e.metrics_path(), &line(RunEvent::Step(make_step(2, 3, 2.0))));
+    append_line(&e.metrics_path(), &line(RunEvent::Step(make_step(2, 4, 1.8))));
+    append_line(&e.metrics_path(), &line(RunEvent::Epoch(make_epoch(2))));
+    e.on_event(&RunEvent::Epoch(make_epoch(2)));
+    let done = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(done.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(done.steps[2].loss.total, 2.0);
+    assert_eq!(done.epochs.iter().map(|ep| ep.epoch).collect::<Vec<_>>(), [1, 2]);
+    let polled_done =
+        runs.metrics(e.id(), &MetricsQuery { after_step: Some(2), ..MetricsQuery::default() }).unwrap();
+    assert_eq!(polled_done.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [3, 4]);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
