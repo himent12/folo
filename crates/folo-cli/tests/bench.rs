@@ -173,7 +173,7 @@ fn bench_in_this_process() {
     assert!(s(&e["message"]).contains("'99'"), "{e}");
     let short = predictions(&t, "short.jsonl", &empty[..3]);
     let e = error(&["run", &b, "--predictions", &short, "--name", "short"], &d, 2);
-    assert!(s(&e["message"]).contains("'4'") && s(&e["hint"]).contains("stopped and deleted"), "{e}");
+    assert!(s(&e["message"]).contains("'4'") && s(&e["hint"]).contains("was removed"), "{e}");
 
     let shown = ok(&["show", &b], &d);
     let board: Vec<&str> = shown["leaderboard"].as_array().unwrap().iter().map(|e| s(&e["name"])).collect();

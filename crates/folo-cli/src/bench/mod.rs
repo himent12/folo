@@ -218,10 +218,7 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
         );
     } else if !model {
         // Here or through a server: an entry left half-filled would block deleting the benchmark.
-        crate::train::watch_interrupt(
-            stop.clone(),
-            "stopping the upload and removing its entry (interrupt again to abort)…",
-        );
+        crate::train::watch_interrupt(stop.clone(), "stopping the upload (interrupt again to abort)…");
     }
     let who = match who {
         Contestant::Model { model_id, max_images, conditions } => {

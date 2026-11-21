@@ -65,6 +65,9 @@ fn a_long_line_is_refused_before_it_is_read_whole() {
     }
     let over = format!("{head}x{}{tail}", "x".repeat(MAX_RECORD_BYTES - head.len() - tail.len()));
     assert!(records(&format!("{over}\r\n")).unwrap_err().body.message.contains("longer"));
+    // A `\r` with no `\n` after it is a byte of the line: a record of the limit plus one at the end of the file is over.
+    assert!(records(&format!("{exact}\r")).unwrap_err().body.message.contains("longer"));
+    assert_eq!(records(&format!("{}\r", r#"{"image":"1","boxes":[]}"#)).unwrap().len(), 1);
 }
 
 /// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.
@@ -102,12 +105,21 @@ fn parts_hold_whole_records_within_the_limits() {
     // A record that fits no part is an error, not an empty part (which would end the file there).
     let mut it = [11].map(|b| Ok(record("1", b))).into_iter().peekable();
     assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("11 boxes"));
-    // Bytes: a part stops before its limit, and a record that alone is over it is an error.
-    let one = serde_json::to_vec(&record("1", 1)).unwrap().len() + 1;
+    // Bytes, at the exact boundary: the limit counts the records' JSON, so two records take exactly twice one; the
+    // commas and brackets of the array that is sent are on top. A byte less holds one record.
+    let one = serde_json::to_vec(&record("1", 1)).unwrap().len();
     let limits = PartLimits { records: 100, boxes: 100, bytes: 2 * one };
     let mut it = [1, 1, 1].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(next_part(&mut it, limits).unwrap().len(), 2);
+    let two = next_part(&mut it, limits).unwrap();
+    assert_eq!(two.len(), 2);
+    assert_eq!(serde_json::to_vec(&two).unwrap().len(), 2 * one + 3, "the records, a comma and two brackets");
     assert_eq!(next_part(&mut it, limits).unwrap().len(), 1);
+    let tight = PartLimits { bytes: 2 * one - 1, ..limits };
+    let mut it = [1, 1].map(|b| Ok(record("1", b))).into_iter().peekable();
+    assert_eq!(next_part(&mut it, tight).unwrap().len(), 1);
+    let alone = PartLimits { bytes: one, ..limits };
+    let mut it = [1].map(|b| Ok(record("1", b))).into_iter().peekable();
+    assert_eq!(next_part(&mut it, alone).unwrap().len(), 1);
     let mut it = [3].map(|b| Ok(record("1", b))).into_iter().peekable();
     assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("bytes"));
     // Records, empty ones too.
@@ -181,7 +193,10 @@ fn parts(b: &Benchmarks, id: &str, dir: &Path) {
     write("99");
     let e = b.submit_in(id, "refused".into(), true, &file, three, &go).unwrap_err();
     let hint = e.body.hint.clone().unwrap_or_default();
-    assert!(e.body.message.contains("99") && hint.contains("stopped and deleted"), "{e:?}");
+    assert!(
+        e.body.message.contains("99") && hint.contains("'refused'") && hint.contains("was removed"),
+        "{e:?}"
+    );
     assert_eq!(b.entries(id).unwrap().len(), 1);
     // Ctrl+C before anything was sent: no entry at all.
     write("4");
@@ -190,35 +205,41 @@ fn parts(b: &Benchmarks, id: &str, dir: &Path) {
     assert_eq!(b.entries(id).unwrap().len(), 1);
 }
 
-/// A finish whose answer was lost: what the server did decides, and a score it saved is never deleted.
+/// The one rule of the cleanup: an entry still open is removed; any other is left and reported; one whose state
+/// cannot be read is named.
 #[test]
-fn a_lost_finish_answer_keeps_what_the_server_did() {
-    let home = folo_test_support::TestDir::new("mcp-bench-lost-finish");
+fn the_cleanup_removes_only_an_entry_still_open() {
+    let home = folo_test_support::TestDir::new("mcp-bench-clean-up");
     let (store, id) = bench_store(home.path());
     let b = Benchmarks::Store(store.clone());
-    let lost = || Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", "no answer");
     let open = |name: &str| {
         let predictions = (1..=4).map(|i| record(&i.to_string(), 0)).collect();
         let contestant = BenchContestantSpec::External { scored: true, open: true, predictions };
         let req = StartBenchEntry { contestant, name: Some(name.into()), max_images: None, conditions: None };
-        b.start_entry(&id, req).unwrap().id
+        b.start_entry(&id, req).unwrap()
     };
-    // Scored before the answer was lost: the result, and the entry stays.
     let scored = open("scored");
-    b.finish(&id, &scored).unwrap();
-    let got = b.after_lost_finish(&id, &scored, lost()).unwrap();
-    assert_eq!(got.status, BenchEntryStatus::Done);
-    assert_eq!(b.entry(&id, &scored).unwrap().status, BenchEntryStatus::Done);
-    // Still open: kept, and the error names it.
-    let kept = open("kept");
-    let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
-    assert!(e.body.hint.as_deref().unwrap_or_default().contains(&kept), "{e:?}");
-    assert!(b.entry(&id, &kept).unwrap().status.is_active());
-    // Stopped from elsewhere: removed as any failed upload is.
-    b.stop_entry(&id, &kept).unwrap();
-    let e = b.after_lost_finish(&id, &kept, lost()).unwrap_err();
-    assert!(e.body.hint.as_deref().unwrap_or_default().contains("stopped and deleted"), "{e:?}");
-    assert!(b.entry(&id, &kept).is_err());
+    b.finish(&id, &scored.id).unwrap();
+    let (what, now) = b.clean_up(&id, &scored);
+    assert_eq!(now.unwrap().status, BenchEntryStatus::Done);
+    assert!(what.contains("'scored'") && what.contains(&scored.id) && what.contains("done"), "{what}");
+    assert_eq!(b.entry(&id, &scored.id).unwrap().status, BenchEntryStatus::Done);
+
+    let elsewhere = open("elsewhere");
+    b.stop_entry(&id, &elsewhere.id).unwrap();
+    let (what, now) = b.clean_up(&id, &elsewhere);
+    assert_eq!(now.unwrap().status, BenchEntryStatus::Stopped);
+    assert!(what.contains("stopped"), "{what}");
+    assert!(b.entry(&id, &elsewhere.id).is_ok());
+
+    let fresh = open("fresh");
+    let (what, now) = b.clean_up(&id, &fresh);
+    assert!(now.is_none() && what.contains("was removed"), "{what}");
+    assert!(b.entry(&id, &fresh.id).is_err());
+
+    let (what, now) = http("http://127.0.0.1:9").clean_up(&id, &scored);
+    assert!(now.is_none(), "{what}");
+    assert!(what.contains("'scored'") && what.contains(&scored.id) && what.contains("may be left"), "{what}");
     folo_server::Store::shutdown(&*store);
 }
 
@@ -380,43 +401,146 @@ fn a_finish_refused_because_another_client_finished_keeps_the_score() {
     });
 }
 
-/// Ctrl+C lands while the first part is on its way: the part is accepted, the next is not sent, and the entry is
-/// stopped and deleted.
+/// The records of `whole_file`; `during` runs as each is read, with how many have been.
+fn counted(dir: &Path, during: impl Fn(usize)) -> impl Iterator<Item = Result<BenchPrediction, Error>> {
+    let all: Vec<_> = read_predictions(&whole_file(dir)).unwrap().collect();
+    let mut n = 0;
+    all.into_iter().inspect(move |_| {
+        n += 1;
+        during(n);
+    })
+}
+
+/// Ctrl+C lands during the request that opens the entry: the next part is not even read, and the entry is removed.
 #[test]
-fn an_interrupt_during_an_upload_removes_its_entry() {
+fn an_interrupt_during_a_request_stops_before_the_next_read() {
+    use std::sync::{Arc, atomic::AtomicUsize};
     with_server("mcp-bench-interrupt", |url, id, dir| {
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let parts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let seen = parts.clone();
         let via = Forwarder::new(url, move |line| {
             if line.starts_with("POST") && line.contains("/entries ") {
                 flag.store(true, Ordering::Relaxed);
             }
+            false
+        });
+        let read = Arc::new(AtomicUsize::new(0));
+        let count = read.clone();
+        let records = counted(dir, move |n| count.store(n, Ordering::Relaxed));
+        let e = http(&via.url)
+            .submit_records(id, "stopped".into(), true, "f", records, THREE, &stop)
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.code == "interrupted" && hint.contains("was removed"), "{e:?}");
+        assert_eq!(read.load(Ordering::Relaxed), 3, "only the first part was read");
+        assert!(http(url).entries(id).unwrap().is_empty());
+    });
+}
+
+/// Ctrl+C lands during a read: what was read is not sent. During the first read no entry is made at all.
+#[test]
+fn an_interrupt_during_a_read_stops_before_the_next_request() {
+    use std::sync::{Arc, atomic::AtomicUsize};
+    with_server("mcp-bench-interrupt-read", |url, id, dir| {
+        let parts = Arc::new(AtomicUsize::new(0));
+        let seen = parts.clone();
+        let via = Forwarder::new(url, move |line| {
             if line.contains("/predictions ") {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
             false
         });
-        let e =
-            http(&via.url).submit_in(id, "stopped".into(), true, &whole_file(dir), THREE, &stop).unwrap_err();
-        let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(e.body.code == "interrupted" && hint.contains("stopped and deleted"), "{e:?}");
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        // The fourth record is the first of the second part.
+        let records = counted(dir, move |n| {
+            if n == 4 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
+        let e = http(&via.url)
+            .submit_records(id, "stopped".into(), true, "f", records, THREE, &stop)
+            .unwrap_err();
+        assert_eq!(e.body.code, "interrupted", "{e:?}");
         assert_eq!(parts.load(Ordering::Relaxed), 0, "no part after the interrupt");
         assert!(http(url).entries(id).unwrap().is_empty());
+
+        let first = Arc::new(AtomicBool::new(false));
+        let flag = first.clone();
+        let records = counted(dir, move |_| flag.store(true, Ordering::Relaxed));
+        let e =
+            http(&via.url).submit_records(id, "early".into(), true, "f", records, THREE, &first).unwrap_err();
+        assert_eq!(e.body.code, "interrupted", "{e:?}");
+        assert!(http(url).entries(id).unwrap().is_empty(), "no entry was opened");
     });
 }
 
-/// The answer to the request that opens the entry is lost: the error says an entry may exist under its name.
+/// The answer to the request that opens the entry is lost: the server did make it, and the error names it as the
+/// server lists it (trimmed).
 #[test]
-fn a_lost_answer_to_the_first_part_says_an_entry_may_exist() {
+fn a_lost_answer_to_the_first_part_names_the_entry_as_listed() {
     with_server("mcp-bench-lost-start", |url, id, dir| {
         let via = Forwarder::new(url, |line| line.starts_with("POST") && line.contains("/entries "));
         let e = http(&via.url)
-            .submit_in(id, "opened".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .submit_in(id, " opened ".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
             .unwrap_err();
         let hint = e.body.hint.clone().unwrap_or_default();
         assert!(hint.contains("may have opened an entry named 'opened'"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!(listed.len(), 1, "the server made the entry");
+        assert_eq!((listed[0].name.as_str(), listed[0].status), ("opened", BenchEntryStatus::Running));
+    });
+}
+
+/// A later part is refused because another client finished the entry: no stop is sent, and its score stays.
+#[test]
+fn a_part_refused_after_another_client_scored_keeps_the_score() {
+    use std::sync::{Arc, atomic::AtomicUsize};
+    with_server("mcp-bench-refused-scored", |url, id, dir| {
+        let rest: Vec<BenchPrediction> =
+            read_predictions(&whole_file(dir)).unwrap().skip(3).map(Result::unwrap).collect();
+        let (other, bench) = (http(url), id.to_string());
+        let stops = Arc::new(AtomicUsize::new(0));
+        let seen = stops.clone();
+        let via = Forwarder::new(url, move |line| {
+            if line.contains("/stop ") {
+                seen.fetch_add(1, Ordering::Relaxed);
+            }
+            if line.starts_with("POST") && line.contains("/predictions ") {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry = path.rsplit('/').nth(1).unwrap();
+                other.add_predictions(&bench, entry, rest.clone()).unwrap();
+                other.finish(&bench, entry).unwrap();
+            }
+            false
+        });
+        let e = http(&via.url)
+            .submit_in(id, "raced".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.code == "bench_entry_not_open" && hint.contains("it is done"), "{e:?}");
+        assert_eq!(stops.load(Ordering::Relaxed), 0, "no stop without reading the entry");
+        let kept = http(url).entries(id).unwrap();
+        assert_eq!((kept.len(), kept[0].status), (1, BenchEntryStatus::Done));
+        assert!(kept[0].score.is_some());
+    });
+}
+
+/// The server stops the entry and the answer to the stop is lost: the entry's state says so, and it is removed.
+#[test]
+fn a_lost_answer_to_the_stop_still_removes_the_entry() {
+    with_server("mcp-bench-lost-stop", |url, id, dir| {
+        let file = dir.join("bad.jsonl");
+        let lines: Vec<String> =
+            ["1", "2", "3", "99"].iter().map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let via = Forwarder::new(url, |line| line.starts_with("POST") && line.contains("/stop "));
+        let e = http(&via.url)
+            .submit_in(id, "bad".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.message.contains("99") && hint.contains("was removed"), "{e:?}");
+        assert!(http(url).entries(id).unwrap().is_empty());
     });
 }
 

@@ -24,8 +24,8 @@ use crate::types::bench::*;
 pub const MAX_PART_BOXES: usize = 200_000;
 /// Most records in one part.
 const MAX_PART_RECORDS: usize = 20_000;
-/// Most bytes of JSON in one part (a request takes 64 MiB), so a file of long strings cannot fill this process's
-/// memory or a request.
+/// Most bytes of record JSON in one part, so a file of long strings cannot fill this process's memory or a request. The
+/// commas between records and the request's wrapper come on top (a request takes 64 MiB).
 const MAX_PART_BYTES: usize = 32 * 1024 * 1024;
 /// Longest line of a file of predictions: far more than a record of [`MAX_BOXES`] boxes takes, and all of a line that
 /// is read before it is judged.
@@ -108,8 +108,8 @@ impl Benchmarks {
         self.start_unless(id, who, name, &AtomicBool::new(false))
     }
 
-    /// [`Benchmarks::start`], with `stop` (Ctrl+C) ending the sending of a file of predictions between its parts:
-    /// the entry is then removed and the error is `interrupted`.
+    /// [`Benchmarks::start`], with `stop` (Ctrl+C) ending the sending of a file of predictions before or after a read
+    /// of a part: the error is `interrupted`, and [`Benchmarks::clean_up`] decides what becomes of the entry.
     pub fn start_unless(
         &self,
         id: &str,
@@ -185,9 +185,8 @@ impl Benchmarks {
     }
 
     /// An external entry from the file at `path`, in parts of at most `limits`: opened with the file's first part,
-    /// sent the rest part by part and finished (scored). A file that does not parse, a part the server refuses, or
-    /// `stop` stops and deletes the entry, so none is left half-filled; the error says so. A finish that got no
-    /// answer may have worked, so it never deletes what the server may have scored ([`Benchmarks::after_lost_finish`]).
+    /// sent the rest part by part and finished (scored). Whatever fails once the entry exists goes to
+    /// [`Benchmarks::clean_up`].
     fn submit_in(
         &self,
         id: &str,
@@ -197,25 +196,42 @@ impl Benchmarks {
         limits: PartLimits,
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
-        let mut records = read_predictions(path)?.peekable();
-        let first = next_part(&mut records, limits)?;
+        let shown = folo_api::json::path(path);
+        self.submit_records(id, name, scored, &shown, read_predictions(path)?, limits, stop)
+    }
+
+    /// [`Benchmarks::submit_in`] of `records` (`shown` names where they come from).
+    #[allow(clippy::too_many_arguments)]
+    fn submit_records(
+        &self,
+        id: &str,
+        name: String,
+        scored: bool,
+        shown: &str,
+        records: impl Iterator<Item = Result<BenchPrediction, Error>>,
+        limits: PartLimits,
+        stop: &AtomicBool,
+    ) -> Result<BenchEntry, Error> {
+        let mut records = records.peekable();
+        // Before a read (it can take long, or wait on a pipe) and after it (a request or the finish comes next).
+        let mut read = || {
+            check_interrupt(stop)?;
+            let part = next_part(&mut records, limits)?;
+            check_interrupt(stop)?;
+            Ok::<_, Error>(part)
+        };
+        let first = read()?;
         if first.is_empty() {
-            return Err(invalid_arguments(format!("{} holds no predictions", folo_api::json::path(path))));
+            return Err(invalid_arguments(format!("{shown} holds no predictions")));
         }
-        if stop.load(Ordering::Relaxed) {
-            return Err(interrupted());
-        }
-        let shown = name.clone();
+        // As the server saves it.
+        let listed = name.trim().to_string();
         let contestant = BenchContestantSpec::External { scored, open: true, predictions: first };
         let req = StartBenchEntry { contestant, name: Some(name), max_images: None, conditions: None };
-        let entry = self.start_entry(id, req).map_err(|e| lost_start(e, &shown))?;
-        let sent = (|| {
+        let entry = self.start_entry(id, req).map_err(|e| lost_start(e, &listed))?;
+        let sent: Result<(), Error> = (|| {
             loop {
-                let part = next_part(&mut records, limits)?;
-                // After the read: reading a part can take long, and what comes next is a request or the finish.
-                if stop.load(Ordering::Relaxed) {
-                    return Err(interrupted());
-                }
+                let part = read()?;
                 if part.is_empty() {
                     return Ok(());
                 }
@@ -223,60 +239,52 @@ impl Benchmarks {
             }
         })();
         if let Err(e) = sent {
-            return Err(self.undo(id, &entry.id, e));
+            let (what, _) = self.clean_up(id, &entry);
+            return Err(with_hint(e, what));
         }
         match self.finish(id, &entry.id) {
-            // The answer was lost, or another client finished it: the entry's state says what happened.
-            Err(e) if e.status.is_server_error() || e.body.code == "bench_entry_not_open" => {
-                self.after_lost_finish(id, &entry.id, e)
-            }
-            Err(e) => Err(self.undo(id, &entry.id, e)),
-            ok => ok,
-        }
-    }
-
-    /// After finish answered `e`, which says nothing of what became of the entry (its answer was lost, or another
-    /// client is finishing it): an entry that ended scored is the result; one stopped from elsewhere is removed;
-    /// one still open, or that cannot be read, may yet be scored, so it is kept and the error names it.
-    fn after_lost_finish(&self, id: &str, entry_id: &str, e: Error) -> Result<BenchEntry, Error> {
-        match self.entry(id, entry_id) {
-            Ok(entry) if matches!(entry.status, BenchEntryStatus::Done | BenchEntryStatus::Failed) => {
-                Ok(entry)
-            }
-            Ok(entry) if !entry.status.is_active() => Err(self.undo(id, entry_id, e)),
-            _ => {
-                let what = format!(
-                    "entry {entry_id} was kept, as it may still be scored: read it by its id (left open, it \
-                     expires on its own)"
-                );
-                Err(with_hint(e, what))
+            Ok(done) => Ok(done),
+            Err(e) => {
+                // No answer, or another client finished it: a result the server saved is this upload's answer.
+                let says_nothing = e.status.is_server_error() || e.body.code == "bench_entry_not_open";
+                let (what, now) = self.clean_up(id, &entry);
+                match now {
+                    Some(end)
+                        if says_nothing
+                            && matches!(end.status, BenchEntryStatus::Done | BenchEntryStatus::Failed) =>
+                    {
+                        Ok(end)
+                    }
+                    _ => Err(with_hint(e, what)),
+                }
             }
         }
     }
 
-    /// Stops and deletes entry `entry_id` after `e` (a failed submit); `e`'s hint says how that went. Only an entry
-    /// the server says is stopped is deleted: one that ended otherwise (scored by another client, expired) is kept.
-    fn undo(&self, id: &str, entry_id: &str, e: Error) -> Error {
-        let stopped = match self.stop_entry(id, entry_id) {
-            Err(s) if s.body.code == "bench_entry_not_active" => self.entry(id, entry_id),
-            other => other,
+    /// The one cleanup of a failed upload, whatever failed. The server is asked what the entry is: only one still
+    /// open is stopped (the server refuses to stop one being scored) and then deleted. Any other state is left alone
+    /// and reported, and an entry whose state cannot be read is named as possibly left. Returns what to tell the
+    /// user, and the entry as last read if it is still there.
+    fn clean_up(&self, id: &str, opened: &BenchEntry) -> (String, Option<BenchEntry>) {
+        let who = format!("entry '{}' ({})", opened.name, opened.id);
+        let stopped = match self.entry(id, &opened.id) {
+            // A stop whose answer was lost may have worked: the entry's state says.
+            Ok(e) if e.status == BenchEntryStatus::Running => {
+                self.stop_entry(id, &opened.id).or_else(|_| self.entry(id, &opened.id))
+            }
+            Ok(e) => return (left(&who, &e), Some(e)),
+            Err(e) => Err(e),
         };
-        let what = match stopped {
-            Ok(entry) if entry.status == BenchEntryStatus::Stopped => match self.delete_entry(id, entry_id) {
-                Ok(()) => format!("entry {entry_id} was stopped and deleted"),
+        match stopped {
+            Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
+                Ok(()) => (format!("{who} was removed"), None),
                 Err(u) => {
-                    format!("entry {entry_id} could not be removed ({}): delete it by hand", u.body.message)
+                    (format!("{who} is stopped but could not be removed ({})", u.body.message), Some(e))
                 }
             },
-            Ok(entry) => format!("entry {entry_id} was kept: it is {:?}", entry.status).to_lowercase(),
-            Err(u) => {
-                format!(
-                    "entry {entry_id} could not be stopped ({}): stop and delete it by hand",
-                    u.body.message
-                )
-            }
-        };
-        with_hint(e, what)
+            Ok(e) => (left(&who, &e), Some(e)),
+            Err(_) => (format!("{who} may be left on the server: read it by its id"), None),
+        }
     }
 }
 
@@ -289,9 +297,27 @@ fn with_hint(e: Error, what: String) -> Error {
     e.hint(hint)
 }
 
-/// The error of an upload stopped by Ctrl+C.
-fn interrupted() -> Error {
-    Error::new(StatusCode::SERVICE_UNAVAILABLE, "interrupted", "interrupted while sending the predictions")
+/// The `interrupted` error once `stop` (Ctrl+C) is set.
+fn check_interrupt(stop: &AtomicBool) -> Result<(), Error> {
+    if !stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    Err(Error::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "interrupted",
+        "interrupted while sending the predictions",
+    ))
+}
+
+/// What the hint says of an entry `clean_up` left as it is.
+fn left(who: &str, e: &BenchEntry) -> String {
+    if e.status.is_active() {
+        format!(
+            "{who} was left: it is running and may be being scored; read it by its id (left open, it expires)"
+        )
+    } else {
+        format!("{who} was left: it is {}", format!("{:?}", e.status).to_lowercase())
+    }
 }
 
 /// The request that opens an entry failed: when the answer may be what was lost, the entry may exist, and its id is
@@ -340,8 +366,11 @@ fn records_of<R: BufRead>(
                 Ok(_) => {}
                 Err(e) => return Some(Err(bad(format!("reading line {n}: {e}")))),
             }
-            let body = line.strip_suffix(b"\n").unwrap_or(&line);
-            let body = body.strip_suffix(b"\r").unwrap_or(body);
+            // A `\r` is a line ending only before a `\n`: at the end of the file it is one more byte of the line.
+            let body = match line.strip_suffix(b"\n") {
+                Some(b) => b.strip_suffix(b"\r").unwrap_or(b),
+                None => &line,
+            };
             // Judged before a blank line is skipped: the rest of a long line must not pass as the next line.
             let long = body.len() > MAX_RECORD_BYTES;
             let text = body.trim_ascii();
@@ -388,7 +417,7 @@ fn parse_record(
 }
 
 /// The next part of `records`: whole records, at most `limits.records` of them, `limits.boxes` boxes and
-/// `limits.bytes` of JSON; empty at the end. A record that could never fit is an error (an empty part would read as
+/// `limits.bytes` of record JSON; empty at the end. A record that could never fit is an error (an empty part would read as
 /// the end of the file).
 fn next_part(
     records: &mut Peekable<impl Iterator<Item = Result<BenchPrediction, Error>>>,
@@ -399,8 +428,7 @@ fn next_part(
         let size = match records.peek() {
             None => break,
             Some(Ok(r)) => {
-                // With the comma between records.
-                let size = serde_json::to_vec(r).map_or(0, |b| b.len()) + 1;
+                let size = serde_json::to_vec(r).map_or(0, |b| b.len());
                 if r.boxes.len() > limits.boxes || size > limits.bytes {
                     return Err(invalid_arguments(format!(
                         "a record of {} boxes and {size} bytes is over a part's {} boxes and {} bytes",

@@ -1282,7 +1282,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   other `sort` is `400 invalid_query`. `409 bench_entry_not_done` as above.
 - `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry, and an open external
   one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
-  then `stopped`. `409 bench_entry_not_active` when it has ended.
+  then `stopped`. `409 bench_entry_not_active` when it has ended, or while an external entry is being scored (the
+  finish took it first, and its score stands).
 - `DELETE /api/bench/benchmarks/{id}/entries/{entry_id}` → `204`. `409 bench_entry_active` while it is active,
   `409 bench_entry_in_loop` while a loop that is still running uses it.
 
