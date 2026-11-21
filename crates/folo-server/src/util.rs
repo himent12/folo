@@ -181,7 +181,7 @@ pub fn slug(name: &str, fallback: &str) -> String {
 }
 
 /// `con`, `prn`, `aux`, `nul`, `com0`-`com9`, `lpt0`-`lpt9`: names Windows maps to devices in any folder.
-pub(crate) fn is_device_name(s: &str) -> bool {
+fn is_device_name(s: &str) -> bool {
     match s.as_bytes() {
         b"con" | b"prn" | b"aux" | b"nul" => true,
         [b'c', b'o', b'm', d] | [b'l', b'p', b't', d] => d.is_ascii_digit(),
