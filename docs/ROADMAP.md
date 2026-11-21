@@ -60,9 +60,10 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 
 - [x] vision benchmarks: a frozen set of labeled images plus a plan of stress conditions, any vision model as a
   contestant (FOLO models, Claude Code / Codex, external predictions), a five-axis score with exact definitions,
-  agent-designed plans, and self-improvement loops (`crates/folo-bench`, `/api/bench`, Benchmarks in Studio;
-  docs/BENCH.md). Next: the screens in FOLO Desktop, a `folo` CLI command and MCP tools; confidences from agents
-  (so they get a calibration axis); generated images as a benchmark source; masks and keypoints
+  agent-designed plans, and self-improvement loops (`crates/folo-bench`, `/api/bench`, Benchmarks in Studio and
+  FOLO Desktop, `folo bench`; docs/BENCH.md). Next: external predictions and Compare in FOLO Desktop; MCP tools;
+  confidences from agents (so they get a calibration axis); generated images as a benchmark source; masks and
+  keypoints
 
 - [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
   server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;
