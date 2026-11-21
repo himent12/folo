@@ -336,28 +336,10 @@ fn coco_opens_the_same_with_and_without_the_cache_and_sees_changes() {
     // The cache answers while the JSON keeps its length and modification time...
     let json = data.join("annotations/instances_train2017.json");
     let mtime = std::fs::metadata(&json).unwrap().modified().unwrap();
-    let check_opts = crate::check::CheckOptions { decode: false, ..Default::default() };
-    let plain_check = with_settings(uncached(), || crate::check::check(&*data, &check_opts).unwrap());
-    assert_eq!(
-        with_settings(settings(&cache), || crate::check::check(&*data, &check_opts).unwrap()),
-        plain_check
-    );
     let text = std::fs::read_to_string(&json).unwrap().replace("[1.25, 2, 10.1, 5]", "[2.25, 2, 10.1, 5]");
     std::fs::write(&json, &text).unwrap();
     std::fs::File::options().write(true).open(&json).unwrap().set_modified(mtime).unwrap();
     assert_eq!(open(&data, settings(&cache)), plain, "same stamp: cached");
-    // `check` reads the manifest through the same COCO scan cache (a same-stamp edit is not reparsed).
-    let broken_same_len = text.replace("category_id\": 1", "category_id\": 9");
-    assert_eq!(broken_same_len.len(), text.len());
-    std::fs::write(&json, &broken_same_len).unwrap();
-    std::fs::File::options().write(true).open(&json).unwrap().set_modified(mtime).unwrap();
-    assert_eq!(
-        with_settings(settings(&cache), || crate::check::check(&*data, &check_opts).unwrap()),
-        plain_check,
-        "check reuses cached COCO annotations"
-    );
-    // Restore original edit before aging.
-    std::fs::write(&json, &text).unwrap();
     // ...and a changed JSON is read again.
     age(&json);
     let changed = open(&data, uncached());

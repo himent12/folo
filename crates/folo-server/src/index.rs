@@ -21,7 +21,7 @@ use crate::util::fnv1a;
 pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
-/// split paths are unset and COCO `check` evaluates boxes against actual image sizes.
+/// split paths are unset.
 pub const INDEX_VERSION: u32 = 6;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative

@@ -6,7 +6,7 @@
 //! hashes file contents to find exact duplicates. It never modifies anything.
 
 use crate::dataset::labels::{Line, LineError, parse_line};
-use crate::dataset::{IssueKind, OpenOptions, Source, coco, detect, label_path_for, yolo};
+use crate::dataset::{IssueKind, OpenOptions, Source, detect, label_path_for, open_with, yolo};
 use crate::error::Result;
 use crate::{Format, Split};
 use rayon::prelude::*;
@@ -182,7 +182,7 @@ pub fn check(path: impl AsRef<Path>, opts: &CheckOptions) -> Result<CheckReport>
     match detect(path, opts.format)? {
         Source::Yaml(yaml) => check_yolo(yolo::scan_yaml(&yaml)?, opts),
         Source::YoloDir(root) => check_yolo(yolo::scan_dir(&root), opts),
-        Source::Coco { root, jsons } => check_coco(root, jsons, opts),
+        Source::Coco { .. } => check_coco(path, opts),
     }
 }
 
@@ -304,31 +304,48 @@ fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
     out
 }
 
-fn check_coco(root: PathBuf, jsons: Vec<(Split, PathBuf)>, opts: &CheckOptions) -> Result<CheckReport> {
-    let open_opts = OpenOptions { format: Format::Coco, verify_images: false };
-    let read = |image: &Path| {
-        let c = read_image_file(image, opts);
-        (c.size, c)
-    };
-    let (ds, checks) = coco::open_jsons_with(&root, jsons, &open_opts, &Split::ALL, &read)?;
+fn check_coco(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
+    let ds = open_with(path, &OpenOptions { format: Format::Coco, verify_images: false })?;
     let mut issues: Vec<CheckIssue> = ds.report.issues.iter().map(from_load_issue).collect();
-    let splits = ds.split_sizes();
-    let (paths, results): (Vec<_>, Vec<_>) = checks
-        .into_iter()
-        .map(|(image, mut c, empty)| {
-            if empty && c.hash.is_some() {
+    let mut splits = [0usize; 3];
+    let mut images = Vec::new();
+    for s in Split::ALL {
+        let entries = ds.split(s).entries();
+        splits[s as usize] = entries.len();
+        images.extend(entries.iter());
+    }
+    let results: Vec<ImageCheck> = images
+        .par_iter()
+        .map(|e| {
+            let mut c = read_image_file(&e.image, opts);
+            // Without image verification the loader keeps the JSON's size; boxes were normalised with it.
+            if let (Some(declared), Some(actual)) = (e.size, c.size)
+                && declared != actual
+            {
+                c.issues.push(CheckIssue::new(
+                    CheckKind::Other,
+                    &e.image,
+                    None,
+                    format!(
+                        "JSON says {}x{} but the image is {}x{}",
+                        declared.0, declared.1, actual.0, actual.1
+                    ),
+                    Some(format!("set width {} and height {} in the JSON", actual.0, actual.1)),
+                ));
+            }
+            if e.boxes.is_empty() && c.hash.is_some() {
                 c.issues.push(CheckIssue::new(
                     CheckKind::EmptyImage,
-                    &image,
+                    &e.image,
                     None,
                     "no annotations (background image)".into(),
                     None,
                 ));
             }
-            (image, c)
+            c
         })
-        .unzip();
-    merge(&mut issues, paths.iter().map(PathBuf::as_path), results, &ds.root);
+        .collect();
+    merge(&mut issues, images.iter().map(|e| e.image.as_path()), results, &ds.root);
     Ok(CheckReport { format: Format::Coco, root: ds.root, classes: ds.classes, splits, issues })
 }
 
