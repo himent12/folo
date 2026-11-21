@@ -1,12 +1,15 @@
 //! The clap command tree. `folo describe` serialises it, so help strings and defaults here are the documented
-//! surface: keep them accurate. `folo label`'s arguments are in `cli/label.rs`.
+//! surface: keep them accurate. `folo label`'s arguments are in `cli/label.rs`, `folo bench`'s in
+//! `cli/bench.rs`.
 
 use std::path::PathBuf;
 
 use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod bench;
 mod label;
+pub use bench::*;
 pub use label::*;
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
@@ -49,8 +52,10 @@ pub enum Command {
     Export(ExportArgs),
     /// Calibrate int8 inference on sample images and write the weights with the calibration (docs/MODEL.md §9.6).
     Quantize(QuantizeArgs),
-    /// Benchmark inference or training speed.
-    Bench(BenchArgs),
+    /// Vision benchmarks (docs/BENCH.md): frozen sets of labeled images with a plan of stress conditions, and the
+    /// entries (FOLO models, predictions made elsewhere) that ran them with their scores.
+    #[command(subcommand)]
+    Bench(BenchCommand),
     /// Inspect and generate datasets.
     #[command(subcommand)]
     Dataset(DatasetCommand),
@@ -590,41 +595,6 @@ pub struct ExportArgs {
     /// (raw, or decoded for NMS) instead of its one-to-one branch.
     #[arg(long, value_enum)]
     pub head: Option<HeadArg>,
-}
-
-/// What `folo bench` measures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum BenchMode {
-    /// Forward pass latency and throughput.
-    Infer,
-    /// Training step throughput.
-    Train,
-}
-
-/// `folo bench`.
-#[derive(Debug, Args)]
-pub struct BenchArgs {
-    /// Architecture (folo-n ... folo-x) or .folo weights.
-    #[arg(long, default_value = "folo-n")]
-    pub model: String,
-    /// What to measure.
-    #[arg(long, value_enum, default_value_t = BenchMode::Infer)]
-    pub mode: BenchMode,
-    /// Square input size in pixels.
-    #[arg(long, default_value_t = 640)]
-    pub imgsz: u32,
-    /// Batch size.
-    #[arg(long, default_value_t = 1)]
-    pub batch: u32,
-    /// Device: auto, cpu or gpu:<n>.
-    #[arg(long, default_value = "auto")]
-    pub device: String,
-    /// Timed iterations.
-    #[arg(long, default_value_t = 100)]
-    pub iters: u32,
-    /// Untimed warmup iterations.
-    #[arg(long, default_value_t = 10)]
-    pub warmup: u32,
 }
 
 /// `folo weights`.

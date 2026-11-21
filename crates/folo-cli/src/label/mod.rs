@@ -170,7 +170,7 @@ impl Drop for Session {
 /// the `folo serve` that owns the data dir) by this OS's rules, so on Windows `/photos` and `\photos` are on the
 /// current drive; for an explicit `--server`, whose OS may be another, an absolute path of another OS is passed as
 /// given. Every path absolute here is written as FOLO writes paths ([`folo_mcp::label::wire_path`]).
-fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliError> {
+pub(crate) fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliError> {
     paths
         .iter()
         .map(|p| {

@@ -20,7 +20,9 @@
 //! - `errors`: tool errors (the server's error type); [`types`]: the MCP-only argument and result types.
 //! - [`label`]: agent labeling in process or through `folo serve`, shared with `folo label`; the view of an image
 //!   with its boxes numbered.
+//! - [`bench`]: vision benchmarks in process or through `folo serve`, shared with `folo bench`.
 
+pub mod bench;
 mod confine;
 mod errors;
 pub mod label;

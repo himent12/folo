@@ -38,6 +38,7 @@ use folo_api::{Bench, BenchCatalog, BenchEvent, BenchLoop, BenchLoopStatus, Benc
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
+pub use external::MAX_BOXES;
 pub use model::InferenceGuard;
 
 use crate::error::{Error, Result};

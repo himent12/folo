@@ -19,7 +19,7 @@ labeled images ──► benchmark ──► entries ──► leaderboard, char
                                                    grades the student
 ```
 
-This is not the speed benchmark (`folo bench`, [BENCHMARKS.md](BENCHMARKS.md)): that one times a model, this one
+This is not the speed benchmark ([BENCHMARKS.md](BENCHMARKS.md), `cargo bench`): that one times a model, this one
 grades what a model sees.
 
 ## What a benchmark is
@@ -281,6 +281,8 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
 - Detection only (boxes): no masks, keypoints or classification benchmarks yet.
 - Up to 5000 images and 80 classes per benchmark.
 - `folo serve --mock` has no benchmarks. Studio's own demo mode (`?mock=1`) simulates them for a look around.
-- Not yet in the `folo` CLI or the MCP server: use Studio, FOLO Desktop or the HTTP API. FOLO Desktop has the list,
+- From the command line, `folo bench` ([CLI.md](CLI.md#vision-benchmarks)) makes benchmarks, runs models and files of
+  predictions on them and reads their scores; agent contestants, agent-designed plans and loops are Studio's, FOLO
+  Desktop's and the HTTP API's. FOLO Desktop has the list,
   the leaderboard (models and agents), the plan with previews and agent design, loops and every entry's result
   (apps/desktop/README.md, Benchmarks); external predictions and Compare are Studio's.
