@@ -259,12 +259,6 @@ impl FoloMcp {
     pub fn new(store: Arc<dyn Store>, proxy: Option<Arc<HttpStore>>, opts: Options) -> FoloMcp {
         let mock = proxy.is_none() && store.is_mock();
         let paths = PathPolicy { data_dir: opts.data_dir.clone(), confine: opts.confine };
-        // In proxy mode `folo serve` reads datasets and label images, so only files this process reads itself
-        // (`paths`) are confined.
-        let confinement = Confinement::new(PathPolicy {
-            data_dir: opts.data_dir.clone(),
-            confine: opts.confine && proxy.is_none(),
-        });
         let labels = match &proxy {
             Some(http) => crate::label::Labels::Http(http.clone()),
             None => crate::label::Labels::Store(store.clone()),
@@ -281,7 +275,7 @@ impl FoloMcp {
                 benchmarks,
                 mock,
                 opts,
-                confinement,
+                confinement: Confinement::new(paths.clone()),
                 paths,
                 created_runs: Mutex::new(Vec::new()),
                 batches: Mutex::new(HashMap::new()),
