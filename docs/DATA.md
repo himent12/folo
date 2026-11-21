@@ -39,7 +39,8 @@ produces plain buffers that the trainer wraps in tensors.
 - `images[].file_name` is resolved against the first folder that has the files: the JSON's folder, `images/<tag>`,
   `<tag>` (where `instances_train2017.json` has tag `train2017`), `images/<split>`, `<split>`, `images/`, the root.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.
-- Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
+- Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`. An integral
+  float is its integer (`"category_id": 1.0` names `"id": 1`).
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
 - Image ids are numbers or strings; an integral float is its integer (`"image_id": 1.0` names `"id": 1`). Two
   `images` entries with one id: the first is kept with every annotation of the id, the second is left out and

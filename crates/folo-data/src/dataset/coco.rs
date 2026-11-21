@@ -122,6 +122,18 @@ fn id_key(v: &Value) -> Option<String> {
     }
 }
 
+/// A non-negative whole number as JSON may write it: `1`, or `1.0` (what pandas writes for an id column), the rule
+/// [`id_key`] has for image ids.
+fn whole_number(v: &Value) -> Option<u64> {
+    v.as_u64().or_else(|| {
+        let f = v.as_f64()?;
+        (f.fract() == 0.0 && (0.0..(1u64 << 53) as f64).contains(&f)).then_some(f as u64)
+    })
+}
+
+/// The category id of an annotation that has none, or one that is not a whole number.
+const NO_CATEGORY: u64 = u64::MAX;
+
 /// `(id key, file_name, declared size)` of a COCO image.
 type ImageRow = (String, String, Option<(u32, u32)>);
 /// Pixel boxes of one image and the first reason its annotations are broken, if any.
@@ -439,7 +451,7 @@ pub(crate) fn read_annotations(
         };
         for c in sections.categories.as_ref().and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(name)) =
-                (c.get("id").and_then(Value::as_u64), c.get("name").and_then(Value::as_str))
+                (c.get("id").and_then(whole_number), c.get("name").and_then(Value::as_str))
             else {
                 report.push(IssueKind::BrokenLabel, &path, format!("bad category {c}"));
                 continue;
@@ -487,7 +499,7 @@ pub(crate) fn read_annotations(
                 );
                 continue;
             };
-            let cat = a.category_id.as_ref().and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let cat = a.category_id.as_ref().and_then(whole_number).unwrap_or(NO_CATEGORY);
             anns.push((img, cat, a.bbox.unwrap_or(Value::Null)));
         }
         parsed.push(Parsed { split, path, images: imgs, anns });
@@ -512,7 +524,10 @@ pub(crate) fn read_annotations(
             }
             let entry = per_image.entry(img.as_str()).or_default();
             let Some(&class) = remap.get(cat) else {
-                entry.1.get_or_insert_with(|| format!("unknown category id {cat}"));
+                entry.1.get_or_insert_with(|| match *cat {
+                    NO_CATEGORY => "category_id is missing or not a whole number".to_string(),
+                    cat => format!("unknown category id {cat}"),
+                });
                 continue;
             };
             // Exactly four numbers; anything else (null, strings, extra values) makes the annotation broken.

@@ -282,6 +282,46 @@ fn coco_integral_float_ids_match_integer_ids() {
     assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 1));
 }
 
+/// Category ids follow the image id rule: `1.0` is `1`, on either side. One that is no whole number is reported as
+/// that, not under an id the file does not hold.
+#[test]
+fn coco_integral_float_category_ids_match_integer_ids() {
+    let t = TempDir::new("coco-float-category");
+    let r = t.path();
+    for name in ["a", "b", "c", "d"] {
+        write_png(&r.join(format!("train/{name}.png")), 10, 10, [0; 3]);
+    }
+    let j = serde_json::json!({
+        "images": [
+            {"id": 1, "file_name": "a.png", "width": 10, "height": 10},
+            {"id": 2, "file_name": "b.png", "width": 10, "height": 10},
+            {"id": 3, "file_name": "c.png", "width": 10, "height": 10},
+            {"id": 4, "file_name": "d.png", "width": 10, "height": 10}
+        ],
+        "annotations": [
+            {"image_id": 1, "category_id": 7.0, "bbox": [0, 0, 5, 5]},
+            {"image_id": 2, "category_id": 9, "bbox": [0, 0, 5, 5]},
+            {"image_id": 3, "category_id": 7.5, "bbox": [0, 0, 5, 5]},
+            {"image_id": 4, "category_id": -7.0, "bbox": [0, 0, 5, 5]}
+        ],
+        "categories": [{"id": 7, "name": "seven"}, {"id": 9.0, "name": "nine"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    assert_eq!(ds.classes, ["seven", "nine"], "{:#?}", ds.report);
+    assert_eq!(ds.split_sizes(), [2, 0, 0], "{:#?}", ds.report);
+    assert_eq!((ds.train.boxes(0)[0].class, ds.train.boxes(1)[0].class), (0, 1));
+    let broken: Vec<&str> = ds
+        .report
+        .issues
+        .iter()
+        .filter(|i| i.kind == IssueKind::BrokenLabel)
+        .map(|i| i.message.as_str())
+        .collect();
+    assert_eq!(broken.len(), 2, "{broken:?}");
+    assert!(broken.iter().all(|m| m.ends_with("category_id is missing or not a whole number")), "{broken:?}");
+}
+
 /// Two `images` entries with one id: the first keeps its boxes, the second is reported (not silently made a
 /// background image) and left out.
 #[test]
