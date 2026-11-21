@@ -205,8 +205,7 @@ fn parts(b: &Benchmarks, id: &str, dir: &Path) {
     assert_eq!(b.entries(id).unwrap().len(), 1);
 }
 
-/// The one rule of the cleanup: an entry still open is removed; any other is left and reported; one whose state
-/// cannot be read is named.
+/// A failure before any finish: an entry still open is removed; any other is left and named.
 #[test]
 fn the_cleanup_removes_only_an_entry_still_open() {
     let home = folo_test_support::TestDir::new("mcp-bench-clean-up");
@@ -220,26 +219,20 @@ fn the_cleanup_removes_only_an_entry_still_open() {
     };
     let scored = open("scored");
     b.finish(&id, &scored.id).unwrap();
-    let (what, now) = b.clean_up(&id, &scored);
-    assert_eq!(now.unwrap().status, BenchEntryStatus::Done);
-    assert!(what.contains("'scored'") && what.contains(&scored.id) && what.contains("done"), "{what}");
+    let what = b.clean_up(&id, &scored);
+    assert!(what.contains("'scored'") && what.contains(&scored.id) && what.contains("it is done"), "{what}");
     assert_eq!(b.entry(&id, &scored.id).unwrap().status, BenchEntryStatus::Done);
 
     let elsewhere = open("elsewhere");
     b.stop_entry(&id, &elsewhere.id).unwrap();
-    let (what, now) = b.clean_up(&id, &elsewhere);
-    assert_eq!(now.unwrap().status, BenchEntryStatus::Stopped);
-    assert!(what.contains("stopped"), "{what}");
+    let what = b.clean_up(&id, &elsewhere);
+    assert!(what.contains("it is stopped"), "{what}");
     assert!(b.entry(&id, &elsewhere.id).is_ok());
 
     let fresh = open("fresh");
-    let (what, now) = b.clean_up(&id, &fresh);
-    assert!(now.is_none() && what.contains("was removed"), "{what}");
+    let what = b.clean_up(&id, &fresh);
+    assert!(what.contains("was removed"), "{what}");
     assert!(b.entry(&id, &fresh.id).is_err());
-
-    let (what, now) = http("http://127.0.0.1:9").clean_up(&id, &scored);
-    assert!(now.is_none(), "{what}");
-    assert!(what.contains("'scored'") && what.contains(&scored.id) && what.contains("may be left"), "{what}");
     folo_server::Store::shutdown(&*store);
 }
 
@@ -273,8 +266,35 @@ fn http(url: &str) -> Benchmarks {
     Benchmarks::Http(std::sync::Arc::new(crate::proxy::HttpStore::new(url, None)))
 }
 
-/// Forwards requests to a server, one per connection. `hook` sees each request line before it is forwarded; when it
-/// answers true, the request still reaches the server but its answer is dropped.
+/// What becomes of a request through a [`Forwarder`].
+#[derive(Clone, Copy, PartialEq)]
+enum Fate {
+    /// It reaches the server and its answer comes back.
+    Pass,
+    /// It reaches the server; its answer is dropped.
+    LoseAnswer,
+    /// It never reaches the server.
+    Never,
+}
+
+impl From<bool> for Fate {
+    fn from(lose: bool) -> Fate {
+        if lose { Fate::LoseAnswer } else { Fate::Pass }
+    }
+}
+
+/// True for a request that stops or deletes something.
+fn removes(line: &str) -> bool {
+    line.starts_with("DELETE") || (line.starts_with("POST") && line.contains("/stop "))
+}
+
+/// A request that reads one entry.
+fn reads_entry(line: &str) -> bool {
+    line.starts_with("GET") && line.contains("/entries/")
+}
+
+/// Forwards requests to a server, one per connection. `hook` sees each request line and says its [`Fate`] (`true`:
+/// the answer is lost).
 struct Forwarder {
     url: String,
     done: std::sync::Arc<AtomicBool>,
@@ -282,7 +302,7 @@ struct Forwarder {
 }
 
 impl Forwarder {
-    fn new(upstream: &str, hook: impl Fn(&str) -> bool + Send + 'static) -> Forwarder {
+    fn new<R: Into<Fate>>(upstream: &str, hook: impl Fn(&str) -> R + Send + 'static) -> Forwarder {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let upstream = upstream.trim_start_matches("http://").to_string();
@@ -294,7 +314,7 @@ impl Forwarder {
                     break;
                 }
                 if let Ok(client) = client {
-                    forward(client, &upstream, &hook);
+                    forward(client, &upstream, &|line| hook(line).into());
                 }
             }
         });
@@ -312,9 +332,9 @@ impl Drop for Forwarder {
     }
 }
 
-/// One request through: its head and body to `upstream` with `Connection: close`, the whole answer back unless
-/// `hook` says to drop it (the client then sees its connection closed with no answer).
-fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) -> bool) {
+/// One request through: its head and body to `upstream` with `Connection: close` and the whole answer back, as its
+/// [`Fate`] says (the client sees its connection closed with no answer otherwise).
+fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) -> Fate) {
     use std::io::Write;
     let mut reader = BufReader::new(client.try_clone().unwrap());
     let (mut head, mut length) = (Vec::new(), 0usize);
@@ -341,13 +361,17 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
     head.extend_from_slice(b"Connection: close\r\n\r\n");
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
-    let lose = hook(first.trim());
+    let fate = hook(first.trim());
+    if fate == Fate::Never {
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     let mut server = std::net::TcpStream::connect(upstream).unwrap();
     server.write_all(&head).unwrap();
     server.write_all(&body).unwrap();
     let mut answer = Vec::new();
     server.read_to_end(&mut answer).unwrap();
-    if !lose {
+    if fate == Fate::Pass {
         client.write_all(&answer).unwrap();
     }
     let _ = client.shutdown(std::net::Shutdown::Both);
@@ -364,18 +388,127 @@ fn whole_file(dir: &Path) -> PathBuf {
 
 const THREE: PartLimits = PartLimits { records: 3, boxes: 10, bytes: usize::MAX };
 
-/// The server scores the entry and its answer to the finish never arrives: the upload reports the score, and the
-/// entry stays on the leaderboard.
+/// How many requests that stop or delete went through `via`, for a hook that counts them with `count`.
+fn counter() -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, impl Fn(&str) + Send + 'static) {
+    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = n.clone();
+    (n, move |line: &str| {
+        if removes(line) {
+            seen.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+}
+
+/// The server scores the entry and its answer to the finish never arrives: the upload reports the score, the entry
+/// stays on the leaderboard, and nothing was stopped.
 #[test]
 fn a_finish_answer_lost_on_the_wire_keeps_the_score() {
     with_server("mcp-bench-lost-wire", |url, id, dir| {
-        let via = Forwarder::new(url, |line| line.starts_with("POST") && line.contains("/finish "));
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            line.starts_with("POST") && line.contains("/finish ")
+        });
         let e = http(&via.url)
             .submit_in(id, "lost".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
             .unwrap();
-        assert_eq!(e.status, BenchEntryStatus::Done);
+        assert!(e.status == BenchEntryStatus::Done && e.score.is_some(), "{e:?}");
         let kept = http(url).entry(id, &e.id).unwrap();
         assert_eq!((kept.status, kept.name.as_str()), (BenchEntryStatus::Done, "lost"));
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after a finish");
+    });
+}
+
+/// The finish never reached the server, so the entry is still open when it is read: it is left and named, not stopped.
+#[test]
+fn a_finish_that_never_arrived_leaves_the_entry_open() {
+    with_server("mcp-bench-finish-never", |url, id, dir| {
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            if line.starts_with("POST") && line.contains("/finish ") { Fate::Never } else { Fate::Pass }
+        });
+        let e = http(&via.url)
+            .submit_in(id, "unsent".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!((listed.len(), listed[0].status), (1, BenchEntryStatus::Running));
+        assert!(
+            hint.contains("'unsent'") && hint.contains(&listed[0].id) && hint.contains("was left"),
+            "{e:?}"
+        );
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after a finish");
+    });
+}
+
+/// The finish's answer and the state read are both lost: nothing is stopped, the score stays, and the entry is named.
+#[test]
+fn a_lost_finish_with_no_state_read_stops_nothing() {
+    with_server("mcp-bench-finish-unread", |url, id, dir| {
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            (line.starts_with("POST") && line.contains("/finish ")) || reads_entry(line)
+        });
+        let e = http(&via.url)
+            .submit_in(id, "unread".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!((listed.len(), listed[0].status), (1, BenchEntryStatus::Done));
+        assert!(hint.contains("'unread'") && hint.contains(&listed[0].id), "{e:?}");
+        assert!(hint.contains("could not be read"), "{e:?}");
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after a finish");
+    });
+}
+
+/// The server refuses the finish (an image is unanswered): a finish was sent, so the entry is left open and named.
+#[test]
+fn a_refused_finish_leaves_the_entry_open() {
+    with_server("mcp-bench-finish-refused", |url, id, dir| {
+        let file = dir.join("short.jsonl");
+        let lines: Vec<String> = (1..=3).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            false
+        });
+        let e = http(&via.url)
+            .submit_in(id, "short".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(e.body.message.contains("'4'") && hint.contains("was left"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!((listed.len(), listed[0].status), (1, BenchEntryStatus::Running));
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after a finish");
+    });
+}
+
+/// A part is refused and the entry's state cannot be read, on a server that would accept a stop: none is sent, and
+/// the entry is named.
+#[test]
+fn a_cleanup_that_cannot_read_the_entry_stops_nothing() {
+    with_server("mcp-bench-unread", |url, id, dir| {
+        let file = dir.join("bad.jsonl");
+        let lines: Vec<String> =
+            ["1", "2", "3", "99"].iter().map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            reads_entry(line)
+        });
+        let e = http(&via.url)
+            .submit_in(id, "bad".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!((listed.len(), listed[0].status), (1, BenchEntryStatus::Running));
+        assert!(hint.contains("'bad'") && hint.contains(&listed[0].id), "{e:?}");
+        assert!(hint.contains("could not be read"), "{e:?}");
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop without reading the entry");
     });
 }
 
@@ -442,18 +575,24 @@ fn an_interrupt_during_a_request_stops_before_the_next_read() {
 fn an_interrupt_during_a_read_stops_before_the_next_request() {
     use std::sync::{Arc, atomic::AtomicUsize};
     with_server("mcp-bench-interrupt-read", |url, id, dir| {
-        let parts = Arc::new(AtomicUsize::new(0));
-        let seen = parts.clone();
+        let (parts, opens) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (seen, opened) = (parts.clone(), opens.clone());
         let via = Forwarder::new(url, move |line| {
             if line.contains("/predictions ") {
                 seen.fetch_add(1, Ordering::Relaxed);
+            }
+            if line.starts_with("POST") && line.contains("/entries ") {
+                opened.fetch_add(1, Ordering::Relaxed);
             }
             false
         });
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let read = Arc::new(AtomicUsize::new(0));
+        let count = read.clone();
         // The fourth record is the first of the second part.
         let records = counted(dir, move |n| {
+            count.store(n, Ordering::Relaxed);
             if n == 4 {
                 flag.store(true, Ordering::Relaxed);
             }
@@ -463,15 +602,26 @@ fn an_interrupt_during_a_read_stops_before_the_next_request() {
             .unwrap_err();
         assert_eq!(e.body.code, "interrupted", "{e:?}");
         assert_eq!(parts.load(Ordering::Relaxed), 0, "no part after the interrupt");
+        assert_eq!(
+            read.load(Ordering::Relaxed),
+            4,
+            "no record is read after the one the interrupt came with"
+        );
         assert!(http(url).entries(id).unwrap().is_empty());
 
         let first = Arc::new(AtomicBool::new(false));
         let flag = first.clone();
-        let records = counted(dir, move |_| flag.store(true, Ordering::Relaxed));
+        // With the last record of the first part: no further read would see it, so the check after the part must.
+        let records = counted(dir, move |n| {
+            if n == 3 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
         let e =
             http(&via.url).submit_records(id, "early".into(), true, "f", records, THREE, &first).unwrap_err();
         assert_eq!(e.body.code, "interrupted", "{e:?}");
-        assert!(http(url).entries(id).unwrap().is_empty(), "no entry was opened");
+        assert_eq!(opens.load(Ordering::Relaxed), 1, "only the first upload opened an entry");
+        assert!(http(url).entries(id).unwrap().is_empty());
     });
 }
 
