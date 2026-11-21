@@ -6,7 +6,7 @@ use std::process::Stdio;
 use folo_test_support::ChildGuard;
 use serde_json::{Value, json};
 
-use super::harness::{ALL_TOOLS, OLD, check_tools, checked, folo_cmd, init_old, spawn};
+use super::harness::{ALL_TOOLS, OLD, check_tools, checked, folo_cmd, init_old, spawn, tmp_dir};
 
 #[test]
 fn proxy_mode_forwards_to_folo_serve() {
@@ -168,4 +168,65 @@ fn proxy_mode_sends_the_token() {
         .status()
         .unwrap();
     assert_eq!(empty.code(), Some(2));
+}
+
+/// In proxy mode (`--server`), `folo serve` owns and reads datasets, so `--confine` confines only files the MCP
+/// process reads itself (`predict.image_path`, `predict_batch`) and never hides or refuses the server's datasets.
+#[test]
+fn proxy_mode_with_confine_serves_remote_datasets_and_confines_local_reads() {
+    let root = tmp_dir("proxy-confine");
+    let server_dir = root.join("server");
+    let client_dir = root.join("client");
+    std::fs::create_dir_all(&client_dir).unwrap();
+    let outside_img = root.join("outside.jpg");
+    std::fs::write(&outside_img, b"x").unwrap();
+
+    let mut serve: ChildGuard = folo_cmd()
+        .args([
+            "serve",
+            "--port",
+            "0",
+            "--json",
+            "--device",
+            "cpu",
+            "--data-dir",
+            server_dir.to_str().unwrap(),
+        ])
+        .env("RUST_LOG", "warn")
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut first = String::new();
+    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    let listening: Value = serde_json::from_str(&first).unwrap();
+    let url = listening["url"].as_str().unwrap().to_string();
+
+    let mut c = spawn(&["--server", &url, "--confine", "--data-dir", client_dir.to_str().unwrap()], None);
+    init_old(&mut c);
+    let ds = c.ok("create_synthetic_dataset", json!({ "name": "tiny", "images": 6, "imgsz": 64 }));
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+
+    let list = c.ok("list_datasets", json!({}));
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["items"][0]["id"], ds_id, "{list}");
+    assert_eq!(c.ok("get_dataset", json!({ "dataset_id": ds_id }))["id"], ds_id);
+    assert_eq!(c.ok("list_dataset_images", json!({ "dataset_id": ds_id }))["total"], 6);
+    assert_eq!(c.ok("list_dataset_issues", json!({ "dataset_id": ds_id }))["total"], 0);
+    let resources = c.result("resources/list", json!({}))["resources"].clone();
+    assert!(resources.to_string().contains(&format!("folo://datasets/{ds_id}")), "{resources}");
+    let read = c.result("resources/read", json!({ "uri": format!("folo://datasets/{ds_id}") }));
+    assert!(read["contents"][0]["text"].as_str().unwrap().contains(&ds_id), "{read}");
+
+    // Files the MCP process reads itself stay confined to its own --data-dir.
+    c.tool_error(
+        "predict",
+        json!({ "model_id": "m_none", "image_path": outside_img }),
+        "path_outside_data_dir",
+    );
+    c.finish();
+    let _ = serve.kill();
+    let _ = serve.wait();
 }
