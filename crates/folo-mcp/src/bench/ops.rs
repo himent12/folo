@@ -279,7 +279,7 @@ impl Benchmarks {
         match stopped {
             Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
                 Ok(()) => format!("{who} was removed"),
-                Err(u) => format!("{who} is stopped but could not be removed ({})", u.body.message),
+                Err(u) => format!("{who} is stopped; removing it did not succeed ({})", u.body.message),
             },
             Ok(e) => left(&who, &e),
             Err(_) => unread(&who),
