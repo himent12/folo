@@ -37,10 +37,11 @@ Subagent guidelines:
 - Delegate by role rather than having one model do everything: let **Opus 5.5** implement and fix code, **GPT-6.2 Sol
   (high, fast)** or **GPT-6.2 Astra (high, standard — not fast)** play-test the app and review diffs, and **Gemini 4
   Neon** (via the Antigravity CLI in T3 Code) write and polish docs and creative copy.
-- **Gemini 4 Neon can replace Opus 5.5 in everything when the owner asks for it**: implementing and fixing code,
-  research, orchestration of a lane. Opus 5.5 stays the default; the swap is the owner's call, per task or per wave,
-  and every other rule here (PRs, reviews by a fresh reviewer, disjoint worktrees) applies to Neon as it does to Opus.
-  A Neon agent splits its own work with Antigravity's agent spawning, and checks what its sub-agents return.
+- **Gemini 4 Neon can replace Opus 5.5 in everything when the owner asks for it**: main orchestration, implementing
+  and fixing code, research. The table's models are the defaults and Opus 5.5 stays one; the swap is the owner's
+  call, per task or per wave, and every other rule here (PRs, disjoint worktrees) applies to Neon as it does to Opus.
+  A Neon agent splits its own work with Antigravity's agent spawning and checks what its sub-agents return; PR
+  reviews still run on a fresh GPT reviewer through T3 Code, never on one of its own sub-agents.
 - Keep worktrees disjoint when running subagents in parallel so two subagents never edit the same checkout or files.
 - Never grade your own PR: code review and app play-testing always run on a fresh play-tester/reviewer subagent.
 - [docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code `delegate_task` target configs, prompts, and

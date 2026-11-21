@@ -19,12 +19,14 @@ dedicated subagent with a clear boundary of responsibility:
 Keep `serviceTier: "default"` (standard, never `"priority"` / fast) when running **GPT-6.2 Astra**; use
 `serviceTier: "priority"` (fast) only for **GPT-6.2 Sol**.
 
-**Gemini 4 Neon in place of Opus 5.5.** When the owner asks for it (for one task, a lane or a whole wave), Gemini 4
-Neon takes any role Claude Opus 5.5 has here: implementer and fixer, researcher, the orchestrator of a lane. Use the
-writer's `target` above for it. Opus 5.5 stays the default when nothing is said. A Neon agent splits its own work
-with Antigravity's agent spawning (its sub-agents, not T3 Code's `delegate_task`), repeats the rules it was given to
-each sub-agent, and checks what they return before it reports. Everything else is unchanged: every change is a pull
-request, a fresh reviewer (GPT-6.2 Sol or Astra) reviews it, worktrees stay disjoint.
+**Gemini 4 Neon in place of Opus 5.5.** The models in the table are the defaults. When the owner asks for it (for
+one task, a lane or a whole wave), Gemini 4 Neon takes any role Claude Opus 5.5 has here: main orchestrator,
+implementer and fixer, researcher. Use the writer's `target` above for it. Opus 5.5 stays the default when nothing is
+said. A Neon agent splits **its own work** with Antigravity's agent spawning and checks what those sub-agents return
+before it reports. The review loop is not its own work and does not change: a Neon implementer starts each review
+round as section 2 says, a fresh GPT-6.2 Sol or Astra reviewer through T3 Code's `delegate_task` (or asks the
+orchestrator to start it when it cannot call that tool), never an Antigravity sub-agent. Everything else is unchanged
+too: every change is a pull request, worktrees stay disjoint.
 
 ## 1. Main orchestrator (Claude Opus 5.5 or Claude Fable 5.2)
 
