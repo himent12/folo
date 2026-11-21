@@ -177,14 +177,14 @@ fn bench_in_this_process() {
     assert!(
         s(&e["message"]).contains("'4'")
             && s(&e["hint"]).contains("'short'")
-            && s(&e["hint"]).contains("was left"),
+            && s(&e["hint"]).contains("was removed"),
         "{e}"
     );
 
     let shown = ok(&["show", &b], &d);
     let board: Vec<&str> = shown["leaderboard"].as_array().unwrap().iter().map(|e| s(&e["name"])).collect();
-    assert_eq!(board.len(), 3, "{shown}");
-    assert!(board.contains(&"shapes") && board.contains(&"nothing") && board.contains(&"short"), "{board:?}");
+    assert_eq!(board.len(), 2, "{shown}");
+    assert!(board.contains(&"shapes") && board.contains(&"nothing"), "{board:?}");
     assert_eq!(ok(&["delete", &b], &d)["deleted"], true);
     assert_eq!(s(&error(&["show", &b], &d, 3)["code"]), "bench_not_found");
 }

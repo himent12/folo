@@ -275,6 +275,8 @@ enum Fate {
     LoseAnswer,
     /// It never reaches the server.
     Never,
+    /// It never reaches the server, and this status and error code come back.
+    Answer(u16, &'static str),
 }
 
 impl From<bool> for Fate {
@@ -362,6 +364,16 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
     let fate = hook(first.trim());
+    if let Fate::Answer(status, code) = fate {
+        let json = format!(r#"{{"error":{{"code":"{code}","message":"answered by the test","hint":null}}}}"#);
+        let _ = write!(
+            client,
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+            json.len()
+        );
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     if fate == Fate::Never {
         let _ = client.shutdown(std::net::Shutdown::Both);
         return;
@@ -463,9 +475,41 @@ fn a_lost_finish_with_no_state_read_stops_nothing() {
     });
 }
 
-/// The server refuses the finish (an image is unanswered): a finish was sent, so the entry is left open and named.
+/// A finish answered `409` or `5xx` on an entry that still reads `running` (as one being scored by another request
+/// does): nothing is stopped, the entry stays, and the hint names it.
 #[test]
-fn a_refused_finish_leaves_the_entry_open() {
+fn a_finish_answered_409_or_5xx_stops_nothing() {
+    with_server("mcp-bench-finish-answered", |url, id, dir| {
+        for (status, code, name) in
+            [(409, "bench_entry_not_open", "conflict"), (500, "internal", "broken"), (503, "busy", "busy")]
+        {
+            let (removals, count) = counter();
+            let via = Forwarder::new(url, move |line| {
+                count(line);
+                if line.starts_with("POST") && line.contains("/finish ") {
+                    Fate::Answer(status, code)
+                } else {
+                    Fate::Pass
+                }
+            });
+            let e = http(&via.url)
+                .submit_in(id, name.into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+                .unwrap_err();
+            assert_eq!((e.status.as_u16(), e.body.code.as_str()), (status, code), "{e:?}");
+            let listed = http(url).entries(id).unwrap();
+            let kept = listed.iter().find(|l| l.name == name).expect("the entry stays");
+            assert_eq!(kept.status, BenchEntryStatus::Running);
+            let hint = e.body.hint.clone().unwrap_or_default();
+            assert!(hint.contains(&kept.id) && hint.contains("was left"), "{e:?}");
+            assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after {status}");
+        }
+    });
+}
+
+/// The server refuses the finish (an image is unanswered): it did not take the entry, so the entry is removed and the
+/// refusal is the error.
+#[test]
+fn a_refused_finish_removes_the_open_entry() {
     with_server("mcp-bench-finish-refused", |url, id, dir| {
         let file = dir.join("short.jsonl");
         let lines: Vec<String> = (1..=3).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
@@ -479,10 +523,10 @@ fn a_refused_finish_leaves_the_entry_open() {
             .submit_in(id, "short".into(), true, &file, THREE, &AtomicBool::new(false))
             .unwrap_err();
         let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(e.body.message.contains("'4'") && hint.contains("was left"), "{e:?}");
-        let listed = http(url).entries(id).unwrap();
-        assert_eq!((listed.len(), listed[0].status), (1, BenchEntryStatus::Running));
-        assert_eq!(removals.load(Ordering::Relaxed), 0, "no stop or delete after a finish");
+        assert_eq!(e.body.code, "invalid_body", "{e:?}");
+        assert!(e.body.message.contains("'4'") && hint.contains("was removed"), "{e:?}");
+        assert!(http(url).entries(id).unwrap().is_empty(), "no entry is left");
+        assert_eq!(removals.load(Ordering::Relaxed), 2, "one stop and one delete");
     });
 }
 
