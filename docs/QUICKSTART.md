@@ -235,8 +235,10 @@ folo serve                      # http://127.0.0.1:7878
   (`FOLO 0.1.0 … serving the real store on http://127.0.0.1:<port>`), or with `--json` the `listening` record's
   `url`, shows the address.
 
-The desktop app (`apps/desktop`, `cargo run --release` there) shows the same screens natively and connects to the
-same server ([apps/desktop/README.md](../apps/desktop/README.md)).
+The desktop app (`apps/desktop`, `cargo run --release` there) shows the main screens natively (Overview, Datasets,
+Runs, Models, Benchmarks, Playground and Settings) and connects to the same server
+([apps/desktop/README.md](../apps/desktop/README.md)); agent labeling, run compare, benchmark compare and external
+predictions stay in Studio.
 
 ## 8. Run the model in a browser
 

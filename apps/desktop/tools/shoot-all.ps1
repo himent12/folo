@@ -1,6 +1,6 @@
 # Renders every review scenario headless with `folo-desktop --shot` (tools\shoot.ps1's way: no window opens,
 # nothing on screen, no cursor, no focus), in parallel: all of `--list-scenarios` at 1280 x 800, plus the
-# minimum (960 x 620) and wide (1680 x 1050) window sizes for the densest screens. The 109 PNGs take a few
+# minimum (960 x 620) and wide (1680 x 1050) window sizes for the densest screens. The 111 PNGs take a few
 # seconds on a release build. This is the same matrix as the GPUI reference captures and capture-all.ps1,
 # so tools\parity.py can compare the trees.
 # Layout: <Dir>\<width>x<height>\<scenario>.png (the scenario name exactly, '+' kept).

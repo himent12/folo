@@ -231,7 +231,9 @@ run `npm run dev` in `web/` to start Vite on `:5173` with `/api` proxied to `fol
 
 ![FOLO Desktop: a live training run](docs/img/desktop-run-live.webp)
 
-The same screens and design system as Studio, built natively in Rust on `folo-ui` (FOLO's own UI framework). The UI
+The same design system and main screens as Studio (Overview, Datasets, Runs, Models, Benchmarks, Playground and
+Settings), built natively in Rust on `folo-ui` (FOLO's own UI framework); agent labeling, run compare, benchmark
+compare and external predictions stay in Studio. The UI
 renders on the CPU so your GPU stays completely free for training and inference. It includes a command palette, full
 keyboard navigation, and dark/light/custom themes, and talks to a local `folo serve` over the same HTTP API. If no
 server answers on `$FOLO_SERVER` (default `http://127.0.0.1:7878`), Desktop starts a local `folo serve` automatically
@@ -271,7 +273,9 @@ Or add it to `.mcp.json` (`claude_desktop_config.json` for Claude Desktop):
 
 From a source checkout without an installed `folo`, use `"command": "cargo", "args": ["run", "-q", "--release", "-p",
 "folo-cli", "--", "mcp"]`. Useful flags:
-- `--device auto|cpu|gpu:<n>`: choose where inference and `val` run (`--tensor-cores` for f16 on tensor cores).
+- `--device auto|cpu|gpu:<n>`: choose where embedded inference and `val` run (always `f32`; `--tensor-cores` enables
+  mixed-precision `train` with `"amp": true` on GPU tensor cores). For `f16` inference or `val` over MCP, start
+  `folo serve --precision f16 --tensor-cores` and pass `--server`.
 - `--mock`: simulated data and runs, ideal for testing tool flows.
 - `--read-only`: expose only non-mutating tools.
 - `--confine`: restrict file reads to `--data-dir`.

@@ -11,8 +11,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 
 ## Conventions
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
-- Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`,
-  `/api/label/jobs/{id}/images`). Unknown fields are ignored; missing optional fields take the defaults listed here.
+- Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`, and
+  `/api/label/jobs/{id}/images`, which also takes JSON) and raw upload parts (`PUT /api/uploads/{id}/parts/{n}`,
+  `application/octet-stream`). Unknown fields are ignored; missing optional fields take the defaults listed here.
 - Enum values grow: a client reads a value it does not know as unknown rather than failing the whole record (the Rust
   types decode `TrainConfig.optimizer` and `ResolvedTrain.optimizer` into an `Unknown` variant, which a server refuses
   with `invalid_config` where a run would train with it). Version skew: clients built before `musgd` (FOLO Desktop,
@@ -39,7 +40,8 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   `--token` no header is needed (the default: the server listens on loopback). docs/CLOUD.md, *Securing a server*.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
   builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
-  ETag; Vite's content-hashed `assets/` are `Cache-Control: immutable`, everything else `no-cache`.
+  ETag. For both embedded files and `--web-dir` (plain paths), Vite's content-hashed `assets/` (except `.map` source
+  maps) are `Cache-Control: public, max-age=31536000, immutable`, everything else `no-cache`.
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.
@@ -56,12 +58,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `label_boxes_changed`, `upload_conflict`, `output_exists`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; a box edit or review made on a revision of an image's boxes that is no longer theirs; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
-| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
+| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one; 32 MiB for `PUT /api/uploads/{id}/parts/{n}`, `max_part_bytes`; 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
-| 500 | `internal` | a bug or an IO failure |
+| 500 | `internal`, `io_error`, `data_error`, `training_failed` | a bug or unexpected failure (`internal`), a file read/write failure (`io_error`), a dataset read failure while training or validating (`data_error`), or a diverged / unusable training run (`training_failed`, `Run.error_code`) |
 | 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
 | 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway`, `agent_failed` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API; a coding agent's call fails or its answer is not usable (designing a benchmark plan). As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
+| 503 | `shutting_down` | the server is shutting down (new or resumed runs refused). As `Run.error_code` of a `stopped` run also `interrupted` (the server stopped or restarted while the run trained or waited) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory, or one tensor is larger than the GPU allows a buffer to be (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -424,7 +427,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state
   (docs/FORMAT.md: epoch, optimizer, schedule, EMA, RNG), or from scratch when no epoch had finished. The run keeps
   its config: every other field in the body must equal it or be omitted (`dataset_id` too; an empty `name` counts
-  as omitted), except `device`, which may change. Errors: `run_not_found`, `run_active` (still queued / running /
+  as omitted), except `device` and `compute`, which may change. Errors: `run_not_found`, `run_active` (still queued / running /
   stopping), `run_not_resumable` (it completed; start a new run with `weights` set to its model instead),
   `invalid_config` (a field differs; the message names it), `dataset_not_found` (its dataset folder is gone).
   `weights: <model id>` without `resume_run_id` starts a **new** run initialised from those weights (matching
@@ -509,8 +512,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
   - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "...",
-    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`); a `failed` one also has `"error_code"`
-    (`Run.error_code`)
+    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`); a `failed` one, or a `stopped` one
+    interrupted by a server shutdown or restart, also has `"error_code"` (`Run.error_code`)
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
@@ -1348,8 +1351,8 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   "bytes"? }` → `201 { "upload": Upload, "existing": null }`. `fingerprint` (at most 128 characters) names the
   content: when this server already holds a finished upload of that kind with it (and the dataset is still
   registered, the model still listed), the answer is `200 { "upload": null, "existing": { "dataset": Dataset } }`
-  (or `{ "model": Model }`) and there is nothing to send. `bytes` is the stream's length when known (reported
-  back, not checked). `400 invalid_body`: a blank `name`, a `format` with `kind: model`, a longer fingerprint.
+  (or `{ "model": Model }`) and there is nothing to send. `bytes` is an optional stream length accepted on creation
+  (ignored by the server and not returned in `Upload`). `400 invalid_body`: a blank `name`, a `format` with `kind: model`, a longer fingerprint.
 - `PUT /api/uploads/{id}/parts/{n}` body: the next bytes of the stream (`Content-Type:
   application/octet-stream`, at most `max_part_bytes`, else `413 payload_too_large`) → `Upload`. `n` must be
   `Upload.part`. Sending part `n - 1` again (a retry after a lost answer) is accepted when it has the length of the

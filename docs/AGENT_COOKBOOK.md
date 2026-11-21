@@ -36,7 +36,8 @@ calling `register_dataset` again on the same folder returns the dataset it alrea
 
 Stop and resume: `stop_run { "run_id": "run_4c1a" }` stops after the current batch (status `stopping`, then
 `stopped`, the last epoch's checkpoint kept). `train { "resume_run_id": "run_4c1a" }` continues the same run from
-that checkpoint (optimizer, schedule, EMA and RNG included); leave the other fields out, only `device` may change.
+that checkpoint (optimizer, schedule, EMA and RNG included); leave the other fields out, only `device` and `compute`
+may change.
 Runs are also stopped this way when the MCP client disconnects, so a new session can resume them. To train further
 after a run **completed**, start a new run with `"weights": "m_4c1a"`.
 
@@ -98,7 +99,7 @@ and the next `get_dataset` re-indexes them.
 CLI (every issue, not just 50, with a suggested fix for each):
 ```sh
 folo dataset check /data/cats --fix-dry-run --json   # exit 0 when clean, 1 with errors or warnings
-folo dataset check /data/cats --json --min-severity warning   # leave the background-image infos out
+folo dataset check /data/cats --fix-dry-run --json --min-severity warning   # leave the background-image infos out
 # {"clean":false,"counts":{"error":3,"warning":12,"info":40,"by_kind":{...}},
 #  "issues":[{"kind","severity","file","line","message","fix"}, ...]}
 folo dataset stats /data/cats --json                 # the same stats object as get_dataset

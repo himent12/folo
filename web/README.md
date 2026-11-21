@@ -8,7 +8,9 @@ development, screenshots and tests.
 
 Related: the [root README](../README.md), [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) (how Studio fits with the
 server and the engine), [framework/README.md](framework/README.md) (fw), [design/README.md](../design/README.md)
-(tokens, type, colour) and [FOLO Desktop](../apps/desktop/README.md), the native app with the same screens.
+(tokens, type, colour) and [FOLO Desktop](../apps/desktop/README.md), the native app with the same design language
+and main screens (Overview, Datasets, Runs, Models, Benchmarks, Playground and Settings; agent labeling, run compare,
+benchmark compare and external predictions stay in Studio).
 
 ## Commands
 
@@ -23,7 +25,7 @@ npm run tokens    # regenerates src/lib/design/tokens.css and tokens.ts from ../
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome); -- --theme paper: one theme
 npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots, then
                   # scripts/load-faults.mjs (a stylesheet or the mock failing to load); fails on any (CI)
-FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
+FOLO_API=http://127.0.0.1:7979 npm run smoke   # core routes (excludes Labeling and Benchmarks) against a running `folo serve`, reports errors
 npm run live-smoke -- <out dir>                # a short training run through New run, watched (usage: its header)
 npm run label-smoke -- <out dir> --images <dir> # agent labeling end to end with a real agent CLI (spends tokens)
 npm run parity    # scripts/parity.mjs --run (Screenshot parity and performance, below)

@@ -221,8 +221,9 @@ FOLO "beats the incumbent" when, on this machine with a quiet GPU and the same m
 below. The bars come from the best incumbent configuration; FOLO's comparable configuration is noted in each row.
 The architectures differ: FOLO's first head is NMS-based (anchor-free decoupled head, as in YOLOv8/11), while YOLO26 is
 NMS-free. **FOLO's end-to-end numbers must include its NMS.** Compare folo-n against yolo26n, folo-s against yolo26s,
-and so on. When FOLO's params/GFLOPs land, list them in the model-size table so the comparison stays honest about
-model size.
+and so on. FOLO's params and GFLOPs ([MODEL.md](MODEL.md): at 640x640 and 80 classes, folo-n 2,624,064 / 6.54, folo-s
+9,458,736 / 21.59, folo-m 20,114,672 / 68.10) are listed in the model-size table below so the comparison stays honest
+about model size.
 
 **Measured 2026-11-13 on `main` after [hill-climb 3](#hill-climb-3-2026-11-13)** (ffa0f8cb: PRs #253–#260) against
 `main` before that climb (e5a6ccf0), the two binaries alternated run by run, for the rows the climb could move: rows
@@ -2021,9 +2022,9 @@ From hill-climb 5's notebooks (not ranked):
 
 | model | params | GFLOPs | fused params | fused GFLOPs | FOLO params | FOLO GFLOPs |
 |---|---|---|---|---|---|---|
-| yolo26n | 2,572,280 | 6.2 | 2,408,932 | 5.5 |  |  |
-| yolo26s | 10,009,784 | 23.1 | 9,496,140 | 20.9 |  |  |
-| yolo26m | 21,896,248 | 75.6 | 20,411,132 | 68.4 |  |  |
+| yolo26n | 2,572,280 | 6.2 | 2,408,932 | 5.5 | 2,624,064 | 6.54 |
+| yolo26s | 10,009,784 | 23.1 | 9,496,140 | 20.9 | 9,458,736 | 21.59 |
+| yolo26m | 21,896,248 | 75.6 | 20,411,132 | 68.4 | 20,114,672 | 68.10 |
 
 ### GPU forward pass (input already on the GPU, ms; img/s = pipelined throughput)
 
