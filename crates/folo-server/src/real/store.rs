@@ -32,7 +32,7 @@ use crate::util::slug;
 
 use super::datasets::Naming;
 use super::models::cli_weights;
-use super::training::{run_cloud, upload_fingerprint};
+use super::training::{RunTarget, check_trainable, run_cloud, upload_fingerprint};
 use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
 
 impl Store for RealStore {
@@ -81,37 +81,19 @@ impl Store for RealStore {
     fn estimate_run(&self, mut config: TrainConfig) -> Result<RunEstimate> {
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
-        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
-        if idx.classes.is_empty() {
-            return Err(bad("the dataset has no classes".into()));
-        }
-        if idx.splits.train == 0 {
-            return Err(bad("the dataset has no training images".into()));
-        }
-        // A fine-tune trains the weights' architecture (see create_run).
-        let weights = match &config.weights {
-            Some(w) => {
-                let m = self.model(w)?;
-                config.arch = m.model.arch;
-                Some(m)
-            }
-            None => None,
-        };
-        // The same checks as POST /api/runs, the settings first (on the CPU).
-        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
-        check.device = "cpu".into();
-        check.validate().map_err(engine_error)?;
+        // POST /api/runs' own checks, except the name's length: Studio's New run asks with the name as it is being
+        // typed, says a long one at its field, and keeps showing the estimate meanwhile.
+        check_trainable(&idx)?;
+        let (_, target) = self.run_settings(&mut config)?;
+        let weights = config.weights.as_ref().map(|w| self.model(w)).transpose()?;
+        let check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
-        let cloud = match &config.compute {
-            Some(compute) => {
-                cloud::check_device(&config)?;
-                Some((self.cloud.target(compute)?.1, compute.max_hours))
+        let (device, cloud) = match target {
+            RunTarget::Cloud(c) => {
+                let (compute, _, offer) = *c;
+                (cloud::estimate_device(&offer), Some((offer, compute.max_hours)))
             }
-            None => None,
-        };
-        let device = match &cloud {
-            Some((offer, _)) => cloud::estimate_device(offer),
-            None => engine::device_id(engine::resolve(&config.device)?),
+            RunTarget::Local(device) => (engine::device_id(device), None),
         };
         let (train, val) = (idx.splits.train, idx.splits.val);
         let cli = crate::cli::train_command(

@@ -19,6 +19,18 @@ use crate::runs::{Ended, RunEntry};
 
 use super::RealStore;
 
+/// `invalid_config` for a dataset a run cannot train on (`POST /api/runs` and its estimate).
+pub(super) fn check_trainable(idx: &Index) -> Result<()> {
+    let bad = |m: &str| Err(Error::new(StatusCode::BAD_REQUEST, "invalid_config", m));
+    if idx.classes.is_empty() {
+        return bad("the dataset has no classes");
+    }
+    if idx.splits.train == 0 {
+        return bad("the dataset has no training images");
+    }
+    Ok(())
+}
+
 impl RealStore {
     /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
     /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
@@ -29,13 +41,7 @@ impl RealStore {
         crate::store::check_run_name(&config.name)?;
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
-        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
-        if idx.classes.is_empty() {
-            return Err(bad("the dataset has no classes".into()));
-        }
-        if idx.splits.train == 0 {
-            return Err(bad("the dataset has no training images".into()));
-        }
+        check_trainable(&idx)?;
         let (weights, target) = self.run_settings(&mut config)?;
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {

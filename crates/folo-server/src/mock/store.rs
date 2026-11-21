@@ -86,6 +86,7 @@ impl Store for MockStore {
             Some(c) => Some((self.cloud_offer(&config, c)?, c.max_hours)),
             None => None,
         };
+        self.check_amp(&config)?;
         let device = match (&cloud, config.device.as_str()) {
             (Some((offer, _)), _) => crate::cloud::estimate_device(offer),
             (None, "cpu") => throughput::cpu(),
@@ -395,25 +396,11 @@ impl Store for MockStore {
             Some(c) => Some((self.cloud_offer(&config, c)?, c.clone())),
             None => None,
         };
-        // As the real store: a fine-tune takes the weights' architecture, and `amp` is refused up front where
-        // `capabilities.amp` says it is unavailable.
+        // As the real store: a fine-tune takes the weights' architecture.
         if let Some(w) = &config.weights {
             config.arch = self.get_model(w)?.arch;
         }
-        if offer.is_none()
-            && config.amp
-            && (config.device == "cpu" || self.tensor_cores != MockTensorCores::On)
-        {
-            let why = if config.device == "cpu" {
-                "the run is on the CPU".to_string()
-            } else {
-                format!(
-                    "gpu:0 has tensor cores {}",
-                    self.tensor_cores.capabilities().tensor_cores.reason.unwrap_or_default()
-                )
-            };
-            return Err(crate::engine::engine_error(folo_vision::train::amp_not_supported(&why)));
-        }
+        self.check_amp(&config)?;
         let meta = ds.meta();
         if meta.classes.is_empty() || meta.splits.train == 0 {
             return Err(Error::new(

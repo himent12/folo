@@ -115,6 +115,8 @@ export interface ResolvedTrain {
    */
   ema_decay?: number;
   ema_tau?: number;
+  /** MuSGD's step weights and class-head LR factor as the run trains with them; missing for other optimizers and older runs. */
+  musgd?: { muon: number; sgd: number; cls_lr: number };
 }
 
 /** GET /api/runs/{id}/cli (servers list `run_cli`): the run's `folo train` command on the server's machine. */

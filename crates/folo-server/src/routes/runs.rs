@@ -46,17 +46,13 @@ fn string_field(fields: &serde_json::Map<String, serde_json::Value>, key: &str) 
     }
 }
 
-/// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
-/// (`200`, same id); with `checkpoint` the new run continues that model's training state.
-pub(super) async fn create_run(
-    State(st): State<AppState>,
-    ApiJson(body): ApiJson<serde_json::Value>,
-) -> Result<Response> {
-    let serde_json::Value::Object(mut fields) = body else {
+/// The fields of a `POST /api/runs` or `POST /api/runs/estimate` body, with the check both make before its types.
+fn run_fields(body: serde_json::Value) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let serde_json::Value::Object(fields) = body else {
         return Err(body_error("expected a JSON object"));
     };
     // Distillation is a recipe key of the CLI (docs/MODEL.md §8.9), not part of the API's TrainConfig: refused, so a
-    // body that asks for a teacher never trains without one.
+    // body that asks for a teacher never trains (or is estimated) without one.
     if fields.contains_key("distill") {
         return Err(Error::new(
             StatusCode::BAD_REQUEST,
@@ -65,6 +61,16 @@ pub(super) async fn create_run(
         )
         .hint("train with a teacher from the CLI: folo train --teacher <weights> (docs/CLI.md)"));
     }
+    Ok(fields)
+}
+
+/// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
+/// (`200`, same id); with `checkpoint` the new run continues that model's training state.
+pub(super) async fn create_run(
+    State(st): State<AppState>,
+    ApiJson(body): ApiJson<serde_json::Value>,
+) -> Result<Response> {
+    let mut fields = run_fields(body)?;
     let checkpoint = string_field(&fields, "checkpoint")?;
     let resume = string_field(&fields, "resume_run_id")?;
     if checkpoint.is_some() {
@@ -100,8 +106,11 @@ pub(super) async fn create_run(
 
 pub(super) async fn estimate_run(
     State(st): State<AppState>,
-    ApiJson(config): ApiJson<TrainConfig>,
+    ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Json<RunEstimate>> {
+    let fields = run_fields(body)?;
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
     Ok(Json(blocking(&st, move |s| s.estimate_run(config)).await?))
 }
 

@@ -339,6 +339,16 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
         Some(_) => folo_nn::ema_for_run(config.epochs as u64 * spe, 0.25),
         None => (folo_nn::EMA_DECAY, folo_nn::EMA_TAU),
     };
+    // MuSGD's step weights: `auto` from scratch takes rule 5's, anything else the configured default.
+    let musgd = (optimizer == ResolvedOptimizer::Musgd).then(|| {
+        let scratch = config.optimizer != Optimizer::Musgd && config.weights.is_none();
+        let w = if scratch {
+            folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS
+        } else {
+            folo_nn::optim::MuSgdWeights::default()
+        };
+        folo_api::ResolvedMusgd { muon: w.muon, sgd: w.sgd, cls_lr: folo_vision::train::MUSGD_CLS_LR_FACTOR }
+    });
     ResolvedTrain {
         optimizer,
         lr0,
@@ -359,6 +369,7 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
         close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
         ema_decay: Some(ema_decay),
         ema_tau: Some(ema_tau),
+        musgd,
     }
 }
 

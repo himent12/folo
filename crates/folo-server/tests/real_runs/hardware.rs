@@ -118,8 +118,10 @@ async fn amp_run_without_tensor_cores_is_refused_up_front() {
     assert!(hint.contains("`amp: false`") && hint.contains("--tensor-cores"), "{hint}");
     assert!(s.list_runs().unwrap().is_empty(), "nothing was queued");
     assert!(!home.join("runs").exists() || std::fs::read_dir(home.join("runs")).unwrap().next().is_none());
-    // The estimate is not refused (it answers what such a run would take where it can run).
-    let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg)).await;
+    // The estimate answers as the run does (docs/API.md): the forms only ask for one with amp where it can run.
+    let e =
+        err(&app, post_json("/api/runs/estimate", cfg), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    assert!(e.message.contains("tensor cores"), "{}", e.message);
 
     // Mixed-precision runs from a server that had tensor cores (their `amp` flag set in run.json): a stopped one is
     // refused on resume with resume advice (`amp` must match), but only once it would otherwise resume; a completed
@@ -181,6 +183,13 @@ async fn throughput_from_runs_predictions_and_a_probe() {
     );
     let bad = json!({ "dataset_id": ds.id, "imgsz": 48, "device": "cpu" });
     err(&app, post_json("/api/runs/estimate", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
+    // The checks it shares with POST /api/runs: `distill` and `amp`; a long name is the run's error only.
+    let distill = json!({ "dataset_id": ds.id, "device": "cpu", "distill": { "teacher": "t" } });
+    err(&app, post_json("/api/runs/estimate", distill), StatusCode::BAD_REQUEST, "invalid_config").await;
+    let amp = json!({ "dataset_id": ds.id, "device": "cpu", "amp": true });
+    err(&app, post_json("/api/runs/estimate", amp), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    let long = json!({ "dataset_id": ds.id, "device": "cpu", "name": "n".repeat(65) });
+    let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", long)).await;
     err(
         &app,
         post_json("/api/runs/estimate", json!({ "dataset_id": "ds_none" })),

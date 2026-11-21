@@ -107,15 +107,20 @@ export function emaSetting(resolved: ResolvedTrain): Setting | null {
   return { value: `window ${n} ${n === 1 ? 'step' : 'steps'}` };
 }
 
-/** The resolved rows a run's Config adds after its request: decay, warmup, momentum, the scaled weight decay, the EMA. */
+/**
+ * The resolved rows a run's Config adds after its request: decay, warmup, momentum, the scaled weight decay, the EMA,
+ * and MuSGD's step weights (no row for another optimizer or a run older than `resolved.musgd`).
+ */
 export function resolvedRows(resolved: ResolvedTrain): [label: string, Setting][] {
   const ema = emaSetting(resolved);
+  const m = resolved.musgd;
   return [
     ['LR decay', decaySetting(resolved)],
     ['Warmup', warmupSetting(resolved)],
     momentumSetting(resolved),
     ['Weight decay', { value: String(resolved.weight_decay) }],
     ...(ema ? [['EMA', ema] as [string, Setting]] : []),
+    ...(m ? [['MuSGD steps', { value: `muon ${m.muon} · sgd ${m.sgd}` }] as [string, Setting]] : []),
   ];
 }
 

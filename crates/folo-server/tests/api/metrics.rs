@@ -244,6 +244,15 @@ async fn mock_run_estimates() {
         "invalid_body",
     )
     .await;
+    // The body's `distill` key, and `amp` on a device without it, answer as on POST /api/runs.
+    let distill = json!({ "dataset_id": "ds_5a1e", "distill": { "teacher": "folo-n-coco" } });
+    err(&app, post_json("/api/runs/estimate", distill), StatusCode::BAD_REQUEST, "invalid_config").await;
+    let amp = json!({ "dataset_id": "ds_5a1e", "device": "cpu", "amp": true });
+    err(&app, post_json("/api/runs/estimate", amp), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    // A name too long is the run's error only: New run keeps its estimate while the name is being typed.
+    let long = json!({ "dataset_id": "ds_5a1e", "name": "n".repeat(65) });
+    let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", long.clone())).await;
+    err(&app, post_json("/api/runs", long), StatusCode::BAD_REQUEST, "invalid_config").await;
     assert_eq!(ok::<RunList>(&app, get("/api/runs")).await.runs.len(), 7, "an estimate creates no run");
     // A run's command: GET /api/runs/{id}/cli, the same mapping, also as argv.
     let run: Run =
