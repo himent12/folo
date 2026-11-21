@@ -62,6 +62,90 @@ fn a_step_cursor_never_skips_a_step() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// After a run stops mid-epoch and resumes, `/metrics` (both full and with `after_step`) must drop the discarded
+/// pre-resume steps of the interrupted epoch and return the live resumed steps from `tail` even before `metrics.jsonl`
+/// flushes them.
+#[test]
+fn resumed_mid_epoch_metrics_prefer_live_tail_over_discarded_steps() {
+    let dir = TestDir::new("runs-resumed-tail");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"r"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let make_step = |epoch: u32, step: u64, total: f32| -> Step {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"step":{step},"loss":{{"box":1,"cls":1,"dfl":1,"total":{total}}},"lr":0.01,"imgs_per_s":1,"eta_s":1}}"#
+        ))
+        .unwrap()
+    };
+    let make_epoch = |epoch: u32| -> Epoch {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},"val":{{"map50":0.1,"map50_95":0.05,"precision":0.1,"recall":0.1,"per_class":[]}},"duration_s":1}}"#
+        ))
+        .unwrap()
+    };
+    let line = |ev: RunEvent| folo_vision::train::event_record(&ev).to_string();
+
+    // Epoch 1 completed (steps 1-2), epoch 2 ran steps 3-4 with high loss (9.0 / 8.0), then stopped.
+    let initial = [
+        line(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))),
+        line(RunEvent::Step(make_step(1, 1, 3.0))),
+        line(RunEvent::Step(make_step(1, 2, 2.5))),
+        line(RunEvent::Epoch(make_epoch(1))),
+        line(RunEvent::Step(make_step(2, 3, 9.0))),
+        line(RunEvent::Step(make_step(2, 4, 8.0))),
+        line(RunEvent::Status(StatusEvent::new(RunStatus::Stopped, None))),
+    ];
+    std::fs::write(e.metrics_path(), initial.join("\n") + "\n").unwrap();
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.epochs_done = 1;
+        st.file.run.started = Some(now());
+        e.finish(&mut st, RunStatus::Stopped, None);
+    }
+    // While stopped (not yet resumed), the partial epoch's steps remain visible.
+    let stopped = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(stopped.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(stopped.steps[2].loss.total, 9.0);
+
+    // Resumed and queued: discarded pre-resume epoch 2 steps are hidden.
+    runs.restart(&e, config, None).unwrap();
+    let queued = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(queued.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+
+    // Trainer starts the resumed run (`status: running` flushed to metrics.jsonl) and emits live step 3 (loss 2.0)
+    // into `tail` before `BufWriter` flushes it.
+    append_line(&e.metrics_path(), &line(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))));
+    e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+    e.on_event(&RunEvent::Step(make_step(2, 3, 2.0)));
+
+    let full = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(full.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3]);
+    assert_eq!(full.steps[2].loss.total, 2.0, "must return resumed step 3, not discarded step 3");
+
+    let polled =
+        runs.metrics(e.id(), &MetricsQuery { after_step: Some(2), ..MetricsQuery::default() }).unwrap();
+    assert_eq!(polled.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [3]);
+    assert_eq!(polled.steps[0].loss.total, 2.0);
+
+    // Rate-limited gap in `tail` (step 4 skipped, step 5 arrives): full sees [1, 2, 3, 5], cursor stops at [3].
+    e.on_event(&RunEvent::Step(make_step(2, 5, 1.5)));
+    let full = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(full.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 5]);
+    assert_eq!(full.steps[2].loss.total, 2.0);
+    let polled =
+        runs.metrics(e.id(), &MetricsQuery { after_step: Some(2), ..MetricsQuery::default() }).unwrap();
+    assert_eq!(polled.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [3]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The record of run `id` queued with `config` that never started.
 fn queued_file(id: &str, config: TrainConfig) -> RunFile {
     let run = Run {
