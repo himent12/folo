@@ -142,10 +142,7 @@ impl Benches {
             .enumerate()
             .map(|(k, (&i, file))| {
                 let im = &gathered.images[i];
-                // `folo mcp --confine`'s read guard (a no-op otherwise): a link swapped in after the dataset's check.
-                let bytes = folo_data::guard::check(&im.path)
-                    .and_then(|()| std::fs::read(&im.path))
-                    .map_err(|e| io_error("reading", &im.path, e))?;
+                let bytes = std::fs::read(&im.path).map_err(|e| io_error("reading", &im.path, e))?;
                 let to = images_dir.join(file);
                 std::fs::write(&to, &bytes).map_err(|e| io_error("writing", &to, e))?;
                 Ok(ImageRecord {

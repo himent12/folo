@@ -96,6 +96,9 @@ fn confine_rejects_paths_outside_the_data_dir() {
     c.tool_error("create_label_job", job, "path_outside_data_dir");
     let add = json!({ "job_id": "lb_1", "paths": ["../outside.jpg"] });
     c.tool_error("create_label_job", add, "path_outside_data_dir");
+    // A benchmark's files are not confined, so its tools are refused.
+    c.tool_error("create_benchmark", json!({ "name": "x", "dataset_id": "ds_5a1e" }), "not_supported");
+    c.tool_error("bench_catalog", json!({}), "not_supported");
     c.finish();
 }
 

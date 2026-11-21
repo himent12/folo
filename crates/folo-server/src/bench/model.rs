@@ -258,12 +258,9 @@ struct Prepared {
 /// Reads image `item` and makes it what the contestant sees: the file decoded as datasets are, or under `variant`
 /// the canonical JPEG of the variant decoded again.
 fn prepare(item: &Item, variant: Option<(Condition, u8)>, seed: u64) -> Result<Prepared> {
-    // `folo mcp --confine`'s read guard (a no-op otherwise), as the dataset reader has: a frozen image is a file of
-    // the data dir, unless a link there was pointed elsewhere.
-    let bytes =
-        folo_data::guard::check(&item.path).and_then(|()| std::fs::read(&item.path)).map_err(|e| {
-            Error::internal(format!("reading image '{}' ({}): {e}", item.id, item.path.display()))
-        })?;
+    let bytes = std::fs::read(&item.path).map_err(|e| {
+        Error::internal(format!("reading image '{}' ({}): {e}", item.id, item.path.display()))
+    })?;
     let bad = |e: &dyn std::fmt::Display| Error::internal(format!("image '{}': {e}", item.id));
     match variant {
         None => Ok(Prepared {

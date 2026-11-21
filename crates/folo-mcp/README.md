@@ -44,7 +44,7 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
 | `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |
-| `bench.rs` | The eight benchmark tools on `crate::bench::Benchmarks`: argument checks, the path of a predictions file, `--confine` of a benchmark's source, `bench_entry`'s `wait`, MCP hints and one-line summaries |
+| `bench.rs` | The eight benchmark tools on `crate::bench::Benchmarks`: argument checks, the path of a predictions file, the refusal under `--confine`, `bench_entry`'s `wait` and fitted results, MCP hints and one-line summaries |
 | `tests.rs` | Unit tests, including the tool count the docs state |
 | `label_tests.rs` | The labeling tools with a scripted agent: in process, through a loopback `folo serve` (also an older one without the image filters and revisions), revisions against a gated run, `--confine` |
 | `bench_tests.rs` | The benchmark tools in process and through a loopback `folo serve` (a benchmark, a file of predictions scored, the refusals), and the mock without benchmarks |
@@ -59,7 +59,8 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
   with the `read_only` error, and `prompts::list` leaves out `train_on_folder` and `label_folder`.
 - **`--confine`.** `build` installs the dataset read guard (`confine::install_read_guard`) unless the backend is
   `Proxy`, where `folo serve` reads the datasets; `PathPolicy` checks every input path, label paths included,
-  and the labeling tools that read a job's images check them all first (`confine_job`).
+  and the labeling tools that read a job's images check them all first (`confine_job`). The benchmark tools are
+  refused (`bench::refuse_confined`): the store reads and writes a benchmark's files without these checks.
 - **Schemas.** The tool types derive `schemars::JsonSchema`: those in `src/types.rs` directly, the folo-api types
   through its `schema` feature, which this crate's `Cargo.toml` turns on. `schemas.rs` generates each schema with
   rmcp's `schema_for_input` / `schema_for_output`, removes what does not help validation and marks every object

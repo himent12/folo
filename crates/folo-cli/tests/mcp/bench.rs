@@ -4,9 +4,7 @@
 
 use serde_json::json;
 
-use super::harness::{
-    ALL_TOOLS, check_tools, checked, init_old, make_dir_link, remove_dir_link, spawn_with_weights, tmp_dir,
-};
+use super::harness::{ALL_TOOLS, check_tools, checked, init_old, spawn_with_weights, tmp_dir};
 
 /// A random folo-n saved as the published `folo-n-coco` in `weights`.
 fn publish_model(weights: &std::path::Path) {
@@ -19,49 +17,6 @@ fn publish_model(weights: &std::path::Path) {
     m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
     m.set_imgsz(64);
     m.save(weights.join("folo-n-coco.folo")).unwrap();
-}
-
-/// With `--confine`, a benchmark whose frozen images became a link to a folder outside the data dir is not read:
-/// the model's entry fails on the read guard.
-#[test]
-fn confine_refuses_frozen_images_behind_a_link() {
-    let dir = tmp_dir("bench-confine");
-    let weights = dir.join("weights");
-    publish_model(&weights);
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let mut c = spawn_with_weights(
-        &["--confine", "--data-dir", data.to_str().unwrap(), "--device", "cpu"],
-        None,
-        &weights,
-    );
-    init_old(&mut c);
-    let ds = c.ok(
-        "create_synthetic_dataset",
-        json!({ "name": "shapes", "images": 20, "imgsz": 64, "classes": ["circle", "square"], "seed": 3 }),
-    );
-    let plan = json!({ "conditions": [{ "condition": "haze", "severities": [2] }] });
-    let b = c.ok("create_benchmark", json!({ "name": "shapes", "dataset_id": ds["id"], "plan": plan }));
-    let images = data.join("bench").join(b["id"].as_str().unwrap()).join("images");
-    let outside = dir.join("outside");
-    std::fs::rename(&images, &outside).unwrap();
-    assert!(make_dir_link(&outside, &images), "could not create a directory link");
-    let started = c.ok(
-        "start_bench_entry",
-        json!({ "benchmark_id": b["id"], "model_id": "folo-n-coco", "name": "published" }),
-    );
-    let ids = json!({ "benchmark_id": b["id"], "entry_id": started["entry_id"], "wait": 20 });
-    let mut entry = c.ok("bench_entry", ids.clone());
-    for _ in 0..15 {
-        if !matches!(entry["status"].as_str(), Some("queued" | "running" | "stopping")) {
-            break;
-        }
-        entry = c.ok("bench_entry", ids.clone());
-    }
-    assert_eq!(entry["status"], "failed", "{entry}");
-    assert!(entry["error"].as_str().unwrap().contains(folo_data::guard::DENIED), "{entry}");
-    remove_dir_link(&images);
-    c.finish();
 }
 
 #[test]

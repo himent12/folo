@@ -71,7 +71,7 @@ impl Inner {
 
     /// With `--confine`: fails unless every image of job `id` is inside the data dir (in process; a job with
     /// one outside is neither shown nor changed).
-    pub(super) async fn confine_job(&self, id: &str) -> Result<(), Error> {
+    async fn confine_job(&self, id: &str) -> Result<(), Error> {
         if !self.opts.confine {
             return Ok(());
         }

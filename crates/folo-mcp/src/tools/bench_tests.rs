@@ -226,7 +226,15 @@ fn a_benchmark_fits_the_result_limit() {
     assert!(json_len(&wordy) > MAX_RESULT_BYTES);
     assert!(super::bench::fit_detail(&mut wordy));
     assert_eq!((wordy.leaderboard.len(), wordy.description.chars().count()), (50, 201));
-    // A huge one also loses rows, then its class names are cut; every class stays.
+    // Class names that alone pass the limit are cut, every class stays, and no row is lost to them.
+    let classes = (0..80).map(|i| format!("{i:02}{}", wide(148))).collect();
+    let mut named = detail(classes, "a pond".into(), &|i| format!("model {i}"));
+    assert!(json_len(&named) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_detail(&mut named));
+    assert!(json_len(&named) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&named));
+    assert_eq!((named.classes.len(), named.leaderboard.len()), (80, 50));
+    assert!((0..80).all(|i| named.classes[i].starts_with(&format!("{i:02}"))));
+    // A huge one has its names cut, then loses rows from the end.
     let classes = (0..80).map(|i| format!("{i:02}{}", wide(62))).collect();
     let mut big = detail(classes, wide(4000), &|_| wide(100));
     assert!(json_len(&big) > MAX_RESULT_BYTES);
@@ -234,22 +242,139 @@ fn a_benchmark_fits_the_result_limit() {
     assert!(json_len(&big) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&big));
     assert_eq!(big.classes.len(), 80);
     assert!(big.classes[7].starts_with("07"), "{}", big.classes[7]);
+    assert!(!big.leaderboard.is_empty() && big.leaderboard.len() < 50, "{}", big.leaderboard.len());
 }
 
-/// A server that accepts and never answers (the connection waits in the listener's backlog): the wait ends at its
-/// grace with the entry's hint, not after the HTTP client's 10-minute timeout, and leaves no request running.
+/// `bench_entry` stays within the result limit with every class missing under a very long name.
+#[test]
+fn an_entry_fits_the_result_limit() {
+    use super::results::{MAX_RESULT_BYTES, json_len};
+    let wide = |n: usize| "\u{1F600}".repeat(n);
+    let state = |missing_classes: Vec<String>, error: Option<String>| crate::types::BenchEntryState {
+        benchmark_id: "bn_1".into(),
+        entry_id: "be_1".into(),
+        name: "m".into(),
+        status: folo_api::BenchEntryStatus::Failed,
+        done: 0,
+        total: 8,
+        condition: None,
+        severity: None,
+        images: 4,
+        conditions: true,
+        missing_classes,
+        error,
+        hint: None,
+        result: None,
+    };
+    let mut small = state(vec!["cat".into()], Some("no such file".into()));
+    assert!(!super::bench::fit_state(&mut small));
+    assert_eq!((small.missing_classes[0].as_str(), small.error.as_deref()), ("cat", Some("no such file")));
+    let classes = (0..80).map(|i| format!("{i:02}{}", wide(148))).collect();
+    let mut big = state(classes, Some(wide(20_000)));
+    assert!(json_len(&big) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_state(&mut big));
+    assert!(json_len(&big) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&big));
+    assert_eq!(big.missing_classes.len(), 80);
+    assert!((0..80).all(|i| big.missing_classes[i].starts_with(&format!("{i:02}"))));
+}
+
+/// With `--confine` every benchmark tool is refused, in process and through a server, before it touches a file or
+/// the network (the address below has no server).
+#[tokio::test]
+async fn a_confined_session_refuses_the_benchmark_tools() {
+    let home = TestDir::new("mcp-bench-confined");
+    let confined = || Options { confine: true, ..options(home.path()) };
+    let here = FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, confined());
+    let http = Arc::new(HttpStore::new("http://127.0.0.1:9", None));
+    let through = FoloMcp::new(http.clone(), Some(http), confined());
+    let bench = json!({ "benchmark_id": "bn_1" });
+    let entry = json!({ "benchmark_id": "bn_1", "entry_id": "be_1" });
+    for s in [&here, &through] {
+        for (tool, args) in [
+            ("bench_catalog", json!({})),
+            ("list_benchmarks", json!({})),
+            ("get_benchmark", bench.clone()),
+            ("create_benchmark", json!({ "name": "x", "dataset_id": "ds_1" })),
+            ("delete_benchmark", bench.clone()),
+            (
+                "start_bench_entry",
+                json!({ "benchmark_id": "bn_1", "predictions_file": "p.jsonl", "name": "p" }),
+            ),
+            ("bench_entry", entry.clone()),
+            ("stop_bench_entry", entry.clone()),
+        ] {
+            assert_eq!(err(s, tool, args).await.body.code, "not_supported", "{tool}");
+        }
+    }
+}
+
+/// A server that accepts and never answers (the connection waits in the listener's backlog), asked for the first time
+/// (so the feature probe is covered too): the wait ends at its grace with the entry's hint. The call runs on a thread
+/// because without the deadline it would hold for the HTTP client's 10-minute timeout; the watchdog is what fails then.
 #[test]
 fn a_wait_ends_when_the_server_stops_answering() {
     use std::time::Duration;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let http = HttpStore::new(&url, None).assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]);
-    let b = crate::bench::Benchmarks::Http(Arc::new(http));
-    let poll = Duration::from_millis(10);
-    let e = super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, Duration::from_millis(50))
-        .unwrap_err();
+    let b = crate::bench::Benchmarks::Http(Arc::new(HttpStore::new(&url, None)));
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let poll = Duration::from_millis(10);
+        let r = super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, Duration::from_millis(50));
+        let _ = done.send(r);
+    });
+    let e =
+        answer.recv_timeout(Duration::from_secs(60)).expect("the deadline did not end the call").unwrap_err();
     assert_eq!(e.body.code, "server_unreachable", "{e:?}");
     assert!(e.body.hint.as_deref().unwrap_or_default().contains("bench_entry"), "{e:?}");
+}
+
+/// `wait` on a real store: 0 answers at once, a wait on an entry that stays open holds for its whole length (a lower
+/// bound, so a loaded machine cannot fail it), and an entry that ends during a long wait ends the wait.
+#[test]
+fn a_wait_follows_an_entry_until_it_ends() {
+    use folo_api::{BenchContestantSpec, BenchEntryStatus, BenchPrediction, CreateBench, StartBenchEntry};
+    use std::time::{Duration, Instant};
+    let home = TestDir::new("mcp-bench-wait");
+    let (store, dataset) = store(home.path());
+    let b = crate::bench::Benchmarks::Store(store.clone());
+    let req = CreateBench {
+        name: "shapes".into(),
+        description: String::new(),
+        source: folo_api::BenchSource::Dataset { dataset_id: dataset, split: None },
+        max_images: None,
+        seed: 0,
+        plan: None,
+    };
+    let bench = b.create_bench(req).unwrap().id;
+    let page = store.benches().unwrap().images(&bench, 0, 1000, None).unwrap();
+    let predictions = page
+        .images
+        .iter()
+        .map(|im| BenchPrediction { image: im.id.clone(), condition: None, severity: None, boxes: vec![] })
+        .collect();
+    let contestant = BenchContestantSpec::External { scored: true, open: true, predictions };
+    let req = StartBenchEntry { contestant, name: Some("open".into()), max_images: None, conditions: None };
+    let entry = b.start_entry(&bench, req).unwrap().id;
+
+    let (poll, grace) = (Duration::from_millis(5), Duration::from_secs(1));
+    let now = super::bench::wait_state(&b, &bench, &entry, poll, Duration::ZERO, grace).unwrap();
+    assert!(now.status.is_active(), "{:?}", now.status);
+    let wait = Duration::from_millis(200);
+    let start = Instant::now();
+    let held = super::bench::wait_state(&b, &bench, &entry, poll, wait, grace).unwrap();
+    assert!(held.status.is_active(), "{:?}", held.status);
+    assert!(start.elapsed() >= wait - poll, "{:?}", start.elapsed());
+
+    let (done, answer) = std::sync::mpsc::channel();
+    let (waiter, id, e) = (b.clone(), bench.clone(), entry.clone());
+    std::thread::spawn(move || {
+        let _ = done.send(super::bench::wait_state(&waiter, &id, &e, poll, Duration::from_secs(30), grace));
+    });
+    b.finish(&bench, &entry).unwrap();
+    let ended = answer.recv_timeout(Duration::from_secs(60)).expect("the wait did not end").unwrap();
+    assert_eq!(ended.status, BenchEntryStatus::Done);
+    store.shutdown();
 }
 
 /// `delete_benchmark` is the one tool that removes files, and the only one a client is told is destructive.

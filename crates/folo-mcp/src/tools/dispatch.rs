@@ -66,6 +66,7 @@ impl Inner {
         if let Some(e) = unknown_argument(def.name, &(def.input)(), &args) {
             return Err(e);
         }
+        super::bench::refuse_confined(def.name, self.opts.confine)?;
         let res = match def.name {
             "folo_info" => self.folo_info(parse_args(args)?).await,
             "list_datasets" => self.list_datasets(parse_args(args)?).await,

@@ -355,8 +355,14 @@ mod tests {
         // Connections wait in the listener's backlog: accepted by the OS, never answered.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let c = Client::new(&format!("http://{}", listener.local_addr().unwrap()));
-        let e = c.until(Instant::now() + Duration::from_millis(50)).get::<serde_json::Value>("/health");
-        assert!(e.unwrap_err().is_unreachable());
+        // On a thread: without the deadline the call holds for the 10-minute timeout, and the watchdog fails the test.
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = c.until(Instant::now() + Duration::from_millis(50)).get::<serde_json::Value>("/health");
+            let _ = done.send(r);
+        });
+        let r = answer.recv_timeout(Duration::from_secs(60)).expect("the deadline did not end the call");
+        assert!(r.unwrap_err().is_unreachable());
     }
 
     #[test]

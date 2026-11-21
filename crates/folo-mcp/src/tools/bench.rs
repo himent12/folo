@@ -6,6 +6,7 @@
 use std::time::{Duration, Instant};
 
 use folo_api::{BenchEntryStatus, BenchSource, CreateBench};
+use http::StatusCode;
 
 use super::results::{MAX_RESULT_BYTES, Output, json_len, out, page_of, short};
 use crate::bench::hints::{self, Front};
@@ -25,6 +26,32 @@ const MAX_ROWS: usize = 50;
 const FIT: usize = MAX_RESULT_BYTES - 1024;
 /// How long `bench_entry` may take beyond its `wait`: every request to a server ends by then.
 const GRACE: Duration = Duration::from_secs(5);
+/// The tools `--confine` refuses: all of them, see [`refuse_confined`].
+const BENCH_TOOLS: [&str; 8] = [
+    "bench_catalog",
+    "list_benchmarks",
+    "get_benchmark",
+    "create_benchmark",
+    "delete_benchmark",
+    "start_bench_entry",
+    "bench_entry",
+    "stop_bench_entry",
+];
+
+/// With `--confine`, refuses a benchmark tool. A benchmark's files (its frozen images, its entries, the weights a
+/// model entry loads) are read, written and deleted by the store without the confinement's checks, and through a
+/// server they are out of its reach, so the one rule that holds in both modes is not to offer them.
+pub(super) fn refuse_confined(tool: &str, confine: bool) -> Result<(), Error> {
+    if !confine || !BENCH_TOOLS.contains(&tool) {
+        return Ok(());
+    }
+    Err(Error::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "not_supported",
+        format!("{tool} is not available with --confine (benchmark files are not confined to the data dir)"),
+    )
+    .hint("restart `folo mcp` without --confine to use the benchmark tools"))
+}
 
 impl Inner {
     /// Runs benchmark calls on the blocking pool (they read files or make HTTP requests); errors get MCP hints.
@@ -91,11 +118,6 @@ impl Inner {
             (None, Some(_)) => return Err(invalid_arguments("split is for a dataset, not for label_job_id")),
             _ => return Err(invalid_arguments("give one source: dataset_id (with split) or label_job_id")),
         };
-        // With --confine, the images a benchmark freezes must be inside the data dir, as the other tools read.
-        match &source {
-            BenchSource::Dataset { dataset_id, .. } => self.ensure_dataset(dataset_id).await?,
-            BenchSource::LabelJob { job_id } => self.confine_job(job_id).await?,
-        }
         let req = CreateBench {
             name: a.name,
             description: a.description,
@@ -167,8 +189,14 @@ impl Inner {
         let poll = if self.proxy.is_some() { POLL_SERVER } else { POLL_HERE };
         let wait = Duration::from_secs(a.wait.into());
         let (id, entry) = (a.benchmark_id, a.entry_id);
-        let r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE)).await?;
-        out(&r, entry_summary(&r))
+        let mut r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE)).await?;
+        let cut = fit_state(&mut r);
+        let mut summary = entry_summary(&r);
+        if cut {
+            summary
+                .push_str(" (long text cut; GET /api/bench/benchmarks/{id}/entries/{entry_id} has it whole)");
+        }
+        out(&r, summary)
     }
 
     pub(super) async fn stop_bench_entry(&self, a: BenchEntryIdArgs) -> Result<Output, Error> {
@@ -203,23 +231,46 @@ pub(super) fn wait_state(
     )
 }
 
-/// Fits a benchmark within the result limit whatever its names, keeping what ranks it longest: a shorter description,
-/// then fewer leaderboard rows from the end, then shorter names (the API has them whole). True when text was cut.
+/// Cuts `s` to `max` characters; true when that changed it.
+fn cut_to(s: &mut String, max: usize) -> bool {
+    let t = short(s, max);
+    let cut = t != *s;
+    *s = t;
+    cut
+}
+
+/// Fits a benchmark within the result limit whatever its names, keeping the ranking longest: a shorter description,
+/// then shorter names, then fewer leaderboard rows from the end (the API has them all). True when text was cut.
 pub(super) fn fit_detail(r: &mut BenchDetail) -> bool {
     if json_len(r) <= FIT {
         return false;
     }
-    let description = short(&r.description, 200);
-    let mut cut = description != r.description;
-    r.description = description;
+    let mut cut = cut_to(&mut r.description, 200);
+    if json_len(r) > FIT {
+        cut |= cut_to(&mut r.name, 200);
+        cut |= cut_to(&mut r.source_name, 200);
+        for c in &mut r.classes {
+            cut |= cut_to(c, 24);
+        }
+    }
     while json_len(r) > FIT && !r.leaderboard.is_empty() {
         r.leaderboard.pop();
     }
-    if json_len(r) > FIT {
-        cut = true;
-        r.name = short(&r.name, 200);
-        r.source_name = short(&r.source_name, 200);
-        r.classes.iter_mut().for_each(|c| *c = short(c, 24));
+    cut
+}
+
+/// Fits an entry's state within the result limit: at most 80 classes are missing, so with short names, a short error
+/// and a short hint it always fits (the API has them whole). True when text was cut.
+pub(super) fn fit_state(r: &mut BenchEntryState) -> bool {
+    if json_len(r) <= FIT {
+        return false;
+    }
+    let mut cut = cut_to(&mut r.name, 200);
+    for c in &mut r.missing_classes {
+        cut |= cut_to(c, 24);
+    }
+    for text in [&mut r.error, &mut r.hint].into_iter().flatten() {
+        cut |= cut_to(text, 500);
     }
     cut
 }
