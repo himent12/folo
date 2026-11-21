@@ -150,7 +150,7 @@ pub const CODES: &[Code] = &[
     c("bench_frozen", 409, 1, "changing the plan of a vision benchmark that has entries"),
     c("bench_active", 409, 1, "deleting a vision benchmark while one of its entries or loops is active"),
     c("bench_entry_active", 409, 1, "deleting a benchmark entry that is still queued or running"),
-    c("bench_entry_not_active", 409, 1, "stopping a benchmark entry that has ended"),
+    c("bench_entry_not_active", 409, 1, "stopping a benchmark entry that has ended or is being scored"),
     c("bench_entry_not_done", 409, 1, "the result or images of a benchmark entry that has not finished"),
     c(
         "bench_entry_not_open",
