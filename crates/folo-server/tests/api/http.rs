@@ -91,7 +91,7 @@ async fn static_files_spa_fallback() {
 const VITE_PAGE: &str = r#"<!doctype html><title>Studio</title><script type="module" crossorigin src="/assets/app-1a2b3c4d.js"></script>"#;
 
 /// `folo serve --web-dir` on a Vite build (issue #309): the hashed `assets/` for a year, everything else revalidated
-/// (`no-cache` with an `ETag`), and an asset name that is no file falls back to `index.html` without being kept.
+/// (`no-cache`), and an asset name that is no file falls back to `index.html` without being kept.
 #[tokio::test]
 async fn web_dir_cache_headers() {
     let dir = TestDir::new("web-cache");
@@ -121,7 +121,7 @@ async fn web_dir_cache_headers() {
         let (s, h, _) = send(&app, get(path)).await;
         assert_eq!(s, StatusCode::OK, "{path}");
         assert_eq!(cache(&h), "no-cache", "{path}");
-        assert!(h.contains_key(header::ETAG), "{path} has a validator");
+        assert!(h.contains_key(header::LAST_MODIFIED), "{path} has a validator");
     }
 
     // A source map is named after its chunk's hash, not its own: revalidated, also asked for percent-encoded (review of
@@ -159,7 +159,6 @@ async fn web_dir_cache_headers() {
     assert_eq!((s, cache(&h).as_str()), (StatusCode::OK, "no-cache"));
     assert!(b.starts_with(b"<!doctype html>"));
     let since = h[header::LAST_MODIFIED].to_str().unwrap().to_string();
-    let fallback_tag = h[header::ETAG].to_str().unwrap().to_string();
     let restored = dir.join("assets/app-later777.js");
     std::fs::write(&restored, "console.log(7)").unwrap();
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
@@ -173,13 +172,7 @@ async fn web_dir_cache_headers() {
         let (s, _, b) = send(&app, req).await;
         assert_eq!((s, b.as_slice()), (StatusCode::OK, body.as_bytes()), "{path}");
     }
-    // The same with the fallback's tag: the asset's content is not the fallback's.
-    let req = Request::builder()
-        .uri("/assets/app-later777.js")
-        .header(header::IF_NONE_MATCH, &fallback_tag)
-        .body(Body::empty())
-        .unwrap();
-    let (s, h, b) = send(&app, req).await;
+    let (s, h, b) = send(&app, get("/assets/app-later777.js")).await;
     assert_eq!((s, b.as_slice()), (StatusCode::OK, b"console.log(7)".as_slice()));
     assert_eq!(cache(&h), immutable);
     // An API answer is not the web app's to cache.
@@ -207,7 +200,6 @@ async fn web_dir_keeps_only_a_vite_builds_hashed_files() {
     for path in ["/assets/app.js", "/assets/hero-Banner01.png", "/assets/logo.svg"] {
         let (s, h, _) = send(&app, get(path)).await;
         assert_eq!((s, h[header::CACHE_CONTROL].to_str().unwrap()), (StatusCode::OK, "no-cache"), "{path}");
-        assert!(h.contains_key(header::ETAG), "{path}");
     }
     // The folder is rebuilt with Vite while the server runs: its hashed files are kept from then on, the others are not.
     std::fs::write(dir.join("index.html"), VITE_PAGE).unwrap();
@@ -221,70 +213,26 @@ async fn web_dir_keeps_only_a_vite_builds_hashed_files() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A file revalidates by its content: unchanged is a `304`, and any change to it is sent, also one that keeps its size
-/// and date (a build unpacked with fixed dates).
+/// Only the start of `index.html` is read: a module tag that ends at the bound makes a Vite page, one a byte later does
+/// not, and the folder's hashed file is then only revalidated.
 #[tokio::test]
-async fn web_dir_revalidates_by_content() {
-    let dir = TestDir::new("web-etag");
-    std::fs::write(dir.join("index.html"), "<!doctype html>one").unwrap();
-    std::fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
+async fn web_dir_reads_a_bounded_head_of_the_page() {
+    let dir = TestDir::new("web-head");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/app-1a2b3c4d.js"), "x").unwrap();
+    std::fs::write(dir.join("index.html"), VITE_PAGE).unwrap();
     let app = Server::new(
         Arc::new(MockStore::new()),
         Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
     )
     .router();
-    let with_tag = |path: &str, tag: &str| {
-        Request::builder().uri(path).header(header::IF_NONE_MATCH, tag).body(Body::empty()).unwrap()
-    };
-    for path in ["/", "/index.html", "/runs/run_1a01", "/favicon.svg"] {
-        let (s, h, _) = send(&app, get(path)).await;
-        assert_eq!(s, StatusCode::OK, "{path}");
-        let tag = h[header::ETAG].to_str().unwrap().to_string();
-        assert!(tag.starts_with("W/"), "{path}: the compression layer may re-encode the body");
-        let (s, h, b) = send(&app, with_tag(path, &tag)).await;
-        assert_eq!(s, StatusCode::NOT_MODIFIED, "{path}");
-        assert!(b.is_empty(), "{path}");
-        assert_eq!(h[header::ETAG].to_str().unwrap(), tag, "{path}");
-        assert_eq!(h[header::CACHE_CONTROL], "no-cache", "{path}");
-        assert_eq!(h[header::VARY], "accept-encoding", "{path}");
+    let tag = r#"<script type="module" crossorigin src="/assets/app-1a2b3c4d.js">"#;
+    let at_bound = folo_server::web::VITE_HEAD_BYTES - tag.len();
+    for (pad, want) in [(at_bound, "public, max-age=31536000, immutable"), (at_bound + 1, "no-cache")] {
+        std::fs::write(dir.join("index.html"), format!("{}{tag}</script>", " ".repeat(pad))).unwrap();
+        let (s, h, _) = send(&app, get("/assets/app-1a2b3c4d.js")).await;
+        assert_eq!((s, h[header::CACHE_CONTROL].to_str().unwrap()), (StatusCode::OK, want), "pad {pad}");
     }
-
-    let index = dir.join("index.html");
-    let date = std::fs::metadata(&index).unwrap().modified().unwrap();
-    let (_, h, _) = send(&app, get("/")).await;
-    let tag = h[header::ETAG].to_str().unwrap().to_string();
-    std::fs::write(&index, "<!doctype html>two").unwrap();
-    std::fs::File::options().write(true).open(&index).unwrap().set_modified(date).unwrap();
-    for path in ["/", "/runs/run_1a01"] {
-        let (s, h, b) = send(&app, with_tag(path, &tag)).await;
-        assert_eq!((s, b.as_slice()), (StatusCode::OK, b"<!doctype html>two".as_slice()), "{path}");
-        assert_ne!(h[header::ETAG].to_str().unwrap(), tag, "{path}");
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// `ServeDir` ignores `If-Range`: a range asked for with one is answered whole, never spliced from a file that changed.
-#[tokio::test]
-async fn web_dir_answers_a_conditional_range_whole() {
-    let dir = TestDir::new("web-range");
-    std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
-    std::fs::write(dir.join("data.txt"), "0123456789").unwrap();
-    let app = Server::new(
-        Arc::new(MockStore::new()),
-        Options { web: WebSource::Dir(dir.to_path_buf()), ..Options::default() },
-    )
-    .router();
-    let range = |if_range: Option<&str>| {
-        let mut req = Request::builder().uri("/data.txt").header(header::RANGE, "bytes=2-3");
-        if let Some(v) = if_range {
-            req = req.header(header::IF_RANGE, v);
-        }
-        req.body(Body::empty()).unwrap()
-    };
-    let (s, _, b) = send(&app, range(None)).await;
-    assert_eq!((s, b.as_slice()), (StatusCode::PARTIAL_CONTENT, b"23".as_slice()));
-    let (s, _, b) = send(&app, range(Some("Wed, 21 Oct 2015 07:28:00 GMT"))).await;
-    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"0123456789".as_slice()));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

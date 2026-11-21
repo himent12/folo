@@ -92,6 +92,7 @@ describe('Resource startFrom', () => {
     flushSync();
     const stopB = root(() => (b = new Resource(own.fetcher, { startFrom: () => a })));
     flushSync();
+    expect(own.calls).toHaveLength(0); // it waits on the read that is out
     lead.calls[0]!.reject(new Error('the shell read failed'));
     await settle();
     expect((a.error as Error).message).toBe('the shell read failed');
@@ -118,6 +119,24 @@ describe('Resource startFrom', () => {
     await settle();
     expect(own.calls).toHaveLength(0);
     stopA();
+  });
+
+  it('stops lending a read once it is gone, while the read it waited on is still out', async () => {
+    const lead = reads<number>();
+    const own = reads<number>();
+    let a!: Resource<number>;
+    let b!: Resource<number>;
+    const stopA = root(() => (a = new Resource(lead.fetcher)));
+    flushSync();
+    const stopB = root(() => (b = new Resource(reads<number>().fetcher, { startFrom: () => a })));
+    flushSync();
+    stopB();
+    await settle();
+    const stopC = root(() => void new Resource(own.fetcher, { startFrom: () => b }));
+    flushSync();
+    expect(own.calls).toHaveLength(1); // B let go at once, without waiting for A's read
+    stopA();
+    stopC();
   });
 
   it('stops waiting on a stalled read at its first poll, and a late answer changes nothing', async () => {
@@ -152,6 +171,14 @@ describe('Resource startFrom', () => {
     flushSync();
     lead.calls[0]!.resolve(1);
     await settle();
+    const whileFresh = reads<number>();
+    let fresh!: Resource<number>;
+    const stopFresh = root(() => (fresh = new Resource(whileFresh.fetcher, { startFrom: () => a })));
+    flushSync();
+    expect(whileFresh.calls).toHaveLength(0); // the same answer, fresh and whole: taken as it is
+    expect(fresh.data).toBe(1);
+    stopFresh();
+
     void a.refresh();
     lead.calls[1]!.reject(new Error('offline'));
     await settle();

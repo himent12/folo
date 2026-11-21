@@ -21,8 +21,8 @@
 //! - [`throughput`]: the measured throughput table and run-time estimates; `probe`: `POST /api/system/benchmark`.
 //! - `index`: dataset indexes and thumbnails on disk; `stats`: dataset statistics; `models`: the real store's models;
 //!   `uploads`: upload sessions; `engine`: devices, GPU info, engine error mapping and the predictor cache.
-//! - [`error`]: the error envelope and the extractors that use it; [`web`]: the embedded Studio; `web_dir`: Studio
-//!   from a folder; [`cli`]: the `folo train` command of a run; [`system`]: host CPU and memory.
+//! - [`error`]: the error envelope and the extractors that use it; [`web`]: the embedded Studio; [`cli`]: the
+//!   `folo train` command of a run; [`system`]: host CPU and memory.
 //! - `raster`: the rasteriser of mock images; `util`: small helpers.
 //!
 //! `crates/folo-server/README.md` maps the crate; `docs/ARCHITECTURE.md` shows how it fits into FOLO.
@@ -48,7 +48,6 @@ pub mod throughput;
 mod uploads;
 mod util;
 pub mod web;
-mod web_dir;
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -65,6 +64,7 @@ use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
@@ -330,6 +330,44 @@ async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Res
     next.run(req).await
 }
 
+/// The web app on disk (`--web-dir`) is cached as the embedded one is ([`web::cache_control`]), by what was served:
+/// - the SPA fallback (a path that is no file, or one the folder could not read) is always `no-cache` ([`no_cache`]);
+/// - a `200` or `206` from `ServeDir` itself gets the path's policy when the path (its leading `/`s trimmed) is plain:
+///   only ASCII letters, digits, `.`, `_`, `-` and `/`, no empty, `.` or `..` segment (so no trailing `/`, which
+///   `ServeDir` answers with a folder's `index.html`), and no segment ending in `.`. Then the file served is the one
+///   the path names, also on a case-insensitive or Windows volume (no percent-encoding, `\`, `:` or `~` alias). The
+///   name must also be Vite's hashed form ([`web::hashed_name`]) and the folder's current `index.html` a Vite page
+///   ([`web::dir_is_vite_build`], read only for such a name whose file was found). Any other `200` or `206` is
+///   `no-cache`;
+/// - every other answer (a redirect to a folder's `/`, an error) is sent as `ServeDir` makes it, without
+///   `Cache-Control`.
+///
+/// `If-Modified-Since` is dropped: `ServeDir` compares dates only, so a date from another answer (the fallback's,
+/// cached under an asset's name before that asset existed; a newer `index.html` before a rollback) would get a `304`
+/// for a different file. Other conditions and ranges are answered as `ServeDir` does.
+async fn web_dir_cache(State(dir): State<Arc<PathBuf>>, mut req: Request, next: Next) -> Response {
+    req.headers_mut().remove(header::IF_MODIFIED_SINCE);
+    let path = req.uri().path().trim_start_matches('/').to_string();
+    let plain = path.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
+        && path.split('/').all(|s| !s.is_empty() && s != ".." && !s.ends_with('.'));
+    let mut res = next.run(req).await;
+    if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT)
+        && !res.headers().contains_key(header::CACHE_CONTROL)
+    {
+        let keep = plain && web::hashed_name(&path) && web::dir_is_vite_build(&dir).await;
+        let cache = if keep { web::cache_control(&path) } else { "no-cache" };
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    }
+    res
+}
+
+/// The disk app's SPA fallback (`index.html` for any path that is no file): a browser may store it, and revalidates it
+/// before every use.
+async fn no_cache(mut res: Response) -> Response {
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    res
+}
+
 async fn web_not_built() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -377,7 +415,13 @@ impl Server {
         };
         let mut router = Router::new().nest("/api", api).with_state(state);
         router = match (opts.web, embedded) {
-            (WebSource::Dir(dir), _) if web_dir_ready(&dir) => router.fallback_service(web_dir::router(&dir)),
+            (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
+                let shell = axum::routing::any_service(ServeFile::new(dir.join("index.html")))
+                    .layer(axum::middleware::map_response(no_cache));
+                let spa = ServeDir::new(&dir).fallback(shell);
+                let cached = axum::middleware::from_fn_with_state(Arc::new(dir.clone()), web_dir_cache);
+                router.fallback_service(Router::new().fallback_service(spa).layer(cached))
+            }
             (_, Some(files)) => {
                 router.fallback(move |method: Method, uri: Uri, headers: HeaderMap| async move {
                     web::respond(files, &method, &uri, &headers)

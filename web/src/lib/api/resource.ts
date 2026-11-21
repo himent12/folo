@@ -16,10 +16,29 @@
 
 import { effect, signal, untrack } from 'fw';
 import { hub } from './index';
-import { copy, pollTogether, reuse, together } from './share';
+import { abortError, copy, pollTogether, reuse, together } from './share';
 
 /** How old an answer a Resource may start from (`startFrom`): one poll of the list and the meters that use it. */
 export const START_FRESH = 2000;
+
+/** `read`, given up at once when `signal` aborts: what stays on `read` then holds neither the caller nor its data. */
+function untilAborted<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let slot: { ok: (v: T) => void; no: (e: unknown) => void } | null = {
+      ok: (v) => (signal.removeEventListener('abort', left), resolve(v)),
+      no: (e) => (signal.removeEventListener('abort', left), reject(e)),
+    };
+    const left = () => {
+      slot = null;
+      reject(abortError());
+    };
+    signal.addEventListener('abort', left, { once: true });
+    read.then(
+      (v) => slot?.ok(v),
+      (e) => slot?.no(e),
+    );
+  });
+}
 
 export interface ResourceOptions<T = unknown> {
   /** Refetch quietly every `poll` ms while mounted (keeps showing the previous data). */
@@ -193,7 +212,7 @@ export class Resource<T> {
   async #follow(read: Promise<T>, ctrl: AbortController, ask: () => Promise<T>): Promise<T> {
     this.#following = ctrl;
     try {
-      return copy(await read);
+      return copy(await untilAborted(read, ctrl.signal));
     } catch (e) {
       if (ctrl.signal.aborted) throw e;
     } finally {

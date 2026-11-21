@@ -97,7 +97,7 @@ export function together<T>(fn: () => T): { value: T; key: string } {
   }
 }
 
-const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
+export const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
 
 function join<T>(entry: Shared, signal: AbortSignal | undefined): Promise<T> {
   const first = entry.callers++ === 0;
