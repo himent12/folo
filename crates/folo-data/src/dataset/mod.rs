@@ -384,14 +384,15 @@ pub(crate) enum Source {
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     let source = locate(path, format)?;
     match &source {
-        Source::Yaml(yaml) => crate::unfinished::check(yaml.parent().unwrap_or(Path::new(".")))?,
+        Source::Yaml(yaml) => crate::unfinished::check(crate::paths::parent_dir(yaml))?,
         Source::YoloDir(root) => crate::unfinished::check(root)?,
         Source::Coco { root, jsons } => {
             crate::unfinished::check(root)?;
             // By plain path, names not resolved: a writer starts in an empty folder, so all below a marked folder is
             // its unfinished output (`annotations/x.json` and `ANNOTATIONS/x.json` alike). The folder above is
             // `dir/..`, which the file system resolves (`partial/../x.json` is beside `partial`, not in it).
-            for dir in jsons.iter().filter_map(|(_, json)| json.parent()) {
+            for (_, json) in jsons {
+                let dir = crate::paths::parent_dir(json);
                 crate::unfinished::check(dir)?;
                 crate::unfinished::check(&dir.join(".."))?;
             }
@@ -412,9 +413,9 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
         return match (format, ext.as_deref()) {
             (Format::Auto | Format::Yolo, Some("yaml" | "yml")) => Ok(Source::Yaml(path.to_path_buf())),
             (Format::Auto | Format::Coco, Some("json")) => {
-                let parent = path.parent().unwrap_or(Path::new("."));
+                let parent = crate::paths::parent_dir(path);
                 let root =
-                    if parent.ends_with("annotations") { parent.parent().unwrap_or(parent) } else { parent };
+                    if parent.ends_with("annotations") { crate::paths::parent_dir(parent) } else { parent };
                 Ok(Source::Coco {
                     root: root.to_path_buf(),
                     jsons: vec![(coco::guess_split(path), path.to_path_buf())],
