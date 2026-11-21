@@ -574,7 +574,9 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     hub.api = api = new MockApi('normal', 0);
     const real = api.estimateRun.bind(api);
     let refuse = true;
+    let down = false;
     vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
+      if (down) throw new TypeError('Failed to fetch');
       if (b.amp && refuse) throw new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores');
       return real(b);
     });
@@ -594,10 +596,21 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     await until(() => target.querySelector('#amp-error'), 'the refusal again');
     refuse = false;
     const seed = target.querySelector<HTMLInputElement>('input#seed')!;
-    seed.value = '5';
-    seed.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
+    const reask = (v: string) => {
+      seed.value = v;
+      seed.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    reask('5');
     await until(() => !target.querySelector('#amp-error'), 'the refusal answered');
+    expect(target.querySelector('#start-why')).toBeNull();
+    // A failed connection says nothing about mixed precision, so it does not keep an old refusal holding Start.
+    refuse = true;
+    reask('6');
+    await until(() => target.querySelector('#amp-error'), 'refused once more');
+    down = true;
+    reask('7');
+    await until(() => !target.querySelector('#amp-error'), 'the refusal let go');
     expect(target.querySelector('#start-why')).toBeNull();
   });
 

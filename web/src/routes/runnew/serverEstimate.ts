@@ -10,7 +10,7 @@ import { withoutInexactSeed } from '$lib/seed';
  * asked once per keystroke); the last answer stays up meanwhile. Its errors are the form's own (a missing device,
  * weights of another size), already said at their fields: the reference figures stand in. `possible` says whether
  * these settings can be asked about at all. The one error no field has said yet is mixed precision on a device the
- * capabilities do not describe (a second GPU, a restarted server): `ampRefusal` holds it until an estimate is answered.
+ * capabilities do not describe (a second GPU, a restarted server): `ampRefusal` holds it until the next estimate ends any other way.
  */
 export function serverEstimate(
   config: ReadSignal<TrainConfig>,
@@ -59,9 +59,10 @@ export function serverEstimate(
             if (ctrl.signal.aborted || seq !== estSeq) return;
             served.set(null);
             estimating.set(false);
-            // A cloud run's mixed precision is the worker's to check, so this is never about it.
-            if (err instanceof ApiError && err.code === 'not_supported' && body.amp && !body.compute)
-              ampRefusal.set({ device: body.device, message: err.message });
+            // A cloud run's mixed precision is the worker's to check, so this is never about it. Any other failure (the
+            // server restarting) says nothing about mixed precision: Start asks the server itself.
+            const refused = err instanceof ApiError && err.code === 'not_supported' && body.amp && !body.compute;
+            ampRefusal.set(refused ? { device: body.device, message: err.message } : null);
           },
         );
       },
