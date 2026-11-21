@@ -121,6 +121,12 @@ export class MockTrainingApi extends MockServer {
     if (!c.amp) return;
     // `amp-refused`: the server was restarted without tensor cores since the page asked.
     if (this.scenario === 'amp-refused') this.state.ampRefused = true;
+    this.#refuseAmp(c);
+  }
+
+  /** The check of `#checkAmp` without its simulated restart: an estimate changes nothing on the server. */
+  #refuseAmp(c: TrainConfig) {
+    if (!c.amp) return;
     const caps = this.capabilities();
     if (c.device !== 'cpu' && caps.amp.available) return;
     const reason =
@@ -202,6 +208,8 @@ export class MockTrainingApi extends MockServer {
       const gpu = /^gpu:(\d+)$/.exec(body.device);
       if (gpu && !this.gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(body.device);
       const c = this.#withWeights(body);
+      // A cloud run's mixed precision is the worker's to check (docs/CLOUD.md).
+      if (!c.compute) this.#refuseAmp(c);
       const cloud = this.#compute(c, false);
       const est = { ...this.state.throughput.estimate(c, ds.splits.train, ds.splits.val, cloud?.offer.gpu), cli: this.#cli(c).cli };
       const price = cloud?.offer.price_per_hour;

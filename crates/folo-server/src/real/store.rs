@@ -84,8 +84,7 @@ impl Store for RealStore {
         // POST /api/runs' own checks, except the name's length: Studio's New run asks with the name as it is being
         // typed, says a long one at its field, and keeps showing the estimate meanwhile.
         check_trainable(&idx)?;
-        let (_, target) = self.run_settings(&mut config)?;
-        let weights = config.weights.as_ref().map(|w| self.model(w)).transpose()?;
+        let (weights, target) = self.run_settings(&mut config)?;
         let check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
         let (device, cloud) = match target {

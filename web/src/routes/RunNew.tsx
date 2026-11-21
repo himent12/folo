@@ -475,7 +475,14 @@ function RunNewForm() {
 
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
   const estKey = computed(() => JSON.stringify(config.get()));
-  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute));
+  const { served, estimating } = serverEstimate(
+    config,
+    estKey,
+    () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute),
+    (message) => {
+      if (!onCloud.get()) ampRefused.set({ device: device.get(), message });
+    },
+  );
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so

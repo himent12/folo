@@ -306,6 +306,10 @@ impl Trainer {
             let c = e.contract();
             (r.ema_decay, r.ema_tau) = (Some(c.decay), Some(c.tau));
         }
+        // The same for MuSGD: a resumed run trains with its checkpoint's `folo.optim`.
+        if let Some(m) = &mut r.musgd {
+            *m = config::musgd_in_use(&self.opt.contract(), m.cls_lr);
+        }
         r
     }
 

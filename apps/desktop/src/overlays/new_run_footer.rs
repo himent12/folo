@@ -154,7 +154,9 @@ impl FoloApp {
         } else {
             match &self.nr_estimate {
                 Some((_, crate::store::Load::Ready(e))) => Est::Server(Box::new(e.clone()), false),
-                Some((_, crate::store::Load::Failed(e))) if e.code == "not_supported" => Est::Local,
+                Some((_, crate::store::Load::Failed(e))) if no_estimator(&e.code, amp && cloud.is_none()) => {
+                    Est::Local
+                }
                 Some((_, crate::store::Load::Failed(e))) => Est::Rejected(e.message.clone()),
                 _ => match &self.nr_estimate_last {
                     Some(e) if same_kind(e) => Est::Server(Box::new(e.clone()), true),
@@ -499,9 +501,22 @@ impl FoloApp {
     }
 }
 
+/// Whether an estimate's error means the server has no estimator, so the local figures stand in. With mixed
+/// precision on this machine, `not_supported` is the run's own refusal (its capabilities may be out of date).
+fn no_estimator(code: &str, local_amp: bool) -> bool {
+    code == "not_supported" && !local_amp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_amp_refusal_is_said_and_not_taken_for_a_missing_estimator() {
+        assert!(no_estimator("not_supported", false));
+        assert!(!no_estimator("not_supported", true), "this machine cannot train these settings");
+        assert!(!no_estimator("invalid_config", false));
+    }
+
     #[test]
     fn rough_durations() {
         assert_eq!(super::rough_duration(576.), "10 min");

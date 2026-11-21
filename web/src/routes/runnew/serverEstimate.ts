@@ -1,6 +1,6 @@
 // The server's estimate of a run (POST /api/runs/estimate), asked again 300 ms after the settings stop changing.
 import { effect, signal, untrack, type ReadSignal } from 'fw';
-import { hub } from '$lib/api/index';
+import { ApiError, hub } from '$lib/api/index';
 import type { RunEstimate, TrainConfig } from '$lib/api/types';
 import { withoutInexactSeed } from '$lib/seed';
 
@@ -9,9 +9,15 @@ import { withoutInexactSeed } from '$lib/seed';
  * 300 ms after the settings stop changing, whether or not the last one was answered (a slow or failing server is not
  * asked once per keystroke); the last answer stays up meanwhile. Its errors are the form's own (a missing device,
  * weights of another size), already said at their fields: the reference figures stand in. `possible` says whether
- * these settings can be asked about at all.
+ * these settings can be asked about at all. The one error no field has said yet is mixed precision on a device the
+ * capabilities do not describe (a second GPU, a restarted server): `onAmpRefused` gets the server's message.
  */
-export function serverEstimate(config: ReadSignal<TrainConfig>, estKey: ReadSignal<string>, possible: () => boolean) {
+export function serverEstimate(
+  config: ReadSignal<TrainConfig>,
+  estKey: ReadSignal<string>,
+  possible: () => boolean,
+  onAmpRefused?: (message: string) => void,
+) {
   const served = signal<{ key: string; est: RunEstimate } | null>(null);
   /** Whether the latest request is still out: set by the run of the effect that owns it, cleared by every other. */
   const estimating = signal(false);
@@ -48,10 +54,11 @@ export function serverEstimate(config: ReadSignal<TrainConfig>, estKey: ReadSign
             served.set({ key, est: e });
             estimating.set(false);
           },
-          () => {
+          (err) => {
             if (ctrl.signal.aborted || seq !== estSeq) return;
             served.set(null);
             estimating.set(false);
+            if (err instanceof ApiError && err.code === 'not_supported' && body.amp) onAmpRefused?.(err.message);
           },
         );
       },

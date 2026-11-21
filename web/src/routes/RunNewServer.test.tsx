@@ -570,6 +570,25 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     expect(target.querySelector('#start-why')).toBeNull();
   });
 
+  it('says an estimate refused for mixed precision at the field, before Start', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const real = api.estimateRun.bind(api);
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
+      if (b.amp) throw new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores');
+      return real(b);
+    });
+    await open();
+    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
+    sw.click();
+    flushSync();
+    await until(() => target.querySelector('#amp-error'), 'the refusal at the field');
+    expect(target.querySelector('#start-why')?.textContent).toMatch(/^Mixed precision: /);
+    sw.click();
+    flushSync();
+    expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+
   it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
     hub.api = api = new MockApi('normal', 0);
     vi.spyOn(api, 'createRun').mockRejectedValue(new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores'));

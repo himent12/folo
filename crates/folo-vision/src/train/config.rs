@@ -2,7 +2,7 @@
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
-use folo_nn::optim::{AUTO_RULE, OptimKind, auto_optimizer_rule, effective_weight_decay};
+use folo_nn::optim::{AUTO_RULE, OptimContract, OptimKind, auto_optimizer_rule, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -547,6 +547,21 @@ impl ResolvedOptim {
         r.musgd = None;
         Some(r)
     }
+}
+
+/// MuSGD's step weights and class-head LR factor as an optimizer holds them. `recipe` is the factor the run was
+/// configured with, kept when the groups hold exactly it (a ratio of two LRs can land one ulp off).
+pub(super) fn musgd_in_use(c: &OptimContract, recipe: f64) -> folo_api::ResolvedMusgd {
+    let w = c.musgd.unwrap_or_default();
+    let lrs = c.groups.iter().find_map(|g| {
+        let plain = g.name.strip_suffix(".cls")?;
+        Some((c.groups.iter().find(|b| b.name == plain)?.lr, g.lr))
+    });
+    let cls_lr = match lrs {
+        Some((base, cls)) if base > 0.0 && base * recipe != cls => cls / base,
+        _ => recipe,
+    };
+    folo_api::ResolvedMusgd { muon: w.muon, sgd: w.sgd, cls_lr }
 }
 
 /// Parse a device string: `cpu`, `gpu` (= `gpu:0`), `gpu:<n>`, or `auto` (the first GPU with a registered
