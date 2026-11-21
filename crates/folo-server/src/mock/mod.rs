@@ -302,6 +302,23 @@ impl MockStore {
         }
         Ok(())
     }
+
+    /// As the real store: `amp` is refused up front where `capabilities.amp` says it is unavailable (a run and its
+    /// estimate). A cloud run's worker checks its own.
+    fn check_amp(&self, c: &TrainConfig) -> Result<()> {
+        if c.compute.is_some() || !c.amp || (c.device != "cpu" && self.tensor_cores == MockTensorCores::On) {
+            return Ok(());
+        }
+        let why = if c.device == "cpu" {
+            "the run is on the CPU".to_string()
+        } else {
+            format!(
+                "gpu:0 has tensor cores {}",
+                self.tensor_cores.capabilities().tensor_cores.reason.unwrap_or_default()
+            )
+        };
+        Err(crate::engine::engine_error(folo_vision::train::amp_not_supported(&why)))
+    }
 }
 
 fn quality_of(model: &Model) -> f32 {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
-import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, emaSetting, lrSetting, momentumSetting, optimizerSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
+import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, emaSetting, lrSetting, momentumSetting, optimizerSetting, resolvedRows, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
 
 const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30, augment: { close_mosaic: 10 } } as TrainConfig;
 
@@ -110,5 +110,25 @@ describe('the EMA window (PR #399, Run.resolved.ema_decay)', () => {
     const { ema_decay: _, ema_tau: __, ...older } = r;
     expect(emaSetting(older)).toBeNull();
     expect(emaSetting({ ...r, ema_decay: null as unknown as number })).toBeNull();
+  });
+});
+
+describe('MuSGD step weights (Run.resolved.musgd)', () => {
+  const row = (r: ResolvedTrain) => resolvedRows(r).find(([label]) => label === 'MuSGD steps')?.[1].value;
+
+  it('resolves them as the trainer does: 0.5 / 0.5 for auto from scratch, 0.2 / 1 for a fine-tune or MuSGD by name', () => {
+    expect(resolveTrain(config, 1000, 3, 16).musgd).toEqual({ muon: 0.5, sgd: 0.5, cls_lr: 3 });
+    const tune = { ...config, weights: 'folo-s.folo' } as TrainConfig;
+    expect(resolveTrain(tune, 1000, 3, 16).musgd).toEqual({ muon: 0.2, sgd: 1, cls_lr: 3 });
+    const named = { ...config, optimizer: 'musgd' } as TrainConfig;
+    expect(resolveTrain(named, 1000, 3, 16).musgd).toEqual({ muon: 0.2, sgd: 1, cls_lr: 3 });
+    expect(resolveTrain({ ...config, optimizer: 'sgd' } as TrainConfig, 1000, 3, 16).musgd).toBeUndefined();
+  });
+
+  it('adds a row only when the run reports them', () => {
+    const r = resolveTrain(config, 1000, 3, 16);
+    expect(row(r)).toBe('muon 0.5 · sgd 0.5');
+    const { musgd: _, ...older } = r;
+    expect(row(older)).toBeUndefined();
   });
 });

@@ -570,6 +570,50 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     expect(target.querySelector('#start-why')).toBeNull();
   });
 
+  it('says an estimate refused for mixed precision at the field, before Start', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const real = api.estimateRun.bind(api);
+    let refuse = true;
+    let down = false;
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
+      if (down) throw new TypeError('Failed to fetch');
+      if (b.amp && refuse) throw new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores');
+      return real(b);
+    });
+    await open();
+    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
+    sw.click();
+    flushSync();
+    await until(() => target.querySelector('#amp-error'), 'the refusal at the field');
+    expect(target.querySelector('#start-why')?.textContent).toMatch(/^Mixed precision: /);
+    sw.click();
+    flushSync();
+    expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+    // On again, and the server can now: the next estimate's answer lets Start go.
+    sw.click();
+    flushSync();
+    await until(() => target.querySelector('#amp-error'), 'the refusal again');
+    refuse = false;
+    const seed = target.querySelector<HTMLInputElement>('input#seed')!;
+    const reask = (v: string) => {
+      seed.value = v;
+      seed.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    reask('5');
+    await until(() => !target.querySelector('#amp-error'), 'the refusal answered');
+    expect(target.querySelector('#start-why')).toBeNull();
+    // A failed connection says nothing about mixed precision, so it does not keep an old refusal holding Start.
+    refuse = true;
+    reask('6');
+    await until(() => target.querySelector('#amp-error'), 'refused once more');
+    down = true;
+    reask('7');
+    await until(() => !target.querySelector('#amp-error'), 'the refusal let go');
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+
   it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
     hub.api = api = new MockApi('normal', 0);
     vi.spyOn(api, 'createRun').mockRejectedValue(new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores'));

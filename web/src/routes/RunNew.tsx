@@ -400,9 +400,13 @@ function RunNewForm() {
   // the device changes; the capabilities are read again, so the field shows what works now (off, with the remedy).
   // While the switch is still on, Start waits (a field in error gates the form).
   const ampRefused = signal<{ device: string; message: string } | null>(null);
+  // The estimate's same refusal, before Start: only while the switch is on, for this machine, and until one is answered.
+  const ampEstimated = signal<{ device: string; message: string } | null>(null);
   const ampErr = computed(() => {
     const r = ampRefused.get();
-    return r && r.device === device.get() ? r : null;
+    if (r && r.device === device.get()) return r;
+    const e = ampEstimated.get();
+    return e && e.device === device.get() && ampOn.get() && !onCloud.get() ? e : null;
   });
 
   // Start answered `404 device_not_found` (`501 not_implemented` from servers before it), or the device list lacks the
@@ -475,7 +479,7 @@ function RunNewForm() {
 
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
   const estKey = computed(() => JSON.stringify(config.get()));
-  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute));
+  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute), ampEstimated);
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so

@@ -172,6 +172,27 @@ fn resumes_keep_their_close_mosaic() {
     assert!(serde_json::from_value::<TrainConfig>(new).is_ok());
 }
 
+/// `resolved.musgd` says what the optimizer holds, which on a resume is the checkpoint's contract, not the recipe.
+#[test]
+fn resolved_musgd_is_what_the_optimizer_holds() {
+    let contract = |musgd: serde_json::Value, cls: f64| -> folo_nn::optim::OptimContract {
+        serde_json::from_value(serde_json::json!({
+            "type": "musgd", "step": 0, "musgd": musgd,
+            "groups": [
+                { "name": "decay", "params": [], "lr": 0.01, "weight_decay": 0.0005 },
+                { "name": "decay.cls", "params": [], "lr": cls, "weight_decay": 0.0005 },
+            ],
+        }))
+        .unwrap()
+    };
+    let m = config::musgd_in_use(&contract(serde_json::json!({ "muon": 0.3, "sgd": 0.7 }), 0.04), 3.0);
+    assert_eq!((m.muon, m.sgd), (0.3, 0.7));
+    assert!((m.cls_lr - 4.0).abs() < 1e-12, "{}", m.cls_lr);
+    // No `musgd` in the contract means the default weights; the recipe's factor stays exact.
+    let m = config::musgd_in_use(&contract(serde_json::Value::Null, 0.01 * 3.0), 3.0);
+    assert_eq!((m.muon, m.sgd, m.cls_lr), (0.2, 1.0, 3.0));
+}
+
 /// A lost GPU device is recognised wherever it surfaces (tensor work, a layer, the batch feeder) and the
 /// message names the checkpoint that was actually written; other errors are left alone.
 #[test]

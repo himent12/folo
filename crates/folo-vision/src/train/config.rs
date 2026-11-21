@@ -2,7 +2,7 @@
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
-use folo_nn::optim::{AUTO_RULE, OptimKind, auto_optimizer_rule, effective_weight_decay};
+use folo_nn::optim::{AUTO_RULE, OptimContract, OptimKind, auto_optimizer_rule, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -491,6 +491,11 @@ impl ResolvedOptim {
             close_mosaic: Some(cfg.augment.close_mosaic_epochs(cfg.epochs)),
             ema_decay: ema.map(|e| e.0),
             ema_tau: ema.map(|e| e.1),
+            musgd: (self.kind == OptimKind::MuSgd).then_some(folo_api::ResolvedMusgd {
+                muon: self.musgd.muon,
+                sgd: self.musgd.sgd,
+                cls_lr: cfg.musgd.cls_lr,
+            }),
         }
     }
 
@@ -538,8 +543,25 @@ impl ResolvedOptim {
         r.weight_decay = f(o, "weight_decay").unwrap_or(r.weight_decay);
         r.warmup_iters = n("warmup_iters").unwrap_or(r.warmup_iters);
         r.close_mosaic = close_mosaic.or(r.close_mosaic);
+        // A file this old does not say which step weights the run trained with.
+        r.musgd = None;
         Some(r)
     }
+}
+
+/// MuSGD's step weights and class-head LR factor as an optimizer holds them. `recipe` is the factor the run was
+/// configured with, kept when the groups hold exactly it (a ratio of two LRs can land one ulp off).
+pub(super) fn musgd_in_use(c: &OptimContract, recipe: f64) -> folo_api::ResolvedMusgd {
+    let w = c.musgd.unwrap_or_default();
+    let lrs = c.groups.iter().find_map(|g| {
+        let plain = g.name.strip_suffix(".cls")?;
+        Some((c.groups.iter().find(|b| b.name == plain)?.lr, g.lr))
+    });
+    let cls_lr = match lrs {
+        Some((base, cls)) if base > 0.0 && base * recipe != cls => cls / base,
+        _ => recipe,
+    };
+    folo_api::ResolvedMusgd { muon: w.muon, sgd: w.sgd, cls_lr }
 }
 
 /// Parse a device string: `cpu`, `gpu` (= `gpu:0`), `gpu:<n>`, or `auto` (the first GPU with a registered
@@ -598,6 +620,33 @@ mod tests {
         }
         assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
         assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
+    }
+
+    /// `Run.resolved` says which MuSGD step weights a run trains with (not the configured `train.musgd`), only for
+    /// MuSGD, and a `config.json` written before the field still loads, without it.
+    #[test]
+    fn resolved_names_the_musgd_step_weights() {
+        let musgd = |muon, sgd| Some(folo_api::ResolvedMusgd { muon, sgd, cls_lr: 3.0 });
+        let cfg = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+        assert_eq!(cfg.resolved_train(2000, 80).musgd, musgd(0.5, 0.5), "auto, from scratch");
+        let tuned = TrainConfig { transfer: true, ..cfg.clone() };
+        assert_eq!(tuned.resolved_train(2000, 80).musgd, musgd(0.2, 1.0), "auto, a fine-tune");
+        let named = TrainConfig { optimizer: OptimizerChoice::Musgd, ..cfg.clone() };
+        assert_eq!(named.resolved_train(2000, 80).musgd, musgd(0.2, 1.0), "asked for by name");
+        let sgd = TrainConfig { optimizer: OptimizerChoice::Sgd, ..cfg.clone() };
+        assert_eq!(sgd.resolved_train(2000, 80).musgd, None);
+        let json = serde_json::to_value(sgd.resolved_train(2000, 80)).unwrap();
+        assert!(json.get("musgd").is_none(), "{json}");
+        // Written before the field: a `resolved` without it, and a file from before `resolved` itself.
+        let mut old = serde_json::to_value(cfg.resolved_train(2000, 80)).unwrap();
+        old.as_object_mut().unwrap().remove("musgd");
+        let file = serde_json::json!({ "resolved": old });
+        assert_eq!(ResolvedOptim::from_run_config(&file).unwrap().musgd, None);
+        let file = serde_json::json!({
+            "optimizer": { "type": "musgd", "lr0": 0.01, "momentum": 0.937, "warmup_bias_lr": 0.1 },
+            "accumulate": 4, "steps_per_epoch": 13, "train": serde_json::to_value(&cfg).unwrap(),
+        });
+        assert_eq!(ResolvedOptim::from_run_config(&file).unwrap().musgd, None);
     }
 
     /// `auto` rule 5 picks MuSGD's step weights: 0.5 / 0.5 from scratch, `musgd.*` (0.2 / 1.0) for a run that starts

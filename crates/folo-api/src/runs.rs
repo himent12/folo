@@ -322,6 +322,23 @@ pub struct ResolvedTrain {
         deserialize_with = "crate::json::exact_opt_f64"
     )]
     pub ema_tau: Option<f64>,
+    /// MuSGD's step weights and class-head LR factor as the run trains with them (`auto` rule 5 trains a run from
+    /// scratch at 0.5 / 0.5, whatever `train.musgd` says). Only for MuSGD; left out by servers older than the field
+    /// and for runs recorded before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musgd: Option<ResolvedMusgd>,
+}
+
+/// [`ResolvedTrain::musgd`] (docs/MODEL.md §8.2).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ResolvedMusgd {
+    /// Weight of the orthogonalised (Muon) update of a conv weight.
+    pub muon: f64,
+    /// Weight of the SGD update of a conv weight.
+    pub sgd: f64,
+    /// LR factor of the head's class branches.
+    pub cls_lr: f64,
 }
 
 /// [`ResolvedTrain::optimizer`].
