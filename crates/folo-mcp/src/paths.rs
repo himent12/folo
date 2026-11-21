@@ -79,10 +79,15 @@ impl PathPolicy {
         let full = if Path::new(pattern).is_absolute() {
             pattern.to_string()
         } else {
+            let raw = self.data_dir.to_string_lossy();
             let base = if cfg!(windows) {
-                folo_api::json::path(&self.data_dir)
+                if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+                    std::borrow::Cow::Owned(format!(r"\\{unc}"))
+                } else {
+                    std::borrow::Cow::Borrowed(raw.strip_prefix(r"\\?\").unwrap_or(&raw))
+                }
             } else {
-                self.data_dir.to_string_lossy().into_owned()
+                raw
             };
             PathBuf::from(glob::Pattern::escape(&base)).join(pattern).to_string_lossy().into_owned()
         };
@@ -196,6 +201,10 @@ mod tests {
     #[test]
     fn relative_glob_escapes_metacharacters_in_data_dir() {
         let root = tmp("glob-meta");
+        // A sibling folder that an unescaped `data [v2]` character class would match.
+        let sibling = root.join("data 2");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("secret.png"), b"s").unwrap();
         for name in ["data [v2]", "data [1"] {
             let dir = root.join(name);
             std::fs::create_dir_all(&dir).unwrap();
@@ -205,7 +214,21 @@ mod tests {
                 let matched = p.expand_glob("*.png").unwrap();
                 assert_eq!(matched.len(), 1, "{name} confine={confine}: {matched:?}");
                 assert_eq!(matched[0].file_name().and_then(|s| s.to_str()), Some("a.png"));
+                assert_eq!(
+                    std::fs::canonicalize(&matched[0]).unwrap(),
+                    std::fs::canonicalize(dir.join("a.png")).unwrap(),
+                    "{name} confine={confine}: {matched:?}"
+                );
             }
         }
+        // Plain data dirs keep native path separators when `--confine` is off (no mixed `/` and `\` on Windows).
+        let plain = root.join("plain");
+        std::fs::create_dir_all(plain.join("sub")).unwrap();
+        let target = plain.join("sub").join("a.png");
+        std::fs::write(&target, b"x").unwrap();
+        let p = PathPolicy { data_dir: plain, confine: false };
+        let matched = p.expand_glob("sub/*.png").unwrap();
+        assert_eq!(matched, vec![target.clone()]);
+        assert_eq!(matched[0].to_string_lossy(), target.to_string_lossy());
     }
 }
