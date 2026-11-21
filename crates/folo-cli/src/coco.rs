@@ -1,10 +1,10 @@
 //! `folo val --coco` / `--save-json`: pycocotools-exact evaluation of a COCO split and COCO results files.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use folo_data::{CocoGroundTruth, CocoImage, FileDataset, Split};
+use folo_data::{CocoGroundTruth, CocoImage, Dataset, FileDataset, Split};
 use folo_vision::Detection;
 use folo_vision::cocoeval::{CocoEval, CocoStats, CocoTruth};
 
@@ -43,119 +43,27 @@ pub struct CocoResult {
     pub missing_images: usize,
 }
 
-/// Category id of each class in `classes`, or `None` for classes declared only in another split of the dataset.
-///
-/// Exact 1:1 matches (`gt.categories` names equal `classes` in order) map every class directly. Otherwise, a split
-/// file is accepted only when `gt.categories` is a non-empty `(id, name)` subset of the COCO dataset's full
-/// categories (`dataset_cats`, matching `classes` 1:1) **and** every annotation in `gt` names a category declared
-/// by `gt.categories`; anything else is refused as `invalid_dataset`.
-pub fn category_ids(
-    gt: &CocoGroundTruth,
-    classes: &[String],
-    dataset_cats: Option<&[(u64, String)]>,
-) -> Result<Vec<Option<u64>>, CliError> {
-    let mismatch = || {
-        CliError::new(
+/// Category id of each class (`classes[i]` must be the name of `categories[i]`, sorted by id).
+pub fn category_ids(gt: &CocoGroundTruth, classes: &[String]) -> Result<Vec<u64>, CliError> {
+    let names: Vec<&str> = gt.categories.iter().map(|c| c.1.as_str()).collect();
+    if names != classes.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Err(CliError::new(
             ExitCode::Runtime,
             "invalid_dataset",
             format!("{}: its categories do not match the dataset's classes", folo_api::json::path(&gt.path)),
-        )
-    };
-    if gt.categories.len() == classes.len()
-        && gt.categories.iter().zip(classes).all(|((_, name), c)| name == c)
-    {
-        return Ok(gt.categories.iter().map(|&(id, _)| Some(id)).collect());
+        ));
     }
-    if gt.categories.is_empty() || gt.categories.len() >= classes.len() {
-        return Err(mismatch());
-    }
-    let Some(ds_cats) = dataset_cats else {
-        return Err(mismatch());
-    };
-    if ds_cats.len() != classes.len() || !ds_cats.iter().zip(classes).all(|((_, name), c)| name == c) {
-        return Err(mismatch());
-    }
-    let mut out = vec![None; classes.len()];
-    let mut declared = HashSet::with_capacity(gt.categories.len());
-    for (id, name) in &gt.categories {
-        let Some(idx) = ds_cats.iter().position(|(did, dname)| did == id && dname == name) else {
-            return Err(mismatch());
-        };
-        out[idx] = Some(*id);
-        declared.insert(*id);
-    }
-    if gt.images.iter().flat_map(|im| &im.annotations).any(|a| !declared.contains(&a.category_id)) {
-        return Err(mismatch());
-    }
-    Ok(out)
-}
-
-/// Union of `(id, name)` categories across every COCO annotation file of `data`, sorted by id (matching
-/// `folo_data::open_splits`), streaming past `images` and `annotations`. Returns `None` if any file cannot be read
-/// or two files assign different names to the same category id.
-fn dataset_categories(data: &str) -> Option<Vec<(u64, String)>> {
-    #[derive(serde::Deserialize)]
-    struct Cat {
-        id: u64,
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct FileCats {
-        #[serde(default)]
-        categories: Vec<Cat>,
-    }
-    let jsons = folo_data::coco_annotation_files(data).ok()?;
-    let mut all: BTreeMap<u64, String> = BTreeMap::new();
-    for (_, path) in jsons {
-        let file = std::fs::File::open(&path).ok()?;
-        let parsed: FileCats =
-            serde_json::from_reader(std::io::BufReader::with_capacity(1 << 20, file)).ok()?;
-        for c in parsed.categories {
-            if let Some(prev) = all.insert(c.id, c.name.clone())
-                && prev != c.name
-            {
-                return None;
-            }
-        }
-    }
-    Some(all.into_iter().collect())
-}
-
-/// Resolve and validate `gt`'s category mapping against `classes` (reading the dataset's full COCO category table
-/// only when `gt.categories` is a proper non-empty subset of `classes`).
-pub fn resolve_categories(
-    data: &str,
-    gt: &CocoGroundTruth,
-    classes: &[String],
-) -> Result<Vec<Option<u64>>, CliError> {
-    if gt.categories.len() == classes.len()
-        && gt.categories.iter().zip(classes).all(|((_, name), c)| name == c)
-    {
-        return category_ids(gt, classes, None);
-    }
-    let ds_cats = if !gt.categories.is_empty() && gt.categories.len() < classes.len() {
-        dataset_categories(data)
-    } else {
-        None
-    };
-    category_ids(gt, classes, ds_cats.as_deref())
-}
-
-/// Category id of a detection's class in this split, or `None` when the class is absent from this split.
-/// Shared by [`evaluate`] and [`write_results`] so `coco.detections` and `--save-json` always apply the same filter.
-fn category_of(cats: &[Option<u64>], class: u32) -> Option<u64> {
-    cats.get(class as usize).copied().flatten()
+    Ok(gt.categories.iter().map(|c| c.0).collect())
 }
 
 /// pycocotools-exact evaluation: every GT image of the split (in id order), crowd regions, annotation areas.
 pub fn evaluate(
     gt: &CocoGroundTruth,
-    cats: &[Option<u64>],
     part: &FileDataset,
     detections: &[(usize, Vec<Detection>)],
-) -> CocoResult {
-    let class_of: HashMap<u64, u32> =
-        cats.iter().enumerate().filter_map(|(i, c)| c.map(|id| (id, i as u32))).collect();
+) -> Result<CocoResult, CliError> {
+    let cats = category_ids(gt, part.class_names())?;
+    let class_of: HashMap<u64, u32> = cats.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
     let images = by_path(gt, part);
     let mut dets_of: HashMap<u64, &[Detection]> = HashMap::new();
     for (index, d) in detections {
@@ -182,11 +90,10 @@ pub fn evaluate(
             missing += 1;
             &[]
         });
-        let dets: Vec<Detection> =
-            dets.iter().filter(|d| category_of(cats, d.class).is_some()).copied().collect();
+        let dets: Vec<Detection> = dets.iter().filter(|d| (d.class as usize) < cats.len()).copied().collect();
         ev.add_image(im.id, &dets, &truths);
     }
-    CocoResult { stats: ev.compute(), missing_images: missing }
+    Ok(CocoResult { stats: ev.compute(), missing_images: missing })
 }
 
 /// Creates the folder of a `--save-json` file before the evaluation (as `predict --save` and `train --project` do)
@@ -218,10 +125,10 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
 pub fn write_results(
     path: &Path,
     gt: &CocoGroundTruth,
-    cats: &[Option<u64>],
     part: &FileDataset,
     detections: &[(usize, Vec<Detection>)],
 ) -> Result<usize, CliError> {
+    let cats = category_ids(gt, part.class_names())?;
     let images = by_path(gt, part);
     let io = |e: std::io::Error| {
         CliError::new(
@@ -240,7 +147,7 @@ pub fn write_results(
             continue;
         }
         for d in dets {
-            let Some(cat) = category_of(cats, d.class) else { continue };
+            let Some(&cat) = cats.get(d.class as usize) else { continue };
             let (x1, y1) = (d.bbox.x1 as f64, d.bbox.y1 as f64);
             let (w, h) = (d.bbox.x2 as f64 - x1, d.bbox.y2 as f64 - y1);
             let sep = if n == 0 { "" } else { "," };
@@ -321,110 +228,5 @@ mod tests {
         assert_eq!(e.code, "io_error");
         let e = super::prepare_results(&new.join("dets.json")).unwrap_err();
         assert!(e.code == "io_error" && e.message.starts_with("cannot write "), "{}", e.message);
-    }
-
-    #[test]
-    fn subset_categories_map_to_dataset_classes_and_reject_mismatches() {
-        let classes: Vec<String> = ["circle", "square", "triangle"].into_iter().map(String::from).collect();
-        let ds_cats: Vec<(u64, String)> =
-            vec![(7, "circle".into()), (19, "square".into()), (42, "triangle".into())];
-        let make = |cats: &[(u64, &str)], ann_cats: &[u64]| folo_data::CocoGroundTruth {
-            path: std::path::PathBuf::from("instances_val.json"),
-            images: vec![folo_data::CocoImage {
-                id: 1,
-                file_name: "a.png".into(),
-                path: Some(std::path::PathBuf::from("a.png")),
-                annotations: ann_cats
-                    .iter()
-                    .map(|&category_id| folo_data::CocoAnnotation {
-                        category_id,
-                        bbox: [1.0, 2.0, 10.0, 10.0],
-                        area: 100.0,
-                        iscrowd: false,
-                    })
-                    .collect(),
-            }],
-            categories: cats.iter().map(|&(id, n)| (id, n.to_string())).collect(),
-        };
-        // Exact 1:1 match.
-        assert_eq!(
-            super::category_ids(
-                &make(&[(7, "circle"), (19, "square"), (42, "triangle")], &[7, 19]),
-                &classes,
-                None
-            )
-            .unwrap(),
-            vec![Some(7), Some(19), Some(42)]
-        );
-        // Valid non-empty (id, name) subset with all annotations declared.
-        let cats =
-            super::category_ids(&make(&[(7, "circle"), (42, "triangle")], &[42]), &classes, Some(&ds_cats))
-                .unwrap();
-        assert_eq!(cats, vec![Some(7), None, Some(42)]);
-
-        // Refused: empty categories, missing dataset table, wrong id for name, unknown category, undeclared annotation.
-        for (bad, ds) in [
-            (make(&[], &[]), Some(ds_cats.as_slice())),
-            (make(&[(19, "square")], &[19]), None),
-            (make(&[(99, "square")], &[99]), Some(ds_cats.as_slice())),
-            (make(&[(7, "circle"), (20, "unknown")], &[7]), Some(ds_cats.as_slice())),
-            (make(&[(19, "square")], &[7, 19]), Some(ds_cats.as_slice())),
-            (make(&[(42, "triangle"), (19, "square"), (7, "circle")], &[7]), Some(ds_cats.as_slice())),
-        ] {
-            assert_eq!(super::category_ids(&bad, &classes, ds).unwrap_err().code, "invalid_dataset");
-        }
-
-        // Shared filter: detections of classes omitted from a subset split are dropped from both evaluate() and
-        // write_results(), so coco.detections equals the number of rows written to --save-json.
-        let dir = TestDir::new("coco-subset-filter");
-        let img = dir.join("a.png");
-        let gt = folo_data::CocoGroundTruth {
-            path: dir.join("instances_val.json"),
-            images: vec![folo_data::CocoImage {
-                id: 1,
-                file_name: "a.png".into(),
-                path: Some(img.clone()),
-                annotations: vec![folo_data::CocoAnnotation {
-                    category_id: 19,
-                    bbox: [10.0, 10.0, 20.0, 20.0],
-                    area: 400.0,
-                    iscrowd: false,
-                }],
-            }],
-            categories: vec![(19, "square".into())],
-        };
-        let ds_two = vec![(7, "circle".into()), (19, "square".into())];
-        let two_classes = vec!["circle".into(), "square".into()];
-        let cats = super::category_ids(&gt, &two_classes, Some(&ds_two)).unwrap();
-        assert_eq!(cats, vec![None, Some(19)]);
-        let part = folo_data::FileDataset::new(
-            folo_data::Split::Val,
-            two_classes,
-            vec![folo_data::ImageEntry { image: img, label: None, size: Some((64, 64)), boxes: Vec::new() }],
-        );
-        let dets = vec![(
-            0usize,
-            vec![
-                folo_vision::Detection {
-                    bbox: folo_vision::Xyxy { x1: 2.0, y1: 2.0, x2: 8.0, y2: 8.0 },
-                    score: 0.9,
-                    class: 0, // circle: absent from val split
-                },
-                folo_vision::Detection {
-                    bbox: folo_vision::Xyxy { x1: 10.0, y1: 10.0, x2: 30.0, y2: 30.0 },
-                    score: 0.8,
-                    class: 1, // square: present in val split (category_id 19)
-                },
-            ],
-        )];
-        let res = super::evaluate(&gt, &cats, &part, &dets);
-        let out_json = dir.join("dets.json");
-        let written = super::write_results(&out_json, &gt, &cats, &part, &dets).unwrap();
-        assert_eq!(res.stats.detections, 1);
-        assert_eq!(written, 1);
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(&out_json).unwrap()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["category_id"].as_u64(), Some(19));
     }
 }
