@@ -88,7 +88,7 @@ pub fn resize_plan(src_w: u32, src_h: u32, width: u32, height: u32) -> ResizePla
 
 /// Resizes `src` to `width x height` with bilinear filtering.
 pub fn resize(src: &Image, width: u32, height: u32) -> Image {
-    let mut dst = vec![0u8; width as usize * height as usize * 3];
+    let mut dst = crate::buffers::scratch(width as usize * height as usize * 3);
     resize_into(src, &mut dst, width as usize * 3, 0, width, height);
     Image { width, height, data: dst }
 }

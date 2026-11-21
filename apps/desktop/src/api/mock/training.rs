@@ -7,7 +7,7 @@ use crate::api::time;
 use crate::api::*;
 use crate::synth::Rng;
 
-use super::cloud::CloudSim;
+use super::cloud::{COLLECT_S, CloudSim};
 use super::{LIVE_ID, MOCK_NOW, MockBackend, STEP_DT};
 
 /// Shape of a run's simulated learning curves.
@@ -162,6 +162,39 @@ pub(super) fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
     )
 }
 
+/// A cloud run's lines after training, the weights copied back and then the instance going, in the
+/// real control plane's words (folo-server's `cloud/executor`): added to its log once the run gets
+/// there, whenever its log is read or streamed (as its phases are worked out from the clock), and
+/// before its instance is terminated by hand (`terminate_instance`), so what it reached stays
+/// whenever it is read. A run that ended before it trained has nothing to copy; one that lost its
+/// instance says only what came before; a run with no instance (a remote FOLO server) has none to
+/// terminate (the executor says so only with an instance id).
+pub(super) fn log_cloud_end(f: &mut RunFixture) {
+    if let Some(now) = f.cloud.as_ref().map(|s| s.elapsed()) {
+        log_cloud_end_at(f, now);
+    }
+}
+
+/// [`log_cloud_end`] at `now` seconds into the instance's life (one clock sample for a caller that
+/// also stamps its own line).
+pub(super) fn log_cloud_end_at(f: &mut RunFixture, now: f64) {
+    let Some(sim) = &f.cloud else { return };
+    if sim.ended.is_some_and(|(e, _)| e < sim.train_at()) {
+        return;
+    }
+    let Some(done) = sim.trained_by(now) else { return };
+    let lost = sim.lost_at.unwrap_or(f64::INFINITY);
+    let mut lines = vec![(done, "cloud: the run ended on the worker; copying its weights")];
+    if sim.base.instance_id.is_some() {
+        lines.push((done + COLLECT_S, "cloud: terminating the instance"));
+    }
+    for (at, message) in lines {
+        if now >= at && at < lost && !f.logs.iter().any(|l| l.message == message) {
+            f.logs.push(LogLine { t: sim.at(at), level: LogLevel::Info, message: message.into() });
+        }
+    }
+}
+
 pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
     let c = &f.run.config;
     // What the run trains with, as the trainer's first log line says: its resolution, or the one a new run gets
@@ -301,6 +334,11 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
     // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4; new runs have no warmup floor).
     let spe = batches.div_ceil(accumulate as u64);
     let warmup_iters = folo_nn::warmup_iters_floor(3.0, config.epochs as u64, spe, 0);
+    // The EMA: a fine-tune's window is a quarter of its optimizer steps (docs/MODEL.md §8.5).
+    let (ema_decay, ema_tau) = match config.weights {
+        Some(_) => folo_nn::ema_for_run(config.epochs as u64 * spe, 0.25),
+        None => (folo_nn::EMA_DECAY, folo_nn::EMA_TAU),
+    };
     ResolvedTrain {
         optimizer,
         lr0,
@@ -319,6 +357,8 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
         warmup_bias_lr,
         // The trainer's cap: at most half the run.
         close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
+        ema_decay: Some(ema_decay),
+        ema_tau: Some(ema_tau),
     }
 }
 

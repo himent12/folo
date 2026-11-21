@@ -85,6 +85,15 @@ describe('ConfigPanel', () => {
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
     expect(r['Momentum']?.textContent).toBe('0.937');
     expect(r['Weight decay']?.textContent).toBe('0.0005');
+    expect(r['EMA']?.textContent).toBe('window 10000 steps');
+  });
+
+  it('has no EMA row for a run without an EMA or from a server older than the field', () => {
+    const full = resolveTrain(config, 1920, 8, 120);
+    expect(rows(full)['EMA']?.textContent).toBe('window 10000 steps');
+    const { ema_decay: _, ema_tau: __, ...older } = full;
+    expect(rows(older)['EMA']).toBeUndefined();
+    expect(rows(null)['EMA']).toBeUndefined();
   });
 
   it('sets the architecture and the device in sans: names, not identifiers (design/README.md, Type)', () => {

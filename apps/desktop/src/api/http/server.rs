@@ -93,17 +93,29 @@ pub fn is_loopback(url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
 }
 
+/// What answered a probe of an address ([`probe`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// A `folo serve`: its health, `status: "ok"`.
+    Folo,
+    /// An HTTP answer that is not a healthy FOLO health: a web page, a redirect, a proxy's sign-in, a
+    /// server's error. The address's own answer says what is wrong there.
+    Answered,
+    /// No answer: nothing listens, or the connection failed, was reset or timed out.
+    Nothing,
+}
+
 /// Whether a `folo serve` answers `GET /api/health` at `url`. On this machine the connection gets half a
 /// second: a listening port accepts at once however busy the server is, and a port nothing listens on is
 /// told first without waiting ([`super::refused::check`]: Windows refuses it only after its SYN retries, 2 s).
 /// Through the proxy the environment names (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, minus `NO_PROXY`),
 /// as every other call of the app goes.
-pub fn probe(url: &str) -> bool {
+pub fn probe(url: &str) -> Probe {
     probe_through(url, ureq::Proxy::try_from_env())
 }
 
 /// [`probe`] with the HTTP client's proxy given: `None` connects directly.
-pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
+pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
     let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
     // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
     let health = super::HttpBackend::new(url).url("/health");
@@ -114,40 +126,51 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> bool {
     let direct = proxy.as_ref().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
     let found = if direct { super::refused::check(&health) } else { Found::Unsure };
     if found == Found::Nothing {
-        return false;
+        return Probe::Nothing;
     }
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // `folo serve` answers its health itself: a redirect is something else's (and a hop that
+        // timed out connecting would look like the first one, so the request went again, #308).
+        .max_redirects(0)
         .timeout_connect(Some(connect))
         .timeout_global(Some(Duration::from_secs(10)))
         .proxy(proxy)
         .build();
     let agent: ureq::Agent = agent.into();
-    let mut answer = agent.get(&health).call();
-    // The check's own connection, closed without a request, waits in the server's accept queue until the
-    // server takes it: with one free slot left there, this connection then finds the queue full (on Windows
-    // it is turned away and times out before its next attempt). Something listens, so once more (the
-    // server takes its queue meanwhile) before saying nobody is there. An answer, or a timeout after the
-    // connection was made, is final.
-    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
-        answer = agent.get(&health).call();
+    let (answer, _) = ask_health(found, || agent.get(&health).call());
+    let Ok(mut r) = answer else { return Probe::Nothing };
+    // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
+    if r.status().is_success() && json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok") {
+        Probe::Folo
+    } else {
+        Probe::Answered
     }
-    answer
-        .ok()
-        .filter(|r| r.status().is_success())
-        // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
-        .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok"))
 }
 
-/// Whether a call failed on its connection: it could not connect in time, or the connection was refused,
-/// reset or aborted.
-fn not_connected(e: &ureq::Error) -> bool {
-    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
-    match e {
-        ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
-        ureq::Error::Io(e) => matches!(e.kind(), ConnectionReset | ConnectionAborted | ConnectionRefused),
-        _ => false,
+/// The health request (`call`), and how many times it was sent. The check's own connection, closed
+/// without a request, waits in the server's accept queue until the server takes it: with one free slot left
+/// there, this request's connection then finds the queue full (on Windows it is turned away and times out
+/// before its next attempt). So when the check saw a listener and the request could not connect, it is sent
+/// once more (the server takes its queue meanwhile) before nobody is said to be there. Only a failure to
+/// connect is tried again (#308): an answer is final, and so is a connection that was made and then reset,
+/// aborted or timed out, which a second attempt would only make wait as long again (a listener that accepts
+/// and resets after `t` cost `2t`) or send twice. The call follows no redirect (`probe_through`), so a
+/// failure to connect is always the first hop's.
+pub(super) fn ask_health<T>(
+    found: Found,
+    mut call: impl FnMut() -> Result<T, ureq::Error>,
+) -> (Result<T, ureq::Error>, u32) {
+    let answer = call();
+    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
+        return (call(), 2);
     }
+    (answer, 1)
+}
+
+/// Whether a call never connected: the connect limit passed, or the client found no connection to make.
+fn not_connected(e: &ureq::Error) -> bool {
+    matches!(e, ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed)
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).
@@ -331,6 +354,66 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answers each request on `listener` with `answer` until `stop`, and says how many it had (a
+    /// connection closed without a request, the probe's check, is none).
+    fn serve(listener: &std::net::TcpListener, answer: &str, stop: &std::sync::atomic::AtomicBool) -> usize {
+        use std::io::{Read, Write};
+        listener.set_nonblocking(true).unwrap();
+        let mut asked = 0;
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let Ok((mut sock, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            sock.set_nonblocking(false).unwrap();
+            // A connection that sends nothing cannot keep the test from stopping.
+            sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut buf = [0u8; 4096];
+            if sock.read(&mut buf).unwrap_or(0) > 0 {
+                asked += 1;
+                let _ = sock.write_all(answer.as_bytes());
+            }
+        }
+        asked
+    }
+
+    /// #390 review: a health answered with a redirect was followed (and a hop that timed out
+    /// connecting sent the health request again). It is not: here the redirect leads to a working
+    /// health, which is never asked, and the address that redirects is no `folo serve`.
+    #[test]
+    fn a_redirected_health_is_not_followed() {
+        let (redirects, health) = (
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+        );
+        let (from, to) = (redirects.local_addr().unwrap(), health.local_addr().unwrap());
+        let moved = format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://{to}/api/health\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let body = r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#;
+        let ok = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        // Sets `stop` when dropped: the workers end however the scope is left (a spawn that fails).
+        struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let (found, asked) = std::thread::scope(|s| {
+            let guard = Stop(&stop);
+            let first = s.spawn(|| serve(&redirects, &moved, &stop));
+            let second = s.spawn(|| serve(&health, &ok, &stop));
+            let found = probe_through(&format!("http://{from}"), None);
+            drop(guard);
+            (found, (first.join().unwrap(), second.join().unwrap()))
+        });
+        assert_eq!((found, asked), (Probe::Answered, (1, 0)), "asked once, and the redirect not followed");
+    }
 
     #[test]
     fn only_this_machines_addresses_are_loopback() {

@@ -7,7 +7,7 @@ use folo_api::{LogLevel, RunEvent, RunStatus};
 use folo_nn::Module;
 use folo_nn::io::BestState;
 
-use super::device::{device_loss_message, device_lost};
+use super::device::{device_loss_message, device_lost, failure_report};
 use super::epoch::Clock;
 use super::{OptimizerChoice, TrainSummary, Trainer};
 use crate::error::{Error, Result};
@@ -44,25 +44,30 @@ impl Trainer {
         let r = match (r, written) {
             (Ok(s), Ok(())) => Ok(s),
             (Err(e), _) | (Ok(_), Err(e)) => Err(e),
-        }
-        .map_err(|e| self.explain_device_loss(e));
+        };
         // A next epoch started before the run ended (finished, stopped, stopped early or failed) is dropped, which
         // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
         self.prefetched = None;
-        match &r {
-            Ok(s) => self.emitter.status(s.status, None),
+        self.report_end(r)
+    }
+
+    /// The run's last events: its final status and, for a failure, the log line naming it ([`failure_report`]); a
+    /// lost GPU's error is first reworded to name the checkpoint to resume from.
+    pub(super) fn report_end(&mut self, r: Result<TrainSummary>) -> Result<TrainSummary> {
+        match r {
+            Ok(s) => {
+                self.emitter.status(s.status, None);
+                Ok(s)
+            }
             Err(e) => {
-                // The status carries the (capped) message; the log line only names the failure, so a driver
-                // report is not repeated in every record.
-                let summary = e.summary();
-                self.emitter.log(
-                    LogLevel::Error,
-                    format!("run failed ({}): {}", e.code(), folo_api::codes::cap(&summary, 120)),
-                );
-                self.emitter.failed(e.code(), summary);
+                let lost = device_lost(&e);
+                let e = self.explain_device_loss(e);
+                let (line, message) = failure_report(&e, lost);
+                self.emitter.log(LogLevel::Error, line);
+                self.emitter.failed(e.code(), message);
+                Err(e)
             }
         }
-        r
     }
 
     /// A lost GPU device (driver reset, TDR) fails the run with a message that says so and names the checkpoint to
@@ -89,7 +94,7 @@ impl Trainer {
             LogLevel::Info,
             format!(
                 "{} ({} params, {} classes) on {}: {} train / {} val images at {}px, batch {} × accumulate {}, {} {} \
-                 lr0 {} momentum {}{}, {} batches = {} optimizer steps per epoch, warmup {} steps",
+                 lr0 {} momentum {}{}, {} batches = {} optimizer steps per epoch, warmup {} steps{}",
                 self.model.arch(),
                 self.model.num_parameters(),
                 self.data.classes.len(),
@@ -110,7 +115,12 @@ impl Trainer {
                 },
                 self.nb,
                 c.steps_per_epoch,
-                c.warmup_iters
+                c.warmup_iters,
+                match &self.ema {
+                    // The nominal window 1 / (1 − decay) of §8.5.
+                    Some(e) => format!(", EMA window {:.0} steps", 1.0 / (1.0 - e.contract().decay)),
+                    None => String::new(),
+                }
             ),
         );
         if self.model.has_o2o() {

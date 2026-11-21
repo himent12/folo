@@ -13,15 +13,52 @@ use crate::{Error, Result};
 pub const EMA_DECAY: f64 = 0.9999;
 /// docs/MODEL.md §8.5: `tau = 2000`.
 pub const EMA_TAU: f64 = 2000.0;
+/// docs/MODEL.md §8.5: the nominal window `1 / (1 − decay)` of the default EMA, in updates: the cap of
+/// [`ema_for_run`].
+pub const EMA_MAX_WINDOW: f64 = 10_000.0;
+
+/// docs/MODEL.md §8.5: `(decay, tau)` of an EMA whose nominal window is `fraction` of a run of `total_updates`
+/// optimizer steps, `w = max(fraction · total_updates, 1)`: `decay = 1 − 1 / w`, `tau = max(w / 5, 1)` (the default's
+/// ratio, 2000 / 10000). When `w` reaches [`EMA_MAX_WINDOW`] (a run of `EMA_MAX_WINDOW / fraction` steps or more),
+/// or `fraction` is not positive, it is exactly the default ([`EMA_DECAY`], [`EMA_TAU`]).
+///
+/// ```
+/// use folo_nn::{EMA_DECAY, EMA_TAU, ema_for_run};
+/// assert_eq!(ema_for_run(400, 0.25), (0.99, 20.0));
+/// assert_eq!(ema_for_run(40_000, 0.25), (EMA_DECAY, EMA_TAU));
+/// assert_eq!(ema_for_run(400, 0.0), (EMA_DECAY, EMA_TAU));
+/// ```
+pub fn ema_for_run(total_updates: u64, fraction: f64) -> (f64, f64) {
+    let w = fraction * total_updates as f64;
+    if !(fraction.is_finite() && fraction > 0.0) || w >= EMA_MAX_WINDOW {
+        return (EMA_DECAY, EMA_TAU);
+    }
+    let w = w.max(1.0);
+    (1.0 - 1.0 / w, (w / 5.0).max(1.0))
+}
 
 /// `folo.ema` (docs/FORMAT.md).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaContract {
     /// Asymptotic decay.
+    #[serde(deserialize_with = "exact_f64")]
     pub decay: f64,
     /// Ramp time constant, in updates.
+    #[serde(deserialize_with = "exact_f64")]
     pub tau: f64,
+}
+
+/// A JSON number parsed by `f64::from_str` (correctly rounded), not by serde_json's fast path, which can land one ulp
+/// off a 17-digit decimal (`0.9090909090909091`, the decay of an 11-step window): the contract a checkpoint
+/// resumes with is then the very `f64` it was saved with. A number that overflows to infinity is refused when the
+/// file is opened.
+fn exact_f64<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    let raw = Box::<serde_json::value::RawValue>::deserialize(d)?;
+    match raw.get().parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        _ => Err(serde::de::Error::custom(format!("{} is not a finite number", raw.get()))),
+    }
 }
 
 /// An EMA copy of a model: every parameter and floating buffer (BatchNorm running statistics) of `M`.

@@ -354,6 +354,10 @@ What works today (v0.1):
   | `folo-n-coco-v2` | folo-n | 0.317 / 0.458 | epoch 62 of a 300-epoch run that is paused |
   | `folo-n-coco` | folo-n | 0.314 / 0.455 | 50 epochs |
 
+  The higher COCO AP is not always the better fine-tuning start: v5 is the documented one, but fine-tuned on
+  brain-tumor from `folo-n-coco-v2`, `best.folo` scores 0.030 AP higher on val (mean of three seeds) than from v5
+  ([docs/QUICKSTART.md](docs/QUICKSTART.md#fine-tune-from-pretrained-weights)).
+
 - YOLO and COCO datasets: reading, stats, validation checks, and format conversion, plus pycocotools-exact mAP.
 - `val`, `predict`, and export to `.folo` (f32 or f16, safetensors-compatible) and ONNX (opset 17, f32 or f16,
   optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).

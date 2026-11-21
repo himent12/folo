@@ -276,6 +276,30 @@ describe('AddDatasetDialog', () => {
     expect(create.mock.calls[0]![0].seed).toBe(4294967296);
   });
 
+  it("takes the server's image counts, whole numbers from 1 to 100,000, as Desktop does (issue #382)", async () => {
+    const create = vi.spyOn(hub.api, 'createSyntheticDataset');
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+    flushSync();
+    const field = [...document.querySelectorAll('.field')].find((f) => f.querySelector('label')?.textContent === 'Images')!;
+    const input = field.querySelector<HTMLInputElement>('input')!;
+    expect([input.min, input.max, input.step]).toEqual(['1', '100000', '1']);
+    const submit = (v: string) => {
+      input.value = v;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      flushSync();
+    };
+    // 10.5 was rounded to 11 and sent; 0 and 100,001 are the server's 400.
+    for (const t of ['10.5', '0', '100001']) {
+      submit(t);
+      expect(field.querySelector('.msg.error')?.textContent).toBe('A whole number from 1 to 100,000.');
+    }
+    expect(create).not.toHaveBeenCalled();
+    submit('1');
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0]![0].images).toBe(1);
+  });
+
   it('takes as many classes as the generator has shapes (8), and says so', () => {
     c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
     flushSync();

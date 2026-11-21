@@ -2,6 +2,8 @@
 //! keyboard actions and the overlay layers (palette, dialogs, inspector, toasts).
 
 mod actions;
+#[cfg(test)]
+mod class_filter_tests;
 mod connection;
 #[cfg(test)]
 mod connection_tests;
@@ -34,6 +36,8 @@ mod render;
 mod revision_tests;
 #[cfg(test)]
 mod run_charts_tests;
+#[cfg(test)]
+mod run_control_tests;
 #[cfg(test)]
 mod run_page_tests;
 #[cfg(test)]
@@ -263,6 +267,9 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
+    /// The image last shown and the filters it was shown under (class, empty images only): when
+    /// they change underneath (the class list read again, a server switch), it lands on it again.
+    pub shown: Option<(String, Option<u32>, bool)>,
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
@@ -347,12 +354,13 @@ pub struct FoloApp {
     // Datasets
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
-    pub ds_class: Option<u32>,
-    /// The dataset whose page was open last: the class filter belongs to it, so opening another
-    /// dataset clears it (its class indices mean other classes there, or none).
-    pub ds_class_of: Option<String>,
-    /// Show only images without labels (from the Empty images tile).
-    pub ds_empty_only: bool,
+    /// The class filter and the dataset it was set on: a class index means another class in
+    /// another dataset, or none, so it applies only there (read it through `class_filter`).
+    pub ds_class: Option<(String, u32)>,
+    /// Show only images without labels (from the Empty images tile), on the dataset it was set on
+    /// (read it through `empty_only`): it and the class filter never both apply to one dataset.
+    /// Both go at a change of data source (`set_backend`).
+    pub ds_empty_of: Option<String>,
     pub ds_boxes: bool,
     /// Grid tiles crop to fill the cell instead of showing the whole image.
     pub ds_fill: bool,
@@ -514,6 +522,11 @@ pub struct FoloApp {
     pub start_error: Option<SharedString>,
     /// The connected server has answered at least once (a lost connection, not one never made).
     pub reached: bool,
+    /// A `/system` request is out: the 2 s refresh asks no more until it answers (`refresh_system`).
+    pub system_out: bool,
+    /// The last `/system` request's number: an answer to an earlier one (asked before a Retry) is
+    /// dropped.
+    pub system_seq: u64,
     pub reduce_motion: bool,
 
     // Overlays
@@ -677,8 +690,7 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
-            ds_class_of: None,
-            ds_empty_only: false,
+            ds_empty_of: None,
             ds_boxes: true,
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,
@@ -768,6 +780,8 @@ impl FoloApp {
             recover_wait: 0,
             start_error: None,
             reached: false,
+            system_out: false,
+            system_seq: 0,
             // Follow the OS animation setting until the user picks in Settings.
             reduce_motion: calm,
             palette: None,

@@ -199,9 +199,11 @@ fn bin_labels(h: &Histogram, label: fn(f64, Option<f64>) -> String) -> Vec<Strin
     h.edges.windows(2).take(n).enumerate().map(|(i, w)| label(w[0], (i + 1 < n).then_some(w[1]))).collect()
 }
 
-/// A box-size bin in % of the image side: "5–10%", the open last bin "≥50%".
+/// A box-size bin in % of the image side: the first bin "<1%" (as Studio's `sizeBinLabel`), "5–10%",
+/// the open last bin "≥50%".
 fn size_label(lo: f64, hi: Option<f64>) -> String {
     match hi {
+        Some(hi) if lo <= 0. => format!("<{}%", pct(hi)),
         Some(hi) => format!("{}–{}%", pct(lo), pct(hi)),
         None => format!("≥{}%", pct(lo)),
     }
@@ -290,6 +292,6 @@ mod tests {
         let per = super::bin_labels(&h(&[0., 1., 2., 4., 8., 16., 32.]), super::count_label);
         assert_eq!(per, ["0", "1", "2–3", "4–7", "8–15", "16+"]);
         let size = super::bin_labels(&h(&[0., 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.]), super::size_label);
-        assert_eq!(size, ["0–1%", "1–2%", "2–5%", "5–10%", "10–20%", "20–50%", "≥50%"]);
+        assert_eq!(size, ["<1%", "1–2%", "2–5%", "5–10%", "10–20%", "20–50%", "≥50%"]);
     }
 }

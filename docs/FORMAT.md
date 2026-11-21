@@ -65,7 +65,7 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming) |
 | `folo.optim` | checkpoint | JSON: optimizer contract, see below |
 | `folo.sched` | checkpoint | JSON: LR / momentum schedule contract, see below |
-| `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }`. The effective decay at update `u` is `decay × (1 − exp(−u / tau))`, and `u` is `ema.__updates` |
+| `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }` (a fine-tune's shorter window has a smaller pair: docs/MODEL.md §8.5). The effective decay at update `u` is `decay × (1 − exp(−u / tau))`, and `u` is `ema.__updates` |
 | `folo.rng` | checkpoint | JSON: `{ "algo": "<generator name from folo_core::rng, e.g. xoshiro256pp>", "seed": <u64>, "streams": { "<stream name>": "<state as lowercase hex of the generator's state words, little-endian>" } }`. Stream names are defined by the trainer (e.g. `data`, `augment`, `init`) |
 | `folo.epoch` | checkpoint | number of completed epochs. In v1, checkpoints are written only at epoch boundaries, so no within-epoch loader position is stored |
 | `folo.metrics` | no | JSON: best validation metrics `{ "map50", "map50_95", "precision", "recall", "best_f1_conf"? }` (`best_f1_conf`: the confidence precision and recall are taken at, docs/METRICS.md; absent in files written before it) |

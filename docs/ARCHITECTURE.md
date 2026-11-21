@@ -15,7 +15,7 @@ These are stated in [AGENTS.md](../AGENTS.md) and in the code, and they explain 
   against them within a stated tolerance, and every differentiable op has a finite-difference gradient check.
 - **Deterministic by construction.** CPU results are bitwise identical for every thread count, randomness comes from
   a seeded RNG, data-loader batches do not depend on the worker count, resuming a run is bit-exact, and a benchmark
-  variant has the same bytes on every machine.
+  variant and a synthetic dataset have the same bytes on every machine and in every build.
 - **Plain data at the edges.** folo-data does not depend on folo-core: it produces plain buffers that the trainer wraps
   in tensors. folo-vision's detection math (boxes, decode, NMS, metrics, assigner) works on plain slices, so the
   trainer, the predictor, the server and the browser share it.

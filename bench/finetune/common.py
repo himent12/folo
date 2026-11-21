@@ -4,7 +4,9 @@ A run is one (tool, model, dataset, variant, seed): tool `folo` or `ultralytics`
 (`folo-n`, `folo-s`, ... for FOLO; the checkpoint's stem, `yolo26n`, `yolo26s`, ... for Ultralytics), variant
 `pretrained` (fine-tuned from COCO weights) or `scratch` (no weights: the control). Its result is one JSON file,
 `<model>-<dataset>-<variant>-s<seed>.json`, written atomically once the run is scored; a runner skips every run whose
-file exists, so a matrix can be stopped and started again. Models of the same size letter (folo-n and yolo26n,
+file exists, so a matrix can be stopped and started again. Variant `holdout` (FOLO only) is `pretrained` trained on the
+train split minus a seeded hold-out and choosing its best checkpoint there (holdout.py), so the scored split is one
+it never selected on; the published tables leave it out. Models of the same size letter (folo-n and yolo26n,
 folo-s and yolo26s) are compared in one table.
 """
 
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TOOLS = ("folo", "ultralytics")
-VARIANTS = ("pretrained", "scratch")
+VARIANTS = ("pretrained", "scratch", "holdout")
 RESULT_VERSION = 1
 
 
@@ -31,21 +33,32 @@ class RunKey:
     dataset: str
     variant: str
     seed: int
+    # The hold-out split a `holdout` run chooses its best checkpoint on (holdout.split_label: `ho0`), part of its file
+    # name; empty for the other variants.
+    split: str = ""
 
     def __post_init__(self):
         if self.tool not in TOOLS:
             raise ValueError(f"tool {self.tool!r} is not one of {TOOLS}")
         if self.variant not in VARIANTS:
             raise ValueError(f"variant {self.variant!r} is not one of {VARIANTS}")
+        if (self.variant == "holdout") != bool(self.split):
+            raise ValueError(f"variant {self.variant!r} with split {self.split!r}: a split is the holdout variant's")
         if (self.tool == "folo") != self.model.startswith("folo-") or not self.model:
             raise ValueError(f"model {self.model!r} does not belong to tool {self.tool!r}")
 
     @property
     def stem(self) -> str:
-        return f"{self.model}-{self.dataset}-{self.variant}-s{self.seed}"
+        split = f"-{self.split}" if self.split else ""
+        return f"{self.model}-{self.dataset}-{self.variant}{split}-s{self.seed}"
 
     def result_path(self, results_dir: Path) -> Path:
         return Path(results_dir) / f"{self.stem}.json"
+
+
+def from_weights(variant: str) -> bool:
+    """Whether runs of `variant` start from the --weights checkpoint (every variant but the scratch control)."""
+    return variant != "scratch"
 
 
 def size_of(model: str) -> str:
@@ -111,7 +124,8 @@ def result_record(key: RunKey, **fields) -> dict:
         "batch": None,
         "weights": None,  # what the run started from: a name / file and its sha256, or None from scratch
         "eval_split": None,
-        "metrics": None,  # scorer.score(): the common pycocotools numbers
+        "metrics": None,  # scorer.score(): the common pycocotools numbers, of the best checkpoint
+        "metrics_last": None,  # the same of the last epoch's checkpoint (no selection), where the runner has it
         "tool_reported": None,  # the tool's own validation of its best checkpoint, for reference only
         "train_wall_s": None,
         "gpu": None,
@@ -156,14 +170,22 @@ def shared(r: dict) -> bool:
     return ((r.get("compute") or {}).get("concurrent_jobs") or 1) > 1
 
 
+def selection_of(r: dict) -> tuple | None:
+    """The hold-out a `holdout` run chose its best checkpoint on, as (seed, fraction, layout digest of the carved
+    folder); None for the other variants."""
+    s = (r.get("versions") or {}).get("selection") if r.get("variant") == "holdout" else None
+    return (s.get("seed"), s.get("fraction"), s.get("layout_sha256")) if s else None
+
+
 def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
-    """Group runs by (dataset, tool, model, variant): AP / AP50 / AP75 / training time over seeds, with which seeds
-    are present, and `complete` once `expected_seeds` seeds are (1 for the scratch control)."""
+    """Group runs by (dataset, tool, model, variant, and for `holdout` the hold-out split): AP / AP50 / AP75 /
+    training time over seeds, with which seeds are present, and `complete` once `expected_seeds` seeds are (1 for the
+    scratch control)."""
     groups: dict[tuple, list[dict]] = {}
     for r in results:
-        groups.setdefault((r["dataset"], r["tool"], r["model"], r["variant"]), []).append(r)
+        groups.setdefault((r["dataset"], r["tool"], r["model"], r["variant"], selection_of(r)), []).append(r)
     rows = []
-    for (dataset, tool, model, variant), rs in sorted(groups.items()):
+    for (dataset, tool, model, variant, selection), rs in sorted(groups.items(), key=lambda kv: repr(kv[0])):
         rs = sorted(rs, key=lambda r: r["seed"])
         want = 1 if variant == "scratch" else expected_seeds
         metric = lambda k: [r["metrics"][k] for r in rs if r.get("metrics") and r["metrics"].get(k) is not None]
@@ -173,12 +195,20 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
                 "tool": tool,
                 "model": model,
                 "variant": variant,
+                **(
+                    {"selection": dict(zip(("seed", "fraction", "layout_sha256"), selection))}
+                    if selection
+                    else {}
+                ),
                 "seeds": [r["seed"] for r in rs],
                 "complete": len(rs) >= want,
                 "eval_split": rs[0].get("eval_split"),
                 "ap": _stat(metric("ap")),
                 "ap50": _stat(metric("ap50")),
                 "ap75": _stat(metric("ap75")),
+                "ap_last": _stat(
+                    [r["metrics_last"]["ap"] for r in rs if (r.get("metrics_last") or {}).get("ap") is not None]
+                ),
                 # Training time of runs that had their GPU to themselves; runs trained side by side on one GPU
                 # (`compute.concurrent_jobs` > 1) are counted apart, since they share it.
                 "train_wall_s": _stat([r["train_wall_s"] for r in rs if r.get("train_wall_s") is not None and not shared(r)]),

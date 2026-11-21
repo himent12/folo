@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
-import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, lrSetting, momentumSetting, optimizerSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
+import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, emaSetting, lrSetting, momentumSetting, optimizerSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
 
 const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30, augment: { close_mosaic: 10 } } as TrainConfig;
 
@@ -84,5 +84,31 @@ describe('close mosaic as the trainer runs it (DOGFOOD-3 S2)', () => {
     expect(settingText(closeMosaicSetting(run(2, 1)))).toBe('last 1 epoch');
     expect(settingText(closeMosaicSetting(run(1, 1)))).toBe('never (requested 1)');
     expect(settingText(closeMosaicSetting(run(20, 0)))).toBe('never');
+  });
+});
+
+describe('the EMA window (PR #399, Run.resolved.ema_decay)', () => {
+  it('resolves the window as the trainer does: the default from scratch, a quarter of a fine-tune, the default from 40,000 steps', () => {
+    // BCCD of docs/MODEL.md §8.5: 100 epochs of 4 optimizer steps, 400 in all, from pretrained weights.
+    const tune = { ...config, epochs: 100, weights: 'folo-s.folo' } as TrainConfig;
+    expect(resolveTrain(tune, 205, 3, 4)).toMatchObject({ ema_tau: 20 });
+    expect(resolveTrain(tune, 205, 3, 4).ema_decay).toBeCloseTo(0.99, 12);
+    expect(resolveTrain({ ...tune, weights: null }, 205, 3, 4)).toMatchObject({ ema_decay: 0.9999, ema_tau: 2000 });
+    expect(resolveTrain(tune, 205, 3, 400)).toMatchObject({ ema_decay: 0.9999, ema_tau: 2000 });
+  });
+
+  it("says the nominal window in steps as the trainer's log line does, and nothing without an EMA or from an older server", () => {
+    const r = resolveTrain(config, 1000, 3, 16);
+    expect(emaSetting(r)).toEqual({ value: 'window 10000 steps' });
+    expect(emaSetting({ ...r, ema_decay: 0.99 })).toEqual({ value: 'window 100 steps' });
+    expect(emaSetting({ ...r, ema_decay: 1 - 1 / 350 })).toEqual({ value: 'window 350 steps' });
+    expect(emaSetting({ ...r, ema_decay: 0 })).toEqual({ value: 'window 1 step' });
+    // Ties to even, as Rust's `{:.0}` writes the trainer's line: 2.5 → 2, 4.5 → 4, 3.5 → 4.
+    expect(emaSetting({ ...r, ema_decay: 0.6 })).toEqual({ value: 'window 2 steps' });
+    expect(emaSetting({ ...r, ema_decay: 1 - 1 / 4.5 })).toEqual({ value: 'window 4 steps' });
+    expect(emaSetting({ ...r, ema_decay: 1 - 1 / 3.5 })).toEqual({ value: 'window 4 steps' });
+    const { ema_decay: _, ema_tau: __, ...older } = r;
+    expect(emaSetting(older)).toBeNull();
+    expect(emaSetting({ ...r, ema_decay: null as unknown as number })).toBeNull();
   });
 });

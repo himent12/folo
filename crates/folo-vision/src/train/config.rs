@@ -81,6 +81,12 @@ pub struct TrainConfig {
     pub nbs: usize,
     /// Keep an EMA of the weights for validation, checkpoints and export (§8.5).
     pub ema: bool,
+    /// A fine-tune's EMA window as a fraction of its optimizer steps (§8.5): a run from pretrained weights
+    /// (`transfer`) averages over `ema_run_fraction · T` steps, at most the default window of 10,000, which runs of
+    /// `10000 / ema_run_fraction` steps or more and every run from scratch keep; `0`: the default window for every
+    /// run. Missing in configs from before it: 0, the window those runs had.
+    #[serde(default = "legacy_ema_run_fraction")]
+    pub ema_run_fraction: f64,
     /// Global gradient-norm clip; `0` disables it.
     pub clip_grad_norm: f64,
     /// Mixed-precision training (docs/MODEL.md §8.8): `F16` activations and convolutions / matrix products on the
@@ -166,6 +172,7 @@ impl Default for TrainConfig {
             cos_lr: false,
             nbs: 64,
             ema: true,
+            ema_run_fraction: 0.25,
             clip_grad_norm: 10.0,
             amp: false,
             head: HeadMode::O2m,
@@ -191,6 +198,11 @@ pub fn f32_decimal(v: f32) -> f64 {
 /// The `warmup_floor` of settings written before the key existed.
 fn legacy_warmup_floor() -> u64 {
     folo_nn::WARMUP_FLOOR
+}
+
+/// The `ema_run_fraction` of settings written before the key existed: the default window for every run.
+fn legacy_ema_run_fraction() -> f64 {
+    0.0
 }
 
 /// The `auto_rule` of settings written before the key existed.
@@ -310,6 +322,7 @@ impl TrainConfig {
             ("warmup_epochs", self.warmup_epochs),
             ("warmup_bias_lr", self.warmup_bias_lr),
             ("clip_grad_norm", self.clip_grad_norm),
+            ("ema_run_fraction", self.ema_run_fraction),
         ] {
             if !(v.is_finite() && v >= 0.0) {
                 return bad(format!("{name} must be a finite number >= 0, got {v}"));
@@ -431,6 +444,19 @@ impl TrainConfig {
     }
 }
 
+impl TrainConfig {
+    /// The EMA's `(decay, tau)` in a run of `total_iters` optimizer steps (docs/MODEL.md §8.5): a run from
+    /// pretrained weights (`transfer`) takes [`folo_nn::ema_for_run`] with `ema_run_fraction`, a run from scratch
+    /// the default (0.9999, 2000).
+    pub fn ema_params(&self, total_iters: u64) -> (f64, f64) {
+        if self.transfer {
+            folo_nn::ema_for_run(total_iters, self.ema_run_fraction)
+        } else {
+            (folo_nn::EMA_DECAY, folo_nn::EMA_TAU)
+        }
+    }
+}
+
 impl ResolvedOptim {
     /// docs/API.md's `Run.resolved` of a run with `cfg` that resolved to `self`, accumulating `accumulate` batches
     /// over `steps_per_epoch` optimizer steps per epoch.
@@ -441,6 +467,7 @@ impl ResolvedOptim {
         steps_per_epoch: u64,
     ) -> folo_api::ResolvedTrain {
         let adamw = self.kind == OptimKind::AdamW;
+        let ema = cfg.ema.then(|| cfg.ema_params(cfg.epochs as u64 * steps_per_epoch));
         folo_api::ResolvedTrain {
             optimizer: match self.kind {
                 OptimKind::Sgd => folo_api::ResolvedOptimizer::Sgd,
@@ -462,6 +489,8 @@ impl ResolvedOptim {
             warmup_momentum: cfg.warmup_momentum,
             warmup_bias_lr: self.warmup_bias_lr,
             close_mosaic: Some(cfg.augment.close_mosaic_epochs(cfg.epochs)),
+            ema_decay: ema.map(|e| e.0),
+            ema_tau: ema.map(|e| e.1),
         }
     }
 
@@ -475,6 +504,15 @@ impl ResolvedOptim {
             v.get("resolved").and_then(|r| serde_json::from_value::<folo_api::ResolvedTrain>(r.clone()).ok())
         {
             r.close_mosaic = r.close_mosaic.or(close_mosaic);
+            // Files from before `resolved.ema_decay`: the EMA their `train` settings give (the default window).
+            if r.ema_decay.is_none()
+                && let Some(t) =
+                    v.get("train").and_then(|t| serde_json::from_value::<TrainConfig>(t.clone()).ok())
+                && t.ema
+            {
+                let (d, tau) = t.ema_params(t.epochs as u64 * r.optimizer_steps_per_epoch);
+                (r.ema_decay, r.ema_tau) = (Some(d), Some(tau));
+            }
             return Some(r);
         }
         let o = v.get("optimizer")?;
@@ -594,6 +632,42 @@ mod tests {
         old.as_object_mut().unwrap().remove("warmup_floor");
         let old: TrainConfig = serde_json::from_value(old).unwrap();
         assert_eq!(old.warmup_floor, 100);
+    }
+
+    /// `ema_run_fraction`: 0.25 by default, so a fine-tune of 400 optimizer steps averages over 100 (decay 0.99,
+    /// tau 20) and one of 40,000 steps or more, or any run from scratch, keeps the default EMA exactly; configs from
+    /// before the key keep the default for every run; a negative or non-finite fraction is refused.
+    #[test]
+    fn ema_run_fraction_versions() {
+        use folo_nn::{EMA_DECAY, EMA_TAU};
+        let tuned = TrainConfig { transfer: true, ..TrainConfig::default() };
+        assert_eq!(tuned.ema_run_fraction, 0.25);
+        assert_eq!(tuned.ema_params(400), (0.99, 20.0));
+        let default = (EMA_DECAY.to_bits(), EMA_TAU.to_bits());
+        let bits = |(d, t): (f64, f64)| (d.to_bits(), t.to_bits());
+        assert_eq!(bits(tuned.ema_params(40_000)), default, "a COCO-length fine-tune");
+        assert_eq!(bits(tuned.ema_params(1_000_000)), default);
+        assert_eq!(tuned.ema_params(39_996), (1.0 - 1.0 / 9999.0, 9999.0 / 5.0), "just under the cap");
+        let scratch = TrainConfig::default();
+        assert_eq!(bits(scratch.ema_params(400)), default, "a run from scratch");
+        let mut old = serde_json::to_value(&tuned).unwrap();
+        old.as_object_mut().unwrap().remove("ema_run_fraction");
+        let old: TrainConfig = serde_json::from_value(old).unwrap();
+        assert_eq!((old.ema_run_fraction, bits(old.ema_params(400))), (0.0, default));
+        // `Run.resolved` carries the pair; a run without an EMA has none.
+        let r = tuned.resolved_train(205, 3);
+        assert_eq!((r.ema_decay, r.ema_tau), (Some(0.99), Some(20.0)), "BCCD: 4 steps an epoch, 400 in all");
+        let off = TrainConfig { ema: false, ..tuned.clone() }.resolved_train(205, 3);
+        assert_eq!((off.ema_decay, off.ema_tau), (None, None));
+        // A config.json from before the fields: the pair its `train` gives (a fine-tune before the key: the default).
+        let mut file = serde_json::json!({ "resolved": r, "train": serde_json::to_value(&tuned).unwrap() });
+        file["resolved"].as_object_mut().unwrap().retain(|k, _| !k.starts_with("ema_"));
+        file["train"].as_object_mut().unwrap().remove("ema_run_fraction");
+        let back = ResolvedOptim::from_run_config(&file).unwrap();
+        assert_eq!((back.ema_decay, back.ema_tau), (Some(EMA_DECAY), Some(EMA_TAU)));
+        for f in [-0.1, f64::NAN, f64::INFINITY] {
+            assert!(TrainConfig { ema_run_fraction: f, ..tuned.clone() }.validate().is_err(), "{f} passed");
+        }
     }
 
     /// `loss.tal.eps` divides the soft targets (`m · u_max / (m_max + eps)`): at 0 an anchor whose prediction

@@ -1349,6 +1349,36 @@ as YOLO26n on three of the four datasets and lost on one:
   YOLO26s is level with or below YOLO26n. Why was not investigated (the datasets are small and have one to three
   classes; no recipe was tuned per size).
 
+**Re-measured with today's `main` and `folo-n-coco-v5` (2026-11-20, wave 6; not the table's protocol: this PC's
+RTX 4080 SUPER instead of an A40, v5 instead of v2 weights; [notes/hill/r6-finetune.md](notes/hill/r6-finetune.md)).**
+folo-n fine-tuned AP, three seeds: BCCD 0.624 (0.617–0.636), brain-tumor 0.422 (0.407–0.430), signature 0.987
+(0.985–0.988), medical pills 0.805 (0.803–0.807). BCCD is now about level with YOLO26n's 0.626 (`auto` rules 4 and
+5 took it there in hill-climb 2). Brain-tumor is 0.030 lower than the table, and that is the weights: the same build
+from `folo-n-coco-v2` scores 0.452 (0.438–0.459), the lowest v2 seed above the highest v5 seed, so the better COCO
+model is the worse fine-tuning start there. No default changed: an EMA scaled to the run's length (nominal window a
+quarter of its optimizer steps) gives a better last-epoch model (+0.009 AP over the four sets) but a worse best
+checkpoint as this protocol picks it (−0.005; three of the four sets pick it on the split they then score), and a lower backbone LR was level.
+
+**The EMA rule on a protocol that does not select on what it scores (2026-11-20, wave 6;
+[notes/hill/r6-finetune.md](notes/hill/r6-finetune.md), lane finetune2).** Each set trained on its train split minus a
+seeded 20% hold-out, `best.folo` chosen on that hold-out, and scored on the reported split, which neither side saw;
+`folo-n-coco-v5`, this PC, three seeds per side paired by seed. The EMA window of a quarter of the run's optimizer
+steps (now the default for runs from pretrained weights, `ema_run_fraction` 0.25, docs/MODEL.md §8.5) against the
+fixed window:
+
+| dataset | `best.folo`, fixed window | `best.folo`, window 0.25 T | Δ | `last.folo` Δ |
+|---|---|---|---:|---:|
+| BCCD (test) | 0.6218 / 0.6215 / 0.6114 | 0.6291 / 0.6326 / 0.6217 | +0.0096 | +0.0133 |
+| brain-tumor (val) | 0.3942 / 0.3349 / 0.3495 | 0.3669 / 0.3438 / 0.3547 | −0.0044 | +0.0057 |
+| signature (val) | 0.9821 / 0.9733 / 0.9676 | 0.9881 / 0.9851 / 0.9791 | +0.0098 | +0.0020 |
+| medical-pills (val) | 0.7973 / 0.7892 / 0.7943 | 0.7986 / 0.7944 / 0.8049 | +0.0057 | +0.0046 |
+| mean | 0.6864 | 0.6916 | **+0.0052** | **+0.0064** |
+
+11 of the 12 seed pairs are up, brain-tumor's one loss is well inside its seed spread (0.059), and the last-epoch
+model is better on every set. The gain is small (the pre-registered gate asked for +0.005), and the table above,
+which picks the best epoch on the split it scores, would not show it on brain-tumor: under that protocol the same
+rule was −0.033 there. P2 trains on 80% of each train split, so its absolute numbers are below the table's.
+
 ## FOLO on the GPU
 
 `cargo bench -p folo-vision --bench gpu` ([`crates/folo-vision/benches/gpu.rs`](../crates/folo-vision/benches/gpu.rs);

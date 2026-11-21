@@ -194,7 +194,8 @@ impl FoloApp {
                             .gap(px(2.))
                             .child({
                                 let status = (StatusKind::of_loop(l.status), l.status.label());
-                                let badges: Vec<(&str, Tone)> = verdict.into_iter().collect();
+                                let badges: Vec<(&str, Tone, Option<String>)> =
+                                    verdict.into_iter().map(|(l, tone)| (l, tone, None)).collect();
                                 name_with_badges(&t, window, &l.name, Some(status), &badges, name_w, &key)
                             })
                             .child(if l.status == BenchLoopStatus::Failed {

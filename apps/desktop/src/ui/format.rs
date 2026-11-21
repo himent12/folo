@@ -273,6 +273,15 @@ pub fn sci(size: TypeStep, color: Hsla, s: String) -> Div {
         })
 }
 
+/// A run's EMA (`Run.resolved.ema_decay`, docs/MODEL.md §8.5) as its nominal window
+/// `1 / (1 − decay)`, in the trainer's log line's words ("window 400 steps"; Studio writes the
+/// same). `None` for a run without an EMA, a server older than the field, or a decay with no
+/// window.
+pub fn fmt_ema_window(decay: Option<f64>) -> Option<String> {
+    let w = 1. / (1. - decay?);
+    (w.is_finite() && w >= 1.).then(|| format!("window {w:.0} steps"))
+}
+
 /// An augmentation strength (mosaic, mixup, flip): two decimals, as New run's sliders show it.
 pub fn fmt_aug(v: f32) -> String {
     format!("{v:.2}")
@@ -285,6 +294,18 @@ pub fn fmt_scale(v: f32) -> String {
 
 pub fn f3(v: f32) -> String {
     format!("{v:.3}")
+}
+
+/// A 0–1 score standing alone (a KPI tile, its "best … @" note): three decimals, as [`f3`], but a
+/// score above zero never reads as zero. Under 0.0005 it takes the decimals its own size needs, as a
+/// chart fitted to it would ([`score_decimals`], at most five); one that still rounds to zero there
+/// reads `<0.00001`.
+pub fn fmt_score(v: f32) -> String {
+    if !(v > 0. && v < 0.000_5) {
+        return f3(v);
+    }
+    let s = fmt_score_on(v, v);
+    if s.bytes().all(|c| c == b'0' || c == b'.') { "<0.00001".into() } else { s }
 }
 
 /// A 0–1 score in the legend of a chart whose y axis is fitted to `top` (charts::domain::unit_top),
@@ -304,6 +325,17 @@ fn score_decimals(top: f32) -> usize {
 mod tests {
     use super::*;
 
+    /// PR #399's `ema_decay`: the window the trainer logs ("EMA window 400 steps"), none without it.
+    #[test]
+    fn a_runs_ema_reads_as_its_window_in_steps() {
+        assert_eq!(fmt_ema_window(Some(0.9999)).as_deref(), Some("window 10000 steps"));
+        assert_eq!(fmt_ema_window(Some(0.9975)).as_deref(), Some("window 400 steps"));
+        assert_eq!(fmt_ema_window(Some(1. - 1. / 350.)).as_deref(), Some("window 350 steps"));
+        assert_eq!(fmt_ema_window(None), None);
+        assert_eq!(fmt_ema_window(Some(1.)), None);
+        assert_eq!(fmt_ema_window(Some(f64::NAN)), None);
+    }
+
     /// d1-datasets: a one-image split read "1 images".
     #[test]
     fn a_split_label_counts_one_image_in_the_singular() {
@@ -319,6 +351,20 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    /// #382: the final-score tile read a one-epoch run's mAP50-95 of 0.000068 as "0.000". A score
+    /// above zero never reads as zero; from 0.0005 up, and zero itself, it keeps three decimals.
+    #[test]
+    fn a_score_above_zero_never_reads_as_zero() {
+        assert_eq!(fmt_score(0.000_068), "0.00007");
+        assert_eq!(fmt_score(0.000_39), "0.00039");
+        assert_eq!(fmt_score(0.000_499), "0.00050");
+        assert_eq!(fmt_score(0.000_001), "<0.00001");
+        assert_eq!(fmt_score(0.000_5), "0.001");
+        assert_eq!(fmt_score(0.412), "0.412");
+        assert_eq!(fmt_score(0.), "0.000");
+        assert_eq!(fmt_score(1.), "1.000");
     }
 
     /// #338: a legend score's decimals follow its axis's fitted top. Studio's `format.test.ts` has the

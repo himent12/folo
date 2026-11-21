@@ -113,7 +113,7 @@ impl FoloApp {
             .child({
                 // Defects are actionable: this tile filters the grid to the images in question.
                 let empty = s.map_or(0, |s| s.empty_images);
-                let on = self.ds_empty_only;
+                let on = self.empty_only(&ds.id);
                 let el = div()
                     .id("ds-empty-tile")
                     .flex_1()
@@ -149,15 +149,21 @@ impl FoloApp {
                         0.,
                         window,
                         cx,
-                        act(|this, _, cx| {
-                            this.ds_empty_only = !this.ds_empty_only;
-                            // Empty images have no class: the two filters can't both apply.
-                            if this.ds_empty_only {
-                                this.ds_class = None;
+                        act({
+                            let id = ds.id.clone();
+                            move |this, _, cx| {
+                                this.ds_empty_of = (!this.empty_only(&id)).then(|| id.clone());
+                                // Empty images have no class: the two filters can't both apply to this
+                                // dataset (another's class filter stays with it).
+                                if this.ds_empty_of.is_some()
+                                    && this.ds_class.as_ref().is_some_and(|(of, _)| *of == id)
+                                {
+                                    this.ds_class = None;
+                                }
+                                this.ds_tab = DsTab::Images;
+                                this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                                cx.notify();
                             }
-                            this.ds_tab = DsTab::Images;
-                            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
-                            cx.notify();
                         }),
                     )
                     .into_any_element()
@@ -218,7 +224,7 @@ impl FoloApp {
                         )
                     });
                 if broken > 0 {
-                    let cmd = format!("folo dataset check \"{}\"", ds.path);
+                    let (cmd, how) = check_command(&ds.path);
                     self.bind(
                         el,
                         "ds-broken-tile",
@@ -230,7 +236,7 @@ impl FoloApp {
                             this.toast(
                                 Tone::Neutral,
                                 "Copied the check command",
-                                Some(format!("Run `{cmd}` in a terminal to list the broken labels.").into()),
+                                Some(how.clone().into()),
                                 cx,
                             );
                         }),
@@ -247,6 +253,25 @@ impl FoloApp {
 /// The Broken labels tile's tooltip: the health finding's words for what the count is, then the tile's action.
 fn broken_tip() -> String {
     format!("{} Click to copy the terminal command that lists them.", super::health::BROKEN_LABELS_DETAIL)
+}
+
+/// The Broken labels tile's command for the dataset at `path` (the server's path, as the API gives
+/// it), quoted as the CLI quotes it (`folo_api::json::quote_path`: a path with spaces in double
+/// quotes), and what its toast says. A path a shell would change inside double quotes (`"`, `$`,
+/// `%`, a backtick, a `\`) is left as `<dataset>` in the command, and the toast gives the path to
+/// put there, quoted for the person's shell: the clipboard only ever holds a command line.
+fn check_command(path: &str) -> (String, String) {
+    match folo_api::json::quote_path(path) {
+        Some(quoted) => {
+            let cmd = format!("folo dataset check {quoted}");
+            let how = format!("Run `{cmd}` in a terminal to list the broken labels.");
+            (cmd, how)
+        }
+        None => (
+            "folo dataset check <dataset>".into(),
+            format!("Replace <dataset> with this path, quoted for your shell, then run it: {path}"),
+        ),
+    }
 }
 
 /// Under the broken-label count: the check command to copy, or that every label is valid.
@@ -298,5 +323,28 @@ mod tests {
         assert!(tip.starts_with(super::super::health::BROKEN_LABELS_DETAIL), "{tip}");
         assert!(tip.ends_with("Click to copy the terminal command that lists them."), "{tip}");
         assert!(!tip.contains("label files") && !tip.contains("images are skipped"), "{tip}");
+    }
+
+    /// #382: the tile wrapped the path in double quotes itself, so a quote in it ended the argument
+    /// and a `$` in it was expanded by PowerShell; now it is quoted as the CLI quotes its commands.
+    /// Review round 1: the path is taken as the server wrote it (a POSIX `\` kept, never made a
+    /// `/`), and what is copied is a command line, the path to put in it said in the toast.
+    #[test]
+    fn the_check_command_quotes_its_path_as_the_cli_does() {
+        let cmd = |p: &str| super::check_command(p).0;
+        assert_eq!(cmd("D:/data/shapes"), "folo dataset check D:/data/shapes");
+        assert_eq!(cmd("D:/my data/shapes"), "folo dataset check \"D:/my data/shapes\"");
+        assert_eq!(
+            super::check_command("D:/my data").1,
+            "Run `folo dataset check \"D:/my data\"` in a terminal to list the broken labels."
+        );
+        for odd in ["D:/O\"Brien/$set", r"/data/set\blue"] {
+            let (cmd, how) = super::check_command(odd);
+            assert_eq!(cmd, "folo dataset check <dataset>");
+            assert_eq!(
+                how,
+                format!("Replace <dataset> with this path, quoted for your shell, then run it: {odd}")
+            );
+        }
     }
 }

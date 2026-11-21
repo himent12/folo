@@ -142,6 +142,15 @@ describe('resolution', () => {
 });
 
 describe('importing', () => {
+  // #382 (after #342): a zero-width name showed as an empty one and an empty "Remove " label; a control character or a
+  // bidi override showed its own way in each list. The names refused and accepted are design/theme-cases.json's
+  // ("raw: name with ..."), which every validator replays; Studio refuses them on import only, so a theme stored
+  // before the rule stays installed.
+  it('keeps a stored theme whose name an import would refuse', () => {
+    expect(readStoredThemes([file({ name: 'A​B' })]).map((t) => t.name)).toEqual(['A​B']);
+    expect(readStoredThemes([file({ name: 'ㅤ' })]).map((t) => t.name)).toEqual(['ㅤ']);
+  });
+
   it('installs, replaces by id in place, and says why a file was refused', () => {
     const parsed = (name: string, v: unknown): ParsedFile => ({ file: name, ...parseThemeFile(JSON.stringify(v)) });
     const { themes: out, results } = importThemes([file({ id: 'a', name: 'A' }), file({ id: 'b', name: 'B' })], [

@@ -323,6 +323,10 @@ export function resolveTrain(c: TrainConfig, images: number, classes: number, st
   const lr0 = c.optimizer === 'auto' ? 0.01 : c.lr0;
   const momentum = 0.937;
   const warmupBias = 0.1;
+  // The EMA (docs/MODEL.md §8.5, `folo_nn::ema_for_run`): the default 0.9999 / 2000 from scratch; a fine-tune averages
+  // over a quarter of its optimizer steps (`ema_run_fraction` 0.25) until that reaches the default's 10,000.
+  const window = 0.25 * c.epochs * stepsPerEpoch;
+  const [emaDecay, emaTau] = !c.weights || window >= 10_000 ? [0.9999, 2000] : [1 - 1 / Math.max(window, 1), Math.max(Math.max(window, 1) / 5, 1)];
   return {
     optimizer: kind,
     lr0,
@@ -341,6 +345,8 @@ export function resolveTrain(c: TrainConfig, images: number, classes: number, st
     warmup_bias_lr: warmupBias,
     // After the trainer's cap at half the run (docs/API.md, `Run.resolved.close_mosaic`).
     close_mosaic: closeMosaicEpochs(c.augment.close_mosaic, c.epochs),
+    ema_decay: emaDecay,
+    ema_tau: emaTau,
   };
 }
 

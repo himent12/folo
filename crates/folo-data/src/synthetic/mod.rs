@@ -8,8 +8,12 @@
 //! Use [`write_yolo`] to write a standard YOLO folder (`images/`, `labels/`, `data.yaml`) or [`SyntheticDataset`]
 //! to render samples on demand in memory.
 //!
-//! `raster.rs` holds the anti-aliased signed-distance rasteriser and the procedural backgrounds.
+//! `raster.rs` holds the anti-aliased signed-distance rasteriser and the procedural backgrounds, `math.rs` the sine,
+//! cosine and powers of two they use: built from IEEE basic operations, so a seed gives the same bytes in every
+//! build and on every machine (the generator takes no approximation from the platform's libm; `sqrt` is
+//! correctly rounded, `floor`, `ceil`, `round` and a remainder are exact).
 
+mod math;
 mod raster;
 
 use crate::bbox::BBox;
@@ -227,15 +231,15 @@ struct Scene {
 }
 
 fn rotate_pts(pts: &[[f32; 2]], c: [f32; 2], r: f32, rot: f32) -> Vec<[f32; 2]> {
-    let (s, co) = rot.sin_cos();
+    let (s, co) = math::sin_cos(rot);
     pts.iter().map(|p| [c[0] + r * (p[0] * co - p[1] * s), c[1] + r * (p[0] * s + p[1] * co)]).collect()
 }
 
 fn regular(n: usize, phase: f32) -> Vec<[f32; 2]> {
     (0..n)
         .map(|i| {
-            let a = phase + TAU * i as f32 / n as f32;
-            [a.cos(), a.sin()]
+            let (s, c) = math::sin_cos(phase + TAU * i as f32 / n as f32);
+            [c, s]
         })
         .collect()
 }
@@ -255,9 +259,9 @@ fn shape_prims(k: usize, c: [f32; 2], r: f32, rot: f32, rng: &mut Rng) -> Vec<Pr
             let inner = rng.uniform(0.38, 0.5);
             let pts: Vec<[f32; 2]> = (0..10)
                 .map(|i| {
-                    let a = -PI / 2.0 + PI * i as f32 / 5.0;
+                    let (s, c) = math::sin_cos(-PI / 2.0 + PI * i as f32 / 5.0);
                     let rr = if i % 2 == 0 { 1.0 } else { inner };
-                    [rr * a.cos(), rr * a.sin()]
+                    [rr * c, rr * s]
                 })
                 .collect();
             vec![Prim::Poly(rotate_pts(&pts, c, r, rot))]
@@ -337,7 +341,7 @@ fn layout(cfg: &SyntheticConfig, kinds: &[usize], index: usize) -> Scene {
                 rng.uniform(4.0, 14.0)
             } else {
                 // Log-uniform between 3% and 24% of the short side.
-                (min_side * 0.03) * (8.0f32).powf(rng.f32())
+                (min_side * 0.03) * math::exp2(3.0 * rng.f32())
             };
             let edge = rng.chance(cfg.edge_fraction);
             let m = if edge { -0.4 * r } else { r + 1.0 };
@@ -548,3 +552,6 @@ pub fn write_yolo_with_progress(
         boxes: boxes.iter().sum(),
     })
 }
+
+#[cfg(test)]
+mod tests;

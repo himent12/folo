@@ -294,7 +294,7 @@ fn a_dataset_page_has_its_tabs_and_one_toolbar_and_statistics_holds_the_strip() 
     // "Show them": the empty-images chip takes the class picker's place on the toolbar.
     drive(&mut app, window, |this, _, cx| {
         this.ds_tab = super::DsTab::Images;
-        this.ds_empty_only = true;
+        this.ds_empty_of = Some("ds_3b91".into());
         cx.notify();
     });
     let empty = drawn_keys(&mut app, window);

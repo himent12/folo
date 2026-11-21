@@ -17,11 +17,11 @@ the determinism rules.
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
-| `src/resize.rs`, `src/warp.rs` | Bilinear resize and affine warp of 8-bit RGB images |
+| `src/resize.rs`, `src/warp.rs` | Bilinear resize and affine warp of 8-bit RGB images (the warp reads a `Plane`: images placed on one colour, so a mosaic needs no canvas) |
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
-| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
+| `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
 | `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
@@ -29,12 +29,13 @@ the determinism rules.
 | `src/stats.rs` | `DatasetStats`, the `stats` object of docs/API.md |
 | `src/guard.rs` | An optional process-wide read guard (`folo mcp --confine` installs one) |
 | `src/par.rs` | Row parallelism that the loader's worker threads switch off |
+| `src/buffers.rs` | Reuse of image-sized buffers on the loader's threads (no page faults per sample) |
 | `src/paths.rs` | Path helpers shared by `folo dataset check --json` and the server |
 | `src/rng.rs` | xoshiro256++ seeded through SplitMix64 |
 | `src/error.rs` | `DataError` and `Result` |
-| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `guard.rs` (its own binary: a guard stays installed for the process), `common/` (helpers) |
+| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `guard.rs` (its own binary: a guard stays installed for the process), `common/` (helpers) |
 | `benches/pipeline.rs` | Stage timings and `DataLoader` images/s |
-| `examples/` | `shapes.rs` (the MODEL.md §10.6 shapes dataset), `synth_sheet.rs` (a contact sheet of synthetic images), `aug_stats.rs` (statistics of the training transform's output), `open_time.rs` (times opening a dataset) |
+| `examples/` | `shapes.rs` (the MODEL.md §10.6 shapes dataset), `synth_sheet.rs` (a contact sheet of synthetic images), `aug_stats.rs` (statistics of the training transform's output), `open_time.rs` (times opening a dataset), `loader_profile.rs` (time and allocations of each stage of a training sample) |
 
 ## Start here
 

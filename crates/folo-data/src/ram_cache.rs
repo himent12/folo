@@ -10,7 +10,7 @@
 use crate::augment::resize_long_side;
 use crate::dataset::Dataset;
 use crate::error::{DataError, Result};
-use crate::image::Sample;
+use crate::image::{Image, Sample};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -311,10 +311,21 @@ impl RamCache {
                 let orig = [s.image.width, s.image.height];
                 // Workers racing on one image may each decode it; only the one whose `get_or_init` wins resizes
                 // it, and the others take the kept entry (the same pixels) and drop their decode.
-                slot.get_or_init(|| Arc::new((resize_long_side(s, self.imgsz), orig))).clone()
+                slot.get_or_init(|| {
+                    // Kept for the whole run: exactly its size (a pooled buffer of a larger class would hold memory
+                    // the cache's reservation does not count).
+                    let mut kept = resize_long_side(s, self.imgsz);
+                    kept.image.data.shrink_to_fit();
+                    Arc::new((kept, orig))
+                })
+                .clone()
             }
         };
-        Ok((entry.0.clone(), entry.1))
+        let kept = &entry.0;
+        let mut data = crate::buffers::scratch(kept.image.data.len());
+        data.copy_from_slice(&kept.image.data);
+        let image = Image { width: kept.image.width, height: kept.image.height, data };
+        Ok((Sample { image, boxes: kept.boxes.clone() }, entry.1))
     }
 }
 

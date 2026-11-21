@@ -305,6 +305,23 @@ pub struct ResolvedTrain {
     /// field and for runs recorded before it whose `config.json` lacks the value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_mosaic: Option<u32>,
+    /// The EMA's asymptotic decay (docs/MODEL.md §8.5, `folo.ema`): 0.9999, or less for a fine-tune whose window is a
+    /// share of its optimizer steps (`TrainConfig.ema_run_fraction`). Left out for a run without an EMA and by servers
+    /// older than the field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::json::exact_opt_f64"
+    )]
+    pub ema_decay: Option<f64>,
+    /// The EMA's ramp time constant in optimizer steps (docs/MODEL.md §8.5, `folo.ema`): 2000, or a fifth of a
+    /// fine-tune's window. Left out when `ema_decay` is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::json::exact_opt_f64"
+    )]
+    pub ema_tau: Option<f64>,
 }
 
 /// [`ResolvedTrain::optimizer`].

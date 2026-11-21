@@ -155,6 +155,9 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
     a new `wsl.exe` started as the probe may time out as described above. After a forced stop
     (`wsl --shutdown`), delete the runners' toolchains and target dirs: a file written just before can be cut short
     (a `librustc_driver` that then failed with "cannot read file data").
+  - **Headless Chrome hangs as root** in the `folo-ci` distribution: it starts, but no page ever opens, and
+    `timeout`'s default signal does not end it. Run browser checks (`npm run qa`, `scripts/load-faults.mjs`) as a
+    runner user, where it works.
 
 ## Unstable self-hosted Windows host
 The maintainers' self-hosted Windows machine (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy

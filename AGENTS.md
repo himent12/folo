@@ -31,12 +31,17 @@ suited for the job:
 | **Main orchestrator** | **Claude Opus 5.5** (`effort: high`) or **Claude Fable 5.2** (`effort: high`) | `claudeAgent` (`claude-opus-5-5` / `claude-fable-5-2`) | Top-level planning, breaking work into focused PRs, dispatching subagents, tracking CI/reviews/play-testing, merging approved PRs, and updating `docs/ROADMAP.md`. |
 | **Main code implementer & doer** *(subagent)* | **Claude Opus 5.5** (`effort: high`) | `claudeAgent` (`claude-opus-5-5`) | The primary builder and doer: implements engine, CLI, server, and UI code, writes tests, runs checks, opens PRs, and fixes review and play-test findings. |
 | **App play-tester & reviewer** *(subagent)* | **GPT-6.2 Sol** (`reasoningEffort: high`, **fast** / `serviceTier: priority`) or **GPT-6.2 Astra** (`reasoningEffort: high`, **standard — not fast** / `serviceTier: default`) | `codex` (`gpt-6.2-sol` / `gpt-6.2-astra`) | Play-tests the real app end to end (FOLO Studio, FOLO Desktop, CLI, MCP, edge cases, live states) like a demanding user, and runs independent code/PR reviews against `origin/main`. |
-| **Writer & creative writer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) | Devin CLI in T3 Code (`acpRegistry_devin`, `gemini-4-neon-high`) | Owns documentation clarity, `README.md` storytelling, user guides, release notes, changelogs, and creative/UX copy so the project is clear and pleasant to read. |
+| **Writer & creative writer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) | Antigravity CLI in T3 Code (`antigravity`, `gemini-4-neon`) | Owns documentation clarity, `README.md` storytelling, user guides, release notes, changelogs, and creative/UX copy so the project is clear and pleasant to read. When the owner asks for it, takes any role Opus 5.5 has (see below). |
 
 Subagent guidelines:
 - Delegate by role rather than having one model do everything: let **Opus 5.5** implement and fix code, **GPT-6.2 Sol
   (high, fast)** or **GPT-6.2 Astra (high, standard — not fast)** play-test the app and review diffs, and **Gemini 4
-  Neon** (via Devin CLI in T3 Code) write and polish docs and creative copy.
+  Neon** (via the Antigravity CLI in T3 Code) write and polish docs and creative copy.
+- **Gemini 4 Neon can replace Opus 5.5 in everything when the owner asks for it**: main orchestration, implementing
+  and fixing code, research. The table's models are the defaults and Opus 5.5 stays one; the swap is the owner's
+  call, per task or per wave, and every other rule here (PRs, disjoint worktrees) applies to Neon as it does to Opus.
+  A Neon agent splits its own work with Antigravity's agent spawning and checks what its sub-agents return; PR
+  reviews still run on a fresh GPT reviewer through T3 Code, never on one of its own sub-agents.
 - Keep worktrees disjoint when running subagents in parallel so two subagents never edit the same checkout or files.
 - Never grade your own PR: code review and app play-testing always run on a fresh play-tester/reviewer subagent.
 - [docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code `delegate_task` target configs, prompts, and

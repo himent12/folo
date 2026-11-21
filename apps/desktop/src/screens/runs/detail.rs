@@ -18,6 +18,9 @@ use crate::store::Load;
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
+/// Why Resume is off on demo data (the built-in demo, `folo serve --mock`).
+const DEMO_NO_RESUME: &str = "Demo data can't resume runs";
+
 impl FoloApp {
     /// Resume a stopped or failed run where it left off (its last finished epoch).
     /// The last finished (validated) epoch, from the loaded history: where a resume continues from
@@ -37,11 +40,19 @@ impl FoloApp {
             Some(f) => format!("Resume from epoch {f}"),
             None => "Resume".to_string(),
         };
+        let icon = if again { "icons/refresh-cw.svg" } else { "icons/play.svg" };
+        // Demo data can't resume a run: the built-in demo refuses it, and `folo serve --mock` answers
+        // 501. Both say `mock` in their health; while that is unknown, Resume is offered.
+        if self.store.health.ready().is_some_and(|h| h.mock) {
+            return self
+                .button_disabled("run-resume", label, Btn::Secondary, Some(icon), DEMO_NO_RESUME, window, cx)
+                .into_any_element();
+        }
         self.button(
             "run-resume",
             label,
             Btn::Secondary,
-            Some(if again { "icons/refresh-cw.svg" } else { "icons/play.svg" }),
+            Some(icon),
             window,
             cx,
             act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
@@ -507,12 +518,12 @@ impl FoloApp {
                 } else {
                     "mAP50-95 · last evaluated"
                 },
-                last.map_or("–".into(), |e| f3(e.val.map50_95)),
+                last.map_or("–".into(), |e| fmt_score(e.val.map50_95)),
                 big,
                 delta.or_else(|| {
                     r.best
                         .as_ref()
-                        .map(|b| kpi_note(&t).child(format!("best {} @ {}", f3(b.map50_95), b.epoch)))
+                        .map(|b| kpi_note(&t).child(format!("best {} @ {}", fmt_score(b.map50_95), b.epoch)))
                 }),
             ),
             div()

@@ -51,6 +51,38 @@ fn labels_are_sane_and_varied() {
     assert!(SyntheticDataset::new(SyntheticConfig { classes: vec![], ..cfg }, Split::Train).is_err());
 }
 
+/// The files a seed writes are golden, encoding included: the same bytes from every build and system (CI checks them
+/// on Linux and Windows in debug; the value came from a release build). A changed generator, label format or image
+/// encoder fails here: if intended, re-bless with the value printed.
+#[test]
+fn a_seed_writes_the_golden_files() {
+    let t = TempDir::new("synth-golden");
+    let cfg = SyntheticConfig { images: 6, imgsz: 64, seed: 7, ..Default::default() };
+    write_yolo(&cfg, t.path(), ImageFormat::Jpeg(90)).unwrap();
+    let mut files = Vec::new();
+    let mut stack = vec![t.path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    for p in &files {
+        let name = p.strip_prefix(t.path()).unwrap().to_string_lossy().replace('\\', "/");
+        for &b in name.as_bytes().iter().chain(&std::fs::read(p).unwrap()) {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01B3);
+        }
+    }
+    assert_eq!(files.len(), 13, "{files:?}");
+    assert_eq!(h, 0x8088ee73020d4c72, "the written dataset changed: if intended, re-bless with 0x{h:016x}");
+}
+
 #[test]
 fn round_trip_through_the_yolo_reader() {
     let t = TempDir::new("synth");

@@ -88,18 +88,51 @@ pub(super) fn device_lost(e: &Error) -> bool {
 }
 
 /// The failure message of a run whose GPU was lost: the cause, and the checkpoint to resume from (the last one
-/// written or resumed from, with the epochs it holds) or that there is none.
+/// written or resumed from, with the epochs it holds) or that there is none. The driver's report is cut to
+/// [`LOSS_CAUSE_CHARS`] and the checkpoint's path is named once, so the message ends in the command to resume with
+/// and stays short unless the path is long ([`failure_report`]).
 pub(super) fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> String {
     let resume = match last {
-        Some((p, n)) => format!(
-            "{} holds the state after epoch {n}: {}",
-            folo_api::json::path(p),
-            folo_api::json::cli_command(
-                "resume with `folo train --resume {checkpoint}`",
-                &[("checkpoint", p)]
-            )
+        Some((p, n)) => folo_api::json::cli_command(
+            &format!("resume from the state after epoch {n} with `folo train --resume {{checkpoint}}`"),
+            &[("checkpoint", p)],
         ),
         None => "no checkpoint was written yet: start the run again".into(),
     };
-    format!("the GPU device was lost ({e}); {resume}")
+    let cause = folo_api::codes::cap(&e.to_string(), LOSS_CAUSE_CHARS);
+    format!("the GPU device was lost ({cause}); {resume}")
 }
+
+/// The most of a driver's report a lost-device message quotes.
+pub(super) const LOSS_CAUSE_CHARS: usize = 120;
+
+/// Most characters of a failure's message in its log line: the line names the failure, the status carries the
+/// message, so a driver's report is not repeated in every record.
+pub(super) const LOG_MESSAGE_CHARS: usize = 120;
+
+/// What a failed run reports: its log line and its status message. The line names the failure in at most
+/// [`LOG_MESSAGE_CHARS`] characters of its message, and the status carries the message ([`Error::summary`]). A lost
+/// GPU's (`lost`, [`device_loss_message`]) ends in the command to resume with, which a cut would lose: its line keeps
+/// all of it whatever the checkpoint's path, and a status message it does not fit says the command is in the log.
+pub(super) fn failure_report(e: &Error, lost: bool) -> (String, String) {
+    let code = e.code();
+    if !lost {
+        let summary = e.summary();
+        return (
+            format!("run failed ({code}): {}", folo_api::codes::cap(&summary, LOG_MESSAGE_CHARS)),
+            summary,
+        );
+    }
+    let whole = e.to_string();
+    let max = folo_api::codes::MAX_MESSAGE_CHARS;
+    let status = if whole.chars().count() <= max {
+        whole.clone()
+    } else {
+        // `cap` adds an ellipsis: the status is `max` characters at most.
+        format!("{}{SEE_LOG}", folo_api::codes::cap(&whole, max - SEE_LOG.chars().count() - 1))
+    };
+    (format!("run failed ({code}): {whole}"), status)
+}
+
+/// The end of a lost GPU's status message cut to fit: the run's log line has the whole command.
+pub(super) const SEE_LOG: &str = " (the whole command to resume with is in the run's log)";

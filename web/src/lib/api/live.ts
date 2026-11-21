@@ -230,6 +230,8 @@ export class LiveRun {
   #lastCloud: RunCloud | null = null;
   /** Bumps on every rewind (resume): history requested before it describes an earlier attempt and is dropped. */
   #gen = 0;
+  /** Bumps only on a rewind: the run's attempt (each resume starts one), for a stop's late answer. */
+  #attempt = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
 
@@ -640,11 +642,32 @@ export class LiveRun {
   }
 
   /**
+   * Stops the run through `call` (POST /api/runs/{id}/stop, or a resumed run's removal from the queue). The answer is
+   * the run as the server had it once it took the stop. It applies only over the state it answered: if the view heard
+   * anything about the run's status meanwhile (a status event, a snapshot, a resume), the stream is newer than the
+   * answer or about to be (the server sends every change of status as an event, the stop's own `stopping` too), and
+   * the view keeps what it has: the run may have ended, or been resumed elsewhere after it stopped. Returns the run as
+   * the view now has it.
+   */
+  async stop(call: () => Promise<Run | null>): Promise<Run | null> {
+    const seq = this.#statusSeq;
+    const attempt = this.#attempt;
+    const before = this.run?.status;
+    const r = await call();
+    if (!r) return null;
+    const cur = this.run;
+    if (cur && (seq !== this.#statusSeq || attempt !== this.#attempt || cur.status !== before)) return cur;
+    this.run = keepStepsPerEpoch(r, cur);
+    return this.run ?? r;
+  }
+
+  /**
    * Drops the steps after the last finished epoch (1-based; a resumed run repeats them), moves the run there and
    * starts a replay.
    */
   #rewind() {
     this.#gen++;
+    this.#attempt++;
     this.#replay = { until: this.steps[this.steps.length - 1]?.step ?? 0, steps: [], epochs: [] };
     const done = this.epochs[this.epochs.length - 1]?.epoch ?? 0;
     this.steps = this.steps.filter((s) => s.epoch <= done);

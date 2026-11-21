@@ -1,6 +1,9 @@
 //! The training transform: mosaic → affine → mixup → HSV → flips, ending at `imgsz x imgsz`.
 
-use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic4, random_affine, random_hsv, resize_long_side};
+use super::{
+    AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_affine, random_hsv, resize_long_side,
+};
+use crate::buffers;
 use crate::dataset::Dataset;
 use crate::error::Result;
 use crate::image::Sample;
@@ -96,12 +99,14 @@ impl TrainTransform {
         let Some(cfg) = &self.augment else {
             let f = fetch(index)?;
             let (sample, letterbox) = letterbox_fetched(&f, self.imgsz);
+            buffers::recycle(f.sample.image.data);
             return Ok(Transformed { index: f.index, sample, orig_size: f.orig_size, letterbox });
         };
         let mut out = self.one(cfg, index, len, fetch, rng)?;
         if self.mosaic && rng.chance(cfg.mixup) {
             let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
             mixup(&mut out.sample, &other.sample, rng);
+            buffers::recycle(other.sample.image.data);
         }
         random_hsv(&mut out.sample.image, cfg.hsv, rng);
         if rng.chance(cfg.flipud) {
@@ -137,13 +142,17 @@ impl TrainTransform {
                 // The identity for a pre-resized sample.
                 parts.push(resize_long_side(f.sample, s));
             }
-            let canvas = mosaic4([&parts[0], &parts[1], &parts[2], &parts[3]], s, rng);
-            let sample = random_affine(&canvas, s, s, cfg, rng);
+            let sample = mosaic_affine([&parts[0], &parts[1], &parts[2], &parts[3]], s, cfg, rng);
+            for p in parts {
+                buffers::recycle(p.image.data);
+            }
             Ok(Transformed { index: primary, sample, orig_size, letterbox: Letterbox::identity(s, s) })
         } else {
             let f = fetch(index)?;
             let (lb_sample, letterbox) = letterbox_fetched(&f, s);
             let sample = random_affine(&lb_sample, s, s, cfg, rng);
+            buffers::recycle(lb_sample.image.data);
+            buffers::recycle(f.sample.image.data);
             Ok(Transformed { index: f.index, sample, orig_size: f.orig_size, letterbox })
         }
     }

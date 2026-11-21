@@ -195,11 +195,59 @@ pub fn prf_label(a: &BenchAccuracy) -> String {
     }
 }
 
-/// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it gave no confidences,
-/// or none of its detections reached the calibration floor, 0.1 (docs/BENCH.md, Calibration). Short enough for the
+/// Why an entry is partial, one reason each, as Studio's `coverageFacts` gives them to `partialWhy` (without the
+/// facts that don't make a score partial: the classes a model knows, an earlier version of the benchmark): "48 of
+/// 360 images", "unchanged only" or "4 of 7 conditions", "no confidences", "calibration not measured (…)", "no
+/// condition answered whole"; "some conditions left out" for a partial score with none of these (an external entry
+/// that left conditions out does not say which).
+pub fn partial_reasons(e: &BenchEntry, b: &Bench) -> Vec<String> {
+    let axis = |a: BenchAxis| e.score.as_ref().and_then(|s| s.axes.iter().find(|x| x.axis == a));
+    let unmeasured = |a: BenchAxis| axis(a).is_some_and(|x| x.value.is_none());
+    let mut out = Vec::new();
+    if e.images < b.images {
+        out.push(format!("{} of {} images", int(e.images), int(b.images)));
+    }
+    let planned = b.plan.conditions.len();
+    // An open external entry has not said yet which conditions it answers.
+    let receiving =
+        e.status == BenchEntryStatus::Running && matches!(e.contestant, BenchContestant::External);
+    if planned > 0 && !e.conditions && !receiving {
+        out.push("unchanged only".into());
+    } else if planned > 0 && e.status == BenchEntryStatus::Done && (e.conditions_run as usize) < planned {
+        out.push(format!("{} of {planned} conditions", e.conditions_run));
+    }
+    if !e.scored {
+        out.push(calibration_none(e));
+    }
+    if e.scored && e.score.is_some() && unmeasured(BenchAxis::Calibration) {
+        out.push(format!(
+            "calibration not measured (no detection on the unchanged images reached confidence {CALIBRATION_FLOOR})"
+        ));
+    }
+    if planned > 0 && e.conditions && e.score.is_some() && unmeasured(BenchAxis::Robustness) {
+        out.push("no condition answered whole".into());
+    }
+    if out.is_empty() && e.score.as_ref().is_some_and(|s| s.partial) {
+        out.push("some conditions left out".into());
+    }
+    out
+}
+
+/// Why an entry is partial, in a sentence (the "partial" badge's tooltip), in Studio's words (`partialWhy`).
+pub fn partial_why(e: &BenchEntry, b: &Bench) -> String {
+    format!("Partial: {}. It compares only loosely with complete entries.", partial_reasons(e, b).join(", "))
+}
+
+/// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it gave no confidences
+/// (an agent), was added as a model that gives none (an external entry: confidences in its file were not used), or
+/// none of its detections reached the calibration floor, 0.1 (docs/BENCH.md, Calibration). Short enough for the
 /// tile at 1280 px; [`calibration_why_not`] says it in full.
 pub fn calibration_none(e: &BenchEntry) -> String {
-    if e.scored { format!("none reached {CALIBRATION_FLOOR}") } else { "no confidences".into() }
+    match (&e.contestant, e.scored) {
+        (_, true) => format!("none reached {CALIBRATION_FLOOR}"),
+        (BenchContestant::Agent { .. }, false) => "no confidences".into(),
+        (_, false) => "confidences not used".into(),
+    }
 }
 
 /// The same in a sentence, in Studio's words (`axisWhyNot`).
@@ -211,7 +259,8 @@ pub fn calibration_why_not(e: &BenchEntry) -> String {
             "Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate."
                 .into()
         }
-        (_, false) => "Its predictions came without confidences.".into(),
+        // Added with "The model gives confidences" off: its file may have had scores, which were not used.
+        (_, false) => "It was added as giving no confidences, so any scores in its predictions were not used.".into(),
     }
 }
 
@@ -328,11 +377,56 @@ mod tests {
         // A contestant that gives none keeps the explanation about missing confidences.
         e.scored = false;
         e.contestant = BenchContestant::External;
-        assert_eq!(calibration_none(&e), "no confidences");
-        assert_eq!(calibration_why_not(&e), "Its predictions came without confidences.");
+        assert_eq!(calibration_none(&e), "confidences not used");
+        assert_eq!(
+            calibration_why_not(&e),
+            "It was added as giving no confidences, so any scores in its predictions were not used."
+        );
         let effort = crate::api::LabelEffort::Medium;
         e.contestant = BenchContestant::Agent { agent: LabelAgentId::Claude, model: None, effort };
         assert!(calibration_why_not(&e).starts_with("Agents give no confidences"));
+        assert_eq!(calibration_none(&e), "no confidences");
+    }
+
+    /// #382: the "partial" badge said nothing of why; Studio's `partialWhy` lists the reasons.
+    #[test]
+    fn a_partial_entry_says_why() {
+        let (b, entries) = demo_board();
+        let mut e = entries[0].clone();
+        e.score.as_mut().unwrap().partial = true;
+        e.images = b.images / 2;
+        e.conditions = false;
+        e.scored = false;
+        e.contestant = BenchContestant::External;
+        let half = format!("{} of {} images", int(e.images), int(b.images));
+        assert_eq!(
+            partial_why(&e, &b),
+            format!(
+                "Partial: {half}, unchanged only, confidences not used. It compares only loosely with complete entries."
+            )
+        );
+        // A scored model that ran every condition: calibration not measured, and robustness when none was answered.
+        let mut e = entries[0].clone();
+        e.images = b.images;
+        e.conditions = true;
+        e.conditions_run = b.plan.conditions.len() as u32;
+        e.scored = true;
+        for x in &mut e.score.as_mut().unwrap().axes {
+            if matches!(x.axis, BenchAxis::Calibration | BenchAxis::Robustness) {
+                x.value = None;
+            }
+        }
+        assert_eq!(
+            partial_reasons(&e, &b),
+            [
+                "calibration not measured (no detection on the unchanged images reached confidence 0.1)",
+                "no condition answered whole"
+            ]
+        );
+        // Partial with none of those: an external entry that left conditions out.
+        e.score.as_mut().unwrap().axes.iter_mut().for_each(|x| x.value = Some(0.5));
+        e.score.as_mut().unwrap().partial = true;
+        assert_eq!(partial_reasons(&e, &b), ["some conditions left out"]);
     }
 
     #[test]

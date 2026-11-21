@@ -198,6 +198,17 @@ describe('MockApi agent labeling: edits and datasets', () => {
     await expect(api.createLabelDataset('lb_3f9a', {})).rejects.toMatchObject({ status: 409 });
   });
 
+  it("tells the job's stream of a dataset made from it once the dataset is there, as the server does", async () => {
+    const api = new MockApi('normal', 0);
+    const found: Promise<string>[] = [];
+    const close = api.labelEvents('lb_51d0', {
+      job: (j) => void (j.dataset_id && found.push(api.dataset(j.dataset_id).then((d) => d.id))),
+    });
+    const ds = await api.createLabelDataset('lb_51d0', {});
+    expect(await Promise.all(found)).toEqual([ds.id]);
+    close();
+  });
+
   it('adds a folder the demo knows, skipping what the job has, and refuses one it does not', async () => {
     const api = new MockApi('normal', 0);
     const job = await api.createLabelJob({ name: 'mini', classes: ['bolt', 'nut'] });

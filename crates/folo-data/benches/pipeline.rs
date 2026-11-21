@@ -11,6 +11,9 @@
 //! - `--no-stages` / `--no-val`: skip the single-thread stage table / the validation loader table.
 //! - `--cache ram`: the training loader with `CacheMode::Ram` (its warm-up epoch is a whole epoch, which fills
 //!   the cache; the measured epochs then read from it).
+//! - `--same-epoch`: every round measures epoch 1, after a warm-up pass over the same batches, so every round reads
+//!   files the warm-up read (an equally warm page cache for A/B runs of two builds; docs/notes/hill/r6-loader.md).
+//! - `SCAN_CACHE=DIR` (environment): open the dataset through the scan cache in `DIR` (docs/DATA.md, Scan cache).
 //!
 //! Prints single-thread stage timings (decode, resize, letterbox, mosaic, affine, HSV, flip, collate) and
 //! end-to-end `DataLoader` images/s for the full training transform (decode + mosaic + affine + HSV + flip +
@@ -50,6 +53,7 @@ struct Args {
     stages: bool,
     val: bool,
     cache: CacheMode,
+    same_epoch: bool,
 }
 
 fn parse_args() -> Args {
@@ -77,6 +81,7 @@ fn parse_args() -> Args {
         stages: !flag("--no-stages"),
         val: !flag("--no-val"),
         cache: if value("--cache").as_deref() == Some("ram") { CacheMode::Ram } else { CacheMode::None },
+        same_epoch: flag("--same-epoch"),
     }
 }
 
@@ -93,11 +98,15 @@ fn epoch_rate(loader: &DataLoader, epoch: u32, batches: usize) -> folo_data::Res
 
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(f64::total_cmp);
-    v[v.len() / 2]
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
 }
 
 fn main() -> folo_data::Result<()> {
     let args = parse_args();
+    if let Some(dir) = std::env::var_os("SCAN_CACHE").filter(|d| !d.is_empty()) {
+        folo_data::set_scan_cache_dir(Some(dir.into()));
+    }
     let s = args.imgsz;
     let mut scratch = None;
     let dir = match &args.data {
@@ -200,11 +209,18 @@ fn main() -> folo_data::Result<()> {
             },
         )?;
         // Warm-up (page cache, allocator; a whole epoch fills a RAM cache), then the measured epochs.
-        let warm = if args.cache == CacheMode::Ram { usize::MAX } else { args.batches.min(8) };
-        epoch_rate(&loader, 0, warm)?;
+        let warm = if args.cache == CacheMode::Ram {
+            usize::MAX
+        } else if args.same_epoch {
+            args.batches
+        } else {
+            args.batches.min(8)
+        };
+        epoch_rate(&loader, if args.same_epoch { 1 } else { 0 }, warm)?;
         let mut rates = Vec::new();
         for e in 0..args.rounds {
-            rates.push(epoch_rate(&loader, 1 + e as u32, args.batches)?);
+            let epoch = if args.same_epoch { 1 } else { 1 + e as u32 };
+            rates.push(epoch_rate(&loader, epoch, args.batches)?);
         }
         let med = median(&mut rates);
         println!("| {workers:>7} | {med:>7.1} | {:>6.1} - {:>6.1} |", rates[0], rates[rates.len() - 1]);

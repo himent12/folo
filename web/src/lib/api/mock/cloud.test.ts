@@ -2,8 +2,9 @@
 // cloud run through every phase on the clock, with its instance and its cost.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunCloud, TrainConfig } from '../types';
+import { mergeLogs } from '../live';
 import { MockApi } from './index';
-import { RTX_4090, RUNPOD_OFFERS } from './cloud';
+import { cloudLog, REMOTE_OFFER, RTX_4090, RUNPOD_OFFERS, trainAt, type CloudTimeline } from './cloud';
 
 const NOW = Date.parse('2026-11-08T14:30:00Z');
 
@@ -187,6 +188,90 @@ describe('mock cloud: runs and instances', () => {
     const uploads = events.filter((e) => e.phase === 'syncing');
     expect(uploads.length).toBeGreaterThanOrEqual(2);
     expect(uploads.length).toBeLessThanOrEqual(3);
+  });
+
+  // #382 (Desktop's demo since #386): the real control plane's two lines after training.
+  const COPYING = 'the run ended on the worker; copying its weights';
+  const TERMINATING = 'terminating the instance';
+  it("logs the weights copied home and the instance terminated after the final epoch, in the control plane's words", async () => {
+    const api = new MockApi('normal', 0);
+    const messages = (await api.runLogs('run_c3d5', 5000)).lines.map((l) => l.message);
+    const at = (m: string) => {
+      expect(messages.filter((x) => x === m), m).toHaveLength(1);
+      return messages.indexOf(m);
+    };
+    const final = messages.findIndex((m) => m.startsWith('epoch 100/100'));
+    const copied = messages.findIndex((m) => m.startsWith('copied best.folo and last.folo'));
+    expect(final).toBeGreaterThan(at('upload done; the worker trains'));
+    expect(at(COPYING)).toBeGreaterThan(final);
+    expect(at(COPYING)).toBeLessThan(copied);
+    expect(copied).toBeLessThan(at(TERMINATING));
+    expect(at(TERMINATING)).toBeLessThan(at('terminated folo-run_c3d5-4c1a'));
+  });
+
+  it('has nothing to copy for a run stopped before it trained or one whose instance was terminated by hand, and releases both', async () => {
+    const api = new MockApi('normal', 0);
+    const created = await api.createRun(await cloudConfig(api));
+    vi.setSystemTime(NOW + 3000);
+    await api.stopRun(created.id);
+    vi.setSystemTime(NOW + 6000);
+    const stopped = (await api.runLogs(created.id)).lines.map((l) => l.message);
+    expect(stopped).not.toContain(COPYING);
+    expect(stopped).toContain(TERMINATING);
+    const lost = new MockApi('cloud-training', 0);
+    await lost.terminateCloudInstance('ci_9d03');
+    vi.setSystemTime(NOW + 10_000);
+    const gone = (await lost.runLogs('run_c7b1')).lines.map((l) => l.message);
+    expect(gone).toContain('instance folo-run_c7b1-9d03 was terminated before the run ended');
+    expect(gone).not.toContain(COPYING);
+    // The executor's release still has the instance's id: it says so after the loss and the trainer's last line.
+    const lostAt = gone.indexOf('instance folo-run_c7b1-9d03 was terminated before the run ended');
+    expect(gone.indexOf(TERMINATING)).toBeGreaterThan(lostAt);
+    expect(gone.indexOf(TERMINATING)).toBeGreaterThan(gone.findLastIndex((m) => m.startsWith('epoch ')));
+    expect(gone).not.toContain('terminated folo-run_c7b1-9d03');
+  });
+
+  it('keeps the copy line of an instance terminated by hand while its weights are collected, then releases it', async () => {
+    // The loss is stamped at the end of training (the mock's clock clamps it there): the copy that had begun, then the
+    // release, follow the final epoch. A log read before the DELETE (the run page during collecting) merged with the
+    // one read after (its final history, `mergeLogs`) says each once, copying before terminating (review round 3).
+    const api = new MockApi('normal', 0);
+    const created = await api.createRun(await cloudConfig(api));
+    vi.setSystemTime(NOW + 6000 + 600_000 + 1750);
+    expect((await api.run(created.id)).cloud!.phase).toBe('collecting');
+    const before = (await api.runLogs(created.id, 5000)).lines;
+    expect(before.map((l) => l.message)).toContain(COPYING);
+    const inst = (await api.cloudInstances()).find((i) => i.run_id === created.id)!;
+    await api.terminateCloudInstance(inst.id);
+    const after = (await api.runLogs(created.id, 5000)).lines;
+    for (const lines of [after.map((l) => l.message), mergeLogs(after, before).map((l) => l.message)]) {
+      expect(lines.filter((m) => m === COPYING)).toHaveLength(1);
+      expect(lines.indexOf(COPYING)).toBeGreaterThan(lines.findIndex((m) => m.startsWith('epoch 10/10')));
+      expect(lines.indexOf(TERMINATING)).toBeGreaterThan(lines.indexOf(COPYING));
+    }
+  });
+
+  it('has no instance to terminate on a remote FOLO server, and still copies the weights home', () => {
+    const remote: CloudTimeline = {
+      connectionId: 'cc_r',
+      provider: 'remote',
+      offer: REMOTE_OFFER,
+      maxHours: 2,
+      instanceId: null,
+      instanceName: 'folo-run_r-0001',
+      providerRef: 'r',
+      launchedAt: NOW,
+      provisionMs: 0,
+      bootMs: 2000,
+      syncMs: 2000,
+      uploadBytes: 1000,
+      weightsBytes: 1000,
+    };
+    const trainEnd = trainAt(remote) + 60_000;
+    const lines = cloudLog(remote, trainEnd, trainEnd + 60_000, 'shapes').map((l) => l.message);
+    expect(lines).toContain(COPYING);
+    expect(lines).not.toContain(TERMINATING);
+    expect(lines.some((m) => m.startsWith('terminated '))).toBe(false);
   });
 
   it('never holds the local training slot', async () => {

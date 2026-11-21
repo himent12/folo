@@ -508,6 +508,57 @@ fn a_copied_run_folder_is_loaded_once() {
     runs.shutdown(None);
 }
 
+/// A run whose `run.json` has a `resolved` object from before its EMA pair (with `close_mosaic`, or without) gets the
+/// pair from its config.json on load; the fields it already has are kept.
+#[test]
+fn an_older_resolved_gets_its_ema_pair_from_config_json() {
+    let dir = TestDir::new("runs-resolved-ema");
+    let tuned =
+        folo_vision::TrainConfig { transfer: true, epochs: 100, ..folo_vision::TrainConfig::default() };
+    let mut old_resolved = serde_json::to_value(tuned.resolved_train(205, 3)).unwrap();
+    old_resolved.as_object_mut().unwrap().retain(|k, _| !k.starts_with("ema_"));
+    let mut old_train = serde_json::to_value(&tuned).unwrap();
+    old_train.as_object_mut().unwrap().remove("ema_run_fraction");
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    for (id, close_mosaic) in [("run_cm", Some(7)), ("run_nocm", None)] {
+        let mut file = queued_file(id, config.clone());
+        let mut resolved = old_resolved.clone();
+        resolved["close_mosaic"] = serde_json::json!(close_mosaic);
+        file.run.resolved = Some(serde_json::from_value(resolved).unwrap());
+        let run_dir = dir.join(id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+        let cfg =
+            serde_json::json!({ "resolved": old_resolved, "train": old_train, "close_mosaic_epochs": 10 });
+        std::fs::write(run_dir.join("config.json"), cfg.to_string()).unwrap();
+    }
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    for (id, close_mosaic) in [("run_cm", 7), ("run_nocm", 10)] {
+        let r = runs.get(id).unwrap().run().resolved.unwrap();
+        // A fine-tune from before `ema_run_fraction` trained with the default EMA.
+        assert_eq!((r.ema_decay, r.ema_tau), (Some(folo_nn::EMA_DECAY), Some(folo_nn::EMA_TAU)), "{id}");
+        assert_eq!(r.close_mosaic, Some(close_mosaic), "{id}");
+    }
+    runs.shutdown(None);
+
+    // A short fine-tune's pair, recorded in run.json, reads back to the bit after a restart (an 11-step window's
+    // decay, a 17-digit decimal).
+    let dir = TestDir::new("runs-resolved-ema-bits");
+    let short =
+        folo_vision::TrainConfig { transfer: true, epochs: 11, ..folo_vision::TrainConfig::default() };
+    let resolved = short.resolved_train(64, 3);
+    let resolved =
+        folo_api::ResolvedTrain { ema_decay: Some(1.0 - 1.0 / 11.0), ema_tau: Some(2.2), ..resolved };
+    let mut file = queued_file("run_short", config.clone());
+    file.run.resolved = Some(resolved.clone());
+    std::fs::create_dir_all(dir.join("run_short")).unwrap();
+    std::fs::write(dir.join("run_short").join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let got = runs.get("run_short").unwrap().run().resolved.unwrap();
+    assert_eq!(got.ema_decay.map(f64::to_bits), resolved.ema_decay.map(f64::to_bits));
+    runs.shutdown(None);
+}
+
 /// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
 #[test]
 fn a_run_with_a_legacy_long_name_resumes() {
@@ -587,10 +638,16 @@ fn a_run_left_training_ends_when_it_last_trained() {
         e.persist(&st);
         st.alive_written = std::time::Instant::now().checked_sub(ALIVE_EVERY);
     }
+    let before = std::time::Instant::now();
     e.on_event(&log);
     near_now(on_disk());
     {
         let mut st = e.state.lock().unwrap();
+        // The write is recorded when it happens. Moved an hour ahead, it stays recent however long this machine
+        // takes to reach the next report (a busy CI runner has taken longer than ALIVE_EVERY).
+        let written = st.alive_written.expect("the write is recorded");
+        assert!(written >= before, "alive_written is the time of the write");
+        st.alive_written = Some(written + std::time::Duration::from_secs(3600));
         st.file.alive_at = Some(t - 50.0);
         e.persist(&st);
     }

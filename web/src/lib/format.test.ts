@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, axisMetric, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, scoreDecimals, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, axisMetric, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, score, scoreDecimals, sentence, timeOfDay, usd, usdRange } from './format';
 import { unitTop } from './charts/domain';
 
 describe('format', () => {
@@ -7,6 +7,19 @@ describe('format', () => {
     expect(metric(0.74123)).toBe('0.741');
     expect(metric(null)).toBe('—');
     expect(pct(0.7412)).toBe('74.1%');
+  });
+  // #382: "best mAP50-95 0.000 at epoch 3" for a run that scored 0.00042.
+  it('never writes a score that is not zero as zero', () => {
+    expect(score(0)).toBe('0.000');
+    expect(score(0.0005)).toBe('0.001');
+    // As the legend of a chart fitted to it writes it (axisMetric on unitTop).
+    expect(score(0.00042)).toBe('0.00042');
+    expect(score(0.00042)).toBe(axisMetric(0.00042, unitTop(0.00042)));
+    expect(score(0.00049)).toBe('0.00049');
+    expect(score(0.000094)).toBe('0.00009');
+    expect(score(0.000004)).toBe('<0.00001');
+    // A KPI tile or a "±" keeps three decimals (its room, its symmetry).
+    expect(metric(0.00042)).toBe('0.000');
   });
   // #338: a legend score's decimals follow its axis's fitted top. Desktop's ui/format.rs has the same table.
   it("writes a chart legend's score with the decimals of its axis top", () => {
