@@ -6,20 +6,31 @@ use std::io::Write;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-/// A path for a record: [`folo_api::json::path`], unless dropping a `\\?\` prefix would make Windows open something
-/// else. A volume path (`\\?\Volume{GUID}\out`) is relative without it, and a name ending in a dot or a space loses
-/// that ending. Windows' own path normalization decides, and such a path stays as it was given.
+/// A path for a record: [`folo_api::json::path`], except a path that starts with `\\?\` and is not safe to show
+/// without it, which stays as it was given. On Windows that is a path Windows' own normalization would change (a
+/// volume path, `\\?\Volume{GUID}\out`, is relative without the prefix, and a name ending in a dot or a space
+/// loses that ending) or one of 248 UTF-16 units or more (`LONG_PATH`: a program held to `MAX_PATH` may open it
+/// only with the prefix). Elsewhere `\\?\` is an ordinary start of a file name, so every such path stays as it
+/// was given.
 pub fn record_path(p: impl AsRef<std::path::Path>) -> String {
     let p = p.as_ref();
-    let shown = folo_api::json::path(p);
     let raw = p.to_string_lossy();
-    if !cfg!(windows) || !raw.starts_with(r"\\?\") {
-        return shown;
+    if !raw.starts_with(r"\\?\") {
+        return folo_api::json::path(p);
     }
+    if !cfg!(windows) {
+        return raw.into_owned();
+    }
+    let shown = folo_api::json::path(p);
     let native = shown.replace('/', r"\");
+    let short = native.encode_utf16().count() < LONG_PATH;
     let same = std::path::absolute(&native).is_ok_and(|a| a.as_os_str() == native.as_str());
-    if same { shown } else { raw.into_owned() }
+    if short && same { shown } else { raw.into_owned() }
 }
+
+/// The length from which [`record_path`] keeps a `\\?\` prefix: for a program that has not opted in to long paths,
+/// Windows limits a folder's path to 248 characters (`MAX_PATH` less an 8.3 file name).
+const LONG_PATH: usize = 248;
 
 /// Stable process exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +190,15 @@ mod tests {
                 r"\\?\C:\studio\dist.",
                 r"\\?\C:\data\b ",
             ] {
+                assert_eq!(super::record_path(kept), kept);
+            }
+            // A long path keeps its prefix from 248 characters on, and loses it one character below.
+            let long = |n: usize| format!(r"\\?\C:\{}", "a".repeat(n - 3));
+            assert_eq!(super::record_path(long(248)), long(248));
+            assert_eq!(super::record_path(long(247)), format!("C:/{}", "a".repeat(244)));
+        } else {
+            // Elsewhere the prefix is part of a file name: nothing is dropped or rewritten.
+            for kept in [r"\\?\/studio", r"\\?\UNC\server\share\x", r"\\?\C:\data\x"] {
                 assert_eq!(super::record_path(kept), kept);
             }
         }

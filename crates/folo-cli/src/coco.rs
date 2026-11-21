@@ -96,11 +96,12 @@ pub fn evaluate(
     Ok(CocoResult { stats: ev.compute(), missing_images: missing })
 }
 
-/// Refuses, before the evaluation, a `--save-json` file that plainly cannot be written, and creates its folder (as
-/// `predict --save` and `train --project` do). Best effort: the final name is never created or removed here, so an
-/// existing file keeps its content and a link keeps its target, and a new file is only tried under another name
-/// in the same folder ([`probe_name`]). [`write_results`] can still fail (a full disk, a folder that changed
-/// meanwhile).
+/// Creates the folder of a `--save-json` file before the evaluation (as `predict --save` and `train --project` do)
+/// and refuses what can be seen to fail without writing anything: a folder that cannot be created, a folder in the
+/// file's place, an existing file that cannot be opened for writing, a name the system refuses. No file is created,
+/// changed or removed here, so an existing file keeps its content and a link keeps its target. Whether a new file
+/// can be created in the folder is not tried: [`write_results`] can still fail (a folder that refuses writes, a
+/// full disk).
 pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     let io = |e: std::io::Error| {
         CliError::new(
@@ -117,30 +118,9 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
         Ok(_) => std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io),
         // A name the system refuses (too long, a loop of links) fails the same way at the end.
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
-        // A link to a file not there yet: the writer creates its target.
-        Err(_) if std::fs::symlink_metadata(path).is_ok() => Ok(()),
-        Err(_) => {
-            // A name already taken says nothing about the folder (a read-only one can hold a stale probe): the next.
-            let mut n = 0;
-            loop {
-                let probe = dir.join(probe_name(path, n));
-                match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&probe);
-                        return Ok(());
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                    Err(e) => return Err(io(e)),
-                }
-            }
-        }
+        // No file there yet, or a link to one not there yet: the writer creates it.
+        Err(_) => Ok(()),
     }
-}
-
-/// The `n`th file name to try creating beside `path`, never the name of `path` (also where case does not count).
-fn probe_name(path: &Path, n: u64) -> String {
-    let name = format!(".folo-probe-{}-{n}.tmp", std::process::id());
-    if path.file_name().is_some_and(|f| f.eq_ignore_ascii_case(&name)) { format!(".{name}") } else { name }
 }
 
 /// Write `detections` as a COCO results file (`[{"image_id", "category_id", "bbox": [x, y, w, h], "score"}]`),
@@ -208,15 +188,22 @@ mod tests {
         assert!(!hint.contains("  "), "{hint}");
     }
 
-    /// `val --save-json` in a new folder works, and one that cannot be written fails before the evaluation.
+    /// `val --save-json` in a new folder works, and a path that can be seen to fail is refused before the evaluation.
     #[test]
     fn a_results_file_is_prepared_before_the_evaluation() {
         let dir = TestDir::new("coco-prepare");
-        // A folder that does not exist yet is created, and no empty results file stays in it.
+        // A folder that does not exist yet is created, and nothing is written into it.
         let new = dir.join("eval").join("deep").join("dets.json");
         super::prepare_results(&new).unwrap();
         assert!(new.parent().unwrap().is_dir() && !new.exists());
-        assert_eq!(std::fs::read_dir(new.parent().unwrap()).unwrap().count(), 0, "no temporary file stays");
+        assert_eq!(std::fs::read_dir(new.parent().unwrap()).unwrap().count(), 0, "no file is created");
+        // Nor into a folder that holds other files: they stay as they are, and no file is added.
+        let folder = dir.join("held");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("other.tmp"), b"old").unwrap();
+        super::prepare_results(&folder.join("dets.json")).unwrap();
+        assert_eq!(std::fs::read(folder.join("other.tmp")).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "no file is created");
         // A link to a file not written yet is left for the writer, which creates its target.
         #[cfg(unix)]
         {
@@ -227,17 +214,6 @@ mod tests {
                 std::fs::symlink_metadata(&link).is_ok() && !dir.join("eval").join("run-2.json").exists()
             );
         }
-        // The probe is never the file asked for, whatever it is called.
-        let same = dir.join(format!(".FOLO-PROBE-{}-0.TMP", std::process::id()));
-        assert!(!same.file_name().unwrap().eq_ignore_ascii_case(super::probe_name(&same, 0)));
-        // A stale probe is stepped over, and left alone.
-        let folder = dir.join("stale");
-        std::fs::create_dir_all(&folder).unwrap();
-        let stale = folder.join(super::probe_name(&folder.join("dets.json"), 0));
-        std::fs::write(&stale, b"old").unwrap();
-        super::prepare_results(&folder.join("dets.json")).unwrap();
-        assert_eq!(std::fs::read(&stale).unwrap(), b"old");
-        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "the next probe was removed");
         // A name the system refuses is refused now, not after the evaluation.
         #[cfg(unix)]
         {
