@@ -214,6 +214,46 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.stats().class_counts, vec![1, 1, 2]);
 }
 
+/// A folder called `images` above a dataset is not part of its layout: labels beside the images are read whichever
+/// way the path is spelled, by the loader and the checker. The layouts that pair `images/` with `labels/` keep working.
+#[test]
+fn labels_beside_images_below_a_folder_called_images() {
+    let t = TempDir::new("labels-beside");
+    let line = "0 0.5 0.5 0.2 0.2\n";
+
+    let beside = t.join("images/birds");
+    write_png(&beside.join("train/a.png"), 8, 8, [0; 3]);
+    write(&beside.join("train/a.txt"), line);
+    write(&beside.join("data.yaml"), "train: train\nnames: [bird]\n");
+    let ds = open(&beside).unwrap();
+    assert_eq!(ds.train.boxes(0).len(), 1, "labels beside the image");
+    assert_eq!(ds.train.entries()[0].label.as_deref(), Some(beside.join("train/a.txt").as_path()));
+    assert!(ds.sources.contains(&t.join("labels")), "a labels folder created later changes the dataset");
+    let report = folo_data::check::check(&beside, &Default::default()).unwrap();
+    assert!(report.issues.is_empty(), "{:#?}", report.issues);
+
+    // The standard layout, inside a folder called `images`.
+    let standard = t.join("images/standard");
+    write_png(&standard.join("images/train/a.png"), 8, 8, [0; 3]);
+    write(&standard.join("labels/train/a.txt"), line);
+    write(&standard.join("data.yaml"), "train: images/train\nnames: [x]\n");
+    assert_eq!(open(&standard).unwrap().train.boxes(0).len(), 1);
+
+    // A YAML whose root is the `images` folder, with `labels/` next to it.
+    let rooted = t.join("rooted");
+    write_png(&rooted.join("images/train/a.png"), 8, 8, [0; 3]);
+    write(&rooted.join("labels/train/a.txt"), line);
+    write(&rooted.join("data.yaml"), "path: images\ntrain: train\nnames: [x]\n");
+    assert_eq!(open(&rooted).unwrap().train.boxes(0).len(), 1);
+
+    // A root below `images` whose labels mirror it in a `labels` folder next to that `images`.
+    let mirrored = t.join("mirrored");
+    write_png(&mirrored.join("images/set/train/a.png"), 8, 8, [0; 3]);
+    write(&mirrored.join("labels/set/train/a.txt"), line);
+    write(&mirrored.join("images/set/data.yaml"), "train: train\nnames: [x]\n");
+    assert_eq!(open(mirrored.join("images/set")).unwrap().train.boxes(0).len(), 1);
+}
+
 /// A COCO file's split comes from whole words of its name, then of its folder's: every name COCO, Roboflow and CVAT
 /// write keeps its split, and a word that merely contains `val`, `test` or `train` is not one.
 #[test]

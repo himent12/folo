@@ -24,7 +24,9 @@ produces plain buffers that the trainer wraps in tensors.
 - Text files (`data.yaml`, image lists, `classes.txt`, label files) may start with a UTF-8 byte order mark, which
   is ignored, and may use CRLF line ends.
 - Label path: the last `images` folder becomes `labels`, the extension `.txt` (`ds/images/train/a.jpg` →
-  `ds/labels/train/a.txt`). A missing label file means a background image.
+  `ds/labels/train/a.txt`). With no `images` folder the label sits next to its image. An `images` folder at or above
+  the dataset root counts only with a `labels` folder next to it, so a dataset with labels beside its images reads
+  them wherever it is stored. A missing label file means a background image.
 - Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding
   box is used). Coordinates may exceed `[0, 1]` by up to 0.01 (clipped, with a warning); exact duplicates are
   removed; zero-size boxes are dropped.

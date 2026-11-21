@@ -16,8 +16,13 @@ use std::path::{Component, Path, PathBuf};
 /// becomes `.txt` (`ds/images/train/a.jpg` → `ds/labels/train/a.txt`). Without an `images` component the label sits
 /// next to the image.
 pub fn label_path_for(image: &Path) -> PathBuf {
+    label_path_from(image, 0)
+}
+
+/// [`label_path_for`] where only an `images` component at index `first` or later counts.
+fn label_path_from(image: &Path, first: usize) -> PathBuf {
     let comps: Vec<Component> = image.components().collect();
-    let pos = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images"));
+    let pos = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images")).filter(|&p| p >= first);
     let mut out = PathBuf::new();
     for (i, c) in comps.iter().enumerate() {
         if Some(i) == pos && i + 1 < comps.len() {
@@ -28,6 +33,36 @@ pub fn label_path_for(image: &Path) -> PathBuf {
     }
     out.set_extension("txt");
     out
+}
+
+/// The label files of one dataset's images: [`label_path_for`], except that a folder called `images` at or above the
+/// dataset root says nothing about the dataset's layout, so the same dataset reads the same labels however its path
+/// is spelled. Such a folder counts only with a `labels` folder next to it (`path: images` in a YAML beside
+/// `labels/`); without one, a label sits next to its image.
+pub(crate) struct LabelPaths {
+    root: PathBuf,
+    /// Components of `root`, whose `images` do not count; 0 when they do.
+    skip: usize,
+    /// The `labels` folder whose creation would make them count.
+    absent: Option<PathBuf>,
+}
+
+impl LabelPaths {
+    pub(crate) fn new(root: &Path) -> Self {
+        let comps: Vec<Component> = root.components().collect();
+        let absent = comps
+            .iter()
+            .rposition(|c| c.as_os_str() == OsStr::new("images"))
+            .map(|i| comps[..i].iter().collect::<PathBuf>().join("labels"))
+            .filter(|labels| !labels.is_dir());
+        let skip = if absent.is_some() { comps.len() } else { 0 };
+        LabelPaths { root: root.to_path_buf(), skip, absent }
+    }
+
+    /// The label file of `image`. An image outside the root follows [`label_path_for`].
+    pub(crate) fn of(&self, image: &Path) -> PathBuf {
+        label_path_from(image, if image.starts_with(&self.root) { self.skip } else { 0 })
+    }
 }
 
 /// A `data.yaml` (or `dataset.yaml`, or any YAML with a `train` key) directly inside `dir`.
@@ -219,16 +254,18 @@ pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Re
     }
     let nc = names.as_ref().map(Vec::len);
     let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
+    let labels = LabelPaths::new(&root);
+    deps.extend(labels.absent.clone());
     for image in splits.values().flatten() {
         deps.extend(image.parent().map(Path::to_path_buf));
-        deps.extend(label_path_for(image).parent().map(Path::to_path_buf));
+        deps.extend(labels.of(image).parent().map(Path::to_path_buf));
     }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
     for (split, images) in splits {
         let candidates = images
             .into_iter()
             .map(|image| {
-                let label = label_path_for(&image);
+                let label = labels.of(&image);
                 Candidate { image, labels: LabelSource::Yolo(label) }
             })
             .collect();
