@@ -123,15 +123,18 @@ describe('Resource startFrom', () => {
 
   it('stops lending a read once it is gone, while the read it waited on is still out', async () => {
     const lead = reads<number>();
+    const waiting = reads<number>();
     const own = reads<number>();
     let a!: Resource<number>;
     let b!: Resource<number>;
     const stopA = root(() => (a = new Resource(lead.fetcher)));
     flushSync();
-    const stopB = root(() => (b = new Resource(reads<number>().fetcher, { startFrom: () => a })));
+    const stopB = root(() => (b = new Resource(waiting.fetcher, { startFrom: () => a })));
     flushSync();
+    expect(waiting.calls).toHaveLength(0); // B waits on A's read
     stopB();
     await settle();
+    expect(waiting.calls).toHaveLength(0);
     const stopC = root(() => void new Resource(own.fetcher, { startFrom: () => b }));
     flushSync();
     expect(own.calls).toHaveLength(1); // B let go at once, without waiting for A's read
