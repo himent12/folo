@@ -468,3 +468,63 @@ async fn box_edits_and_reviews_check_the_revision() {
     let health: Value = ok(app, get("/api/health")).await;
     assert_eq!(health["features"], system["features"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_false_refuses_unlabeled_images_and_keeps_active_run_waiting() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::harness::Step;
+
+    let t = TestDir::new("label-review-unlabeled");
+    let home = t.join("home");
+    let gate = Arc::new(AtomicBool::new(false));
+    let f = fixture(&home, vec![Step::Until(gate.clone())]);
+    let app = &f.app;
+    let job = job_with_images(app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+
+    // Idle job: neither PUT nor POST /review may mark an unlabeled image unreviewed.
+    err(
+        app,
+        put(&format!("{uri}/images/1"), json!({ "reviewed": false })),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    let r: LabelReviewResult =
+        ok(app, post(&format!("{uri}/review"), json!({ "image_ids": ["1", "2"], "reviewed": false }))).await;
+    assert_eq!((r.updated, r.failed_total), (0, 2));
+    assert!(r.failed.iter().all(|f| f.code == "invalid_body"), "{:?}", r.failed);
+
+    // Active run: image 1 is in flight and image 2 is waiting; `reviewed: false` must be refused without
+    // removing image 2 from the active run's waiting queue.
+    ok::<LabelJob>(
+        app,
+        post(&format!("{uri}/start"), json!({ "agent": "claude", "batch": 1, "parallel": 1 })),
+    )
+    .await;
+    let t0 = std::time::Instant::now();
+    while f.agent.calls() == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "agent call did not start");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    err(
+        app,
+        put(&format!("{uri}/images/2"), json!({ "reviewed": false })),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    let r: LabelReviewResult =
+        ok(app, post(&format!("{uri}/review"), json!({ "image_ids": ["2"], "reviewed": false }))).await;
+    assert_eq!((r.updated, r.failed_total), (0, 1));
+    assert_eq!(r.failed[0].code, "invalid_body");
+
+    gate.store(true, Ordering::SeqCst);
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.total, run.done, run.failed), (2, 2, 0));
+    assert_eq!((done.counts.labeled, done.counts.pending), (2, 0));
+}
