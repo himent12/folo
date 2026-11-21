@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 /// without it, which stays as it was given. On Windows that is a path Windows' own normalization would change (a
 /// volume path, `\\?\Volume{GUID}\out`, is relative without the prefix, and a name ending in a dot or a space
 /// loses that ending) or one of 248 UTF-16 units or more (`LONG_PATH`: a program held to `MAX_PATH` may open it
-/// only with the prefix). Elsewhere `\\?\` is an ordinary start of a file name, so every such path stays as it
-/// was given.
+/// only with the prefix). Elsewhere `\\?\` is an ordinary start of a file name, so every such path keeps its
+/// spelling. "As it was given" is the path's lossy text, as for every path in a record: JSON holds Unicode only.
 pub fn record_path(p: impl AsRef<std::path::Path>) -> String {
     let p = p.as_ref();
     let raw = p.to_string_lossy();
@@ -196,6 +196,14 @@ mod tests {
             let long = |n: usize| format!(r"\\?\C:\{}", "a".repeat(n - 3));
             assert_eq!(super::record_path(long(248)), long(248));
             assert_eq!(super::record_path(long(247)), format!("C:/{}", "a".repeat(244)));
+            // The length is in UTF-16 units: an emoji counts two (one as a character, four as UTF-8 bytes).
+            let wide = |n: usize, tail: &str| format!(r"\\?\C:\{}{tail}", "\u{1F600}".repeat(n));
+            assert_eq!(super::record_path(wide(122, "a")), wide(122, "a"), "3 + 244 + 1 = 248 units");
+            assert_eq!(
+                super::record_path(wide(122, "")),
+                format!("C:/{}", "\u{1F600}".repeat(122)),
+                "247 units"
+            );
         } else {
             // Elsewhere the prefix is part of a file name: nothing is dropped or rewritten.
             for kept in [r"\\?\/studio", r"\\?\UNC\server\share\x", r"\\?\C:\data\x"] {

@@ -197,7 +197,8 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let device = model.device().to_string();
     let precision = precision_of(&model);
     let head = cfg.head.unwrap_or(model.head_mode());
-    // After every check of the request, so a mistyped one leaves no new folder, and before any image is read.
+    // After every check of the request, so a mistyped one leaves no new folder, and before the evaluation (the split
+    // is open by now, which may have read image headers).
     if let Some(path) = &args.save_json {
         check_config(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
         crate::coco::prepare_results(path)?;

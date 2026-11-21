@@ -97,11 +97,9 @@ pub fn evaluate(
 }
 
 /// Creates the folder of a `--save-json` file before the evaluation (as `predict --save` and `train --project` do)
-/// and refuses what can be seen to fail without writing anything: a folder that cannot be created, a folder in the
-/// file's place, an existing file that cannot be opened for writing, a name the system refuses. No file is created,
-/// changed or removed here, so an existing file keeps its content and a link keeps its target. Whether a new file
-/// can be created in the folder is not tried: [`write_results`] can still fail (a folder that refuses writes, a
-/// full disk).
+/// and refuses three things: a folder that cannot be created, a folder in the file's place, and a path whose lookup
+/// fails with an error other than "not found". The path itself is only looked up (`metadata`), never opened, so
+/// nothing is tried about whether the file can be written: [`write_results`] reports that after the evaluation.
 pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     let io = |e: std::io::Error| {
         CliError::new(
@@ -114,12 +112,10 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     std::fs::create_dir_all(dir).map_err(io)?;
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Err(io(std::io::ErrorKind::IsADirectory.into())),
-        // Not truncated: an earlier results file stays until the new one is written.
-        Ok(_) => std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io),
-        // A name the system refuses (too long, a loop of links) fails the same way at the end.
+        // A lookup that fails for another reason than "not there" (a name too long, a loop of links).
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
-        // No file there yet, or a link to one not there yet: the writer creates it.
-        Err(_) => Ok(()),
+        // Something that is not a folder, or nothing yet (also a link to a file not there yet): the writer's to try.
+        _ => Ok(()),
     }
 }
 
