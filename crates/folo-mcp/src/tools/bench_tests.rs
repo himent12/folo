@@ -234,9 +234,19 @@ fn a_benchmark_fits_the_result_limit() {
     assert!(json_len(&named) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&named));
     assert_eq!((named.classes.len(), named.leaderboard.len()), (80, 50));
     assert!((0..80).all(|i| named.classes[i].starts_with(&format!("{i:02}"))));
-    // A huge one has its names cut, then loses rows from the end.
-    let classes = (0..80).map(|i| format!("{i:02}{}", wide(62))).collect();
-    let mut big = detail(classes, wide(4000), &|_| wide(100));
+    // Long entry names are cut before any row goes.
+    let classes = (0..80).map(|i| format!("{i:02}{}", wide(22))).collect();
+    let mut ranked = detail(classes, "a pond".into(), &|_| wide(100));
+    assert!(json_len(&ranked) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_detail(&mut ranked));
+    assert!(json_len(&ranked) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&ranked));
+    assert_eq!((ranked.leaderboard.len(), ranked.leaderboard[49].name.chars().count()), (50, 41));
+    // A huge one (control characters take six bytes each in JSON) has all its names cut, then loses rows from the end.
+    let control = |n: usize| "\u{1}".repeat(n);
+    let classes = (0..80).map(|i| format!("{i:02}{}", control(62))).collect();
+    let mut big = detail(classes, control(4000), &|_| control(100));
+    big.name = control(500);
+    big.source_name = control(500);
     assert!(json_len(&big) > MAX_RESULT_BYTES);
     assert!(super::bench::fit_detail(&mut big));
     assert!(json_len(&big) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&big));
@@ -276,6 +286,11 @@ fn an_entry_fits_the_result_limit() {
     assert!(json_len(&big) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&big));
     assert_eq!(big.missing_classes.len(), 80);
     assert!((0..80).all(|i| big.missing_classes[i].starts_with(&format!("{i:02}"))));
+    // The summary keeps the way to the whole text, whatever it had to shorten for it.
+    big.name = wide(100);
+    let summary = super::bench::fitted_summary(&big, true);
+    assert!(summary.chars().count() <= super::results::MAX_SUMMARY_CHARS, "{summary}");
+    assert!(summary.ends_with("/entries/{entry_id} has it whole)"), "{summary}");
 }
 
 /// With `--confine` every benchmark tool is refused, in process and through a server, before it touches a file or
@@ -306,31 +321,54 @@ async fn a_confined_session_refuses_the_benchmark_tools() {
             assert_eq!(err(s, tool, args).await.body.code, "not_supported", "{tool}");
         }
     }
+    // With --read-only too, a mutating tool is refused as read-only first: neither reaches a file.
+    let both = Options { read_only: true, ..confined() };
+    let both = FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, both);
+    let create = json!({ "name": "x", "dataset_id": "ds_1" });
+    assert_eq!(err(&both, "create_benchmark", create).await.body.code, "read_only");
+    assert_eq!(err(&both, "get_benchmark", bench).await.body.code, "not_supported");
 }
 
-/// A server that accepts and never answers (the connection waits in the listener's backlog), asked for the first time
-/// (so the feature probe is covered too): the wait ends at its grace with the entry's hint. The call runs on a thread
-/// because without the deadline it would hold for the HTTP client's 10-minute timeout; the watchdog is what fails then.
+/// Runs `f`, a call to a server that never answers on `listener` (its connections wait in the backlog), on a thread.
+/// Without a deadline the call would hold for the HTTP client's 10-minute timeout: the watchdog fails the test then,
+/// and closing the listener ends the call, so no thread outlives the test.
+fn ends_by_its_deadline<T: Send>(listener: std::net::TcpListener, f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        let (done, answer) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = done.send(f());
+        });
+        let got = answer.recv_timeout(std::time::Duration::from_secs(60));
+        drop(listener);
+        got.expect("the deadline did not end the call")
+    })
+}
+
+/// A server that stops answering ends the wait at its grace, with the entry's hint: at the first request of a session
+/// (the feature probe) and, with the features known, at the request for the entry.
 #[test]
 fn a_wait_ends_when_the_server_stops_answering() {
     use std::time::Duration;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let b = crate::bench::Benchmarks::Http(Arc::new(HttpStore::new(&url, None)));
-    let (done, answer) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let poll = Duration::from_millis(10);
-        let r = super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, Duration::from_millis(50));
-        let _ = done.send(r);
-    });
-    let e =
-        answer.recv_timeout(Duration::from_secs(60)).expect("the deadline did not end the call").unwrap_err();
-    assert_eq!(e.body.code, "server_unreachable", "{e:?}");
-    assert!(e.body.hint.as_deref().unwrap_or_default().contains("bench_entry"), "{e:?}");
+    for known in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let http = HttpStore::new(&url, None);
+        let http =
+            if known { http.assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]) } else { http };
+        let b = crate::bench::Benchmarks::Http(Arc::new(http));
+        let (poll, grace) = (Duration::from_millis(10), Duration::from_millis(50));
+        let r = ends_by_its_deadline(listener, || {
+            super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, grace, || {})
+        });
+        let e = r.unwrap_err();
+        assert_eq!(e.body.code, "server_unreachable", "known features: {known}, {e:?}");
+        assert!(e.body.hint.as_deref().unwrap_or_default().contains("bench_entry"), "{e:?}");
+    }
 }
 
-/// `wait` on a real store: 0 answers at once, a wait on an entry that stays open holds for its whole length (a lower
-/// bound, so a loaded machine cannot fail it), and an entry that ends during a long wait ends the wait.
+/// `wait` on a real store. Through the tool: 0 answers at once, and a wait on an entry that stays open holds for its
+/// length (a lower bound, so a loaded machine cannot fail it). An entry that ends during a long wait, after the wait
+/// has read it active, ends the wait before its time.
 #[test]
 fn a_wait_follows_an_entry_until_it_ends() {
     use folo_api::{BenchContestantSpec, BenchEntryStatus, BenchPrediction, CreateBench, StartBenchEntry};
@@ -357,23 +395,33 @@ fn a_wait_follows_an_entry_until_it_ends() {
     let req = StartBenchEntry { contestant, name: Some("open".into()), max_images: None, conditions: None };
     let entry = b.start_entry(&bench, req).unwrap().id;
 
-    let (poll, grace) = (Duration::from_millis(5), Duration::from_secs(1));
-    let now = super::bench::wait_state(&b, &bench, &entry, poll, Duration::ZERO, grace).unwrap();
-    assert!(now.status.is_active(), "{:?}", now.status);
-    let wait = Duration::from_millis(200);
+    let s = FoloMcp::new(store.clone(), None, options(home.path()));
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let args = |wait: u32| json!({ "benchmark_id": bench, "entry_id": entry, "wait": wait });
+    let now = rt.block_on(ok(&s, "bench_entry", args(0)));
+    assert_eq!(now["status"], "running", "{now}");
     let start = Instant::now();
-    let held = super::bench::wait_state(&b, &bench, &entry, poll, wait, grace).unwrap();
-    assert!(held.status.is_active(), "{:?}", held.status);
-    assert!(start.elapsed() >= wait - poll, "{:?}", start.elapsed());
+    let held = rt.block_on(ok(&s, "bench_entry", args(1)));
+    assert_eq!(held["status"], "running", "{held}");
+    // The tool polls every 100 ms and does not start a sleep that would pass the end of its wait.
+    assert!(start.elapsed() >= Duration::from_millis(900), "{:?}", start.elapsed());
 
-    let (done, answer) = std::sync::mpsc::channel();
-    let (waiter, id, e) = (b.clone(), bench.clone(), entry.clone());
-    std::thread::spawn(move || {
-        let _ = done.send(super::bench::wait_state(&waiter, &id, &e, poll, Duration::from_secs(30), grace));
+    let (poll, long, grace) = (Duration::from_millis(5), Duration::from_secs(30), Duration::from_secs(1));
+    let (ended, took) = std::thread::scope(|scope| {
+        let (seen, polled) = std::sync::mpsc::channel();
+        let waiter = scope.spawn(|| {
+            let start = Instant::now();
+            let r = super::bench::wait_state(&b, &bench, &entry, poll, long, grace, move || {
+                let _ = seen.send(());
+            });
+            (r, start.elapsed())
+        });
+        polled.recv().expect("the wait never read the entry active");
+        b.finish(&bench, &entry).unwrap();
+        waiter.join().unwrap()
     });
-    b.finish(&bench, &entry).unwrap();
-    let ended = answer.recv_timeout(Duration::from_secs(60)).expect("the wait did not end").unwrap();
-    assert_eq!(ended.status, BenchEntryStatus::Done);
+    assert_eq!(ended.unwrap().status, BenchEntryStatus::Done);
+    assert!(took < long, "the wait ran to its end: {took:?}");
     store.shutdown();
 }
 

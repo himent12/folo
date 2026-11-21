@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use folo_api::{BenchEntryStatus, BenchSource, CreateBench};
 use http::StatusCode;
 
-use super::results::{MAX_RESULT_BYTES, Output, json_len, out, page_of, short};
+use super::results::{MAX_RESULT_BYTES, MAX_SUMMARY_CHARS, Output, json_len, out, page_of, short};
 use crate::bench::hints::{self, Front};
 use crate::bench::{Benchmarks, Contestant};
 use crate::errors::{Error, invalid_arguments};
@@ -26,6 +26,8 @@ const MAX_ROWS: usize = 50;
 const FIT: usize = MAX_RESULT_BYTES - 1024;
 /// How long `bench_entry` may take beyond its `wait`: every request to a server ends by then.
 const GRACE: Duration = Duration::from_secs(5);
+/// Ends the summary of an entry whose text was cut: where the whole text is.
+const ENTRY_CUT: &str = " (long text cut; GET /api/bench/benchmarks/{id}/entries/{entry_id} has it whole)";
 /// The tools `--confine` refuses: all of them, see [`refuse_confined`].
 const BENCH_TOOLS: [&str; 8] = [
     "bench_catalog",
@@ -103,7 +105,8 @@ impl Inner {
             ));
         }
         if cut {
-            summary.push_str(" (long text cut; GET /api/bench/benchmarks/{id} has it whole)");
+            summary
+                .push_str(" (long text cut; GET /api/bench/benchmarks/{id} and its /entries have it whole)");
         }
         if let Some(e) = r.leaderboard.first().filter(|e| e.score.is_some()) {
             summary.push_str(&format!("; first: {} {:.1}", short(&e.name, 40), e.score.unwrap_or_default()));
@@ -189,13 +192,9 @@ impl Inner {
         let poll = if self.proxy.is_some() { POLL_SERVER } else { POLL_HERE };
         let wait = Duration::from_secs(a.wait.into());
         let (id, entry) = (a.benchmark_id, a.entry_id);
-        let mut r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE)).await?;
+        let mut r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE, || {})).await?;
         let cut = fit_state(&mut r);
-        let mut summary = entry_summary(&r);
-        if cut {
-            summary
-                .push_str(" (long text cut; GET /api/bench/benchmarks/{id}/entries/{entry_id} has it whole)");
-        }
+        let summary = fitted_summary(&r, cut);
         out(&r, summary)
     }
 
@@ -209,6 +208,7 @@ impl Inner {
 
 /// An entry's state once it has ended or `wait` has passed. Through a server, every request ends by `grace` after
 /// the wait, so a server that stops answering cannot hold the call (or this thread) for the client's long timeout.
+/// `seen` runs each time the entry is read still active.
 pub(super) fn wait_state(
     b: &Benchmarks,
     id: &str,
@@ -216,19 +216,22 @@ pub(super) fn wait_state(
     poll: Duration,
     wait: Duration,
     grace: Duration,
+    mut seen: impl FnMut(),
 ) -> Result<BenchEntryState, Error> {
     let deadline = Instant::now() + wait;
     let b = b.until(deadline + grace);
-    b.follow(id, entry, poll, |_| Instant::now() + poll <= deadline).and_then(|e| b.state_of(e)).map_err(
-        |mut e| {
-            if e.body.code == "server_unreachable" {
-                e.body.hint = Some(
-                    "the server is slow or gone; the entry stays on it: bench_entry follows it again".into(),
-                );
-            }
-            e
-        },
-    )
+    let keep_going = |_: &folo_api::BenchEntry| {
+        seen();
+        Instant::now() + poll <= deadline
+    };
+    b.follow(id, entry, poll, keep_going).and_then(|e| b.state_of(e)).map_err(|mut e| {
+        if e.body.code == "server_unreachable" {
+            e.body.hint = Some(
+                "the server is slow or gone; the entry stays on it: bench_entry follows it again".into(),
+            );
+        }
+        e
+    })
 }
 
 /// Cuts `s` to `max` characters; true when that changed it.
@@ -240,7 +243,8 @@ fn cut_to(s: &mut String, max: usize) -> bool {
 }
 
 /// Fits a benchmark within the result limit whatever its names, keeping the ranking longest: a shorter description,
-/// then shorter names, then fewer leaderboard rows from the end (the API has them all). True when text was cut.
+/// then shorter names (its own, its classes', its entries'), then fewer rows from the end (the API has them all).
+/// True when text was cut.
 pub(super) fn fit_detail(r: &mut BenchDetail) -> bool {
     if json_len(r) <= FIT {
         return false;
@@ -251,6 +255,11 @@ pub(super) fn fit_detail(r: &mut BenchDetail) -> bool {
         cut |= cut_to(&mut r.source_name, 200);
         for c in &mut r.classes {
             cut |= cut_to(c, 24);
+        }
+    }
+    if json_len(r) > FIT {
+        for e in &mut r.leaderboard {
+            cut |= cut_to(&mut e.name, 40);
         }
     }
     while json_len(r) > FIT && !r.leaderboard.is_empty() {
@@ -273,6 +282,16 @@ pub(super) fn fit_state(r: &mut BenchEntryState) -> bool {
         cut |= cut_to(text, 500);
     }
     cut
+}
+
+/// An entry's summary, keeping room for where the whole text is when `cut`.
+pub(super) fn fitted_summary(r: &BenchEntryState, cut: bool) -> String {
+    let summary = entry_summary(r);
+    if !cut {
+        return summary;
+    }
+    // `short` may add one character, the ellipsis.
+    format!("{}{ENTRY_CUT}", short(&summary, MAX_SUMMARY_CHARS - ENTRY_CUT.len() - 1))
 }
 
 /// One line of an entry's state: its progress, or its score.
