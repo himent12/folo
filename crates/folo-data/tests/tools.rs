@@ -392,6 +392,49 @@ fn check_coco_evaluates_boxes_against_actual_image_size() {
             report.issues
         );
     }
+
+    // 4. Unreadable image without declared width/height (with and without a broken annotation on the same row):
+    //    `check` reports `corrupt_image` and leaves the row out of `splits` and `images()`, agreeing with `open`.
+    for (name, category_id) in [("coco-corrupt-nodims", 1), ("coco-corrupt-nodims-broken", 99)] {
+        let t = TempDir::new(name);
+        write(&t.join("images/train/bad.jpg"), b"");
+        let json = serde_json::json!({
+            "images": [{ "id": 1, "file_name": "bad.jpg" }],
+            "annotations": [{ "id": 1, "image_id": 1, "category_id": category_id, "bbox": [10, 10, 20, 20], "iscrowd": 0 }],
+            "categories": [{ "id": 1, "name": "thing" }],
+        });
+        write(&t.join("annotations/instances_train.json"), json.to_string());
+        let ds = open(t.path()).unwrap();
+        assert_eq!(ds.split_sizes(), [0, 0, 0]);
+        for decode in [true, false] {
+            let report = check(t.path(), &CheckOptions { decode, ..Default::default() }).unwrap();
+            assert_eq!(report.splits, [0, 0, 0], "{name} decode {decode}: {:?}", report.issues);
+            assert_eq!(report.images(), 0);
+            let ks: Vec<CheckKind> = report.issues.iter().map(|i| i.kind).collect();
+            assert_eq!(ks, vec![CheckKind::CorruptImage], "{name} decode {decode}: {:?}", report.issues);
+        }
+    }
+
+    // 5. Corrupt image with a declared size and a zero-width box: reports both `corrupt_image` and `zero_size_box`
+    //    (and no `empty_image` for the unreadable image).
+    let t = TempDir::new("coco-corrupt-declared-zerosize");
+    write(&t.join("images/train/bad.jpg"), b"");
+    let json = serde_json::json!({
+        "images": [{ "id": 1, "file_name": "bad.jpg", "width": 64, "height": 64 }],
+        "annotations": [{ "id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 0, 20], "iscrowd": 0 }],
+        "categories": [{ "id": 1, "name": "thing" }],
+    });
+    write(&t.join("annotations/instances_train.json"), json.to_string());
+    for decode in [true, false] {
+        let report = check(t.path(), &CheckOptions { decode, ..Default::default() }).unwrap();
+        let ks: Vec<CheckKind> = report.issues.iter().map(|i| i.kind).collect();
+        assert_eq!(
+            ks,
+            vec![CheckKind::ZeroSizeBox, CheckKind::CorruptImage],
+            "decode {decode}: {:?}",
+            report.issues
+        );
+    }
 }
 
 #[test]

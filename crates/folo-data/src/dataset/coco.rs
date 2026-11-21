@@ -290,6 +290,28 @@ pub(crate) fn open_jsons(
     opts: &OpenOptions,
     wanted: &[Split],
 ) -> Result<LoadedDataset> {
+    Ok(open_jsons_impl(root, jsons, opts, wanted, None::<super::ImageReader<'_, ()>>)?.0)
+}
+
+/// [`open_jsons`] using `reader` to read each COCO image once (for [`crate::check`]), returning the dataset and
+/// a [`super::CheckedImage`] for every kept entry and every unreadable entry without a declared size.
+pub(crate) fn open_jsons_with<T: Send>(
+    root: &Path,
+    jsons: Vec<(Split, PathBuf)>,
+    opts: &OpenOptions,
+    wanted: &[Split],
+    reader: super::ImageReader<'_, T>,
+) -> Result<(LoadedDataset, Vec<super::CheckedImage<T>>)> {
+    open_jsons_impl(root, jsons, opts, wanted, Some(reader))
+}
+
+fn open_jsons_impl<T: Send>(
+    root: &Path,
+    jsons: Vec<(Split, PathBuf)>,
+    opts: &OpenOptions,
+    wanted: &[Split],
+    reader: Option<super::ImageReader<'_, T>>,
+) -> Result<(LoadedDataset, Vec<super::CheckedImage<T>>)> {
     let settings = super::cache::Settings::current();
     let ann = super::cache::coco::load_or_read(&settings, &jsons, wanted, || {
         read_annotations(root, &jsons, wanted)
@@ -319,23 +341,29 @@ pub(crate) fn open_jsons(
         }
     }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
+    let mut checks = Vec::new();
     for (split, cands) in by_split {
-        let entries = super::build_entries(cands, Some(classes.len()), opts, &mut report);
+        let (entries, split_checks) =
+            super::build_entries_with(cands, Some(classes.len()), opts, &mut report, reader);
         built.entry(split).or_default().extend(entries);
+        checks.extend(split_checks);
     }
     let mut take = |s: Split| FileDataset::new(s, classes.clone(), built.remove(&s).unwrap_or_default());
     let (train, val, test) = (take(Split::Train), take(Split::Val), take(Split::Test));
     let sources = deps.into_iter().collect();
-    Ok(LoadedDataset {
-        format: Format::Coco,
-        root: root.to_path_buf(),
-        classes,
-        train,
-        val,
-        test,
-        report,
-        sources,
-    })
+    Ok((
+        LoadedDataset {
+            format: Format::Coco,
+            root: root.to_path_buf(),
+            classes,
+            train,
+            val,
+            test,
+            report,
+            sources,
+        },
+        checks,
+    ))
 }
 
 /// What [`open_jsons`] derives from the JSON files alone, before it looks for the images: the part the scan cache
@@ -528,7 +556,7 @@ pub(crate) fn read_annotations(
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.
-pub(crate) fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
+fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
     let json_dir = match json.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => root,

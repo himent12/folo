@@ -487,6 +487,12 @@ pub(crate) struct Candidate {
     pub labels: LabelSource,
 }
 
+/// Custom per-image reader supplied by [`crate::check`]: returns `(actual_size, payload)`.
+pub(crate) type ImageReader<'a, T> = &'a (dyn Fn(&Path) -> (Option<(u32, u32)>, T) + Sync);
+
+/// One per-image result from [`build_entries_with`]: `(image_path, payload, boxes_empty)`.
+pub(crate) type CheckedImage<T> = (PathBuf, T, bool);
+
 /// Validates candidates in parallel (order preserved), returning kept entries and issues.
 pub(crate) fn build_entries(
     candidates: Vec<Candidate>,
@@ -494,6 +500,19 @@ pub(crate) fn build_entries(
     opts: &OpenOptions,
     report: &mut LoadReport,
 ) -> Vec<ImageEntry> {
+    build_entries_with(candidates, num_classes, opts, report, None::<ImageReader<'_, ()>>).0
+}
+
+/// Validates candidates in parallel (order preserved). When `reader` is `Some`, each COCO image that would be
+/// kept (or has no declared size) is read through `reader` instead of `probe_image`, returning a [`CheckedImage`]
+/// for every kept entry and for every unreadable entry dropped for having no declared size.
+pub(crate) fn build_entries_with<T: Send>(
+    candidates: Vec<Candidate>,
+    num_classes: Option<usize>,
+    opts: &OpenOptions,
+    report: &mut LoadReport,
+    reader: Option<ImageReader<'_, T>>,
+) -> (Vec<ImageEntry>, Vec<CheckedImage<T>>) {
     let files = candidates.iter().flat_map(|c| {
         let label = match &c.labels {
             LabelSource::Yolo(l) => Some(l.as_path()),
@@ -502,21 +521,24 @@ pub(crate) fn build_entries(
         std::iter::once(c.image.as_path()).chain(label)
     });
     let probes = cache::probe::Probes::new(files, cache::Settings::current());
-    let results: Vec<Checked> =
-        candidates.into_par_iter().map(|c| check_candidate(c, num_classes, opts, &probes)).collect();
+    let results: Vec<Checked<T>> =
+        candidates.into_par_iter().map(|c| check_candidate(c, num_classes, opts, &probes, reader)).collect();
     let mut entries = Vec::with_capacity(results.len());
+    let mut checks = Vec::new();
     let mut fresh = Vec::new();
-    for (e, issues, learnt) in results {
+    for (e, issues, learnt, extra) in results {
         report.issues.extend(issues);
         entries.extend(e);
         fresh.extend(learnt);
+        checks.extend(extra);
     }
     probes.save(fresh);
-    entries
+    (entries, checks)
 }
 
-/// A checked candidate: its entry (unless skipped), its issues and what the scan cache should learn from it.
-type Checked = (Option<ImageEntry>, Vec<Issue>, Vec<cache::probe::Fresh>);
+/// A checked candidate: its entry (unless skipped), its issues, what the scan cache should learn from it, and
+/// any per-image payload from a custom [`ImageReader`].
+type Checked<T> = (Option<ImageEntry>, Vec<Issue>, Vec<cache::probe::Fresh>, Option<CheckedImage<T>>);
 
 /// The header probe of `image` (`(width, height)` or the issue), from the scan cache when it has it. A file gone
 /// since it was listed is a [`IssueKind::MissingImage`], any other failure a [`IssueKind::CorruptImage`].
@@ -593,30 +615,50 @@ fn parse_label(
     parsed
 }
 
-fn check_candidate(
+fn check_candidate<T>(
     c: Candidate,
     num_classes: Option<usize>,
     opts: &OpenOptions,
     probes: &cache::probe::Probes,
-) -> Checked {
+    reader: Option<ImageReader<'_, T>>,
+) -> Checked<T> {
     let mut issues = Vec::new();
     let mut fresh = Vec::new();
     let issue = |kind, path: &Path, message: String| Issue { kind, path: path.to_path_buf(), message };
     let Some(image) = probes.stat(&c.image).filter(|e| e.is_file) else {
         issues.push(issue(IssueKind::MissingImage, &c.image, "image file not found".into()));
-        return (None, issues, fresh);
+        return (None, issues, fresh, None);
     };
-    let need_size = opts.verify_images || matches!(&c.labels, LabelSource::Coco { declared: None, .. });
-    let size = if need_size {
-        match probe_image(&c.image, image.stamp, probes, &mut fresh) {
-            Ok(s) => Some(s),
-            Err((kind, m)) => {
-                issues.push(issue(kind, &c.image, m));
-                return (None, issues, fresh);
+    let (size, extra) = match reader {
+        Some(read) => {
+            // Broken COCO annotations with a declared size are dropped without opening the image.
+            if matches!(&c.labels, LabelSource::Coco { declared: Some(_), broken: Some(_), .. }) {
+                (None, None)
+            } else {
+                let (s, extra) = read(&c.image);
+                // No declared size and unreadable: drop the row, matching `open`.
+                if s.is_none() && matches!(&c.labels, LabelSource::Coco { declared: None, .. }) {
+                    return (None, issues, fresh, Some((c.image, extra, false)));
+                }
+                (s, Some(extra))
             }
         }
-    } else {
-        None
+        None => {
+            let need_size =
+                opts.verify_images || matches!(&c.labels, LabelSource::Coco { declared: None, .. });
+            let size = if need_size {
+                match probe_image(&c.image, image.stamp, probes, &mut fresh) {
+                    Ok(s) => Some(s),
+                    Err((kind, m)) => {
+                        issues.push(issue(kind, &c.image, m));
+                        return (None, issues, fresh, None);
+                    }
+                }
+            } else {
+                None
+            };
+            (size, None)
+        }
     };
     match c.labels {
         LabelSource::Yolo(label) => {
@@ -630,12 +672,12 @@ fn check_candidate(
                     }
                     Err(m) => {
                         issues.push(issue(IssueKind::BrokenLabel, &label, m));
-                        return (None, issues, fresh);
+                        return (None, issues, fresh, None);
                     }
                 },
                 None => (Vec::new(), None),
             };
-            (Some(ImageEntry { image: c.image, label, size, boxes }), issues, fresh)
+            (Some(ImageEntry { image: c.image, label, size, boxes }), issues, fresh, None)
         }
         LabelSource::Coco { boxes, declared, broken, label } => {
             if let Some(msg) = broken {
@@ -644,7 +686,7 @@ fn check_candidate(
                     &label,
                     format!("{}: {msg}", crate::paths::shown(&c.image)),
                 ));
-                return (None, issues, fresh);
+                return (None, issues, fresh, None);
             }
             if let (Some(d), Some(s)) = (declared, size)
                 && d != s
@@ -660,9 +702,19 @@ fn check_candidate(
             }
             let Some((w, h)) = size.or(declared) else {
                 issues.push(issue(IssueKind::CorruptImage, &c.image, "unknown image size".into()));
-                return (None, issues, fresh);
+                return (None, issues, fresh, None);
             };
-            let (out, dropped) = clip_coco_boxes(&boxes, w, h);
+            let (fw, fh) = (w as f32, h as f32);
+            let mut out = Vec::with_capacity(boxes.len());
+            let mut dropped = 0;
+            for (class, [x1, y1, x2, y2]) in boxes {
+                let c = [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
+                if c[2] - c[0] <= 0.0 || c[3] - c[1] <= 0.0 {
+                    dropped += 1;
+                    continue;
+                }
+                out.push(BBox::from_pixel_xyxy(class, c, w, h));
+            }
             if dropped > 0 {
                 issues.push(issue(
                     IssueKind::LabelWarning,
@@ -670,26 +722,16 @@ fn check_candidate(
                     format!("{dropped} zero-size box(es) dropped"),
                 ));
             }
-            (Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }), issues, fresh)
+            let empty = out.is_empty();
+            let check = extra.map(|t| (c.image.clone(), t, empty));
+            (
+                Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }),
+                issues,
+                fresh,
+                check,
+            )
         }
     }
-}
-
-/// Clips pixel `xyxy` boxes to `(w, h)`, returning the normalised boxes kept and the count dropped for having no
-/// area inside the image.
-pub(crate) fn clip_coco_boxes(boxes: &[(u32, [f32; 4])], w: u32, h: u32) -> (Vec<BBox>, usize) {
-    let (fw, fh) = (w as f32, h as f32);
-    let mut out = Vec::with_capacity(boxes.len());
-    let mut dropped = 0;
-    for &(class, [x1, y1, x2, y2]) in boxes {
-        let c = [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
-        if c[2] - c[0] <= 0.0 || c[3] - c[1] <= 0.0 {
-            dropped += 1;
-            continue;
-        }
-        out.push(BBox::from_pixel_xyxy(class, c, w, h));
-    }
-    (out, dropped)
 }
 
 /// `class0`, `class1`, ... for datasets without names.

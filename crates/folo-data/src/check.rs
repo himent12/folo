@@ -6,7 +6,7 @@
 //! hashes file contents to find exact duplicates. It never modifies anything.
 
 use crate::dataset::labels::{Line, LineError, parse_line};
-use crate::dataset::{IssueKind, Source, clip_coco_boxes, coco, detect, label_path_for, yolo};
+use crate::dataset::{IssueKind, OpenOptions, Source, coco, detect, label_path_for, yolo};
 use crate::error::Result;
 use crate::{Format, Split};
 use rayon::prelude::*;
@@ -305,108 +305,31 @@ fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
 }
 
 fn check_coco(root: PathBuf, jsons: Vec<(Split, PathBuf)>, opts: &CheckOptions) -> Result<CheckReport> {
-    let ann = coco::read_annotations(&root, &jsons, &Split::ALL)?;
-    let mut issues: Vec<CheckIssue> = ann.issues.iter().map(from_load_issue).collect();
-    let mut by_split: BTreeMap<Split, Vec<(PathBuf, coco::ImageAnnotations, PathBuf)>> = BTreeMap::new();
-    for p in ann.splits {
-        let files: Vec<&str> = p.files.iter().map(String::as_str).collect();
-        let base = coco::image_base(&root, &p.path, p.split, &files);
-        let list = by_split.entry(p.split).or_default();
-        for im in p.images {
-            let image = base.join(&p.files[im.row]);
-            list.push((image, im, p.path.clone()));
-        }
-    }
-    let items: Vec<(Split, PathBuf, coco::ImageAnnotations, PathBuf)> = Split::ALL
+    let open_opts = OpenOptions { format: Format::Coco, verify_images: false };
+    let read = |image: &Path| {
+        let c = read_image_file(image, opts);
+        (c.size, c)
+    };
+    let (ds, checks) = coco::open_jsons_with(&root, jsons, &open_opts, &Split::ALL, &read)?;
+    let mut issues: Vec<CheckIssue> = ds.report.issues.iter().map(from_load_issue).collect();
+    let splits = ds.split_sizes();
+    let (paths, results): (Vec<_>, Vec<_>) = checks
         .into_iter()
-        .flat_map(|s| {
-            by_split.remove(&s).into_iter().flatten().map(move |(img, im, label)| (s, img, im, label))
+        .map(|(image, mut c, empty)| {
+            if empty && c.hash.is_some() {
+                c.issues.push(CheckIssue::new(
+                    CheckKind::EmptyImage,
+                    &image,
+                    None,
+                    "no annotations (background image)".into(),
+                    None,
+                ));
+            }
+            (image, c)
         })
-        .collect();
-    let mut splits = [0usize; 3];
-    let checked: Vec<(bool, ImageCheck)> = items
-        .par_iter()
-        .map(|(_, image, im, label)| {
-            if !std::fs::metadata(image).is_ok_and(|m| m.is_file()) {
-                return (
-                    false,
-                    ImageCheck {
-                        issues: vec![CheckIssue::new(
-                            CheckKind::MissingImage,
-                            image,
-                            None,
-                            "image file not found".into(),
-                            Some("remove the entry that names the image".into()),
-                        )],
-                        hash: None,
-                        size: None,
-                    },
-                );
-            }
-            if let Some(msg) = &im.broken {
-                return (
-                    false,
-                    ImageCheck {
-                        issues: vec![CheckIssue::new(
-                            CheckKind::BrokenLabel,
-                            label,
-                            None,
-                            format!("{}: {msg}", crate::paths::shown(image)),
-                            Some("fix or remove the broken annotation".into()),
-                        )],
-                        hash: None,
-                        size: None,
-                    },
-                );
-            }
-            let mut c = read_image_file(image, opts);
-            if let Some(actual) = c.size {
-                if let Some(declared) = im.declared
-                    && declared != actual
-                {
-                    c.issues.push(CheckIssue::new(
-                        CheckKind::Other,
-                        image,
-                        None,
-                        format!(
-                            "JSON says {}x{} but the image is {}x{}",
-                            declared.0, declared.1, actual.0, actual.1
-                        ),
-                        Some(format!("set width {} and height {} in the JSON", actual.0, actual.1)),
-                    ));
-                }
-                let (kept, dropped) = clip_coco_boxes(&im.boxes, actual.0, actual.1);
-                if dropped > 0 {
-                    c.issues.push(CheckIssue::new(
-                        CheckKind::ZeroSizeBox,
-                        image,
-                        None,
-                        format!("{dropped} zero-size box(es) dropped"),
-                        Some("remove the degenerate annotation".into()),
-                    ));
-                }
-                if kept.is_empty() && c.hash.is_some() {
-                    c.issues.push(CheckIssue::new(
-                        CheckKind::EmptyImage,
-                        image,
-                        None,
-                        "no annotations (background image)".into(),
-                        None,
-                    ));
-                }
-            }
-            (true, c)
-        })
-        .collect();
-    let mut results = Vec::with_capacity(checked.len());
-    for ((split, ..), (kept, c)) in items.iter().zip(checked) {
-        if kept {
-            splits[*split as usize] += 1;
-        }
-        results.push(c);
-    }
-    merge(&mut issues, items.iter().map(|(_, image, ..)| image.as_path()), results, &root);
-    Ok(CheckReport { format: Format::Coco, root, classes: ann.classes, splits, issues })
+        .unzip();
+    merge(&mut issues, paths.iter().map(PathBuf::as_path), results, &ds.root);
+    Ok(CheckReport { format: Format::Coco, root: ds.root, classes: ds.classes, splits, issues })
 }
 
 /// Appends per-image issues in order and flags images whose bytes repeat an earlier image's (named relative to
