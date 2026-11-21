@@ -290,8 +290,8 @@ pub struct TrainArgs {
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
-    /// are used: only --workers, --device, --data, --format, --cache, --project, --json-events and --teacher (with
-    /// --set distill.*) may differ, other flags must match or be left out. A run that completed cannot be resumed;
+    /// are used: only --workers, --device, --data, --format, --cache, --project, --json-events, --teacher and
+    /// --set distill.* may differ, other flags must match or be left out. A run that completed cannot be resumed;
     /// start a new run with --model <run>/weights/best.folo instead.
     #[arg(long)]
     pub resume: Option<PathBuf>,
