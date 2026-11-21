@@ -33,6 +33,9 @@ produces plain buffers that the trainer wraps in tensors.
   normalised.
 
 ### COCO
+- A file's split comes from the whole words of its name, then of its folder's name (`instances_val2017.json`,
+  `valid/_annotations.coco.json`); with neither it is `train`, so a dataset in a folder called `valves` or `latest` is
+  a training set.
 - `images[].file_name` is resolved against the first folder that has the files: the JSON's folder, `images/<tag>`,
   `<tag>` (where `instances_train2017.json` has tag `train2017`), `images/<split>`, `<split>`, `images/`, the root.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.

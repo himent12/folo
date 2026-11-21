@@ -214,6 +214,49 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.stats().class_counts, vec![1, 1, 2]);
 }
 
+/// A COCO file's split comes from whole words of its name, then of its folder's: every name COCO, Roboflow and CVAT
+/// write keeps its split, and a word that merely contains `val`, `test` or `train` is not one.
+#[test]
+fn coco_split_comes_from_whole_words() {
+    let t = TempDir::new("coco-split");
+    let doc = serde_json::json!({
+        "images": [{"id": 1, "file_name": "a.png", "width": 8, "height": 8}],
+        "annotations": [{"image_id": 1, "category_id": 1, "bbox": [1, 1, 4, 4]}],
+        "categories": [{"id": 1, "name": "thing"}]
+    });
+    let cases = [
+        ("annotations/instances_train2017.json", Split::Train),
+        ("annotations/instances_val2017.json", Split::Val),
+        ("annotations/instances_minival2014.json", Split::Val),
+        ("annotations/instances_valminusminival2014.json", Split::Val),
+        ("annotations/instances_trainval35k.json", Split::Train),
+        ("annotations/image_info_test-dev2017.json", Split::Test),
+        ("annotations/instances_Validation.json", Split::Val),
+        ("annotations/instances_default.json", Split::Train),
+        ("valid/_annotations.coco.json", Split::Val),
+        ("test/_annotations.coco.json", Split::Test),
+        ("d/valAnnotations.json", Split::Val),
+        ("d/valannotations.json", Split::Val),
+        ("d/cocotest.json", Split::Test),
+        ("d/train_val.json", Split::Train),
+        ("coco_val/annotations.json", Split::Val),
+        // A folder or file named for what it holds.
+        ("valves/annotations.json", Split::Train),
+        ("festival/_annotations.coco.json", Split::Train),
+        ("latest/annotations.json", Split::Train),
+        ("contest-2024/annotations.json", Split::Train),
+        ("d/valves.json", Split::Train),
+        ("d/protest_coco.json", Split::Train),
+    ];
+    for (i, (path, split)) in cases.into_iter().enumerate() {
+        let json = t.join(i.to_string()).join(path);
+        write_png(&json.with_file_name("a.png"), 8, 8, [0; 3]);
+        write(&json, serde_json::to_vec(&doc).unwrap());
+        let ds = open(&json).unwrap();
+        assert_eq!(ds.split(split).len(), 1, "{path} should be {split}: {:?}", ds.split_sizes());
+    }
+}
+
 /// An integral float id is the integer: `"image_id": 1.0` names the image `"id": 1` (and the other way round).
 #[test]
 fn coco_integral_float_ids_match_integer_ids() {
