@@ -14,7 +14,7 @@
 pub mod transfer;
 
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use folo_api::{ApiError, ErrorBody};
 use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_MATCH, RANGE};
@@ -91,6 +91,8 @@ pub struct Client {
     base: String,
     token: Option<String>,
     agent: ureq::Agent,
+    /// When set, every request ends by then ([`Client::until`]).
+    deadline: Option<Instant>,
 }
 
 // Not derived: the token must not reach a log through `{:?}`.
@@ -129,7 +131,7 @@ impl Client {
             .timeout_global(Some(request))
             .build()
             .into();
-        Client { base: base.trim_end_matches('/').to_string(), token: None, agent }
+        Client { base: base.trim_end_matches('/').to_string(), token: None, agent, deadline: None }
     }
 
     /// Sends `token` as `Authorization: Bearer` (a server started with `--token`). An empty token sends none.
@@ -137,6 +139,12 @@ impl Client {
         let token = token.into();
         self.token = (!token.is_empty()).then_some(token);
         self
+    }
+
+    /// This client with every request ending by `deadline` (body included), for a caller that has promised an
+    /// answer by then: one past it fails as [`UNREACHABLE`]. Shares the connection pool.
+    pub fn until(&self, deadline: Instant) -> Client {
+        Client { deadline: Some(deadline), ..self.clone() }
     }
 
     /// The server's base URL, without a trailing slash.
@@ -159,8 +167,15 @@ impl Client {
         }
     }
 
-    /// `request` with the token, if there is one.
+    /// `request` with the token, if there is one, and what is left until the deadline, if there is one.
     fn auth<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        let request = match self.deadline {
+            Some(d) => {
+                let left = d.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+                request.config().timeout_global(Some(left)).build()
+            }
+            None => request,
+        };
         match &self.token {
             Some(t) => request.header(AUTHORIZATION, format!("Bearer {t}")),
             None => request,
@@ -333,6 +348,27 @@ mod tests {
         assert_eq!((e.code(), e.status), (UNREACHABLE, None));
         assert!(e.is_unreachable() && e.is_transient());
         assert!(!format!("{e}").contains("s3cret"));
+    }
+
+    #[test]
+    fn a_deadline_ends_a_call_the_server_never_answers() {
+        // Connections wait in the listener's backlog: accepted by the OS, never answered.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = Client::new(&format!("http://{}", listener.local_addr().unwrap()));
+        // On a thread: without the deadline the call holds for the 10-minute timeout, the watchdog fails the test,
+        // and closing the listener ends the call, so no thread outlives the test.
+        let r = std::thread::scope(|scope| {
+            let (done, answer) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let r =
+                    c.until(Instant::now() + Duration::from_millis(50)).get::<serde_json::Value>("/health");
+                let _ = done.send(r);
+            });
+            let got = answer.recv_timeout(Duration::from_secs(60));
+            drop(listener);
+            got.expect("the deadline did not end the call")
+        });
+        assert!(r.unwrap_err().is_unreachable());
     }
 
     #[test]

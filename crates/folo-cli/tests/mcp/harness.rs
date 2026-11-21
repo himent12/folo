@@ -234,7 +234,7 @@ pub(super) fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-pub(super) const ALL_TOOLS: [&str; 32] = [
+pub(super) const ALL_TOOLS: [&str; 40] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -267,23 +267,39 @@ pub(super) const ALL_TOOLS: [&str; 32] = [
     "set_label_boxes",
     "review_label_images",
     "export_label_dataset",
+    "bench_catalog",
+    "list_benchmarks",
+    "get_benchmark",
+    "create_benchmark",
+    "delete_benchmark",
+    "start_bench_entry",
+    "bench_entry",
+    "stop_bench_entry",
 ];
+
+/// The most `tools/list` may take, and the benchmark tools of it, in bytes (docs/MCP.md states what they take).
+const TOTAL_BYTES: usize = 92 * 1024;
+const BENCH_BYTES: usize = 11 * 1024;
 
 /// `tools/list` with schema checks; returns `name -> outputSchema`.
 pub(super) fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<String, Value> {
     let tools = c.result("tools/list", json!({}))["tools"].as_array().unwrap().clone();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, expected);
-    // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
-    let bytes = serde_json::to_vec(&tools).unwrap().len();
-    assert!(bytes < 80 * 1024, "tools/list is {bytes} bytes");
-    // The labeling tools, measured on their own (an agent that never labels still pays for them).
-    let label: usize = tools
-        .iter()
-        .filter(|t| t["name"].as_str().unwrap().contains("label"))
-        .map(|t| serde_json::to_vec(t).unwrap().len())
-        .sum();
-    assert!(label < 14 * 1024, "the labeling tools take {label} bytes of tools/list");
+    // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small. The labeling and the
+    // benchmark tools are measured on their own too (an agent that never labels or benchmarks still pays for them).
+    let share = |part: &str| -> usize {
+        tools
+            .iter()
+            .filter(|t| t["name"].as_str().unwrap().contains(part))
+            .map(|t| serde_json::to_vec(t).unwrap().len())
+            .sum()
+    };
+    let (bytes, label, bench) = (serde_json::to_vec(&tools).unwrap().len(), share("label"), share("bench"));
+    let sizes = format!(
+        "tools/list is {bytes} bytes, {label} of them the labeling tools, {bench} the benchmark tools"
+    );
+    assert!(bytes < TOTAL_BYTES && label < 14 * 1024 && bench < BENCH_BYTES, "{sizes}");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);

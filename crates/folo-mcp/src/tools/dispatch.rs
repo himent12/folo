@@ -66,6 +66,7 @@ impl Inner {
         if let Some(e) = unknown_argument(def.name, &(def.input)(), &args) {
             return Err(e);
         }
+        super::bench::refuse_confined(def.name, self.opts.confine)?;
         let res = match def.name {
             "folo_info" => self.folo_info(parse_args(args)?).await,
             "list_datasets" => self.list_datasets(parse_args(args)?).await,
@@ -99,6 +100,14 @@ impl Inner {
             "set_label_boxes" => self.set_label_boxes(parse_args(args)?).await,
             "review_label_images" => self.review_label_images(parse_args(args)?).await,
             "export_label_dataset" => self.export_label_dataset(parse_args(args)?).await,
+            "bench_catalog" => self.bench_catalog(parse_args(args)?).await,
+            "list_benchmarks" => self.list_benchmarks(parse_args(args)?).await,
+            "get_benchmark" => self.get_benchmark(parse_args(args)?).await,
+            "create_benchmark" => self.create_benchmark(parse_args(args)?).await,
+            "delete_benchmark" => self.delete_benchmark(parse_args(args)?).await,
+            "start_bench_entry" => self.start_bench_entry(parse_args(args)?).await,
+            "bench_entry" => self.bench_entry(parse_args(args)?).await,
+            "stop_bench_entry" => self.stop_bench_entry(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
         res.map_err(|e| mcp_code(crate::confine::map_denied(e)))

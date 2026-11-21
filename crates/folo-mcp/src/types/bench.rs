@@ -6,9 +6,11 @@
 //! (the reliability bins, the label curve, the IoU histogram, the per-image detections) stay behind the HTTP API
 //! (`/api/bench/benchmarks/{id}/entries/{entry_id}/result`, docs/API.md).
 
-use folo_api::{BenchAxis, BenchBest, BenchEntryStatus, BenchReadiness, BenchSource};
+use folo_api::{
+    BenchAxis, BenchBest, BenchEntryStatus, BenchPlan, BenchPlanCondition, BenchReadiness, BenchSource, Split,
+};
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The catalog: the conditions a plan can name, the default plan and the axes of the score.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -86,7 +88,9 @@ pub struct BenchDetail {
     pub name: String,
     /// What it stands for.
     pub description: String,
-    /// Where its images came from.
+    /// Where its images came from: `{kind: "dataset", dataset_id, split}` or `{kind: "label_job", job_id}` (an
+    /// object in the schema, which stays small).
+    #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
     pub source: BenchSource,
     /// The dataset's or labeling job's name.
     pub source_name: String,
@@ -165,8 +169,10 @@ pub struct BenchEntryState {
     /// How to fix it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    /// The score and its numbers, once done.
+    /// The score and its numbers, once done. Its schema is an object only: the tool listing every session carries
+    /// stays small, and docs/MCP.md (Benchmarks) has its fields.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub result: Option<BenchScoreResult>,
 }
 
@@ -248,4 +254,168 @@ pub struct BenchSelfLabelingSummary {
     pub recall: f32,
     /// The verdict.
     pub readiness: BenchReadiness,
+}
+
+// The arguments and the small results of the MCP benchmark tools.
+
+/// `start_bench_entry` and `stop_bench_entry` result: where the entry stands (`bench_entry` has the rest).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchEntryBrief {
+    /// The benchmark.
+    pub benchmark_id: String,
+    /// The entry.
+    pub entry_id: String,
+    /// Its name.
+    pub name: String,
+    /// Where it stands.
+    pub status: BenchEntryStatus,
+    /// Images run (each pass counts its images).
+    pub done: u64,
+    /// Images to run.
+    pub total: u64,
+    /// Its score once done (a file of predictions is scored at once).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+impl From<BenchEntryState> for BenchEntryBrief {
+    fn from(s: BenchEntryState) -> BenchEntryBrief {
+        BenchEntryBrief {
+            benchmark_id: s.benchmark_id,
+            entry_id: s.entry_id,
+            name: s.name,
+            status: s.status,
+            done: s.done,
+            total: s.total,
+            score: s.result.map(|r| r.score),
+        }
+    }
+}
+
+/// `delete_benchmark` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchDeleted {
+    /// The benchmark.
+    pub benchmark_id: String,
+    /// Always true.
+    pub deleted: bool,
+}
+
+/// `get_benchmark` and `delete_benchmark`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BenchmarkIdArgs {
+    /// Benchmark id, e.g. `bn_3f9a0c1e5b7d`.
+    pub benchmark_id: String,
+}
+
+/// `stop_bench_entry`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BenchEntryIdArgs {
+    /// Benchmark id.
+    pub benchmark_id: String,
+    /// Entry id, e.g. `be_91c2`.
+    pub entry_id: String,
+}
+
+/// `bench_entry`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BenchEntryArgs {
+    /// Benchmark id.
+    pub benchmark_id: String,
+    /// Entry id.
+    pub entry_id: String,
+    /// Seconds to wait for a running entry to end before answering (0 to 50).
+    #[serde(default)]
+    #[schemars(range(max = 50))]
+    pub wait: u32,
+}
+
+/// `create_benchmark`: from a dataset split or a labeling job's labeled images.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateBenchmarkArgs {
+    /// Name.
+    pub name: String,
+    /// A dataset (with split, default val).
+    #[serde(default)]
+    pub dataset_id: Option<String>,
+    /// The dataset's split.
+    #[serde(default)]
+    pub split: Option<Split>,
+    /// Or a labeling job's labeled images.
+    #[serde(default)]
+    pub label_job_id: Option<String>,
+    /// What it stands for (camera, hard cases).
+    #[serde(default)]
+    pub description: String,
+    /// At most this many images (1 to 5000, default 500).
+    #[serde(default)]
+    pub max_images: Option<u32>,
+    /// Seed of the sample and the conditions.
+    #[serde(default)]
+    pub seed: u64,
+    /// The plan (default: bench_catalog's default_plan).
+    #[serde(default)]
+    pub plan: Option<BenchPlanArgs>,
+}
+
+/// A plan: the conditions to run (bench_catalog lists them).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPlanArgs {
+    /// Each at most once; [] runs the unchanged images only.
+    pub conditions: Vec<BenchPlanConditionArgs>,
+}
+
+/// One condition of a plan.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPlanConditionArgs {
+    /// Condition id.
+    pub condition: String,
+    /// 1 to 5 distinct severities in 1..=5, ascending.
+    pub severities: Vec<u8>,
+    /// Weight in the robustness axis (0 to 10, default 1).
+    #[serde(default)]
+    pub weight: Option<f32>,
+}
+
+impl From<BenchPlanArgs> for BenchPlan {
+    fn from(p: BenchPlanArgs) -> BenchPlan {
+        let conditions = p
+            .conditions
+            .into_iter()
+            .map(|c| BenchPlanCondition {
+                condition: c.condition,
+                severities: c.severities,
+                weight: c.weight.unwrap_or(1.0),
+                why: None,
+            })
+            .collect();
+        BenchPlan { conditions, rationale: None, designed_by: None }
+    }
+}
+
+/// `start_bench_entry`: a model of the store, or a file of predictions made elsewhere.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StartBenchEntryArgs {
+    /// Benchmark id.
+    pub benchmark_id: String,
+    /// A model (list_models).
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Or a JSON Lines file of {image, condition?, severity?, boxes: [{class, score, x1, y1, x2, y2}]}.
+    #[serde(default)]
+    pub predictions_file: Option<String>,
+    /// Leaderboard name (required with predictions_file).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// model_id: the first this many images only.
+    #[serde(default)]
+    pub max_images: Option<u32>,
+    /// model_id: run the plan's conditions (default true).
+    #[serde(default)]
+    pub conditions: Option<bool>,
+    /// predictions_file: false without confidences (default true).
+    #[serde(default)]
+    pub scored: Option<bool>,
 }

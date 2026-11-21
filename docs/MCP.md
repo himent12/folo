@@ -23,7 +23,7 @@ Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#u
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp/`.
 
 ## Status
-Implemented: both protocol revisions, all 32 tools with generated input and output schemas, every resource and
+Implemented: both protocol revisions, all 40 tools with generated input and output schemas, every resource and
 both subscription flows, the three prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
 tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
 it:
@@ -43,6 +43,7 @@ it:
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 | `cloud_*`, `train` with `compute` | the data dir's connections and instance ledger; cloud runs on their worker (docs/CLOUD.md) | the mock's RunPod connection `cc_4d2a`, simulated cloud runs | `/api/cloud/...`, `POST /api/runs` |
 | labeling (`*_label_*`, `start_labeling`, `stop_labeling`, `label_status`) | the data dir's labeling jobs; runs call the `claude` / `codex` CLI of this machine (docs/LABELING.md) | `not_implemented` (the mock has no labeler) | `/api/label/...` |
+| benchmarks (`bench_*`, `*_benchmark*`, `*_bench_entry`) | the data dir's benchmarks; a model entry runs in this process on `--device` and stops with the session | `not_implemented` (the mock has no benchmarks) | `/api/bench/...` (a server that lists `vision_bench`, else `not_implemented`); entries run in the server and outlive the session |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
 in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the ONNX switches `half`, `dynamic` and
@@ -81,8 +82,9 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 79 KB for all 32 tools, 13.6 KB of it the ten labeling tools; a test
-keeps the whole under 80 KiB and the labeling tools under 14 KiB): no `$schema`,
+meanings. They are compacted for `tools/list` (about 91 KB for all 40 tools, 13.6 KB of it the ten labeling
+tools and 10.3 KB the eight benchmark tools; a test keeps the whole under 92 KiB, the labeling tools under 14
+KiB and the benchmark tools under 11 KiB): no `$schema`,
 no numeric `format` annotations, no `minimum: 0` of unsigned types (also optional ones), defaults without f32 noise
 (`0.01`, not `0.009999999776482582`); output schemas also leave out defaults and the field descriptions of the shared
 types, in `$defs` and when the result is one (`Run`, `TrainConfig`, `Epoch`, `Dataset`, `CloudInstance`, ...;
@@ -211,10 +213,40 @@ with that id and `expect: { id: revision }`, or `set_label_boxes` with `expect` 
 is `null`. Errors carry hints that name these tools (`label_job_active`: wait or `stop_labeling`;
 `label_boxes_changed`: view the image again).
 
+### Benchmarks
+Eight tools make and run vision benchmarks (docs/BENCH.md defines every number): frozen sets of labeled images with
+a plan of stress conditions, and the entries that ran them. They share their operations with `folo bench`
+(docs/CLI.md, Vision benchmarks; `folo_mcp::bench`). A contestant is a model of `list_models` (trained, under
+`models/`, or published weights pulled with `folo weights pull`) or a file of predictions made by any other
+detector. Agent contestants and agent-designed plans are not tools: they spend tokens, and are Studio's, Desktop's
+or the HTTP API's (`/api/bench`, docs/API.md).
+
+Results are small: counts, the plan, and an entry's score with the numbers behind it, never image lists, bins,
+curves or histograms (those are on the HTTP API). Typical sizes (`structuredContent`): `bench_catalog` 2.8 KB,
+`get_benchmark` 1.7 KB for 80 classes and three entries (about 150 bytes an entry), `start_bench_entry` 120 bytes,
+`bench_entry` 150 while it runs and 1 KB once done with two conditions. Their output schemas carry no descriptions or `required` lists, and a benchmark's `source`
+and an entry's `result` are plain objects there (this table documents them).
+
+| tool | input | output (`structuredContent`) |
+|---|---|---|
+| `bench_catalog` | `{}` | `{ conditions: [{ id, group, description }], severities: 5, default_plan: [{ condition, severities, weight }], axes: [{ axis, weight }] }` |
+| `list_benchmarks` | paging | page of `{ id, name, source_name, images, num_classes, conditions, entries, best: { entry_id, name, score, partial }?, active }`, newest first |
+| `get_benchmark` | `{ benchmark_id }` | `{ id, name, description, source, source_name, classes, images, boxes, plan, seed, fingerprint, active, leaderboard }`: `leaderboard` is the entries best first (the first 50). A result that would pass the size limit has its description cut first, then its names (its own, its classes', its entries'), then rows dropped from the end, and the summary says so (`GET /api/bench/benchmarks/{id}` and `/entries` have them whole). Each row is `{ id, name, kind: "model"\|"agent"\|"external", status, score, partial, map50_95, ci95, stale }` (`stale`: graded on an earlier version of the benchmark) |
+| `create_benchmark` | `{ name, dataset_id + split?: "val" \| label_job_id, description?, max_images?: 500 (1–5000), seed?: 0, plan?: { conditions: [{ condition, severities, weight? }] } }` | the benchmark as `list_benchmarks` lists it (`get_benchmark` has the rest). The images are sampled with `seed` and frozen; the plan defaults to `bench_catalog`'s `default_plan`, and one naming an unknown condition or a severity outside 1–5 is `invalid_arguments` |
+| `delete_benchmark` | `{ benchmark_id }` | `{ benchmark_id, deleted: true }`. Removes the benchmark's folder for good: its frozen images and its entries' results (a running entry is `bench_active`). The one tool with `destructiveHint: true` |
+| `start_bench_entry` | `{ benchmark_id, model_id, name?, max_images?, conditions?: true }` or `{ benchmark_id, predictions_file, name, scored?: true }` | `{ benchmark_id, entry_id, name, status, done, total, score? }` (`score` once done; `bench_entry` has the rest). A model entry runs in the background on the server's device (`--device`), the unchanged images then each condition and severity of the plan; follow it with `bench_entry`. A predictions file is read by this `folo mcp` process, on its machine, also in proxy mode (a path absolute or relative to `--data-dir`); it is sent to the server's benchmark in parts: JSON Lines of `{ image, condition?, severity?, boxes: [{ class, score, x1, y1, x2, y2 }] }` records, `examples/bench_external.py`'s format, one record per line of at most 1 MiB and 1,000 boxes, pixel corners in the served image, `class` the index of one of the benchmark's `classes` (a number, not a name). It is scored at once (the answer is `done` with its score): every image of each pass it has must be answered (an empty `boxes` for none), a pass of the plan it leaves out is not measured (the score is `partial`). After a failed part, or a finish the server refuses with a 4xx other than `409`, the tool reads the entry and, if the server reports it still open, tries to stop and remove it. After a finish with no answer, a 5xx or a `409` it stops and removes nothing (the entry may be being scored): it reads the entry once and returns the score if that read succeeds and says scored. In every other case the error is returned and an entry may be left on the server: `get_benchmark` lists it, `bench_entry` shows it and `stop_bench_entry` ends it. `scored: false` for a detector that gives no confidences |
+| `bench_entry` | `{ benchmark_id, entry_id, wait?: 0 (0–50) }` | `{ benchmark_id, entry_id, name, status, done, total, condition?, severity?, images, conditions, missing_classes?, error?, result? }`. `wait` holds the call until the entry ends (or the seconds pass); through a server that stops answering, the call ends 5 s after `wait` with `server_unreachable`. A state that would pass the size limit has its names, error and hint cut, and the summary says so. `result` once it is done: `{ score (0–100), partial, axes: [{ axis, value, weight }] (accuracy, robustness, self_labeling, calibration, localization; value `null` when not measured), accuracy: { map50_95, ci95, map50, map75, precision, recall, best_conf }, conditions: [{ condition, weight, retention, points: [severity, map50_95, retention][] }], ece, mean_iou, self_labeling: { threshold, precision, recall, readiness }, ms_per_image? }` |
+| `stop_bench_entry` | `{ benchmark_id, entry_id }` | as `start_bench_entry` (`stopping`, then `stopped`); a finished one is `bench_entry_not_active` |
+
+A model entry belongs to the process that runs it: in embedded mode this `folo mcp` (the entry stops when the
+session ends), through a `folo serve` the server (it goes on after the session, and a later session follows it by
+id). The usual loop: `bench_catalog` once, `create_benchmark`, `start_bench_entry`, then `bench_entry` with `wait:
+50` until `result` is there, then `get_benchmark` for the leaderboard.
+
 Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`,
 `get_dataset`, `run_status`, `val`, `predict`, `predict_batch`, `compare_runs`, `cloud_connections`, `cloud_offers`,
-`cloud_instances`, `label_status` and `view_label_image` (`list_*` includes `list_label_jobs` and
-`list_label_images`). Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
+`cloud_instances`, `label_status`, `view_label_image`, `bench_catalog`, `get_benchmark` and `bench_entry` (`list_*`
+includes `list_label_jobs`, `list_label_images` and `list_benchmarks`). Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
 error) if called anyway.
 
 ## Resources
@@ -279,11 +311,12 @@ calls tools itself.
 In read-only mode, `train_on_folder` and `label_folder` are not listed.
 
 ## Files and safety
-- No tool deletes or overwrites existing files. Generated outputs (synthetic datasets, run directories, exports,
+- No tool overwrites existing files, and only `delete_benchmark` deletes any (a benchmark's own folder under
+  `--data-dir`). Generated outputs (synthetic datasets, run directories, exports,
   prediction dumps) go to new, collision-free paths under `--data-dir` (`<name>`, then `<name>-2`, ... if taken).
   Writes go to a temp file first and are then renamed into place.
 - Input paths (`register_dataset.path`, `predict.image_path`, `predict_batch.paths/glob`, the `paths` of
-  `create_label_job`) may be absolute or relative
+  `create_label_job`, `start_bench_entry.predictions_file`) may be absolute or relative
   to `--data-dir`, and are resolved on the machine running `folo mcp` (in proxy mode the label paths are the
   server's: an absolute path, of the server's OS, is passed on as given, and a relative one is
   `invalid_arguments`). `--data-dir` is where FOLO **writes**; it is not
@@ -307,7 +340,11 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   `--confine` covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`); the
   labeling tools that would have the server read image files (`create_label_job` with paths, `start_labeling`,
   `view_label_image`, `export_label_dataset`) are refused there with `not_supported` (run `folo mcp --confine` on
-  the data dir itself to label confined); a job without paths reads nothing and can be made there. The checks guard
+  the data dir itself to label confined); a job without paths reads nothing and can be made there. All eight
+  benchmark tools are refused with `not_supported` under `--confine`, embedded and through a server (with
+  `--read-only` too, the mutating ones answer `read_only` first): the store
+  reads, writes and deletes a benchmark's files (frozen images, entries, a model entry's weights) without these
+  checks. Run `folo mcp` without `--confine` to use them. The checks guard
   what is reachable through FOLO's tools; they do not defend against another process re-pointing links inside the
   data dir between a check and the open (FOLO never creates links).
 
@@ -385,3 +422,7 @@ through a loopback `folo serve` (also an older one without `label_image_filters`
 images a request so the fallback crosses pages), the `image/jpeg` content of a view, box edits in pixels and their
 errors, revisions against a run (a gated agent holds an image in its call while an edit is tried, then changes
 its boxes), `--confine` (in process and through a server) and a job that a missing path leaves behind.
+The benchmark tools are tested in `crates/folo-mcp/src/tools/bench_tests.rs`, in process and through a loopback
+`folo serve`: a benchmark of a synthetic dataset, a file of predictions (the truth) scored at once, the refusals
+and their hints, and the mock without benchmarks; `crates/folo-cli/tests/mcp/bench.rs` enters a published model
+over stdio and follows it with `bench_entry`'s `wait` to its score.

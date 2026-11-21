@@ -57,6 +57,15 @@ impl HttpStore {
         self.client.base()
     }
 
+    /// This store with every request ending by `deadline` (`bench_entry`'s wait promises an answer by then).
+    pub fn until(&self, deadline: std::time::Instant) -> HttpStore {
+        HttpStore {
+            client: self.client.until(deadline),
+            mock: self.mock.clone(),
+            features: self.features.clone(),
+        }
+    }
+
     /// The client (the labeling tools call `/api/label` through it, `crate::label`).
     pub fn client(&self) -> &Client {
         &self.client

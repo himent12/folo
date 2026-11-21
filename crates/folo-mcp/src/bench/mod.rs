@@ -11,6 +11,7 @@ pub mod hints;
 mod ops;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use folo_api::{
     Bench, BenchCatalog, BenchEntry, BenchEntryList, BenchList, BenchPrediction, BenchPredictions,
@@ -54,6 +55,14 @@ impl Benchmarks {
                 Via::Http(h)
             }
         })
+    }
+
+    /// These calls with every request to a server ending by `deadline` (in process, the same calls).
+    pub fn until(&self, deadline: Instant) -> Benchmarks {
+        match self {
+            Benchmarks::Http(h) => Benchmarks::Http(Arc::new(h.until(deadline))),
+            here => here.clone(),
+        }
     }
 
     /// Fails as every call does where there are no benchmarks (the mock, a server without `vision_bench`): for a
