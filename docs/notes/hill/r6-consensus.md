@@ -80,10 +80,14 @@ detection counts, for B0, B0 + consensus and B\* + consensus on both models.
 
 ## With the setting off
 
-**Output.** `folo val --save-json` of folo-n v5 from this branch and from its branch point (`4b65e6e5`) are byte for byte
-the same file (sha256 `ba86dad8…d336`). Tests also check this bit for bit on every NMS path.
+**Output.** `folo val --save-json` of folo-n v5 from this branch (with the review's fixes) and from `main` at `53d28165`
+are byte for byte the same file (sha256 `ba86dad8…d336`). Tests also check this bit for bit on every NMS path. With the
+setting on, the same build's four `--score consensus` files (both models, with and without the fusion) are byte for
+byte the ones the Rust = Python check above was run on, so the review's fixes did not move a gate number.
 
-**Time.** In the code, off adds one enum match and one `is_some` check per image. One timing, single-threaded, on real
+**Time.** In the code, off adds one comparison per image, before the rule's branch. The timing below is of the first
+version of that step, which also tested an `Option` once per kept detection; the review's fix removed that test, and the
+timing was not repeated. One timing, single-threaded, on real
 val2017 candidates of folo-n v5 (first 1,500 images, 24 alternated process runs of each binary in one `cpu` lock hold,
 fastest of 40 passes per run; the job hit its time limit after 22 complete pairs; 22% busy when it started):
 
@@ -118,7 +122,8 @@ milliseconds per image:
   at `predict`'s `conf` 0.25 than at 0.001. No gain is claimed at `predict`'s settings.
 - **The score scale.** A lonely box is divided by 3.16, so thresholds, best-F1 confidence, precision, recall and the
   confusion matrix mean something else with the option on.
-- **The GPU was not run in this lane** (two other lanes were training on it). The rule runs on the host in the step
-  every NMS path ends in, and `gpu_lazy_head` checks the GPU path against the dense one bit for bit with the rule on,
-  on CI's Windows runner.
+- **The real GPU was not run in this lane** (two other lanes were training on it). The rule runs on the host in the
+  step every NMS path ends in. On WARP, Windows' software adapter, the device-pairs test passes with the rule on.
+  `gpu_lazy_head`'s fusion test, which also checks that the rule changes scores and nothing else, crashes on WARP on
+  `main` as well (segmentation fault, 2 of 2 runs on each side), so that test is left to CI's Windows runner.
 - **Not offered** by the server, Studio, ONNX export or the wasm build.

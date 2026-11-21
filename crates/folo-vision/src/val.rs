@@ -699,6 +699,18 @@ mod tests {
             })
             .collect();
         assert!(want_dfl.iter().zip(&want).any(|(f, w)| f.iter().zip(w).any(|(f, w)| f.bbox != w.bbox)));
+        // The consensus score: the pairs path gives the full-row result, which is not the plain one.
+        let consensus = NmsConfig { score: crate::fusion::ScoreRule::Consensus, ..nms.clone() };
+        let want_consensus: Vec<Vec<Detection>> = (0..b)
+            .map(|i| {
+                let mut rows = Vec::with_capacity(a * (4 + nc));
+                for j in 0..a {
+                    rows.extend((0..4 + nc).map(|r| host[(i * (4 + nc) + r) * a + j]));
+                }
+                crate::nms::non_max_suppression_rows(&rows, nc, &consensus)
+            })
+            .collect();
+        assert_ne!(want_consensus, want, "the rule moved no score");
         // Room for every pair, for image 1's only, for none: how many images are served from their pairs.
         for (cap, served) in [(a * nc, 3), (1024, 1), (200, 0)] {
             let mut post = Post {
@@ -718,6 +730,8 @@ mod tests {
             assert_eq!(post.from_pairs, served, "cap {cap}");
             let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &dfl, Some(&prec)).unwrap();
             assert_eq!(got, want_dfl, "cap {cap}, DFL fusion");
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &consensus, None).unwrap();
+            assert_eq!(got, want_consensus, "cap {cap}, consensus");
         }
         assert_eq!(most.load(Ordering::Relaxed), *counts.iter().max().unwrap());
     }

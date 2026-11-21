@@ -290,20 +290,19 @@ fn finish(
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
         }
     };
-    let rescored = match cfg.score {
-        ScoreRule::None => None,
-        ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes, cfg.agnostic)),
-    };
     let mut dets: Vec<Detection> = kept
         .iter()
         .enumerate()
         .map(|(i, &k)| Detection {
             bbox: fused.as_ref().map_or(boxes[k], |f| f[i]),
-            score: rescored.as_ref().map_or(scores[k], |r| r[i]),
+            score: scores[k],
             class: classes[k],
         })
         .collect();
-    if rescored.is_some() {
+    if cfg.score == ScoreRule::Consensus {
+        for (d, s) in dets.iter_mut().zip(consensus_scores(&kept, &boxes, &scores, &classes)) {
+            d.score = s;
+        }
         // Stable: equal new scores stay in NMS's order.
         dets.sort_by(|a, b| b.score.total_cmp(&a.score));
     }

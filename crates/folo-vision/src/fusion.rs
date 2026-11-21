@@ -13,10 +13,10 @@
 //! under `agnostic`) whose IoU with the kept box is `>= iou`, the kept candidate included. Lane `fusion` of
 //! hill-climb 3 chose the rule and the weights on 5000 train2017 images (docs/notes/hill/r3-fusion.md).
 //!
-//! [`ScoreRule::Consensus`], opt-in through [`crate::nms::NmsConfig::score`], uses the same clusters for the other
-//! half of a detection: it scales each kept box's score by the score mass of its cluster and re-sorts
-//! ([`consensus_scores`], docs/MODEL.md §9.4, docs/notes/hill/r6-consensus.md). Boxes, classes and the kept set do
-//! not change.
+//! [`ScoreRule::Consensus`], opt-in through [`crate::nms::NmsConfig::score`], uses such a cluster for the other half
+//! of a detection, always within the box's own class: it scales each kept box's score by the score mass of its
+//! cluster and re-sorts ([`consensus_scores`], docs/MODEL.md §9.4, docs/notes/hill/r6-consensus.md). Boxes, classes
+//! and the kept set do not change.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +56,7 @@ impl ScoreRule {
     }
 }
 
-/// The candidates grouped by class (stable: candidate order inside a class), so a cluster scans one bucket; with
+/// The `n` candidates grouped by class (stable: candidate order inside a class), so a cluster scans one bucket; with
 /// `agnostic`, one bucket of every candidate.
 struct Buckets<'a> {
     order: Vec<u32>,
@@ -65,8 +65,8 @@ struct Buckets<'a> {
 }
 
 impl<'a> Buckets<'a> {
-    fn new(classes: &'a [u32], agnostic: bool) -> Self {
-        let mut order: Vec<u32> = (0..classes.len() as u32).collect();
+    fn new(n: usize, classes: &'a [u32], agnostic: bool) -> Self {
+        let mut order: Vec<u32> = (0..n as u32).collect();
         if !agnostic {
             order.sort_by_key(|&i| classes[i as usize]);
         }
@@ -102,16 +102,12 @@ fn overlap(b: &Xyxy, ba: f32, c: &Xyxy) -> f32 {
 /// ```
 ///
 /// The sum runs in `f64` in candidate order, so the result does not depend on threads or on other classes'
-/// candidates (any class counts under `agnostic`, as for the fusion). A member whose score is not `> 0` or whose box
-/// is not finite adds nothing, and a kept score that is not `> 0` stays as it is.
-pub fn consensus_scores(
-    kept: &[usize],
-    boxes: &[Xyxy],
-    scores: &[f32],
-    classes: &[u32],
-    agnostic: bool,
-) -> Vec<f32> {
-    let buckets = Buckets::new(classes, agnostic);
+/// candidates: the cluster stays within `k`'s class even when NMS is `agnostic`. A member whose score is not `> 0` or
+/// whose box is not finite adds nothing, a kept box that is not finite has no members but itself (`M = s`), and a
+/// kept score that is not `> 0` stays as it is.
+pub fn consensus_scores(kept: &[usize], boxes: &[Xyxy], scores: &[f32], classes: &[u32]) -> Vec<f32> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let buckets = Buckets::new(boxes.len(), classes, false);
     kept.iter()
         .map(|&k| {
             if scores[k].is_nan() || scores[k] <= 0.0 {
@@ -119,18 +115,21 @@ pub fn consensus_scores(
             }
             let b = boxes[k];
             let ba = b.area();
-            let mut mass = 0f64;
-            for &j in buckets.of(classes[k]) {
-                let j = j as usize;
-                let c = &boxes[j];
-                // A NaN box can reach any IoU from f32 min / max, so a member's box must be finite.
-                let member = j == k
-                    || (overlap(&b, ba, c) >= CONSENSUS_IOU && c.to_array().iter().all(|v| v.is_finite()));
-                if member && scores[j] > 0.0 {
-                    mass += scores[j] as f64;
-                }
-            }
             let s = scores[k] as f64;
+            let mut mass = 0f64;
+            // A NaN box can reach any IoU from f32 min / max, so both boxes of a pair must be finite.
+            if finite(&b) {
+                for &j in buckets.of(classes[k]) {
+                    let j = j as usize;
+                    let c = &boxes[j];
+                    let member = j == k || (overlap(&b, ba, c) >= CONSENSUS_IOU && finite(c));
+                    if member && scores[j] > 0.0 {
+                        mass += scores[j] as f64;
+                    }
+                }
+            } else {
+                mass = s;
+            }
             // a = 0.5: a square root, which IEEE 754 rounds exactly on every platform.
             (s * (mass / s).min(CONSENSUS_CAP).sqrt() / CONSENSUS_CAP.sqrt()) as f32
         })
@@ -176,7 +175,7 @@ pub fn fuse_boxes(
     iou: f32,
     precision: Option<&dyn Fn(usize) -> [f32; 4]>,
 ) -> Vec<Xyxy> {
-    let buckets = Buckets::new(&classes[..boxes.len()], agnostic);
+    let buckets = Buckets::new(boxes.len(), classes, agnostic);
     kept.iter()
         .map(|&k| {
             let b = boxes[k];
@@ -356,30 +355,39 @@ mod tests {
         ];
         let scores = [0.8f32, 0.9, 0.4, 0.6, 0.9, 0.1, 0.5, 0.5, 0.5, 0.5];
         let classes = [0u32, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-        let got = consensus_scores(&[0, 2, 5], &boxes, &scores, &classes, false);
+        let got = consensus_scores(&[0, 2, 5], &boxes, &scores, &classes);
         assert_eq!(got[0], (0.8f32 as f64 / 10f64.sqrt()) as f32, "lonely: s / sqrt(10)");
         let mass = 0.4f32 as f64 + 0.6f32 as f64;
         let want = 0.4f32 as f64 * (mass / 0.4f32 as f64).sqrt() / 10f64.sqrt();
         assert_eq!(got[1], want as f32, "between: M/s = 2.5");
         assert!((got[1] - 0.2).abs() < 1e-6, "0.4 * sqrt(2.5 / 10) = 0.2, got {}", got[1]);
         assert_eq!(got[2].to_bits(), 0.1f32.to_bits(), "at the cap the score stays");
-        // Agnostic: candidate 1 (another class, the same box) joins the lonely box's cluster.
-        let agn = consensus_scores(&[0], &boxes, &scores, &classes, true)[0];
-        let m = 0.8f32 as f64 + 0.9f32 as f64;
-        assert_eq!(agn, (0.8f32 as f64 * (m / 0.8f32 as f64).sqrt() / 10f64.sqrt()) as f32);
     }
 
     /// A kept box is in its own cluster even when its IoU with itself is not defined (zero area); a member with a
-    /// NaN box or a score that is not positive adds nothing; a kept score that is not positive stays.
+    /// NaN box or a score that is not positive adds nothing; a kept score that is not positive stays. A NaN box and
+    /// a valid one reach IoU 1 through f32 min / max, and neither lends the other its score, in either direction.
     #[test]
     fn consensus_edge_cases() {
         let flat = [b(5.0, 5.0, 5.0, 9.0)];
-        let got = consensus_scores(&[0], &flat, &[0.5], &[0], false)[0];
+        let got = consensus_scores(&[0], &flat, &[0.5], &[0])[0];
         assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32);
-        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
-        let got = consensus_scores(&[0], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0], false)[0];
+        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 5.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
+        assert_eq!(overlap(&boxes[1], boxes[1].area(), &boxes[0]), 1.0, "the pair the guard is for");
+        assert_eq!(overlap(&boxes[0], boxes[0].area(), &boxes[1]), 1.0, "the pair the guard is for");
+        let got = consensus_scores(&[0], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0])[0];
         assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32, "the NaN box and the zero score add nothing");
-        assert_eq!(consensus_scores(&[2], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0], false), [0.0]);
+        let got = consensus_scores(&[1], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0])[0];
+        assert_eq!(got, (0.9f32 as f64 / 10f64.sqrt()) as f32, "a kept NaN box has no members but itself");
+        assert_eq!(consensus_scores(&[2], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0]), [0.0]);
+    }
+
+    /// `fuse_boxes` reads a class only for a kept candidate under `agnostic`: a shorter `classes` still works.
+    #[test]
+    fn agnostic_fusion_reads_only_the_kept_class() {
+        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(1.0, 0.0, 10.0, 10.0)];
+        let got = fuse_boxes(&[0], &boxes, &[0.5, 0.5], &[0], true, 0.75, None)[0];
+        assert_eq!(got.x1, 0.5, "both boxes vote");
     }
 
     /// The same inputs give the same boxes, bit for bit.

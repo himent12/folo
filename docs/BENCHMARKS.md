@@ -1211,7 +1211,8 @@ server, Studio, ONNX export and the wasm build do not offer it yet ([Next optimi
 `--score consensus` on `folo val` and `folo predict` scales each kept box's score by the score mass of the candidates
 of its class that overlap it (IoU at least 0.75), and sorts by the new score. Boxes, classes and which boxes are kept
 do not change. It is off by default and every other table here is without it. **The score scale changes** (a box that
-fired alone is divided by 3.16), so a `conf` threshold means something else with it on. CPU, f32, val2017, pycocotools;
+fired alone is divided by 3.16). `--conf` still filters the class score, but a threshold on the returned scores, and
+`folo val`'s precision, recall and best-F1 confidence, use the new scale. CPU, f32, val2017, pycocotools;
 the gain is a paired bootstrap over the 5,000 images (1,000 resamples, seed 0, 95% interval):
 
 | weights, post-process | without: AP / AP50 / AP75 | with `--score consensus` | gain [95% interval] | AP_L without → with |

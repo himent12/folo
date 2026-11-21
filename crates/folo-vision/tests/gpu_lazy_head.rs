@@ -102,9 +102,30 @@ fn check_precisions(
     }
 }
 
+/// `on` is `off` with the consensus score: the same boxes and classes, each score at most `off`'s and at least
+/// `off`'s over `√10`. Returns how many scores it lowered.
+fn lowered_by_consensus(on: &[Detection], off: &[Detection]) -> usize {
+    let key = |d: &Detection| {
+        let b = d.bbox;
+        ([d.class, b.x1.to_bits(), b.y1.to_bits(), b.x2.to_bits(), b.y2.to_bits()], d.score.to_bits())
+    };
+    let (mut a, mut b): (Vec<_>, Vec<_>) = (on.iter().map(key).collect(), off.iter().map(key).collect());
+    a.sort_unstable();
+    b.sort_unstable();
+    assert_eq!(a.len(), b.len(), "the same number of detections");
+    let mut lowered = 0;
+    for ((ka, sa), (kb, sb)) in a.iter().zip(&b) {
+        assert_eq!(ka, kb, "the same box and class");
+        let (s, was) = (f32::from_bits(*sa), f32::from_bits(*sb));
+        assert!(s <= was && f64::from(s) >= f64::from(was) / 10f64.sqrt() * (1.0 - 1e-6), "{s} from {was}");
+        lowered += usize::from(s < was);
+    }
+    lowered
+}
+
 /// Candidate-first against dense on `x` with the box fusion `fusion` and the score rule `score`, at thresholds picked
-/// from the dense scores: none passing, the top 1%, 5% and 30% of all anchors, and every anchor. Returns how many
-/// detections were compared.
+/// from the dense scores: none passing, the top 1%, 5% and 30% of all anchors, and every anchor. With the consensus
+/// score, also that it changed scores and nothing else. Returns how many detections were compared.
 fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreRule) -> usize {
     let _g = no_grad();
     let dense = m.forward(x).unwrap();
@@ -119,7 +140,7 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
         .collect();
     best.sort_by(f32::total_cmp);
     let at = |q: f64| best[((best.len() as f64 * q) as usize).min(best.len() - 1)];
-    let mut compared = 0;
+    let (mut compared, mut lowered) = (0, 0);
     for conf in [best[best.len() - 1] + 1e-3, at(0.99), at(0.95), at(0.7), best[0] - 1e-3] {
         let nms = NmsConfig {
             conf,
@@ -148,7 +169,12 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
             assert_eq!(bits(g), bits(w), "{what}: image {i} at conf {conf}");
             compared += w.len();
         }
+        if score == ScoreRule::Consensus {
+            let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
+            lowered += got.iter().zip(&off).map(|(on, off)| lowered_by_consensus(on, off)).sum::<usize>();
+        }
     }
+    assert!(score == ScoreRule::None || lowered > 0, "{what}: the consensus score changed nothing");
     compared
 }
 

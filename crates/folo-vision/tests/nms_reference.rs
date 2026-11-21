@@ -89,7 +89,8 @@ fn large_bucket_parallel_suppression_matches_naive() {
 /// each kept box's sides become the `f64` weighted means over every candidate of its class (any class when
 /// agnostic) with IoU `>= fusion_iou`, weights score times the anchor's side precision (`prec`, 1 when `None` or
 /// voting), skipping weights that are not `> 0`; and with the consensus score each kept box's score from the `f64`
-/// score mass of the unfused candidates at IoU `>= 0.75` with it (itself included), then a stable sort by it.
+/// score mass of the unfused candidates of its class (also when agnostic) at IoU `>= 0.75` with it (itself included),
+/// then a stable sort by it.
 fn naive_post(
     boxes: &[Xyxy],
     scores: &[f32],
@@ -170,9 +171,7 @@ fn naive_post(
             .iter()
             .enumerate()
             .filter(|(j, d)| {
-                *j == k
-                    || ((cfg.agnostic || d.class == cands[k].class)
-                        && box_iou(&cands[k].bbox, &d.bbox) >= CONSENSUS_IOU)
+                *j == k || (d.class == cands[k].class && box_iou(&cands[k].bbox, &d.bbox) >= CONSENSUS_IOU)
             })
             .map(|(_, d)| d.score as f64)
             .sum();
@@ -282,4 +281,42 @@ fn consensus_changes_only_the_scores() {
         }
     }
     assert!(changed > 100, "only {changed} scores moved: the test cannot see the rule");
+}
+
+/// Agnostic NMS suppresses across classes, but a box's consensus is its own class's: one anchor scoring 0.8 for
+/// class 0 and 0.6 for class 1 keeps class 0 with a lonely box's score.
+#[test]
+fn consensus_stays_in_the_class_under_agnostic_nms() {
+    let cfg = NmsConfig {
+        conf: 0.01,
+        agnostic: true,
+        multi_label: true,
+        score: ScoreRule::Consensus,
+        ..NmsConfig::default()
+    };
+    let got = non_max_suppression(&[Xyxy::new(0.0, 0.0, 10.0, 10.0)], &[0.8, 0.6], 2, &cfg);
+    assert_eq!(got.len(), 1);
+    assert_eq!((got[0].class, got[0].score), (0, (0.8f32 as f64 / 10f64.sqrt()) as f32));
+}
+
+/// A NaN box and a valid one of the same class reach IoU 1 through f32 min / max. Whichever NMS keeps gets no score
+/// from the other, in either candidate order.
+#[test]
+fn consensus_gives_a_nan_box_no_neighbours() {
+    let (nan, good) = (Xyxy::new(f32::NAN, 0.0, 5.0, 10.0), Xyxy::new(0.0, 0.0, 10.0, 10.0));
+    let cfg = NmsConfig { conf: 0.01, score: ScoreRule::Consensus, ..NmsConfig::default() };
+    for (first, second) in [(nan, good), (good, nan)] {
+        let dets = [
+            Detection { bbox: first, score: 0.8, class: 0 },
+            Detection { bbox: second, score: 0.6, class: 0 },
+        ];
+        let got = nms_detections(&dets, &cfg);
+        assert!(!got.is_empty());
+        for d in &got {
+            let was = dets
+                .iter()
+                .find(|q| q.bbox.to_array().map(f32::to_bits) == d.bbox.to_array().map(f32::to_bits));
+            assert_eq!(d.score, (was.unwrap().score as f64 / 10f64.sqrt()) as f32, "{d:?}");
+        }
+    }
 }
