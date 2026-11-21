@@ -46,6 +46,8 @@ Wave 6 (2026-11-20):
 - [The data loader: faster training samples with the same bytes](hill/r6-loader.md)
 - [Fine-tuning defaults on small datasets: the EMA of short runs, the benchmark's selection, starting
   weights](hill/r6-finetune.md) (no default changed)
+- [folo-s continued on full COCO for 48 epochs: val2017 AP 0.4162 to 0.4224, and a mixed fine-tuning
+  guard](hill/r6-long-s.md) (weights not published)
 
 ## Design review logs
 
