@@ -156,3 +156,23 @@ fn a_coco_file_beside_a_marked_folder_opens() {
     assert_eq!(open(&json).unwrap().split_sizes(), [0, 1, 0]);
     assert_eq!(detect_format(&json, Format::Auto).unwrap(), Format::Coco);
 }
+
+/// A `convert` (or early `synth`) stopped while copying images leaves `.folo-unfinished` and `images/train/` before
+/// any `labels/`, `annotations/` or `data.yaml` exists: readers must report it unfinished, not unknown format.
+#[test]
+fn an_interrupted_convert_folder_is_refused_as_unfinished() {
+    let t = TempDir::new("unfinished-convert-early");
+    let dir = t.join("partial");
+    write(&dir.join(MARKER), "");
+    write(&dir.join("images/train/000000.png"), "placeholder");
+    assert_unfinished(&dir);
+    assert_refused(detect_format(&dir, Format::Coco).unwrap_err());
+    assert_refused(detect_format(&dir, Format::Yolo).unwrap_err());
+    assert_refused(folo_data::open_coco_ground_truth(&dir, folo_data::Split::Train).unwrap_err());
+    assert_refused(folo_data::coco_annotation_files(&dir).unwrap_err());
+
+    // Stopped immediately after `claim`, with only the marker present.
+    let bare = t.join("bare");
+    write(&bare.join(MARKER), "");
+    assert_unfinished(&bare);
+}

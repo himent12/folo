@@ -382,6 +382,17 @@ pub(crate) enum Source {
 /// not finished ([`crate::unfinished`]) is refused once found: the YAML's folder (and the root its `path:` gives,
 /// `yolo::scan_yaml`), the folder images resolve against, or a COCO JSON's own folder or the one above it.
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
+    if !path.exists() {
+        return Err(DataError::io(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "dataset path not found"),
+        ));
+    }
+    // A folder a writer claimed (`convert`, `synth`) holds the marker before any `data.yaml`, `labels/` or
+    // `annotations/` exists; check it before format detection so an early stop is not reported as unknown format.
+    if path.is_dir() {
+        crate::unfinished::check(path)?;
+    }
     let source = locate(path, format)?;
     match &source {
         Source::Yaml(yaml) => crate::unfinished::check(crate::paths::parent_dir(yaml))?,
@@ -402,12 +413,6 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
 }
 
 fn locate(path: &Path, format: Format) -> Result<Source> {
-    if !path.exists() {
-        return Err(DataError::io(
-            path,
-            std::io::Error::new(std::io::ErrorKind::NotFound, "dataset path not found"),
-        ));
-    }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if path.is_file() {
         return match (format, ext.as_deref()) {

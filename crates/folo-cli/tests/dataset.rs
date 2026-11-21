@@ -363,6 +363,22 @@ fn bare_yaml_and_coco_paths_report_dot_root_and_relative_issue_files() {
     assert_eq!(corrupt["file"], expected_val);
 }
 
+/// A `convert` stopped during image copying holds `.folo-unfinished` and `images/train/` with no `labels/`,
+/// `annotations/` or `data.yaml` yet: `stats` and `check` must report `dataset_unfinished`, not `unknown_format`.
+#[test]
+fn interrupted_convert_folder_reports_dataset_unfinished() {
+    let t = TestDir::new("cli-unfinished-convert");
+    let dir = t.join("partial");
+    std::fs::create_dir_all(dir.join("images/train")).unwrap();
+    std::fs::write(dir.join(folo_data::unfinished::MARKER), "").unwrap();
+    std::fs::write(dir.join("images/train/000000.png"), "half").unwrap();
+    for cmd in ["stats", "check"] {
+        let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{cmd}: {err}");
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
