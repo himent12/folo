@@ -466,8 +466,9 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
 pub const UNDETECTED: &str = "could not detect a dataset";
 
 /// The format of the dataset at `path` without reading it (`format` restricts the search; `Auto` tries both).
-/// Fails with [`DataError::Io`] when `path` does not exist and with [`DataError::Format`] (message starting with
-/// [`UNDETECTED`]) when nothing there looks like a dataset.
+/// Fails with [`DataError::Io`] when `path` does not exist, with [`DataError::Unfinished`] when `path` is a folder a
+/// writer has not finished (checked first, whatever the folder holds), and with [`DataError::Format`] (message
+/// starting with [`UNDETECTED`]) when nothing there looks like a dataset.
 pub fn detect_format(path: impl AsRef<Path>, format: Format) -> Result<Format> {
     Ok(match detect(path.as_ref(), format)? {
         Source::Yaml(_) | Source::YoloDir(_) => Format::Yolo,
