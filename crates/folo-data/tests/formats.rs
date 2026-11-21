@@ -272,6 +272,22 @@ fn label_layouts_that_pair_images_with_labels() {
     assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 0), "the stray file is not read");
 }
 
+/// A YAML reached through a folder link, with `path: ../images/birds`: the OS follows the link before the `..`, so the
+/// mirrored labels are in the link target's parent, not the link's.
+#[cfg(unix)]
+#[test]
+fn mirrored_labels_through_a_linked_yaml_folder() {
+    let t = TempDir::new("labels-linked");
+    let release = t.join("releases/v7");
+    write_png(&release.join("images/birds/train/a.png"), 8, 8, [0; 3]);
+    write(&release.join("labels/birds/train/a.txt"), "0 0.5 0.5 0.2 0.2\n");
+    write(&release.join("meta/data.yaml"), "path: ../images/birds\ntrain: train\nnames: [bird]\n");
+    std::fs::create_dir_all(t.join("work")).unwrap();
+    std::os::unix::fs::symlink(release.join("meta"), t.join("work/current")).unwrap();
+    let ds = open(t.join("work/current/data.yaml")).unwrap();
+    assert_eq!(ds.train.boxes(0).len(), 1, "the labels of the link target's parent");
+}
+
 /// Opens a one-image COCO file at each `(path, split)` and checks the image lands in that split.
 fn assert_coco_splits(tag: &str, cases: &[(&str, Split)]) {
     let t = TempDir::new(tag);

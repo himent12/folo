@@ -32,10 +32,12 @@ pub fn label_path_for(image: &Path) -> PathBuf {
 
 /// The label files of one dataset's images: [`label_path_for`], except that a folder called `images` at or above the
 /// dataset root counts only if the root's mirror exists (`x/labels/birds` for `x/images/birds`, `x/labels` for
-/// `x/images`). Without it, the labels of the images below the root sit next to them. Paths are compared absolute, so
-/// the answer does not depend on how the root or an image list entry is spelled.
+/// `x/images`). Without it, the labels of the images below the root sit next to them. Whether an image is below the
+/// root is compared on absolute, normalised paths, so it does not depend on how the root or a list entry is spelled.
+/// The mirror is probed with the root's `..` kept: the file system follows a link before a `..`, as it does when it
+/// opens a label at [`label_path_for`].
 pub(crate) struct LabelPaths {
-    /// The dataset root, absolute.
+    /// The dataset root, absolute and normalised.
     root: PathBuf,
     /// The root's mirror when it has one and it does not exist: creating it changes the dataset.
     absent: Option<PathBuf>,
@@ -44,8 +46,10 @@ pub(crate) struct LabelPaths {
 impl LabelPaths {
     pub(crate) fn new(root: &Path) -> Self {
         // `.` first: a dataset named by a bare `data.yaml` has an empty root.
-        let root = crate::paths::normalize(&Path::new(".").join(root));
-        let comps: Vec<Component> = root.components().collect();
+        let spelled = Path::new(".").join(root);
+        let full = std::path::absolute(&spelled).unwrap_or_else(|_| spelled.clone());
+        let root = crate::paths::normalize(&spelled);
+        let comps: Vec<Component> = full.components().collect();
         let absent = comps
             .iter()
             .rposition(|c| c.as_os_str() == OsStr::new("images"))
