@@ -362,7 +362,7 @@ fn a_wait_ends_when_the_server_stops_answering() {
         let (poll, grace) = (Duration::from_millis(10), Duration::from_millis(50));
         // The connections wait in the listener's backlog; closing it ends a call still held.
         let r = bounded(
-            || super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, grace, |_| {}),
+            || super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, grace),
             move || drop(listener),
         );
         let e = r.unwrap_err();
@@ -371,12 +371,46 @@ fn a_wait_ends_when_the_server_stops_answering() {
     }
 }
 
+/// Answers every request with `running` for the first `active` requests and then `ended`, counting in `after_end` the
+/// requests that came after the client was told the entry had ended.
+fn serve_entry(
+    listener: std::net::TcpListener,
+    (running, active): (&str, usize),
+    ended: &str,
+    after_end: &std::sync::atomic::AtomicUsize,
+    closing: &std::sync::atomic::AtomicBool,
+) {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut reads = 0_usize;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { return };
+        if closing.load(Relaxed) {
+            return;
+        }
+        let mut head = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while head.read_line(&mut line).is_ok_and(|n| n > 0) && line != "\r\n" {
+            line.clear();
+        }
+        reads += 1;
+        after_end.store(reads.saturating_sub(active + 1), Relaxed);
+        let body = if reads <= active { running } else { ended };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+}
+
 /// `wait` on a real store. Through the tool: 0 answers at once, and a wait on an entry that stays open holds for its
-/// length (a lower bound, so a loaded machine cannot fail it). An entry that ends during a long wait, after the wait
-/// has read it active, ends the wait before its time.
+/// length (a lower bound, so a loaded machine cannot fail it). Through a server that reports the entry ended during a
+/// long wait, the wait returns that state without asking the server again.
 #[test]
 fn a_wait_follows_an_entry_until_it_ends() {
     use folo_api::{BenchContestantSpec, BenchEntryStatus, BenchPrediction, CreateBench, StartBenchEntry};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     let home = TestDir::new("mcp-bench-wait");
     let (store, dataset) = store(home.path());
@@ -415,33 +449,34 @@ fn a_wait_follows_an_entry_until_it_ends() {
     // The tool polls every 100 ms and does not start a sleep that would pass the end of its wait.
     assert!(start.elapsed() >= Duration::from_millis(900), "{:?}", start.elapsed());
 
-    let (poll, long, grace) = (Duration::from_millis(5), Duration::from_secs(30), Duration::from_secs(1));
-    let after_end = std::sync::atomic::AtomicUsize::new(0);
-    let counter = &after_end;
-    let (ended, took) = std::thread::scope(|scope| {
-        let (seen, polled) = std::sync::mpsc::channel();
-        let waiter = scope.spawn(|| {
-            let start = Instant::now();
-            let r = super::bench::wait_state(&b, &bench, &entry, poll, long, grace, move |e| {
-                if !e.status.is_active() {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let _ = seen.send(());
-            });
-            (r, start.elapsed())
-        });
-        polled.recv().expect("the wait never read the entry active");
-        b.finish(&bench, &entry).unwrap();
-        waiter.join().unwrap()
-    });
-    assert_eq!(ended.unwrap().status, BenchEntryStatus::Done);
-    assert_eq!(
-        after_end.load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "the wait went on after the entry ended"
-    );
-    assert!(took < long, "the wait ran to its end: {took:?}");
+    // The store's own JSON of the entry, open and then stopped, served by a fake server.
+    let running = serde_json::to_string(&b.entry(&bench, &entry).unwrap()).unwrap();
+    let stopped = b.stop_entry(&bench, &entry).unwrap();
+    assert_eq!(stopped.status, BenchEntryStatus::Stopped);
+    let stopped = serde_json::to_string(&stopped).unwrap();
     store.shutdown();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let http = HttpStore::new(&format!("http://{addr}"), None)
+        .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]);
+    let via = crate::bench::Benchmarks::Http(Arc::new(http));
+    let (poll, long, grace) = (Duration::from_millis(5), Duration::from_secs(30), Duration::from_secs(1));
+    let after_end = AtomicUsize::new(0);
+    let closing = AtomicBool::new(false);
+    // Ends a wait that never returned: the requests after this one are refused.
+    let close = || {
+        closing.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(addr);
+    };
+    let ended = std::thread::scope(|scope| {
+        scope.spawn(|| serve_entry(listener, (&running, 3), &stopped, &after_end, &closing));
+        let r = bounded(|| super::bench::wait_state(&via, &bench, &entry, poll, long, grace), close);
+        close();
+        r
+    });
+    assert_eq!(ended.unwrap().status, BenchEntryStatus::Stopped);
+    assert_eq!(after_end.load(Ordering::Relaxed), 0, "the wait asked again after the entry ended");
 }
 
 /// `delete_benchmark` is the one tool that removes files, and the only one a client is told is destructive.
