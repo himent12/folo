@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use folo_api::{BenchEntryStatus, BenchSource, CreateBench};
 
-use super::results::{Output, out, page_of, short};
+use super::results::{MAX_RESULT_BYTES, Output, json_len, out, page_of, short};
 use crate::bench::hints::{self, Front};
 use crate::bench::{Benchmarks, Contestant};
 use crate::errors::{Error, invalid_arguments};
@@ -19,8 +19,12 @@ pub const MAX_WAIT_SECONDS: u32 = 50;
 /// How often a wait reads the entry: in process, and through a server.
 const POLL_HERE: Duration = Duration::from_millis(100);
 const POLL_SERVER: Duration = Duration::from_millis(500);
-/// Leaderboard rows `get_benchmark` returns.
+/// Leaderboard rows `get_benchmark` returns (fewer when the result would be over its size limit).
 const MAX_ROWS: usize = 50;
+/// The bytes `get_benchmark` fits its result in (the result limit, less room for the envelope).
+const FIT: usize = MAX_RESULT_BYTES - 1024;
+/// How long `bench_entry` may take beyond its `wait`: every request to a server ends by then.
+const GRACE: Duration = Duration::from_secs(5);
 
 impl Inner {
     /// Runs benchmark calls on the blocking pool (they read files or make HTTP requests); errors get MCP hints.
@@ -62,10 +66,17 @@ impl Inner {
         let mut r = self.benchmarks(move |b| b.detail(&id)).await?;
         let entries = r.leaderboard.len();
         r.leaderboard.truncate(MAX_ROWS);
+        let cut = fit_detail(&mut r);
         let mut summary =
             format!("{} '{}': {} images, {} entries", r.id, short(&r.name, 40), r.images, entries);
-        if entries > MAX_ROWS {
-            summary.push_str(&format!(" (the first {MAX_ROWS} listed)"));
+        if entries > r.leaderboard.len() {
+            summary.push_str(&format!(
+                " (the first {} listed; GET /api/bench/benchmarks/{{id}}/entries has all)",
+                r.leaderboard.len()
+            ));
+        }
+        if cut {
+            summary.push_str(" (long text cut; GET /api/bench/benchmarks/{id} has it whole)");
         }
         if let Some(e) = r.leaderboard.first().filter(|e| e.score.is_some()) {
             summary.push_str(&format!("; first: {} {:.1}", short(&e.name, 40), e.score.unwrap_or_default()));
@@ -154,14 +165,9 @@ impl Inner {
             return Err(invalid_arguments(format!("wait must be in 0..={MAX_WAIT_SECONDS}, got {}", a.wait)));
         }
         let poll = if self.proxy.is_some() { POLL_SERVER } else { POLL_HERE };
-        let deadline = Instant::now() + Duration::from_secs(a.wait.into());
+        let wait = Duration::from_secs(a.wait.into());
         let (id, entry) = (a.benchmark_id, a.entry_id);
-        let r = self
-            .benchmarks(move |b| {
-                let e = b.follow(&id, &entry, poll, |_| Instant::now() + poll <= deadline)?;
-                b.state_of(e)
-            })
-            .await?;
+        let r = self.benchmarks(move |b| wait_state(b, &id, &entry, poll, wait, GRACE)).await?;
         out(&r, entry_summary(&r))
     }
 
@@ -171,6 +177,51 @@ impl Inner {
         let summary = entry_summary(&r);
         out(&BenchEntryBrief::from(r), summary)
     }
+}
+
+/// An entry's state once it has ended or `wait` has passed. Through a server, every request ends by `grace` after
+/// the wait, so a server that stops answering cannot hold the call (or this thread) for the client's long timeout.
+pub(super) fn wait_state(
+    b: &Benchmarks,
+    id: &str,
+    entry: &str,
+    poll: Duration,
+    wait: Duration,
+    grace: Duration,
+) -> Result<BenchEntryState, Error> {
+    let deadline = Instant::now() + wait;
+    let b = b.until(deadline + grace);
+    b.follow(id, entry, poll, |_| Instant::now() + poll <= deadline).and_then(|e| b.state_of(e)).map_err(
+        |mut e| {
+            if e.body.code == "server_unreachable" {
+                e.body.hint = Some(
+                    "the server is slow or gone; the entry stays on it: bench_entry follows it again".into(),
+                );
+            }
+            e
+        },
+    )
+}
+
+/// Fits a benchmark within the result limit whatever its names, keeping what ranks it longest: a shorter description,
+/// then fewer leaderboard rows from the end, then shorter names (the API has them whole). True when text was cut.
+pub(super) fn fit_detail(r: &mut BenchDetail) -> bool {
+    if json_len(r) <= FIT {
+        return false;
+    }
+    let description = short(&r.description, 200);
+    let mut cut = description != r.description;
+    r.description = description;
+    while json_len(r) > FIT && !r.leaderboard.is_empty() {
+        r.leaderboard.pop();
+    }
+    if json_len(r) > FIT {
+        cut = true;
+        r.name = short(&r.name, 200);
+        r.source_name = short(&r.source_name, 200);
+        r.classes.iter_mut().for_each(|c| *c = short(c, 24));
+    }
+    cut
 }
 
 /// One line of an entry's state: its progress, or its score.

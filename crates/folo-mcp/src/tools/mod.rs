@@ -329,7 +329,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "delete_benchmark",
-        description: "Deletes a benchmark and its entries.",
+        description: "Deletes a benchmark: its frozen images and its entries' results, for good.",
         mutating: true,
         input: terse_input::<BenchmarkIdArgs>,
         output: terse_output::<BenchDeleted>,
@@ -364,7 +364,8 @@ impl ToolDef {
     pub fn tool(&self) -> Tool {
         let annotations = ToolAnnotations::new()
             .read_only(!self.mutating)
-            .destructive(false)
+            // The one tool that removes files: a benchmark's frozen images and its entries' results.
+            .destructive(self.name == "delete_benchmark")
             .idempotent(!self.mutating || matches!(self.name, "stop_run" | "stop_bench_entry"))
             .open_world(false);
         Tool::new(self.name, self.description, (self.input)())

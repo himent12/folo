@@ -182,3 +182,83 @@ async fn the_mock_has_no_benchmarks() {
         assert_eq!(err(&s, tool, json!({})).await.body.code, "not_implemented", "{tool}");
     }
 }
+
+/// `get_benchmark` stays within the result limit whatever the names: 80 class names of 64 four-byte characters, a
+/// 4,000-character description, 50 entries with long names.
+#[test]
+fn a_benchmark_fits_the_result_limit() {
+    use super::results::{MAX_RESULT_BYTES, json_len};
+    let wide = |n: usize| "\u{1F600}".repeat(n);
+    let row = |i: usize, name: String| crate::types::BenchEntryRow {
+        id: format!("be_{i}"),
+        name,
+        kind: "model".into(),
+        status: folo_api::BenchEntryStatus::Done,
+        score: Some(50.0),
+        partial: false,
+        map50_95: Some(0.5),
+        ci95: Some([0.4, 0.6]),
+        stale: false,
+    };
+    let detail = |classes: Vec<String>, description: String, names: &dyn Fn(usize) -> String| {
+        crate::types::BenchDetail {
+            id: "bn_1".into(),
+            name: "b".into(),
+            description,
+            source: folo_api::BenchSource::Dataset { dataset_id: "ds_1".into(), split: None },
+            source_name: "d".into(),
+            classes,
+            images: 5000,
+            boxes: 1,
+            plan: vec![],
+            seed: 0,
+            fingerprint: "f".repeat(64),
+            active: false,
+            leaderboard: (0..50).map(|i| row(i, names(i))).collect(),
+        }
+    };
+    // A usual benchmark is left as it is.
+    let mut small = detail(vec!["cat".into(), "dog".into()], "a pond".into(), &|i| format!("model {i}"));
+    assert!(!super::bench::fit_detail(&mut small));
+    assert_eq!((small.leaderboard.len(), small.description.as_str()), (50, "a pond"));
+    // A long description goes before any row of the leaderboard.
+    let mut wordy = detail(vec!["cat".into()], wide(9000), &|i| format!("model {i}"));
+    assert!(json_len(&wordy) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_detail(&mut wordy));
+    assert_eq!((wordy.leaderboard.len(), wordy.description.chars().count()), (50, 201));
+    // A huge one also loses rows, then its class names are cut; every class stays.
+    let classes = (0..80).map(|i| format!("{i:02}{}", wide(62))).collect();
+    let mut big = detail(classes, wide(4000), &|_| wide(100));
+    assert!(json_len(&big) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_detail(&mut big));
+    assert!(json_len(&big) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&big));
+    assert_eq!(big.classes.len(), 80);
+    assert!(big.classes[7].starts_with("07"), "{}", big.classes[7]);
+}
+
+/// A server that accepts and never answers (the connection waits in the listener's backlog): the wait ends at its
+/// grace with the entry's hint, not after the HTTP client's 10-minute timeout, and leaves no request running.
+#[test]
+fn a_wait_ends_when_the_server_stops_answering() {
+    use std::time::Duration;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let http = HttpStore::new(&url, None).assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]);
+    let b = crate::bench::Benchmarks::Http(Arc::new(http));
+    let poll = Duration::from_millis(10);
+    let e = super::bench::wait_state(&b, "bn_1", "be_1", poll, Duration::ZERO, Duration::from_millis(50))
+        .unwrap_err();
+    assert_eq!(e.body.code, "server_unreachable", "{e:?}");
+    assert!(e.body.hint.as_deref().unwrap_or_default().contains("bench_entry"), "{e:?}");
+}
+
+/// `delete_benchmark` is the one tool that removes files, and the only one a client is told is destructive.
+#[test]
+fn only_delete_benchmark_is_destructive() {
+    let destructive: Vec<&str> = super::TOOLS
+        .iter()
+        .filter(|t| t.tool().annotations.is_some_and(|a| a.destructive_hint == Some(true)))
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(destructive, ["delete_benchmark"]);
+}
