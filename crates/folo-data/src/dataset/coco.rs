@@ -351,7 +351,7 @@ pub(crate) fn open_jsons(
         let list = by_split.entry(p.split).or_default();
         for im in p.images {
             let image = base.join(&p.files[im.row]);
-            deps.extend(image.parent().map(Path::to_path_buf));
+            deps.insert(crate::paths::parent_dir(&image).to_path_buf());
             list.push(Candidate {
                 image,
                 labels: LabelSource::Coco {
@@ -578,7 +578,11 @@ pub(crate) fn read_annotations(
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.
 fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
-    let json_dir = json.parent().unwrap_or(root).to_path_buf();
+    let json_dir = match json.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => root,
+    }
+    .to_path_buf();
     let stem = json.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let tag = stem.strip_prefix("instances_").unwrap_or(stem);
     let mut cands = vec![

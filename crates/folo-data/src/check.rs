@@ -240,12 +240,11 @@ fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
     type Folder = (PathBuf, BTreeSet<PathBuf>, bool, HashSet<String>);
     let mut pairs: BTreeMap<PathBuf, Folder> = BTreeMap::new();
     let mut real: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
-    // `.` first: a dataset named by a bare `data.yaml` has an empty root.
-    let Ok(root) = std::fs::canonicalize(Path::new(".").join(&scan.root)) else { return Vec::new() };
+    let Ok(root) = std::fs::canonicalize(&scan.root) else { return Vec::new() };
     let label_paths = yolo::LabelPaths::new(&scan.root);
     for image in scan.splits.values().flatten() {
         let label = label_paths.of(image);
-        let (Some(dir), Some(images)) = (label.parent(), image.parent()) else { continue };
+        let (dir, images) = (crate::paths::parent_dir(&label), crate::paths::parent_dir(image));
         let Some(key) = real
             .entry(dir.to_path_buf())
             .or_insert_with(|| std::fs::canonicalize(dir).ok().filter(|k| k.starts_with(&root)))

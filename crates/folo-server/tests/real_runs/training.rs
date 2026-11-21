@@ -502,3 +502,54 @@ fn with_metadata(bytes: &[u8], key: &str, value: Option<&str>) -> Vec<u8> {
     out.extend_from_slice(&bytes[8 + n..]);
     out
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn predict_maps_corrupt_and_missing_dataset_images() {
+    let t = TestDir::new("predict-dataset-errors");
+    let home = t.join("home");
+    let models_dir = home.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    let mut model = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(1),
+    )
+    .unwrap();
+    model.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    model.set_imgsz(64);
+    model.save(models_dir.join("tiny.folo")).unwrap();
+
+    let s = store(&home);
+    let app = app(&s);
+    let ds = dataset(&app, "pred-errs", 2).await;
+    let models: ModelList = ok(&app, get("/api/models")).await;
+    let model_id = models.models[0].id.clone();
+    let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images", ds.id))).await;
+    let ds_dir = Path::new(&ds.path);
+
+    // Corrupt image 0 on disk -> 422 image_decode_failed (not 500 internal).
+    std::fs::write(ds_dir.join(&page.images[0].file), b"not an image").unwrap();
+    err(
+        &app,
+        post_json(
+            "/api/predict",
+            json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": page.images[0].id }),
+        ),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "image_decode_failed",
+    )
+    .await;
+
+    // Delete image 1 on disk -> 404 image_not_found (not 404 path_not_found with a dataset-root hint).
+    std::fs::remove_file(ds_dir.join(&page.images[1].file)).unwrap();
+    let e = err(
+        &app,
+        post_json(
+            "/api/predict",
+            json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": page.images[1].id }),
+        ),
+        StatusCode::NOT_FOUND,
+        "image_not_found",
+    )
+    .await;
+    assert!(e.hint.as_deref().unwrap_or("").contains("reload"), "{e:?}");
+}

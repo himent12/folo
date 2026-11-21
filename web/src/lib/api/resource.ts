@@ -5,7 +5,8 @@
 // - its poll timer is shared with the pollers started in the same turn with the same period (one task per tick, and
 //   their identical reads one request), stops when the last one goes, and stops while the tab is hidden;
 // - an answer equal to the data shown keeps the data shown (`reuse`): an unchanged poll writes nothing, so nothing that
-//   reads `data` recomputes, and a changed list keeps its unchanged items (keyed rows stay as they are).
+//   reads `data` recomputes, and a changed list keeps its unchanged items (keyed rows stay as they are);
+// - with `startFrom`, its first fetch takes the answer of another Resource reading the same thing, a few ms apart.
 //
 // Reactive async data for components. Create inside a component's body: the fetcher re-runs whenever a reactive value
 // it reads synchronously changes (route params, filters) and when the API hub reconnects. A reconnect (`hub.epoch`: the
@@ -15,11 +16,40 @@
 
 import { effect, signal, untrack } from 'fw';
 import { hub } from './index';
-import { pollTogether, reuse, together } from './share';
+import { abortError, copy, pollTogether, reuse, together } from './share';
 
-export interface ResourceOptions {
+/** How old an answer a Resource may start from (`startFrom`): one poll of the list and the meters that use it. */
+export const START_FRESH = 2000;
+
+/** `read`, given up at once when `signal` aborts: what stays on `read` then holds neither the caller nor its data. */
+function untilAborted<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let slot: { ok: (v: T) => void; no: (e: unknown) => void } | null = {
+      ok: (v) => (signal.removeEventListener('abort', left), resolve(v)),
+      no: (e) => (signal.removeEventListener('abort', left), reject(e)),
+    };
+    const left = () => {
+      slot = null;
+      reject(abortError());
+    };
+    signal.addEventListener('abort', left, { once: true });
+    read.then(
+      (v) => slot?.ok(v),
+      (e) => slot?.no(e),
+    );
+  });
+}
+
+export interface ResourceOptions<T = unknown> {
   /** Refetch quietly every `poll` ms while mounted (keeps showing the previous data). */
   poll?: number;
+  /**
+   * A Resource that reads the same thing and may already have asked (the shell's run list, a page's system info). This
+   * one's first fetch, instead of a request of its own, takes that Resource's answer: the one it is loading, or one
+   * under START_FRESH old whose refreshes have not failed. Only a success is taken: when the read it waits on fails, it
+   * asks for itself and reports its own outcome, and with a `poll`, it stops waiting at its first tick.
+   */
+  startFrom?: () => Resource<T> | null | undefined;
 }
 
 export class Resource<T> {
@@ -78,12 +108,17 @@ export class Resource<T> {
   #seq = 0;
   /** The hub epoch of the last fetch (see above). */
   #epoch: number | null = null;
+  /** The read this Resource is loading its data with (none during a quiet refresh): what `startFrom` can wait on. */
+  #loadingRead: Promise<T> | null = null;
+  /** The fetch that is waiting on another Resource's read (`startFrom`), by its controller. */
+  #following: AbortController | null = null;
 
-  constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions = {}) {
+  constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions<T> = {}) {
     this.#fetcher = fetcher;
     effect(() => {
       if (hub.mode === 'connecting') return;
       const epoch = hub.epoch;
+      const first = this.#epoch === null;
       if (epoch !== this.#epoch) {
         this.#epoch = epoch;
         untrack(() => {
@@ -94,8 +129,19 @@ export class Resource<T> {
       }
       const ctrl = new AbortController();
       // Reactive reads inside the fetcher (before its first await) are tracked by this effect.
-      const promise = together(() => fetcher(ctrl.signal)).value;
-      untrack(() => void this.#settle(promise, ctrl, false));
+      const ask = () => together(() => fetcher(ctrl.signal)).value;
+      const from = first ? untrack(() => opts.startFrom?.()) : null;
+      const start = from ? untrack(() => from.#lend()) : null;
+      if (start && 'data' in start) {
+        untrack(() => {
+          this.data = copy(start.data);
+          this.updated = start.updated;
+          this.loading = false;
+        });
+      } else {
+        const promise = start ? this.#follow(start.read, ctrl, ask) : ask();
+        untrack(() => void this.#settle(promise, ctrl, false));
+      }
       return () => {
         // Invalidate whatever is in flight (including refreshes started since), so nothing lands after cleanup.
         this.#seq++;
@@ -107,7 +153,9 @@ export class Resource<T> {
       const every = opts.poll;
       effect(() =>
         pollTogether(every, () => {
-          if (hub.mode === 'connecting' || untrack(() => this.loading || this.refreshing)) return;
+          // A first fetch still waiting on another Resource's read stops waiting here: that read may be stalled.
+          const waiting = () => this.#following !== null && this.#following === this.#ctrl;
+          if (hub.mode === 'connecting' || untrack(() => (this.loading && !waiting()) || this.refreshing)) return;
           if (document.visibilityState === 'visible') void this.#poll();
         }),
       );
@@ -150,14 +198,39 @@ export class Resource<T> {
     this.data = v;
   }
 
+  /** What another Resource's first fetch can start from (`startFrom`), for the server in use; null when nothing. */
+  #lend(): { read: Promise<T> } | { data: T; updated: number } | null {
+    if (this.#epoch !== hub.epoch) return null;
+    if (this.#loadingRead) return { read: this.#loadingRead };
+    const data = this.#data.peek();
+    const updated = this.#updated.peek();
+    if (data === undefined || updated === null || this.#stale.peek() !== undefined) return null;
+    return Date.now() - updated < START_FRESH ? { data, updated } : null;
+  }
+
+  /** `read`'s answer, a copy of its own (no Resource sees another's edits); if it fails, this fetch asks for itself. */
+  async #follow(read: Promise<T>, ctrl: AbortController, ask: () => Promise<T>): Promise<T> {
+    this.#following = ctrl;
+    try {
+      return copy(await untilAborted(read, ctrl.signal));
+    } catch (e) {
+      if (ctrl.signal.aborted) throw e;
+    } finally {
+      if (this.#following === ctrl) this.#following = null;
+    }
+    return ask();
+  }
+
   async #settle(promise: Promise<T>, ctrl: AbortController, quiet: boolean, poll = false): Promise<void> {
     this.#ctrl?.abort();
     this.#ctrl = ctrl;
+    this.#loadingRead = null;
     const seq = ++this.#seq;
     if (quiet && (this.data !== undefined || (poll && this.error !== undefined))) this.refreshing = true;
     else {
       this.loading = true;
       this.error = undefined;
+      this.#loadingRead = promise;
     }
     try {
       const v = await promise;
@@ -172,6 +245,7 @@ export class Resource<T> {
       if (!quiet || this.data === undefined) this.error = e;
       else this.stale = e;
     } finally {
+      if (this.#loadingRead === promise) this.#loadingRead = null;
       if (seq === this.#seq) {
         this.loading = false;
         this.refreshing = false;

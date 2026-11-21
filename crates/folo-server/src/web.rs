@@ -1,10 +1,15 @@
 //! FOLO Studio compiled into the binary (the `embed-web` feature), served like `web/dist` on disk: an SPA fallback
 //! to `index.html`, long-lived caching for Vite's hashed `assets/`, `no-cache` plus an ETag for everything else.
+//!
+//! A folder (`--web-dir`) keeps a file for a year only under Vite's hashed name while its `index.html` is a Vite page
+//! ([`hashed_name`], [`dir_is_vite_build`]). A name merely shaped like a hash, in a folder whose page loads such a
+//! module, is trusted.
 
 use std::path::Path;
 
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use tokio::io::AsyncReadExt;
 
 /// One embedded file of the built web app.
 #[derive(Debug)]
@@ -81,6 +86,42 @@ pub(crate) fn content_type(path: &str) -> &'static str {
 pub(crate) fn cache_control(path: &str) -> &'static str {
     let map = path.get(path.len().saturating_sub(4)..).is_some_and(|e| e.eq_ignore_ascii_case(".map"));
     if path.starts_with("assets/") && !map { "public, max-age=31536000, immutable" } else { "no-cache" }
+}
+
+/// How much of a folder's `index.html` is read to tell a Vite page. Vite puts the entry module in `<head>`: in Studio's
+/// build its tag ends at byte 6,757, after the inline first-paint script, so this leaves about nine times that. A page
+/// whose tag ends later is not taken for a Vite page, so its files are only `no-cache`.
+pub const VITE_HEAD_BYTES: usize = 64 * 1024;
+
+/// Whether `path` (relative to the folder) is Vite's hashed form: `assets/<name>-<8 base64url characters>.<ext>`.
+pub(crate) fn hashed_name(path: &str) -> bool {
+    let Some(file) = path.strip_prefix("assets/") else { return false };
+    let Some((stem, ext)) = file.rsplit_once('.') else { return false };
+    if file.contains('/') || ext.is_empty() || !stem.is_ascii() || stem.len() < 10 {
+        return false;
+    }
+    let (name, hash) = stem.split_at(stem.len() - 8);
+    name.ends_with('-') && hash.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Whether `html` loads a module script with a hashed name, in a whole tag (one cut by the read's bound does not count).
+fn is_vite_page(html: &str) -> bool {
+    html.split("<script").skip(1).any(|rest| {
+        let Some((tag, _)) = rest.split_once('>') else { return false };
+        let src = tag.split_once(r#"src=""#).and_then(|(_, s)| s.split_once('"')).map(|(src, _)| src);
+        tag.contains(r#"type="module""#)
+            && src.is_some_and(|s| hashed_name(s.trim_start_matches("./").trim_start_matches('/')))
+    })
+}
+
+/// Whether the folder's current `index.html` is a Vite page, from its first [`VITE_HEAD_BYTES`] bytes.
+pub(crate) async fn dir_is_vite_build(dir: &Path) -> bool {
+    let Ok(file) = tokio::fs::File::open(dir.join("index.html")).await else { return false };
+    let mut head = Vec::new();
+    if file.take(VITE_HEAD_BYTES as u64).read_to_end(&mut head).await.is_err() {
+        return false;
+    }
+    is_vite_page(&String::from_utf8_lossy(&head))
 }
 
 /// Whether the request's `If-None-Match` matches `etag` (`None` without the header). It uses the weak comparison
@@ -226,6 +267,45 @@ mod tests {
         std::fs::write(dir.join(FOLO_WASM_FILES[1]), b"").unwrap();
         assert!(dir_has_folo_wasm(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vite_hashed_names() {
+        for p in ["assets/index-xjBsy1zZ.js", "assets/a-b-1a2b3c4d.css", "assets/app-Ab_c-123.woff2"] {
+            assert!(hashed_name(p), "{p}");
+        }
+        for p in [
+            "index.html",
+            "assets/app.js",
+            "assets/logo.svg",
+            "assets/app-1a2b3c4.js",
+            "assets/app1a2b3c4d.js",
+            "assets/x/app-1a2b3c4d.js",
+            "assets/app-1a2b3c4d",
+            "assets/app-1a2b3c4d.js.map",
+        ] {
+            assert!(!hashed_name(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_vite_page_loads_a_hashed_module() {
+        for page in [
+            r#"<script type="module" crossorigin src="/assets/app-1a2b3c4d.js"></script>"#,
+            r#"<script src="./assets/app-1a2b3c4d.js" type="module"></script>"#,
+        ] {
+            assert!(is_vite_page(page), "{page}");
+        }
+        for page in [
+            r#"<script src="/assets/app-1a2b3c4d.js"></script>"#,
+            r#"<script type="module" src="/assets/app.js"></script>"#,
+            r#"<script type="module">import "/assets/app-1a2b3c4d.js"</script>"#,
+            // Cut by the read's bound: inside the tag, and inside its `src`.
+            r#"<script type="module" src="/assets/app-1a2b3c4d.js""#,
+            r#"<script type="module" src="/assets/app-1a2b3c4d.js"#,
+        ] {
+            assert!(!is_vite_page(page), "{page}");
+        }
     }
 
     #[test]

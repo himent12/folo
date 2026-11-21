@@ -19,7 +19,7 @@ use crate::bench::Benches;
 use crate::cloud::{self};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
-use crate::index::{data_error, read_image_with, requested_path, write_atomic};
+use crate::index::{data_error, decode_image, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
 use crate::runs::run_model_id;
 use crate::store::{
@@ -419,7 +419,7 @@ impl Store for RealStore {
                 )
                 .hint("send a JPEG, PNG, BMP or WebP file")
             })?,
-            (_, Some(p)) => folo_data::read_image(p).map_err(|err| data_error(err, &p.to_string_lossy()))?,
+            (_, Some(p)) => decode_image(p)?,
             _ => unreachable!("dataset sources have a path"),
         };
         let decode_ms = t0.elapsed().as_secs_f64() * 1e3;

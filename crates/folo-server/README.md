@@ -75,6 +75,8 @@ A cloud run takes the same first two steps, then `Runs::create_cloud` registers 
   store simulates the cloud (`src/mock/cloud.rs`) and has no labeler and no benches (`501 not_implemented`).
 - **The web app**: outside `/api` the router serves `WebSource::Dir` (`folo serve --web-dir`, else `web/dist` when
   it has an `index.html`) or `WebSource::Embedded` (built with the `embed-web` feature, `src/web.rs` and `build.rs`).
+  A folder's file is kept for a year only under Vite's hashed name while the folder's `index.html` is a Vite page;
+  everything else is `no-cache` (docs/SERVER.md, *Router*).
 - **Errors**: handlers return `error::Error`, which answers with its status and the JSON envelope (`IntoResponse` in
   `src/error.rs`). The `Api*` extractors turn axum's rejections into the same envelope, `engine::engine_error` maps
   engine errors, and `routes/mod.rs` answers unknown paths with `route_not_found`. Every code is listed in

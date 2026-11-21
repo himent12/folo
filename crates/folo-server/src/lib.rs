@@ -335,15 +335,17 @@ async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Res
 /// - a `200` or `206` from `ServeDir` itself gets the path's policy when the path (its leading `/`s trimmed) is plain:
 ///   only ASCII letters, digits, `.`, `_`, `-` and `/`, no empty, `.` or `..` segment (so no trailing `/`, which
 ///   `ServeDir` answers with a folder's `index.html`), and no segment ending in `.`. Then the file served is the one
-///   the path names, also on a case-insensitive or Windows volume (no percent-encoding, `\`, `:` or `~` alias). Any
-///   other path's `200` or `206` is `no-cache`;
+///   the path names, also on a case-insensitive or Windows volume (no percent-encoding, `\`, `:` or `~` alias). The
+///   name must also be Vite's hashed form ([`web::hashed_name`]) and the folder's current `index.html` a Vite page
+///   ([`web::dir_is_vite_build`], read only for such a name whose file was found). Any other `200` or `206` is
+///   `no-cache`;
 /// - every other answer (a redirect to a folder's `/`, an error) is sent as `ServeDir` makes it, without
 ///   `Cache-Control`.
 ///
 /// `If-Modified-Since` is dropped: `ServeDir` compares dates only, so a date from another answer (the fallback's,
 /// cached under an asset's name before that asset existed; a newer `index.html` before a rollback) would get a `304`
 /// for a different file. Other conditions and ranges are answered as `ServeDir` does.
-async fn web_dir_cache(mut req: Request, next: Next) -> Response {
+async fn web_dir_cache(State(dir): State<Arc<PathBuf>>, mut req: Request, next: Next) -> Response {
     req.headers_mut().remove(header::IF_MODIFIED_SINCE);
     let path = req.uri().path().trim_start_matches('/').to_string();
     let plain = path.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
@@ -352,7 +354,8 @@ async fn web_dir_cache(mut req: Request, next: Next) -> Response {
     if matches!(res.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT)
         && !res.headers().contains_key(header::CACHE_CONTROL)
     {
-        let cache = if plain { web::cache_control(&path) } else { "no-cache" };
+        let keep = plain && web::hashed_name(&path) && web::dir_is_vite_build(&dir).await;
+        let cache = if keep { web::cache_control(&path) } else { "no-cache" };
         res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     }
     res
@@ -416,9 +419,8 @@ impl Server {
                 let shell = axum::routing::any_service(ServeFile::new(dir.join("index.html")))
                     .layer(axum::middleware::map_response(no_cache));
                 let spa = ServeDir::new(&dir).fallback(shell);
-                router.fallback_service(
-                    Router::new().fallback_service(spa).layer(axum::middleware::from_fn(web_dir_cache)),
-                )
+                let cached = axum::middleware::from_fn_with_state(Arc::new(dir.clone()), web_dir_cache);
+                router.fallback_service(Router::new().fallback_service(spa).layer(cached))
             }
             (_, Some(files)) => {
                 router.fallback(move |method: Method, uri: Uri, headers: HeaderMap| async move {

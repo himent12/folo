@@ -143,7 +143,8 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
   (images copied unchanged, stems made unique per split, COCO category ids 1-based).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
-  a `DataError::Format` whose message starts with `UNDETECTED`.
+  a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
+  as unfinished first, whatever it holds.
 
 ### Unfinished datasets
 Every writer (`synthetic::write_yolo`, `convert::convert`, the server's sample sets) starts with

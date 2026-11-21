@@ -20,9 +20,10 @@ use crate::util::fnv1a;
 /// Most classes a dataset may have.
 pub const MAX_CLASSES: usize = 4096;
 
-/// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: folo-data
-/// reads COCO splits, float category ids and crowd flags, and labels below a folder called `images`, differently.
-pub const INDEX_VERSION: u32 = 6;
+/// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
+/// split paths are unset. 7: folo-data reads COCO splits, float category ids and crowd flags, and labels below a
+/// folder called `images`, differently.
+pub const INDEX_VERSION: u32 = 7;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
@@ -711,6 +712,24 @@ pub fn read_image(path: &Path, thumb: Option<u32>, cache: Option<&Path>) -> Resu
     })
 }
 
+fn missing_image_error(path: &Path, e: std::io::Error) -> Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        Error::new(StatusCode::NOT_FOUND, "image_not_found", format!("{} no longer exists", path.display()))
+            .hint("the dataset changed on disk; reload the image list")
+    } else {
+        Error::internal(format!("reading {}: {e}", path.display()))
+    }
+}
+
+/// Reads and decodes a dataset image file on disk (`404 image_not_found` when the file disappeared since indexing,
+/// `422 image_decode_failed` when its bytes cannot be decoded).
+pub fn decode_image(path: &Path) -> Result<folo_data::Image> {
+    folo_data::read_image(path).map_err(|e| match e {
+        folo_data::DataError::Io { source, .. } => missing_image_error(path, source),
+        e => Error::new(StatusCode::UNPROCESSABLE_ENTITY, "image_decode_failed", e.to_string()),
+    })
+}
+
 /// [`read_image`] that hands a newly made thumbnail to `save(cache_file, bytes)` instead of writing it, so the
 /// caller can coordinate cache writes (e.g. with unregistering the dataset).
 pub fn read_image_with(
@@ -719,18 +738,7 @@ pub fn read_image_with(
     cache: Option<&Path>,
     save: impl FnOnce(&Path, &[u8]),
 ) -> Result<ImageData> {
-    let missing = |e: std::io::Error| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::new(
-                StatusCode::NOT_FOUND,
-                "image_not_found",
-                format!("{} no longer exists", path.display()),
-            )
-            .hint("the dataset changed on disk; reload the image list")
-        } else {
-            Error::internal(format!("reading {}: {e}", path.display()))
-        }
-    };
+    let missing = |e: std::io::Error| missing_image_error(path, e);
     folo_data::guard::check(path).map_err(missing)?;
     let Some(side) = thumb else {
         let bytes = std::fs::read(path).map_err(missing)?;
@@ -746,10 +754,7 @@ pub fn read_image_with(
     {
         return Ok(ImageData { content_type: "image/jpeg", bytes, immutable: false });
     }
-    let img = folo_data::read_image(path).map_err(|e| match e {
-        folo_data::DataError::Io { source, .. } => missing(source),
-        e => Error::new(StatusCode::UNPROCESSABLE_ENTITY, "image_decode_failed", e.to_string()),
-    })?;
+    let img = decode_image(path)?;
     let long = img.width.max(img.height);
     let img = if side < long {
         let scale = side as f64 / long as f64;

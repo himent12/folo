@@ -40,9 +40,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   `--token` no header is needed (the default: the server listens on loopback). docs/CLOUD.md, *Securing a server*.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
   builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
-  ETag. For files served from the embedded copy or from `--web-dir` (plain paths), Vite's content-hashed `assets/`
-  (except `.map` source maps) are `Cache-Control: public, max-age=31536000, immutable`; every other served file
-  and the SPA fallback are `no-cache`.
+  ETag. Vite's content-hashed `assets/` (except `.map` source maps) are `Cache-Control: public, max-age=31536000,
+  immutable`: all of them in the embedded copy, and from `--web-dir` a plain path with Vite's hashed name while the
+  folder's `index.html` is a Vite page. Every other served file and the SPA fallback are `no-cache`.
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.
@@ -1388,7 +1388,12 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
   (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
   `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
-  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so are two files whose paths
+  `..`, `:`, links, and special files are `422 invalid_upload` on the part that carries them; on Windows servers,
+  entries with characters Windows forbids (`< > " | ? *` or a byte below `0x20`), dot/space-only segments,
+  `NUL` (bare or with trailing dots/spaces), or parent directories ending in a space or more than one dot/space
+  are `422 invalid_upload` too (on Linux/macOS those names stay accepted, and names that unpack on Windows 11
+  such as `CON.png`, `NUL.png`, or an `aux/` folder stay accepted on Windows too). Also `422 invalid_upload` are
+  two files whose paths
   differ only by letter case or a trailing dot or space (`A.jpg` and `a.jpg`: one would overwrite the other on
   Windows; the message names both) and a stream that is not a tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).

@@ -333,6 +333,77 @@ fn labels_beside_listed_images_read_the_same_from_any_working_folder() {
     assert_eq!(json_lines(&stdout)[0]["stats"]["boxes"], 1, "as data.yaml from inside");
 }
 
+/// Naming a dataset by a bare file in the working directory (`data.yaml`, `instances_val.json`) or under a single
+/// `annotations/` folder (`annotations/instances_val.json`) still sets `root` to `.` and reports issue paths
+/// relative to it, rather than leaving `root` empty and emitting full absolute paths.
+#[test]
+fn bare_yaml_and_coco_paths_report_dot_root_and_relative_issue_files() {
+    let t = TestDir::new("cli-bare-root");
+    let yolo = t.join("yolo");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&yolo), "--images", "4", "--imgsz", "64", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(yolo.join("labels/train/000000.txt"), "99 0.5 0.5 0.2 0.2\n").unwrap();
+
+    let run = |dir: &Path, args: &[&str]| {
+        let out = folo_cmd().args(args).current_dir(dir).output().unwrap();
+        (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap())
+    };
+
+    let (code, stdout) = run(&yolo, &["dataset", "stats", "data.yaml", "--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(json_lines(&stdout)[0]["root"], ".");
+
+    let (code, stdout) = run(&yolo, &["dataset", "check", "data.yaml", "--json"]);
+    assert_eq!(code, 1, "{stdout}");
+    let r = &json_lines(&stdout)[0];
+    assert_eq!(r["root"], ".");
+    let overflow = r["issues"].as_array().unwrap().iter().find(|i| i["kind"] == "class_overflow").unwrap();
+    assert_eq!(overflow["file"], "labels/train/000000.txt");
+
+    // COCO under `annotations/instances_val.json` and bare `instances_val.json` in the working directory.
+    let coco = t.join("coco");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&yolo), s(&coco), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let val_img = std::fs::read_dir(coco.join("images/val")).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&val_img, b"not an image").unwrap();
+    let expected_val = format!("images/val/{}", val_img.file_name().unwrap().to_str().unwrap());
+
+    let (code, stdout) = run(&coco, &["dataset", "stats", "annotations/instances_val.json", "--json"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(json_lines(&stdout)[0]["root"], ".");
+
+    let (code, stdout) = run(&coco, &["dataset", "check", "annotations/instances_val.json", "--json"]);
+    assert_eq!(code, 1, "{stdout}");
+    let r = &json_lines(&stdout)[0];
+    assert_eq!(r["root"], ".");
+    let corrupt = r["issues"].as_array().unwrap().iter().find(|i| i["kind"] == "corrupt_image").unwrap();
+    assert_eq!(corrupt["file"], expected_val);
+
+    std::fs::copy(coco.join("annotations/instances_val.json"), coco.join("instances_val.json")).unwrap();
+    let (code, stdout) = run(&coco, &["dataset", "check", "instances_val.json", "--json"]);
+    assert_eq!(code, 1, "{stdout}");
+    let r = &json_lines(&stdout)[0];
+    assert_eq!(r["root"], ".");
+    let corrupt = r["issues"].as_array().unwrap().iter().find(|i| i["kind"] == "corrupt_image").unwrap();
+    assert_eq!(corrupt["file"], expected_val);
+}
+
+/// A `convert` stopped during image copying holds `.folo-unfinished` and `images/train/` with no `labels/`,
+/// `annotations/` or `data.yaml` yet: `stats` and `check` must report `dataset_unfinished`, not `unknown_format`.
+#[test]
+fn interrupted_convert_folder_reports_dataset_unfinished() {
+    let t = TestDir::new("cli-unfinished-convert");
+    let dir = t.join("partial");
+    std::fs::create_dir_all(dir.join("images/train")).unwrap();
+    std::fs::write(dir.join(folo_data::unfinished::MARKER), "").unwrap();
+    std::fs::write(dir.join("images/train/000000.png"), "half").unwrap();
+    for cmd in ["stats", "check"] {
+        let (code, stdout, _) = folo(&["dataset", cmd, s(&dir), "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("dataset_unfinished")), "{cmd}: {err}");
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));

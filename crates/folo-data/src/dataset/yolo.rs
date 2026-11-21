@@ -130,7 +130,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
             crate::paths::shown(yaml)
         )));
     }
-    let yaml_dir = yaml.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let yaml_dir = crate::paths::parent_dir(yaml).to_path_buf();
     let mut report = LoadReport::default();
     let mut deps = vec![yaml.to_path_buf()];
     let root = match v.get("path").and_then(scalar_string) {
@@ -169,6 +169,9 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
         };
         let mut images = Vec::new();
         for src in sources {
+            if src.is_empty() {
+                continue;
+            }
             match resolve(&root, &yaml_dir, &src) {
                 Some(p) => {
                     collect_images(&p, &root, &mut images, &mut report);
@@ -264,8 +267,8 @@ pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Re
     let labels = LabelPaths::new(&root);
     deps.extend(labels.mirror.clone());
     for image in splits.values().flatten() {
-        deps.extend(image.parent().map(Path::to_path_buf));
-        deps.extend(labels.of(image).parent().map(Path::to_path_buf));
+        deps.insert(crate::paths::parent_dir(image).to_path_buf());
+        deps.insert(crate::paths::parent_dir(&labels.of(image)).to_path_buf());
     }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
     for (split, images) in splits {
@@ -411,7 +414,7 @@ fn collect_images(src: &Path, root: &Path, out: &mut Vec<PathBuf>, report: &mut 
                 return;
             }
         };
-        let parent = src.parent().unwrap_or(Path::new("."));
+        let parent = crate::paths::parent_dir(src);
         for line in strip_bom(&text).lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let p = Path::new(line);
             let path = if p.is_absolute() {

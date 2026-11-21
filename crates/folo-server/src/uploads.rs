@@ -731,15 +731,25 @@ fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The relative path an entry unpacks to: its normal components (`.` skipped). An absolute path, `..`, a drive or
-/// a `:` (an NTFS stream) is `422 invalid_upload`.
+/// The relative path an entry unpacks to: its normal components (`.` skipped). An absolute path, `..`, a drive,
+/// or a `:` (an NTFS stream) is `422 invalid_upload` on every OS; on Windows, components that fail to unpack or
+/// lose data there (`< > " | ? *`, ASCII control bytes `< 0x20`, dot/space-only names, `NUL` with optional trailing
+/// dots/spaces, or a parent folder ending in a space or more than one dot/space) are `422 invalid_upload` too.
 fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
     let raw = entry.path().map_err(|e| invalid(format!("an entry's name is not a path: {e}")))?;
-    let mut rel = PathBuf::new();
+    let mut parts = Vec::new();
     for c in raw.components() {
         match c {
             Component::CurDir => {}
-            Component::Normal(n) if !n.to_string_lossy().contains(':') => rel.push(n),
+            Component::Normal(n) => {
+                if n.to_string_lossy().contains(':') {
+                    return Err(invalid(format!(
+                        "{}: only relative paths inside the dataset folder are accepted",
+                        raw.display()
+                    )));
+                }
+                parts.push(n.to_os_string());
+            }
             _ => {
                 return Err(invalid(format!(
                     "{}: only relative paths inside the dataset folder are accepted",
@@ -748,7 +758,41 @@ fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
             }
         }
     }
-    Ok(rel)
+    #[cfg(windows)]
+    for (i, n) in parts.iter().enumerate() {
+        let s = n.to_string_lossy();
+        let is_parent = i + 1 < parts.len();
+        if let Some(why) = windows_unsafe_component(&s, is_parent) {
+            return Err(invalid(format!("{}: {why}; rename it and pack again", raw.display())));
+        }
+    }
+    Ok(parts.into_iter().collect())
+}
+
+/// Why a path component fails to unpack or loses data on Windows (`os error 123`/`5`/`3` or writing to
+/// `\Device\Null`). Narrowed to what fails on Windows 11 with `std::fs`: forbidden characters (`< > " | ? *` and
+/// ASCII control bytes `< 0x20`), dot/space-only components (`...`, `   `), bare `NUL` (with optional trailing
+/// dots/spaces), and parent folders ending in a space or multiple dots/spaces (`foo /a.png`, `foo../a.png`).
+/// Names that unpack cleanly on Windows 11 (`CON.png`, `NUL.png`, `aux/`, bare `CON`/`AUX`/`PRN`/`COM*`/`LPT*`,
+/// and files with a trailing dot or space) stay accepted; collisions remain caught by [`folded`].
+#[cfg(windows)]
+fn windows_unsafe_component(name: &str, is_parent: bool) -> Option<&'static str> {
+    if name.bytes().any(|b| b < 0x20 || matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*')) {
+        return Some("contains characters Windows forbids in file names");
+    }
+    let trimmed = name.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return Some("is empty on Windows (only dots or spaces)");
+    }
+    if trimmed.eq_ignore_ascii_case("nul") {
+        return Some("uses the reserved Windows device name NUL");
+    }
+    if is_parent && trimmed != name && !name.strip_suffix('.').is_some_and(|s| s == trimmed) {
+        return Some(
+            "has a folder name ending in spaces or multiple dots that Windows cannot open files under",
+        );
+    }
+    None
 }
 
 /// The name of what an entry at `rel` (a folder when `dir`) collides with in `root`: an earlier file where it or one
