@@ -10,6 +10,8 @@ use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
+#[path = "engine/infer.rs"]
+mod infer;
 #[path = "engine/score.rs"]
 mod score;
 

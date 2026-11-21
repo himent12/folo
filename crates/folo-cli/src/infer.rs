@@ -290,13 +290,22 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
 /// Every image under `sources` (folders recursively, in name order), with its path relative to the folder it was
 /// found in (just the file name for a file source).
 fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(
+        dir: &Path,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        out: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
         let mut entries: Vec<PathBuf> =
             std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                walk(&p, out)?;
+                // Skip directories already visited (symlink/junction cycles or duplicate links inside the source),
+                // while still following non-cyclic links to external folders.
+                let Ok(canon) = std::fs::canonicalize(&p) else { continue };
+                if visited.insert(canon) {
+                    walk(&p, visited, out)?;
+                }
             } else if folo_data::is_image_path(&p) {
                 out.push(p);
             }
@@ -306,8 +315,12 @@ fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliErr
     let mut out = Vec::new();
     for s in sources {
         if s.is_dir() {
+            let mut visited = std::collections::HashSet::new();
+            if let Ok(canon) = std::fs::canonicalize(s) {
+                visited.insert(canon);
+            }
             let mut found = Vec::new();
-            walk(s, &mut found).map_err(|e| {
+            walk(s, &mut visited, &mut found).map_err(|e| {
                 CliError::new(
                     ExitCode::Runtime,
                     "io_error",
