@@ -619,7 +619,8 @@ async fn a_missing_path_leaves_no_empty_job() {
     store.shutdown();
 }
 
-/// Cursors near `u64::MAX` return an empty page with no `next_cursor` instead of overflowing `offset + 1`.
+/// Cursors near `u64::MAX` return an empty page with no `next_cursor` and a non-wrapping summary instead of
+/// overflowing `offset + 1`, while normal cursors keep reporting the 1-based offset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_label_images_handles_max_cursor_without_overflow() {
     let home = TestDir::new("mcp-label-cursor");
@@ -632,10 +633,21 @@ async fn list_label_images_handles_max_cursor_without_overflow() {
         .as_str()
         .unwrap()
         .to_string();
-    let page =
-        ok(&s, "list_label_images", json!({ "job_id": job, "cursor": format!("o{}", u64::MAX) })).await;
+
+    let (mid, mid_summary, _) =
+        call(&s, "list_label_images", json!({ "job_id": job, "cursor": "o2", "limit": 2 })).await.unwrap();
+    assert_eq!(mid["items"].as_array().unwrap().len(), 2);
+    assert_eq!(mid["total"], 5);
+    assert_eq!(mid["next_cursor"], "o4");
+    assert_eq!(mid_summary, "2 of 5 images (from 3)");
+
+    let (page, summary, _) =
+        call(&s, "list_label_images", json!({ "job_id": job, "cursor": format!("o{}", u64::MAX) }))
+            .await
+            .unwrap();
     assert_eq!(page["items"], json!([]));
     assert_eq!(page["total"], 5);
     assert!(page["next_cursor"].is_null(), "{page}");
+    assert_eq!(summary, "0 of 5 images");
     store.shutdown();
 }
