@@ -220,7 +220,11 @@ impl Inner {
         let (items, total) =
             self.labels(move |l| l.image_page(&id, status, reviewed, boxes, offset, limit)).await?;
         let page = fit_page(items, offset, limit, total);
-        let summary = format!("{} of {total} images (from {})", page.items.len(), offset + 1);
+        let summary = if page.items.is_empty() {
+            format!("0 of {total} images")
+        } else {
+            format!("{} of {total} images (from {})", page.items.len(), offset.saturating_add(1))
+        };
         out(&page, summary)
     }
 

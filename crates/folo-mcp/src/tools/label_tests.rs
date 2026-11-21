@@ -618,3 +618,24 @@ async fn a_missing_path_leaves_no_empty_job() {
     assert_eq!(code(&s, "create_label_job", no_classes).await, "invalid_arguments");
     store.shutdown();
 }
+
+/// Cursors near `u64::MAX` return an empty page with no `next_cursor` instead of overflowing `offset + 1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_label_images_handles_max_cursor_without_overflow() {
+    let home = TestDir::new("mcp-label-cursor");
+    images(&home.join("photos"));
+    let store = store(home.path());
+    let s = FoloMcp::new(store.clone(), None, options(home.path(), false));
+    let photos = folo_api::json::path(home.join("photos"));
+    let job = ok(&s, "create_label_job", json!({ "name": "x", "classes": ["car"], "paths": [photos] })).await
+        ["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let page =
+        ok(&s, "list_label_images", json!({ "job_id": job, "cursor": format!("o{}", u64::MAX) })).await;
+    assert_eq!(page["items"], json!([]));
+    assert_eq!(page["total"], 5);
+    assert!(page["next_cursor"].is_null(), "{page}");
+    store.shutdown();
+}

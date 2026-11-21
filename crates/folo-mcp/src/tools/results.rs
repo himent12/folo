@@ -105,7 +105,7 @@ pub(super) fn fit_page<T: Serialize>(
         bytes += n;
         page.push(item);
     }
-    let end = offset + page.len() as u64;
+    let end = offset.saturating_add(page.len() as u64);
     Page { next_cursor: (end < total).then(|| cursor_at(end)), total, items: page }
 }
 
@@ -117,5 +117,6 @@ pub(super) fn page_of<T: Serialize>(
 ) -> Result<Page<T>, Error> {
     let (offset, limit) = page_window(cursor, limit)?;
     let total = all.len() as u64;
-    Ok(fit_page(all.into_iter().skip(offset as usize), offset, limit, total))
+    let skip = usize::try_from(offset).unwrap_or(usize::MAX);
+    Ok(fit_page(all.into_iter().skip(skip), offset, limit, total))
 }
