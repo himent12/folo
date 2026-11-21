@@ -488,7 +488,8 @@ pub(crate) fn read_annotations(
         }
         let mut anns = Vec::with_capacity(sections.annotations.len());
         for a in sections.annotations {
-            if a.iscrowd.as_ref().and_then(Value::as_u64) == Some(1) {
+            // `1`, `1.0` (pandas) or `true`: pycocotools takes each as a crowd region.
+            if a.iscrowd.as_ref().is_some_and(|v| v.as_bool() == Some(true) || whole_number(v) == Some(1)) {
                 continue;
             }
             let Some(img) = a.image_id.as_ref().and_then(id_key) else {

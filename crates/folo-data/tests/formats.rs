@@ -322,6 +322,27 @@ fn coco_integral_float_category_ids_match_integer_ids() {
     assert!(broken.iter().all(|m| m.ends_with("category_id is missing or not a whole number")), "{broken:?}");
 }
 
+/// A crowd region is one however the file writes the flag: it never becomes a box to train on.
+#[test]
+fn coco_crowd_flag_in_every_spelling() {
+    let t = TempDir::new("coco-crowd");
+    let r = t.path();
+    write_png(&r.join("train/a.png"), 10, 10, [0; 3]);
+    let ann = |iscrowd: serde_json::Value, x: u32| serde_json::json!({"image_id": 1, "category_id": 1, "bbox": [x, 0, 1, 5], "iscrowd": iscrowd});
+    let j = serde_json::json!({
+        "images": [{"id": 1, "file_name": "a.png", "width": 10, "height": 10}],
+        "annotations": [
+            ann(1.into(), 0), ann(1.0.into(), 1), ann(true.into(), 2),
+            ann(0.into(), 3), ann(0.0.into(), 4), ann(false.into(), 5), ann(serde_json::Value::Null, 6)
+        ],
+        "categories": [{"id": 1, "name": "thing"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    let left: Vec<u32> = ds.train.boxes(0).iter().map(|b| (b.cx * 10.0 - 0.5).round() as u32).collect();
+    assert_eq!(left, [3, 4, 5, 6], "only the boxes that are not crowd regions stay");
+}
+
 /// Two `images` entries with one id: the first keeps its boxes, the second is reported (not silently made a
 /// background image) and left out.
 #[test]
