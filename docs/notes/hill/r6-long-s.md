@@ -1,11 +1,16 @@
 # Wave 6, lane long: `folo-s-coco` continued on full COCO (lab notebook)
 
-Lane `long` of wave 6 (2026-11-20/21). Goal: a better folo-s, FOLO's least trained published model (56 epochs from
+Lane `long` of wave 6 (2026-11-20/21). Goal: a better folo-s (the published `folo-s-coco` trained for 56 epochs from
 scratch, val2017 AP 0.416), and with it a better teacher for the next folo-n. **Result: val2017 AP 0.4224 against
 0.4162, +0.0062 (paired bootstrap 95% interval [+0.0034, +0.0090]), one training seed.** The fine-tuning guard passes
 its bar on `best.folo`, but it is mixed: BCCD is a little lower in all three seeds, and on brain-tumor the `last.folo`
 models are lower by 0.0146. **Nothing is published**; that decision is the owner's. Run data:
 `D:/folo-data/runs-wave6/long/`; scratch, scripts and evaluation files: `D:/folo-wave6/lanes/long/`.
+
+Terms: **AP** is COCO's mAP50-95 (AP_S, AP_M and AP_L are the same for small, medium and large objects); **AMP** is
+mixed-precision training (`--amp`: f16 activations, f32 master weights); **EMA** is the running average of the weights
+that FOLO validates and exports; **mosaic** is the four-image training augmentation, which a run turns off ("closes")
+for its last epochs.
 
 ## Result
 
@@ -20,8 +25,9 @@ binary, and its detections are byte-identical to hill 4's `dets-teacher.json`.
 | continued, fused f16 (`--half`) | 0.4225 | 0.5916 | 0.4571 | 0.2479 | 0.4669 | 0.5851 | 726,869 |
 
 Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1,000 resamples, seed 0, `logs/bootstrap.log`):
-**continued − published = +0.0062, 95% interval [+0.0034, +0.0090]**, P(diff ≤ 0) 0.000. Most of the gain is in small
-objects (AP_S +0.0189, AP_M +0.0076, AP_L +0.0005).
+**continued − published = +0.0062, 95% interval [+0.0034, +0.0090]**, P(diff ≤ 0) 0.000. By object size, from the
+unrounded scores: AP_S +0.0189, AP_M +0.0076, AP_L +0.0006. Each size is scored on its own, so these do not say how
+much each one contributed to the overall AP.
 
 | file | bytes | sha256 |
 |---|---:|---|
@@ -31,8 +37,9 @@ objects (AP_S +0.0189, AP_M +0.0076, AP_L +0.0005).
 **What the number does not show.**
 - One training seed: the interval covers the sampling of the evaluation images, not the training seed.
 - val2017 was not fully untouched. The early-failure rule read the trainer's val2017 mAP at epoch 6 and that reading
-  sent the lane from run 1 to run 2. The rule and its threshold were fixed before any run and the weights are the last
-  epoch's, never `best.folo`, so the selection is small, but it is not zero.
+  sent the lane from run 1 to run 2. The rule and its threshold were fixed before any run, and the exported weights
+  are epoch 48's, also fixed in advance, never `best.folo`. How much that one reading flatters the result is not
+  measured: the bootstrap covers neither it nor the training seed.
 - Run 1 was stopped at epoch 6, so "0.3x LR is better than the default LR for this continuation" is not measured.
 
 ## Recipe
@@ -42,16 +49,20 @@ objects (AP_S +0.0189, AP_M +0.0076, AP_L +0.0005).
 - **Binary:** `origin/main` 0e682e28 (#396, the faster loader), release, `bin/folo-long.exe`, sha256
   `4fb339b48c262f5ce405c3939a0834c252e577b56f40befbc713f2b4cde57728`. The same file for the runs, the evaluation and
   the guard.
-- **Run 2, the one that counts** (`s-cont-lr03`): `folo train --weights folo-s-coco --data D:/folo-data/coco --format
-  coco --epochs 48 --batch 32 --imgsz 640 --amp --cos-lr --seed 0 --device gpu:0 --workers 8 --optimizer musgd --lr0
-  0.003 --set val_batch=32`. Resolved: MuSGD, momentum 0.937, Muon / SGD 0.2 / 1.0, bias warm-up LR 0.1, batch 32 ×
+- **Run 2, the one that counts** (`s-cont-lr03`), its settings: `folo train --weights folo-s-coco --data
+  D:/folo-data/coco --format coco --epochs 48 --batch 32 --imgsz 640 --amp --cos-lr --seed 0 --device gpu:0 --workers 8
+  --optimizer musgd --lr0 0.003 --set val_batch=32`. The launcher (`bin/long.sh`) passes the weights as the local
+  copy `weights/folo-s-coco.folo` and adds `--project D:/folo-data/runs-wave6/long --name s-cont-lr03 --json-events
+  epoch`. Resolved: MuSGD, momentum 0.937, Muon / SGD 0.2 / 1.0, bias warm-up LR 0.1, batch 32 ×
   accumulate 2, 1,849 optimizer steps per epoch, 3 warm-up epochs, mosaic closed for the last 10. No teacher.
 
 ### Decisions and deviations from the brief
 
 1. **Length: 48 epochs, and the two timing measurements disagreed.** The first 10-minute smoke trained a whole epoch
    at 222.1 img/s (532.7 s, about 9.3 min with validation, which would have meant 64 epochs), then died of a GPU
-   out-of-memory at the epoch-end validation. It was not the final command, so I repeated it with the final command:
+   out-of-memory at the epoch-end validation. It did not have `val_batch=32`, so I repeated it with that setting
+   (`bin/smoke.sh`: the command as then planned, a 64-epoch schedule at the default peak LR; batch, image size, AMP,
+   seed and workers as in the final run):
    183.6 img/s, 10.74 min of training plus about 0.4 min of validation per epoch, over the 9.5-minute line, so **48**.
    The machine was busier during the second smoke. In hindsight 48 was conservative: run 2's epochs took a median
    of about 7.2 minutes, so 64 epochs would have taken about 7.7 h.
@@ -84,6 +95,7 @@ measured. Epochs 4–6 ran slower; CI's GPU tests were seen on the same card dur
 `s-cont-lr03`, the one allowed relaunch: `lr0` 0.003 (0.3 × the resolved 0.01), everything else as resolved in run 1
 (both `config.json` files compared). Epoch 6: 0.3935, gate passed. The trainer's mAP50-95 reads about 0.004 below
 pycocotools here (the published model: 0.4120 internal, 0.4162 pycocotools; the continued model: 0.4180 and 0.4224).
+`s` is the epoch's duration; `img/s` is the rate the trainer reported at the epoch's last training step.
 
 | epoch | mAP50-95 | mAP50 | train loss | s | img/s |
 |---:|---:|---:|---:|---:|---:|
@@ -136,13 +148,15 @@ pycocotools here (the published model: 0.4120 internal, 0.4162 pycocotools; the 
 | 47 | 0.4185 | 0.5848 | 2.9374 | 436 | 276.4 |
 | 48 | 0.4180 | 0.5847 | 2.9342 | 424 | 284.3 |
 
-**The last ten epochs lost ground on the trainer's own metric.** It peaked at 0.4215 (epochs 38, 40, 41) and fell to
-0.4180 at epoch 48, as mosaic closed and the learning rate annealed. The exported weights are epoch 48's as the brief
-fixed; `best.folo` would be chosen on the scored split and was not used or evaluated.
+**After epoch 40 the run lost ground on the trainer's own metric.** It peaked at epoch 40 (0.42154; epochs 38 and 41
+round to the same 0.4215) and fell to 0.41796 at epoch 48, a drop of 0.0036. Over the last ten epochs mosaic was off
+and the learning rate was annealing, so the curve does not say which of the two did it. The exported weights are
+epoch 48's as the brief fixed; `best.folo` (epoch 40) would be chosen on the scored split and was not used or
+evaluated.
 
 ## Wall-clock and throughput
 
-- **Run 2:** 20,854 s of training (5.79 h; 23:00:31Z to 04:48:08Z). Median epoch 283.0 img/s, range 190.5–290.0.
+- **Run 2:** 20,854 s of training (5.79 h; 23:00:31Z to 04:48:08Z). Median epoch 282.8 img/s, range 190.5–290.0.
 - **Run 1, stopped:** 21:52:37Z to 23:00:07Z (1 h 7.5 min). From the first launch to the end of run 2: 6 h 55.5 min.
 - **What else ran:** CI on the same PC (its GPU tests were seen on the card during run 1), other lanes' builds, and normal desktop
   use. No finetune2 run overlapped (its last log entry is at 21:17:41Z). This is not an unloaded cost.
@@ -150,19 +164,20 @@ fixed; `best.folo` would be chosen on the scored split and was not used or evalu
 ## Speed
 
 Same architecture, so no speed row should move, but the first alternated `folo val` timing (four rounds, always
-published then continued) read the continued weights at 2.2x the time. Two more alternated runs were also noisy:
-single runs took either about 10 s or 15–29 s. A last test with **fresh byte-identical copies of both files**, 24 runs
-in one order shuffled with seed 0 inside one GPU lock hold (`eval/ab-val4.txt`):
+published then continued) read the continued weights at 2.2x the time (medians about 9.7 s and 21.4 s). Two more
+trials, with the order reversed in blocks, were also noisy: most single runs took about 10 s or 15–29 s, and two took
+about 11.8 s. A last test with **fresh byte-identical copies of both files**, 24 runs in one order shuffled with
+seed 0 inside one GPU lock hold (`eval/ab-val4.txt`):
 
 | arm (12 runs: original + copy) | median s | min | max | runs over 15 s |
 |---|---:|---:|---:|---:|
-| published | 13.14 | 9.35 | 28.63 | 5 |
-| continued | 10.29 | 9.74 | 24.31 | 3 |
+| published | 13.1 | 9.35 | 28.63 | 5 |
+| continued | 10.3 | 9.74 | 24.31 | 3 |
 
-The slow mode hits both weights, and a copy of the published file was the slowest of the four arms (median 17.66 s).
-So nothing ties it to the new weights. **Its cause is not identified**, and these runs are not a precise speed
-measurement; they only show no slowdown from the weights. Timings: `eval/ab-val.txt`, `ab-val2.txt`, `ab-val3.txt`,
-`ab-val4.txt`.
+Both weights have slow runs, a copy of the published file was the slowest of the four arms (median 17.7 s), and the
+first trial's 2.2x did not come back in the shuffled trial. That is all these timings show: with 12 noisy runs per
+arm they neither establish nor rule out a speed difference between the weights. **The cause of the slow runs is not
+identified.** Timings: `eval/ab-val.txt`, `ab-val2.txt`, `ab-val3.txt`, `ab-val4.txt`.
 
 ## Fine-tuning guard
 
@@ -190,10 +205,11 @@ flatters a noisy curve, so the +0.0085 is weak evidence of a gain. The −0.0146
 and points the other way, on the set where a distilled folo-n was also a worse start. **The guard shows no clear
 fine-tuning gain and leaves a possible loss on brain-tumor open.**
 
-**The change: `--amp` on both arms.** folo-s in f32 at batch 16 reaches 15.7 GB within seconds and dies of a GPU
-out-of-memory on this 16 GB card, with nothing else on the GPU, at validation batch 32 and at 16 (`logs/guard-oom/`).
-The benchmark's folo-s rows ran on larger rented GPUs. With AMP a run peaks at 12.6 GB. So the two starts are compared
-fairly with each other, but these absolute numbers are not the f32 table's in docs/BENCHMARKS.md.
+**The change: both arms train with `--amp`** (every checkpoint is then scored in f32). folo-s trained in f32 at batch
+16 reaches 15.7 GB within seconds and dies of a GPU out-of-memory on this 16 GB card, with nothing else on the GPU, at
+validation batch 32 and at 16 (`logs/guard-oom/`). The benchmark's folo-s rows ran on larger rented GPUs. With AMP a
+run peaks at 12.6 GB. So the two starts are compared with each other under the same settings, but these absolute
+numbers are not the f32 table's in docs/BENCHMARKS.md.
 
 ## What went wrong
 
@@ -203,17 +219,18 @@ fairly with each other, but these absolute numbers are not the f32 table's in do
   exact cause is not established** (a tight fit, another GPU user at that moment, or both).
 - **Early-failure relaunch:** 1 h 7.5 min of GPU spent on run 1.
 - **My own slip in the guard queue:** after stopping a failed runner I removed the wrong queue line. I caught it at
-  once, restored the two missing runs and checked that each of the 12 ran exactly once. No number is affected.
+  once and restored the two missing runs. Each of the 12 configurations completed once (`logs/runner.out` has 12
+  rows with exit 0; the failed f32 attempt of the published BCCD seed 0 is in `logs/guard-oom/`).
 
 ## What I would do next
 
-1. **Decide on publication with the guard in view.** The COCO gain is real but small, and the fine-tuning evidence is
-   mixed. As a *teacher* for the next folo-n these weights need no fine-tuning guard; as the recommended fine-tuning
+1. **Decide on publication with the guard in view.** The measured val2017 gain is +0.0062 on one training seed, and
+   the fine-tuning evidence is mixed. As a *teacher* for the next folo-n these weights need no fine-tuning guard; as the recommended fine-tuning
    start, the brain-tumor `last.folo` result argues for keeping `folo-s-coco` until it is understood.
 2. **Fix the out-of-memory path.** A default `folo train` of folo-s at batch 32 can lose a whole epoch at its first
    validation on a 16 GB card. Options: validate at the training batch when memory is tight, or free the training
    buffers first. The same note belongs in `bench/finetune/README.md` for folo-s in f32.
 3. **A longer continuation at the lower LR.** Epochs ran at about 7.2 minutes, so 64 would fit overnight, but the
    mAP curve had flattened by epoch 38, so expect little from length alone.
-4. **Look at the last ten epochs.** The trainer's mAP fell 0.0035 after mosaic closed. Test shorter or later closing on
-   a split carved from train2017, not on val2017.
+4. **Look at the last ten epochs.** The trainer's mAP fell 0.0036 from epoch 40 to 48, with mosaic off and the
+   learning rate annealing. Test shorter or later closing on a split carved from train2017, not on val2017.
