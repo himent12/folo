@@ -543,3 +543,43 @@ async fn the_mock_has_no_uploads() {
     assert!(sys.features.iter().any(|f| f == FEATURE_RUN_CURSORS));
     assert!(!sys.features.iter().any(|f| f == FEATURE_UPLOADS || f == FEATURE_RUN_CHECKPOINT));
 }
+
+/// Entries with characters Windows forbids (`< > " | ? *` or control characters), reserved Windows device names
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, bare or with an extension), or components made only of
+/// dots/spaces are refused with `422 invalid_upload` instead of failing with `500 io_error` or writing to a device.
+#[tokio::test(flavor = "multi_thread")]
+async fn entries_with_windows_unsafe_names_are_refused() {
+    let t = TestDir::new("uploads-windows-unsafe");
+    let home = t.join("home");
+    let app = app(open(&home));
+    let cases = [
+        "images/train/a?b.png",
+        "images/train/a*b.png",
+        "images/train/a<b.png",
+        "images/train/a>b.png",
+        "images/train/a\"b.png",
+        "images/train/a|b.png",
+        "images/train/NUL",
+        "images/train/CON.png",
+        "images/train/aux .txt",
+        "NUL/a.png",
+        "com1/a.png",
+        "images/train/...",
+        "images/train/   ",
+    ];
+    for name in cases {
+        let mut b = tar::Builder::new(Vec::new());
+        for (entry, data) in [("data.yaml", &b"names: [x]\n"[..]), (name, b"one")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, entry, data).unwrap();
+        }
+        let u = start(&app, json!({ "kind": "dataset", "name": "unsafe" })).await;
+        let req = put(&format!("/api/uploads/{}/parts/0", u.id), b.into_inner().unwrap());
+        err(&app, req, StatusCode::UNPROCESSABLE_ENTITY, "invalid_upload").await;
+        err(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::NOT_FOUND, "upload_not_found")
+            .await;
+        assert!(staging(&home).is_empty(), "{name}: {:?}", staging(&home));
+    }
+}

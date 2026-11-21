@@ -1388,7 +1388,9 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
   (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
   `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
-  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so are two files whose paths
+  `..`, links, devices, and names Windows cannot hold (`< > : " | ? *`, control characters, dot/space-only
+  segments, or reserved device names such as `CON` / `NUL`) are `422 invalid_upload` on the part that carries them,
+  and so are two files whose paths
   differ only by letter case or a trailing dot or space (`A.jpg` and `a.jpg`: one would overwrite the other on
   Windows; the message names both) and a stream that is not a tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).

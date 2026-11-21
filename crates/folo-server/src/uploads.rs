@@ -731,15 +731,28 @@ fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The relative path an entry unpacks to: its normal components (`.` skipped). An absolute path, `..`, a drive or
-/// a `:` (an NTFS stream) is `422 invalid_upload`.
+/// The relative path an entry unpacks to: its normal components (`.` skipped). An absolute path, `..`, a drive,
+/// a `:` (an NTFS stream), characters Windows forbids (`< > " | ? *` or ASCII control characters), a dot/space-only
+/// component, or a Windows reserved device name (`CON`, `NUL`, ...) is `422 invalid_upload`.
 fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
     let raw = entry.path().map_err(|e| invalid(format!("an entry's name is not a path: {e}")))?;
     let mut rel = PathBuf::new();
     for c in raw.components() {
         match c {
             Component::CurDir => {}
-            Component::Normal(n) if !n.to_string_lossy().contains(':') => rel.push(n),
+            Component::Normal(n) => {
+                let s = n.to_string_lossy();
+                if s.contains(':') {
+                    return Err(invalid(format!(
+                        "{}: only relative paths inside the dataset folder are accepted",
+                        raw.display()
+                    )));
+                }
+                if let Some(why) = unsafe_component(&s) {
+                    return Err(invalid(format!("{}: {why}; rename it and pack again", raw.display())));
+                }
+                rel.push(n);
+            }
             _ => {
                 return Err(invalid(format!(
                     "{}: only relative paths inside the dataset folder are accepted",
@@ -749,6 +762,24 @@ fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
         }
     }
     Ok(rel)
+}
+
+/// Why a path component cannot be unpacked cleanly on Windows (and so is refused on every OS, as case collisions
+/// are): forbidden characters (`< > " | ? *` or ASCII control characters), a name made only of dots or spaces, or
+/// a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, bare or with an extension).
+fn unsafe_component(name: &str) -> Option<&'static str> {
+    if name.bytes().any(|b| b < 0x20 || matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*')) {
+        return Some("contains characters Windows forbids in file names");
+    }
+    let trimmed = name.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return Some("is empty on Windows (only dots or spaces)");
+    }
+    let base = trimmed.split('.').next().unwrap_or("").trim_end_matches(' ');
+    if crate::util::is_device_name(&base.to_ascii_lowercase()) {
+        return Some("uses a device name reserved on Windows");
+    }
+    None
 }
 
 /// The name of what an entry at `rel` (a folder when `dir`) collides with in `root`: an earlier file where it or one
