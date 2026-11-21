@@ -80,16 +80,14 @@ impl PathPolicy {
             pattern.to_string()
         } else {
             let raw = self.data_dir.to_string_lossy();
-            let base = if cfg!(windows) {
-                if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
-                    std::borrow::Cow::Owned(format!(r"\\{unc}"))
-                } else {
-                    std::borrow::Cow::Borrowed(raw.strip_prefix(r"\\?\").unwrap_or(&raw))
-                }
+            let escaped = if cfg!(windows)
+                && let Some(rest) = raw.strip_prefix(r"\\?\")
+            {
+                format!(r"\\?\{}", glob::Pattern::escape(rest))
             } else {
-                raw
+                glob::Pattern::escape(&raw)
             };
-            PathBuf::from(glob::Pattern::escape(&base)).join(pattern).to_string_lossy().into_owned()
+            PathBuf::from(escaped).join(pattern).to_string_lossy().into_owned()
         };
         let entries =
             glob::glob(&full).map_err(|e| invalid_arguments(format!("glob `{pattern}` is invalid: {e}")))?;
@@ -226,9 +224,29 @@ mod tests {
         std::fs::create_dir_all(plain.join("sub")).unwrap();
         let target = plain.join("sub").join("a.png");
         std::fs::write(&target, b"x").unwrap();
-        let p = PathPolicy { data_dir: plain, confine: false };
+        let p = PathPolicy { data_dir: plain.clone(), confine: false };
         let matched = p.expand_glob("sub/*.png").unwrap();
         assert_eq!(matched, vec![target.clone()]);
         assert_eq!(matched[0].to_string_lossy(), target.to_string_lossy());
+
+        // On Windows, a verbatim `\\?\` data dir keeps its prefix verbatim while still escaping metacharacters after it.
+        #[cfg(windows)]
+        {
+            let canon_plain = std::fs::canonicalize(&plain).unwrap();
+            assert!(canon_plain.to_string_lossy().starts_with(r"\\?\"), "{canon_plain:?}");
+            let want_plain = canon_plain.join("sub").join("a.png");
+            let p = PathPolicy { data_dir: canon_plain, confine: false };
+            let matched = p.expand_glob("sub/*.png").unwrap();
+            assert_eq!(matched, vec![want_plain.clone()]);
+            assert_eq!(matched[0].to_string_lossy(), want_plain.to_string_lossy());
+
+            let canon_meta = std::fs::canonicalize(root.join("data [v2]")).unwrap();
+            assert!(canon_meta.to_string_lossy().starts_with(r"\\?\"), "{canon_meta:?}");
+            let want_meta = canon_meta.join("a.png");
+            let p = PathPolicy { data_dir: canon_meta, confine: false };
+            let matched = p.expand_glob("*.png").unwrap();
+            assert_eq!(matched, vec![want_meta.clone()]);
+            assert_eq!(matched[0].to_string_lossy(), want_meta.to_string_lossy());
+        }
     }
 }
