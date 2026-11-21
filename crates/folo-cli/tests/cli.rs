@@ -411,6 +411,7 @@ fn mcp_auto_proxies_through_a_wildcard_serve_json_record() {
     let mut server: ChildGuard = folo_cmd()
         .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
         .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -439,14 +440,26 @@ fn mcp_auto_proxies_through_a_wildcard_serve_json_record() {
     )
     .unwrap();
 
-    let second = folo_cmd()
+    let mut second: ChildGuard = folo_cmd()
         .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
         .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
         .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(second.status.code(), Some(1));
-    let first_line = String::from_utf8_lossy(&second.stdout).lines().next().unwrap_or_default().to_string();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let first_line = read_line_within(second.stdout.take().unwrap(), Duration::from_secs(30));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match second.try_wait().unwrap() {
+            Some(s) => break Some(s),
+            None if std::time::Instant::now() > deadline => break None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "second serve did not exit 1: {first_line:?}");
     let in_use: Value = serde_json::from_str(&first_line).unwrap_or_else(|e| panic!("{e}: {first_line:?}"));
     assert_eq!(in_use["event"], "data_dir_in_use", "{in_use}");
     assert_eq!(in_use["url"], format!("http://127.0.0.1:{port}"), "{in_use}");
@@ -454,6 +467,7 @@ fn mcp_auto_proxies_through_a_wildcard_serve_json_record() {
     let mut mcp: ChildGuard = folo_cmd()
         .args(["mcp", "--data-dir", dir.to_str().unwrap()])
         .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
