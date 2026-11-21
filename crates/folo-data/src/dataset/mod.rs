@@ -379,19 +379,32 @@ pub(crate) enum Source {
 }
 
 /// Finds the dataset at `path` (rules of [`open_with`]) without reading any labels or images. A folder a writer has
-/// not finished ([`crate::unfinished`]) is refused once found: the YAML's folder (and the root its `path:` gives,
-/// `yolo::scan_yaml`), the folder images resolve against, or a COCO JSON's own folder or the one above it.
+/// not finished ([`crate::unfinished`]) is refused: `path` itself when it is a directory (before format detection),
+/// then the YAML's folder (and the root its `path:` gives, `yolo::scan_yaml`), the folder images resolve against, or
+/// a COCO JSON's own folder or the one above it.
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
+    if !path.exists() {
+        return Err(DataError::io(
+            path,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "dataset path not found"),
+        ));
+    }
+    // A folder a writer claimed (`convert`, `synth`) holds the marker before any `data.yaml`, `labels/` or
+    // `annotations/` exists; check it before format detection so an early stop is not reported as unknown format.
+    if path.is_dir() {
+        crate::unfinished::check(path)?;
+    }
     let source = locate(path, format)?;
     match &source {
-        Source::Yaml(yaml) => crate::unfinished::check(yaml.parent().unwrap_or(Path::new(".")))?,
+        Source::Yaml(yaml) => crate::unfinished::check(crate::paths::parent_dir(yaml))?,
         Source::YoloDir(root) => crate::unfinished::check(root)?,
         Source::Coco { root, jsons } => {
             crate::unfinished::check(root)?;
             // By plain path, names not resolved: a writer starts in an empty folder, so all below a marked folder is
             // its unfinished output (`annotations/x.json` and `ANNOTATIONS/x.json` alike). The folder above is
             // `dir/..`, which the file system resolves (`partial/../x.json` is beside `partial`, not in it).
-            for dir in jsons.iter().filter_map(|(_, json)| json.parent()) {
+            for (_, json) in jsons {
+                let dir = crate::paths::parent_dir(json);
                 crate::unfinished::check(dir)?;
                 crate::unfinished::check(&dir.join(".."))?;
             }
@@ -401,20 +414,14 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
 }
 
 fn locate(path: &Path, format: Format) -> Result<Source> {
-    if !path.exists() {
-        return Err(DataError::io(
-            path,
-            std::io::Error::new(std::io::ErrorKind::NotFound, "dataset path not found"),
-        ));
-    }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if path.is_file() {
         return match (format, ext.as_deref()) {
             (Format::Auto | Format::Yolo, Some("yaml" | "yml")) => Ok(Source::Yaml(path.to_path_buf())),
             (Format::Auto | Format::Coco, Some("json")) => {
-                let parent = path.parent().unwrap_or(Path::new("."));
+                let parent = crate::paths::parent_dir(path);
                 let root =
-                    if parent.ends_with("annotations") { parent.parent().unwrap_or(parent) } else { parent };
+                    if parent.ends_with("annotations") { crate::paths::parent_dir(parent) } else { parent };
                 Ok(Source::Coco {
                     root: root.to_path_buf(),
                     jsons: vec![(coco::guess_split(path), path.to_path_buf())],
@@ -459,8 +466,9 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
 pub const UNDETECTED: &str = "could not detect a dataset";
 
 /// The format of the dataset at `path` without reading it (`format` restricts the search; `Auto` tries both).
-/// Fails with [`DataError::Io`] when `path` does not exist and with [`DataError::Format`] (message starting with
-/// [`UNDETECTED`]) when nothing there looks like a dataset.
+/// Fails with [`DataError::Io`] when `path` does not exist, with [`DataError::Unfinished`] when `path` is a folder a
+/// writer has not finished (checked first, whatever the folder holds), and with [`DataError::Format`] (message
+/// starting with [`UNDETECTED`]) when nothing there looks like a dataset.
 pub fn detect_format(path: impl AsRef<Path>, format: Format) -> Result<Format> {
     Ok(match detect(path.as_ref(), format)? {
         Source::Yaml(_) | Source::YoloDir(_) => Format::Yolo,

@@ -21,7 +21,17 @@ pub fn lexical(p: &Path) -> PathBuf {
 
 /// `p` made absolute against the working directory and [`lexical`]ly normalised.
 pub fn normalize(p: &Path) -> PathBuf {
+    let p = if p.as_os_str().is_empty() { Path::new(".") } else { p };
     lexical(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// The folder holding `p`: [`Path::parent`], turning `None` and an empty `""` (the parent of a bare file name
+/// such as `data.yaml`) into `.`.
+pub(crate) fn parent_dir(p: &Path) -> &Path {
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    }
 }
 
 /// A path as FOLO shows it to people and agents (messages, hints, logs): `/` separators on Windows (which accepts
@@ -63,5 +73,11 @@ mod tests {
         assert_eq!(relative_to(Path::new("d/images/../images/a.jpg"), Path::new("./d")), "images/a.jpg");
         let outside = relative_to(Path::new("elsewhere/a.jpg"), Path::new("d"));
         assert!(Path::new(&outside).is_absolute(), "{outside}");
+        assert_eq!(normalize(Path::new("")), normalize(Path::new(".")));
+        assert_eq!(relative_to(Path::new("labels/train/a.txt"), Path::new("")), "labels/train/a.txt");
+        assert_eq!(parent_dir(Path::new("data.yaml")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("annotations/instances_val.json")), Path::new("annotations"));
+        assert_eq!(parent_dir(Path::new("annotations")), Path::new("."));
     }
 }

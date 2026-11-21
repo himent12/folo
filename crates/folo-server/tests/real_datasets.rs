@@ -194,6 +194,17 @@ async fn registry_and_index_cache_survive_restarts_and_track_changes() {
     assert_eq!(std::fs::metadata(&cache).unwrap().modified().unwrap(), stamp, "cache reused");
     drop(app2);
 
+    // A saved index from an older schema version (e.g. v5 before the reader fixes) is rebuilt on restart even
+    // while the dataset files on disk are unchanged.
+    let mut stale: Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    stale["version"] = json!(5);
+    stale["splits"]["test"] = json!(99);
+    std::fs::write(&cache, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let app_upgrade = app(&home);
+    let got: Dataset = ok(&app_upgrade, get(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(got.splits, Splits { train: 8, val: 2, test: 0 }, "stale v5 index must be rebuilt");
+    drop(app_upgrade);
+
     // A label edited while the server was down: the restart re-indexes.
     let label = data.join("labels/train/000000.txt");
     let mut text = std::fs::read_to_string(&label).unwrap();
