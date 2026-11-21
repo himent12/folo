@@ -14,10 +14,17 @@ dedicated subagent with a clear boundary of responsibility:
 | **Main orchestrator** | Claude Opus 5.5 or Claude Fable 5.2 (`effort: high`) | `{ providerInstanceId: "claudeAgent", model: "claude-opus-5-5", options: { effort: "high" } }` or `{ providerInstanceId: "claudeAgent", model: "claude-fable-5-2", options: { effort: "high" } }` |
 | **Main code implementer & doer** | Claude Opus 5.5 (`effort: high`) | `{ providerInstanceId: "claudeAgent", model: "claude-opus-5-5", options: { effort: "high" } }` |
 | **App play-tester & PR reviewer** | GPT-6.2 Sol (`high`, **fast**) or GPT-6.2 Astra (`high`, **standard — not fast**) | Fast: `{ providerInstanceId: "codex", model: "gpt-6.2-sol", options: { reasoningEffort: "high", serviceTier: "priority" } }` <br> Standard (not fast): `{ providerInstanceId: "codex", model: "gpt-6.2-astra", options: { reasoningEffort: "high", serviceTier: "default" } }` |
-| **Writer & creative writer** | Gemini 4 Neon (`thought_level: high`) via Devin CLI in T3 Code | `{ providerInstanceId: "acpRegistry_devin", model: "gemini-4-neon-high", options: { thought_level: "high" } }` |
+| **Writer & creative writer** | Gemini 4 Neon (`thought_level: high`) via the Antigravity CLI in T3 Code | `{ providerInstanceId: "antigravity", model: "gemini-4-neon", options: { thought_level: "high" } }` |
 
 Keep `serviceTier: "default"` (standard, never `"priority"` / fast) when running **GPT-6.2 Astra**; use
 `serviceTier: "priority"` (fast) only for **GPT-6.2 Sol**.
+
+**Gemini 4 Neon in place of Opus 5.5.** When the owner asks for it (for one task, a lane or a whole wave), Gemini 4
+Neon takes any role Claude Opus 5.5 has here: implementer and fixer, researcher, the orchestrator of a lane. Use the
+writer's `target` above for it. Opus 5.5 stays the default when nothing is said. A Neon agent splits its own work
+with Antigravity's agent spawning (its sub-agents, not T3 Code's `delegate_task`), repeats the rules it was given to
+each sub-agent, and checks what they return before it reports. Everything else is unchanged: every change is a pull
+request, a fresh reviewer (GPT-6.2 Sol or Astra) reviews it, worktrees stay disjoint.
 
 ## 1. Main orchestrator (Claude Opus 5.5 or Claude Fable 5.2)
 
@@ -26,8 +33,8 @@ Keep `serviceTier: "default"` (standard, never `"priority"` / fast) when running
 - Dispatches **Claude Opus 5.5** as the main implementer/doer for code changes, bug fixes, and refactors.
 - Dispatches **GPT-6.2 Sol (high, fast)** or **GPT-6.2 Astra (high, standard — not fast)** to play-test the real app
   (Studio, Desktop, CLI, MCP) and to review PRs.
-- Dispatches **Gemini 4 Neon** (via Devin CLI in T3 Code) for documentation rewrites, README storytelling, release
-  notes, guides, and creative/UX writing.
+- Dispatches **Gemini 4 Neon** (via the Antigravity CLI in T3 Code) for documentation rewrites, README storytelling,
+  release notes, guides, and creative/UX writing, and in place of Opus 5.5 when the owner asks for that.
 - Watches each delivered PR, merges with `gh pr merge --squash --delete-branch` once CI is green and review/play-test
   sign-off is clean, updates `docs/ROADMAP.md`, and starts the next wave. On a merge conflict, asks the implementer
   (or a fresh Opus 5.5 subagent) to rebase.
@@ -85,9 +92,9 @@ Used in two complementary ways, always as an independent subagent that does not 
 - **PR code review:** Inspect diffs against `origin/main` read-only and report blocking, should-fix, and nit findings
   with exact `file:line` references and concrete failure scenarios.
 
-## 4. Writer & creative writer (Gemini 4 Neon via Devin CLI in T3 Code)
+## 4. Writer & creative writer (Gemini 4 Neon via the Antigravity CLI in T3 Code)
 
-Delegated via `target = { providerInstanceId: "acpRegistry_devin", model: "gemini-4-neon-high", options: { thought_level: "high" } }`:
+Delegated via `target = { providerInstanceId: "antigravity", model: "gemini-4-neon", options: { thought_level: "high" } }`:
 
 - Owns high-craft writing and creative writing across the repository: `README.md`, user guides (`docs/QUICKSTART.md`,
   `docs/AGENT_COOKBOOK.md`, etc.), `CONTRIBUTING.md`, `CHANGELOG.md`, release announcements, UI/empty-state microcopy,
