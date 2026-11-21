@@ -39,8 +39,10 @@ pub fn label_path_for(image: &Path) -> PathBuf {
 pub(crate) struct LabelPaths {
     /// The dataset root, absolute and normalised.
     root: PathBuf,
-    /// The root's mirror when it has one and it does not exist: creating it changes the dataset.
-    absent: Option<PathBuf>,
+    /// The root's mirror, when it has one: creating or removing it changes the dataset.
+    mirror: Option<PathBuf>,
+    /// The root has a mirror and it does not exist.
+    beside: bool,
 }
 
 impl LabelPaths {
@@ -50,22 +52,19 @@ impl LabelPaths {
         let full = std::path::absolute(&spelled).unwrap_or_else(|_| spelled.clone());
         let root = crate::paths::normalize(&spelled);
         let comps: Vec<Component> = full.components().collect();
-        let absent = comps
-            .iter()
-            .rposition(|c| c.as_os_str() == OsStr::new("images"))
-            .map(|i| {
-                let mut mirror: PathBuf = comps[..i].iter().collect();
-                mirror.push("labels");
-                mirror.extend(&comps[i + 1..]);
-                mirror
-            })
-            .filter(|mirror| !mirror.is_dir());
-        LabelPaths { root, absent }
+        let mirror = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images")).map(|i| {
+            let mut mirror: PathBuf = comps[..i].iter().collect();
+            mirror.push("labels");
+            mirror.extend(&comps[i + 1..]);
+            mirror
+        });
+        let beside = mirror.as_ref().is_some_and(|m| !m.is_dir());
+        LabelPaths { root, mirror, beside }
     }
 
     /// The label file of `image`. An image outside the root follows [`label_path_for`].
     pub(crate) fn of(&self, image: &Path) -> PathBuf {
-        let beside = self.absent.is_some()
+        let beside = self.beside
             && crate::paths::normalize(&Path::new(".").join(image))
                 .strip_prefix(&self.root)
                 .is_ok_and(|below| !below.components().any(|c| c.as_os_str() == OsStr::new("images")));
@@ -263,7 +262,7 @@ pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Re
     let nc = names.as_ref().map(Vec::len);
     let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
     let labels = LabelPaths::new(&root);
-    deps.extend(labels.absent.clone());
+    deps.extend(labels.mirror.clone());
     for image in splits.values().flatten() {
         deps.extend(image.parent().map(Path::to_path_buf));
         deps.extend(labels.of(image).parent().map(Path::to_path_buf));
