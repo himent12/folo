@@ -177,8 +177,8 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     // evaluation (and before `--save-json` creates its output folder).
     let coco_gt = if args.coco || args.save_json.is_some() {
         let gt = crate::coco::ground_truth(&args.data, split)?;
-        crate::coco::category_ids(&gt, part.class_names())?;
-        Some(gt)
+        let cats = crate::coco::resolve_categories(&args.data, &gt, part.class_names())?;
+        Some((gt, cats))
     } else {
         None
     };
@@ -213,13 +213,13 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
     let mut coco = serde_json::Value::Null;
     let mut coco_text = None;
-    if let Some(gt) = &coco_gt {
+    if let Some((gt, cats)) = &coco_gt {
         if let Some(path) = &args.save_json {
-            let n = crate::coco::write_results(path, gt, part, &r.detections)?;
+            let n = crate::coco::write_results(path, gt, cats, part, &r.detections)?;
             out.human(format!("wrote {n} detections to {}", folo_api::json::path(path)));
         }
         if args.coco {
-            let c = crate::coco::evaluate(gt, part, &r.detections)?;
+            let c = crate::coco::evaluate(gt, cats, part, &r.detections);
             coco = json!({
                 "ap": c.stats.ap, "ap50": c.stats.ap50, "ap75": c.stats.ap75,
                 "ap_small": c.stats.ap_small, "ap_medium": c.stats.ap_medium, "ap_large": c.stats.ap_large,

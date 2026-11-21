@@ -186,8 +186,9 @@ fn export_and_quantize_strip_checkpoint_only_keys() {
     assert_eq!(qmeta.extra.get("folo.custom").map(String::as_str), Some("keep-me"), "quantize");
 }
 
-/// `folo val --coco` / `--save-json` works on a multi-split COCO dataset whose `val` JSON declares only a subset of
-/// `train`'s categories (mapping each category to its dataset class index), and rejects a genuine category mismatch
+/// `folo val --coco` / `--save-json` accepts a multi-split COCO dataset whose `val` JSON declares a non-empty
+/// `(id, name)` subset of `train`'s categories with every val annotation declared (keeping `coco.detections` and
+/// `--save-json` on one filter), and refuses empty categories, undeclared val annotations, and mismatched classes
 /// before creating `--save-json`'s output folder.
 #[test]
 fn val_coco_handles_subset_val_categories_and_fails_early_on_mismatch() {
@@ -198,22 +199,44 @@ fn val_coco_handles_subset_val_categories_and_fails_early_on_mismatch() {
     let coco = root.join("coco-sub");
     let (code, _, stderr) = folo(&["dataset", "convert", s(&tiny.data), s(&coco), "--to", "coco", "--json"]);
     assert_eq!(code, 0, "{stderr}");
-    // Keep only the second category (`square`, id 2 -> dataset class 1) in `instances_val.json` while `train` keeps both.
+    // Remap ids to non-contiguous 7=circle, 19=square in train and val so (id, name) matching is exercised.
+    let remap_ids = |path: &Path| {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let old0 = doc["categories"][0]["id"].as_u64().unwrap();
+        let old1 = doc["categories"][1]["id"].as_u64().unwrap();
+        doc["categories"][0]["id"] = serde_json::json!(7);
+        doc["categories"][1]["id"] = serde_json::json!(19);
+        for a in doc["annotations"].as_array_mut().unwrap() {
+            let cid = a["category_id"].as_u64().unwrap();
+            a["category_id"] = serde_json::json!(if cid == old0 {
+                7
+            } else if cid == old1 {
+                19
+            } else {
+                cid
+            });
+        }
+        std::fs::write(path, serde_json::to_string(&doc).unwrap()).unwrap();
+        doc
+    };
+    let _train_doc = remap_ids(&coco.join("annotations/instances_train.json"));
     let val_json = coco.join("annotations/instances_val.json");
-    let mut doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&val_json).unwrap()).unwrap();
-    let kept_id = doc["categories"][1]["id"].as_u64().unwrap();
-    doc["categories"] = serde_json::json!([doc["categories"][1].clone()]);
-    doc["annotations"] = serde_json::Value::Array(
-        doc["annotations"]
+    let full_val = remap_ids(&val_json);
+
+    // (c) Valid subset: val declares only 19=square and keeps only square annotations.
+    let mut sub_val = full_val.clone();
+    sub_val["categories"] = serde_json::json!([full_val["categories"][1].clone()]);
+    sub_val["annotations"] = serde_json::Value::Array(
+        full_val["annotations"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|a| a["category_id"].as_u64() == Some(kept_id))
+            .filter(|a| a["category_id"].as_u64() == Some(19))
             .cloned()
             .collect(),
     );
-    std::fs::write(&val_json, serde_json::to_string(&doc).unwrap()).unwrap();
+    std::fs::write(&val_json, serde_json::to_string(&sub_val).unwrap()).unwrap();
 
     let dets_path = root.join("sub-out/dets.json");
     let (code, lines, stderr) = folo(&[
@@ -236,12 +259,59 @@ fn val_coco_handles_subset_val_categories_and_fails_early_on_mismatch() {
     assert_eq!((c["images"].as_u64(), c["missing_images"].as_u64()), (Some(4), Some(0)), "{c}");
     let dets: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(&dets_path).unwrap()).unwrap();
+    assert_eq!(
+        c["detections"].as_u64(),
+        Some(dets.len() as u64),
+        "coco.detections must match --save-json row count: {c}"
+    );
     for d in &dets {
-        assert_eq!(d["category_id"].as_u64(), Some(kept_id), "unexpected category_id in {d}");
+        assert_eq!(d["category_id"].as_u64(), Some(19), "unexpected category_id in {d}");
     }
 
-    // Genuine mismatch: YOLO `data.yaml` with reversed classes alongside COCO annotations fails before creating
+    let check_refused = |label: &str, data_dir: &Path, out_path: &Path| {
+        let (code, lines, _) = folo(&[
+            "val",
+            "--json",
+            "--model",
+            s(&best),
+            "--data",
+            s(data_dir),
+            "--workers",
+            "1",
+            "--coco",
+            "--save-json",
+            s(out_path),
+        ]);
+        assert_eq!(code, 1, "{label}: {lines:?}");
+        assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{label}: {lines:?}");
+        assert!(
+            !out_path.parent().unwrap().exists(),
+            "{label}: refused categories must fail before creating --save-json dir"
+        );
+    };
+
+    // (a) Val JSON with `"categories": []` is refused as invalid_dataset (as on main).
+    let mut empty_cats = full_val.clone();
+    empty_cats["categories"] = serde_json::json!([]);
+    std::fs::write(&val_json, serde_json::to_string(&empty_cats).unwrap()).unwrap();
+    check_refused("empty categories", &coco, &root.join("never-empty/dets.json"));
+
+    // (b) Val JSON declares only 19=square but holds an annotation with category_id 7 (from train): refused.
+    let mut undeclared_ann = full_val.clone();
+    undeclared_ann["categories"] = serde_json::json!([full_val["categories"][1].clone()]);
+    if !undeclared_ann["annotations"].as_array().unwrap().iter().any(|a| a["category_id"].as_u64() == Some(7))
+    {
+        let img_id = undeclared_ann["images"][0]["id"].as_u64().unwrap();
+        undeclared_ann["annotations"].as_array_mut().unwrap().push(serde_json::json!({
+            "id": 9999, "image_id": img_id, "category_id": 7, "bbox": [4.0, 4.0, 10.0, 10.0], "area": 100.0, "iscrowd": 0
+        }));
+    }
+    std::fs::write(&val_json, serde_json::to_string(&undeclared_ann).unwrap()).unwrap();
+    check_refused("undeclared annotation category", &coco, &root.join("never-undeclared/dets.json"));
+
+    // Genuine mismatch: YOLO `data.yaml` with different classes alongside COCO annotations fails before creating
     // `--save-json`'s output folder.
+    std::fs::write(&val_json, serde_json::to_string(&sub_val).unwrap()).unwrap();
     let mismatch = root.join("mismatch");
     let (code, _, stderr) =
         folo(&["dataset", "convert", s(&tiny.data), s(&mismatch), "--to", "yolo", "--json"]);
@@ -253,25 +323,5 @@ fn val_coco_handles_subset_val_categories_and_fails_early_on_mismatch() {
         std::fs::read_to_string(&yaml).unwrap().replace("circle", "other").replace("square", "another");
     assert!(text.contains("another"), "expected class names in data.yaml: {text}");
     std::fs::write(&yaml, text).unwrap();
-
-    let refused = root.join("never-created/dets.json");
-    let (code, lines, _) = folo(&[
-        "val",
-        "--json",
-        "--model",
-        s(&best),
-        "--data",
-        s(&mismatch),
-        "--workers",
-        "1",
-        "--coco",
-        "--save-json",
-        s(&refused),
-    ]);
-    assert_eq!(code, 1, "{lines:?}");
-    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
-    assert!(
-        !refused.parent().unwrap().exists(),
-        "mismatched categories must fail before creating --save-json dir"
-    );
+    check_refused("yolo/coco mismatch", &mismatch, &root.join("never-mismatch/dets.json"));
 }
