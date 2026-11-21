@@ -184,7 +184,9 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
   runs `Server`. It serves Studio from `--web-dir` when given, else from the copy compiled into the binary by the
   `embed-web` feature (release builds, [RELEASE.md](RELEASE.md)), else from `web/dist`.
 - `serve_lock.rs` keeps one owner per data dir: `folo serve` (real store) and an embedded `folo mcp` hold an
-  exclusive OS lock on `<data dir>/serve.lock`, and a server writes its address to `serve.json`.
+  exclusive OS lock on `<data dir>/serve.lock`, and a server writes its local address to `serve.json` (wildcard binds
+  `0.0.0.0` and `::` become loopback `127.0.0.1` and `[::1]`, and legacy wildcard records are normalized on read;
+  specific binds, including scoped IPv6 addresses, stay as bound).
 - `folo cloud` (`cloud.rs`) opens `folo_server::cloud::Cloud` on the data dir directly, so it works with or without a
   server running.
 - `GET /api/runs/{id}/cli` comes from `folo_server::cli`, which turns a `TrainConfig` back into `folo train`

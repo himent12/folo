@@ -321,26 +321,28 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   server's: an absolute path, of the server's OS, is passed on as given, and a relative one is
   `invalid_arguments`). `--data-dir` is where FOLO **writes**; it is not
   a read sandbox. `--confine` restricts reads to `--data-dir` as well, using canonicalised paths with symlinks and
-  junctions resolved, and rejects anything outside it with `path_outside_data_dir`. Datasets are confined where they are read:
-  a dataset root inside the data dir can still reference files elsewhere (a `data.yaml` `path:`, image lists, linked
-  folders, YOLO labels derived from image paths), so `folo mcp --confine` installs folo-data's process-wide read
-  guard (`folo_data::guard`). Every manifest, image list, split folder, COCO JSON, image and label the dataset
-  reader opens, and every image the server sends, is resolved canonically first and refused outside the data dir,
-  whatever the manifest syntax, at registration and at every later re-index (with the guard on, the real store
-  rebuilds every index at startup instead of trusting caches built without it; refused folders are not descended). A refused read fails like an
-  unreadable file and shows up as a dataset issue or error that names it. On top of that, before any tool or
-  resource reads a dataset, its root, every image the store reports, each image's label, and its issues are
-  checked, so the agent gets a clear `path_outside_data_dir` error (results cached per dataset; the guard keeps
-  enforcing if the dataset changes later). `register_dataset` unregisters a dataset that fails the check, and
-  datasets registered earlier without `--confine` that fail it are left out of `list_datasets` and
-  `resources/list` and rejected everywhere else. Labeling jobs are checked the same way: label paths outside the
-  data dir are refused when they are added, and a job (made earlier without `--confine`) that has images outside it
-  is left out of `list_label_jobs` and refused by every other labeling tool (`path_outside_data_dir`; results cached
-  per job until its image files change). In proxy mode `folo serve` reads the datasets and the label images, so
-  `--confine` covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`); the
-  labeling tools that would have the server read image files (`create_label_job` with paths, `start_labeling`,
-  `view_label_image`, `export_label_dataset`) are refused there with `not_supported` (run `folo mcp --confine` on
-  the data dir itself to label confined); a job without paths reads nothing and can be made there. All eight
+  junctions resolved, and rejects anything outside it with `path_outside_data_dir`. In **embedded mode**, datasets
+  are confined where they are read: a dataset root inside the data dir can still reference files elsewhere (a
+  `data.yaml` `path:`, image lists, linked folders, YOLO labels derived from image paths), so embedded
+  `folo mcp --confine` installs folo-data's process-wide read guard (`folo_data::guard`). Every manifest, image list,
+  split folder, COCO JSON, image and label the dataset reader opens, and every image the server sends, is resolved
+  canonically first and refused outside the data dir, whatever the manifest syntax, at registration and at every later
+  re-index (with the guard on, the real store rebuilds every index at startup instead of trusting caches built without
+  it; refused folders are not descended). A refused read fails like an unreadable file and shows up as a dataset issue
+  or error that names it. On top of that, before any embedded tool or resource reads a dataset, its root, every image
+  the store reports, each image's label, and its issues are checked, so the agent gets a clear `path_outside_data_dir`
+  error (results cached per dataset; the guard keeps enforcing if the dataset changes later). `register_dataset`
+  unregisters a dataset that fails the check, and datasets registered earlier without `--confine` that fail it are
+  left out of `list_datasets` and `resources/list` and rejected everywhere else. Labeling jobs in embedded mode are
+  checked the same way: label paths outside the data dir are refused when they are added, and a job (made earlier
+  without `--confine`) that has images outside it is left out of `list_label_jobs` and refused by every other labeling
+  tool (`path_outside_data_dir`; results cached per job until its image files change). In **proxy mode** (`--server`),
+  `folo serve` owns and reads the datasets and label images without the guard, so `--confine` covers only the files
+  the MCP process reads itself (`predict.image_path`, `predict_batch`), and does not filter or refuse datasets already
+  on the server; tools that would have `folo serve` read new or unguarded files (`register_dataset`, `create_label_job`
+  with paths, `start_labeling`, `view_label_image`, `export_label_dataset`) are refused there with `not_supported`
+  (run `folo mcp --confine` on the data dir itself to register datasets or label confined); a labeling job without
+  paths reads nothing and can be made there. All eight
   benchmark tools are refused with `not_supported` under `--confine`, embedded and through a server (with
   `--read-only` too, the mutating ones answer `read_only` first): the store
   reads, writes and deletes a benchmark's files (frozen images, entries, a model entry's weights) without these
