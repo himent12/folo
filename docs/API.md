@@ -1389,7 +1389,7 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
   `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
   `..`, `:`, links, and special files are `422 invalid_upload` on the part that carries them; on Windows servers,
-  entries with characters Windows forbids (`< > " | ? *` or ASCII control characters), dot/space-only segments,
+  entries with characters Windows forbids (`< > " | ? *` or a byte below `0x20`), dot/space-only segments,
   `NUL` (bare or with trailing dots/spaces), or parent directories ending in a space or more than one dot/space
   are `422 invalid_upload` too (on Linux/macOS those names stay accepted, and names that unpack on Windows 11
   such as `CON.png`, `NUL.png`, or an `aux/` folder stay accepted on Windows too). Also `422 invalid_upload` are
