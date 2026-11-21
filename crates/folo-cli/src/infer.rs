@@ -707,9 +707,10 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     if fused {
         file.export(output.tmp(), dtype)
     } else {
-        // The inference tensor set (EMA when present), unfused, written as a plain weights file.
+        // The inference tensor set (EMA when present), unfused, written as a plain weights file
+        // preserving the source file's non-checkpoint metadata (folo.metrics, folo.created, unknown folo.* keys).
         FoloModel::from_file(&file, folo_nn::io::Purpose::Inference)
-            .and_then(|(model, _)| model.save(output.tmp()))
+            .and_then(|(model, _)| folo_nn::io::save_weights(output.tmp(), file.metadata(), &model))
     }
     .map_err(|e| nn_error("export", e))?;
     let output = output.publish()?;
