@@ -27,7 +27,10 @@ produces plain buffers that the trainer wraps in tensors.
   `ds/labels/train/a.txt`). With no `images` folder the label sits next to its image. An `images` folder at or above
   the dataset root counts only if the root's mirror exists (`x/labels/birds` for a root `x/images/birds`, `x/labels`
   for `x/images`); without it the labels sit next to the images, and another dataset's folder in `x/labels` changes
-  nothing. With the mirror, a `.txt` beside an image is not its label. A missing label file means a background image.
+  nothing. With the mirror, a `.txt` beside an image is not its label. The `images` folder is looked for in the
+  image's path as the dataset spells it: a dataset opened as a bare `data.yaml` from inside `x/images/birds` with
+  relative split paths has none in its image paths and reads the labels next to the images, mirror or not (open
+  it by a path that names the `images` folder to use the mirror). A missing label file means a background image.
 - Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding
   box is used). Coordinates may exceed `[0, 1]` by up to 0.01 (clipped, with a warning); exact duplicates are
   removed; zero-size boxes are dropped.
