@@ -528,7 +528,7 @@ pub(crate) fn read_annotations(
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.
-fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
+pub(crate) fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
     let json_dir = match json.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => root,

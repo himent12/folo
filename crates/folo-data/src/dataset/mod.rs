@@ -8,7 +8,7 @@
 //!   [`open`] / [`open_with`] / [`open_splits`] and [`detect_format`].
 
 pub(crate) mod cache;
-mod coco;
+pub(crate) mod coco;
 
 pub use coco::{
     CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, open_coco_ground_truth,
@@ -657,17 +657,7 @@ fn check_candidate(
                 issues.push(issue(IssueKind::CorruptImage, &c.image, "unknown image size".into()));
                 return (None, issues, fresh);
             };
-            let (fw, fh) = (w as f32, h as f32);
-            let mut out = Vec::with_capacity(boxes.len());
-            let mut dropped = 0;
-            for (class, [x1, y1, x2, y2]) in boxes {
-                let c = [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
-                if c[2] - c[0] <= 0.0 || c[3] - c[1] <= 0.0 {
-                    dropped += 1;
-                    continue;
-                }
-                out.push(BBox::from_pixel_xyxy(class, c, w, h));
-            }
+            let (out, dropped) = clip_coco_boxes(&boxes, w, h);
             if dropped > 0 {
                 issues.push(issue(
                     IssueKind::LabelWarning,
@@ -678,6 +668,23 @@ fn check_candidate(
             (Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }), issues, fresh)
         }
     }
+}
+
+/// Clips pixel `xyxy` boxes to `(w, h)`, returning the normalised boxes kept and the count dropped for having no
+/// area inside the image.
+pub(crate) fn clip_coco_boxes(boxes: &[(u32, [f32; 4])], w: u32, h: u32) -> (Vec<BBox>, usize) {
+    let (fw, fh) = (w as f32, h as f32);
+    let mut out = Vec::with_capacity(boxes.len());
+    let mut dropped = 0;
+    for &(class, [x1, y1, x2, y2]) in boxes {
+        let c = [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
+        if c[2] - c[0] <= 0.0 || c[3] - c[1] <= 0.0 {
+            dropped += 1;
+            continue;
+        }
+        out.push(BBox::from_pixel_xyxy(class, c, w, h));
+    }
+    (out, dropped)
 }
 
 /// `class0`, `class1`, ... for datasets without names.
