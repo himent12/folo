@@ -55,17 +55,14 @@ fn shortest_f32(x: f64) -> Option<f64> {
     (clean != x).then_some(clean)
 }
 
-/// A path as FOLO reports it in JSON: `/` separators (Windows accepts them) and no `\\?\` verbatim prefix, except a
-/// path those would turn from absolute to relative (`\\?\Volume{GUID}\photos`), which stays as it is.
+/// A path as FOLO reports it in JSON: `/` separators (Windows accepts them) and no `\\?\` verbatim prefix.
 pub fn path(p: impl AsRef<Path>) -> String {
-    let p = p.as_ref();
-    let raw = p.to_string_lossy();
-    let s = raw
+    let s = p.as_ref().to_string_lossy();
+    let s = s
         .strip_prefix(r"\\?\UNC\")
         .map(|rest| format!(r"\\{rest}"))
-        .unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string());
-    let s = if cfg!(windows) { s.replace('\\', "/") } else { s };
-    if Path::new(&s).is_absolute() == p.is_absolute() { s } else { raw.into_owned() }
+        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+    if cfg!(windows) { s.replace('\\', "/") } else { s }
 }
 
 /// A command FOLO prints for the user to paste (`folo train --resume {checkpoint}`): each `{name}` in `template` is
@@ -177,9 +174,6 @@ mod tests {
             assert_eq!(path(r"runs\shapes-n\weights/best.folo"), "runs/shapes-n/weights/best.folo");
             assert_eq!(path(r"\\?\D:\data\x"), "D:/data/x");
             assert_eq!(path(r"\\?\UNC\server\share\x"), "//server/share/x");
-            // Without its prefix a volume path would be relative.
-            let volume = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\folo";
-            assert_eq!(path(volume), volume);
         }
     }
 

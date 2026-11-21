@@ -539,7 +539,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
         "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
-        "saved_to": args.save.as_ref().map(folo_api::json::path),
+        "saved_to": args.save.as_deref().map(folo_mcp::label::wire_path),
     }));
     out.human(format!(
         "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",

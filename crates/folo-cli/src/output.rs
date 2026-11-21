@@ -162,10 +162,11 @@ mod tests {
 
     /// docs/CLI.md promises `/` in the paths of records on every OS, which a raw `PathBuf` breaks on Windows only. So
     /// this reads the source, on every OS: a `"key": value` in a `json!`, or a `record["key"] = value`, whose key
-    /// names a path must build its value with `folo_api::json::path` (or `rel`, the dataset-relative form). It is a
-    /// text scan and only a net for the next field; the runtime assertions in `tests/` hold the four known ones. It
-    /// cannot see a path under a key not named like one, a value on the line after its key, or a `Serialize` struct
-    /// holding a `PathBuf` (none reaches a record today), and text in a string that looks like a field trips it.
+    /// names a path must build its value with `folo_api::json::path`, `wire_path` or `rel` (the dataset-relative
+    /// form). It is a text scan and only a net for the next field; the runtime assertions in `tests/` hold the four
+    /// known ones. It cannot see a path under a key not named like one, a value on the line after its key, or a
+    /// `Serialize` struct holding a `PathBuf` (none reaches a record today), and text in a string that looks like a
+    /// field trips it.
     #[test]
     fn json_records_spell_paths_with_forward_slashes() {
         // Not raw paths: a command's words, and a string `json::path` made a few lines above.
@@ -187,6 +188,7 @@ mod tests {
                         let value = after.split(", \"").next().unwrap();
                         if names_a_path(key)
                             && !value.contains("json::path")
+                            && !value.contains("wire_path")
                             && !value.starts_with("rel(")
                             && !FINE.contains(&(name.as_str(), key))
                         {

@@ -232,10 +232,16 @@ impl Labels {
     }
 }
 
-/// An absolute path as a server is sent it: as FOLO writes paths, which keeps it absolute
-/// ([`folo_api::json::path`]).
+/// A path as a server is sent it and as the CLI's records name a folder or file: as FOLO writes paths (`/`
+/// separators, no `\\?\` prefix) when that keeps it absolute, else as it is. A volume path
+/// (`\\?\Volume{GUID}\photos`) without its prefix is relative.
 pub fn wire_path(p: &std::path::Path) -> String {
-    folo_api::json::path(p)
+    let shown = folo_api::json::path(p);
+    if std::path::Path::new(&shown).is_absolute() == p.is_absolute() {
+        shown
+    } else {
+        p.to_string_lossy().into_owned()
+    }
 }
 
 /// `Ok` when a start with `fast` can have it: the server lists the Fast tier for the run's model (the one named, or

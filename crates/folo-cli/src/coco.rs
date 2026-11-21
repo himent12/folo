@@ -98,8 +98,9 @@ pub fn evaluate(
 
 /// Refuses, before the evaluation, a `--save-json` file that plainly cannot be written, and creates its folder (as
 /// `predict --save` and `train --project` do). Best effort: the final name is never created or removed here, so an
-/// existing file keeps its content and a link keeps its target, and a new file is only tried under a temporary name
-/// in the same folder. [`write_results`] can still fail (a full disk, a folder that changed meanwhile).
+/// existing file keeps its content and a link keeps its target, and a new file is only tried under another name
+/// in the same folder ([`probe_path`]). [`write_results`] can still fail (a full disk, a folder that changed
+/// meanwhile).
 pub fn prepare_results(path: &Path) -> Result<(), CliError> {
     let io = |e: std::io::Error| {
         CliError::new(
@@ -114,14 +115,32 @@ pub fn prepare_results(path: &Path) -> Result<(), CliError> {
         Ok(m) if m.is_dir() => Err(io(std::io::ErrorKind::IsADirectory.into())),
         // Not truncated: an earlier results file stays until the new one is written.
         Ok(_) => std::fs::OpenOptions::new().write(true).open(path).map(drop).map_err(io),
+        // A name the system refuses (too long, a loop of links) fails the same way at the end.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
         // A link to a file not there yet: the writer creates its target.
         Err(_) if std::fs::symlink_metadata(path).is_ok() => Ok(()),
         Err(_) => {
-            let tmp = folo_nn::io::temp_path(dir).map_err(io)?;
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
+            let probe = probe_path(dir, path);
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe);
+                    Ok(())
+                }
+                // Another process's probe: the folder takes new files.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(io(e)),
+            }
         }
     }
+}
+
+/// A file name in `dir` to try creating, never the name of `path` (also where case does not count).
+fn probe_path(dir: &Path, path: &Path) -> std::path::PathBuf {
+    let mut name = format!(".folo-probe-{}.tmp", std::process::id());
+    if path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&name)) {
+        name.insert(0, '.');
+    }
+    dir.join(name)
 }
 
 /// Write `detections` as a COCO results file (`[{"image_id", "category_id", "bbox": [x, y, w, h], "score"}]`),
@@ -207,6 +226,23 @@ mod tests {
             assert!(
                 std::fs::symlink_metadata(&link).is_ok() && !dir.join("eval").join("run-2.json").exists()
             );
+        }
+        // The probe is never the file asked for, whatever it is called.
+        let same = dir.join(format!(".FOLO-PROBE-{}.TMP", std::process::id()));
+        assert!(
+            !super::probe_path(&dir, &same)
+                .file_name()
+                .unwrap()
+                .eq_ignore_ascii_case(same.file_name().unwrap())
+        );
+        // A name the system refuses is refused now, not after the evaluation.
+        #[cfg(unix)]
+        {
+            let long = dir.join("x".repeat(256));
+            assert_eq!(super::prepare_results(&long).unwrap_err().code, "io_error");
+            let looped = dir.join("eval").join("loop.json");
+            std::os::unix::fs::symlink("loop.json", &looped).unwrap();
+            assert_eq!(super::prepare_results(&looped).unwrap_err().code, "io_error");
         }
         // An earlier results file keeps its content until the new one is written.
         std::fs::write(&new, b"[]").unwrap();
