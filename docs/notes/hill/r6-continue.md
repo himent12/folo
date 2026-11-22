@@ -11,14 +11,15 @@ Terms: **mAP** is the trainer's internal mAP50-95 on val2017 (or on the proxy's 
 warm-up epochs. **EMA running** means the EMA's update counter starts at `ceil(10 · tau)` instead of 0, so its decay is
 at full strength from the first step (docs/MODEL.md §8.5 gives the ramp). **Bias start** is `warmup_bias_lr`, the LR
 the bias groups ramp from. It is not a cap: each bias group ramps from it to its own scheduled LR, base LR · `lf(t)`.
-MuSGD's `bias.cls` has base LR 3 · lr0.
+In these runs MuSGD's `bias.cls` has the default base LR, 3 · lr0.
 
 ## The question
 
 Earlier continuations with `--weights` on the same data dropped in their first epochs. The published folo-s (internal
 mAP 0.4120) continued for 48 epochs at lr0 0.003 (`D:/folo-data/runs-wave6/long/s-cont-lr03`) fell to 0.3760 at epoch 3
-and was back only at epoch 18. The same at lr0 0.01 (`s-cont`) fell to 0.3035, and folo-n v5's continuation fell from
-0.3523 to 0.3031. Which warm-up setting causes the drop, and can a rule for continuations remove it?
+and was back only at epoch 18. The same at lr0 0.01 (`s-cont`) fell to 0.3035, and the continuation from folo-n v4 that
+produced v5 (`n-v4-cont-kd`) fell from 0.3523 to 0.3031. Which warm-up setting causes the drop, and can a rule for
+continuations remove it?
 
 The gate, fixed in the brief before any run: on the exact command of `s-cont-lr03`, with only the arm's settings
 changed and stopped after epoch 8, **epoch 3 ≥ 0.405 and epoch 8 ≥ 0.414**. Under that, one more arm at most, then stop.
@@ -102,9 +103,10 @@ Both arms pass epoch 3 (≥ 0.405) and **both miss epoch 8 (≥ 0.414)**. As the
   the table above shows what that does to the reading.
 - **Weight decay coupled to the momentum: read, not tested.** The code matches the description
   (`crates/folo-nn/src/optim/sgd.rs`: the decay enters the gradient before the momentum). MuSGD's SGD half of a Muon
-  group runs at `sgd · lr`, so `sgd` 1.0 doubles that half's LR multiplier against `sgd` 0.5. That is not a measured 2×
-  shrinkage between the from-scratch and continuation recipes, which also differ in their Muon weight and their LRs.
-  Every arm here used the same weights and decay, so nothing here says whether it matters. Out of scope for this lane.
+  group runs at `sgd · lr`, so `sgd` 1.0 doubles that half's LR multiplier against the 0.5 of `auto` rule 5 from
+  scratch. That is not a measured 2× shrinkage: rule 5's from-scratch recipe also differs in its Muon weight (0.5
+  against 0.2) and its LRs, and the published folo-s was trained under rule 3 with Muon weight 0.2. Every arm here used
+  the same weights and decay, so nothing here says whether it matters. Out of scope for this lane.
 - **The mosaic-off epochs: not the cause of this dip.** The schedule closes mosaic for the last 10 of 48 epochs, and the
   dip is at epochs 1 to 3, with mosaic on. Mosaic closing itself was not tested.
 
