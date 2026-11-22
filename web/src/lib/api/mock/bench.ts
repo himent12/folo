@@ -32,7 +32,7 @@ import type {
   StartBenchLoop,
   UpdateBench,
 } from '../types';
-import { resolveAgentRequest } from './label';
+import { checkMockModel, resolveAgentRequest } from './label';
 import { AGENT_NAME } from '../../label';
 import { boxesKey, checkPredictions, predictionKey } from '../../bench/external';
 import { clonePlan, planError } from '../../bench/plan';
@@ -207,9 +207,10 @@ export class MockBench extends MockBenchState {
     if (body.agent !== 'claude' && body.agent !== 'codex' && body.agent !== 'antigravity')
       throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\`, \`codex\` or \`antigravity\``);
     if ((body.note ?? '').length > DESIGN_NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${DESIGN_NOTE_MAX} characters`);
+    const checkedModel = checkMockModel(body.model);
     const agent = this.host.agents().find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
-    const { model } = resolveAgentRequest(body.agent, body.model, body.effort, agent.default_model, agent.default_effort);
+    const { model } = resolveAgentRequest(body.agent, checkedModel, body.effort, agent.default_model, agent.default_effort);
     if (this.designFails)
       throw new ApiError(
         502,
@@ -337,9 +338,10 @@ export class MockBench extends MockBenchState {
       e.duration = images * this.passes(e, b).length * (MS_PER_PASS[m.arch] ?? 5);
     } else if (c.kind === 'agent') {
       if (c.agent !== 'claude' && c.agent !== 'codex' && c.agent !== 'antigravity') throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(c.agent)}\``);
+      const checkedModel = checkMockModel(c.model);
       const agent = this.host.agents().find((a) => a.id === c.agent);
       if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[c.agent]} is not installed on the server's machine.`, agent?.hint);
-      const { model, effort } = resolveAgentRequest(c.agent, c.model, c.effort, agent.default_model, agent.default_effort);
+      const { model, effort } = resolveAgentRequest(c.agent, checkedModel, c.effort, agent.default_model, agent.default_effort);
       const images = body.max_images ?? Math.min(AGENT_IMAGES, b.images.length);
       const conditions = body.conditions ?? false;
       e = {

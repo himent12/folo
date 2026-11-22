@@ -146,33 +146,49 @@ pub(super) fn acp_command(path: &Path, iso: &Isolation) -> Command {
     cmd
 }
 
+/// Diagnostics returned by [`run_acp_checked`] for deterministic subprocess-cleanup tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct AcpRunCheck {
+    pub result: Result<AgentReply, AgentError>,
+    pub pipes_closed: bool,
+    pub saw_stdout_marker: bool,
+    pub stderr: String,
+}
+
 /// Spawns `agy acp`, drives one ACP v1 labeling turn, and cleans up the entire child tree and reader threads.
 pub(super) fn run_acp(
     path: &Path,
     req: &AgentRequest<'_>,
     timeout: Duration,
 ) -> Result<AgentReply, AgentError> {
-    run_acp_checked(path, req, timeout, None).0
+    run_acp_checked(path, req, timeout, None, None).result
 }
 
-/// Same as [`run_acp`], returning `(result, pipes_closed)` for deterministic descendant-cleanup tests.
+/// Same as [`run_acp`], returning pipe-EOF and stream-marker observations for deterministic cleanup tests.
 pub(super) fn run_acp_checked(
     path: &Path,
     req: &AgentRequest<'_>,
     timeout: Duration,
     home: Option<&Path>,
-) -> (Result<AgentReply, AgentError>, bool) {
+    stdout_marker: Option<&str>,
+) -> AcpRunCheck {
+    let early = |err: AgentError| AcpRunCheck {
+        result: Err(err),
+        pipes_closed: true,
+        saw_stdout_marker: false,
+        stderr: String::new(),
+    };
     if req.cancel.load(Ordering::Relaxed) {
-        return (Err(AgentError::Cancelled(LabelUsage::default())), true);
+        return early(AgentError::Cancelled(LabelUsage::default()));
     }
     let iso = match prepare_isolation(req.scratch, home) {
         Ok(iso) => iso,
-        Err(e) => return (Err(e), true),
+        Err(e) => return early(e),
     };
 
     let mut proc = match AcpProcess::spawn(path, &iso) {
         Ok(p) => p,
-        Err(e) => return (Err(e), true),
+        Err(e) => return early(e),
     };
     let stdin = proc.child.stdin.take().expect("stdin is piped");
     let stdout = proc.child.stdout.take().expect("stdout is piped");
@@ -193,10 +209,18 @@ pub(super) fn run_acp_checked(
     let (out_tx, out_rx) = mpsc::channel::<String>();
     let stdout_ended = Arc::new(AtomicBool::new(false));
     let stdout_done = stdout_ended.clone();
+    let saw_marker = Arc::new(AtomicBool::new(false));
+    let saw_marker_out = saw_marker.clone();
+    let marker = stdout_marker.map(str::to_string);
     let out_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let Ok(line) = line else { break };
+            if let Some(m) = marker.as_deref()
+                && line.contains(m)
+            {
+                saw_marker_out.store(true, Ordering::Release);
+            }
             if out_tx.send(line).is_err() {
                 break;
             }
@@ -245,7 +269,12 @@ pub(super) fn run_acp_checked(
     }
     let out_closed = join_bounded(out_thread, &stdout_ended, EXIT_DRAIN);
     let err_closed = join_bounded(err_thread, &stderr_tail.ended, EXIT_DRAIN);
-    (outcome.result, out_closed && err_closed)
+    AcpRunCheck {
+        result: outcome.result,
+        pipes_closed: out_closed && err_closed,
+        saw_stdout_marker: saw_marker.load(Ordering::Acquire),
+        stderr: stderr_tail.drain_text(Duration::ZERO),
+    }
 }
 
 fn join_bounded(handle: JoinHandle<()>, ended: &AtomicBool, wait: Duration) -> bool {

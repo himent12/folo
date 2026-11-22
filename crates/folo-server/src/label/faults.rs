@@ -114,14 +114,24 @@ const HARD_ACCOUNT_LIMIT: [&str; 8] = [
 ];
 
 fn is_usage_limit(lower: &str, wait: Option<Duration>) -> bool {
+    // Structured daily quota violations (e.g. Google's `GenerateRequestsPerDayPerProject`) and explicit account
+    // exhaustion always take precedence over short retry delays, even without generic `"quota"` wording.
+    let daily_quota = lower.contains("perday")
+        || lower.contains("per_day")
+        || (lower.contains("per day")
+            && (lower.contains("quota")
+                || lower.contains("limit")
+                || lower.contains("exceeded")
+                || lower.contains("resource_exhausted")));
+    if daily_quota || HARD_ACCOUNT_LIMIT.iter().any(|w| has_word(lower, w)) {
+        return true;
+    }
     // Classify structured Google RPC per-minute rate limits (`RATE_LIMIT_EXCEEDED` or `QuotaFailure` `*PerMinute*`
-    // paired with a retry delay) BEFORE generic `"quota"` / `"billing"` text heuristics, while keeping daily quota
-    // violations (`*PerDay*`) and explicit account exhaustion non-retryable.
-    let per_day = lower.contains("perday") || lower.contains("per_day") || lower.contains("per day");
+    // paired with a retry delay) BEFORE generic `"quota"` / `"billing"` text heuristics.
     let structured_rate =
         lower.contains("rate_limit_exceeded") || lower.contains("perminute") || lower.contains("per_minute");
-    if structured_rate && wait.is_some() && !per_day {
-        return HARD_ACCOUNT_LIMIT.iter().any(|w| has_word(lower, w));
+    if structured_rate && wait.is_some() {
+        return false;
     }
     USAGE_LIMIT.iter().any(|w| has_word(lower, w))
 }
@@ -413,6 +423,7 @@ mod tests {
             "RESOURCE_EXHAUSTED: model capacity limit reached",
             "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: Quota exceeded for requests per minute: retry after 120s",
             "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: You exceeded your current quota, please check your plan and billing details.: GenerateRequestsPerDayPerProjectPerModel: retry after 15s",
+            "Request failed: RESOURCE_EXHAUSTED: GenerateRequestsPerDayPerProject: retry after 15s",
             "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: You exceeded your current quota, please check your plan and billing details.",
             // A server error that asks for a long wait ends the run like a limit.
             "unexpected status 503 Service Unavailable; try again in 2 hours",

@@ -50,7 +50,15 @@ const inRange = (v: number | null | undefined, max: number) => v === null || v =
 
 const EFFORT_SUFFIXES = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
-/** Mirrors the server's `Agent::resolve_request`: maps Antigravity effort-suffixed slugs and rejects conflicts. */
+/** Mirrors the server's `check_model`: trims a model name and refuses invalid characters or length. */
+export function checkMockModel(rawModel: string | null | undefined): string | null {
+  const model = rawModel?.trim() || null;
+  if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
+    throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
+  return model;
+}
+
+/** Mirrors the server's `Agent::resolve_request`: validates model, maps Antigravity effort-suffixed slugs, and rejects conflicts. */
 export function resolveAgentRequest(
   agent: LabelAgentId,
   rawModel: string | null | undefined,
@@ -58,7 +66,7 @@ export function resolveAgentRequest(
   defaultModel: string | null,
   defaultEffort: LabelEffort,
 ): { model: string | null; effort: LabelEffort } {
-  const model = rawModel?.trim() || null;
+  const model = checkMockModel(rawModel);
   if (agent === 'antigravity' && model) {
     const lower = model.toLowerCase();
     for (const suffix of EFFORT_SUFFIXES) {
@@ -662,9 +670,7 @@ export class MockLabeling {
       throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\`, \`codex\` or \`antigravity\``);
     // In the server's order: the body's fields, then the agent, then the job.
     if ([...(body.note ?? '')].length > NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${NOTE_MAX} characters`);
-    const model = body.model?.trim() || null;
-    if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
-      throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
+    const model = checkMockModel(body.model);
     if (!inRange(body.batch, BATCH_MAX)) throw new ApiError(400, 'invalid_body', `batch must be in 1..=${BATCH_MAX}`);
     if (!inRange(body.parallel, PARALLEL_MAX)) throw new ApiError(400, 'invalid_body', `parallel must be in 1..=${PARALLEL_MAX}`);
     if (body.fast) {

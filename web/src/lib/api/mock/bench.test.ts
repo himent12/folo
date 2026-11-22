@@ -417,6 +417,14 @@ describe('MockApi vision benchmarks: entries run', () => {
   it('resolves Antigravity effort-suffixed models in benchmark entries and design and rejects conflicts', async () => {
     const api = new MockApi('all-agents', 0);
     await expect(
+      api.designBench('bn_9f03', { agent: 'antigravity', model: 'bad model-xhigh', effort: 'high' }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/model must be/) });
+    await expect(
+      api.startBenchEntry('bn_9f03', {
+        contestant: { kind: 'agent', agent: 'antigravity', model: 'bad model-xhigh', effort: 'high' },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/model must be/) });
+    await expect(
       api.designBench('bn_9f03', { agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'low' }),
     ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/conflicts/) });
     await expect(

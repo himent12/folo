@@ -13,6 +13,9 @@ use crate::label::agent::{Agent, AgentError, cancel_when};
 use crate::label::antigravity::Antigravity;
 use crate::label::antigravity::process::run_acp_checked;
 
+const HELPER_STDOUT_MARKER: &str = "helper-stdout-acquired";
+const HELPER_STDERR_MARKER: &str = "helper-stderr-acquired";
+
 #[derive(Copy, Clone)]
 enum FakeMode {
     CleanWithHelper,
@@ -28,10 +31,9 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let cancel = AtomicBool::new(false);
     let imgs = vec![vec![0xff, 0xd8, 0xff, 0xd9]];
 
-    // 1. Clean exit while a sleeping helper has ALREADY started and inherited stdio pipes (proven by
-    // `helper_started` written by the helper before `session/prompt` replies): returns reply promptly and kills
-    // the helper (proven deterministically by `pipes_closed == true`: dead processes close inherited fds before
-    // reaping).
+    // 1. Clean exit while a sleeping helper has ALREADY written directly onto BOTH inherited stdio pipes (proven
+    // by `saw_stdout_marker` and `stderr.contains(HELPER_STDERR_MARKER)`): returns reply promptly and kills the
+    // helper (proven deterministically by `pipes_closed == true`: dead processes close inherited fds before reaping).
     let bin = write_fake_agy(&dir.join("clean"), FakeMode::CleanWithHelper);
     let agy = Antigravity::new();
     agy.cli.remember(bin.to_str().unwrap(), "1.5.13");
@@ -45,24 +47,44 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let clean_scratch = dir.join("s-clean");
     let req = test_req(&clean_scratch, &imgs, Some("gemini-4-neon"), LabelEffort::Low, &schema, &cancel);
     let t0 = Instant::now();
-    let (res, pipes_closed) = run_acp_checked(&bin, &req, Duration::from_secs(30), Some(&home));
-    let reply = res.unwrap();
-    assert!(clean_scratch.join("work/helper_started").is_file(), "helper never acquired stdio before exit");
-    assert!(pipes_closed, "helper holding stdout/stderr survived clean ACP exit");
+    let check = run_acp_checked(&bin, &req, Duration::from_secs(30), Some(&home), Some(HELPER_STDOUT_MARKER));
+    let reply = check.result.unwrap();
+    assert!(check.saw_stdout_marker, "helper did not inherit captured stdout pipe before parent exit");
+    assert!(
+        check.stderr.contains(HELPER_STDERR_MARKER),
+        "helper did not inherit captured stderr pipe before parent exit: {:?}",
+        check.stderr
+    );
+    assert!(check.pipes_closed, "helper holding stdout/stderr survived clean ACP exit");
     assert!(t0.elapsed() < Duration::from_secs(20), "call hung waiting on descendant: {:?}", t0.elapsed());
     assert_eq!(reply.text, r#"{"images":[{"image":1,"boxes":[["car",1,2,30,40]]}]}"#);
     assert_eq!((reply.usage.calls, reply.usage.input_tokens, reply.usage.output_tokens), (1, 512, 32));
 
-    // 2. Parent exits BEFORE responding to `session/prompt` after its helper has already started and inherited
-    // stdio: must detect parent exit promptly (never stall until the 30s timeout), kill the helper, and close pipes.
+    // 2. Parent exits BEFORE responding to `session/prompt` after its helper has written onto BOTH captured stdio
+    // pipes: must detect parent exit promptly (never stall until the 30s timeout), kill the helper, and close pipes.
     let early_bin = write_fake_agy(&dir.join("early"), FakeMode::EarlyExitWithHelper);
     let early_scratch = dir.join("s-early");
     let early_req = test_req(&early_scratch, &[], None, LabelEffort::Low, &schema, &cancel);
     let t1 = Instant::now();
-    let (res, pipes_closed) = run_acp_checked(&early_bin, &early_req, Duration::from_secs(30), Some(&home));
-    assert!(matches!(res, Err(AgentError::Failed(ref f)) if f.message.contains("early crash")), "{res:?}");
-    assert!(early_scratch.join("work/helper_started").is_file(), "helper never acquired stdio before crash");
-    assert!(pipes_closed, "helper survived early parent exit");
+    let check = run_acp_checked(
+        &early_bin,
+        &early_req,
+        Duration::from_secs(30),
+        Some(&home),
+        Some(HELPER_STDOUT_MARKER),
+    );
+    assert!(
+        matches!(check.result, Err(AgentError::Failed(ref f)) if f.message.contains("early crash")),
+        "{:?}",
+        check.result
+    );
+    assert!(check.saw_stdout_marker, "helper did not inherit captured stdout pipe before crash");
+    assert!(
+        check.stderr.contains(HELPER_STDERR_MARKER),
+        "helper did not inherit captured stderr pipe before crash: {:?}",
+        check.stderr
+    );
+    assert!(check.pipes_closed, "helper survived early parent exit");
     assert!(t1.elapsed() < Duration::from_secs(15), "early exit with helper stalled: {:?}", t1.elapsed());
 
     // 3. Wedged subprocess on `session/prompt` signaled deterministically by marker file (no fixed sleep).
@@ -71,9 +93,9 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let cancel_wedged = cancel_when(wedged_scratch.join("work/wedged"));
     let wedged_req = test_req(&wedged_scratch, &[], None, LabelEffort::Low, &schema, &cancel_wedged);
     let t2 = Instant::now();
-    let (res, pipes_closed) = run_acp_checked(&wedged_bin, &wedged_req, Duration::from_secs(30), Some(&home));
-    assert!(matches!(res, Err(AgentError::Cancelled(_))), "{res:?}");
-    assert!(pipes_closed, "wedged child survived cancel");
+    let check = run_acp_checked(&wedged_bin, &wedged_req, Duration::from_secs(30), Some(&home), None);
+    assert!(matches!(check.result, Err(AgentError::Cancelled(_))), "{:?}", check.result);
+    assert!(check.pipes_closed, "wedged child survived cancel");
     assert!(t2.elapsed() < Duration::from_secs(15), "wedged cancel took {:?}", t2.elapsed());
 }
 
@@ -82,13 +104,15 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     if cfg!(windows) {
         let ps1 = dir.join("fake_agy.ps1");
-        let spawn_helper_ps = r#"$evName = 'Local\folo-helper-' + [Guid]::NewGuid().ToString('N')
+        let spawn_helper_ps = format!(
+            r#"$evName = 'Local\folo-helper-' + [Guid]::NewGuid().ToString('N')
             $ev = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $evName)
-            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[IO.File]::WriteAllText('helper_started','1'); [Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
+            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[Console]::Out.WriteLine('{HELPER_STDOUT_MARKER}'); [Console]::Out.Flush(); [Console]::Error.WriteLine('{HELPER_STDERR_MARKER}'); [Console]::Error.Flush(); [Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
             $psi.UseShellExecute = $false
             [Diagnostics.Process]::Start($psi) | Out-Null
             [void]$ev.WaitOne(10000)
-            $ev.Dispose()"#;
+            $ev.Dispose()"#
+        );
         let prompt_body = match mode {
             FakeMode::CleanWithHelper => format!(
                 r#"{spawn_helper_ps}
@@ -98,6 +122,7 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
             FakeMode::EarlyExitWithHelper => format!(
                 r#"{spawn_helper_ps}
             [Console]::Error.WriteLine('early crash')
+            [Console]::Error.Flush()
             exit 1"#
             ),
             FakeMode::WedgedOnPrompt => r#"[IO.File]::WriteAllText('wedged', '1')
@@ -168,11 +193,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
         cmd
     } else {
         let sh = dir.join("agy");
-        let spawn_helper_sh = r#"fifo="$PWD/helper_ready.fifo"
+        let spawn_helper_sh = format!(
+            r#"fifo="$PWD/helper_ready.fifo"
       rm -f "$fifo"
       mkfifo "$fifo"
-      ( printf '1\n' > helper_started; printf 'ready\n' > "$fifo"; exec sleep 60 ) &
-      read -r _ < "$fifo""#;
+      ( printf '{HELPER_STDOUT_MARKER}\n'; printf '{HELPER_STDERR_MARKER}\n' >&2; printf 'ready\n' > "$fifo"; exec sleep 60 ) &
+      read -r _ < "$fifo""#
+        );
         let prompt_body = match mode {
             FakeMode::CleanWithHelper => format!(
                 r#"{spawn_helper_sh}

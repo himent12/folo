@@ -315,6 +315,14 @@ pub(super) fn resolve_model_and_effort(
                 suffix_on_model: false,
             };
         }
+        if let Some((variant, var_suffix)) = find_suffixed_model_variant(values, base, suffix) {
+            return ModelResolution {
+                model: Some(variant.to_string()),
+                desired_effort: var_suffix.to_string(),
+                stripped_suffix: false,
+                suffix_on_model: true,
+            };
+        }
         if values.is_empty() {
             return ModelResolution {
                 model: Some(base.to_string()),
@@ -323,6 +331,15 @@ pub(super) fn resolve_model_and_effort(
                 suffix_on_model: false,
             };
         }
+    } else if let Some((variant, var_suffix)) = find_suffixed_model_variant(values, raw, &default_effort) {
+        // Studio's catalog collapses effort-suffixed models (`gemini-4-neon-low`, `gemini-4-neon-high`) to their
+        // base ID (`gemini-4-neon`); resolve back to the advertised variant matching the requested effort tier.
+        return ModelResolution {
+            model: Some(variant.to_string()),
+            desired_effort: var_suffix.to_string(),
+            stripped_suffix: false,
+            suffix_on_model: true,
+        };
     }
     ModelResolution {
         model: Some(raw.to_string()),
@@ -330,6 +347,29 @@ pub(super) fn resolve_model_and_effort(
         stripped_suffix: false,
         suffix_on_model: false,
     }
+}
+
+/// Finds an advertised effort-suffixed model option matching `base` and `desired_effort` (preferring an exact suffix
+/// match over a same-tier equivalent such as `minimal` for `low`, never crossing reasoning tiers).
+fn find_suffixed_model_variant<'a>(
+    values: &'a [(String, String)],
+    base: &str,
+    desired_effort: &str,
+) -> Option<(&'a str, &'a str)> {
+    let mut fallback: Option<(&'a str, &'a str)> = None;
+    for (v, _) in values {
+        let Some((opt_base, opt_suffix)) = split_effort_suffix(v) else { continue };
+        if !opt_base.eq_ignore_ascii_case(base) {
+            continue;
+        }
+        if opt_suffix.eq_ignore_ascii_case(desired_effort) {
+            return Some((v.as_str(), opt_suffix));
+        }
+        if fallback.is_none() && suffix_matches_effort(opt_suffix, desired_effort) {
+            fallback = Some((v.as_str(), opt_suffix));
+        }
+    }
+    fallback
 }
 
 /// Extracts legacy `session/new.models.availableModels` entries as `(modelId, name)` pairs.

@@ -1,7 +1,7 @@
 //! Single-turn ACP v1 JSON-RPC session state machine and mode/model/effort invariant enforcement.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,10 @@ use crate::label::agent::{AgentError, AgentReply, AgentRequest, Failure, POLL};
 pub(super) const CANCEL_GRACE: Duration = Duration::from_millis(500);
 /// How long to drain buffered stdout/stderr after the parent process has exited before reporting early exit.
 pub(super) const EXIT_DRAIN: Duration = Duration::from_millis(250);
+/// Maximum queued lines drained before dispatching an RPC; bounds work if a noisy child/helper floods stdout.
+const MAX_DRAIN_LINES: usize = 256;
+/// Maximum wall-clock budget for draining queued stdout lines before dispatching an RPC.
+const DRAIN_BUDGET: Duration = Duration::from_millis(250);
 
 /// Outcome of driving one ACP conversation, plus whether the caller must kill the child tree immediately (skipping
 /// any graceful exit window, e.g. on cancellation, timeout, or a tool/mode/config policy violation).
@@ -43,6 +47,8 @@ struct SessionState {
     legacy_mode: Option<String>,
     /// Set by `current_mode_update` during an RPC call so `session/set_mode` never overwrites a live update.
     mode_notified_in_call: bool,
+    /// Set by `config_option_update` during an RPC call so legacy `session/set_model` knows whether effort was refreshed.
+    config_updated_in_call: bool,
     /// Set once step 2b verifies restricted mode; any later mode drift fails closed immediately.
     enforce_mode: bool,
     /// Set once step 3 verifies model and effort; any later `config_option_update` drift fails closed immediately.
@@ -213,6 +219,7 @@ fn handle_incoming_line(
                 }
             }
             Some("config_option_update") => {
+                state.config_updated_in_call = true;
                 state.apply_config_snapshot(parse_config_options(update.get("configOptions")));
                 if state.enforce_mode
                     && let Err(AgentError::Unavailable(why)) = state.verify_mode()
@@ -236,16 +243,44 @@ fn handle_incoming_line(
     Ok(None)
 }
 
-/// Drains any already-queued notifications before dispatching the next RPC (e.g. `session/prompt`).
+/// Drains already-queued notifications before dispatching the next RPC (e.g. `session/prompt`), while checking
+/// cancellation, call deadline, parent exit, and a strict line/time budget so sustained stdout can never starve Stop.
+#[allow(clippy::too_many_arguments)]
 fn drain_pending(
     recv: &mpsc::Receiver<String>,
     state: &mut SessionState,
     send: &mut dyn FnMut(&Value) -> bool,
     stderr_text: &dyn Fn() -> String,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    parent_exited: &mut dyn FnMut() -> bool,
 ) -> Result<(), AgentError> {
+    let drain_deadline = (Instant::now() + DRAIN_BUDGET).min(deadline);
+    let mut drained = 0usize;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            state.kill_immediately = true;
+            return Err(AgentError::Cancelled(state.usage.to_usage(0)));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            state.kill_immediately = true;
+            return Err(AgentError::Timeout(state.usage.to_usage(0)));
+        }
+        if parent_exited() {
+            state.kill_immediately = true;
+            return Err(unexpected_exit(&state.usage, stderr_text));
+        }
         match recv.try_recv() {
             Ok(line) => {
+                if drained >= MAX_DRAIN_LINES || now >= drain_deadline {
+                    state.kill_immediately = true;
+                    return Err(AgentError::Failed(Failure {
+                        used: state.usage.to_usage(0),
+                        ..Failure::new("`agy acp` flooded stdout before the next request")
+                    }));
+                }
+                drained += 1;
                 let _ = handle_incoming_line(&line, None, false, false, state, send)?;
             }
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
@@ -322,7 +357,7 @@ pub(super) fn drive_acp_inner(
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         // Drain any already-queued notifications, verify active invariants, and check cancellation/deadline right
         // before dispatching so a late mode/config drift or stop never sends a billable prompt.
-        drain_pending(recv, state, send, stderr_text)?;
+        drain_pending(recv, state, send, stderr_text, req.cancel, deadline, parent_exited)?;
         if state.enforce_mode {
             state.verify_mode()?;
         }
@@ -338,6 +373,7 @@ pub(super) fn drive_acp_inner(
             return Err(AgentError::Timeout(state.usage.to_usage(0)));
         }
         state.mode_notified_in_call = false;
+        state.config_updated_in_call = false;
         if !send(&msg) {
             return Err(unexpected_exit(&state.usage, stderr_text));
         }
@@ -645,6 +681,20 @@ pub(super) fn drive_acp_inner(
                     false,
                     &mut state,
                 ));
+                // Legacy `session/set_model` returns `{}` without refreshed `configOptions`: invalidate any prior
+                // effort reading from the old model unless a live `config_option_update` already refreshed it.
+                if !state.config_updated_in_call {
+                    for opt in &mut state.config_options {
+                        let is_effort = opt.category.as_deref() == Some("thought_level")
+                            || matches!(
+                                opt.id.to_ascii_lowercase().as_str(),
+                                "thought_level" | "thinking_level" | "effort"
+                            );
+                        if is_effort {
+                            opt.current_value = None;
+                        }
+                    }
+                }
             }
             verified_legacy_model = Some(target);
         } else {
@@ -655,6 +705,12 @@ pub(super) fn drive_acp_inner(
                 kill_immediately: state.kill_immediately,
             };
         }
+    } else if let Some(cur) = find_model_option(&state.config_options)
+        .and_then(|o| o.current_value.as_deref())
+        .or(verified_legacy_model.as_deref())
+    {
+        // Pin the session's reported default model so a later setter or mid-prompt update cannot drift away.
+        state.expected_model = Some(cur.to_string());
     }
 
     if let Some(opt) = find_effort_option(&state.config_options).cloned() {
