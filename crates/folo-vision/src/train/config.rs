@@ -104,7 +104,7 @@ pub struct TrainConfig {
     /// `min_box_size` (its `topk = 7` and `topk2 = 1` are fixed, MODEL.md §6.6). Missing in configs from before it:
     /// `false`, the §7.3 defaults those runs trained that branch with, so they resume bit-exactly. Like the other
     /// versioned keys, a partial JSON decoded straight into this type reads as such a config; new runs of the CLI, of
-    /// the API (`from_api`) and from `TrainConfig::default()` have `true`.
+    /// the API (`from_api`) and from `TrainConfig::default()` default to `true`.
     #[serde(default = "legacy_o2o_keeps_tal")]
     pub o2o_keeps_tal: bool,
     /// Stop after this many epochs without a fitness gain.

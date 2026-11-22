@@ -20,7 +20,7 @@ AMP, `auto` optimizer). **o2m** is the default one-to-many head, **o2o** the opt
 | 2a | MuSGD orthogonalises depthwise weights across channels | **not a defect**: the reference routes every rank-2 and rank-4 parameter to Muon. As a candidate improvement: tied alone (`dw`, +0.0003), and +0.0012 with the scale rule (`dws`), under the gate's +0.0030 | `ultralytics/engine/trainer.py:1201` |
 | 2b | `muon_scale` should use the flattened matrix | **not a defect**: the reference uses the last two dimensions of the unflattened gradient. As a candidate improvement: lost | `ultralytics/optim/muon.py:106` |
 | 3 | the one-to-one branch overwrites the user's `loss.tal.*` | **a defect, fixed**: `--set` promises the key, and the branch silently used the defaults | docs/CLI.md (`--set`), `train/epoch.rs` before this change |
-| 4 | AMP clipping overflows to NaN at a loss scale of 2^125 | **no NaN**: the overflow means "no clip", and at the default clip norm the scale does not get there | below |
+| 4 | AMP clipping overflows to NaN at a loss scale of 2^125 | **no NaN**: the overflow means "no clip", and no logged run came near that scale | below |
 
 ## The gate
 
@@ -94,8 +94,8 @@ only the SGD update at the group's LR.
 - `dw` tied the control: +0.0003 on the mean, above it on two seeds of three.
 - `scale` alone finished below the control on seed 0, so it failed the gate there.
 - `dws` (both) was above the control on all three seeds, by +0.0015, +0.0017 and +0.0005, and **+0.0012 on the mean**. The
-  gate asks for +0.0030, so it is not shipped and `auto` is unchanged. With no real effect and fair signs, all three
-  seeds land above the control one time in eight, so this is a lead for a longer run and not a result: at the size the
+  gate asks for +0.0030, so it is not shipped and `auto` is unchanged. With no real effect and independent, fair signs,
+  all three seeds land above the control one time in eight, so this is a lead for a longer run and not a result: at the size the
   gate asks for, the report's argument did not show up in training.
 
 ## Finding 3: the one-to-one branch and `loss.tal.*`
@@ -110,8 +110,8 @@ The fix (`TalConfig::one_to_one`, `LossConfig::o2o_branch`): the branch takes th
 and `topk2` stay the one-to-many branch's.
 
 `--resume` is promised to be bit-exact, and a run started before the fix with a custom `loss.tal` trained this branch on the
-defaults. So the behaviour is versioned like `warmup_floor` and `ema_run_fraction`: a new key `o2o_keeps_tal`, true for new
-runs and false when a stored config does not have it.
+defaults. So the behaviour is versioned like `warmup_floor` and `ema_run_fraction`: a new key `o2o_keeps_tal`, on by default for
+new runs and false when a stored config does not have it.
 
 Test: `o2o_branch_takes_the_runs_assigner_settings` (`crates/folo-vision/tests/train.rs`). After one optimizer step the
 branch's weights depend only on its own loss, so they differ with `loss.tal.beta` exactly when its assigner reads it (before
@@ -131,14 +131,15 @@ harmless:
 2. **Not clipping is the right answer there.** Clipping would need a buffer norm above `max_norm · S`, at least 2^128. The
    weight gradients are built from f16 input gradients (docs/MODEL.md §8.8), which overflow to infinity at 65504 and skip
    the step, so they stay many orders of magnitude below that.
-3. **At the default `clip_grad_norm` the scale does not get there.** From a fresh scaler it starts at 2^16 and doubles
-   after 2000 finite steps in a row, so 2^125 takes at least 218,000 finite optimizer steps (an overflow halves the scale
-   and restarts the count, which only adds to that), with every f16 input gradient below about 2^-109 in the original
-   units, and a scaled loss still finite in `f32`. As an observation, the 720 per-epoch scale logs of this wave's COCO
-   and proxy runs never pass **2^17**.
+3. **No logged run came near that scale.** A fresh default scaler starts at 2^16 and doubles after 2000 finite steps in
+   a row, so 2^125 takes at least 218,000 finite optimizer steps (an overflow halves the scale and restarts the count,
+   which only adds to that), with every f16 input gradient below about 2^-109 in the original units and a scaled loss
+   still finite in `f32`. Zero gradients qualify, so a run with all its loss gains at 0 could get there. As an
+   observation, the 720 per-epoch scale logs of this wave's COCO and proxy runs never pass **2^17**.
 
-A very large `--set clip_grad_norm` (1e35) reaches the same overflow at the first step, at any scale. Points 1 and 2 hold
-there too: no NaN, and no clip.
+A very large `--set clip_grad_norm` reaches the same overflow sooner: it happens whenever `clip_grad_norm · S` passes
+`f32::MAX`, as 1e35 does at the fresh AMP scale of 2^16 (and does not after five backoffs, at 2^11, or without AMP, where
+`S` is 1). Points 1 and 2 hold there too: no NaN, and no clip.
 
 So the fix is a comment at the line (`crates/folo-nn/src/optim/grads.rs`), as the brief asked for this case.
 
