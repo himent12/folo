@@ -26,6 +26,8 @@ fn gpu_tal(cfg: &LossConfig) -> folo_gpu::detect::TalSettings {
         beta: t.beta,
         eps: t.eps,
         min_box_size: t.min_box_size,
+        eps_free: t.eps_free,
+        nwd_weight: t.nwd_weight,
     }
 }
 
@@ -36,6 +38,16 @@ pub(super) fn detection_loss_device(
     targets: &[ImageTargets],
     cfg: &LossConfig,
 ) -> Result<LossOutput> {
+    Ok(detection_loss_device_with_assignment(box_raw, cls_raw, anchors, targets, cfg)?.0)
+}
+
+pub(super) fn detection_loss_device_with_assignment(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+) -> Result<(LossOutput, Option<folo_gpu::detect::Assignment>)> {
     check_inputs(box_raw, cls_raw, anchors, cfg)?;
     let tables = gpu_targets(targets);
     let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
@@ -44,20 +56,25 @@ pub(super) fn detection_loss_device(
         reg_max: cfg.reg_max,
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         tal: gpu_tal(cfg),
+        mal_gamma: cfg.mal_gamma,
+        nwd_weight: cfg.nwd_weight,
     };
-    let out = folo_gpu::detect::detection_loss(box_raw, cls_raw, &at, &gts, &s)?;
+    let (out, asg) = folo_gpu::detect::detection_loss_with_assignment(box_raw, cls_raw, &at, &gts, &s)?;
     // The loss's one readback: the reported items, the positives and the target score sum.
     let st = out.stats.to_vec::<f32>()?;
     if st[6] != 0.0 {
-        return nan_loss(cls_raw.device());
+        return Ok((nan_loss(cls_raw.device())?, None));
     }
-    Ok(LossOutput {
-        total: out.total,
-        total_value: st[0],
-        items: LossItems { box_: st[1], cls: st[2], dfl: st[3] },
-        num_fg: st[4] as usize,
-        target_score_sum: st[5],
-    })
+    Ok((
+        LossOutput {
+            total: out.total,
+            total_value: st[0],
+            items: LossItems { box_: st[1], cls: st[2], dfl: st[3] },
+            num_fg: st[4] as usize,
+            target_score_sum: st[5],
+        },
+        Some(asg),
+    ))
 }
 
 /// [`assign_batch`] on a folo-gpu device (the kernels [`detection_loss`] uses there), downloaded into the same

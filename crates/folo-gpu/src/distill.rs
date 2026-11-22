@@ -31,6 +31,8 @@ pub struct KdSettings {
     pub temperature: f32,
     /// `N`, the supervised one-to-many loss's normaliser (`max(target score sum, 1)`).
     pub normaliser: f32,
+    /// BCKD focal disagreement exponent (`0.0` = plain Bernoulli KL).
+    pub bckd_gamma: f32,
 }
 
 /// What [`distill_loss`] returns.
@@ -96,7 +98,10 @@ fn check(student: [&Tensor; 2], teacher: [&Tensor; 2], s: &KdSettings) -> Result
     if !(s.temperature.is_finite() && s.temperature > 0.0 && s.normaliser >= 1.0) {
         return Err(err(format!("temperature {} must be > 0 and N {} >= 1", s.temperature, s.normaliser)));
     }
-    let d = KdDesc { b, a, nc, reg_max: s.reg_max, teacher_f16: tf == DType::F16 };
+    if !(s.bckd_gamma.is_finite() && s.bckd_gamma >= 0.0) {
+        return Err(err(format!("bckd_gamma {} must be finite and >= 0", s.bckd_gamma)));
+    }
+    let d = KdDesc { b, a, nc, reg_max: s.reg_max, teacher_f16: tf == DType::F16, bckd_gamma: s.bckd_gamma };
     d.validate().map_err(|e| err(e.to_string()))?;
     Ok(d)
 }
@@ -104,7 +109,7 @@ fn check(student: [&Tensor; 2], teacher: [&Tensor; 2], s: &KdSettings) -> Result
 /// Whether [`distill_loss`] takes a student head of `b` images, `nc` classes, `a` anchors and `reg_max` bins per
 /// side (on a folo-gpu device).
 pub fn supports(b: usize, nc: usize, a: usize, reg_max: usize) -> bool {
-    KdDesc { b, a, nc, reg_max, teacher_f16: false }.validate().is_ok()
+    KdDesc { b, a, nc, reg_max, teacher_f16: false, bckd_gamma: 0.0 }.validate().is_ok()
 }
 
 /// Everything the backward reads, kept alive by the custom op.
@@ -113,6 +118,8 @@ struct Saved {
     device: Device,
     desc: KdDesc,
     inputs: [Tensor; 4],
+    gt_dense: Option<Tensor>,
+    ver_w: Option<Tensor>,
     temp: f32,
     scales: [f32; 2],
 }
@@ -131,11 +138,15 @@ impl Saved {
         let bufs = Buffers { ctx: self.ctx.clone(), device: self.device };
         let (dbox, dbox_b) = bufs.alloc(DType::F32, &[d.b, 4 * d.reg_max, d.a], false)?;
         let (dcls, dcls_b) = bufs.alloc(DType::F32, &[d.b, d.nc, d.a], false)?;
+        let gt_b = self.gt_dense.as_ref().map(&buf).transpose()?;
+        let vw_b = self.ver_w.as_ref().map(&buf).transpose()?;
         k::backward(
             &self.ctx,
             d,
             [&buf(s_box)?, &buf(s_cls)?],
             [&buf(t_box)?, &buf(t_cls)?],
+            gt_b.as_ref(),
+            vw_b.as_ref(),
             self.temp,
             self.scales,
             &gbuf,
@@ -143,8 +154,13 @@ impl Saved {
             &dcls_b,
         )
         .map_err(gpu)?;
-        // No gradient for the teacher's outputs (inputs only so that autograd checks their storage versions).
-        Ok(vec![Some(dbox), Some(dcls), None, None])
+        // No gradient for the teacher's outputs (and optional saved gt_dense): inputs only so that autograd checks
+        // their storage versions.
+        let mut grads = vec![Some(dbox), Some(dcls), None, None];
+        if self.gt_dense.is_some() {
+            grads.push(None);
+        }
+        Ok(grads)
     }
 }
 
@@ -168,6 +184,21 @@ pub fn distill_loss(
     teacher_cls: &Tensor,
     s: &KdSettings,
 ) -> Result<DeviceKd> {
+    distill_loss_with_context(box_raw, cls_raw, teacher_box, teacher_cls, s, None, false)
+}
+
+/// [`distill_loss`] with optional supervised [`crate::detect::Assignment`] context for conflict-free BCKD
+/// (`s.bckd_gamma > 0` clamps positive teacher targets to `max(p_t, t_gt)`) and positive-only GT-verified DFL KD
+/// (`gt_verify = true`).
+pub fn distill_loss_with_context(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    teacher_box: &Tensor,
+    teacher_cls: &Tensor,
+    s: &KdSettings,
+    gt_asg: Option<&crate::detect::Assignment>,
+    gt_verify: bool,
+) -> Result<DeviceKd> {
     let d = check([box_raw, cls_raw], [teacher_box, teacher_cls], s)?;
     let device = box_raw.device();
     let ctx = context_for(device).ok_or_else(|| err(format!("{device} is not a folo-gpu device")))?;
@@ -176,6 +207,71 @@ pub fn distill_loss(
     let (sc, sc_b) = dense(cls_raw)?;
     let (tb, tb_b) = dense(teacher_box)?;
     let (tc, tc_b) = dense(teacher_cls)?;
+    if let Some(asg) = gt_asg {
+        let ad = &asg.desc;
+        if (ad.b, ad.a, ad.nc, ad.reg_max) != (d.b, d.a, d.nc, d.reg_max) {
+            return Err(err(format!(
+                "assignment (B={}, A={}, nc={}, reg_max={}) does not match distillation head ({}, {}, {}, {})",
+                ad.b, ad.a, ad.nc, ad.reg_max, d.b, d.a, d.nc, d.reg_max
+            )));
+        }
+        ad.validate().map_err(gpu)?;
+        for (name, t, want_dims) in [
+            ("dense", &asg.dense, vec![2, d.b, d.a]),
+            ("meta", &asg.meta, vec![ad.meta_words()]),
+            ("picks", &asg.picks, vec![d.b, ad.g, ad.k, 3]),
+            ("slots", &asg.slots, vec![d.b, ad.g, ad.k, 2]),
+        ] {
+            if t.device() != device {
+                return Err(Error::DeviceMismatch { op: "folo_gpu::distill", lhs: device, rhs: t.device() });
+            }
+            if t.dtype() != DType::U32 {
+                return Err(Error::DTypeMismatch {
+                    op: "folo_gpu::distill",
+                    expected: DType::U32,
+                    got: t.dtype(),
+                });
+            }
+            if t.dims() != want_dims.as_slice() {
+                return Err(err(format!(
+                    "assignment.{name} shape {:?} does not match expected {want_dims:?}",
+                    t.dims()
+                )));
+            }
+        }
+    }
+    let (gt_dense_t, gt_dense_b) = match gt_asg.filter(|_| s.bckd_gamma > 0.0) {
+        Some(asg) => {
+            let b = dense_buffer(&asg.dense).ok_or_else(|| err("assignment dense is not on GPU"))?;
+            (Some(asg.dense.clone()), Some(b))
+        }
+        None => (None, None),
+    };
+    let (ver_w_t, ver_w_b) = match gt_asg.filter(|_| gt_verify) {
+        Some(asg) => {
+            let (vw_t, vw_b) = bufs.alloc(DType::F32, &[d.b, d.a], true)?;
+            let meta_b = dense_buffer(&asg.meta).ok_or_else(|| err("assignment meta is not on GPU"))?;
+            let pick_b = dense_buffer(&asg.picks).ok_or_else(|| err("assignment picks is not on GPU"))?;
+            let slot_b = dense_buffer(&asg.slots).ok_or_else(|| err("assignment slots is not on GPU"))?;
+            k::gt_verify_weights(
+                &ctx,
+                &asg.desc,
+                d.teacher_f16,
+                &sb_b,
+                &tb_b,
+                &meta_b,
+                &pick_b,
+                &slot_b,
+                &vw_b,
+            )
+            .map_err(gpu)?;
+            (Some(vw_t), Some(vw_b))
+        }
+        None if gt_verify => {
+            return Err(err("gt_verify requires a matching device Assignment"));
+        }
+        None => (None, None),
+    };
     let (_pc, pc) = bufs.alloc(DType::F32, &[d.cls_partials()], false)?;
     let (_pd, pd) = bufs.alloc(DType::F32, &[d.dfl_partials(&ctx).map_err(gpu)?], false)?;
     let (_misc, misc) = bufs.alloc(DType::U32, &[4], true)?;
@@ -183,20 +279,40 @@ pub fn distill_loss(
     let (total, total_b) = bufs.alloc(DType::F32, &[], false)?;
     let (n, t, nb) = (s.normaliser, s.temperature, d.b as f32);
     let fwd_scales = [s.cls_gain / n, s.dfl_gain * t * t / (4.0 * n), nb];
-    k::forward(&ctx, &d, [&sb_b, &sc_b], [&tb_b, &tc_b], t, fwd_scales, &pc, &pd, &misc, &stats_b, &total_b)
-        .map_err(gpu)?;
+    k::forward(
+        &ctx,
+        &d,
+        [&sb_b, &sc_b],
+        [&tb_b, &tc_b],
+        gt_dense_b.as_ref(),
+        ver_w_b.as_ref(),
+        t,
+        fwd_scales,
+        &pc,
+        &pd,
+        &misc,
+        &stats_b,
+        &total_b,
+    )
+    .map_err(gpu)?;
+    let gt_input = gt_dense_t.clone();
     let saved = Arc::new(Saved {
         ctx: ctx.clone(),
         device,
         desc: d,
         inputs: [sb, sc, tb, tc],
+        gt_dense: gt_dense_t,
+        ver_w: ver_w_t,
         temp: t,
         // In f64, so `B · λ` cannot overflow before the division by `N` (the tensor path's backward divides first).
         scales: backward_scales(s, d.b),
     });
-    // The teacher's outputs are inputs too, without gradient: the backward reads them, so autograd must refuse a
-    // backward after they were overwritten in place (the saved dense handles may share their storage).
-    let inputs = [box_raw, cls_raw, teacher_box, teacher_cls];
+    // The teacher's outputs (and optional `gt_dense`) are inputs too, without gradient: the backward reads them,
+    // so autograd must refuse a backward after they were overwritten in place.
+    let mut inputs = vec![box_raw, cls_raw, teacher_box, teacher_cls];
+    if let Some(gt) = gt_input.as_ref() {
+        inputs.push(gt);
+    }
     let total = Tensor::custom_op("distill_loss_gpu", &inputs, total, move |g| saved.backward(g))?;
     Ok(DeviceKd { total, stats })
 }

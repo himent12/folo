@@ -191,6 +191,36 @@ fn gen_optim_many(spec: &Spec) -> String {
              \x20     let denom = sqrt(v) / pf(7u) + pf(8u);\n\
              \x20     p = p + (-pf(6u)) * (m / denom);\n"
         }
+        4 => {
+            "      var decay = 0.0;\n\
+             \x20     if (FLAG) { decay = pf(3u) * p; }\n\
+             \x20     p = p - pf(1u) * g - decay;\n"
+        }
+        5 => {
+            "      let mu = pf(2u);\n\
+             \x20     let b = mu * S0_T[i] + g;\n\
+             \x20     S0_T[i] = b;\n\
+             \x20     var u = b;\n\
+             \x20     if (NESTEROV) { u = g + mu * b; }\n\
+             \x20     var decay = 0.0;\n\
+             \x20     if (FLAG) { decay = pf(3u) * p; }\n\
+             \x20     p = p - pf(1u) * u - decay;\n"
+        }
+        6 => {
+            "      var decay = 0.0;\n\
+             \x20     if (FLAG && g * p > 0.0) { decay = pf(3u) * p; }\n\
+             \x20     p = p - pf(1u) * g - decay;\n"
+        }
+        7 => {
+            "      let mu = pf(2u);\n\
+             \x20     let b = mu * S0_T[i] + g;\n\
+             \x20     S0_T[i] = b;\n\
+             \x20     var u = b;\n\
+             \x20     if (NESTEROV) { u = g + mu * b; }\n\
+             \x20     var decay = 0.0;\n\
+             \x20     if (FLAG && u * p > 0.0) { decay = pf(3u) * p; }\n\
+             \x20     p = p - pf(1u) * u - decay;\n"
+        }
         _ => "      p = p * pf(1u) + g * pf(2u);\n",
     };
     for t in 0..j {
@@ -494,6 +524,11 @@ fn update_params(u: &OptimUpdate, momentum_buffer: bool) -> Result<(u32, bool, b
             let mode = if momentum_buffer { 1 } else { 0 };
             (mode, weight_decay != 0.0, nesterov, Params::new().u(0).f(lr).f(momentum).f(weight_decay))
         }
+        OptimUpdate::SgdDecoupled { lr, momentum, wd_step, nesterov, cautious } => {
+            let base = if cautious { 6 } else { 4 };
+            let mode = base + u32::from(momentum_buffer);
+            (mode, wd_step != 0.0, nesterov, Params::new().u(0).f(lr).f(momentum).f(wd_step))
+        }
         OptimUpdate::AdamW {
             decay,
             beta1,
@@ -534,6 +569,19 @@ pub enum OptimUpdate {
         weight_decay: f32,
         /// Nesterov momentum.
         nesterov: bool,
+    },
+    /// Decoupled or Cautious-Decoupled SGD (P3).
+    SgdDecoupled {
+        /// Learning rate for `u`.
+        lr: f32,
+        /// Momentum.
+        momentum: f32,
+        /// Pre-multiplied decoupled decay `lr_unscaled · wd`.
+        wd_step: f32,
+        /// Nesterov momentum.
+        nesterov: bool,
+        /// Cautious mask (`u · p > 0`).
+        cautious: bool,
     },
     /// AdamW with precomputed bias corrections.
     AdamW {
@@ -588,6 +636,11 @@ pub fn optimizer_step(
         OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov } => {
             let mode = if s0.is_some() { 1 } else { 0 };
             (mode, weight_decay != 0.0, nesterov, Params::new().uz(n)?.f(lr).f(momentum).f(weight_decay))
+        }
+        OptimUpdate::SgdDecoupled { lr, momentum, wd_step, nesterov, cautious } => {
+            let base = if cautious { 6 } else { 4 };
+            let mode = base + u32::from(s0.is_some());
+            (mode, wd_step != 0.0, nesterov, Params::new().uz(n)?.f(lr).f(momentum).f(wd_step))
         }
         OptimUpdate::AdamW {
             decay,

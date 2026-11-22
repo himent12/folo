@@ -4,7 +4,7 @@
 // positive, the dense per-anchor map DENSE = [label + 1 | t bits] (zeroed before: 0 means background).
 // With K2 > 0 (the one-to-one assignment's second filter) only the gt's first K2 positives stay positive: the picks
 // are in (m descending, anchor ascending) order, so those are its highest-metric ones.
-// Spec: K (<= 64), K2 (0 = off). Params: 0 = A, 1 = G, 2 = B·A, 3 = label word offset, 4 = eps.
+// Spec: K (<= 64), K2 (0 = off). Params: 0 = A, 1 = G, 2 = B·A, 3 = label word offset, 4 = eps, 5 = eps_free (u32).
 @group(0) @binding(1) var<storage, read> PICK: array<u32>;
 @group(0) @binding(2) var<storage, read> OWN: array<u32>;
 @group(0) @binding(3) var<storage, read> META: array<u32>;
@@ -57,7 +57,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     if (lid < K) {
         var t = 0.0;
         if (pos) {
-            t = m * UM[0] / (MM[0] + pf(4u));
+            if (pu(5u) != 0u) {
+                t = select(0.0, (m / MM[0]) * UM[0], MM[0] > 0.0);
+            } else {
+                t = m * UM[0] / (MM[0] + pf(4u));
+            }
             let cell = b * na + a;
             DENSE[cell] = META[pu(3u) + gi] + 1u;
             DENSE[pu(2u) + cell] = bitcast<u32>(t);

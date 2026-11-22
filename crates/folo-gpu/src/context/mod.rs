@@ -191,6 +191,10 @@ pub struct Capabilities {
     /// The device was created with cooperative matrices and passed the tensor-core self-test, so the f16 GEMM
     /// and conv kernels can run on tensor cores (see [`GpuContext::tensor_cores`] for the run-time switch).
     pub coop_f16: bool,
+    /// Compute-shader subgroup operations (`enable subgroups;`) are enabled on the device.
+    pub subgroups: bool,
+    /// Subgroup (warp / wave) size range `(min, max)` reported by the adapter.
+    pub subgroup_size: (u32, u32),
     /// Largest buffer in bytes.
     pub max_buffer_size: u64,
     /// Largest storage binding in bytes.

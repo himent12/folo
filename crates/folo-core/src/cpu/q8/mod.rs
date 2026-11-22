@@ -1,29 +1,36 @@
-//! int8 inference on the CPU (docs/MODEL.md §9.6, docs/CORE.md "int8 convs"): u8 activations on an affine grid,
-//! s8 weights, exact i32 accumulation with AVX-VNNI (`vpdpbusd`) where the CPU has it and a portable kernel
-//! with the same integers where it does not.
+//! int8 inference on the CPU (docs/MODEL.md §9.6, docs/CORE.md "int8 convs"): u8 activations on affine grids
+//! (per-tensor or per-channel in C4), s8 weights, exact i32 accumulation with AVX-VNNI (`vpdpbusd`) where the CPU
+//! has it and a portable kernel with the same integers where it does not.
 //!
 //! Activations are channel-blocked ("C4"): `[N][C / 4][H][W]` words of four u8 codes, channels `4g..4g + 4` of a
 //! pixel in one `u32` (byte `t` is channel `4g + t`), so a word is one K step of four for the kernel. Every
 //! buffer an activation lives in has [`SLACK`] words after its last plane: the kernel reads whole 24-column
 //! tiles and drops the columns past a plane.
 //!
-//! - `kernel.rs`: the 4 × 24 micro-kernel (VNNI and portable) and the epilogue (dequantise, bias, SiLU,
-//!   residual, requantise), the same bits on both paths.
-//! - `conv.rs`: packed weights ([`QConv`]) and the conv driver ([`conv`]).
-//! - this file: grids, C4 views, packing from and to `f32`, max pools and upsamples on codes.
+//! - `silu.rs`: bit-exact division-free minimax fast SiLU (`silu_q8`, scalar and AVX2).
+//! - `kernel.rs`: the 4 × 24 micro-kernel (VNNI and portable), L1 `TileF32` part accumulator, and per-channel
+//!   epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on both paths.
+//! - `stem.rs`: direct `u8` RGB0-to-C4 AVX-VNNI stem ([`QStem`], [`stem_u8`], [`pack_f32_to_rgb0_u8`]).
+//! - `conv.rs`: packed weights ([`QConv`]) and the conv drivers ([`conv`], [`conv_per_channel`]).
+//! - this file: grids, C4 views, AVX2-vectorised packing from and to `f32`, max pools and upsamples on codes.
 //! - `tests.rs`: everything against a scalar integer reference.
 
 mod conv;
 mod kernel;
+mod silu;
+mod stem;
 #[cfg(test)]
 mod tests;
 
 use rayon::prelude::*;
 
 pub use conv::{
-    MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, conv_size, out_size, quantize_weights,
+    MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, conv_per_channel, conv_size, out_size,
+    quantize_weights, should_decouple_parts,
 };
-pub use kernel::{silu_q8, uses_vnni};
+pub use kernel::uses_vnni;
+pub use silu::silu_q8;
+pub use stem::{PIXEL_SCALE, QStem, pack_f32_to_rgb0_u8, stem_u8};
 
 /// Words of readable slack after an activation's last plane.
 pub const SLACK: usize = 64;
@@ -82,7 +89,7 @@ pub struct C4<'a> {
     pub img_stride: usize,
     /// Channels (a multiple of 4).
     pub c: usize,
-    /// The grid's zero code (the conv pads with it).
+    /// The grid's zero code (the single-grid conv pads with it; per-channel convs use the weights' zero points).
     pub zero: u8,
 }
 
@@ -125,21 +132,165 @@ pub fn recycle(v: Vec<u32>) {
     crate::cpu::recycle(unsafe { Vec::from_raw_parts(v.as_ptr() as *mut f32, v.len(), v.capacity()) });
 }
 
+/// Quantise one 4-channel slice `p0..p3[0..len]` into C4 words `out[0..len]` using per-channel grids `gs`,
+/// bit-exact between scalar and AVX2.
+fn quantize_group(p0: &[f32], p1: &[f32], p2: &[f32], p3: &[f32], gs: [Grid; 4], out: &mut [u32]) {
+    #[cfg(target_arch = "x86_64")]
+    if kernel::uses_avx2() {
+        // SAFETY: AVX2 and FMA were detected; slices have identical lengths.
+        return unsafe { quantize_group_avx2(p0, p1, p2, p3, gs, out) };
+    }
+    for i in 0..out.len() {
+        out[i] = u32::from_le_bytes([
+            gs[0].quantize(p0[i]),
+            gs[1].quantize(p1[i]),
+            gs[2].quantize(p2[i]),
+            gs[3].quantize(p3[i]),
+        ]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn quantize_group_avx2(
+    p0: &[f32],
+    p1: &[f32],
+    p2: &[f32],
+    p3: &[f32],
+    gs: [Grid; 4],
+    out: &mut [u32],
+) {
+    use std::arch::x86_64::*;
+    let len = out.len();
+    let (lo, hi) = (_mm256_set1_ps(-512.0), _mm256_set1_ps(512.0));
+    let inv0 = _mm256_set1_ps(gs[0].inv());
+    let inv1 = _mm256_set1_ps(gs[1].inv());
+    let inv2 = _mm256_set1_ps(gs[2].inv());
+    let inv3 = _mm256_set1_ps(gs[3].inv());
+    let (z0, z1, z2, z3) = (gs[0].zero as i16, gs[1].zero as i16, gs[2].zero as i16, gs[3].zero as i16);
+    let z01 = _mm256_setr_epi16(z0, z0, z0, z0, z1, z1, z1, z1, z0, z0, z0, z0, z1, z1, z1, z1);
+    let z23 = _mm256_setr_epi16(z2, z2, z2, z2, z3, z3, z3, z3, z2, z2, z2, z2, z3, z3, z3, z3);
+    let transpose = _mm256_setr_epi8(
+        0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7,
+        11, 15,
+    );
+    let mut i = 0;
+    // SAFETY: `i + 8 <= len` and all five slices have length `len`.
+    unsafe {
+        while i + 8 <= len {
+            let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p0.as_ptr().add(i)), inv0), lo),
+                hi,
+            ));
+            let v1 = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p1.as_ptr().add(i)), inv1), lo),
+                hi,
+            ));
+            let v2 = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p2.as_ptr().add(i)), inv2), lo),
+                hi,
+            ));
+            let v3 = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p3.as_ptr().add(i)), inv3), lo),
+                hi,
+            ));
+            let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01);
+            let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v2, v3), z23);
+            let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, bytes);
+            i += 8;
+        }
+    }
+    for j in i..len {
+        out[j] = u32::from_le_bytes([
+            gs[0].quantize(p0[j]),
+            gs[1].quantize(p1[j]),
+            gs[2].quantize(p2[j]),
+            gs[3].quantize(p3[j]),
+        ]);
+    }
+}
+
 /// `[n][c][hw]` `f32` (`c` a multiple of 4) into C4 codes on `grid`.
 pub fn quantize(x: &[f32], n: usize, c: usize, hw: usize, grid: Grid, out: &mut [u32]) {
     assert!(c.is_multiple_of(4) && x.len() >= n * c * hw && out.len() >= n * c / 4 * hw);
-    // Blocks of a plane, so a few large planes (the stem's 4 groups) still spread over the pool.
     const BLOCK: usize = 4096;
     out[..n * c / 4 * hw].par_chunks_mut(hw.max(1)).enumerate().for_each(|(ig, o)| {
         let (img, g) = (ig / (c / 4), ig % (c / 4));
         let base = (img * c + 4 * g) * hw;
         o.par_chunks_mut(BLOCK).enumerate().for_each(|(b, o)| {
-            for (i, d) in o.iter_mut().enumerate() {
-                let p = b * BLOCK + i;
-                *d = u32::from_le_bytes([0, 1, 2, 3].map(|t| grid.quantize(x[base + t * hw + p])));
-            }
+            let p0 = b * BLOCK;
+            let len = o.len();
+            quantize_group(
+                &x[base + p0..base + p0 + len],
+                &x[base + hw + p0..base + hw + p0 + len],
+                &x[base + 2 * hw + p0..base + 2 * hw + p0 + len],
+                &x[base + 3 * hw + p0..base + 3 * hw + p0 + len],
+                [grid; 4],
+                o,
+            );
         });
     });
+}
+
+/// `[n][c][hw]` `f32` (`c` a multiple of 4) into C4 codes on per-channel `grids` (`grids.len() == c`).
+pub fn quantize_per_channel(x: &[f32], n: usize, c: usize, hw: usize, grids: &[Grid], out: &mut [u32]) {
+    assert!(c.is_multiple_of(4) && grids.len() == c && x.len() >= n * c * hw && out.len() >= n * c / 4 * hw);
+    const BLOCK: usize = 4096;
+    out[..n * c / 4 * hw].par_chunks_mut(hw.max(1)).enumerate().for_each(|(ig, o)| {
+        let (img, g) = (ig / (c / 4), ig % (c / 4));
+        let base = (img * c + 4 * g) * hw;
+        let gs = [grids[4 * g], grids[4 * g + 1], grids[4 * g + 2], grids[4 * g + 3]];
+        o.par_chunks_mut(BLOCK).enumerate().for_each(|(b, o)| {
+            let p0 = b * BLOCK;
+            let len = o.len();
+            quantize_group(
+                &x[base + p0..base + p0 + len],
+                &x[base + hw + p0..base + hw + p0 + len],
+                &x[base + 2 * hw + p0..base + 2 * hw + p0 + len],
+                &x[base + 3 * hw + p0..base + 3 * hw + p0 + len],
+                gs,
+                o,
+            );
+        });
+    });
+}
+
+/// Dequantise one channel byte (`shift = 8 * (ch % 4)`) from C4 words `src` into `out`, bit-exact scalar == AVX2.
+fn dequantize_plane(src: &[u32], shift: u32, grid: Grid, out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if kernel::uses_avx2() {
+        // SAFETY: AVX2 and FMA were detected; slices have identical lengths.
+        return unsafe { dequantize_plane_avx2(src, shift, grid, out) };
+    }
+    for (d, &w) in out.iter_mut().zip(src) {
+        *d = grid.dequantize((w >> shift) as u8);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dequantize_plane_avx2(src: &[u32], shift: u32, grid: Grid, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let len = out.len();
+    let vshift = _mm256_set1_epi32(shift as i32);
+    let mask = _mm256_set1_epi32(0xFF);
+    let vz = _mm256_set1_epi32(grid.zero as i32);
+    let vs = _mm256_set1_ps(grid.scale);
+    let mut i = 0;
+    // SAFETY: `i + 8 <= len` and `src.len() == out.len() == len`.
+    unsafe {
+        while i + 8 <= len {
+            let w = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            let q = _mm256_and_si256(_mm256_srlv_epi32(w, vshift), mask);
+            let y = _mm256_mul_ps(vs, _mm256_cvtepi32_ps(_mm256_sub_epi32(q, vz)));
+            _mm256_storeu_ps(out.as_mut_ptr().add(i), y);
+            i += 8;
+        }
+    }
+    for j in i..len {
+        out[j] = grid.dequantize((src[j] >> shift) as u8);
+    }
 }
 
 /// C4 codes on `grid` into `[n][c][hw]` `f32`.
@@ -150,10 +301,20 @@ pub fn dequantize(x: C4<'_>, n: usize, hw: usize, grid: Grid, out: &mut [f32]) {
     out[..n * c * hw].par_chunks_mut(hw.max(1)).enumerate().for_each(|(ic, o)| {
         let (img, ch) = (ic / c, ic % c);
         let src = &x.data[x.offset + img * x.img_stride + ch / 4 * hw..][..hw];
-        let shift = 8 * (ch % 4);
-        for (d, &w) in o.iter_mut().zip(src) {
-            *d = grid.dequantize((w >> shift) as u8);
-        }
+        dequantize_plane(src, 8 * (ch % 4) as u32, grid, o);
+    });
+}
+
+/// C4 codes on per-channel `grids` (`grids.len() == x.c`) into `[n][c][hw]` `f32`.
+pub fn dequantize_per_channel(x: C4<'_>, n: usize, hw: usize, grids: &[Grid], out: &mut [f32]) {
+    x.check(n, hw);
+    let c = x.c;
+    assert_eq!(grids.len(), c, "q8::dequantize_per_channel: grids length");
+    assert!(out.len() >= n * c * hw);
+    out[..n * c * hw].par_chunks_mut(hw.max(1)).enumerate().for_each(|(ic, o)| {
+        let (img, ch) = (ic / c, ic % c);
+        let src = &x.data[x.offset + img * x.img_stride + ch / 4 * hw..][..hw];
+        dequantize_plane(src, 8 * (ch % 4) as u32, grids[ch], o);
     });
 }
 
@@ -165,7 +326,7 @@ fn max4(a: u32, b: u32) -> u32 {
 }
 
 /// `k × k` max pool, stride 1, padding `k / 2` (padding never wins), of C4 codes into a contiguous C4 `out`
-/// (`[n][c / 4][h · w]`). Exact: max commutes with a monotone quantiser.
+/// (`[n][c / 4][h · w]`). Exact: max commutes with a monotone quantiser (per-tensor or per-channel).
 pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u32]) {
     let hw = h * w;
     x.check(n, hw);
@@ -175,7 +336,6 @@ pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u3
     out[..n * groups * hw].par_chunks_mut(hw.max(1)).enumerate().for_each(|(ig, o)| {
         let (img, g) = (ig / groups, ig % groups);
         let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
-        // Rows first, then columns (separable, exact for max).
         let mut tmp = vec![0u32; hw];
         for y in 0..h {
             let row = &src[y * w..(y + 1) * w];

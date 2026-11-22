@@ -10,13 +10,15 @@ code](../crates/folo-vision/README.md#from-modelmd-to-the-code).
 
 ```text
 model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.folo through folo-nn),
-                   predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head)
-loss/              the detection loss: assignment.rs (host assigner), terms.rs (BCE, CIoU, DFL), device.rs (GPU)
-assign.rs          the task-aligned assigner and DFL target encoding, on plain arrays
-boxes.rs, decode.rs, nms.rs, fusion.rs   boxes and IoU, anchors and DFL decode, NMS, cluster box fusion
+                   predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head),
+                   quant/ (int8 inference, §9.6), v2/ (FOLO v2-Iso clean-sheet model family)
+loss/              the detection loss: assignment.rs (host assigner), terms.rs (BCE/MAL, CIoU/NWD-IoU, DFL),
+                   device.rs (GPU), distill/ (dense/BCKD/GT-verified distillation, §8.9)
+assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
+boxes.rs, decode.rs, nms/mod.rs, fusion.rs   boxes and IoU, anchors and DFL decode, NMS, cluster fusion & ELC/DFL-consensus
 metrics.rs, cocoeval.rs                  Evaluator (mAP, PR curves, confusion matrix), the full COCOeval
 train/             Trainer: config, setup (new / resume), run (epochs), epoch, feed (GPU staging), device,
-                   checkpoint, events, writer/ (the epoch's files)
+                   teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/
 val.rs             validate: a model on a dataset split
 predict.rs         Predictor
 export/onnx/       ONNX export: graph.rs, blocks.rs (mirrors forward), decode.rs, proto.rs

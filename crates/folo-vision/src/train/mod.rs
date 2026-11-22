@@ -39,8 +39,8 @@
 //! `epoch.rs` (one epoch), `run.rs` ([`Trainer::run`]: epochs, validation, early stopping), `checkpoint.rs`
 //! ([`Trainer::save_checkpoint`]), `writer/` (the epoch's files, off the training thread), `events.rs`
 //! ([`EventSink`]), `feed.rs` (staging batches for a GPU), `device.rs` ([`place_model`], [`amp_support`]),
-//! `teacher.rs` (the distillation teacher, [`resolve_teacher`]) and `tests.rs`. This file: [`Trainer`],
-//! [`TrainData`], [`TrainOptions`] and the trainer's constants.
+//! `teacher.rs` (the distillation teacher, [`resolve_teacher`]), `gauge.rs` (Floor Conv+BN Gauge Normalization)
+//! and `tests.rs`. This file: [`Trainer`], [`TrainData`], [`TrainOptions`] and the trainer's constants.
 //!
 //! [`distill_loss`]: crate::loss::distill_loss
 //! [`step_loss`]: crate::loss::step_loss
@@ -53,6 +53,7 @@ mod device;
 mod epoch;
 mod events;
 mod feed;
+pub mod gauge;
 mod run;
 mod setup;
 mod teacher;
@@ -65,6 +66,7 @@ pub use config::{
 };
 pub use device::{amp_available, amp_not_supported, amp_support, can_place, place_model};
 pub use events::{EventSink, channel_sink, event_record, rfc3339_now};
+pub use gauge::{GAUGE_TARGET_NORM, GaugeNormReport, apply_floor_gauge_norm};
 pub use run::update_best;
 pub use setup::{resumed_close_mosaic, schedule_warnings};
 pub use teacher::resolve_teacher;
@@ -79,7 +81,7 @@ use folo_api::{LogLevel, RunStatus};
 use folo_core::Device;
 use folo_data::{Batch, DataLoader, Dataset};
 use folo_nn::io::BestState;
-use folo_nn::optim::{GradAccumulator, Optimizer, effective_weight_decay};
+use folo_nn::optim::{GradAccumulator, Optimizer};
 
 /// MuSGD's LR factor for the head's class branches (docs/MODEL.md §8.2, the reference's `lr * 3`).
 pub const MUSGD_CLS_LR_FACTOR: f64 = 3.0;
@@ -378,7 +380,7 @@ impl Trainer {
                 "lr0": self.resolved.lr0,
                 "momentum": self.resolved.momentum,
                 "warmup_bias_lr": self.resolved.warmup_bias_lr,
-                "weight_decay": effective_weight_decay(self.cfg.weight_decay, self.cfg.batch, self.accumulate, self.cfg.nbs),
+                "weight_decay": self.cfg.effective_wd(self.accumulate),
             },
             "batches_per_epoch": self.nb,
             "accumulate": self.accumulate,

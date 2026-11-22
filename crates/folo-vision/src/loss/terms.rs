@@ -6,7 +6,7 @@ use folo_core::{DType, Result, Tensor, no_grad};
 use rayon::prelude::*;
 
 use super::{BatchAssignment, LossConfig, LossItems, LossOutput, check_inputs, invalid};
-use crate::assign::{bbox2dist_clamped, dfl_bins};
+use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
@@ -67,7 +67,26 @@ fn sigmoid_fast(x: f32) -> f32 {
 /// This fuses what the composite form does in several full-size passes (softplus, sums, and an `index_select`
 /// whose backward materialises a dense zero gradient). `x` is viewed as rows of its last dimension; rows are
 /// summed in parallel, each serially, and combined in row order in `f64`, so the result is reproducible.
-fn bce_sum_cpu(x: &Tensor, idx: Vec<usize>, t: Vec<f32>) -> Result<Tensor> {
+fn mal_neg_loss(x: f32, gamma: f32) -> f32 {
+    let p = sigmoid_fast(x);
+    let sp = softplus(x);
+    if p <= 0.0 { 0.0 } else { p.powf(gamma) * sp }
+}
+
+fn mal_neg_grad(x: f32, gamma: f32) -> f32 {
+    let p = sigmoid_fast(x);
+    if p <= 0.0 {
+        return 0.0;
+    }
+    let q = sigmoid_fast(-x);
+    let sp = softplus(x);
+    p.powf(gamma) * (gamma * q * sp + p)
+}
+
+fn bce_sum_cpu(x: &Tensor, idx: Vec<usize>, t: Vec<f32>, mal_gamma: f32) -> Result<Tensor> {
+    if mal_gamma > 0.0 {
+        return mal_sum_cpu(x, idx, t, mal_gamma);
+    }
     let row = x.dims().last().copied().unwrap_or(1).max(1);
     // Foreground positions sorted, so each row finds its own with a binary search. They are distinct (checked by
     // the caller). The dense sum skips them and each gets its own `BCE(x, t)`: summing `softplus(x)` and `x · t`
@@ -118,6 +137,82 @@ fn bce_sum_cpu(x: &Tensor, idx: Vec<usize>, t: Vec<f32>) -> Result<Tensor> {
         }
         Ok(vec![Some(Tensor::from_vec(grad, xs.shape())?)])
     })
+}
+
+/// Matchability-Aware Loss (MAL) sum on CPU: positives (`t > 0`) use unweighted `softplus(x) - x·t`,
+/// negatives (`t == 0`) use `p^γ · softplus(x)` with exact gradient `p^γ · (γ · (1-p) · softplus(x) + p)`.
+fn mal_sum_cpu(x: &Tensor, idx: Vec<usize>, t: Vec<f32>, gamma: f32) -> Result<Tensor> {
+    let row = x.dims().last().copied().unwrap_or(1).max(1);
+    let mut order: Vec<usize> = (0..idx.len()).filter(|&k| t[k] > 0.0).collect();
+    order.sort_unstable_by_key(|&k| idx[k]);
+    let pos: Vec<usize> = order.iter().map(|&k| idx[k]).collect();
+    let value = x.with_f32_slice(|v| {
+        let rows: Vec<f32> = v
+            .par_chunks(row * PAR_ROWS)
+            .enumerate()
+            .flat_map_iter(|(ci, c)| {
+                let pos = &pos;
+                c.chunks(row).enumerate().map(move |(ri, r)| {
+                    let start = (ci * PAR_ROWS + ri) * row;
+                    let lo = pos.partition_point(|&p| p < start);
+                    let hi = pos.partition_point(|&p| p < start + r.len());
+                    let mut s = 0f32;
+                    let mut from = 0;
+                    for &p in &pos[lo..hi] {
+                        for &xv in &r[from..p - start] {
+                            s += mal_neg_loss(xv, gamma);
+                        }
+                        from = p - start + 1;
+                    }
+                    for &xv in &r[from..] {
+                        s += mal_neg_loss(xv, gamma);
+                    }
+                    s
+                })
+            })
+            .collect();
+        let dense: f64 = rows.iter().map(|&r| r as f64).sum();
+        let fg: f64 =
+            order.iter().map(|&k| softplus(v[idx[k]]) as f64 - v[idx[k]] as f64 * t[k] as f64).sum();
+        (dense + fg) as f32
+    })?;
+    let xs = x.detach();
+    Tensor::custom_op("mal_with_logits_sum", &[x], Tensor::scalar(value), move |g| {
+        let g = g.item::<f32>()?;
+        let mut grad = xs.with_f32_slice(|v| {
+            let mut out = vec![0f32; v.len()];
+            out.par_chunks_mut(row * PAR_ROWS).zip(v.par_chunks(row * PAR_ROWS)).for_each(|(o, x)| {
+                for (o, &xv) in o.iter_mut().zip(x) {
+                    *o = g * mal_neg_grad(xv, gamma);
+                }
+            });
+            out
+        })?;
+        xs.with_f32_slice(|v| {
+            for (&i, &tk) in idx.iter().zip(&t) {
+                if tk > 0.0 {
+                    grad[i] = g * (sigmoid_fast(v[i]) - tk);
+                }
+            }
+        })?;
+        Ok(vec![Some(Tensor::from_vec(grad, xs.shape())?)])
+    })
+}
+
+/// Differentiable Normalized Wasserstein Distance loss `1 − NWD(b1, b2; c)` between rows of `b1` and `b2`
+/// (`[N, 4]`, `xyxy`), with per-row scale constant `c` (`[N]`, in the boxes' coordinate units), returning `[N]`.
+pub fn nwd_loss(b1: &Tensor, b2: &Tensor, c: &Tensor) -> Result<Tensor> {
+    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
+    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
+    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
+    let dcx = ax1.add(&ax2)?.sub(&bx1)?.sub(&bx2)?.mul_scalar(0.5)?;
+    let dcy = ay1.add(&ay2)?.sub(&by1)?.sub(&by2)?.mul_scalar(0.5)?;
+    let dw = ax2.sub(&ax1)?.sub(&bx2.sub(&bx1)?)?;
+    let dh = ay2.sub(&ay1)?.sub(&by2.sub(&by1)?)?;
+    let w2_sq =
+        dcx.square()?.add(&dcy.square()?)?.add(&dw.square()?.add(&dh.square()?)?.mul_scalar(0.25)?)?;
+    let dist = w2_sq.add_scalar(1e-6)?.sqrt()?;
+    dist.div(c)?.neg()?.exp()?.rsub_scalar(1.0)
 }
 
 /// `x.flatten_all().index_select(0, idx)` for a CPU tensor, with a backward that scatters into a fresh zeroed
@@ -259,22 +354,47 @@ pub(super) fn loss_impl(
     // Classification: Σ BCE(x, T) = Σ_bg softplus(x) + Σ_fg (softplus(x) − x · t), since T is t at the assigned
     // class of each foreground anchor and 0 elsewhere. Foreground terms are formed per element before any sum, so a
     // confident positive (large x, t ≈ 1) does not cancel against a large dense sum.
+    let mal_gamma = cfg.mal_gamma;
+    // Evaluates `sigmoid(x)^gamma * softplus(x)` as `exp(-gamma * softplus(-x)) * softplus(x)` so fractional
+    // `0 < gamma < 1` never hits `0^(gamma - 1) = inf` in `powf` backward when `sigmoid(x)` underflows to `0`.
+    let mal_neg_composite = |x: &Tensor| -> Result<Tensor> {
+        if mal_gamma > 0.0 {
+            let log_p = x.neg()?.softplus()?;
+            Ok(log_p.mul_scalar(-mal_gamma)?.exp()?.mul(&x.softplus()?)?)
+        } else {
+            Ok(x.softplus()?)
+        }
+    };
     let cls_sum = if fused {
-        bce_sum_cpu(cls_raw, idx_cls, asg.score.clone())?
+        bce_sum_cpu(cls_raw, idx_cls, asg.score.clone(), mal_gamma)?
     } else if n == 0 {
-        sum_fixed_order(&cls_raw.softplus()?.sum(2, false)?)?
+        let neg_term = mal_neg_composite(cls_raw)?;
+        sum_fixed_order(&neg_term.sum(2, false)?)?
     } else {
-        // A constant 0/1 mask, built on the device (ones with −1 added at the foreground), removes the foreground
-        // positions from the dense sum exactly, value and gradient. Per-(image, class) row sums keep a fixed order.
-        let idx = index(idx_cls)?;
-        let x_fg = cls_raw.flatten_all()?.index_select(0, &idx)?;
-        let bg_mask = {
-            let _g = no_grad();
-            let ones = Tensor::full_with([b * nc * n_a], 1.0, DType::F32, dev)?;
-            ones.index_add(0, &idx, &Tensor::full_with([n], -1.0, DType::F32, dev)?)?.reshape([b, nc, n_a])?
+        // Only t > 0 positions are positives under MAL (t == 0 stays negative, matching GPU).
+        let (fg_idx, fg_t): (Vec<usize>, Vec<f32>) = if mal_gamma > 0.0 {
+            idx_cls.into_iter().zip(asg.score.iter().copied()).filter(|&(_, s)| s > 0.0).unzip()
+        } else {
+            (idx_cls, asg.score.clone())
         };
-        let dense = sum_fixed_order(&cls_raw.softplus()?.mul(&bg_mask)?.sum(2, false)?)?;
-        dense.add(&sum_fixed_order(&x_fg.softplus()?.sub(&x_fg.mul(&t)?)?)?)?
+        let n_pos = fg_idx.len();
+        if n_pos == 0 {
+            let neg_term = mal_neg_composite(cls_raw)?;
+            sum_fixed_order(&neg_term.sum(2, false)?)?
+        } else {
+            let idx = index(fg_idx)?;
+            let t_pos = on_dev(Tensor::from_slice(&fg_t, [n_pos])?)?;
+            let x_fg = cls_raw.flatten_all()?.index_select(0, &idx)?;
+            let bg_mask = {
+                let _g = no_grad();
+                let ones = Tensor::full_with([b * nc * n_a], 1.0, DType::F32, dev)?;
+                ones.index_add(0, &idx, &Tensor::full_with([n_pos], -1.0, DType::F32, dev)?)?
+                    .reshape([b, nc, n_a])?
+            };
+            let neg_base = mal_neg_composite(cls_raw)?;
+            let dense = sum_fixed_order(&neg_base.mul(&bg_mask)?.sum(2, false)?)?;
+            dense.add(&sum_fixed_order(&x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?)?)?
+        }
     };
 
     let (l_box, l_dfl) = if n == 0 {
@@ -293,7 +413,18 @@ pub(super) fn loss_impl(
         let sign = on_dev(Tensor::from_slice(&[-1.0f32, -1.0, 1.0, 1.0], [4])?)?;
         let pd = on_dev(Tensor::from_vec(anchor4, [n, 4])?)?.add(&dist.mul(&sign)?)?;
         let tb = on_dev(Tensor::from_vec(tbox, [n, 4])?)?;
-        let l_box = sum_fixed_order(&ciou(&pd, &tb)?.rsub_scalar(1.0)?.mul(&t)?)?.div_scalar(tss)?;
+        let l_ciou = ciou(&pd, &tb)?.rsub_scalar(1.0)?;
+        let box_per = if cfg.nwd_weight > 0.0 {
+            let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
+            let cs: Vec<f32> = (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
+            let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
+            let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
+            let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+            lam_t.rsub_scalar(1.0)?.mul(&l_ciou)?.add(&lam_t.mul(&l_nwd)?)?
+        } else {
+            l_ciou
+        };
+        let l_box = sum_fixed_order(&box_per.mul(&t)?)?.div_scalar(tss)?;
 
         // DFL: cross-entropy against the two neighbouring bins of each side's target distance.
         let bins = on_dev(Tensor::from_vec(bins, [n, 4, 2])?)?;

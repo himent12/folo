@@ -17,8 +17,9 @@ fn bn_tree_merge(lid: u32) {
             } else if (nb > 0.0) {
                 let n = na + nb;
                 let d = wm[lid + s] - wm[lid];
-                wm[lid] += d * (nb / n);
-                wq[lid] += wq[lid + s] + d * d * (na * nb / n);
+                let delta = d * (nb / n);
+                wm[lid] += delta;
+                wq[lid] += wq[lid + s] + d * (delta * na);
                 wn[lid] = n;
             }
         }

@@ -303,6 +303,11 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        // Native only: wgpu 30.0.1's WebGPU backend omits `SUBGROUP` and BatchNorm also needs WGSL `subgroup_id`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if adapter.features().contains(wgpu::Features::SUBGROUP) {
+            features |= wgpu::Features::SUBGROUP;
+        }
         let cache_file = crate::pipeline_cache::wanted(&adapter, options.pipeline_cache_dir.as_deref());
         if cache_file.is_some() {
             features |= wgpu::Features::PIPELINE_CACHE;
@@ -370,6 +375,8 @@ impl GpuContext {
             shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
             // Set below once the self-test passes.
             coop_f16: false,
+            subgroups: device.features().contains(wgpu::Features::SUBGROUP),
+            subgroup_size: summary.subgroup_size,
             max_buffer_size: dl.max_buffer_size,
             max_storage_buffer_binding_size: dl.max_storage_buffer_binding_size,
             max_workgroup_storage: dl.max_compute_workgroup_storage_size,

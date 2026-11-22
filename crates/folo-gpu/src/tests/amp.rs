@@ -147,3 +147,131 @@ fn autocast_conv_and_matmul_train_f32_leaves() {
     let xc = randn(&[1, 2, 5, 5], 12);
     assert_eq!(xc.conv2d(&randn(&[3, 2, 3, 3], 13), None, 1, 1, 1, 1).unwrap().dtype(), DType::F32);
 }
+
+/// B4 verification: vectorized `vec4` 4-lane Welford + pairwise Chan subgroup merge `bn_stats` / `bn_bwd_reduce`
+/// match between the 32-wide subgroup fast path and the portable shared-memory fallback across both `hw % 4 == 0`
+/// (VEC4) and odd `hw`, all activations, large shifted means (`+500.0`), and partial-subgroup extreme constants.
+#[test]
+fn batch_norm_subgroups_and_portable_fallback_agree() {
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            let prev = crate::kernels::norm::FORCE_NO_SUBGROUPS.replace(v);
+            Self(prev)
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+    let dev = dev16!();
+    let _g = no_grad();
+    for &(shape, act, shift) in &[
+        ([4, 16, 20, 20], Some(UnaryOp::Silu), 500.0f32),
+        ([3, 8, 9, 11], Some(UnaryOp::Silu), 120.0f32),
+        ([2, 12, 8, 8], Some(UnaryOp::Relu), -300.0f32),
+        ([2, 8, 16, 16], None, 0.0f32),
+    ] {
+        let c = shape[1];
+        let x = q(&randn(&shape, 41).add_scalar(shift).unwrap()).to_device(dev).unwrap();
+        let g = q(&randn(&shape, 42)).to_device(dev).unwrap();
+        let w = randn(&[c], 43).add_scalar(1.0).unwrap().to_device(dev).unwrap();
+        let b = randn(&[c], 44).to_device(dev).unwrap();
+        let run = |force_portable: bool, dtype: DType| {
+            let _guard = ForceGuard::set(force_portable);
+            let xd = x.to_dtype(dtype).unwrap();
+            let gd = g.to_dtype(dtype).unwrap();
+            let out = xd.batch_norm_act_train(&w, &b, 1e-3, act, None).unwrap().expect("kernels");
+            let (dx, dw, db) = xd
+                .batch_norm_act_train_backward(&gd, &w, &b, &out.mean, &out.invstd, act)
+                .unwrap()
+                .expect("kernels");
+            (
+                out.y.to_dtype(DType::F32).unwrap(),
+                out.mean,
+                out.invstd,
+                dx.to_dtype(DType::F32).unwrap(),
+                dw,
+                db,
+            )
+        };
+        for dtype in [DType::F32, DType::F16] {
+            let (y_sg, m_sg, iv_sg, dx_sg, dw_sg, db_sg) = run(false, dtype);
+            let (y_fb, m_fb, iv_fb, dx_fb, dw_fb, db_fb) = run(true, dtype);
+            let what = format!("bn sg vs portable {shape:?} {act:?} {dtype:?} shift={shift}");
+            assert_close_t(&m_sg, &m_fb, 1e-4, 1e-5, &format!("{what} mean"));
+            assert_close_t(&iv_sg, &iv_fb, 1e-4, 1e-4, &format!("{what} invstd"));
+            assert_close_t(&y_sg, &y_fb, 2e-3, 2e-3, &format!("{what} y"));
+            assert_close_t(&dx_sg, &dx_fb, 2e-3, 2e-3, &format!("{what} dx"));
+            assert_close_t(&dw_sg, &dw_fb, 2e-3, 1e-3, &format!("{what} dw"));
+            assert_close_t(&db_sg, &db_fb, 2e-3, 2e-3, &format!("{what} db"));
+        }
+    }
+
+    // Extreme finite inputs against f64 reference: no sum2 overflow (`1e19`), no subgroup `cnt * mean` overflow
+    // (`1e37`), and no first-element outlier cancellation (`1e5` at index 0 with ±1 background).
+    let w1 = Tensor::from_slice(&[1.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let b0 = Tensor::from_slice(&[0.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let mut spike = vec![0.0f32; 2048];
+    spike[0] = 1e19;
+    let huge_const = vec![1e37f32; 1024];
+    let mut outlier: Vec<f32> = (0..1024).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    outlier[0] = 1e5;
+    for (name, vals) in [("spike_1e19", spike), ("const_1e37", huge_const), ("outlier_1e5", outlier)] {
+        let n = vals.len();
+        let mean_ref = vals.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+        let var_ref = vals.iter().map(|&v| (v as f64 - mean_ref).powi(2)).sum::<f64>() / n as f64;
+        let invstd_ref = (var_ref + 1e-5).sqrt().recip() as f32;
+        let x = Tensor::from_vec(vals, [1, 1, 1, n]).unwrap().to_device(dev).unwrap();
+        for force_portable in [false, true] {
+            let _guard = ForceGuard::set(force_portable);
+            let out = x.batch_norm_act_train(&w1, &b0, 1e-5, None, None).unwrap().expect("kernels");
+            let m = out.mean.to_vec::<f32>().unwrap()[0];
+            let iv = out.invstd.to_vec::<f32>().unwrap()[0];
+            assert!(
+                m.is_finite() && iv.is_finite(),
+                "{name} portable={force_portable}: non-finite mean={m} invstd={iv}"
+            );
+            assert!(
+                (m - mean_ref as f32).abs() <= 1e-4 * (mean_ref.abs() as f32).max(1.0),
+                "{name} portable={force_portable}: mean {m} vs {mean_ref}"
+            );
+            assert!(
+                iv > 0.0 && (iv - invstd_ref).abs() <= 1e-3 * invstd_ref,
+                "{name} portable={force_portable}: invstd {iv} vs {invstd_ref}"
+            );
+        }
+    }
+
+    // Partial-subgroup constant inputs (`3` identical elements): pairwise Chan subgroup merge must keep `d == 0`
+    // bit-exact so variance is strictly zero (`invstd = 1/sqrt(eps)`, `y == 0`), including `3 x 65504.0` in F16
+    // and `3 x 1e37` in F32 (where weighted `subgroupAdd` rounding caused fake nonzero variance / M2 overflow).
+    let expected_invstd = (1e-5f64).sqrt().recip() as f32;
+    for (name, dt, val) in
+        [("partial_f16_65504", DType::F16, 65504.0f32), ("partial_f32_1e37", DType::F32, 1e37f32)]
+    {
+        let x = Tensor::from_vec(vec![val; 3], [1, 1, 1, 3])
+            .unwrap()
+            .to_device(dev)
+            .unwrap()
+            .to_dtype(dt)
+            .unwrap();
+        for force_portable in [false, true] {
+            let _guard = ForceGuard::set(force_portable);
+            let out = x.batch_norm_act_train(&w1, &b0, 1e-5, None, None).unwrap().expect("kernels");
+            let m = out.mean.to_vec::<f32>().unwrap()[0];
+            let iv = out.invstd.to_vec::<f32>().unwrap()[0];
+            let yv = out.y.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+            assert_eq!(m, val, "{name} portable={force_portable}: mean drift {m} vs {val}");
+            assert!(
+                (iv - expected_invstd).abs() <= 1e-3 * expected_invstd,
+                "{name} portable={force_portable}: invstd {iv} vs {expected_invstd}"
+            );
+            assert!(
+                yv.iter().all(|&v| v.abs() < 1e-4),
+                "{name} portable={force_portable}: constant BN output non-zero: {yv:?}"
+            );
+        }
+    }
+}

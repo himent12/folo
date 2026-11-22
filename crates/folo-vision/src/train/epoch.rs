@@ -4,12 +4,15 @@
 use std::time::Instant;
 
 use folo_api::{LogLevel, RunEvent};
-use folo_nn::{GradScaler, Module, RunningStats, ScaleUpdate};
+use folo_nn::{BatchNorm2d, GradScaler, Module, RunningStats, ScaleUpdate};
 
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
-use crate::loss::{LossItems, detection_loss, o2m_weight, step_loss, targets_from_normalized};
+use crate::loss::{
+    LossConfig, LossItems, detection_loss, detection_loss_for_distill, o2m_weight, step_loss,
+    targets_from_normalized,
+};
 use crate::val::batch_tensor;
 
 impl Trainer {
@@ -17,6 +20,18 @@ impl Trainer {
     /// interrupted it.
     pub(super) fn train_epoch(&mut self, e: u32, clock: &mut Clock) -> Result<Option<folo_api::Loss>> {
         self.model.train();
+        // Stage-2 Mosaic-Off BN-Freeze safeguard (P3): keep BN in eval mode when mosaic is closed.
+        let mosaic_closed = self.is_mosaic_closed(e);
+        if self.cfg.bn_freeze_close_mosaic && mosaic_closed {
+            self.model.for_each_module(&mut |_, m| {
+                if let Some(bn) = (m as &dyn std::any::Any).downcast_ref::<BatchNorm2d>() {
+                    bn.eval();
+                }
+            });
+        }
+        // MAL gamma warmup ramp over warmup_epochs (safeguard #38).
+        let epoch_loss_cfg = self.epoch_loss_cfg(e);
+        let need_kd_asg = self.cfg.distill.as_ref().is_some_and(|d| d.bckd_gamma > 0.0 || d.gt_verify);
         self.acc.zero();
         let s = self.cfg.imgsz;
         let (nb, acc_n) = (self.nb, self.accumulate);
@@ -64,19 +79,36 @@ impl Trainer {
             // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
-            let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
+            let (mut loss, kd_asg) = detection_loss_for_distill(
+                &box_raw,
+                &cls_raw,
+                &out.anchors,
+                &targets,
+                &epoch_loss_cfg,
+                need_kd_asg,
+            )?;
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
+            // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
+            // where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below runs cleanly.
             let kd = match (&teacher_batch, &self.cfg.distill) {
-                (Some(t), Some(d)) => Some(t.loss(&box_raw, &cls_raw, loss.target_score_sum, d)?),
+                (Some(t), Some(d)) if loss.is_finite() => Some(t.loss(
+                    &box_raw,
+                    &cls_raw,
+                    &out.anchors,
+                    loss.target_score_sum,
+                    d,
+                    kd_asg.as_ref(),
+                )?),
                 _ => None,
             };
+            drop(kd_asg);
             drop(teacher_batch);
             drop((box_raw, cls_raw));
             // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
             let o2o = match &out.o2o {
                 Some((b, c)) => {
                     let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
-                    let cfg = self.loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
+                    let cfg = epoch_loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
                     Some(detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &cfg)?)
                 }
                 None => None,
@@ -224,8 +256,31 @@ impl Trainer {
     /// gradients are unscaled before clipping, and a window whose gradients are not all finite skips the step
     /// (`t`, the optimizer and the EMA unchanged) and backs the loss scale off: one readback of a single flag.
     /// `(e, k)` name the window's last batch in the log.
+    fn is_mosaic_closed(&self, e: u32) -> bool {
+        let a = &self.cfg.augment;
+        a.mosaic > 0.0 && a.close_mosaic_epochs(self.cfg.epochs) > 0 && !a.mosaic_active(e, self.cfg.epochs)
+    }
+
+    fn epoch_loss_cfg(&self, e: u32) -> LossConfig {
+        let mut c = self.loss_cfg;
+        if c.mal_gamma > 0.0 && self.cfg.transfer {
+            let warm = self.cfg.warmup_epochs.ceil() as u32;
+            if warm > 0 && e < warm {
+                c.mal_gamma *= (e + 1) as f32 / warm as f32;
+            }
+        }
+        c
+    }
+
     fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         self.sched.apply(self.opt.as_mut());
+        if self.cfg.cls_lr_close_scale != 1.0 && self.is_mosaic_closed(e) {
+            for g in self.opt.groups_mut() {
+                if g.name.ends_with(".cls") {
+                    g.lr *= self.cfg.cls_lr_close_scale;
+                }
+            }
+        }
         if let Some(scaler) = &mut self.scaler {
             let finite = self.acc.unscale_clip(scaler.inv_scale(), self.cfg.clip_grad_norm)?;
             let scale = scaler.scale();

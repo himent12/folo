@@ -647,6 +647,16 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
 | `distill` | none | distillation from a frozen teacher (§8.9); absent: none |
+| `loss.mal_gamma` | 0.0 | opt-in Matchability-Aligned Loss (MAL) negative focal exponent `γ ∈ [0, 5]`; `0` keeps standard BCE. When `> 0`, fresh class-head output biases initialize to `-4.59512` (`ln(0.01/0.99)`) and transfer runs linearly ramp `γ` over warmup epochs |
+| `loss.nwd_weight` | 0.0 | opt-in scale-adaptive Normalized Wasserstein Distance weight `∈ [0, 1]` blended with CIoU on small boxes (`λ(box) = w · exp(−area / 24²)`); `0` keeps pure CIoU |
+| `loss.tal.nwd_weight` | 0.0 | opt-in scale-adaptive NWD weight `∈ [0, 1]` inside the task-aligned assigner metric (CPU and GPU); `0` keeps pure CIoU |
+| `loss.tal.eps_free` | false | opt-in epsilon-free TAL target normalization (`t = m · iou_max / m_max` when `m_max > 0`, removing `+ eps` small-target shrinkage) |
+| `decoupled_wd` | false | opt-in decoupled weight decay for SGD and MuSGD (`p *= 1 − lr · wd` outside Nesterov momentum; AdamW already decouples decay) |
+| `cautious_wd` | false | opt-in cautious decoupled weight decay (`u · p > 0` mask) for SGD and MuSGD; refused with AdamW |
+| `wd_eff` | none | optional explicit effective weight decay overriding `weight_decay · batch · accumulate / nbs` (applied to the optimizer and recorded in `resolved.weight_decay`) |
+| `gauge_norm` | false | opt-in exact function-preserving Floor Conv+BN Gauge Normalization applied on `--weights` transfer load (raises small-norm filters to the target norm floor while rescaling BN `running_mean` by `α` and `running_var + ε` by `α²`, leaving BN `γ`/`β` fixed) |
+| `bn_freeze_close_mosaic` | false | opt-in eval-mode BatchNorm (frozen running stats) during closed-mosaic annealing epochs (intended for mature Stage-2 runs) |
+| `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -971,6 +981,8 @@ and the HTTP API do not change: the teacher exists only in the trainer.
 | `cls_gain` | 0.5 | `λc`, 0 to 1e6 |
 | `dfl_gain` | 1.5 | `λd`, 0 to 1e6 |
 | `temperature` | 4.0 | `T`, 0.05 to 100 (DFL term only; 4 beat 1 on the proxy, docs/notes/hill/r4-distill.md) |
+| `bckd_gamma` | 0.0 | opt-in conflict-free Binary Classification KD exponent `γ ∈ [0, 5]` (`\|p_S − p_T\|^γ` focal weighting with positive teacher target clamping `max(p_T, t_GT)`); `0` keeps standard Bernoulli KL |
+| `gt_verify` | false | opt-in positive-only GT-verified DFL KD: distills box DFL only at supervised positive anchors where `IoU(teacher, GT) > IoU(student, GT) + 0.02` and `IoU(teacher, GT) > 0.50` |
 
 **Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
 an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,
@@ -1184,6 +1196,36 @@ before those runs, but τ 0.75 had itself been read on val2017, on folo-n v3 and
 fixed in advance gave +0.0007, not significant). So the folo-s numbers are optimistic, and only the folo-n v5 ones are
 on weights that played no part in the choice, on the same images.
 
+**Exclusive Logit-Space Consensus (`--score elc`) and DFL-Precision Consensus (`--score dfl-consensus`, opt-in).**
+Two scale-preserving successors to `--score consensus` that fix two flaws of the probability-space rule: (1) surviving
+duplicate boxes can steal cluster mass from a higher-scoring kept box's suppressed candidates, and (2) multiplying a
+high-confidence probability `s ≈ 0.90` by `√(M/s / 10)` amplifies its log-odds penalty by `1 / (1 − s) ≈ 10×`, which
+caused `folo-s`'s `AP_L` to fall by 0.0035. Both rules restrict each kept box `k`'s cluster `C_excl(k)` to candidates
+`j` of `k`'s own class with `IoU(b_k, b_j) >= 0.75` that were **exclusively owned** by `k` (the first kept box of `j`'s
+class to suppress `j` in NMS, or `j = k` itself; under `agnostic` NMS, ownership is still computed class-locally) and
+update log-odds in `f64` with a branch-safe sigmoid:
+
+    M_excl,k     = Σ_{j ∈ C_excl(k)} s_j
+    σ̄_bin,k      = (1/4) Σ_{e=0..4} ( (Σ_{j ∈ C_excl(k)} s_j · (max(σ²_{j,e} − f(1 − f), 0) + 0.1)^{-1}) / M_excl,k )^{-1/2}
+    logit(s'_k)  = logit(clamp(s_k, 1e-6, 1 − 1e-6))
+                   + 0.65 · ln(min(M_excl,k / s_k, 10) / 4.0)                          (`elc`)
+                   − 0.60 · ln(max(σ̄_bin,k, 0.1) / 0.50)                               (added by `dfl-consensus`)
+
+`dfl-consensus` reuses the exact DFL moments already computed for `--fusion dfl` (zero extra GPU readback) and falls
+back cleanly to `elc` when callers provide boxes without DFL moments (`nms_detections`, `folo-wasm`). Because both
+rules preserve the `[0, 1]` score scale, single-label prediction with `conf > 0.10` lowers pre-NMS candidate extraction
+to `0.10` so nearby supporting anchors enter the cluster before filtering final calibrated scores by `score > conf`;
+validation (`multi_label`, `conf = 0.001`) extracts at `conf` and re-ranks all kept boxes without post-filtering.
+With exclusive ownership demoting duplicates, keeping `--iou 0.70` (instead of `B*`'s `0.65`) recovers high-IoU boxes:
+on a locked 50/50 val2017 dev/test split (1,000 paired bootstrap resamples), `--fusion dfl --iou 0.7 --max-det 1000`
+with `--score elc` / `--score dfl-consensus` reaches **0.3758 / 0.3759** on `folo-n v5` (`+0.0058` over B0, `+0.0010`
+over `B* + consensus`, `P(≤0) = 0.000`; held-out test `+0.0010 / +0.0008`, `P = 0.004 / 0.011`) and **0.4209 / 0.4214**
+on `folo-s` (`+0.0048 / +0.0052` over B0, `+0.0012 / +0.0016` over `B* + consensus`, `P = 0.000 / 0.003`; held-out test
+`+0.0011 / +0.0013`, `P = 0.000 / 0.020`), lifting `folo-s` `AP_L` to `0.5882` (`+0.0043` over `B* + consensus`) and
+cutting `predict` (`conf = 0.25`) 10-bin ECE from `0.209 / 0.171` (B0) to `0.145 / 0.110` while raising `F1@50` and
+`F1@75`. (`elc` requires no DFL moments and improves every size bucket S/M/L; `dfl-consensus` trades ~0.002 `AP_S` for
+higher `AP_L`, F1 and calibration.)
+
 ### 9.5 Candidate-first evaluation
 Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
 `conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and
@@ -1200,7 +1242,7 @@ does so bit for bit too: a class pass lists each image's candidates and the pixe
 fixed-capacity lists on the device, the 3×3 box convs run the dense implicit GEMM (regular or tensor-core) with
 one column per listed pixel and the dense conv's split-K chunks, `out` runs the dense GEMM over the candidates'
 columns, and one decode appends the boxes to one record list per image, read back once; an image with more
-candidates on a level than the list holds (1024, 512, 256 for P3, P4, P5) takes the dense head instead. The dense
+candidates on a level than the list holds (1024, 512, 512 for P3, P4, P5) takes the dense head instead. The dense
 raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
 `conf = 0.001`), export and every other consumer of them use the dense forward. Box fusion (§9.4) is served as on
 the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its

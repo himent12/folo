@@ -82,6 +82,14 @@ pub struct DetectDesc {
     pub eps: f32,
     /// Candidate boxes widen sides shorter than this (pixels).
     pub min_box_size: f32,
+    /// Epsilon-free TAL target normalization (`m_max > 0 ? m * u_max / m_max : 0`).
+    pub eps_free: bool,
+    /// Scale-adaptive NWD blending weight in TAL (`0.0` = legacy CIoU).
+    pub tal_nwd_weight: f32,
+    /// Matchability-Aware Loss exponent on background (`0.0` = plain BCE).
+    pub mal_gamma: f32,
+    /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
+    pub box_nwd_weight: f32,
 }
 
 impl DetectDesc {
@@ -115,20 +123,40 @@ impl DetectDesc {
         self.b * self.nc * self.a.div_ceil(BCE_CHUNK)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.k == 0 || self.k > MAX_TOPK {
             return Err(shape_err(format!("detect: topk {} must be in 1..={MAX_TOPK}", self.k)));
         }
         if !(2..=MAX_REG_MAX).contains(&self.reg_max) {
             return Err(shape_err(format!("detect: reg_max {} must be in 2..={MAX_REG_MAX}", self.reg_max)));
         }
-        if self.g > 65535 || self.b > 65535 || self.b * self.nc > 65535 {
+        let b_nc = self.b.checked_mul(self.nc).ok_or_else(|| shape_err("detect: b * nc overflow"))?;
+        if self.g > 65535 || self.b > 65535 || b_nc > 65535 {
             return Err(shape_err(format!(
                 "detect: {} images x {} gts x {} classes exceed one dispatch",
                 self.b, self.g, self.nc
             )));
         }
-        let words = self.meta_words().max(self.b * 4 * self.reg_max * self.a).max(self.b * self.nc * self.a);
+        let bg = self.b.checked_mul(self.g).ok_or_else(|| shape_err("detect: b * g overflow"))?;
+        let meta = self
+            .a
+            .checked_mul(3)
+            .and_then(|v| bg.checked_mul(5).and_then(|w| v.checked_add(w)))
+            .and_then(|v| v.checked_add(self.b))
+            .ok_or_else(|| shape_err("detect: meta size overflow"))?;
+        let box_words = self
+            .b
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(self.reg_max))
+            .and_then(|v| v.checked_mul(self.a))
+            .ok_or_else(|| shape_err("detect: box buffer size overflow"))?;
+        let cls_words =
+            b_nc.checked_mul(self.a).ok_or_else(|| shape_err("detect: cls buffer size overflow"))?;
+        let pick_words = bg
+            .checked_mul(self.k)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| shape_err("detect: pick buffer size overflow"))?;
+        let words = meta.max(box_words).max(cls_words).max(pick_words);
         if words >= u32::MAX as usize / 4 {
             return Err(shape_err("detect: problem too large for 32-bit indexing"));
         }
@@ -198,7 +226,8 @@ pub fn assign(
         .f(d.eps)
         .f(d.min_box_size)
         .f(d.alpha)
-        .f(d.beta);
+        .f(d.beta)
+        .f(d.tal_nwd_weight);
     ctx.dispatch(&k, &[pd, cls_raw, meta, pick], &p, [d.g as u32, d.b as u32, 1])?;
     let p = Params::new().uz(d.slots())?.uz(d.a)?.uz(d.g)?.uz(ba)?;
     for mode in 0..2 {
@@ -206,7 +235,8 @@ pub fn assign(
         ctx.dispatch(&k, &[pick, own], &p, ctx.grid_1d(d.slots() as u64, 256)?)?;
     }
     let k = ctx.kernel(&TARGETS, Spec::new().u32("K", d.k as u32).u32("K2", d.k2 as u32))?;
-    let p = Params::new().uz(d.a)?.uz(d.g)?.uz(ba)?.uz(d.gt_label_offset())?.f(d.eps);
+    let p =
+        Params::new().uz(d.a)?.uz(d.g)?.uz(ba)?.uz(d.gt_label_offset())?.f(d.eps).u(u32::from(d.eps_free));
     ctx.dispatch(&k, &[pick, own, meta, slot, dense], &p, [d.g as u32, d.b as u32, 1])
 }
 
@@ -221,7 +251,7 @@ pub fn bce_forward(
 ) -> Result<()> {
     let chunks = d.a.div_ceil(BCE_CHUNK);
     let k = ctx.kernel(&BCE_FWD, Spec::new())?;
-    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(chunks)?.uz(d.b * d.a)?;
+    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(chunks)?.uz(d.b * d.a)?.f(d.mal_gamma);
     ctx.dispatch(&k, &[cls_raw, dense, part, misc], &p, [chunks as u32, (d.b * d.nc) as u32, 1])
 }
 
@@ -238,7 +268,7 @@ pub fn bce_backward(
 ) -> Result<()> {
     let n = d.b * d.nc * d.a;
     let k = ctx.kernel(&BCE_BWD, Spec::new())?;
-    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(n)?.uz(d.b * d.a)?;
+    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(n)?.uz(d.b * d.a)?.f(d.mal_gamma);
     ctx.dispatch(&k, &[cls_raw, dense, stats, grad, dcls], &p, ctx.grid_1d(n as u64, 256)?)
 }
 
@@ -264,7 +294,7 @@ pub fn box_terms(
     let spec = Spec::new().u32("R", d.reg_max as u32).u32("K", d.k as u32).u32("MODE", backward as u32);
     let k = ctx.kernel(&BOX, spec)?;
     let hi = d.reg_max as f32 - 1.0 - 0.01;
-    let p = Params::new().uz(d.slots())?.uz(d.a)?.uz(d.g)?.uz(d.gt_box_offset())?.f(hi);
+    let p = Params::new().uz(d.slots())?.uz(d.a)?.uz(d.g)?.uz(d.gt_box_offset())?.f(hi).f(d.box_nwd_weight);
     ctx.dispatch(&k, &[box_raw, meta, pick, slot, out, stats, grad], &p, ctx.grid_1d(d.slots() as u64, 64)?)
 }
 
@@ -360,6 +390,10 @@ mod tests {
             beta: 6.0,
             eps: 1e-9,
             min_box_size: 16.0,
+            eps_free: false,
+            tal_nwd_weight: 0.0,
+            mal_gamma: 0.0,
+            box_nwd_weight: 0.0,
         }
     }
 

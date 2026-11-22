@@ -75,13 +75,13 @@ pub(crate) const FEATURES: wgpu::Features =
 /// 2. Only the kernels generated in this module (and the self-test probe) contain
 ///    `enable wgpu_cooperative_matrix;`, and they only `coopLoadT` / `coopStoreT` through **workgroup** arrays of
 ///    compile-time size. Every fragment's offset is a compile-time constant plus a subgroup index clamped to
-///    `0..8`, and its stride is a constant; the generator asserts that all 16 rows of every fragment lie inside
+///    `0..8` (or `0..4` for `C32X32`), and its stride is a constant; the generator asserts that all 16 rows of every fragment lie inside
 ///    the array ([`gen_coop`]). No cooperative load or store touches a storage buffer, so the missing bounds
 ///    checks on cooperative accesses cannot reach outside a binding: global memory is read and written only by
 ///    ordinary WGSL loads and stores, which wgpu bounds-checks (robust buffer access on Vulkan).
 /// 3. Every `coopLoadT`, `coopMultiplyAdd` and `coopStoreT` runs in workgroup-uniform control flow: the trip
 ///    counts and conditions around them depend only on uniform parameters, never on the invocation, as
-///    subgroup-scope operations require. Workgroups are 256 invocations, a multiple of the subgroup size, and
+///    subgroup-scope operations require. Workgroups are 128 (`C32X32`) or 256 invocations, a multiple of the subgroup size, and
 ///    which fragments a subgroup owns comes from `@builtin(subgroup_id)`, so it is uniform within the subgroup.
 /// 4. A device must pass [`self_test`] (the generated kernels against a CPU reference, plus a probe) before the
 ///    kernels are used, so a driver that mis-compiles them is caught at start-up; on failure the experimental

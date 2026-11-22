@@ -22,9 +22,11 @@ fn prelude(spec: &Spec) -> String {
     let tw = if spec.get_bool("TF16") { "u32" } else { "f32" };
     // `detect_common.wgsl` needs CIoU's `V_K` (unused here), declared as the detection kernels declare it.
     let vk = super::detect::v_k();
-    // The combine kernel reads no teacher and has no `TF16` constant.
+    // Supply defaults for optional specialisation constants absent from older precompile lists or combine.
     let tf16 = if spec.get("TF16").is_none() { "const TF16: bool = false;\n" } else { "" };
-    format!("alias TW = {tw};\n{tf16}const V_K: f32 = {vk:?}f;\n{COMMON}{KD_COMMON}")
+    let has_gt = if spec.get("HAS_GT").is_none() { "const HAS_GT: bool = false;\n" } else { "" };
+    let use_ver_w = if spec.get("USE_VER_W").is_none() { "const USE_VER_W: bool = false;\n" } else { "" };
+    format!("alias TW = {tw};\n{tf16}{has_gt}{use_ver_w}const V_K: f32 = {vk:?}f;\n{COMMON}{KD_COMMON}")
 }
 
 macro_rules! kd_kernel {
@@ -41,9 +43,10 @@ macro_rules! kd_kernel {
 
 // The `det_` prefix puts these kernels under the detection kernels' precompile bounds (`kernels/bounds.rs`: `R` at
 // most `MAX_REG_MAX`).
-kd_kernel!(CLS_FWD, "det_kd_cls_fwd", "kd_cls_fwd.wgsl", [Read, Read, ReadWrite, ReadWrite]);
-kd_kernel!(CLS_BWD, "det_kd_cls_bwd", "kd_cls_bwd.wgsl", [Read, Read, Read, ReadWrite]);
-kd_kernel!(DFL, "det_kd_dfl", "kd_dfl.wgsl", [Read, Read, Read, ReadWrite, ReadWrite, Read]);
+kd_kernel!(CLS_FWD, "det_kd_cls_fwd", "kd_cls_fwd.wgsl", [Read, Read, ReadWrite, ReadWrite, Read]);
+kd_kernel!(CLS_BWD, "det_kd_cls_bwd", "kd_cls_bwd.wgsl", [Read, Read, Read, ReadWrite, Read]);
+kd_kernel!(DFL, "det_kd_dfl", "kd_dfl.wgsl", [Read, Read, Read, ReadWrite, ReadWrite, Read, Read]);
+kd_kernel!(GT_VERIFY, "det_kd_gt_verify", "kd_gt_verify.wgsl", [Read, Read, Read, Read, Read, ReadWrite]);
 kd_kernel!(COMBINE, "det_kd_combine", "kd_combine.wgsl", [Read, Read, Read, ReadWrite, ReadWrite]);
 
 /// Anchors per class-term workgroup (4 per thread).
@@ -65,6 +68,8 @@ pub struct KdDesc {
     pub reg_max: usize,
     /// Whether the teacher's outputs are f16 (else f32).
     pub teacher_f16: bool,
+    /// BCKD focal disagreement exponent (`0.0` = plain Bernoulli KL).
+    pub bckd_gamma: f32,
 }
 
 impl KdDesc {
@@ -115,6 +120,8 @@ pub fn forward(
     d: &KdDesc,
     student: [&wgpu::Buffer; 2],
     teacher: [&wgpu::Buffer; 2],
+    gt_dense: Option<&wgpu::Buffer>,
+    ver_w: Option<&wgpu::Buffer>,
     temp: f32,
     scales: [f32; 3],
     part_cls: &wgpu::Buffer,
@@ -126,21 +133,53 @@ pub fn forward(
     d.validate()?;
     let [s_box, s_cls] = student;
     let [t_box, t_cls] = teacher;
+    let dummy = ctx.dummy().clone();
     let chunks = d.a.div_ceil(CLS_CHUNK);
-    let k = ctx.kernel(&CLS_FWD, d.spec())?;
+    let has_gt = gt_dense.is_some();
+    let k = ctx.kernel(&CLS_FWD, d.spec().bool("HAS_GT", has_gt))?;
     let groups = d.cls_partials();
-    let p = Params::new().uz(d.a)?.uz(chunks)?.uz(groups)?;
+    let p = Params::new().uz(d.a)?.uz(chunks)?.uz(groups)?.uz(d.nc)?.uz(d.b * d.a)?.f(d.bckd_gamma);
     // One workgroup per partial, folded into x / y like a 1-D grid of `groups` workgroups.
     let grid = ctx.grid_1d(groups as u64 * 256, 256)?;
-    ctx.dispatch(&k, &[s_cls, t_cls, part_cls, misc], &p, grid)?;
-    let k = ctx.kernel(&DFL, d.spec().u32("R", d.reg_max as u32).u32("MODE", 0))?;
+    ctx.dispatch(&k, &[s_cls, t_cls, part_cls, misc, gt_dense.unwrap_or(&dummy)], &p, grid)?;
+    let use_ver_w = ver_w.is_some();
+    let k =
+        ctx.kernel(&DFL, d.spec().u32("R", d.reg_max as u32).u32("MODE", 0).bool("USE_VER_W", use_ver_w))?;
     let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(d.b * d.a)?.f(temp).f(0.0);
-    let dummy = ctx.dummy().clone();
-    ctx.dispatch(&k, &[s_box, t_box, t_cls, part_dfl, misc, &dummy], &p, d.dfl_grid(ctx)?)?;
+    ctx.dispatch(
+        &k,
+        &[s_box, t_box, t_cls, part_dfl, misc, &dummy, ver_w.unwrap_or(&dummy)],
+        &p,
+        d.dfl_grid(ctx)?,
+    )?;
     let k = ctx.kernel(&COMBINE, Spec::new())?;
     let p =
         Params::new().uz(d.cls_partials())?.uz(d.dfl_partials(ctx)?)?.f(scales[0]).f(scales[1]).f(scales[2]);
     ctx.dispatch(&k, &[part_cls, part_dfl, misc, stats, total], &p, [1, 1, 1])
+}
+
+/// Positive-only GT-verified DFL KD weights (`ver_w [B·A]`, zeroed by caller).
+#[allow(clippy::too_many_arguments)]
+pub fn gt_verify_weights(
+    ctx: &GpuContext,
+    asg_desc: &super::detect::DetectDesc,
+    teacher_f16: bool,
+    s_box: &wgpu::Buffer,
+    t_box: &wgpu::Buffer,
+    meta: &wgpu::Buffer,
+    pick: &wgpu::Buffer,
+    slot: &wgpu::Buffer,
+    ver_w: &wgpu::Buffer,
+) -> Result<()> {
+    if asg_desc.slots() == 0 {
+        return Ok(());
+    }
+    let spec =
+        Spec::new().bool("TF16", teacher_f16).u32("R", asg_desc.reg_max as u32).u32("K", asg_desc.k as u32);
+    let k = ctx.kernel(&GT_VERIFY, spec)?;
+    let p =
+        Params::new().uz(asg_desc.slots())?.uz(asg_desc.a)?.uz(asg_desc.g)?.uz(asg_desc.gt_box_offset())?;
+    ctx.dispatch(&k, &[s_box, t_box, meta, pick, slot, ver_w], &p, ctx.grid_1d(asg_desc.slots() as u64, 64)?)
 }
 
 /// The backward: the gradients with respect to the student's `box_raw` and `cls_raw` into `dbox` and `dcls`
@@ -152,6 +191,8 @@ pub fn backward(
     d: &KdDesc,
     student: [&wgpu::Buffer; 2],
     teacher: [&wgpu::Buffer; 2],
+    gt_dense: Option<&wgpu::Buffer>,
+    ver_w: Option<&wgpu::Buffer>,
     temp: f32,
     scales: [f32; 2],
     grad: &wgpu::Buffer,
@@ -161,15 +202,23 @@ pub fn backward(
     d.validate()?;
     let [s_box, s_cls] = student;
     let [t_box, t_cls] = teacher;
-    let n = d.b * d.nc * d.a;
-    let k = ctx.kernel(&CLS_BWD, d.spec())?;
-    let p = Params::new().uz(n)?.f(scales[0]);
-    ctx.dispatch(&k, &[s_cls, t_cls, grad, dcls], &p, ctx.grid_1d(n as u64, 256)?)?;
-    let k = ctx.kernel(&DFL, d.spec().u32("R", d.reg_max as u32).u32("MODE", 1))?;
-    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(d.b * d.a)?.f(temp).f(scales[1]);
     let dummy = ctx.dummy().clone();
-    ctx.dispatch(&k, &[s_box, t_box, t_cls, dbox, &dummy, grad], &p, d.dfl_grid(ctx)?)
+    let n = d.b * d.nc * d.a;
+    let has_gt = gt_dense.is_some();
+    let k = ctx.kernel(&CLS_BWD, d.spec().bool("HAS_GT", has_gt))?;
+    let p = Params::new().uz(n)?.f(scales[0]).uz(d.a)?.uz(d.nc)?.uz(d.b * d.a)?.f(d.bckd_gamma);
+    ctx.dispatch(
+        &k,
+        &[s_cls, t_cls, grad, dcls, gt_dense.unwrap_or(&dummy)],
+        &p,
+        ctx.grid_1d(n as u64, 256)?,
+    )?;
+    let use_ver_w = ver_w.is_some();
+    let k =
+        ctx.kernel(&DFL, d.spec().u32("R", d.reg_max as u32).u32("MODE", 1).bool("USE_VER_W", use_ver_w))?;
+    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(d.b * d.a)?.f(temp).f(scales[1]);
+    ctx.dispatch(&k, &[s_box, t_box, t_cls, dbox, &dummy, grad, ver_w.unwrap_or(grad)], &p, d.dfl_grid(ctx)?)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&CLS_FWD, &CLS_BWD, &DFL, &COMBINE];
+pub(crate) static DEFS: &[&KernelDef] = &[&CLS_FWD, &CLS_BWD, &DFL, &GT_VERIFY, &COMBINE];

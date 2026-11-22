@@ -9,9 +9,7 @@ use folo_core::Device;
 use folo_core::rng::Rng;
 use folo_data::{DataLoader, LoaderConfig};
 use folo_nn::io::{BestState, ModelConfig, ModelFile};
-use folo_nn::optim::{
-    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
-};
+use folo_nn::optim::{AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups};
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
@@ -83,6 +81,16 @@ impl Trainer {
         if let Some(w) = weights {
             let file = ModelFile::open(&w)?;
             let report = t.model.transfer_from(&file)?;
+            if t.cfg.gauge_norm {
+                let gn = super::gauge::apply_floor_gauge_norm(&t.model)?;
+                t.pending_logs.push((
+                    LogLevel::Info,
+                    format!(
+                        "floor gauge norm: rescaled {}/{} channels across {}/{} Conv+BN layers",
+                        gn.channels_rescaled, gn.total_channels, gn.layers_rescaled, gn.layers_visited
+                    ),
+                ));
+            }
             if let Some(ema) = &mut t.ema {
                 ema.reset(&t.model)?;
             }
@@ -270,6 +278,20 @@ impl Trainer {
         mconf.head = cfg.head.as_str().into();
         let mut init = Rng::seed(cfg.seed);
         let mut model = FoloModel::with_rng(mconf.clone(), &mut init)?;
+        // Safeguard #38: MAL requires focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would
+        // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8). Always apply to freshly initialized heads so
+        // cross-class transfers (whose class bias is skipped by `transfer_from`) also start at -4.59512; same-class
+        // transfers and resumes overwrite it when loading weights.
+        if cfg.loss.mal_gamma > 0.0 {
+            const MAL_BIAS_PRIOR: f32 = -4.595_12;
+            for (name, p) in model.named_parameters() {
+                if (name.starts_with("head.cls.") || name.starts_with("head.o2o.cls."))
+                    && name.ends_with(".out.bias")
+                {
+                    folo_nn::init::constant_(&p, MAL_BIAS_PRIOR)?;
+                }
+            }
+        }
         model.set_classes(data.classes.clone())?;
         model.set_imgsz(cfg.imgsz);
         let model = place_model(model, device)?;
@@ -295,25 +317,45 @@ impl Trainer {
             None => None,
         };
 
+        if resolved.kind == OptimKind::AdamW && cfg.cautious_wd {
+            return Err(Error::Config("cautious_wd is supported for SGD and MuSGD only, not AdamW".into()));
+        }
+        if resolved.kind != OptimKind::MuSgd && cfg.cls_lr_close_scale != 1.0 {
+            return Err(Error::Config(
+                "cls_lr_close_scale applies only to MuSGD (which has a separate .cls parameter group)".into(),
+            ));
+        }
+
         let accumulate = cfg.accumulate();
-        let wd = effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs);
+        let wd = cfg.effective_wd(accumulate);
         let std_groups = StandardGroups::from_module(&model);
-        let opt: Box<dyn Optimizer> = match resolved.kind {
-            OptimKind::Sgd => {
-                Box::new(Sgd::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
+        let apply_wd_mode = |mut gs: Vec<folo_nn::optim::ParamGroup>| {
+            if cfg.decoupled_wd || cfg.cautious_wd {
+                for g in &mut gs {
+                    g.decoupled_wd = cfg.decoupled_wd;
+                    g.cautious_wd = cfg.cautious_wd;
+                }
             }
+            gs
+        };
+        let opt: Box<dyn Optimizer> = match resolved.kind {
+            OptimKind::Sgd => Box::new(Sgd::new(apply_wd_mode(std_groups.into_groups(
+                resolved.lr0,
+                resolved.momentum,
+                wd,
+            )))?),
             OptimKind::AdamW => {
                 Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
             }
             // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
             OptimKind::MuSgd => Box::new(MuSgd::with_weights(
-                std_groups.into_boosted_groups(
+                apply_wd_mode(std_groups.into_boosted_groups(
                     resolved.lr0,
                     resolved.momentum,
                     wd,
                     |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
                     cfg.musgd.cls_lr,
-                ),
+                )),
                 resolved.musgd,
             )?),
         };

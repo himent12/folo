@@ -28,6 +28,9 @@ pub struct ImageCandidates {
     /// With DFL evidence fusion (`NmsConfig::fusion == BoxFusion::Dfl`, an `o2m` head): each candidate's side
     /// precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
     pub precisions: Option<Vec<[f32; 4]>>,
+    /// With DFL consensus scoring (`NmsConfig::score == ScoreRule::DflConsensus`, an `o2m` head): each candidate's
+    /// scale-free bin precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
+    pub bin_precisions: Option<Vec<[f32; 4]>>,
 }
 
 /// `c` (a fused `Conv` block) at the output sites `at` ([`Tensor::conv2d_act_at`]).
@@ -136,46 +139,90 @@ impl FoloModel {
             let _g = no_grad();
             let (h, w) = self.check_input(x)?;
             let feats = self.features(x, None)?;
-            let mode = self.head_mode;
-            let dfl = self.wants_precisions(nms);
-            let levels = match (mode, &self.head.o2o) {
-                (HeadMode::O2o, Some(o2o)) => o2o,
-                _ => &self.head.levels,
-            };
-            let anchors = self.anchors(h, w);
-            let b = x.dims()[0];
-            let hw: Vec<usize> = feats.iter().map(|f| f.dims()[2] * f.dims()[3]).collect();
-            let offsets = [0, hw[0], hw[0] + hw[1]];
-            // The class branches and the candidates of every level (side by side, like the dense head).
-            let found: Vec<Vec<Vec<Found>>> = (0..3)
-                .into_par_iter()
-                .map(|l| with_no_grad(|| self.class_candidates(&levels[l], &feats[l], nms.conf)))
-                .collect::<Result<_>>()?;
-            // Per image, the candidates that need a box.
-            let mut need: [Vec<Vec<Found>>; 3] = Default::default();
-            let mut found: Vec<_> = found.into_iter().map(Vec::into_iter).collect();
-            for _ in 0..b {
-                let per_level = [0, 1, 2].map(|l| found[l].next().unwrap_or_default());
-                for (l, v) in needing_boxes(per_level, offsets, mode, nms).into_iter().enumerate() {
-                    need[l].push(v);
-                }
-            }
-            // Their boxes, level by level (side by side), then every image's records in anchor order.
-            let boxed: Vec<Vec<ImageCandidates>> = (0..3)
-                .into_par_iter()
-                .map(|l| {
-                    with_no_grad(|| self.boxes_at(&levels[l], &feats[l], &need[l], &anchors, offsets[l], dfl))
-                })
-                .collect::<Result<_>>()?;
-            Ok((0..b)
-                .map(|i| ImageCandidates {
-                    cands: boxed.iter().flat_map(|lv| lv[i].cands.iter().copied()).collect(),
-                    precisions: dfl.then(|| {
-                        boxed.iter().flat_map(|lv| lv[i].precisions.iter().flatten().copied()).collect()
-                    }),
-                })
-                .collect())
+            self.predict_candidates_from_features(feats, x.dims()[0], h, w, nms)
         })
+    }
+
+    /// Candidate-first prediction reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas directly into the
+    /// int8 `u8` stem (zero `f32` image materialisation).
+    pub(crate) fn predict_candidates_rgb0_u8(
+        &self,
+        rgb0: &[u32],
+        b: usize,
+        h: usize,
+        w: usize,
+        nms: &NmsConfig,
+    ) -> Result<Vec<ImageCandidates>> {
+        if !self.candidates_first_applies(Device::Cpu, nms) {
+            return Err(folo_nn::Error::Invalid(
+                "FoloModel::predict_candidates needs a fused model in eval mode (F32 on the CPU), single-label"
+                    .into(),
+            ));
+        }
+        let plan = self.int8.as_ref().ok_or_else(|| {
+            folo_nn::Error::Invalid("predict_candidates_rgb0_u8 requires an int8 plan".into())
+        })?;
+        folo_core::cpu::in_pool(|| {
+            let _g = no_grad();
+            self.check_hw(b, h, w)?;
+            let feats = super::quant::exec::features_rgb0_u8(self, plan, rgb0, b, h, w)?;
+            self.predict_candidates_from_features(feats, b, h, w, nms)
+        })
+    }
+
+    fn predict_candidates_from_features(
+        &self,
+        feats: [Tensor; 3],
+        b: usize,
+        h: usize,
+        w: usize,
+        nms: &NmsConfig,
+    ) -> Result<Vec<ImageCandidates>> {
+        let mode = self.head_mode;
+        let want_side = self.wants_precisions(nms);
+        let want_bin = self.wants_bin_precisions(nms);
+        let cand_conf = nms.candidate_conf_for(mode);
+        let levels = match (mode, &self.head.o2o) {
+            (HeadMode::O2o, Some(o2o)) => o2o,
+            _ => &self.head.levels,
+        };
+        let anchors = self.anchors(h, w);
+        let hw: Vec<usize> = feats.iter().map(|f| f.dims()[2] * f.dims()[3]).collect();
+        let offsets = [0, hw[0], hw[0] + hw[1]];
+        // The class branches and the candidates of every level (side by side, like the dense head).
+        let found: Vec<Vec<Vec<Found>>> = (0..3)
+            .into_par_iter()
+            .map(|l| with_no_grad(|| self.class_candidates(&levels[l], &feats[l], cand_conf)))
+            .collect::<Result<_>>()?;
+        // Per image, the candidates that need a box.
+        let mut need: [Vec<Vec<Found>>; 3] = Default::default();
+        let mut found: Vec<_> = found.into_iter().map(Vec::into_iter).collect();
+        for _ in 0..b {
+            let per_level = [0, 1, 2].map(|l| found[l].next().unwrap_or_default());
+            for (l, v) in needing_boxes(per_level, offsets, mode, nms).into_iter().enumerate() {
+                need[l].push(v);
+            }
+        }
+        // Their boxes, level by level (side by side), then every image's records in anchor order.
+        let boxed: Vec<Vec<ImageCandidates>> = (0..3)
+            .into_par_iter()
+            .map(|l| {
+                with_no_grad(|| {
+                    self.boxes_at(&levels[l], &feats[l], &need[l], &anchors, offsets[l], want_side, want_bin)
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok((0..b)
+            .map(|i| ImageCandidates {
+                cands: boxed.iter().flat_map(|lv| lv[i].cands.iter().copied()).collect(),
+                precisions: want_side.then(|| {
+                    boxed.iter().flat_map(|lv| lv[i].precisions.iter().flatten().copied()).collect()
+                }),
+                bin_precisions: want_bin.then(|| {
+                    boxed.iter().flat_map(|lv| lv[i].bin_precisions.iter().flatten().copied()).collect()
+                }),
+            })
+            .collect())
     }
 
     /// The single-label post-process of one image's candidates from [`FoloModel::predict_candidates`] for the
@@ -183,13 +230,18 @@ impl FoloModel {
     /// `o2m`, §6.6's top-k for `o2o`. Highest score first, in network-input pixels. `c` must come from
     /// [`FoloModel::predict_candidates`] with the same `nms` (DFL fusion needs its precisions).
     pub fn finish_candidates(&self, c: &ImageCandidates, nms: &NmsConfig) -> Vec<Detection> {
-        finish_candidates(self.head_mode, &c.cands, c.precisions.as_deref(), nms)
+        finish_candidates(self.head_mode, &c.cands, c.precisions.as_deref(), c.bin_precisions.as_deref(), nms)
     }
 
     /// Whether the post-process of `nms` needs each candidate's side precisions (DFL evidence fusion, an `o2m`
     /// head): the dense path's `HeadOutput::wants_precisions`.
     pub(super) fn wants_precisions(&self, nms: &NmsConfig) -> bool {
         nms.fusion == BoxFusion::Dfl && self.head_mode == HeadMode::O2m
+    }
+
+    /// Whether the post-process of `nms` needs each candidate's scale-free DFL bin precisions (`o2m` head).
+    pub(super) fn wants_bin_precisions(&self, nms: &NmsConfig) -> bool {
+        nms.score.wants_bin_precisions() && self.head_mode == HeadMode::O2m
     }
 
     /// One level's class branch on `x` (`[B, C, h, w]`) and each image's candidates in it (local anchors).
@@ -210,6 +262,7 @@ impl FoloModel {
 
     /// One level's box branch at the anchors `need[img]` (local, ascending) of `x` (`[B, C, h, w]`), decoded into
     /// per-image candidate records (global anchors from `offset`), with `dfl` also their side precisions.
+    #[allow(clippy::too_many_arguments)]
     fn boxes_at(
         &self,
         level: &HeadLevel,
@@ -217,12 +270,17 @@ impl FoloModel {
         need: &[Vec<Found>],
         anchors: &Anchors,
         offset: usize,
-        dfl: bool,
+        want_side: bool,
+        want_bin: bool,
     ) -> Result<Vec<ImageCandidates>> {
         let (b, _, h, w) = x.dims4()?;
         let (hw, rm) = (h * w, self.head.reg_max);
         if need.iter().all(Vec::is_empty) {
-            let empty = ImageCandidates { cands: Vec::new(), precisions: dfl.then(Vec::new) };
+            let empty = ImageCandidates {
+                cands: Vec::new(),
+                precisions: want_side.then(Vec::new),
+                bin_precisions: want_bin.then(Vec::new),
+            };
             return Ok(vec![empty; b]);
         }
         // `out` and `conv1` at the candidates; `conv0` on their receptive fields (3×3, padding 1).
@@ -256,14 +314,17 @@ impl FoloModel {
                     let mut bins = vec![0f32; rm];
                     let mut out = ImageCandidates {
                         cands: Vec::with_capacity(v.len()),
-                        precisions: dfl.then(|| Vec::with_capacity(v.len())),
+                        precisions: want_side.then(|| Vec::with_capacity(v.len())),
+                        bin_precisions: want_bin.then(|| Vec::with_capacity(v.len())),
                     };
                     for &(j, class, score) in v {
                         let (j, k) = (j as usize, offset + j as usize);
                         let (point, st) = (anchors.points[k], anchors.strides[k]);
-                        let (bbox, p) = dfl_box(&mut bins, |r| rg[r * hw + j], point, st, dfl);
+                        let (bbox, p, bp) =
+                            dfl_box(&mut bins, |r| rg[r * hw + j], point, st, want_side, want_bin);
                         out.cands.push(Candidate { anchor: k as u32, class, score, bbox });
                         out.precisions.iter_mut().zip(p).for_each(|(v, p)| v.push(p));
+                        out.bin_precisions.iter_mut().zip(bp).for_each(|(v, p)| v.push(p));
                     }
                     out
                 })
@@ -308,7 +369,9 @@ mod tests {
                     v.into_iter().map(|j| (j, 0, 1.0)).collect()
                 })
                 .collect();
-            let got = m.boxes_at(&m.head.levels[l], &feats[l], &need, &out.anchors, lv.start, false).unwrap();
+            let got = m
+                .boxes_at(&m.head.levels[l], &feats[l], &need, &out.anchors, lv.start, false, false)
+                .unwrap();
             for (i, (g, n)) in got.iter().zip(&need).enumerate() {
                 assert_eq!(g.cands.len(), n.len());
                 assert_eq!(g.precisions, None);

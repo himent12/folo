@@ -161,8 +161,14 @@ fn f16_desc(m: usize, n: usize, k: usize, ta: bool, tb: bool, batch: usize) -> G
     d
 }
 
-pub(super) const CONFIGS: [CoopConfig; 5] =
-    [CoopConfig::C128X128, CoopConfig::C64X128, CoopConfig::C64X64, CoopConfig::C32X128, CoopConfig::C16X256];
+pub(super) const CONFIGS: [CoopConfig; 6] = [
+    CoopConfig::C128X128,
+    CoopConfig::C64X128,
+    CoopConfig::C64X64,
+    CoopConfig::C32X128,
+    CoopConfig::C32X32,
+    CoopConfig::C16X256,
+];
 
 #[test]
 fn self_test_passes_and_reports() {

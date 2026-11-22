@@ -9,10 +9,13 @@ use rayon::prelude::*;
 use super::{FoloModel, HeadMode, HeadOutput, ImageCandidates};
 use crate::boxes::Xyxy;
 use crate::decode::{
-    decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation, softmax_moments,
+    bin_precision, decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation,
+    softmax_moments,
 };
 use crate::fusion::BoxFusion;
-use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates_with, postprocess_with, topk_candidates};
+use crate::nms::{
+    Candidate, Detection, NmsConfig, nms_candidates_with_dfl, postprocess_with_dfl, topk_candidates,
+};
 
 /// Records per image in the first download of [`HeadOutput::detections`]' device path: the counts and up to
 /// this many candidates of every image come back in one readback; an image with more takes a second one.
@@ -77,37 +80,44 @@ pub(super) fn dfl_box(
     read: impl Fn(usize) -> f32,
     point: [f32; 2],
     stride: f32,
-    precisions: bool,
-) -> (Xyxy, Option<[f32; 4]>) {
+    want_side: bool,
+    want_bin: bool,
+) -> (Xyxy, Option<[f32; 4]>, Option<[f32; 4]>) {
     let rm = bins.len();
-    let (mut d, mut p) = ([0f32; 4], [0f32; 4]);
+    let (mut d, mut p, mut bp) = ([0f32; 4], [0f32; 4], [0f32; 4]);
+    let moments = want_side || want_bin;
     for side in 0..4 {
         for (k, v) in bins.iter_mut().enumerate() {
             *v = read(side * rm + k);
         }
-        if precisions {
+        if moments {
             // The mean is the expectation of `decode::softmax_expectation`, bit for bit.
             let (mean, var) = softmax_moments(bins);
             d[side] = mean;
-            p[side] = side_precision(mean, var, stride);
+            if want_side {
+                p[side] = side_precision(mean, var, stride);
+            }
+            if want_bin {
+                bp[side] = bin_precision(mean, var);
+            }
         } else {
             d[side] = softmax_expectation(bins);
         }
     }
-    (dist2bbox(d, point).scale(stride, stride), precisions.then_some(p))
+    (dist2bbox(d, point).scale(stride, stride), want_side.then_some(p), want_bin.then_some(bp))
 }
 
 /// The single-label post-process of one image's candidates (sorted by anchor) for the branch `mode`: NMS for
-/// `o2m` (with the candidates' side precisions, parallel to `cands`, when DFL fusion wants them), §6.6's top-k for
-/// `o2o`.
+/// `o2m` (with the candidates' side and/or scale-free bin precisions, parallel to `cands`), §6.6's top-k for `o2o`.
 pub(super) fn finish_candidates(
     mode: HeadMode,
     cands: &[Candidate],
     prec: Option<&[[f32; 4]]>,
+    bin_prec: Option<&[[f32; 4]]>,
     nms: &NmsConfig,
 ) -> Vec<Detection> {
     match mode {
-        HeadMode::O2m => nms_candidates_with(cands, prec, nms),
+        HeadMode::O2m => nms_candidates_with_dfl(cands, prec, bin_prec, nms),
         HeadMode::O2o => topk_candidates(cands, nms),
     }
 }
@@ -250,13 +260,21 @@ impl HeadOutput {
             }
         }
         let (nc, mode) = (self.num_classes, self.mode);
-        let prec = self.precisions_for(nms)?;
+        let (prec, bin_prec) = self.dfl_precisions_for(nms)?;
         Ok(self
             .decode_images()?
             .into_par_iter()
             .enumerate()
             .map(|(i, (b, s))| {
-                postprocess_with(&b, &s, prec.as_ref().map(|p| p[i].as_slice()), nc, nms, mode)
+                postprocess_with_dfl(
+                    &b,
+                    &s,
+                    prec.as_ref().map(|p| p[i].as_slice()),
+                    bin_prec.as_ref().map(|p| p[i].as_slice()),
+                    nc,
+                    nms,
+                    mode,
+                )
             })
             .collect())
     }
@@ -267,9 +285,86 @@ impl HeadOutput {
         nms.fusion == BoxFusion::Dfl && self.mode == HeadMode::O2m
     }
 
-    /// [`HeadOutput::side_precisions`] when [`HeadOutput::wants_precisions`].
-    fn precisions_for(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<[f32; 4]>>>> {
-        if self.wants_precisions(nms) { self.side_precisions().map(Some) } else { Ok(None) }
+    /// Whether `nms` scores kept boxes with scale-free DFL bin precisions ([`crate::fusion::ScoreRule::DflConsensus`]).
+    fn wants_bin_precisions(&self, nms: &NmsConfig) -> bool {
+        nms.score.wants_bin_precisions() && self.mode == HeadMode::O2m
+    }
+
+    /// Per-image side precisions (for [`BoxFusion::Dfl`]) and/or scale-free bin precisions (for
+    /// [`crate::fusion::ScoreRule::DflConsensus`]), computed in a single pass / single device readback.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn dfl_precisions_for(
+        &self,
+        nms: &NmsConfig,
+    ) -> Result<(Option<Vec<Vec<[f32; 4]>>>, Option<Vec<Vec<[f32; 4]>>>)> {
+        let want_side = self.wants_precisions(nms);
+        let want_bin = self.wants_bin_precisions(nms);
+        if !want_side && !want_bin {
+            return Ok((None, None));
+        }
+        if want_side && !want_bin {
+            return Ok((Some(self.side_precisions()?), None));
+        }
+        let _g = no_grad();
+        let (b, a, rm) = (self.batch(), self.num_anchors(), self.reg_max);
+        if self.box_raw.dims() != [b, 4 * rm, a] {
+            return Err(Error::Invalid(format!(
+                "HeadOutput: box_raw {:?} does not match {a} anchors",
+                self.box_raw.dims()
+            )));
+        }
+        let strides = &self.anchors.strides;
+        if !self.box_raw.device().is_cpu() {
+            let m = self.moments_on_device()?.to_vec::<f32>()?;
+            let side = want_side.then(|| {
+                m.chunks_exact(8 * a)
+                    .map(|img| (0..a).map(|j| precision_from_moments(img, a, j, strides[j])).collect())
+                    .collect()
+            });
+            let bin = m
+                .chunks_exact(8 * a)
+                .map(|img| (0..a).map(|j| bin_precision_from_moments(img, a, j)).collect())
+                .collect();
+            return Ok((side, Some(bin)));
+        }
+        let reg = self.box_raw.to_dtype(DType::F32)?.to_vec::<f32>()?;
+        let both: Vec<(Option<Vec<[f32; 4]>>, Vec<[f32; 4]>)> = reg
+            .par_chunks_exact(4 * rm * a)
+            .map(|rg| {
+                let mut row = vec![0f32; 4 * rm];
+                let mut sp = want_side.then(|| Vec::with_capacity(a));
+                let mut bp = Vec::with_capacity(a);
+                for j in 0..a {
+                    for (k, v) in row.iter_mut().enumerate() {
+                        *v = rg[k * a + j];
+                    }
+                    let stride = strides[j];
+                    let mut s_arr = [0f32; 4];
+                    let mut b_arr = [0f32; 4];
+                    for side in 0..4 {
+                        let (mean, var) = softmax_moments(&row[side * rm..(side + 1) * rm]);
+                        if want_side {
+                            s_arr[side] = side_precision(mean, var, stride);
+                        }
+                        b_arr[side] = bin_precision(mean, var);
+                    }
+                    if let Some(sp) = sp.as_mut() {
+                        sp.push(s_arr);
+                    }
+                    bp.push(b_arr);
+                }
+                (sp, bp)
+            })
+            .collect();
+        let mut side = want_side.then(|| Vec::with_capacity(both.len()));
+        let mut bin = Vec::with_capacity(both.len());
+        for (s, b) in both {
+            if let (Some(sv), Some(s)) = (side.as_mut(), s) {
+                sv.push(s);
+            }
+            bin.push(b);
+        }
+        Ok((side, Some(bin)))
     }
 
     /// Per image, every anchor's side precisions for DFL evidence fusion (`[A]`,
@@ -331,24 +426,28 @@ impl HeadOutput {
             return Ok(None);
         }
         let anchors = &self.anchors;
-        let dfl = self.wants_precisions(nms);
-        // The candidates among anchors `j0..j1` of one image, and with `dfl` their side precisions.
-        let block = |cl: &[f32], rg: &[f32], j0: usize, j1: usize| -> (Vec<Candidate>, Vec<[f32; 4]>) {
+        let want_side = self.wants_precisions(nms);
+        let want_bin = self.wants_bin_precisions(nms);
+        let cand_conf = nms.candidate_conf_for(self.mode);
+        // The candidates among anchors `j0..j1` of one image, plus any requested DFL precisions.
+        let block = |cl: &[f32], rg: &[f32], j0: usize, j1: usize| {
             let mut found = Vec::new();
-            single_label_block(cl, a, j0, j1, nms.conf, &mut found);
+            single_label_block(cl, a, j0, j1, cand_conf, &mut found);
             let mut bins = vec![0f32; rm];
             let mut precs = Vec::new();
-            let cands = found
+            let mut bprecs = Vec::new();
+            let cands: Vec<Candidate> = found
                 .into_iter()
                 .map(|(j, class, score)| {
                     let j = j as usize;
                     let (point, st) = (anchors.points[j], anchors.strides[j]);
-                    let (bbox, p) = dfl_box(&mut bins, |i| rg[i * a + j], point, st, dfl);
+                    let (bbox, p, bp) = dfl_box(&mut bins, |i| rg[i * a + j], point, st, want_side, want_bin);
                     precs.extend(p);
+                    bprecs.extend(bp);
                     Candidate { anchor: j as u32, class, score, bbox }
                 })
                 .collect();
-            (cands, precs)
+            (cands, precs, bprecs)
         };
         let blocks = a.div_ceil(CPU_DECODE_BLOCK);
         let images = |reg: &[f32], cls: &[f32]| -> Vec<Vec<Detection>> {
@@ -357,13 +456,25 @@ impl HeadOutput {
                 .map(|i| {
                     let cl = &cls[i * nc * a..(i + 1) * nc * a];
                     let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
-                    let parts: Vec<(Vec<Candidate>, Vec<[f32; 4]>)> = (0..blocks)
+                    let parts: Vec<_> = (0..blocks)
                         .into_par_iter()
                         .map(|t| block(cl, rg, t * CPU_DECODE_BLOCK, ((t + 1) * CPU_DECODE_BLOCK).min(a)))
                         .collect();
-                    let (cands, precs): (Vec<_>, Vec<_>) = parts.into_iter().unzip();
-                    let precs = precs.concat();
-                    finish_candidates(self.mode, &cands.concat(), dfl.then_some(precs.as_slice()), nms)
+                    let mut cands = Vec::new();
+                    let mut precs = Vec::new();
+                    let mut bprecs = Vec::new();
+                    for (c, p, bp) in parts {
+                        cands.extend(c);
+                        precs.extend(p);
+                        bprecs.extend(bp);
+                    }
+                    finish_candidates(
+                        self.mode,
+                        &cands,
+                        want_side.then_some(precs.as_slice()),
+                        want_bin.then_some(bprecs.as_slice()),
+                        nms,
+                    )
                 })
                 .collect()
         };
@@ -392,21 +503,29 @@ impl HeadOutput {
     fn detections_on_device(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
         Ok(self.candidates_on_device(nms)?.map(|c| {
             c.into_par_iter()
-                .map(|c| finish_candidates(self.mode, &c.cands, c.precisions.as_deref(), nms))
+                .map(|c| {
+                    finish_candidates(
+                        self.mode,
+                        &c.cands,
+                        c.precisions.as_deref(),
+                        c.bin_precisions.as_deref(),
+                        nms,
+                    )
+                })
                 .collect()
         }))
     }
 
-    /// Every image's candidates (best class score `> nms.conf`) with their boxes, in anchor order, decoded on the
-    /// outputs' device ([`Tensor::detect_candidates`]), with DFL fusion also their side precisions (from
-    /// [`HeadOutput::moments_on_device`]); `None` when the device has no candidate kernel.
+    /// Every image's candidates (best class score `> nms.candidate_conf()`) with their boxes, in anchor order,
+    /// decoded on the outputs' device ([`Tensor::detect_candidates`]), with DFL fusion / DFL consensus also their
+    /// precisions (from [`HeadOutput::moments_on_device`]); `None` when the device has no candidate kernel.
     pub(super) fn candidates_on_device(&self, nms: &NmsConfig) -> Result<Option<Vec<ImageCandidates>>> {
         let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
         if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
             return Ok(None);
         }
         let dev = self.box_raw.device();
-        let p = DetectDecode { reg_max: rm, num_classes: nc, conf: nms.conf };
+        let p = DetectDecode { reg_max: rm, num_classes: nc, conf: nms.candidate_conf_for(self.mode) };
         let anchors = self.anchors_tensor(dev)?;
         let Some(cands) = Tensor::detect_candidates(&self.box_raw, &self.cls_raw, &anchors, &p)? else {
             return Ok(None);
@@ -426,9 +545,11 @@ impl HeadOutput {
                 cands.narrow(0, i, 1)?.narrow(1, 1, W * n)?.to_vec::<u32>()?
             });
         }
-        // DFL fusion: the side moments of every anchor, one more download (`[B, 8, A]`, an eighth of the logits).
+        let want_side = self.wants_precisions(nms);
+        let want_bin = self.wants_bin_precisions(nms);
+        // DFL fusion / DFL consensus: the side moments of every anchor, one download (`[B, 8, A]`).
         let moments =
-            if self.wants_precisions(nms) { Some(self.moments_on_device()?.to_vec::<f32>()?) } else { None };
+            if want_side || want_bin { Some(self.moments_on_device()?.to_vec::<f32>()?) } else { None };
         let strides = &self.anchors.strides;
         Ok(Some(
             records
@@ -436,15 +557,31 @@ impl HeadOutput {
                 .enumerate()
                 .map(|(i, r)| {
                     let cands = candidates_of_records(&r);
-                    let precisions = moments.as_ref().map(|m| {
-                        let img = &m[i * 8 * a..(i + 1) * 8 * a];
-                        cands
-                            .iter()
-                            .map(|c| c.anchor as usize)
-                            .map(|j| precision_from_moments(img, a, j, strides[j]))
-                            .collect()
-                    });
-                    ImageCandidates { cands, precisions }
+                    let precisions = if want_side {
+                        moments.as_ref().map(|m| {
+                            let img = &m[i * 8 * a..(i + 1) * 8 * a];
+                            cands
+                                .iter()
+                                .map(|c| c.anchor as usize)
+                                .map(|j| precision_from_moments(img, a, j, strides[j]))
+                                .collect()
+                        })
+                    } else {
+                        None
+                    };
+                    let bin_precisions = if want_bin {
+                        moments.as_ref().map(|m| {
+                            let img = &m[i * 8 * a..(i + 1) * 8 * a];
+                            cands
+                                .iter()
+                                .map(|c| c.anchor as usize)
+                                .map(|j| bin_precision_from_moments(img, a, j))
+                                .collect()
+                        })
+                    } else {
+                        None
+                    };
+                    ImageCandidates { cands, precisions, bin_precisions }
                 })
                 .collect(),
         ))
@@ -510,14 +647,15 @@ impl FoloModel {
         let _g = no_grad();
         let output = self.forward_head(x, mode)?;
         let (nc, mode) = (output.num_classes, output.mode);
-        let prec = output.precisions_for(nms)?;
+        let (prec, bin_prec) = output.dfl_precisions_for(nms)?;
         let images = output
             .decode_images()?
             .into_par_iter()
             .enumerate()
             .map(|(i, (boxes, scores))| {
                 let p = prec.as_ref().map(|p| p[i].as_slice());
-                let detections = postprocess_with(&boxes, &scores, p, nc, nms, mode);
+                let bp = bin_prec.as_ref().map(|p| p[i].as_slice());
+                let detections = postprocess_with_dfl(&boxes, &scores, p, bp, nc, nms, mode);
                 ImagePrediction { boxes, scores, detections }
             })
             .collect();
@@ -579,5 +717,14 @@ pub(super) fn precision_from_moments(img: &[f32], a: usize, j: usize, stride: f3
         let mean = img[side * a + j];
         let var = (img[(4 + side) * a + j] - mean * mean).max(0.0);
         side_precision(mean, var, stride)
+    })
+}
+
+/// The scale-free bin precisions of anchor `j` from one image's [`HeadOutput::moments_on_device`] values (`[8, A]`).
+pub(super) fn bin_precision_from_moments(img: &[f32], a: usize, j: usize) -> [f32; 4] {
+    std::array::from_fn(|side| {
+        let mean = img[side * a + j];
+        let var = (img[(4 + side) * a + j] - mean * mean).max(0.0);
+        bin_precision(mean, var)
     })
 }

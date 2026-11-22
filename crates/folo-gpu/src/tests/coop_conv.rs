@@ -160,8 +160,8 @@ fn gemm_dims(d: &Conv2dDesc) -> (usize, usize, usize, usize) {
 
 /// The tile config the tensor-core forward conv picks for `d`.
 fn picked_config(d: &Conv2dDesc) -> CoopConfig {
-    let (m, n, _, _) = gemm_dims(d);
-    coop::pick_config_conv(m, n)
+    let (m, n, _, batch) = gemm_dims(d);
+    coop::pick_config_conv_batched(m, n, batch)
 }
 
 #[test]
@@ -762,5 +762,51 @@ fn coop_pointwise_convs_take_the_forward_tiles() {
         check("1x1 conv over a concatenation", &|y| {
             conv::conv2d_cat(&ctx, &d, &parts, gw.raw(), Some(gb.raw()), y).unwrap();
         });
+    }
+}
+
+/// B1 verification: stride-1 `CONV_MODE = 2` tap_mask (3x3, 5x5, 4x8 exact 32-tap limit, 7x7 >32 fallback,
+/// dilated 3x3), backward dW never picks C128X128, and C1 batch-1 20x20 picks C32X32 (4x more tiles).
+#[test]
+fn coop_conv_backward_tap_mask_and_c32x32() {
+    let (ctx, _g) = coop!();
+    let k4x8 = Window2d { kernel: (4, 8), stride: (1, 1), padding: (1, 3), dilation: (1, 1) };
+    let dil = Window2d { kernel: (3, 3), stride: (1, 1), padding: (2, 2), dilation: (2, 2) };
+    for (i, d) in [
+        cdesc(2, 16, 11, 13, 24, 1, Window2d::square(3, 1, 1)),
+        cdesc(1, 8, 9, 10, 16, 1, Window2d::square(5, 1, 2)),
+        cdesc(1, 4, 10, 11, 12, 1, k4x8),
+        cdesc(1, 4, 13, 13, 8, 1, Window2d::square(7, 1, 3)),
+        cdesc(2, 8, 12, 10, 16, 1, dil),
+    ]
+    .iter()
+    .enumerate()
+    {
+        run_conv_grads(&ctx, d, 300 + i as u64);
+    }
+    // Wide M=128, N=16*9=144 weight gradient must pick C64X128 (never C128X128).
+    let wide = cdesc(2, 16, 16, 16, 128, 1, Window2d::square(3, 1, 1));
+    let routes = conv_grads(&ctx, &wide, 310, false);
+    for r in &routes[..2] {
+        assert!(matches!(r, Some((true, (64, 128), _))), "expected C64X128 for wide dW, got {r:?}");
+    }
+    // Batch-1 20x20 pointwise conv (plus ragged M/N/K) picks C32X32 and matches CPU reference.
+    ctx.set_tensor_cores(true);
+    let b1 = cdesc(1, 64, 20, 20, 128, 1, Window2d::square(1, 1, 0));
+    assert_eq!(coop::pick_config_conv_batched(128, 400, 1), CoopConfig::C32X32);
+    assert_eq!(coop::pick_config_conv_batched(128, 400, 16), CoopConfig::C64X64);
+    for (seed, d) in [(311u64, b1), (312, cdesc(1, 48, 19, 17, 50, 1, Window2d::square(1, 1, 0)))] {
+        run_conv(&ctx, &d, false, DType::F16, Some(CoopConfig::C32X32), seed);
+        let (oh, ow) = d.output().unwrap();
+        let mut rng = Rng::new(seed);
+        let gx = upload(&ctx, &f16_round(&rng.vec(d.c_in * d.h * d.w, -1.0, 1.0)), DType::F16);
+        let gw = upload(&ctx, &f16_round(&rng.vec(d.c_out * d.c_in, -1.0, 1.0)), DType::F16);
+        let gy = GpuTensor::empty(&ctx, &[d.c_out * oh * ow], DType::F16).unwrap();
+        assert_eq!(
+            traced_tile(&ctx, || {
+                conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), None, gy.raw()).unwrap();
+            }),
+            (32, 32)
+        );
     }
 }

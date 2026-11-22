@@ -62,12 +62,13 @@ pub(crate) enum SpecVal {
     F32(u32),
 }
 
-/// Specialisation constants plus the f16 switch (`enable f16;`).
+/// Specialisation constants plus the f16 (`enable f16;`), cooperative-matrix and subgroup switches.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Spec {
     vals: Vec<(&'static str, SpecVal)>,
     f16: bool,
     coop: bool,
+    subgroups: bool,
 }
 
 impl Spec {
@@ -106,6 +107,14 @@ impl Spec {
     /// Only valid on a device created with them (see `kernels::coop`).
     pub fn coop(mut self, on: bool) -> Self {
         self.coop = on;
+        self
+    }
+
+    /// Marks a pipeline variant as using native WGSL subgroup built-ins (enabled via `wgpu::Features::SUBGROUP`
+    /// in Naga without a WGSL `enable` directive; browser WebGPU stays on the portable fallback).
+    #[allow(dead_code)]
+    pub fn subgroups(mut self, on: bool) -> Self {
+        self.subgroups = on;
         self
     }
 
@@ -151,19 +160,30 @@ impl Spec {
         if self.coop {
             parts.push("coop".into());
         }
+        if self.subgroups {
+            parts.push("subgroups".into());
+        }
         parts.join(" ")
     }
 
-    /// The switches and constants as fields of a kernel list line (`crate::kernel_list`): `-`, `h` (f16), `c`
-    /// (coop) or `hc`, then ` NAME=u5`, ` NAME=i-3`, ` NAME=b1` or ` NAME=f<bits>` per constant.
+    /// The switches and constants as fields of a kernel list line (`crate::kernel_list`): `-`, or a combination of
+    /// `h` (f16), `c` (coop), `s` (subgroups), then ` NAME=u5`, ` NAME=i-3`, ` NAME=b1` or ` NAME=f<bits>` per
+    /// constant.
     pub(crate) fn encode_fields(&self, out: &mut String) {
         use std::fmt::Write as _;
-        out.push_str(match (self.f16, self.coop) {
-            (false, false) => "-",
-            (true, false) => "h",
-            (false, true) => "c",
-            (true, true) => "hc",
-        });
+        if !self.f16 && !self.coop && !self.subgroups {
+            out.push('-');
+        } else {
+            if self.f16 {
+                out.push('h');
+            }
+            if self.coop {
+                out.push('c');
+            }
+            if self.subgroups {
+                out.push('s');
+            }
+        }
         for (name, v) in &self.vals {
             let _ = match v {
                 SpecVal::U32(x) => write!(out, " {name}=u{x}"),
@@ -183,13 +203,21 @@ impl Spec {
         max_int: u32,
         mut intern: impl FnMut(&str) -> Option<&'static str>,
     ) -> Option<Self> {
-        let (f16, coop) = match fields.next()? {
-            "-" => (false, false),
-            "h" => (true, false),
-            "c" => (false, true),
-            "hc" => (true, true),
-            _ => return None,
-        };
+        let flag_str = fields.next()?;
+        let (mut f16, mut coop, mut subgroups) = (false, false, false);
+        if flag_str != "-" {
+            if flag_str.is_empty() {
+                return None;
+            }
+            for b in flag_str.bytes() {
+                match b {
+                    b'h' if !f16 => f16 = true,
+                    b'c' if !coop => coop = true,
+                    b's' if !subgroups => subgroups = true,
+                    _ => return None,
+                }
+            }
+        }
         let mut vals = Vec::new();
         for f in fields {
             let (name, v) = f.split_once('=')?;
@@ -211,7 +239,7 @@ impl Spec {
             };
             vals.push((intern(name)?, val));
         }
-        Some(Self { vals, f16, coop })
+        Some(Self { vals, f16, coop, subgroups })
     }
 
     /// Whether the cooperative-matrix variant is requested.
@@ -220,9 +248,18 @@ impl Spec {
         self.coop
     }
 
+    /// Whether the subgroup variant is requested.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn is_subgroups(&self) -> bool {
+        self.subgroups
+    }
+
     fn header(&self) -> String {
         let mut s = String::new();
         // Directives first: WGSL rejects `enable` after any declaration.
+        // Subgroup kernels are native-only (Naga 30 enables subgroup built-ins via `wgpu::Features::SUBGROUP`
+        // and rejects `enable subgroups;`; browser WebGPU stays on the portable fallback until wgpu exposes
+        // both `SUBGROUP` and the WGSL `subgroup_id` language feature).
         if self.coop {
             s.push_str("enable wgpu_cooperative_matrix;\n");
         }

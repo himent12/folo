@@ -478,6 +478,7 @@ fn fused_term_rejects_bad_inputs() {
         dfl_gain: 0.5,
         temperature: 2.0,
         normaliser: 1.0,
+        bckd_gamma: 0.0,
     };
     assert!(
         folo_gpu::distill::distill_loss(&on(&sb), &on(&sc), &on(&tb), &on(&tc), &s).is_err(),

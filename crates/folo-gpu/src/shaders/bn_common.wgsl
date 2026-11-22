@@ -7,7 +7,7 @@ fn bn_act(z: vec4<f32>) -> vec4<f32> {
     }
 }
 
-// The derivative of the activation at z.
+// The derivative of the activation at z (4 lanes).
 fn bn_act_grad(z: vec4<f32>) -> vec4<f32> {
     switch ACT {
         case 1u: {
@@ -19,9 +19,21 @@ fn bn_act_grad(z: vec4<f32>) -> vec4<f32> {
     }
 }
 
-// Walks the elements [start, end) of channel c of an NCHW tensor (hw values per plane), 256 threads in a
-// stride: element e is plane e / hw, offset e % hw. Params 5 and 6 hold 256 / hw and 256 % hw, so a step
-// needs no division.
+// Scalar derivative of the activation at z (avoids 4x wasted exp() on odd-hw fallback).
+fn bn_act_grad_f32(z: f32) -> f32 {
+    switch ACT {
+        case 1u: {
+            let s = 1.0 / (1.0 + exp(-z));
+            return s * (1.0 + z * (1.0 - s));
+        }
+        case 2u: { return select(0.0, 1.0, z > 0.0); }
+        default: { return 1.0; }
+    }
+}
+
+// Walks the units [start, end) of channel c of an NCHW tensor (hw units per plane: elements when scalar,
+// vec4s when VEC4), 256 threads in a stride: unit e is plane e / hw, offset e % hw. Params 5 and 6 hold
+// 256 / hw and 256 % hw, so a step needs no division.
 struct BnWalk { e: u32, n: u32, i: u32 }
 
 fn bn_walk_start(start: u32, lid: u32, hw: u32) -> BnWalk {

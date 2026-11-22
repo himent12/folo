@@ -27,6 +27,20 @@ pub fn distill_loss_fused(
     target_score_sum: f32,
     cfg: &DistillConfig,
 ) -> Result<DistillLoss> {
+    distill_loss_fused_with_context(box_raw, cls_raw, teacher_box, teacher_cls, target_score_sum, cfg, None)
+}
+
+/// [`distill_loss_fused`] with optional GPU supervised assignment context for conflict-free BCKD and GT-verified
+/// DFL KD.
+pub fn distill_loss_fused_with_context(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    teacher_box: &Tensor,
+    teacher_cls: &Tensor,
+    target_score_sum: f32,
+    cfg: &DistillConfig,
+    gt_asg: Option<&folo_gpu::detect::Assignment>,
+) -> Result<DistillLoss> {
     let (_, ch, _) = box_raw.dims3()?;
     let s = folo_gpu::distill::KdSettings {
         reg_max: ch / 4,
@@ -35,8 +49,17 @@ pub fn distill_loss_fused(
         temperature: cfg.temperature,
         // `f32::max` ignores a NaN: a non-finite supervised loss (skipped anyway) still gives a finite normaliser.
         normaliser: target_score_sum.max(1.0),
+        bckd_gamma: cfg.bckd_gamma,
     };
-    let kd = folo_gpu::distill::distill_loss(box_raw, cls_raw, teacher_box, teacher_cls, &s)?;
+    let kd = folo_gpu::distill::distill_loss_with_context(
+        box_raw,
+        cls_raw,
+        teacher_box,
+        teacher_cls,
+        &s,
+        gt_asg,
+        cfg.gt_verify,
+    )?;
     let v = kd.stats.to_vec::<f32>()?;
     Ok(DistillLoss { total: kd.total, cls: v[0], dfl: v[1] })
 }

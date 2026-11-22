@@ -81,6 +81,9 @@ pub(super) fn optim_update(step: &OptimStep) -> Option<OptimUpdate> {
         OptimStep::Sgd { lr, momentum, weight_decay, nesterov } => {
             OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov }
         }
+        OptimStep::SgdDecoupled { lr, momentum, wd_step, nesterov, cautious } => {
+            OptimUpdate::SgdDecoupled { lr, momentum, wd_step, nesterov, cautious }
+        }
         OptimStep::AdamW {
             decay,
             beta1,

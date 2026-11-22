@@ -3,32 +3,33 @@
 
 use std::fmt::Write as _;
 
-use super::{CoopConfig, FRAG, PAD, SUBGROUPS, THREADS};
+use super::{CoopConfig, FRAG, PAD};
 use crate::kernels::UNARY_FN;
 use crate::pipeline::{Access, KernelDef, Source, Spec};
 
 /// One operand-tile load plan: element `u` of this invocation covers inner unit `tid % inner` of line
-/// `tid / inner + u · (256 / inner)`; `guard` is set when fewer than 256 units exist.
+/// `tid / inner + u · (threads / inner)`; `guard` is set when fewer than `threads` units exist.
 struct Lines {
+    threads: u32,
     inner: u32,
     count: u32,
     guard: Option<u32>,
 }
 
-fn lines(inner: u32, units: u32) -> Lines {
-    Lines { inner, count: units.div_ceil(THREADS), guard: (units < THREADS).then_some(units) }
+fn lines(threads: u32, inner: u32, units: u32) -> Lines {
+    Lines { threads, inner, count: units.div_ceil(threads), guard: (units < threads).then_some(units) }
 }
 
 impl Lines {
     fn outer(&self, u: u32) -> String {
-        format!("(tid / {}u + {}u)", self.inner, u * (THREADS / self.inner))
+        format!("(tid / {}u + {}u)", self.inner, u * (self.threads / self.inner))
     }
 
     fn inner_expr(&self) -> String {
         format!("(tid % {}u)", self.inner)
     }
 
-    /// Wraps `body` in the "fewer than 256 units" guard.
+    /// Wraps `body` in the "fewer than `threads` units" guard.
     fn guarded(&self, body: String) -> String {
         match self.guard {
             Some(n) => format!("    if (tid < {n}u) {{\n{body}    }}\n"),
@@ -47,6 +48,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     };
     assert!(cfg.valid(), "invalid tensor-core config {cfg:?}");
     let CoopConfig { bm, bn, bk, wgm: _, wgn } = cfg;
+    let (threads, subgroups) = (cfg.threads(), cfg.subgroups());
     let (fm, fnn) = (cfg.fm(), cfg.fnn());
     let (sa, sb) = (bk + PAD, bn + PAD);
     let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
@@ -58,10 +60,12 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     // Input gradient of one stride phase (`crate::kernels::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
-    // Forward conv windows of at most 32 taps keep a per-column tap mask (`vm`), as the regular generator does.
+    // Forward conv windows (and stride-1 backward input windows) of at most 32 taps keep a per-column tap mask (`vm`).
     let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
+    let (sh_n, sw_n) = (spec.get_u32("SH", 1), spec.get_u32("SW", 1));
     let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
     let tap_mask = mode == 1 && kh_n * kw_n <= 32;
+    let dx_tap_mask = mode == 2 && !phase && sh_n == 1 && sw_n == 1 && kh_n * kw_n <= 32;
     // The forward conv at listed output pixels (`crate::kernels::conv::conv2d_sites`).
     let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
@@ -71,12 +75,12 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let (a_len, b_len) = (bm * sa, bk * sb);
 
     // Condition 2 of `experimental_opt_in`: every fragment lies inside its workgroup array. The largest
-    // subgroup index is 7 (clamped in the shader), so these are the furthest fragments.
+    // subgroup index is `subgroups - 1` (clamped in the shader), so these are the furthest fragments.
     let a_last = ((cfg.wgm - 1) * fm * 16 + (fm - 1) * 16) * sa + (bk - 16);
     assert!(a_last + 15 * sa + 16 <= a_len, "A fragment out of bounds");
     let b_last = (bk - 16) * sb + (wgn - 1) * fnn * 16 + (fnn - 1) * 16;
     assert!(b_last + 15 * sb + 16 <= b_len, "B fragment out of bounds");
-    const { assert!((SUBGROUPS - 1) * FRAG + 15 * 16 + 16 <= SUBGROUPS * FRAG, "scratch fragment out of bounds") };
+    assert!((subgroups - 1) * FRAG + 15 * 16 + 16 <= subgroups * FRAG, "scratch fragment out of bounds");
 
     let vty = |v: bool, scalar: &str| if v { format!("vec4<{scalar}>") } else { scalar.to_string() };
     let mut s = String::new();
@@ -99,8 +103,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         let _ = writeln!(s, "var<workgroup> As{b}: array<f16, {a_len}>;");
         let _ = writeln!(s, "var<workgroup> Bs{b}: array<f16, {b_len}>;");
     }
-    let _ = writeln!(s, "var<workgroup> Cs: array<f32, {}>;", SUBGROUPS * FRAG);
-    let _ = writeln!(s, "@compute @workgroup_size({THREADS})");
+    let _ = writeln!(s, "var<workgroup> Cs: array<f32, {}>;", subgroups * FRAG);
+    let _ = writeln!(s, "@compute @workgroup_size({threads})");
     s.push_str(
         "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) tid: u32,\n\
          \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
@@ -108,8 +112,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
          \x20 let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n",
     );
     if split {
-        // wid.z = batch index * S + chunk; chunk `sidx` covers k in [kbeg, kbeg + KS) and writes its own C slab.
-        // All of it derives from `wid` and uniforms, so the K loop stays workgroup-uniform.
         s.push_str(
             "  let S = pu(28u); let zz = wid.z / S; let sidx = wid.z % S;\n\
              \x20 let b1 = zz / pu(6u); let b2 = zz % pu(6u);\n\
@@ -132,25 +134,24 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     if sites {
         s.push_str(crate::kernels::conv::SITES_LIVE);
     }
-    // The clamp keeps the fragment offsets in bounds whatever the driver reports (safety condition 2).
     let _ =
-        writeln!(s, "  let sg = min(sgid, {}u); let wm = sg / {wgn}u; let wn = sg % {wgn}u;", SUBGROUPS - 1);
+        writeln!(s, "  let sg = min(sgid, {}u); let wm = sg / {wgn}u; let wn = sg % {wgn}u;", subgroups - 1);
 
     // --- tile-load plans ------------------------------------------------------------------------------------
     let pa = match (va, ta) {
-        (true, false) => lines(bk / 4, bm * bk / 4),
-        (false, false) => lines(bk, bm * bk),
-        (true, true) => lines(bm / 4, bm * bk / 4),
-        (false, true) => lines(bm, bm * bk),
+        (true, false) => lines(threads, bk / 4, bm * bk / 4),
+        (false, false) => lines(threads, bk, bm * bk),
+        (true, true) => lines(threads, bm / 4, bm * bk / 4),
+        (false, true) => lines(threads, bm, bm * bk),
     };
     let pb = if conv {
-        lines(bn, bk * bn)
+        lines(threads, bn, bk * bn)
     } else {
         match (vb, tb) {
-            (true, false) => lines(bn / 4, bn * bk / 4),
-            (false, false) => lines(bn, bn * bk),
-            (true, true) => lines(bk / 4, bn * bk / 4),
-            (false, true) => lines(bk, bn * bk),
+            (true, false) => lines(threads, bn / 4, bn * bk / 4),
+            (false, false) => lines(threads, bn, bn * bk),
+            (true, true) => lines(threads, bk / 4, bn * bk / 4),
+            (false, true) => lines(threads, bk, bn * bk),
         }
     };
     // One B column per invocation for the whole K loop, so its index math is done once.
@@ -160,8 +161,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n");
             s.push_str(&crate::kernels::conv::forward_column(&pb.inner_expr(), sites));
             if tap_mask {
-                // As in `crate::kernels::gemm`: which taps of this column's window lie inside the image (bit
-                // `kh·KW + kw`), and the window's top-left element (wrapping u32: only in-image taps are read).
                 s.push_str("  var vm = 0u;\n  if (cjok) {\n");
                 for kh in 0..kh_n {
                     for kw in 0..kw_n {
@@ -199,9 +198,26 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20 let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;",
                 pb.inner_expr()
             );
+            if dx_tap_mask {
+                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
+                for kh in 0..kh_n {
+                    for kw in 0..kw_n {
+                        let _ = writeln!(
+                            s,
+                            "    if (u32(cih - {}i) < OH && u32(ciw - {}i) < OW) {{ vm |= {}u; }}",
+                            kh * dh_n,
+                            kw * dw_n,
+                            1u32 << (kh * kw_n + kw)
+                        );
+                    }
+                }
+                s.push_str(
+                    "  }\n  let wbase = offB + bitcast<u32>(cih * i32(OW) + ciw);\n\
+                     \x20 let OHW = OH * OW; let DHOW = DH * OW;\n",
+                );
+            }
         }
-        // Weight gradient: k = (n, oh, ow) runs over the whole batch, column = (ci, kh, kw);
-        // A[m][k] = G[n][m][oh, ow], B[k][j] = X[n][ci][oh·SH − PH + kh·DH][ow·SW − PW + kw·DW].
+        // Weight gradient: k = (n, oh, ow) runs over the whole batch, column = (ci, kh, kw).
         3 => {
             let _ = writeln!(
                 s,
@@ -213,10 +229,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         }
         _ => {}
     }
-    // The weight gradient's B tile: runs of pixels down each column (`crate::kernels::conv::wgrad_b_units`).
-    // Runs of 8 pixels: with the tile rows `bn + PAD` halves apart, a warp's f16 stores then hit distinct banks.
     let wb =
-        (mode == 3).then(|| crate::kernels::conv::wgrad_b_units(THREADS, bk, bn, spec.get_u32("WG_RUN", 8)));
+        (mode == 3).then(|| crate::kernels::conv::wgrad_b_units(threads, bk, bn, spec.get_u32("WG_RUN", 8)));
     let a_reg = if va { "vec4<f16>" } else { "f16" };
     let b_reg = if vb && !conv { "vec4<f16>" } else { "f16" };
     for u in 0..pa.count {
@@ -231,7 +245,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         }
     }
     if sites {
-        // No `K` tile for a workgroup past the live columns (see `crate::kernels::conv::SITES_RETIRE`).
         let _ = writeln!(s, "  let nt = select(0u, (K - kbeg + {bk}u - 1u) / {bk}u, n0 < live);");
     } else {
         let _ = writeln!(s, "  let nt = (K - kbeg + {bk}u - 1u) / {bk}u;");
@@ -242,8 +255,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     for u in 0..pa.count {
         let (o, i) = (pa.outer(u), pa.inner_expr());
         let (idx, cond) = match (va, ta) {
-            // Weight gradient: k = (n, pixel) folds the batch into K and the gradient rows are `OHOW` long (a
-            // multiple of 4 for the vec4 form, so four consecutive k stay in one image).
             (true, false) if mode == 3 => (
                 format!(
                     "(offA + ((k0 + {i} * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i} * 4u) % OHOW) / 4u"
@@ -300,7 +311,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
             )
         } else if phase {
-            // k = (co, th, tw), column = phase pixel (a, b): output pixel (BH + a - th, BW + b - tw).
             format!(
                 "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k % (PTH * PTW);\n\
                  \x20     let oh = ca - i32(r / PTW); let ow = cb - i32(r % PTW);\n\
@@ -309,6 +319,15 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20       v = MB[offB + (co * OH + u32(oh)) * OW + u32(ow)];\n\
                  \x20     }}\n\
                  \x20     rb{u} = v; }}\n"
+            )
+        } else if dx_tap_mask {
+            let _ = i;
+            let kcheck = if check { "k < K && " } else { "" };
+            format!(
+                "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k - co * (KH * KW);\n\
+                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+                 \x20       rb{u} = MB[wbase + co * OHW - (r / KW) * DHOW - (r % KW) * DW];\n\
+                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
             )
         } else if mode == 2 {
             format!(
@@ -445,9 +464,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     };
 
     // --- main loop: two K tiles per iteration so the tile buffers are named statically -----------------------
-    // The tensor-core ops must be in uniform control flow, and naga treats anything derived from the loop
-    // counter as non-uniform. A `break` does not taint the statements after it, so each half starts with a
-    // `break` check instead of being wrapped in an `if`.
     let _ = writeln!(s, "  {{\n    let k0 = kbeg;\n{load}  }}");
     let _ = writeln!(s, "  {{\n{}  }}", store(0));
     s.push_str("  workgroupBarrier();\n  var t = 0u;\n  loop {\n");
@@ -548,7 +564,6 @@ pub(crate) static COOP: KernelDef = KernelDef {
     source: Source::Generated(gen_coop),
 };
 
-/// [`COOP`] with `B` in up to [`crate::kernels::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`).
 /// [`COOP`] as the forward conv at listed output pixels (`CONV_MODE` 1 with `SITES`; binding 5 is the list).
 pub(crate) static COOP_SITES: KernelDef = KernelDef {
     name: "coop_gemm_sites",
@@ -556,6 +571,7 @@ pub(crate) static COOP_SITES: KernelDef = KernelDef {
     source: Source::Generated(gen_coop),
 };
 
+/// [`COOP`] with `B` in up to [`crate::kernels::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`).
 pub(crate) static COOP_CAT: KernelDef = KernelDef {
     name: "coop_gemm_cat",
     storage: &[

@@ -26,7 +26,15 @@ use serde::{Deserialize, Serialize};
 use super::invalid;
 use super::terms::sum_fixed_order;
 
-pub use fused::{distill_loss_fused, fused_supported};
+pub use fused::{distill_loss_fused, distill_loss_fused_with_context, fused_supported};
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 
 /// `TrainConfig.distill` (docs/MODEL.md §8.9): the teacher and the weights of the two distillation terms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,11 +50,26 @@ pub struct DistillConfig {
     /// `T`, the temperature of the DFL softmaxes (`> 0`); the class term has none. Starts at 4, which beat 1 on
     /// the proxy (docs/notes/hill/r4-distill.md).
     pub temperature: f32,
+    /// BCKD focal disagreement exponent `γ` (`0.0` = legacy dense Bernoulli KL). When `> 0`, weights class KL by
+    /// `sg(|p_S − p_T|^γ)` and clamps positive teacher targets upward to `max(p_T, t_gt)` when GT context is given.
+    #[serde(skip_serializing_if = "is_zero_f32")]
+    pub bckd_gamma: f32,
+    /// GT-Verified DFL KD (`false` = legacy `max_c p_T` weighting). When `true`, distills DFL only on GT-matched
+    /// positive anchors where `IoU(b_T, g) > IoU(b_S, g) + 0.02` and `IoU(b_T, g) > 0.50`, weighted by `IoU_T − IoU_S`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub gt_verify: bool,
 }
 
 impl Default for DistillConfig {
     fn default() -> Self {
-        DistillConfig { teacher: String::new(), cls_gain: 0.5, dfl_gain: 1.5, temperature: 4.0 }
+        DistillConfig {
+            teacher: String::new(),
+            cls_gain: 0.5,
+            dfl_gain: 1.5,
+            temperature: 4.0,
+            bckd_gamma: 0.0,
+            gt_verify: false,
+        }
     }
 }
 
@@ -80,6 +103,9 @@ impl DistillConfig {
                 "distill.temperature must be a number from {lo} to {hi}, got {}",
                 self.temperature
             ));
+        }
+        if !(0.0..=5.0).contains(&self.bckd_gamma) {
+            return Err(format!("distill.bckd_gamma must be in 0..=5, got {}", self.bckd_gamma));
         }
         Ok(())
     }
@@ -121,6 +147,8 @@ pub struct DistillTargets {
     pub box_log_prob: Tensor,
     /// `q_a · s~`, `[B, 4, reg_max, A]`, with `q_a = max_c p~[b, c, a]`.
     pub box_weight: Tensor,
+    /// Unweighted `s~ = softmax(box_raw_T / T)`, `[B, 4, reg_max, A]` (used with GT-verified anchor weights).
+    pub box_prob: Tensor,
 }
 
 impl DistillTargets {
@@ -138,8 +166,61 @@ impl DistillTargets {
             cls_entropy,
             box_log_prob: s.clamp(tiny, f32::MAX)?.log()?,
             box_weight: s.mul(&q)?,
+            box_prob: s.clone(),
         })
     }
+}
+
+/// Positive-only GT-verified DFL KD anchor weights `[B, 1, 1, A]` on the host (matching GPU `kd_gt_verify.wgsl`).
+/// Decodes only the `N_fg` positive anchors of `asg`, setting weight `iou_t − iou_s` where
+/// `iou_t > iou_s + 0.02 && iou_t > 0.50` and `0.0` elsewhere.
+pub fn gt_verify_weights_cpu(
+    student_box: &Tensor,
+    teacher_box: &Tensor,
+    anchors: &crate::decode::Anchors,
+    asg: &super::BatchAssignment,
+    reg_max: usize,
+) -> Result<Tensor> {
+    let _g = no_grad();
+    let (b, _, a) = student_box.dims3()?;
+    let sb = student_box.to_dtype(DType::F32)?.to_vec::<f32>()?;
+    let tb = teacher_box.to_dtype(DType::F32)?.to_vec::<f32>()?;
+    let mut weights = vec![0.0f32; b * a];
+    let decode_one = |raw: &[f32], img: usize, anc: usize| -> crate::boxes::Xyxy {
+        let base = img * 4 * reg_max * a + anc;
+        let mut d = [0.0f32; 4];
+        for side in 0..4 {
+            let mut m = f32::NEG_INFINITY;
+            for k in 0..reg_max {
+                m = m.max(raw[base + (side * reg_max + k) * a]);
+            }
+            let (mut z, mut e) = (0.0f32, 0.0f32);
+            for k in 0..reg_max {
+                let p = (raw[base + (side * reg_max + k) * a] - m).exp();
+                z += p;
+                e += p * k as f32;
+            }
+            d[side] = e / z;
+        }
+        crate::decode::dist2bbox(d, anchors.points[anc])
+    };
+    for k in 0..asg.num_fg() {
+        if asg.score[k] <= 0.0 {
+            continue;
+        }
+        let img = asg.image[k] as usize;
+        let anc = asg.anchor[k] as usize;
+        let inv = 1.0 / anchors.strides[anc];
+        let gt = asg.target[k].scale(inv, inv);
+        let pd_s = decode_one(&sb, img, anc);
+        let pd_t = decode_one(&tb, img, anc);
+        let iou_s = crate::assign::iou_plain(&pd_s, &gt);
+        let iou_t = crate::assign::iou_plain(&pd_t, &gt);
+        if iou_t > iou_s + 0.02 && iou_t > 0.50 {
+            weights[img * a + anc] = iou_t - iou_s;
+        }
+    }
+    Tensor::from_vec(weights, [b, 1, 1, a])?.to_device(student_box.device())
 }
 
 /// The result of [`distill_loss`].
@@ -174,6 +255,20 @@ pub fn distill_loss(
     target_score_sum: f32,
     cfg: &DistillConfig,
 ) -> Result<DistillLoss> {
+    distill_loss_with_context(box_raw, cls_raw, targets, target_score_sum, cfg, None, None)
+}
+
+/// [`distill_loss`] with optional supervised assignment context (`gt_asg` for conflict-free BCKD positive
+/// clamping when `cfg.bckd_gamma > 0`, and `anchor_ver_w: [B, 1, 1, A]` for GT-verified DFL KD).
+pub fn distill_loss_with_context(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    targets: &DistillTargets,
+    target_score_sum: f32,
+    cfg: &DistillConfig,
+    gt_asg: Option<&super::BatchAssignment>,
+    anchor_ver_w: Option<&Tensor>,
+) -> Result<DistillLoss> {
     const OP: &str = "distill_loss";
     for t in [box_raw, cls_raw] {
         if t.dtype() != DType::F32 {
@@ -202,14 +297,54 @@ pub fn distill_loss(
     let n = target_score_sum.max(1.0);
     let temp = cfg.temperature;
 
-    // Class: per element softplus(x) − x · p~ − H(p~) (formed before any sum), row sums per (image, class).
-    let elem_c = cls_raw.softplus()?.sub(&cls_raw.mul(&targets.cls_prob)?)?.sub(&targets.cls_entropy)?;
+    // Optional conflict-free positive target clamp: when GT target > teacher prob on a positive, clamp teacher up.
+    let (cls_prob, cls_entropy) = if cfg.bckd_gamma > 0.0
+        && let Some(asg) = gt_asg
+        && asg.num_fg() > 0
+    {
+        let _g = no_grad();
+        let mut p = targets.cls_prob.to_vec::<f32>()?;
+        let mut h = targets.cls_entropy.to_vec::<f32>()?;
+        for k in 0..asg.num_fg() {
+            let idx = (asg.image[k] as usize * nc + asg.label[k] as usize) * a + asg.anchor[k] as usize;
+            let t_gt = asg.score[k];
+            if t_gt > p[idx] {
+                p[idx] = t_gt;
+                let q = 1.0 - t_gt;
+                h[idx] =
+                    if t_gt > 1e-7 && t_gt < 1.0 - 1e-7 { -(t_gt * t_gt.ln() + q * q.ln()) } else { 0.0 };
+            }
+        }
+        let dev = cls_raw.device();
+        (Tensor::from_vec(p, [b, nc, a])?.to_device(dev)?, Tensor::from_vec(h, [b, nc, a])?.to_device(dev)?)
+    } else {
+        (targets.cls_prob.clone(), targets.cls_entropy.clone())
+    };
+
+    // Class: per element softplus(x) − x · p~ − H(p~), optionally weighted by detached BCKD |p_S − p_T|^γ.
+    let mut elem_c = cls_raw.softplus()?.sub(&cls_raw.mul(&cls_prob)?)?.sub(&cls_entropy)?;
+    if cfg.bckd_gamma > 0.0 {
+        let w = {
+            let _g = no_grad();
+            cls_raw.sigmoid()?.sub(&cls_prob)?.abs()?.powf(cfg.bckd_gamma)?
+        };
+        elem_c = elem_c.mul(&w)?;
+    }
     let l_kc = sum_fixed_order(&elem_c.sum(2, false)?)?.mul_scalar(cfg.cls_gain / n)?;
 
-    // DFL: per element q_a · s~ · (ln s~ − log_softmax(z / T)), row sums per (image, side, bin).
+    // DFL: per element weight · (ln s~ − log_softmax(z / T)), row sums per (image, side, bin).
     let z = box_raw.reshape([b, 4, r, a])?;
     let z = if temp == 1.0 { z } else { z.div_scalar(temp)? };
-    let elem_d = targets.box_log_prob.sub(&z.log_softmax(2)?)?.mul(&targets.box_weight)?;
+    let bw = if cfg.gt_verify {
+        let vw = anchor_ver_w.ok_or_else(|| invalid("distill_loss: cfg.gt_verify requires anchor_ver_w"))?;
+        targets.box_prob.mul(vw)?
+    } else {
+        match anchor_ver_w {
+            Some(vw) => targets.box_prob.mul(vw)?,
+            None => targets.box_weight.clone(),
+        }
+    };
+    let elem_d = targets.box_log_prob.sub(&z.log_softmax(2)?)?.mul(&bw)?;
     let l_kd = sum_fixed_order(&elem_d.sum(3, false)?)?.mul_scalar(cfg.dfl_gain * temp * temp / (4.0 * n))?;
 
     // One readback for both reported values.

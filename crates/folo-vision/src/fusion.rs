@@ -34,6 +34,30 @@ pub const CONSENSUS_IOU: f32 = 0.75;
 /// The cap `R` of [`ScoreRule::Consensus`]: a cluster carrying this many times the kept box's score keeps the score.
 pub const CONSENSUS_CAP: f64 = 10.0;
 
+/// The cluster IoU `τ` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+pub const ELC_IOU: f32 = 0.75;
+
+/// The cluster support cap `R` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+pub const ELC_CAP: f64 = 10.0;
+
+/// The log-support slope `α` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+pub const ELC_ALPHA: f64 = 0.65;
+
+/// The scale-preserving support reference `R_ref` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+pub const ELC_R_REF: f64 = 4.0;
+
+/// The DFL excess-std slope `β` of [`ScoreRule::DflConsensus`].
+pub const DFL_CONSENSUS_BETA: f64 = 0.60;
+
+/// The scale-preserving DFL excess-std reference `σ_ref` (bins) of [`ScoreRule::DflConsensus`].
+pub const DFL_CONSENSUS_SIG_REF: f64 = 0.50;
+
+/// Lower clamp on the 4-side mean fused DFL excess std (bins) in [`ScoreRule::DflConsensus`].
+const DFL_CONSENSUS_SIG_MIN: f64 = 0.1;
+
+/// Probability clamp before taking log-odds in [`elc_scores`] and [`dfl_consensus_scores`].
+const ELC_PROB_EPS: f64 = 1e-6;
+
 /// How the boxes NMS keeps are scored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,15 +68,38 @@ pub enum ScoreRule {
     /// The class score scaled by the score mass of the box's cluster ([`consensus_scores`]). The score scale
     /// changes: a box that fired alone is divided by up to `√10`, so a threshold on it means something else.
     Consensus,
+    /// Exclusive Logit-Space Consensus ([`elc_scores`]): each candidate votes only for the kept box that
+    /// suppressed it in NMS, updating log-odds so high-confidence scores are protected and the `[0, 1]` scale
+    /// is preserved.
+    Elc,
+    /// Scale-Free Exclusive Logit-Consensus with fused DFL precision ([`dfl_consensus_scores`]): adds a
+    /// scale-free fused DFL excess-std term from the DFL moments already computed for [`BoxFusion::Dfl`].
+    /// Falls back to [`ScoreRule::Elc`] when DFL bin precisions are unavailable.
+    #[serde(rename = "dfl-consensus")]
+    DflConsensus,
 }
 
 impl ScoreRule {
-    /// The name used by the CLI and in JSON (`none`, `consensus`).
+    /// The name used by the CLI and in JSON (`none`, `consensus`, `elc`, `dfl-consensus`).
     pub fn as_str(self) -> &'static str {
         match self {
             ScoreRule::None => "none",
             ScoreRule::Consensus => "consensus",
+            ScoreRule::Elc => "elc",
+            ScoreRule::DflConsensus => "dfl-consensus",
         }
+    }
+
+    /// Whether this rule uses exclusive NMS suppressor ownership and centered logit-space calibration.
+    #[inline]
+    pub fn is_calibrated(self) -> bool {
+        matches!(self, ScoreRule::Elc | ScoreRule::DflConsensus)
+    }
+
+    /// Whether this rule uses per-anchor scale-free DFL bin precisions ([`crate::decode::bin_precision`]).
+    #[inline]
+    pub fn wants_bin_precisions(self) -> bool {
+        self == ScoreRule::DflConsensus
     }
 }
 
@@ -132,6 +179,164 @@ pub fn consensus_scores(kept: &[usize], boxes: &[Xyxy], scores: &[f32], classes:
             }
             // a = 0.5: a square root, which IEEE 754 rounds exactly on every platform.
             (s * (mass / s).min(CONSENSUS_CAP).sqrt() / CONSENSUS_CAP.sqrt()) as f32
+        })
+        .collect()
+}
+
+/// Overflow-safe logistic sigmoid in `f64`.
+#[inline]
+fn branch_safe_sigmoid(z: f64) -> f64 {
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        let ez = z.exp();
+        ez / (1.0 + ez)
+    }
+}
+
+/// Class-local suppressor ownership of every candidate `j` relative to `kept` (assumed in descending score order):
+/// each kept box owns itself, and every other candidate of class `c` is owned by the first kept box of class `c`
+/// whose IoU with it is `> nms_iou` (`u32::MAX` if none). Used when NMS ran `agnostic` or when a caller invokes
+/// [`elc_scores`] / [`dfl_consensus_scores`] without precomputed owners.
+fn class_local_owners(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    buckets: &Buckets<'_>,
+    nms_iou: f32,
+) -> Vec<u32> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let mut own = vec![u32::MAX; boxes.len()];
+    for (kp, &k) in kept.iter().enumerate() {
+        own[k] = kp as u32;
+    }
+    for (kp, &k) in kept.iter().enumerate() {
+        let b = boxes[k];
+        if !finite(&b) {
+            continue;
+        }
+        let sk = scores[k];
+        let ba = b.area();
+        for &j in buckets.of(classes[k]) {
+            let j = j as usize;
+            // Require `j` to be lower-ranked than `k` so an agnostic cross-class suppression cannot let a weaker
+            // survivor steal a stronger suppressed same-class candidate.
+            let lower_ranked = scores[j] < sk || (scores[j] == sk && j > k);
+            if own[j] == u32::MAX && lower_ranked && finite(&boxes[j]) && overlap(&b, ba, &boxes[j]) > nms_iou
+            {
+                own[j] = kp as u32;
+            }
+        }
+    }
+    own
+}
+
+/// Exclusive Logit-Space Consensus scores of `kept` (docs/MODEL.md §9.4), in `kept`'s order:
+///
+/// ```text
+/// M_excl,k = Σ s_j over candidates j of k's class owned by k with IoU(b_k, b_j) >= 0.75   (j = k included)
+/// logit(s'_k) = logit(s_k) + 0.65 · ln(min(M_excl,k / s_k, 10) / 4.0)
+/// ```
+///
+/// `owner` maps each candidate index to the position in `kept` of the kept box of its class that suppressed it
+/// (or itself, or `u32::MAX` if unowned); when `None` (e.g. under `agnostic` NMS), class-local ownership is derived
+/// from `kept` and `nms_iou`. Sums run in `f64` in candidate order for same-platform bit determinism (`f64::ln` /
+/// `exp` may differ by 1 ULP across OS libms).
+pub fn elc_scores(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+) -> Vec<f32> {
+    dfl_consensus_scores(kept, boxes, scores, classes, owner, nms_iou, None)
+}
+
+/// Scale-Free Exclusive Logit-Consensus with fused DFL precision (docs/MODEL.md §9.4), in `kept`'s order:
+///
+/// ```text
+/// σ̄_bin,k = (1/4) Σ_{e=0..4} ( (Σ_{j ∈ C_excl(k)} s_j · bin_prec(j)[e]) / M_excl,k )^{-1/2}
+/// logit(s'_k) = logit(s_k) + 0.65 · ln(min(M_excl,k / s_k, 10) / 4.0) − 0.60 · ln(max(σ̄_bin,k, 0.1) / 0.50)
+/// ```
+///
+/// When `bin_precision` is `None`, the DFL term is omitted and this reduces identically to [`elc_scores`].
+pub fn dfl_consensus_scores(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+    bin_precision: Option<&dyn Fn(usize) -> [f32; 4]>,
+) -> Vec<f32> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let buckets = Buckets::new(boxes.len(), classes, false);
+    let computed_owners;
+    let owners: &[u32] = match owner {
+        Some(o) => {
+            debug_assert_eq!(o.len(), boxes.len(), "dfl_consensus_scores: owner length mismatch");
+            o
+        }
+        None => {
+            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            &computed_owners
+        }
+    };
+    kept.iter()
+        .enumerate()
+        .map(|(kp, &k)| {
+            if !scores[k].is_finite() || scores[k] <= 0.0 {
+                return scores[k];
+            }
+            let b = boxes[k];
+            let ba = b.area();
+            let s = scores[k] as f64;
+            let kp_u32 = kp as u32;
+            let mut mass = 0f64;
+            let mut prec_sum = [0f64; 4];
+            let mut prec_mass = [0f64; 4];
+            let mut add_member = |j: usize, sj: f64| {
+                mass += sj;
+                if let Some(bp_fn) = bin_precision {
+                    let bp = bp_fn(j);
+                    for e in 0..4 {
+                        let p = bp[e] as f64;
+                        if p.is_finite() && p > 0.0 {
+                            prec_sum[e] += sj * p;
+                            prec_mass[e] += sj;
+                        }
+                    }
+                }
+            };
+            if finite(&b) {
+                for &j in buckets.of(classes[k]) {
+                    let j = j as usize;
+                    let c = &boxes[j];
+                    let member =
+                        j == k || (owners[j] == kp_u32 && finite(c) && overlap(&b, ba, c) >= ELC_IOU);
+                    if member && scores[j].is_finite() && scores[j] > 0.0 {
+                        add_member(j, scores[j] as f64);
+                    }
+                }
+            } else {
+                add_member(k, s);
+            }
+            let sc = s.clamp(ELC_PROB_EPS, 1.0 - ELC_PROB_EPS);
+            let mut z = (sc / (1.0 - sc)).ln();
+            let ratio = (mass / s).clamp(1.0, ELC_CAP);
+            z += ELC_ALPHA * (ratio / ELC_R_REF).ln();
+            if bin_precision.is_some() && prec_mass.iter().all(|&m| m > 0.0) {
+                let mut sum_std = 0f64;
+                for e in 0..4 {
+                    let mp = (prec_sum[e] / prec_mass[e]).max(1e-12);
+                    sum_std += mp.sqrt().recip();
+                }
+                let sig_bin = (0.25 * sum_std).max(DFL_CONSENSUS_SIG_MIN);
+                z -= DFL_CONSENSUS_BETA * (sig_bin / DFL_CONSENSUS_SIG_REF).ln();
+            }
+            branch_safe_sigmoid(z) as f32
         })
         .collect()
 }

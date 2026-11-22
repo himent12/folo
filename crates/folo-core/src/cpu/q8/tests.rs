@@ -523,7 +523,7 @@ fn epilogue_rounds_exact_ties_to_even_on_both_paths() {
         bias: &bias,
         silu: false,
         res: None,
-        out: Out::U8 { inv: 1.0, zero },
+        out: Out::U8 { inv: &[1.0; MR], zero: &[zero; MR] },
     };
     let want: Vec<u32> = (0..NR)
         .map(|j| {

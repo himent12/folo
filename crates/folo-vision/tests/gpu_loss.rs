@@ -229,6 +229,8 @@ fn returned_stats_do_not_feed_the_backward() {
     let s = folo_gpu::detect::LossSettings {
         reg_max: 16,
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
+        mal_gamma: cfg.mal_gamma,
+        nwd_weight: cfg.nwd_weight,
         tal: folo_gpu::detect::TalSettings {
             topk: cfg.tal.topk,
             topk2: cfg.tal.topk2,
@@ -236,6 +238,8 @@ fn returned_stats_do_not_feed_the_backward() {
             beta: cfg.tal.beta,
             eps: cfg.tal.eps,
             min_box_size: cfg.tal.min_box_size,
+            eps_free: cfg.tal.eps_free,
+            nwd_weight: cfg.tal.nwd_weight,
         },
     };
     let grads = |mutate: bool| {

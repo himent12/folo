@@ -28,8 +28,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         } else if (nb > 0.0) {
             let n = cnt + nb;
             let d = PART[o + 1u] - mean;
-            mean += d * (nb / n);
-            m2 += PART[o + 2u] + d * d * (cnt * nb / n);
+            let delta = d * (nb / n);
+            mean += delta;
+            m2 += PART[o + 2u] + d * (delta * cnt);
             cnt = n;
         }
     }

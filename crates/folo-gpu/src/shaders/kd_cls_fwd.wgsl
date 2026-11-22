@@ -5,11 +5,13 @@
 // (image·class row, chunk of 1024 anchors), numbered row-major and folded into x / y, writes its partial sum (a
 // fixed tree, so the result does not depend on scheduling). Raises MISC[0] bit 0 if a student logit is not finite
 // or a teacher logit is NaN (the inputs that make the tensor path's term non-finite).
-// Params: 0 = A, 1 = chunks per row, 2 = workgroups (rows · chunks).
+// Spec: TF16, HAS_GT (conflict-free positive clamp against assigner's DENSE map).
+// Params: 0 = A, 1 = chunks per row, 2 = workgroups (rows · chunks), 3 = NC, 4 = B·A, 5 = bckd_gamma (0 = plain KL).
 @group(0) @binding(1) var<storage, read> X: array<f32>;
 @group(0) @binding(2) var<storage, read> TC: array<TW>;
 @group(0) @binding(3) var<storage, read_write> PART: array<f32>;
 @group(0) @binding(4) var<storage, read_write> MISC: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read> GT_DENSE: array<u32>;
 
 var<workgroup> ACC: array<f32, 256>;
 
@@ -18,10 +20,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         @builtin(local_invocation_index) lid: u32) {
     let na = pu(0u);
     let chunks = pu(1u);
+    let nc = pu(3u);
+    let ba = pu(4u);
+    let gamma = pf(5u);
     let w = wid.y * nwg.x + wid.x;
     let live = w < pu(2u);
     let row = w / chunks;
     let chunk = w - row * chunks;
+    let b = row / nc;
+    let c = row - b * nc;
     var acc = 0.0;
     var bad = false;
     for (var e = 0u; e < 4u; e++) {
@@ -31,9 +38,24 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let x = X[i];
             let y = tv(TC[ti(i)], i);
             bad = bad || !is_finite_f(x) || is_nan_f(y);
-            let p = sigmoid_f(y);
-            let h = select(0.0, p * softplus_f(-y) + (1.0 - p) * softplus_f(y), is_finite_f(y));
-            acc = acc + (softplus_f(x) - x * p - h);
+            var p = sigmoid_f(y);
+            var h = select(0.0, p * softplus_f(-y) + (1.0 - p) * softplus_f(y), is_finite_f(y));
+            if (HAS_GT) {
+                let cell = b * na + a;
+                if (GT_DENSE[cell] == c + 1u) {
+                    let t_gt = bitcast<f32>(GT_DENSE[ba + cell]);
+                    if (t_gt > p) {
+                        p = t_gt;
+                        let q = 1.0 - p;
+                        h = select(0.0, -(p * log(max(p, 1.17549435e-38)) + q * log(max(q, 1.17549435e-38))), p > 1e-7 && p < 1.0 - 1e-7);
+                    }
+                }
+            }
+            var kl = softplus_f(x) - x * p - h;
+            if (gamma > 0.0) {
+                kl = pow_pos(abs(sigmoid_f(x) - p), gamma) * kl;
+            }
+            acc = acc + kl;
         }
     }
     if (bad) { atomicOr(&MISC[0], 1u); }

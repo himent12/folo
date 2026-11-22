@@ -10,6 +10,7 @@
 // is not finite, a student side whose z / T − max (z / T) overflows, a teacher box value of NaN or +inf or whose
 // z_T / T is +inf, or a side whose teacher bins all have z_T / T = −inf. MODE 1 (backward): DZ = g · S · q · (softmax(z / T) − s~), with g = GRAD[0] and
 // S = B · dfl_gain · T / (4 N).
+// Spec: TF16, R, MODE, USE_VER_W (use precomputed GT-verified anchor weight VER_W[i]).
 // Params: 0 = A, 1 = NC, 2 = B·A, 3 = T, 4 = S (MODE 1).
 @group(0) @binding(1) var<storage, read> Z: array<f32>;
 @group(0) @binding(2) var<storage, read> TZ: array<TW>;
@@ -17,6 +18,7 @@
 @group(0) @binding(4) var<storage, read_write> OUT: array<f32>;
 @group(0) @binding(5) var<storage, read_write> MISC: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read> GRAD: array<f32>;
+@group(0) @binding(7) var<storage, read> VER_W: array<f32>;
 
 var<workgroup> ACC: array<f32, 256>;
 
@@ -26,12 +28,58 @@ fn anchor(i: u32) -> f32 {
     let temp = pf(3u);
     let b = i / na;
     let a = i - b * na;
-    var m = tv(TC[ti(b * nc * na + a)], b * nc * na + a);
-    for (var c = 1u; c < nc; c++) {
-        let k = (b * nc + c) * na + a;
-        m = max(m, tv(TC[ti(k)], k));
+    var q = 0.0;
+    if (USE_VER_W) {
+        q = VER_W[i];
+        if (q <= 0.0) {
+            if (MODE == 0u) {
+                // Keep numerical validation independent of the GT weight so corrupted student/teacher box logits
+                // still raise MISC[0] just like the dense/tensor paths (`NaN * 0 == NaN`).
+                var bad_zero = false;
+                for (var side = 0u; side < 4u; side++) {
+                    let base = (b * 4u + side) * R * na + a;
+                    var ms = -3.40282347e38;
+                    var live = 0u;
+                    var vs_arr: array<f32, R>;
+                    for (var r = 0u; r < R; r++) {
+                        let k = base + r * na;
+                        let zt = tv(TZ[ti(k)], k);
+                        let zs = Z[k];
+                        let vs = zs / temp;
+                        bad_zero = bad_zero || !is_finite_f(zs) || !is_finite_f(vs) || is_nan_f(zt) || is_pos_inf_f(zt);
+                        if (is_finite_f(zt)) {
+                            let qt = zt / temp;
+                            bad_zero = bad_zero || is_pos_inf_f(qt);
+                            if (is_finite_f(qt)) {
+                                live = live | (1u << r);
+                            }
+                        }
+                        vs_arr[r] = vs;
+                        ms = max(ms, vs);
+                    }
+                    bad_zero = bad_zero || live == 0u;
+                    for (var r = 0u; r < R; r++) {
+                        bad_zero = bad_zero || !is_finite_f(vs_arr[r] - ms);
+                    }
+                }
+                if (bad_zero) { atomicOr(&MISC[0], 1u); }
+            } else {
+                let z = GRAD[0] * 0.0;
+                for (var side = 0u; side < 4u; side++) {
+                    let base = (b * 4u + side) * R * na + a;
+                    for (var r = 0u; r < R; r++) { OUT[base + r * na] = z; }
+                }
+            }
+            return 0.0;
+        }
+    } else {
+        var m = tv(TC[ti(b * nc * na + a)], b * nc * na + a);
+        for (var c = 1u; c < nc; c++) {
+            let k = (b * nc + c) * na + a;
+            m = max(m, tv(TC[ti(k)], k));
+        }
+        q = sigmoid_f(m);
     }
-    let q = sigmoid_f(m);
     var acc = 0.0;
     var bad = false;
     var u: array<f32, R>;

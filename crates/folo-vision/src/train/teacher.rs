@@ -10,9 +10,10 @@ use folo_nn::Module;
 use folo_nn::io::ModelFile;
 
 use crate::error::{Error, Result};
+use crate::loss::DistillAssignment;
 use crate::loss::distill::{
-    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_fused,
-    fused_supported,
+    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss_fused_with_context,
+    distill_loss_with_context, fused_supported, gt_verify_weights_cpu,
 };
 use crate::model::{FoloModel, HeadMode};
 
@@ -137,19 +138,24 @@ impl Teacher {
         let _g = no_grad();
         let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?;
         if fused_supported(&out.cls_raw, out.reg_max) {
-            return Ok(TeacherBatch::Raw { box_raw: out.box_raw, cls_raw: out.cls_raw });
+            return Ok(TeacherBatch::Raw {
+                box_raw: out.box_raw,
+                cls_raw: out.cls_raw,
+                reg_max: out.reg_max,
+            });
         }
         let view = TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, self.cfg.temperature)?;
-        Ok(TeacherBatch::Targets(DistillTargets::new(&view)?))
+        let raw_box = self.cfg.gt_verify.then_some(out.box_raw);
+        Ok(TeacherBatch::Targets { targets: DistillTargets::new(&view)?, raw_box, reg_max: out.reg_max })
     }
 }
 
 /// One batch's teacher outputs, as [`Teacher::batch`] gives them.
 pub(super) enum TeacherBatch {
-    /// The raw head outputs (`F16` under mixed precision), for [`distill_loss_fused`].
-    Raw { box_raw: Tensor, cls_raw: Tensor },
-    /// The constants of [`distill_loss`].
-    Targets(DistillTargets),
+    /// The raw head outputs (`F16` under mixed precision), for [`distill_loss_fused_with_context`].
+    Raw { box_raw: Tensor, cls_raw: Tensor, reg_max: usize },
+    /// The constants of [`distill_loss_with_context`].
+    Targets { targets: DistillTargets, raw_box: Option<Tensor>, reg_max: usize },
 }
 
 impl TeacherBatch {
@@ -158,14 +164,78 @@ impl TeacherBatch {
         &self,
         box_raw: &Tensor,
         cls_raw: &Tensor,
+        anchors: &crate::decode::Anchors,
         target_score_sum: f32,
         cfg: &DistillConfig,
+        asg: Option<&DistillAssignment>,
     ) -> Result<DistillLoss> {
-        Ok(match self {
-            TeacherBatch::Raw { box_raw: tb, cls_raw: tc } => {
-                distill_loss_fused(box_raw, cls_raw, tb, tc, target_score_sum, cfg)?
+        let eval_host = |targets: &DistillTargets,
+                         tb: Option<&Tensor>,
+                         reg_max: usize,
+                         host_asg: Option<&crate::loss::BatchAssignment>|
+         -> Result<DistillLoss> {
+            let ver_w = if cfg.gt_verify {
+                let (Some(tb), Some(a)) = (tb, host_asg) else {
+                    return Err(Error::Config(
+                        "distill.gt_verify requires the supervised assignment and teacher box outputs".into(),
+                    ));
+                };
+                Some(gt_verify_weights_cpu(box_raw, tb, anchors, a, reg_max)?)
+            } else {
+                None
+            };
+            Ok(distill_loss_with_context(
+                box_raw,
+                cls_raw,
+                targets,
+                target_score_sum,
+                cfg,
+                host_asg,
+                ver_w.as_ref(),
+            )?)
+        };
+        match (self, asg) {
+            (
+                TeacherBatch::Raw { box_raw: tb, cls_raw: tc, .. },
+                Some(DistillAssignment::Device(dev_asg)),
+            ) => Ok(distill_loss_fused_with_context(
+                box_raw,
+                cls_raw,
+                tb,
+                tc,
+                target_score_sum,
+                cfg,
+                Some(dev_asg),
+            )?),
+            // A GPU run whose TAL fell back to the host (e.g. `loss.tal.topk > 64`) still preserves
+            // `bckd_gamma` clamping and `gt_verify` by falling back to the matching host-assignment tensor path.
+            (
+                TeacherBatch::Raw { box_raw: tb, cls_raw: tc, reg_max },
+                Some(DistillAssignment::Host(host_asg)),
+            ) => {
+                let targets = {
+                    let _g = no_grad();
+                    let view = TeacherView::new(tb, tc, *reg_max, cfg.temperature)?;
+                    DistillTargets::new(&view)?
+                };
+                eval_host(&targets, Some(tb), *reg_max, Some(host_asg))
             }
-            TeacherBatch::Targets(t) => distill_loss(box_raw, cls_raw, t, target_score_sum, cfg)?,
-        })
+            (TeacherBatch::Raw { box_raw: tb, cls_raw: tc, .. }, None) => {
+                if cfg.gt_verify {
+                    return Err(Error::Config("distill.gt_verify requires the supervised assignment".into()));
+                }
+                Ok(distill_loss_fused_with_context(box_raw, cls_raw, tb, tc, target_score_sum, cfg, None)?)
+            }
+            (
+                TeacherBatch::Targets { targets, raw_box, reg_max },
+                Some(DistillAssignment::Host(host_asg)),
+            ) => eval_host(targets, raw_box.as_ref(), *reg_max, Some(host_asg)),
+            (TeacherBatch::Targets { targets, raw_box, reg_max }, None) => {
+                eval_host(targets, raw_box.as_ref(), *reg_max, None)
+            }
+            (TeacherBatch::Targets { .. }, Some(DistillAssignment::Device(_))) => {
+                Err(Error::Config("internal: device assignment paired with host distillation targets".into()))
+            }
+        }
     }
 }

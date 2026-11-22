@@ -161,7 +161,16 @@ fn conv2d_at(
     if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
         let bias_buf = bias.unwrap_or(ctx.dummy());
         let done = if d.is_pointwise() {
-            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, coop::conv_config(ctx, g.m, g.n))?
+            coop::encode_gemm(
+                ctx,
+                &g,
+                DType::F16,
+                weight,
+                x,
+                bias_buf,
+                y,
+                coop::conv_config_batched(ctx, g.m, g.n, g.batch.0 * g.batch.1),
+            )?
         } else {
             coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None, plan.splits)?
         };

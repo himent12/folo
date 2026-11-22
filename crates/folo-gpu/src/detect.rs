@@ -40,6 +40,10 @@ pub struct TalSettings {
     pub eps: f32,
     /// Candidate boxes widen sides shorter than this (pixels).
     pub min_box_size: f32,
+    /// Epsilon-free TAL target normalization.
+    pub eps_free: bool,
+    /// Scale-adaptive NWD blending weight in TAL (`0.0` = legacy CIoU).
+    pub nwd_weight: f32,
 }
 
 /// Loss settings (folo-vision's `LossConfig`).
@@ -51,6 +55,10 @@ pub struct LossSettings {
     pub gains: [f32; 3],
     /// Assigner settings.
     pub tal: TalSettings,
+    /// Matchability-Aware Loss exponent on background (`0.0` = plain BCE).
+    pub mal_gamma: f32,
+    /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
+    pub nwd_weight: f32,
 }
 
 /// The anchors: points in grid units and the stride of each.
@@ -81,7 +89,7 @@ pub struct Assignment {
     pub slots: Tensor,
     /// `[2, B, A]` u32: per anchor `label + 1` (0 = background), then `t` bits.
     pub dense: Tensor,
-    meta: Tensor,
+    pub(crate) meta: Tensor,
     misc: Tensor,
 }
 
@@ -205,6 +213,9 @@ fn check(
     if tal.topk2 == Some(0) {
         return Err(err("topk2 must be at least 1"));
     }
+    if !(tal.nwd_weight.is_finite() && (0.0..=1.0).contains(&tal.nwd_weight)) {
+        return Err(err(format!("tal.nwd_weight {} must be finite and in [0, 1]", tal.nwd_weight)));
+    }
     Ok(DetectDesc {
         b,
         a,
@@ -218,6 +229,10 @@ fn check(
         beta: tal.beta,
         eps: tal.eps,
         min_box_size: tal.min_box_size,
+        eps_free: tal.eps_free,
+        tal_nwd_weight: tal.nwd_weight,
+        mal_gamma: 0.0,
+        box_nwd_weight: 0.0,
     })
 }
 
@@ -251,6 +266,7 @@ fn assign_impl(
     tal: &TalSettings,
 ) -> Result<(Buffers, Assignment, DenseInput, DenseInput)> {
     let d = check(box_raw, cls_raw, anchors, gts, reg_max, tal)?;
+    d.validate().map_err(gpu)?;
     let device = box_raw.device();
     let ctx = context_for(device).ok_or_else(|| err(format!("{device} is not a folo-gpu device")))?;
     let bufs = Buffers { ctx, device };
@@ -331,7 +347,8 @@ impl Saved {
             &dcls_b,
         )
         .map_err(gpu)?;
-        Ok(vec![Some(dbox), Some(dcls)])
+        // No gradient for the saved assignment buffers (inputs only so autograd checks their storage versions).
+        Ok(vec![Some(dbox), Some(dcls), None, None, None, None])
     }
 }
 
@@ -344,9 +361,29 @@ pub fn detection_loss(
     gts: &[ImageGt<'_>],
     s: &LossSettings,
 ) -> Result<DeviceLoss> {
+    Ok(detection_loss_with_assignment(box_raw, cls_raw, anchors, gts, s)?.0)
+}
+
+/// [`detection_loss`], also returning the device [`Assignment`] so distillation (`bckd_gamma`, `gt_verify`)
+/// can reuse it without running the assigner twice.
+pub fn detection_loss_with_assignment(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &AnchorTable<'_>,
+    gts: &[ImageGt<'_>],
+    s: &LossSettings,
+) -> Result<(DeviceLoss, Assignment)> {
+    if !(s.mal_gamma.is_finite() && s.mal_gamma >= 0.0) {
+        return Err(err(format!("mal_gamma {} must be finite and >= 0", s.mal_gamma)));
+    }
+    if !(s.nwd_weight.is_finite() && (0.0..=1.0).contains(&s.nwd_weight)) {
+        return Err(err(format!("nwd_weight {} must be finite and in [0, 1]", s.nwd_weight)));
+    }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
-    let d = asg.desc;
+    let mut d = asg.desc;
+    d.mal_gamma = s.mal_gamma;
+    d.box_nwd_weight = s.nwd_weight;
     let ctx = &bufs.ctx;
     let raw = |t: &Tensor| dense_buffer(t).ok_or_else(|| err("assignment tensor is not dense"));
     let (dense_b, misc_b, slot_b, pick_b, meta_b) =
@@ -371,13 +408,18 @@ pub fn detection_loss(
         dense: asg.dense.clone(),
         stats: stats.clone(),
     });
-    let total =
-        Tensor::custom_op("detection_loss_gpu", &[box_raw, cls_raw], total, move |g| saved.backward(g))?;
+    // Pass the publicly returned assignment tensors as no-grad inputs so autograd checks their storage versions
+    // and refuses backward if a caller mutates them in place after forward.
+    let total = Tensor::custom_op(
+        "detection_loss_gpu",
+        &[box_raw, cls_raw, &asg.meta, &asg.picks, &asg.slots, &asg.dense],
+        total,
+        move |g| saved.backward(g),
+    )?;
     // The caller gets a copy of the stats, so nothing it does to them can change the backward.
     let (public, public_b) = bufs.alloc(DType::F32, &[12], false)?;
     ctx.copy(&stats_b, 0, &public_b, 0, 48);
-    drop(asg);
-    Ok(DeviceLoss { total, stats: public })
+    Ok((DeviceLoss { total, stats: public }, asg))
 }
 
 /// The multi-label candidates of a decoded head (validation's NMS input) on the device, so only they are

@@ -6,7 +6,8 @@
 // before its sign). MODE 1 writes the gradient of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
 // first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
 // S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
-// Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01).
+// Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
+// 5 = nwd_weight (0 = pure CIoU).
 @group(0) @binding(1) var<storage, read> BOX: array<f32>;
 @group(0) @binding(2) var<storage, read> META: array<u32>;
 @group(0) @binding(3) var<storage, read> PICK: array<u32>;
@@ -90,8 +91,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         dfl = dfl + lp[side * R + ju] * wl[side] + lp[side * R + ju + 1u] * wr[side];
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
+    let nwd_w = pf(5u);
+    // tb is in stride units (inv = 1 / stride); convert GT size to pixels for lambda and C = 12.8px to stride units.
+    let lam = nwd_lambda((tb.z - tb.x) / inv, (tb.w - tb.y) / inv, nwd_w);
+    let c_s = 12.8 * inv;
     if (MODE == 0u) {
-        OUT[2u * s] = (1.0 - ciou_eps(pd, tb)) * t;
+        let l_ciou = 1.0 - ciou_eps(pd, tb);
+        let l_box = select(l_ciou, (1.0 - lam) * l_ciou + lam * (1.0 - nwd_box(pd, tb, c_s)), lam > 0.0);
+        OUT[2u * s] = l_box * t;
         OUT[2u * s + 1u] = dfl;
         return;
     }
@@ -121,8 +128,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let alpha = v / (v - iou + (1.0 + eps));
 
     let g = GRAD[0];
-    // dL/dCIoU for L = S_box · t · (1 − CIoU).
-    let gc = -t * STATS[8] * g;
+    // dL/dCIoU for L = S_box · t · (1 − lam) · (1 − CIoU).
+    let gc = -t * STATS[8] * g * (1.0 - lam);
     let g_rho2 = -gc / c2;
     let g_c2 = gc * rho2 / (c2 * c2);
     let g_v = -gc * alpha;
@@ -137,10 +144,23 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let g_ch = g_c2 * 2.0 * ch;
     let g_dx = g_rho2 * 0.5 * dx;
     let g_dy = g_rho2 * 0.5 * dy;
-    let gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) - g_cw * w_min(pd.x, tb.x) - g_dx;
-    let gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) - g_ch * w_min(pd.y, tb.y) - g_dy;
-    let gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + g_cw * w_max(pd.z, tb.z) - g_dx;
-    let gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + g_ch * w_max(pd.w, tb.w) - g_dy;
+    var gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) - g_cw * w_min(pd.x, tb.x) - g_dx;
+    var gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) - g_ch * w_min(pd.y, tb.y) - g_dy;
+    var gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + g_cw * w_max(pd.z, tb.z) - g_dx;
+    var gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + g_ch * w_max(pd.w, tb.w) - g_dy;
+    if (lam > 0.0) {
+        let dcx = 0.5 * (pd.x + pd.z - tb.x - tb.z);
+        let dcy = 0.5 * (pd.y + pd.w - tb.y - tb.w);
+        let dw = (pd.z - pd.x) - (tb.z - tb.x);
+        let dh = (pd.w - pd.y) - (tb.w - tb.y);
+        let dist = sqrt(dcx * dcx + dcy * dcy + 0.25 * (dw * dw + dh * dh) + 1e-6);
+        let nwd = fexp(-dist / c_s);
+        let gn = t * STATS[8] * g * lam * nwd / (2.0 * c_s * dist);
+        gx1 = gx1 + gn * (dcx - 0.5 * dw);
+        gy1 = gy1 + gn * (dcy - 0.5 * dh);
+        gx2 = gx2 + gn * (dcx + 0.5 * dw);
+        gy2 = gy2 + gn * (dcy + 0.5 * dh);
+    }
     let g_d = vec4<f32>(-gx1, -gy1, gx2, gy2);
     // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}).
     let sd = STATS[10] * g;

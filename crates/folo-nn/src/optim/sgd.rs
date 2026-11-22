@@ -53,6 +53,149 @@ impl Sgd {
     pub fn momentum_buffer(&self, group: usize, param: usize) -> Option<&Tensor> {
         self.bufs.get(group)?.get(param)?.as_ref()
     }
+
+    /// Step with optional per-group LR scales on the gradient/momentum direction `u` (used by [`super::MuSgd`]
+    /// so decoupled/cautious weight decay uses the unscaled `g.lr · g.weight_decay` independently of `w_sgd`).
+    pub(crate) fn step_with_lr_scales(
+        &mut self,
+        grads: &dyn GradSource,
+        lr_scales: Option<&[f64]>,
+    ) -> Result<()> {
+        self.ensure_buffers(|g| g.momentum > 0.0)?;
+        let (groups, bufs) = (&self.groups, &self.bufs);
+        let scale_of = |gi: usize| lr_scales.map_or(1.0, |s| s[gi]);
+        let sgd = |gi: usize| {
+            let g = &groups[gi];
+            let eff_lr = (g.lr * scale_of(gi)) as f32;
+            let momentum = g.momentum as f32;
+            if g.decoupled_wd || g.cautious_wd {
+                OptimStep::SgdDecoupled {
+                    lr: eff_lr,
+                    momentum,
+                    wd_step: (g.lr * g.weight_decay) as f32,
+                    nesterov: g.nesterov,
+                    cautious: g.cautious_wd,
+                }
+            } else {
+                OptimStep::Sgd {
+                    lr: eff_lr,
+                    momentum,
+                    weight_decay: g.weight_decay as f32,
+                    nesterov: g.nesterov,
+                }
+            }
+        };
+        let state = |gi: usize, pi: usize| -> Vec<&Tensor> {
+            bufs[gi][pi].as_ref().filter(|_| groups[gi].momentum as f32 != 0.0).into_iter().collect()
+        };
+        let done = step_many("sgd", groups, grads, sgd, state)?;
+        for_each_param(groups, |gi, pi| {
+            if done[gi] {
+                return Ok(());
+            }
+            let grp = &groups[gi];
+            let (name, p) = &grp.params[pi];
+            let Some(g) = grads.grad(p) else { return Ok(()) };
+            if g.shape() != p.shape() {
+                return Err(Error::Invalid(format!(
+                    "sgd: gradient of `{name}` is {:?}, parameter is {:?}",
+                    g.dims(),
+                    p.dims()
+                )));
+            }
+            let eff_lr = (grp.lr * scale_of(gi)) as f32;
+            let mu = grp.momentum as f32;
+            if grp.decoupled_wd || grp.cautious_wd {
+                update_decoupled(
+                    p,
+                    g,
+                    bufs[gi][pi].as_ref(),
+                    eff_lr,
+                    mu,
+                    (grp.lr * grp.weight_decay) as f32,
+                    grp.nesterov,
+                    grp.cautious_wd,
+                )
+            } else {
+                update(p, g, bufs[gi][pi].as_ref(), eff_lr, mu, grp.weight_decay as f32, grp.nesterov)
+            }
+        })?;
+        self.step += 1;
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_decoupled(
+    p: &Tensor,
+    g: &Tensor,
+    buf: Option<&Tensor>,
+    lr: f32,
+    mu: f32,
+    wd_step: f32,
+    nesterov: bool,
+    cautious: bool,
+) -> Result<()> {
+    if cpu_fast(&[p]) && buf.is_none_or(|b| cpu_fast(&[b])) && g.device().is_cpu() && g.dtype() == DType::F32
+    {
+        return g.with_f32_slice(|g| -> Result<()> {
+            let step = |p: &mut [f32], b: Option<&mut [f32]>| match b {
+                Some(b) if mu != 0.0 => {
+                    for ((p, &g), b) in p.iter_mut().zip(g).zip(b) {
+                        *b = mu * *b + g;
+                        let u = if nesterov { g + mu * *b } else { *b };
+                        let decay =
+                            if wd_step != 0.0 && (!cautious || u * *p > 0.0) { wd_step * *p } else { 0.0 };
+                        *p = *p - lr * u - decay;
+                    }
+                }
+                _ => {
+                    for (p, &g) in p.iter_mut().zip(g) {
+                        let decay =
+                            if wd_step != 0.0 && (!cautious || g * *p > 0.0) { wd_step * *p } else { 0.0 };
+                        *p = *p - lr * g - decay;
+                    }
+                }
+            };
+            match buf {
+                Some(b) => b.update_f32(|b| p.update_f32(|p| step(p, Some(b))))??,
+                None => p.update_f32(|p| step(p, None))?,
+            }
+            Ok(())
+        })?;
+    }
+    let g = g.to_dtype(DType::F32)?;
+    if !p.device().is_cpu() {
+        let state: Vec<&Tensor> = buf.filter(|_| mu != 0.0).into_iter().collect();
+        let step = OptimStep::SgdDecoupled { lr, momentum: mu, wd_step, nesterov, cautious };
+        if p.optimizer_step_(&g, &state, &step)? {
+            return Ok(());
+        }
+    }
+    let u = if let Some(b) = buf
+        && mu != 0.0
+    {
+        b.mul_scalar_assign(mu)?;
+        b.add_assign(&g)?;
+        if nesterov { g.add(&b.mul_scalar(mu)?)? } else { b.clone() }
+    } else {
+        g
+    };
+    if wd_step != 0.0 {
+        if cautious {
+            let mask = u.mul(p)?.gt(&Tensor::zeros_with([], DType::F32, p.device())?)?;
+            let decay = p.mul(&mask)?.mul_scalar(wd_step)?;
+            p.add_scaled_assign(&u, -lr)?;
+            p.add_scaled_assign(&decay, -1.0)?;
+        } else {
+            let decay = p.mul_scalar(wd_step)?;
+            p.add_scaled_assign(&u, -lr)?;
+            p.add_scaled_assign(&decay, -1.0)?;
+        }
+    } else {
+        p.add_scaled_assign(&u, -lr)?;
+    }
+    Ok(())
 }
 
 fn update(
@@ -126,37 +269,7 @@ impl Optimizer for Sgd {
     }
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
-        // Warmup can give a momentum-free group a non-zero momentum: give it buffers first.
-        self.ensure_buffers(|g| g.momentum > 0.0)?;
-        let (groups, bufs) = (&self.groups, &self.bufs);
-        let sgd = |gi: usize| {
-            let g = &groups[gi];
-            let (lr, momentum, weight_decay) = (g.lr as f32, g.momentum as f32, g.weight_decay as f32);
-            OptimStep::Sgd { lr, momentum, weight_decay, nesterov: g.nesterov }
-        };
-        let state = |gi: usize, pi: usize| -> Vec<&Tensor> {
-            bufs[gi][pi].as_ref().filter(|_| groups[gi].momentum as f32 != 0.0).into_iter().collect()
-        };
-        let done = step_many("sgd", groups, grads, sgd, state)?;
-        for_each_param(groups, |gi, pi| {
-            if done[gi] {
-                return Ok(());
-            }
-            let grp = &groups[gi];
-            let (name, p) = &grp.params[pi];
-            let Some(g) = grads.grad(p) else { return Ok(()) };
-            if g.shape() != p.shape() {
-                return Err(Error::Invalid(format!(
-                    "sgd: gradient of `{name}` is {:?}, parameter is {:?}",
-                    g.dims(),
-                    p.dims()
-                )));
-            }
-            let (lr, mu, wd) = (grp.lr as f32, grp.momentum as f32, grp.weight_decay as f32);
-            update(p, g, bufs[gi][pi].as_ref(), lr, mu, wd, grp.nesterov)
-        })?;
-        self.step += 1;
-        Ok(())
+        self.step_with_lr_scales(grads, None)
     }
 
     fn step_count(&self) -> u64 {
