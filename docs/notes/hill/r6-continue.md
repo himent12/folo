@@ -10,16 +10,15 @@ optimizer's updates. Scratch, scripts and logs: `D:/folo-wave6/lanes/continue/`.
 Terms: **mAP** is the trainer's internal mAP50-95 on val2017 (or on the proxy's validation set). **W** is the number of
 warm-up epochs. **EMA running** means the EMA's update counter starts at `ceil(10 · tau)` instead of 0, so its decay is
 at full strength from the first step (docs/MODEL.md §8.5 gives the ramp). **Bias start** is `warmup_bias_lr`, the LR
-the bias groups ramp from. It is not a cap: each bias group ramps from it to its own scheduled LR, which for MuSGD's
-`bias.cls` is 3 · lr0.
+the bias groups ramp from. It is not a cap: each bias group ramps from it to its own scheduled LR, base LR · `lf(t)`.
+MuSGD's `bias.cls` has base LR 3 · lr0.
 
 ## The question
 
 Earlier continuations with `--weights` on the same data dropped in their first epochs. The published folo-s (internal
 mAP 0.4120) continued for 48 epochs at lr0 0.003 (`D:/folo-data/runs-wave6/long/s-cont-lr03`) fell to 0.3760 at epoch 3
 and was back only at epoch 18. The same at lr0 0.01 (`s-cont`) fell to 0.3035, and folo-n v5's continuation fell from
-0.3523 to 0.3031. One run did not dip: `land-n-v2` (docs/notes/hill/r3-fusion.md, Part 0). Which warm-up setting causes
-the drop, and can a rule for continuations remove it?
+0.3523 to 0.3031. Which warm-up setting causes the drop, and can a rule for continuations remove it?
 
 The gate, fixed in the brief before any run: on the exact command of `s-cont-lr03`, with only the arm's settings
 changed and stopped after epoch 8, **epoch 3 ≥ 0.405 and epoch 8 ≥ 0.414**. Under that, one more arm at most, then stop.
@@ -89,10 +88,10 @@ Both arms pass epoch 3 (≥ 0.405) and **both miss epoch 8 (≥ 0.414)**. As the
 - **Lowering the bias start, under the running EMA, did little.** Starting the bias groups at lr0 instead of 0.1 moved
   mAP by at most 0.0006 and the epoch's training loss by at most 0.006, in either direction, one seed. A true cap at
   lr0 was not tested, and neither was this setting without the running EMA at full scale.
-- **What is left is an untested lead.** The training loss rises from 3.31 to 3.62 over epochs 1 to 5 while the LR ramps
-  up, and the earlier run at a higher lr0 dropped further (epoch 3: 0.3760 at 0.003, 0.3035 at 0.01, in
-  `D:/folo-data/runs-wave6/long/s-cont`). A restart at lr0 of a model that ended its schedule near zero LR may be the
-  disturbance. No arm here changed lr0, so this is a hypothesis.
+- **What is left is an untested lead.** The training loss rises from 3.31 to 3.63 over epochs 1 to 5, during the
+  three-epoch warm-up and for two epochs after it, and the earlier run at a higher lr0 dropped further (epoch 3: 0.3760
+  at 0.003, 0.3035 at 0.01, in `D:/folo-data/runs-wave6/long/s-cont`). A restart at lr0 of a model that ended its
+  schedule near zero LR may be the disturbance. No arm here changed lr0, so this is a hypothesis.
 
 ## The research report's claims
 
@@ -103,8 +102,8 @@ Both arms pass epoch 3 (≥ 0.405) and **both miss epoch 8 (≥ 0.414)**. As the
   the table above shows what that does to the reading.
 - **Weight decay coupled to the momentum: read, not tested.** The code matches the description
   (`crates/folo-nn/src/optim/sgd.rs`: the decay enters the gradient before the momentum). MuSGD's SGD half of a Muon
-  group runs at `sgd · lr`, so at the same group LR, `sgd` 1.0 doubles that update, decay term included, against
-  `sgd` 0.5. That is not a measured 2× shrinkage between the from-scratch and continuation recipes, whose LRs differ.
+  group runs at `sgd · lr`, so `sgd` 1.0 doubles that half's LR multiplier against `sgd` 0.5. That is not a measured 2×
+  shrinkage between the from-scratch and continuation recipes, which also differ in their Muon weight and their LRs.
   Every arm here used the same weights and decay, so nothing here says whether it matters. Out of scope for this lane.
 - **The mosaic-off epochs: not the cause of this dip.** The schedule closes mosaic for the last 10 of 48 epochs, and the
   dip is at epochs 1 to 3, with mosaic on. Mosaic closing itself was not tested.
