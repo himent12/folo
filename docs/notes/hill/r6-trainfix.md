@@ -123,23 +123,26 @@ the GPU, a 20-epoch `--head o2o` P1 run gives the same loss at all 6260 steps wi
 
 ## Finding 4: AMP clipping at a loss scale of 2^125
 
-`(max_norm / pre_f) as f32` does overflow to infinity when `max_norm · S` passes `f32::MAX`. Three things make that
-harmless:
+`(max_norm / pre_f) as f32` does round to infinity when `max_norm · S` is too far past `f32::MAX` to round back to it.
+Three things keep that from being the reported failure:
 
 1. **It is not a NaN.** The threshold is `h · inf = inf` for the positive `h` of a finite gradient, so `n > threshold` is
    false and the step is simply not clipped. The other factor, `k`, is not selected then.
-2. **Not clipping is the right answer there.** Clipping would need a buffer norm above `max_norm · S`, at least 2^128. The
-   weight gradients are built from f16 input gradients (docs/MODEL.md §8.8), which overflow to infinity at 65504 and skip
-   the step, so they stay many orders of magnitude below that.
+2. **Clipping would need buffers near the top of the `f32` range.** It needs a buffer norm above `max_norm · S`, about
+   2^128. The weight gradients are built from f16 input gradients (docs/MODEL.md §8.8), which overflow to infinity at
+   65504 and skip the step, and at the scales logged (point 3) the default threshold is far from overflowing. Finite
+   buffers above it can be built by hand (two values of 3e38 through `unscale_clip(1 / 65536, 6e33)`), and that step
+   stays unclipped. This is a known limit of the GPU path, left alone because this change adds no code to the clipping
+   path, which every default run goes through.
 3. **No logged run came near that scale.** A fresh default scaler starts at 2^16 and doubles after 2000 finite steps in
    a row, so 2^125 takes at least 218,000 finite optimizer steps (an overflow halves the scale and restarts the count,
    which only adds to that), with every f16 input gradient below about 2^-109 in the original units and a scaled loss
    still finite in `f32`. Zero gradients qualify, so a run with all its loss gains at 0 could get there. As an
    observation, the 720 per-epoch scale logs of this wave's COCO and proxy runs never pass **2^17**.
 
-A very large `--set clip_grad_norm` reaches the same overflow sooner: it happens whenever `clip_grad_norm · S` passes
-`f32::MAX`, as 1e35 does at the fresh AMP scale of 2^16 (and does not after five backoffs, at 2^11, or without AMP, where
-`S` is 1). Points 1 and 2 hold there too: no NaN, and no clip.
+A very large `--set clip_grad_norm` reaches the same overflow sooner: it happens whenever `(max_norm / pre_f) as f32`
+rounds to infinity, as with 1e35 at the fresh AMP scale of 2^16 (and not after five backoffs, at 2^11, or without AMP,
+where `S` is 1). Points 1 and 2 hold there too: no NaN, and no clip.
 
 So the fix is a comment at the line (`crates/folo-nn/src/optim/grads.rs`), as the brief asked for this case.
 

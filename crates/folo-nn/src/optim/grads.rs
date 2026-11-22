@@ -226,10 +226,10 @@ impl GradAccumulator {
         let r = sum.sqrt()?; // n_b / s, the norm of the buffers as they are
         // The norm of `pre · g` is n = pre · n_b, so with max' = max / pre and eps' = 1e-6 / pre:
         // n > max ⇔ r·sqrt(s) > max'·h, and pre · max / (n + 1e-6) = max / (n_b + eps') = h · (max·h / (r + eps'·h²)),
-        // applied as two factors (or `pre` alone below the threshold). If `max / pre` overflows to infinity (`max · S`
-        // past `f32::MAX`: a loss scale near `MAX_SCALE`, or a very large `clip_grad_norm`), the comparison is false for
-        // finite buffers, so the factors are `pre` and 1: the step is not clipped and no NaN comes from it. Clipping
-        // would need a buffer norm above `max · S`, past `f32::MAX`.
+        // applied as two factors (or `pre` alone below the threshold). If `(max / pre) as f32` rounds to infinity (a
+        // loss scale near `MAX_SCALE`, or a very large `clip_grad_norm`), the comparison is false for finite buffers,
+        // so the factors are `pre` and 1 and no NaN comes from it. The step is then not clipped, even if the buffers'
+        // norm is above `max · S`, a known limit: such buffers hold values within a few orders of `f32::MAX`.
         let (max, pre_f) = (max_norm as f32, pre as f64);
         let clip = r.mul(&root)?.gt(&h.mul_scalar((max_norm / pre_f) as f32)?)?;
         let one = r.ones_like()?;
