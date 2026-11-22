@@ -201,6 +201,7 @@ fn branch_safe_sigmoid(z: f64) -> f64 {
 fn class_local_owners(
     kept: &[usize],
     boxes: &[Xyxy],
+    scores: &[f32],
     classes: &[u32],
     buckets: &Buckets<'_>,
     nms_iou: f32,
@@ -215,10 +216,15 @@ fn class_local_owners(
         if !finite(&b) {
             continue;
         }
+        let sk = scores[k];
         let ba = b.area();
         for &j in buckets.of(classes[k]) {
             let j = j as usize;
-            if own[j] == u32::MAX && finite(&boxes[j]) && overlap(&b, ba, &boxes[j]) > nms_iou {
+            // Require `j` to be lower-ranked than `k` so an agnostic cross-class suppression cannot let a weaker
+            // survivor steal a stronger suppressed same-class candidate.
+            let lower_ranked = scores[j] < sk || (scores[j] == sk && j > k);
+            if own[j] == u32::MAX && lower_ranked && finite(&boxes[j]) && overlap(&b, ba, &boxes[j]) > nms_iou
+            {
                 own[j] = kp as u32;
             }
         }
@@ -274,14 +280,14 @@ pub fn dfl_consensus_scores(
             o
         }
         None => {
-            computed_owners = class_local_owners(kept, boxes, classes, &buckets, nms_iou);
+            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
             &computed_owners
         }
     };
     kept.iter()
         .enumerate()
         .map(|(kp, &k)| {
-            if scores[k].is_nan() || scores[k] <= 0.0 {
+            if !scores[k].is_finite() || scores[k] <= 0.0 {
                 return scores[k];
             }
             let b = boxes[k];
@@ -310,7 +316,7 @@ pub fn dfl_consensus_scores(
                     let c = &boxes[j];
                     let member =
                         j == k || (owners[j] == kp_u32 && finite(c) && overlap(&b, ba, c) >= ELC_IOU);
-                    if member && scores[j] > 0.0 {
+                    if member && scores[j].is_finite() && scores[j] > 0.0 {
                         add_member(j, scores[j] as f64);
                     }
                 }
@@ -319,7 +325,7 @@ pub fn dfl_consensus_scores(
             }
             let sc = s.clamp(ELC_PROB_EPS, 1.0 - ELC_PROB_EPS);
             let mut z = (sc / (1.0 - sc)).ln();
-            let ratio = (mass / s.max(1e-12)).clamp(1.0, ELC_CAP);
+            let ratio = (mass / s).clamp(1.0, ELC_CAP);
             z += ELC_ALPHA * (ratio / ELC_R_REF).ln();
             if bin_precision.is_some() && prec_mass.iter().all(|&m| m > 0.0) {
                 let mut sum_std = 0f64;

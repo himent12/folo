@@ -9,8 +9,8 @@ use rayon::prelude::*;
 use super::{FoloModel, HeadMode, HeadOutput, ImageCandidates};
 use crate::boxes::Xyxy;
 use crate::decode::{
-    bin_precision, bin_precisions, decode_head, dist2bbox, side_precision, side_precisions, sigmoid,
-    softmax_expectation, softmax_moments,
+    bin_precision, decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation,
+    softmax_moments,
 };
 use crate::fusion::BoxFusion;
 use crate::nms::{
@@ -338,16 +338,32 @@ impl HeadOutput {
                     for (k, v) in row.iter_mut().enumerate() {
                         *v = rg[k * a + j];
                     }
-                    if let Some(sp) = sp.as_mut() {
-                        sp.push(side_precisions(&row, rm, strides[j]));
+                    let stride = strides[j];
+                    let mut s_arr = [0f32; 4];
+                    let mut b_arr = [0f32; 4];
+                    for side in 0..4 {
+                        let (mean, var) = softmax_moments(&row[side * rm..(side + 1) * rm]);
+                        if want_side {
+                            s_arr[side] = side_precision(mean, var, stride);
+                        }
+                        b_arr[side] = bin_precision(mean, var);
                     }
-                    bp.push(bin_precisions(&row, rm));
+                    if let Some(sp) = sp.as_mut() {
+                        sp.push(s_arr);
+                    }
+                    bp.push(b_arr);
                 }
                 (sp, bp)
             })
             .collect();
-        let side = want_side.then(|| both.iter().map(|(s, _)| s.clone().unwrap()).collect());
-        let bin = both.into_iter().map(|(_, b)| b).collect();
+        let mut side = want_side.then(|| Vec::with_capacity(both.len()));
+        let mut bin = Vec::with_capacity(both.len());
+        for (s, b) in both {
+            if let (Some(sv), Some(s)) = (side.as_mut(), s) {
+                sv.push(s);
+            }
+            bin.push(b);
+        }
         Ok((side, Some(bin)))
     }
 

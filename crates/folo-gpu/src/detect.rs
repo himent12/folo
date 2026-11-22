@@ -213,6 +213,9 @@ fn check(
     if tal.topk2 == Some(0) {
         return Err(err("topk2 must be at least 1"));
     }
+    if !(tal.nwd_weight.is_finite() && tal.nwd_weight >= 0.0) {
+        return Err(err(format!("tal.nwd_weight {} must be finite and >= 0", tal.nwd_weight)));
+    }
     Ok(DetectDesc {
         b,
         a,
@@ -343,7 +346,8 @@ impl Saved {
             &dcls_b,
         )
         .map_err(gpu)?;
-        Ok(vec![Some(dbox), Some(dcls)])
+        // No gradient for the saved assignment buffers (inputs only so autograd checks their storage versions).
+        Ok(vec![Some(dbox), Some(dcls), None, None, None, None])
     }
 }
 
@@ -368,6 +372,12 @@ pub fn detection_loss_with_assignment(
     gts: &[ImageGt<'_>],
     s: &LossSettings,
 ) -> Result<(DeviceLoss, Assignment)> {
+    if !(s.mal_gamma.is_finite() && s.mal_gamma >= 0.0) {
+        return Err(err(format!("mal_gamma {} must be finite and >= 0", s.mal_gamma)));
+    }
+    if !(s.nwd_weight.is_finite() && s.nwd_weight >= 0.0) {
+        return Err(err(format!("nwd_weight {} must be finite and >= 0", s.nwd_weight)));
+    }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
     let mut d = asg.desc;
@@ -397,8 +407,14 @@ pub fn detection_loss_with_assignment(
         dense: asg.dense.clone(),
         stats: stats.clone(),
     });
-    let total =
-        Tensor::custom_op("detection_loss_gpu", &[box_raw, cls_raw], total, move |g| saved.backward(g))?;
+    // Pass the publicly returned assignment tensors as no-grad inputs so autograd checks their storage versions
+    // and refuses backward if a caller mutates them in place after forward.
+    let total = Tensor::custom_op(
+        "detection_loss_gpu",
+        &[box_raw, cls_raw, &asg.meta, &asg.picks, &asg.slots, &asg.dense],
+        total,
+        move |g| saved.backward(g),
+    )?;
     // The caller gets a copy of the stats, so nothing it does to them can change the backward.
     let (public, public_b) = bufs.alloc(DType::F32, &[12], false)?;
     ctx.copy(&stats_b, 0, &public_b, 0, 48);

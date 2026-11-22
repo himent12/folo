@@ -164,7 +164,8 @@ impl PeakSuppress {
     /// Apply content-adaptive peak-preserving suppression to `logits [B, nc, H, W]` using `feat [B, c_cls, H, W]`.
     pub fn apply(&self, logits: &Tensor, feat: &Tensor) -> Result<Tensor> {
         let g = self.gate.forward(feat)?.sigmoid()?;
-        let alpha = self.alpha_raw.softplus()?.reshape([1, self.num_classes, 1, 1])?;
+        let alpha =
+            self.alpha_raw.softplus()?.to_dtype(logits.dtype())?.reshape([1, self.num_classes, 1, 1])?;
         let z_max = logits.max_pool2d(3, 1, 1)?;
         let penalty = z_max.sub(logits)?.mul(&g)?.mul(&alpha)?;
         Ok(logits.sub(&penalty)?)
@@ -386,18 +387,19 @@ impl LazyAlignHead {
 
     /// One-to-one raw outputs `(box_raw, cls_raw_o2o, iou_raw)` sharing `box_branch`.
     ///
-    /// When `shared_box` is `Some` (training mode), `box_raw` reuses the already-computed `o2m` box
-    /// tensor and `iou_raw` is `None` (already returned by [`LazyAlignHead::forward`]). When `shared_box`
-    /// is `None` (eval `o2o` mode), `box_branch.forward_box_iou` runs once per level with zero wasted
-    /// `o2m` classification compute.
+    /// When `o2o_detach` is true and autograd is enabled, gradients stop strictly at the backbone/neck feature
+    /// inputs `feats` while `box_branch` weights still receive `o2o` box+DFL gradients (running `box_branch` on
+    /// the detached features). When `o2o_detach` is false or autograd is disabled, `shared_box` is reused directly
+    /// with zero redundant compute.
     pub fn forward_o2o(
         &self,
         feats: [&Tensor; 3],
         shared_box: Option<&Tensor>,
     ) -> Result<Option<(Tensor, Tensor, Option<Tensor>)>> {
         let Some(o2o_levels) = &self.o2o_cls else { return Ok(None) };
+        let detach_feats = self.o2o_detach && is_grad_enabled();
         let detached;
-        let cls_feats = if self.o2o_detach && is_grad_enabled() {
+        let cls_feats = if detach_feats {
             detached = feats.map(Tensor::detach);
             [&detached[0], &detached[1], &detached[2]]
         } else {
@@ -411,12 +413,9 @@ impl LazyAlignHead {
             })
             .collect::<Result<_>>()?;
         let cls_raw = Tensor::cat(&cls_parts, 2)?;
-        let (box_raw, iou_raw) = match shared_box {
-            Some(b) => {
-                let b_out = if self.o2o_detach && is_grad_enabled() { b.detach() } else { b.clone() };
-                (b_out, None)
-            }
-            None => {
+        let (box_raw, iou_raw) = match (shared_box, detach_feats) {
+            (Some(b), false) => (b.clone(), None),
+            _ => {
                 let mut boxes = Vec::with_capacity(3);
                 let mut ious = Vec::with_capacity(3);
                 for i in 0..3 {
@@ -424,11 +423,17 @@ impl LazyAlignHead {
                     let (b, _, h, w) = x.dims4()?;
                     let (bx, iou) = self.levels[i].box_branch.forward_box_iou(x)?;
                     boxes.push(bx.reshape([b, 4 * self.reg_max, h * w])?);
-                    if let Some(t) = iou {
+                    if shared_box.is_none()
+                        && let Some(t) = iou
+                    {
                         ious.push(t.reshape([b, 1, h * w])?);
                     }
                 }
-                let iou_raw = if self.has_iou_head { Some(Tensor::cat(&ious, 2)?) } else { None };
+                let iou_raw = if shared_box.is_none() && self.has_iou_head {
+                    Some(Tensor::cat(&ious, 2)?)
+                } else {
+                    None
+                };
                 (Tensor::cat(&boxes, 2)?, iou_raw)
             }
         };

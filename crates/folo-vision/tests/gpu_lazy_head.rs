@@ -43,9 +43,9 @@ fn gpu() -> Option<(Device, folo_gpu::GpuContext, MutexGuard<'static, ()>)> {
     Some((dev, ctx, guard))
 }
 
-/// A folo-n detector with `nc` classes and `head` (`o2m` or `o2o`), with non-trivial BatchNorm statistics and zero
-/// class biases (scores spread around 0.5), loaded fused for inference on `dev` in `dtype`.
-fn model(nc: usize, head: &str, dev: Device, dtype: DType) -> FoloModel {
+/// A folo-n detector with `nc` classes and `head` (`o2m` or `o2o`), with non-trivial BatchNorm statistics and
+/// constant `cls_bias` class biases, loaded fused for inference on `dev` in `dtype`.
+fn model_with_bias(nc: usize, head: &str, dev: Device, dtype: DType, cls_bias: f32) -> FoloModel {
     let mut c = ModelConfig::new("n", nc).unwrap();
     c.head = head.into();
     let m = FoloModel::new(c).unwrap();
@@ -59,7 +59,8 @@ fn model(nc: usize, head: &str, dev: Device, dtype: DType) -> FoloModel {
             } else if t.name.ends_with("running_var") {
                 t.tensor.copy_from(&Tensor::rand_uniform([n], 0.5, 1.5, rng)).unwrap();
             } else if t.name.contains("cls.") && t.name.ends_with(".out.bias") {
-                t.tensor.copy_from(&t.tensor.zeros_like().unwrap()).unwrap();
+                let b = t.tensor.zeros_like().unwrap().add_scalar(cls_bias).unwrap();
+                t.tensor.copy_from(&b).unwrap();
             }
         }
     }
@@ -67,6 +68,10 @@ fn model(nc: usize, head: &str, dev: Device, dtype: DType) -> FoloModel {
     m.save(&path).unwrap();
     let file = ModelFile::open(&path).unwrap();
     FoloModel::from_file_for_inference(&file, dev, dtype).unwrap()
+}
+
+fn model(nc: usize, head: &str, dev: Device, dtype: DType) -> FoloModel {
+    model_with_bias(nc, head, dev, dtype, 0.0)
 }
 
 fn bits(d: &[Detection]) -> Vec<[u32; 6]> {
@@ -140,8 +145,15 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
         .collect();
     best.sort_by(f32::total_cmp);
     let at = |q: f64| best[((best.len() as f64 * q) as usize).min(best.len() - 1)];
-    let (mut compared, mut lowered) = (0, 0);
-    for conf in [best[best.len() - 1] + 1e-3, at(0.99), at(0.95), at(0.7), best[0] - 1e-3] {
+    let (mut compared, mut changed) = (0, 0);
+    let mut confs = vec![best[best.len() - 1] + 1e-3, at(0.99), at(0.95), at(0.7), best[0] - 1e-3];
+    if score.is_calibrated() {
+        // Singleton anchors around 0.50 shift to ~0.29 under ELC and ~0.097 under DflConsensus (untrained wide
+        // DFL bins), so include both 0.15 (exercises `post_filter_calibrated`) and 0.05 (non-empty for both).
+        confs.push(0.15);
+        confs.push(0.05);
+    }
+    for conf in confs {
         let nms = NmsConfig {
             conf,
             iou: 1.0,
@@ -169,12 +181,19 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
             assert_eq!(bits(g), bits(w), "{what}: image {i} at conf {conf}");
             compared += w.len();
         }
-        if score == ScoreRule::Consensus {
-            let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
-            lowered += got.iter().zip(&off).map(|(on, off)| lowered_by_consensus(on, off)).sum::<usize>();
+        match score {
+            ScoreRule::None => {}
+            ScoreRule::Consensus => {
+                let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
+                changed += got.iter().zip(&off).map(|(on, off)| lowered_by_consensus(on, off)).sum::<usize>();
+            }
+            ScoreRule::Elc | ScoreRule::DflConsensus => {
+                let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
+                changed += got.iter().zip(&off).filter(|(on, off)| bits(on) != bits(off)).count();
+            }
         }
     }
-    assert!(score == ScoreRule::None || lowered > 0, "{what}: the consensus score changed nothing");
+    assert!(score == ScoreRule::None || changed > 0, "{what}: {score:?} changed nothing");
     compared
 }
 
@@ -232,9 +251,11 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
                 let what = format!("{fusion:?} {dtype:?} tensor cores {on} {dims:?}");
                 let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::None);
                 assert!(n > 0, "{what}: nothing compared");
-                // The consensus score runs on the host after NMS, on the same candidates.
-                let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::Consensus);
-                assert!(n > 0, "{what}, consensus: nothing compared");
+                // The consensus / ELC / DFL-consensus rules run on the host after NMS, on the same candidates.
+                for rule in [ScoreRule::Consensus, ScoreRule::Elc, ScoreRule::DflConsensus] {
+                    let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, rule);
+                    assert!(n > 0, "{what}, {rule:?}: nothing compared");
+                }
             }
         }
         // The fusion moves boxes, so the comparison above sees the precisions.
@@ -245,6 +266,14 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
         let (dfl, vote) =
             (out.detections(&nms(BoxFusion::Dfl)).unwrap(), out.detections(&nms(BoxFusion::Vote)).unwrap());
         assert_ne!(bits(&dfl[0]), bits(&vote[0]), "{dtype:?}: DFL fusion moved no box past voting");
+        // Exercise calibrated rules with real NMS suppression (default iou = 0.7) on GPU candidates-first.
+        for rule in [ScoreRule::Elc, ScoreRule::DflConsensus] {
+            let cfg = NmsConfig { conf: 0.3, fusion: BoxFusion::Dfl, score: rule, ..NmsConfig::default() };
+            let want = out.detections(&cfg).unwrap();
+            let cands = m.predict_candidates(&x, &cfg).unwrap();
+            let got: Vec<Vec<Detection>> = cands.iter().map(|c| m.finish_candidates(c, &cfg)).collect();
+            assert_eq!(bits(&got[0]), bits(&want[0]), "{dtype:?} tensor cores {on}: {rule:?} at iou=0.7");
+        }
         assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
     }
     ctx.set_tensor_cores(true);
@@ -294,13 +323,90 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
     for img in 0..2 {
         assert_eq!(bits(&m.finish_candidates(&got[img], &nms)), bits(&want[img]), "image {img}");
     }
-    // DFL fusion: the overflowing image's precisions come from the dense head, the other's from its sites.
-    let nms = NmsConfig { fusion: BoxFusion::Dfl, ..nms };
+    // DFL fusion + DFL-consensus scoring on a genuine mixed fit/overflow batch (including bin_precision mapping).
+    // Bias class logits to -2.6 so the 1025th P3 scores straddle below `CALIBRATED_PRE_CONF = 0.10` (ensuring
+    // `candidate_conf == conf`), so one image overflows P3 (>1024) and the other fits (<=1024) on the GPU sites path.
+    let m_low = model_with_bias(3, "o2m", dev, DType::F32, -2.6);
+    let dense_low = m_low.forward(&x).unwrap();
+    let cls_low = dense_low.cls_raw.to_vec::<f32>().unwrap();
+    let kth_low: Vec<f32> = (0..2)
+        .map(|img| {
+            let mut best: Vec<f32> = (0..p3)
+                .map(|j| (0..nc).map(|c| cls_low[(img * nc + c) * an + j]).fold(f32::NEG_INFINITY, f32::max))
+                .map(|l| 1.0 / (1.0 + (-l).exp()))
+                .collect();
+            best.sort_by(|u, v| v.total_cmp(u));
+            best[1024]
+        })
+        .collect();
+    let conf_low = (kth_low[0] + kth_low[1]) / 2.0;
+    assert!(conf_low <= 0.10, "expected low-bias threshold <= 0.10, got {conf_low} ({kth_low:?})");
+    let nms_low =
+        NmsConfig { conf: conf_low, fusion: BoxFusion::Dfl, score: ScoreRule::DflConsensus, ..nms.clone() };
+    let got_low = m_low.predict_candidates(&x, &nms_low).unwrap();
+    let in_p3_low = |img: usize| got_low[img].cands.iter().filter(|c| (c.anchor as usize) < p3).count();
+    let (over_low, fit_low) = if kth_low[0] > kth_low[1] { (0, 1) } else { (1, 0) };
+    assert!(
+        in_p3_low(over_low) > 1024 && in_p3_low(fit_low) <= 1024,
+        "DflConsensus P3 candidates {} and {} ({kth_low:?})",
+        in_p3_low(0),
+        in_p3_low(1)
+    );
+    let dense_low_side = dense_low.side_precisions().unwrap();
+    check_precisions(&m_low, &got_low, &dense_low_side, &nms_low, "mixed batch, DFL-consensus");
+    let raw_box = dense_low.box_raw.to_vec::<f32>().unwrap();
+    let rm = dense_low.reg_max;
+    for (img, ic) in got_low.iter().enumerate() {
+        let bp = ic.bin_precisions.as_ref().expect("mixed batch bin_precisions");
+        assert_eq!(bp.len(), ic.cands.len());
+        let rg = &raw_box[img * 4 * rm * an..(img + 1) * 4 * rm * an];
+        for (c, &p) in ic.cands.iter().zip(bp) {
+            let a_idx = c.anchor as usize;
+            let row: Vec<f32> = (0..4 * rm).map(|k| rg[k * an + a_idx]).collect();
+            let want_bp = folo_vision::decode::bin_precisions(&row, rm);
+            for side in 0..4 {
+                assert!(
+                    (p[side] - want_bp[side]).abs() <= 1e-3 * want_bp[side].max(1.0),
+                    "mixed batch bin_precision mismatch img={img} anchor={a_idx} side={side}: {} vs {}",
+                    p[side],
+                    want_bp[side]
+                );
+            }
+        }
+    }
+    let want_low = dense_low.detections(&nms_low).unwrap();
+    for img in 0..2 {
+        assert_eq!(
+            bits(&m_low.finish_candidates(&got_low[img], &nms_low)),
+            bits(&want_low[img]),
+            "DFL-consensus mixed fit/overflow: image {img}"
+        );
+    }
+    // Also check single-label post-filtered (`conf > 0.10`) DFL-consensus parity on the zero-bias model.
+    let nms = NmsConfig { fusion: BoxFusion::Dfl, score: ScoreRule::DflConsensus, ..nms };
     let got = m.predict_candidates(&x, &nms).unwrap();
-    check_precisions(&m, &got, &dense.side_precisions().unwrap(), &nms, "mixed batch, DFL");
+    let dense_side = dense.side_precisions().unwrap();
+    check_precisions(&m, &got, &dense_side, &nms, "mixed batch, DFL");
     let want = dense.detections(&nms).unwrap();
     for img in 0..2 {
-        assert_eq!(bits(&m.finish_candidates(&got[img], &nms)), bits(&want[img]), "DFL: image {img}");
+        assert_eq!(
+            bits(&m.finish_candidates(&got[img], &nms)),
+            bits(&want[img]),
+            "DFL-consensus: image {img}"
+        );
+    }
+    // `o2o` ignores `--score` (DflConsensus matches None bit-for-bit).
+    let m_o2o = model(3, "o2o", dev, DType::F32);
+    let o2o_none = NmsConfig { conf: 0.25, score: ScoreRule::None, ..NmsConfig::default() };
+    let o2o_dfl = NmsConfig { conf: 0.25, score: ScoreRule::DflConsensus, ..NmsConfig::default() };
+    let d_none = m_o2o.predict_raw(&x, &o2o_none).unwrap();
+    let d_dfl = m_o2o.predict_raw(&x, &o2o_dfl).unwrap();
+    for img in 0..2 {
+        assert_eq!(
+            bits(&d_none.images[img].detections),
+            bits(&d_dfl.images[img].detections),
+            "o2o img={img}"
+        );
     }
     ctx.set_tensor_cores(true);
 }

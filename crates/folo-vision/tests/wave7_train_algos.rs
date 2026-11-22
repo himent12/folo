@@ -533,3 +533,317 @@ fn gpu_parity_p1_p2_p3() {
         );
     }
 }
+
+/// Regression tests for Round-1 review findings:
+/// - fractional `0 < mal_gamma < 1` at `x = -120` on the composite (`!fused`) path stays 100% finite,
+/// - `wd_eff` is reported consistently in `run_config()` and `resolved_train()`,
+/// - unsupported P3 optimizer combinations (`AdamW + cautious_wd`, non-`MuSGD + cls_lr_close_scale`) error,
+/// - cross-class `--weights` transfer with `mal_gamma > 0` initializes fresh class biases to `-4.59512`,
+/// - Wave-7 trainer config round-trips cleanly through checkpoint save + `Trainer::resume`.
+#[test]
+fn composite_fractional_mal_and_p3_validation_and_resume_regressions() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_data::{AugmentConfig, Split};
+    use folo_test_support::{TestDir, TestFile};
+    use folo_vision::train::{OptimizerChoice, ResumeOverrides};
+    use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
+    use std::sync::Arc;
+
+    // 1. Composite `!fused` MAL with fractional gamma = 0.5 at x = -120 on an empty-target batch (CPU + GPU).
+    let anchors = make_anchors(32, 32, &[8, 16, 32], 0.5);
+    let a = anchors.len();
+    let empty = vec![ImageTargets { boxes: vec![], labels: vec![] }];
+    let cfg_frac = LossConfig { mal_gamma: 0.5, ..LossConfig::default() };
+    let mut devices = vec![Device::Cpu];
+    if let Some(dev) = gpu() {
+        devices.push(dev);
+    }
+    for dev in devices {
+        let bx = Tensor::zeros([1, 64, a]).to_device(dev).unwrap().requires_grad_();
+        let cl = Tensor::full([1, 3, a], -120.0).to_device(dev).unwrap().requires_grad_();
+        let out = detection_loss_host(&bx, &cl, &anchors, &empty, &cfg_frac).unwrap();
+        assert!(out.total_value.is_finite(), "{dev}: fractional MAL loss non-finite");
+        let grads = out.total.backward().unwrap();
+        let g = grads.get(&cl).unwrap().to_vec::<f32>().unwrap();
+        assert!(g.iter().all(|v| v.is_finite()), "{dev}: fractional MAL produced NaN/Inf grad at x=-120");
+    }
+
+    let make_data = |classes: Vec<String>| {
+        let syn = SyntheticConfig {
+            images: 6,
+            classes: classes.clone(),
+            imgsz: 64,
+            seed: 9,
+            min_objects: 1,
+            max_objects: 2,
+            empty_fraction: 0.0,
+            small_fraction: 0.0,
+            vary_aspect: false,
+            val_fraction: 2.0 / 6.0,
+            ..SyntheticConfig::default()
+        };
+        TrainData {
+            train: Arc::new(SyntheticDataset::new(syn.clone(), Split::Train).unwrap()),
+            val: Arc::new(SyntheticDataset::new(syn, Split::Val).unwrap()),
+            classes,
+        }
+    };
+
+    // 2. P3 optimizer compatibility validation & consistent `wd_eff` reporting.
+    let bad_adamw = TrainConfig {
+        epochs: 1,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        optimizer: OptimizerChoice::Adamw,
+        cautious_wd: true,
+        device: "cpu".into(),
+        workers: 0,
+        augment: AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    assert!(
+        Trainer::new(bad_adamw, make_data(vec!["circle".into(), "square".into()]), TrainOptions::default())
+            .is_err()
+    );
+
+    let bad_sgd_cls = TrainConfig {
+        epochs: 1,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        optimizer: OptimizerChoice::Sgd,
+        cls_lr_close_scale: 0.5,
+        device: "cpu".into(),
+        workers: 0,
+        augment: AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    assert!(
+        Trainer::new(bad_sgd_cls, make_data(vec!["circle".into(), "square".into()]), TrainOptions::default())
+            .is_err()
+    );
+
+    // 3. Cross-class transfer (`nc = 2 -> 3`) with `mal_gamma > 0` keeps fresh class biases at `-4.59512`,
+    //    `wd_eff` matches both `optimizer.weight_decay` and `resolved.weight_decay`, and checkpoint resumes cleanly.
+    let src_weights = TestFile::new("wave7-xfer", "src.folo");
+    let mut m_src = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+    m_src.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m_src.save(&src_weights).unwrap();
+
+    let run_dir = TestDir::new("wave7-resume");
+    let w7_cfg = TrainConfig {
+        epochs: 2,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        optimizer: OptimizerChoice::Musgd,
+        lr0: 0.005,
+        warmup_epochs: 0.0,
+        workers: 0,
+        device: "cpu".into(),
+        augment: AugmentConfig::none(),
+        loss: LossConfig {
+            mal_gamma: 1.5,
+            nwd_weight: 0.5,
+            tal: TalConfig { eps_free: true, nwd_weight: 0.5, ..TalConfig::default() },
+            ..LossConfig::default()
+        },
+        decoupled_wd: true,
+        cautious_wd: true,
+        wd_eff: Some(0.004),
+        gauge_norm: true,
+        ..TrainConfig::default()
+    };
+    let trainer = Trainer::new(
+        w7_cfg.clone(),
+        make_data(vec!["circle".into(), "square".into(), "triangle".into()]),
+        TrainOptions { weights: Some(src_weights.path().to_path_buf()), ..TrainOptions::default() },
+    )
+    .unwrap();
+    let rc = trainer.run_config();
+    assert_eq!(rc["optimizer"]["weight_decay"].as_f64(), Some(0.004));
+    assert_eq!(rc["resolved"]["weight_decay"].as_f64(), Some(0.004));
+    let cls_bias = trainer
+        .model()
+        .named_parameters()
+        .into_iter()
+        .find(|(n, _)| n == "head.cls.p3.out.bias")
+        .unwrap()
+        .1
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        (cls_bias[0] - (-4.595_12)).abs() < 1e-4,
+        "cross-class transfer with mal_gamma > 0 must initialize fresh cls bias to -4.59512, got {}",
+        cls_bias[0]
+    );
+    let ckpt = run_dir.join("last.folo");
+    trainer.save_checkpoint(&ckpt).unwrap();
+    let resumed = Trainer::resume(
+        &ckpt,
+        make_data(vec!["circle".into(), "square".into(), "triangle".into()]),
+        TrainOptions::default(),
+        ResumeOverrides::default(),
+    )
+    .unwrap();
+    let rrc = resumed.run_config();
+    assert_eq!(rrc["resolved"]["weight_decay"].as_f64(), Some(0.004));
+    assert_eq!(rrc["train"]["decoupled_wd"].as_bool(), Some(true));
+    assert_eq!(rrc["train"]["cautious_wd"].as_bool(), Some(true));
+}
+
+/// GPU distillation safety & fallback regressions:
+/// - `gt_verify = true` still flags non-finite teacher `box_raw` at zero-weight anchors (CPU == GPU),
+/// - `folo_gpu::distill::distill_loss_with_context` validates `gt_asg` dimensions and rejects `gt_verify` w/o `asg`,
+/// - in-place mutation of returned `Assignment.dense` invalidates backward via autograd version tracking,
+/// - GPU trainer with `loss.tal.topk = 65` (host TAL fallback) + `gt_verify` + `bckd_gamma` runs cleanly on both
+///   empty-target and matched-positive batches.
+#[test]
+fn gpu_distill_safety_and_topk65_fallback_regressions() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_data::{AugmentConfig, Split};
+    use folo_test_support::TestFile;
+    use folo_vision::train::OptimizerChoice;
+    use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
+    use std::sync::Arc;
+
+    let Some(dev) = gpu() else { return };
+    let (box_raw, cls_raw, anchors, targets) = sample_batch(99);
+    let a = anchors.len();
+    let cfg = LossConfig::default();
+
+    // 1. Corrupt teacher box_raw with +Inf on a zero-object batch (all gt_verify weights == 0): BOTH CPU & GPU must report NaN.
+    let empty_targets = vec![ImageTargets { boxes: vec![], labels: vec![] }; 2];
+    let mut tb_vec = box_raw.to_vec::<f32>().unwrap();
+    tb_vec[0] = f32::INFINITY;
+    let tb_bad = Tensor::from_vec(tb_vec, box_raw.shape()).unwrap();
+    let tc = cls_raw.clone();
+    let dcfg = DistillConfig { bckd_gamma: 1.5, gt_verify: true, ..DistillConfig::new("t") };
+
+    let (sup_c, asg_c) =
+        detection_loss_for_distill(&box_raw, &cls_raw, &anchors, &empty_targets, &cfg, true).unwrap();
+    let Some(DistillAssignment::Host(ha)) = asg_c else { panic!("expected host assignment") };
+    let view_c = TeacherView::new(&tb_bad, &tc, 16, dcfg.temperature).unwrap();
+    let tgt_c = DistillTargets::new(&view_c).unwrap();
+    let vw_c = gt_verify_weights_cpu(&box_raw, &tb_bad, &anchors, &ha, 16).unwrap();
+    let kd_c = distill_loss_with_context(
+        &box_raw,
+        &cls_raw,
+        &tgt_c,
+        sup_c.target_score_sum,
+        &dcfg,
+        Some(&ha),
+        Some(&vw_c),
+    )
+    .unwrap();
+    assert!(kd_c.dfl.is_nan(), "CPU gt_verify must propagate NaN from +Inf teacher box logit");
+
+    let sb_g = box_raw.to_device(dev).unwrap().requires_grad_();
+    let sc_g = cls_raw.to_device(dev).unwrap().requires_grad_();
+    let tb_g = tb_bad.to_device(dev).unwrap();
+    let tc_g = tc.to_device(dev).unwrap();
+    let (sup_g, asg_g) =
+        detection_loss_for_distill(&sb_g, &sc_g, &anchors, &empty_targets, &cfg, true).unwrap();
+    let Some(DistillAssignment::Device(da)) = asg_g else { panic!("expected device assignment") };
+    let kd_g =
+        distill_loss_fused_with_context(&sb_g, &sc_g, &tb_g, &tc_g, sup_g.target_score_sum, &dcfg, Some(&da))
+            .unwrap();
+    assert!(kd_g.dfl.is_nan(), "GPU gt_verify must not swallow +Inf teacher box logit on zero-weight anchor");
+
+    // 2. Reject gt_verify=true without Assignment, and reject mismatched Assignment dimensions.
+    assert!(
+        distill_loss_fused_with_context(
+            &sb_g,
+            &sc_g,
+            &box_raw.to_device(dev).unwrap(),
+            &tc_g,
+            1.0,
+            &dcfg,
+            None
+        )
+        .is_err(),
+        "gt_verify without assignment must error"
+    );
+    let small_anchors = make_anchors(32, 32, &[8, 16, 32], 0.5);
+    let mut rng = Rng::seed(101);
+    let sb_s = Tensor::randn([2, 64, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+    let sc_s = Tensor::randn([2, 4, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+    assert!(
+        distill_loss_fused_with_context(&sb_s, &sc_s, &sb_s, &sc_s, 1.0, &dcfg, Some(&da)).is_err(),
+        "mismatched assignment anchor count must error"
+    );
+
+    // 3. In-place mutation of returned `Assignment.dense` invalidates both detection and BCKD backward.
+    let sb_m = box_raw.to_device(dev).unwrap().requires_grad_();
+    let sc_m = cls_raw.to_device(dev).unwrap().requires_grad_();
+    let (sup_m, asg_m) = detection_loss_for_distill(&sb_m, &sc_m, &anchors, &targets, &cfg, true).unwrap();
+    let Some(DistillAssignment::Device(da_m)) = asg_m else { panic!("expected device assignment") };
+    let kd_m = distill_loss_fused_with_context(
+        &sb_m,
+        &sc_m,
+        &box_raw.to_device(dev).unwrap(),
+        &tc_g,
+        sup_m.target_score_sum,
+        &dcfg,
+        Some(&da_m),
+    )
+    .unwrap();
+    let zeros_dense = da_m.dense.zeros_like().unwrap();
+    da_m.dense.copy_from(&zeros_dense).unwrap();
+    assert!(sup_m.total.backward().is_err(), "mutating Assignment.dense must invalidate detection backward");
+    assert!(kd_m.total.backward().is_err(), "mutating Assignment.dense must invalidate BCKD backward");
+
+    // 4. GPU Trainer run with `loss.tal.topk = 65` (host TAL fallback) + `gt_verify` + `bckd_gamma`,
+    //    exercising both an empty-object image and a matched-positive image.
+    let teacher_file = TestFile::new("wave7-topk65", "teacher.folo");
+    let mut tm = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+    tm.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    tm.save(&teacher_file).unwrap();
+    let syn = SyntheticConfig {
+        images: 4,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 17,
+        min_objects: 1,
+        max_objects: 2,
+        empty_fraction: 0.5,
+        small_fraction: 0.0,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..SyntheticConfig::default()
+    };
+    let data = TrainData {
+        train: Arc::new(SyntheticDataset::new(syn.clone(), Split::Train).unwrap()),
+        val: Arc::new(SyntheticDataset::new(syn, Split::Val).unwrap()),
+        classes: vec!["circle".into(), "square".into()],
+    };
+    let tcfg = TrainConfig {
+        epochs: 1,
+        batch: 1,
+        nbs: 1,
+        imgsz: 64,
+        optimizer: OptimizerChoice::Sgd,
+        lr0: 0.001,
+        warmup_epochs: 0.0,
+        workers: 0,
+        device: "gpu:0".into(),
+        augment: AugmentConfig::none(),
+        loss: LossConfig {
+            mal_gamma: 1.5,
+            tal: TalConfig { topk: 65, ..TalConfig::default() },
+            ..LossConfig::default()
+        },
+        distill: Some(DistillConfig {
+            bckd_gamma: 1.5,
+            gt_verify: true,
+            ..DistillConfig::new(teacher_file.path().to_string_lossy())
+        }),
+        ..TrainConfig::default()
+    };
+    let mut tr = Trainer::new(tcfg, data, TrainOptions::default()).unwrap();
+    let summary = tr.run().unwrap();
+    assert_eq!(summary.epochs_completed, 1);
+    assert!(summary.epochs[0].train_loss.total.is_finite());
+    let _ = a;
+}

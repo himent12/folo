@@ -153,7 +153,18 @@ fn autocast_conv_and_matmul_train_f32_leaves() {
 /// odd `hw`, all activations, and large shifted means (`+500.0`, verifying zero catastrophic cancellation).
 #[test]
 fn batch_norm_subgroups_and_portable_fallback_agree() {
-    use std::sync::atomic::Ordering;
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            let prev = crate::kernels::norm::FORCE_NO_SUBGROUPS.replace(v);
+            Self(prev)
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
     let dev = dev16!();
     let _g = no_grad();
     for &(shape, act, shift) in &[
@@ -168,7 +179,7 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
         let w = randn(&[c], 43).add_scalar(1.0).unwrap().to_device(dev).unwrap();
         let b = randn(&[c], 44).to_device(dev).unwrap();
         let run = |force_portable: bool, dtype: DType| {
-            crate::kernels::norm::FORCE_NO_SUBGROUPS.store(force_portable, Ordering::Relaxed);
+            let _guard = ForceGuard::set(force_portable);
             let xd = x.to_dtype(dtype).unwrap();
             let gd = g.to_dtype(dtype).unwrap();
             let out = xd.batch_norm_act_train(&w, &b, 1e-3, act, None).unwrap().expect("kernels");
@@ -176,7 +187,6 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
                 .batch_norm_act_train_backward(&gd, &w, &b, &out.mean, &out.invstd, act)
                 .unwrap()
                 .expect("kernels");
-            crate::kernels::norm::FORCE_NO_SUBGROUPS.store(false, Ordering::Relaxed);
             (
                 out.y.to_dtype(DType::F32).unwrap(),
                 out.mean,
@@ -196,6 +206,41 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
             assert_close_t(&dx_sg, &dx_fb, 2e-3, 2e-3, &format!("{what} dx"));
             assert_close_t(&dw_sg, &dw_fb, 2e-3, 1e-3, &format!("{what} dw"));
             assert_close_t(&db_sg, &db_fb, 2e-3, 2e-3, &format!("{what} db"));
+        }
+    }
+
+    // Extreme finite inputs against f64 reference: no sum2 overflow (`1e19`), no subgroup `cnt * mean` overflow
+    // (`1e37`), and no first-element outlier cancellation (`1e5` at index 0 with ±1 background).
+    let w1 = Tensor::from_slice(&[1.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let b0 = Tensor::from_slice(&[0.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let mut spike = vec![0.0f32; 2048];
+    spike[0] = 1e19;
+    let huge_const = vec![1e37f32; 1024];
+    let mut outlier: Vec<f32> = (0..1024).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    outlier[0] = 1e5;
+    for (name, vals) in [("spike_1e19", spike), ("const_1e37", huge_const), ("outlier_1e5", outlier)] {
+        let n = vals.len();
+        let mean_ref = vals.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+        let var_ref = vals.iter().map(|&v| (v as f64 - mean_ref).powi(2)).sum::<f64>() / n as f64;
+        let invstd_ref = (var_ref + 1e-5).sqrt().recip() as f32;
+        let x = Tensor::from_vec(vals, [1, 1, 1, n]).unwrap().to_device(dev).unwrap();
+        for force_portable in [false, true] {
+            let _guard = ForceGuard::set(force_portable);
+            let out = x.batch_norm_act_train(&w1, &b0, 1e-5, None, None).unwrap().expect("kernels");
+            let m = out.mean.to_vec::<f32>().unwrap()[0];
+            let iv = out.invstd.to_vec::<f32>().unwrap()[0];
+            assert!(
+                m.is_finite() && iv.is_finite(),
+                "{name} portable={force_portable}: non-finite mean={m} invstd={iv}"
+            );
+            assert!(
+                (m - mean_ref as f32).abs() <= 1e-4 * (mean_ref.abs() as f32).max(1.0),
+                "{name} portable={force_portable}: mean {m} vs {mean_ref}"
+            );
+            assert!(
+                (iv - invstd_ref).abs() <= 1e-3 * invstd_ref.max(1e-6),
+                "{name} portable={force_portable}: invstd {iv} vs {invstd_ref}"
+            );
         }
     }
 }

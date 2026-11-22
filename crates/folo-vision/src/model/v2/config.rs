@@ -127,8 +127,23 @@ impl FoloV2Config {
         if self.in_channels == 0 {
             return Err(Error::Invalid("FoloV2Config: in_channels must be positive".into()));
         }
-        if self.reg_max == 0 {
-            return Err(Error::Invalid("FoloV2Config: reg_max must be positive".into()));
+        if self.reg_max < 2 {
+            return Err(Error::Invalid(format!(
+                "FoloV2Config: reg_max must be at least 2, got {}",
+                self.reg_max
+            )));
+        }
+        if !(self.bn_eps.is_finite() && self.bn_eps > 0.0) {
+            return Err(Error::Invalid(format!(
+                "FoloV2Config: bn_eps must be finite and > 0, got {}",
+                self.bn_eps
+            )));
+        }
+        if !(self.bn_momentum.is_finite() && (0.0..=1.0).contains(&self.bn_momentum)) {
+            return Err(Error::Invalid(format!(
+                "FoloV2Config: bn_momentum must be finite and in [0, 1], got {}",
+                self.bn_momentum
+            )));
         }
         if self.strides != [8, 16, 32] {
             return Err(Error::Invalid(format!(

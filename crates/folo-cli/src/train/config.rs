@@ -78,6 +78,15 @@ pub(super) fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfi
             .hint("--set takes KEY=VALUE with a key of the run's config.json `train` object, e.g. --set momentum=0.9")
     };
     let mut v = serde_json::to_value(&cfg).expect("configs serialize");
+    // Ensure optional/skip-if-default Wave-7 keys are discoverable via `--set` while keeping default checkpoint
+    // JSON clean when unset.
+    if let Some(root) = v.as_object_mut() {
+        root.entry("wd_eff").or_insert(serde_json::Value::Null);
+        if let Some(distill) = root.get_mut("distill").and_then(serde_json::Value::as_object_mut) {
+            distill.entry("bckd_gamma").or_insert_with(|| json!(0.0));
+            distill.entry("gt_verify").or_insert_with(|| json!(false));
+        }
+    }
     for s in sets {
         let Some((key, raw)) = s.split_once('=') else {
             return Err(bad(format!("--set {s}: expected KEY=VALUE")));

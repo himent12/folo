@@ -9,9 +9,7 @@ use folo_core::Device;
 use folo_core::rng::Rng;
 use folo_data::{DataLoader, LoaderConfig};
 use folo_nn::io::{BestState, ModelConfig, ModelFile};
-use folo_nn::optim::{
-    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
-};
+use folo_nn::optim::{AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups};
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
@@ -281,8 +279,10 @@ impl Trainer {
         let mut init = Rng::seed(cfg.seed);
         let mut model = FoloModel::with_rng(mconf.clone(), &mut init)?;
         // Safeguard #38: MAL requires focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would
-        // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8).
-        if cfg.loss.mal_gamma > 0.0 && !cfg.transfer {
+        // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8). Always apply to freshly initialized heads so
+        // cross-class transfers (whose class bias is skipped by `transfer_from`) also start at -4.59512; same-class
+        // transfers and resumes overwrite it when loading weights.
+        if cfg.loss.mal_gamma > 0.0 {
             const MAL_BIAS_PRIOR: f32 = -4.595_12;
             for (name, p) in model.named_parameters() {
                 if (name.starts_with("head.cls.") || name.starts_with("head.o2o.cls."))
@@ -317,10 +317,17 @@ impl Trainer {
             None => None,
         };
 
+        if resolved.kind == OptimKind::AdamW && cfg.cautious_wd {
+            return Err(Error::Config("cautious_wd is supported for SGD and MuSGD only, not AdamW".into()));
+        }
+        if resolved.kind != OptimKind::MuSgd && cfg.cls_lr_close_scale != 1.0 {
+            return Err(Error::Config(
+                "cls_lr_close_scale applies only to MuSGD (which has a separate .cls parameter group)".into(),
+            ));
+        }
+
         let accumulate = cfg.accumulate();
-        let wd = cfg
-            .wd_eff
-            .unwrap_or_else(|| effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs));
+        let wd = cfg.effective_wd(accumulate);
         let std_groups = StandardGroups::from_module(&model);
         let apply_wd_mode = |mut gs: Vec<folo_nn::optim::ParamGroup>| {
             if cfg.decoupled_wd || cfg.cautious_wd {

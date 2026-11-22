@@ -355,14 +355,20 @@ pub(super) fn loss_impl(
     // class of each foreground anchor and 0 elsewhere. Foreground terms are formed per element before any sum, so a
     // confident positive (large x, t ≈ 1) does not cancel against a large dense sum.
     let mal_gamma = cfg.mal_gamma;
+    // Evaluates `sigmoid(x)^gamma * softplus(x)` as `exp(-gamma * softplus(-x)) * softplus(x)` so fractional
+    // `0 < gamma < 1` never hits `0^(gamma - 1) = inf` in `powf` backward when `sigmoid(x)` underflows to `0`.
+    let mal_neg_composite = |x: &Tensor| -> Result<Tensor> {
+        if mal_gamma > 0.0 {
+            let log_p = x.neg()?.softplus()?;
+            Ok(log_p.mul_scalar(-mal_gamma)?.exp()?.mul(&x.softplus()?)?)
+        } else {
+            Ok(x.softplus()?)
+        }
+    };
     let cls_sum = if fused {
         bce_sum_cpu(cls_raw, idx_cls, asg.score.clone(), mal_gamma)?
     } else if n == 0 {
-        let neg_term = if mal_gamma > 0.0 {
-            cls_raw.sigmoid()?.powf(mal_gamma)?.mul(&cls_raw.softplus()?)?
-        } else {
-            cls_raw.softplus()?
-        };
+        let neg_term = mal_neg_composite(cls_raw)?;
         sum_fixed_order(&neg_term.sum(2, false)?)?
     } else {
         // Only t > 0 positions are positives under MAL (t == 0 stays negative, matching GPU).
@@ -373,7 +379,7 @@ pub(super) fn loss_impl(
         };
         let n_pos = fg_idx.len();
         if n_pos == 0 {
-            let neg_term = cls_raw.sigmoid()?.powf(mal_gamma)?.mul(&cls_raw.softplus()?)?;
+            let neg_term = mal_neg_composite(cls_raw)?;
             sum_fixed_order(&neg_term.sum(2, false)?)?
         } else {
             let idx = index(fg_idx)?;
@@ -385,11 +391,7 @@ pub(super) fn loss_impl(
                 ones.index_add(0, &idx, &Tensor::full_with([n_pos], -1.0, DType::F32, dev)?)?
                     .reshape([b, nc, n_a])?
             };
-            let neg_base = if mal_gamma > 0.0 {
-                cls_raw.sigmoid()?.powf(mal_gamma)?.mul(&cls_raw.softplus()?)?
-            } else {
-                cls_raw.softplus()?
-            };
+            let neg_base = mal_neg_composite(cls_raw)?;
             let dense = sum_fixed_order(&neg_base.mul(&bg_mask)?.sum(2, false)?)?;
             dense.add(&sum_fixed_order(&x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?)?)?
         }

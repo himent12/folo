@@ -63,7 +63,12 @@ impl Forward for Linear {
         let rows = x.numel() / i.max(1);
         let mut y = x.reshape([rows, i])?.matmul(&self.weight.t()?)?;
         if let Some(b) = &self.bias {
-            y = y.add(b)?;
+            let b = if b.dtype() != y.dtype() && folo_core::autocast_dtype().is_some() {
+                b.to_dtype(y.dtype())?
+            } else {
+                b.clone()
+            };
+            y = y.add(&b)?;
         }
         let mut out = x.dims().to_vec();
         *out.last_mut().expect("rank >= 1") = o;

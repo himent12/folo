@@ -1,5 +1,6 @@
-// Pass 1 of train-mode BatchNorm: per-thread block-shifted 2-moment accumulation over NCHW X (E is f32/f16
-// or vec4<f32>/vec4<f16>; statistics are f32). Zero divisions in the hot loop and zero catastrophic cancellation;
+// Pass 1 of train-mode BatchNorm: per-thread vectorized Welford accumulation over NCHW X (E is f32/f16 or
+// vec4<f32>/vec4<f16>; statistics are f32). Using 4-lane Welford keeps 1 vec4 load and 1 scalar reciprocal per 4
+// elements while avoiding both `sum2` overflow on extreme values (`1e19`) and first-element outlier cancellation;
 // `norm.rs` appends either the 1-barrier 32-wide subgroup Chan merge (when `SUBGROUPS` is true) or the portable
 // 8-barrier shared-memory `bn_tree_merge` fallback.
 // Grid: (chunks, C). Params: 0 = C, 1 = hw_units, 2 = N·hw_units, 3 = chunk length, 4 = chunks,
@@ -12,41 +13,42 @@ fn bn_stats_thread(c: u32, chunk: u32, lid: u32) -> vec3<f32> {
     let hw = pu(1u);
     let start = chunk * pu(3u);
     let end = min(start + pu(3u), pu(2u));
-    var has_v0 = false;
-    var v0 = 0.0;
-    var cnt = 0.0;
-    var s1 = vec4<f32>(0.0);
-    var s2 = vec4<f32>(0.0);
+    var k = 0.0;
+    var m4 = vec4<f32>(0.0);
+    var q4 = vec4<f32>(0.0);
     var w = bn_walk_start(start, lid, hw);
     loop {
         if (w.e >= end) { break; }
         let idx = (w.n * channels + c) * hw + w.i;
         let x = V4(X[idx]);
-        if (!has_v0) {
-            v0 = x.x;
-            has_v0 = true;
-        }
+        k += 1.0;
+        let inv_k = 1.0 / k;
         if (VEC) {
-            let dv = x - vec4<f32>(v0);
-            s1 += dv;
-            s2 += dv * dv;
-            cnt += 4.0;
+            let d = x - m4;
+            m4 += d * inv_k;
+            q4 += d * (x - m4);
         } else {
-            let dv = x.x - v0;
-            s1.x += dv;
-            s2.x += dv * dv;
-            cnt += 1.0;
+            let d = x.x - m4.x;
+            m4.x += d * inv_k;
+            q4.x += d * (x.x - m4.x);
         }
         bn_walk_next(&w, hw);
     }
-    var mean = 0.0;
-    var m2 = 0.0;
-    if (cnt > 0.0) {
-        let sum1 = select(s1.x, (s1.x + s1.y) + (s1.z + s1.w), VEC);
-        let sum2 = select(s2.x, (s2.x + s2.y) + (s2.z + s2.w), VEC);
-        let off = sum1 / cnt;
-        mean = v0 + off;
-        m2 = max(sum2 - sum1 * off, 0.0);
+    if (k == 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
     }
-    return vec3<f32>(cnt, mean, m2);
+    if (!VEC) {
+        return vec3<f32>(k, m4.x, q4.x);
+    }
+    // Exact equal-count Chan merge of the 4 vector lanes (each has count `k`).
+    let d01 = m4.y - m4.x;
+    let m01 = m4.x + 0.5 * d01;
+    let q01 = q4.x + q4.y + (0.5 * k * d01) * d01;
+    let d23 = m4.w - m4.z;
+    let m23 = m4.z + 0.5 * d23;
+    let q23 = q4.z + q4.w + (0.5 * k * d23) * d23;
+    let d_all = m23 - m01;
+    let mean = m01 + 0.5 * d_all;
+    let m2 = q01 + q23 + (k * d_all) * d_all;
+    return vec3<f32>(4.0 * k, mean, m2);
 }

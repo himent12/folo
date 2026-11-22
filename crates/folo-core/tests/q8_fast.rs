@@ -321,3 +321,22 @@ fn per_channel_c4_and_decoupled_concat_tile_f32_are_bit_exact_and_accurate() {
         );
     }
 }
+
+#[test]
+fn stem_u8_rejects_overflowing_output_extent_before_writes() {
+    let w = vec![0.1f32; 4 * 3];
+    let b = vec![0.0f32; 4];
+    let stem = QStem::new(&w, &b, (4, 1), 1, 1, false);
+    let mut out = vec![0u32; 4];
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stem_u8(
+            &[],
+            usize::MAX / 4 + 2,
+            0,
+            0,
+            &stem,
+            QOut::U8 { data: &mut out, grid: Grid { scale: 1.0, zero: 0 } },
+        );
+    }));
+    assert!(res.is_err(), "overflowing n * oh * ow must panic before touching raw output pointers");
+}

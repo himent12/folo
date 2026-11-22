@@ -138,6 +138,9 @@ pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
 /// perfectly certain edge at `mean` to (its two neighbouring bins), so only the excess is uncertainty.
 #[inline]
 pub fn side_precision(mean: f32, var: f32, stride: f32) -> f32 {
+    if !mean.is_finite() || !var.is_finite() || !stride.is_finite() || stride <= 0.0 {
+        return 0.0;
+    }
     let f = mean - mean.floor();
     let excess = (var - f * (1.0 - f)).max(0.0);
     1.0 / (stride * stride * (excess + crate::fusion::DFL_FUSION_EPS))
@@ -148,6 +151,9 @@ pub fn side_precision(mean: f32, var: f32, stride: f32) -> f32 {
 /// by [`crate::fusion::ScoreRule::DflConsensus`] (docs/MODEL.md §9.4).
 #[inline]
 pub fn bin_precision(mean: f32, var: f32) -> f32 {
+    if !mean.is_finite() || !var.is_finite() {
+        return 0.0;
+    }
     let f = mean - mean.floor();
     let excess = (var - f * (1.0 - f)).max(0.0);
     1.0 / (excess + crate::fusion::DFL_FUSION_EPS)

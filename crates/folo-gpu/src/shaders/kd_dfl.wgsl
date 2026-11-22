@@ -32,7 +32,38 @@ fn anchor(i: u32) -> f32 {
     if (USE_VER_W) {
         q = VER_W[i];
         if (q <= 0.0) {
-            if (MODE != 0u) {
+            if (MODE == 0u) {
+                // Keep numerical validation independent of the GT weight so corrupted student/teacher box logits
+                // still raise MISC[0] just like the dense/tensor paths (`NaN * 0 == NaN`).
+                var bad_zero = false;
+                for (var side = 0u; side < 4u; side++) {
+                    let base = (b * 4u + side) * R * na + a;
+                    var ms = -3.40282347e38;
+                    var live = 0u;
+                    var vs_arr: array<f32, R>;
+                    for (var r = 0u; r < R; r++) {
+                        let k = base + r * na;
+                        let zt = tv(TZ[ti(k)], k);
+                        let zs = Z[k];
+                        let vs = zs / temp;
+                        bad_zero = bad_zero || !is_finite_f(zs) || !is_finite_f(vs) || is_nan_f(zt) || is_pos_inf_f(zt);
+                        if (is_finite_f(zt)) {
+                            let qt = zt / temp;
+                            bad_zero = bad_zero || is_pos_inf_f(qt);
+                            if (is_finite_f(qt)) {
+                                live = live | (1u << r);
+                            }
+                        }
+                        vs_arr[r] = vs;
+                        ms = max(ms, vs);
+                    }
+                    bad_zero = bad_zero || live == 0u;
+                    for (var r = 0u; r < R; r++) {
+                        bad_zero = bad_zero || !is_finite_f(vs_arr[r] - ms);
+                    }
+                }
+                if (bad_zero) { atomicOr(&MISC[0], 1u); }
+            } else {
                 for (var side = 0u; side < 4u; side++) {
                     let base = (b * 4u + side) * R * na + a;
                     for (var r = 0u; r < R; r++) { OUT[base + r * na] = 0.0; }

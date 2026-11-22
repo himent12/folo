@@ -181,32 +181,37 @@ impl<T> OutPtr<T> {
 /// packed 3-channel kernel, and `out` is C4 u8 (single-grid or per-channel) or `f32`. Runs row bands in
 /// parallel with L1-resident tap strips; bit-identical across thread counts and scalar/AVX2/VNNI.
 pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: QOut<'_>) {
-    let hw = h * w;
-    assert!(x_rgb0.len() >= n * hw, "q8::stem_u8: input too short");
+    let hw = h.checked_mul(w).expect("q8::stem_u8: h * w overflow");
+    let n_hw = n.checked_mul(hw).expect("q8::stem_u8: n * h * w overflow");
+    assert!(x_rgb0.len() >= n_hw, "q8::stem_u8: input too short");
     let (oh, ow) = stem.out_hw(h, w);
-    let ohw = oh * ow;
+    let ohw = oh.checked_mul(ow).expect("q8::stem_u8: oh * ow overflow");
     let og = stem.o / 4;
+    let n_ohw = n.checked_mul(ohw).expect("q8::stem_u8: n * oh * ow overflow");
+    let u8_need = n_ohw.checked_mul(og).expect("q8::stem_u8: u8 output size overflow");
+    let f32_need = n_ohw.checked_mul(stem.o).expect("q8::stem_u8: f32 output size overflow");
     let (qptr, fptr, out_grids): (OutPtr<u32>, OutPtr<f32>, Option<Vec<super::Grid>>) = match out {
         QOut::U8 { data, grid } => {
-            assert!(data.len() >= n * og * ohw, "q8::stem_u8: u8 output too short");
+            assert!(data.len() >= u8_need, "q8::stem_u8: u8 output too short");
             (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), Some(vec![grid; stem.o]))
         }
         QOut::U8PerChannel { data, grids } => {
-            assert!(data.len() >= n * og * ohw, "q8::stem_u8: u8 output too short");
+            assert!(data.len() >= u8_need, "q8::stem_u8: u8 output too short");
             assert_eq!(grids.len(), stem.o, "q8::stem_u8: output grids length");
             (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), Some(grids.to_vec()))
         }
         QOut::F32 { data } => {
-            assert!(data.len() >= n * stem.o * ohw, "q8::stem_u8: f32 output too short");
+            assert!(data.len() >= f32_need, "q8::stem_u8: f32 output too short");
             (OutPtr(std::ptr::null_mut()), OutPtr(data.as_mut_ptr()), None)
         }
     };
-    if n * ohw == 0 {
+    if n_ohw == 0 {
         return;
     }
     let kern = kernel();
     let (k, s, p, ks) = (stem.k, stem.stride, stem.pad, stem.ks);
-    let strip_w = ow.next_multiple_of(NR);
+    let strip_w = ow.checked_next_multiple_of(NR).expect("q8::stem_u8: strip_w overflow");
+    let strip_len = ks.checked_mul(strip_w).expect("q8::stem_u8: strip buffer overflow");
     let chunks = ow.div_ceil(NR);
     let zero_corr = [0i32; MR];
     let resw = [0u32; NR];
@@ -227,18 +232,14 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
         None => Vec::new(),
     };
     let threads = rayon::current_num_threads();
-    let total_rows = n * oh;
+    let total_rows = n.checked_mul(oh).expect("q8::stem_u8: n * oh overflow");
     let band = (total_rows / (3 * threads).max(1)).max(1);
     let bands = total_rows.div_ceil(band);
     (0..bands).into_par_iter().for_each(|bi| {
         let r0 = bi * band;
         let r1 = (r0 + band).min(total_rows);
-        let mut strips = vec![0u32; ks * strip_w];
+        let mut strips = vec![0u32; strip_len];
         let mut row_ptrs = vec![std::ptr::null::<u32>(); ks];
-        for (t, ptr) in row_ptrs.iter_mut().enumerate().take(ks) {
-            // SAFETY: `t * strip_w` is inside `strips` and every strip has `chunks * NR` words.
-            *ptr = unsafe { strips.as_ptr().add(t * strip_w) };
-        }
         let mut acc: Tile = [[0; NR]; MR];
         let mut qw = [0u32; NR];
         let mut fv = [[0f32; NR]; MR];
@@ -263,6 +264,13 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                         *d = if ix < 0 || ix >= w as isize { 0 } else { srow[ix as usize] };
                     }
                 }
+            }
+            // Refresh shared raw strip pointers AFTER every `&mut strips` borrow has ended so Stacked/Tree Borrows
+            // stay strictly valid across the entire kernel pass below.
+            let base = strips.as_ptr();
+            for (t, ptr) in row_ptrs.iter_mut().enumerate().take(ks) {
+                // SAFETY: `t * strip_w` is inside `strips` and every strip has `strip_w >= chunks * NR` words.
+                *ptr = unsafe { base.add(t * strip_w) };
             }
             for g in 0..og {
                 let out_kind = if out_grids.is_some() {

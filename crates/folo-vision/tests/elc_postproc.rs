@@ -358,3 +358,65 @@ fn cpu_candidate_first_and_val_match_dense_bit_for_bit() {
     let cs = consensus_scores(&[0], &boxes, &sc, &[0, 0]);
     assert_eq!(cs.len(), 1);
 }
+
+#[test]
+fn elc_and_dfl_consensus_edge_case_regressions() {
+    // 1. NaN / +Inf DFL logits never yield maximum bin_precision or survive calibrated NMS.
+    let nan_logits = [f32::NAN; 16];
+    let (mn, vn) = softmax_moments(&nan_logits);
+    assert_eq!(bin_precision(mn, vn), 0.0);
+    assert_eq!(side_precision(mn, vn, 8.0), 0.0);
+    let mut inf_logits = [0.0f32; 16];
+    inf_logits[0] = f32::INFINITY;
+    let (mi, vi) = softmax_moments(&inf_logits);
+    assert_eq!(bin_precision(mi, vi), 0.0);
+    let cfg_cal = NmsConfig {
+        conf: 0.0,
+        iou: 0.70,
+        score: ScoreRule::DflConsensus,
+        multi_label: true,
+        ..NmsConfig::default()
+    };
+    let dets = non_max_suppression_with_dfl(
+        &[b(f32::NAN, 0.0, 10.0, 10.0), b(0.0, 0.0, 20.0, 20.0)],
+        &[0.95, 0.50],
+        None,
+        Some(&[[0.0; 4], [2.0; 4]]),
+        1,
+        &cfg_cal,
+    );
+    assert_eq!(dets.len(), 1, "non-finite box must be excluded before calibrated NMS");
+    assert_eq!(dets[0].bbox, b(0.0, 0.0, 20.0, 20.0));
+
+    // 2. Tiny `conf = 0` cluster (`1e-15`): 10 coincident members keep M/s = 10 > lone candidate.
+    let tiny_boxes = vec![b(0.0, 0.0, 20.0, 20.0); 10];
+    let tiny_scores = vec![1e-15f32; 10];
+    let tiny_classes = vec![0u32; 10];
+    let cluster_s = elc_scores(&[0], &tiny_boxes, &tiny_scores, &tiny_classes, None, 0.70)[0];
+    let lone_s = elc_scores(&[0], &[b(0.0, 0.0, 20.0, 20.0)], &[1e-15f32], &[0u32], None, 0.70)[0];
+    assert!(cluster_s > lone_s, "10-member 1e-15 cluster ({cluster_s:e}) must beat lone ({lone_s:e})");
+
+    // 3. Agnostic NMS ownership: weaker box C (cls 0, 0.30) must not steal stronger suppressed box B (cls 0, 0.85).
+    let box_a = b(0.0, 0.0, 100.0, 100.0);
+    let box_b = b(5.0, 0.0, 105.0, 100.0); // IoU > 0.7 with A and C
+    let box_c = b(18.0, 0.0, 118.0, 100.0); // IoU < 0.7 with A, IoU > 0.75 with B
+    let ag_boxes = [box_a, box_b, box_c];
+    let ag_scores = [0.90f32, 0.85, 0.30];
+    let ag_classes = [1u32, 0, 0];
+    let kept_ag = [0usize, 2]; // A suppressed B across classes; C survived
+    let out_ag = elc_scores(&kept_ag, &ag_boxes, &ag_scores, &ag_classes, None, 0.70);
+    let out_c_alone = elc_scores(&[0], &[box_c], &[0.30], &[0], None, 0.70);
+    assert_eq!(out_ag[1].to_bits(), out_c_alone[0].to_bits(), "C must not steal stronger box B");
+
+    // 4. +Inf score does not produce NaN.
+    let inf_out = dfl_consensus_scores(
+        &[0],
+        &[b(0.0, 0.0, 20.0, 20.0), b(1.0, 1.0, 21.0, 21.0)],
+        &[f32::INFINITY, 0.5],
+        &[0, 0],
+        None,
+        0.70,
+        None,
+    );
+    assert!(!inf_out[0].is_nan());
+}

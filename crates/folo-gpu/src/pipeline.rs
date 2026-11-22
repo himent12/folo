@@ -257,8 +257,12 @@ impl Spec {
     fn header(&self) -> String {
         let mut s = String::new();
         // Directives first: WGSL rejects `enable` after any declaration.
-        // Note: Naga 30 enables subgroup built-ins automatically via `wgpu::Features::SUBGROUP` and rejects an
-        // explicit `enable subgroups;` directive, so `self.subgroups` only gates capability & pipeline caching.
+        // Native Naga 30 enables subgroup built-ins automatically via `wgpu::Features::SUBGROUP` and rejects an
+        // explicit `enable subgroups;` directive; on Browser WebGPU (`wasm32`), Dawn/Tint/WebKit require it.
+        #[cfg(target_arch = "wasm32")]
+        if self.subgroups {
+            s.push_str("enable subgroups;\n");
+        }
         if self.coop {
             s.push_str("enable wgpu_cooperative_matrix;\n");
         }

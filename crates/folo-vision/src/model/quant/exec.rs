@@ -11,7 +11,7 @@ use folo_nn::{Activation, ConvBnAct, Error, Result};
 
 use super::calib::conv_f32;
 use super::walk::{self, Exec};
-use super::{Calibration, int8_able, stem_int8_able};
+use super::{Calibration, VERSION_V2, int8_able, stem_int8_able};
 use crate::model::FoloModel;
 
 /// A calibrated model's int8 plan. A conv's packed weights are kept with its weight tensor
@@ -157,7 +157,7 @@ impl Int8<'_> {
         let geometry = [cfg.in_channels, cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
         let silu = conv.act == Activation::Silu;
         let part_grids: Vec<&[Grid]> = parts.iter().map(|a| a.grids()).collect();
-        let decouple = q8::should_decouple_parts(&part_grids);
+        let decouple = self.plan.cal.version >= VERSION_V2 && q8::should_decouple_parts(&part_grids);
         let part_lens: Vec<usize> = parts.iter().map(|a| a.dims[1]).collect();
         let in_grids: Vec<(u32, u8)> =
             part_grids.iter().flat_map(|gs| gs.iter().map(|g| (g.scale.to_bits(), g.zero))).collect();

@@ -118,7 +118,7 @@ impl<'a> FakeQuant<'a> {
         // per-channel `in_scales[ic]` (down to `1e-8`) never blow up `w / in_scales[ic]` inside f32 Winograd.
         let owned_grids: Vec<Vec<QParam>> = parts.iter().map(|a| self.grids_of(a)).collect();
         let grid_refs: Vec<&[QParam]> = owned_grids.iter().map(Vec::as_slice).collect();
-        let decouple = should_decouple_parts(&grid_refs);
+        let decouple = self.cal.version >= super::VERSION_V2 && should_decouple_parts(&grid_refs);
         let norm_parts: Vec<Tensor> = parts
             .iter()
             .zip(&owned_grids)

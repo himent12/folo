@@ -98,6 +98,9 @@ fn check(student: [&Tensor; 2], teacher: [&Tensor; 2], s: &KdSettings) -> Result
     if !(s.temperature.is_finite() && s.temperature > 0.0 && s.normaliser >= 1.0) {
         return Err(err(format!("temperature {} must be > 0 and N {} >= 1", s.temperature, s.normaliser)));
     }
+    if !(s.bckd_gamma.is_finite() && s.bckd_gamma >= 0.0) {
+        return Err(err(format!("bckd_gamma {} must be finite and >= 0", s.bckd_gamma)));
+    }
     let d = KdDesc { b, a, nc, reg_max: s.reg_max, teacher_f16: tf == DType::F16, bckd_gamma: s.bckd_gamma };
     d.validate().map_err(|e| err(e.to_string()))?;
     Ok(d)
@@ -151,8 +154,13 @@ impl Saved {
             &dcls_b,
         )
         .map_err(gpu)?;
-        // No gradient for the teacher's outputs (inputs only so that autograd checks their storage versions).
-        Ok(vec![Some(dbox), Some(dcls), None, None])
+        // No gradient for the teacher's outputs (and optional saved gt_dense): inputs only so that autograd checks
+        // their storage versions.
+        let mut grads = vec![Some(dbox), Some(dcls), None, None];
+        if self.gt_dense.is_some() {
+            grads.push(None);
+        }
+        Ok(grads)
     }
 }
 
@@ -199,6 +207,38 @@ pub fn distill_loss_with_context(
     let (sc, sc_b) = dense(cls_raw)?;
     let (tb, tb_b) = dense(teacher_box)?;
     let (tc, tc_b) = dense(teacher_cls)?;
+    if let Some(asg) = gt_asg {
+        let ad = &asg.desc;
+        if (ad.b, ad.a, ad.nc, ad.reg_max) != (d.b, d.a, d.nc, d.reg_max) {
+            return Err(err(format!(
+                "assignment (B={}, A={}, nc={}, reg_max={}) does not match distillation head ({}, {}, {}, {})",
+                ad.b, ad.a, ad.nc, ad.reg_max, d.b, d.a, d.nc, d.reg_max
+            )));
+        }
+        for (name, t, want_dims) in [
+            ("dense", &asg.dense, vec![2, d.b, d.a]),
+            ("meta", &asg.meta, vec![ad.meta_words()]),
+            ("picks", &asg.picks, vec![d.b, ad.g, ad.k, 3]),
+            ("slots", &asg.slots, vec![d.b, ad.g, ad.k, 2]),
+        ] {
+            if t.device() != device {
+                return Err(Error::DeviceMismatch { op: "folo_gpu::distill", lhs: device, rhs: t.device() });
+            }
+            if t.dtype() != DType::U32 {
+                return Err(Error::DTypeMismatch {
+                    op: "folo_gpu::distill",
+                    expected: DType::U32,
+                    got: t.dtype(),
+                });
+            }
+            if t.dims() != want_dims.as_slice() {
+                return Err(err(format!(
+                    "assignment.{name} shape {:?} does not match expected {want_dims:?}",
+                    t.dims()
+                )));
+            }
+        }
+    }
     let (gt_dense_t, gt_dense_b) = match gt_asg.filter(|_| s.bckd_gamma > 0.0) {
         Some(asg) => {
             let b = dense_buffer(&asg.dense).ok_or_else(|| err("assignment dense is not on GPU"))?;
@@ -226,6 +266,9 @@ pub fn distill_loss_with_context(
             .map_err(gpu)?;
             (Some(vw_t), Some(vw_b))
         }
+        None if gt_verify => {
+            return Err(err("gt_verify requires a matching device Assignment"));
+        }
         None => (None, None),
     };
     let (_pc, pc) = bufs.alloc(DType::F32, &[d.cls_partials()], false)?;
@@ -251,6 +294,7 @@ pub fn distill_loss_with_context(
         &total_b,
     )
     .map_err(gpu)?;
+    let gt_input = gt_dense_t.clone();
     let saved = Arc::new(Saved {
         ctx: ctx.clone(),
         device,
@@ -262,9 +306,12 @@ pub fn distill_loss_with_context(
         // In f64, so `B · λ` cannot overflow before the division by `N` (the tensor path's backward divides first).
         scales: backward_scales(s, d.b),
     });
-    // The teacher's outputs are inputs too, without gradient: the backward reads them, so autograd must refuse a
-    // backward after they were overwritten in place (the saved dense handles may share their storage).
-    let inputs = [box_raw, cls_raw, teacher_box, teacher_cls];
+    // The teacher's outputs (and optional `gt_dense`) are inputs too, without gradient: the backward reads them,
+    // so autograd must refuse a backward after they were overwritten in place.
+    let mut inputs = vec![box_raw, cls_raw, teacher_box, teacher_cls];
+    if let Some(gt) = gt_input.as_ref() {
+        inputs.push(gt);
+    }
     let total = Tensor::custom_op("distill_loss_gpu", &inputs, total, move |g| saved.backward(g))?;
     Ok(DeviceKd { total, stats })
 }

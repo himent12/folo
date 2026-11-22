@@ -393,6 +393,9 @@ fn finish(
         // Back to candidate order so NMS tie-breaks by position.
         cands.sort_unstable_by_key(|c| (c.idx, c.class));
     }
+    if cfg.score.is_calibrated() {
+        cands.retain(|c| bbox_of(c.idx).to_array().iter().all(|v| v.is_finite()));
+    }
     let boxes: Vec<Xyxy> = cands.iter().map(|c| bbox_of(c.idx)).collect();
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();

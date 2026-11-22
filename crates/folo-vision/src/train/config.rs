@@ -499,6 +499,13 @@ impl TrainConfig {
 }
 
 impl TrainConfig {
+    /// The effective weight decay actually passed to the optimizer and recorded in run metadata (`wd_eff` when
+    /// explicitly set, otherwise batch-scaled [`effective_weight_decay`]).
+    pub fn effective_wd(&self, accumulate: usize) -> f64 {
+        self.wd_eff
+            .unwrap_or_else(|| effective_weight_decay(self.weight_decay, self.batch, accumulate, self.nbs))
+    }
+
     /// The EMA's `(decay, tau)` in a run of `total_iters` optimizer steps (docs/MODEL.md §8.5): a run from
     /// pretrained weights (`transfer`) takes [`folo_nn::ema_for_run`] with `ema_run_fraction`, a run from scratch
     /// the default (0.9999, 2000).
@@ -533,7 +540,7 @@ impl ResolvedOptim {
             cos_lr: cfg.cos_lr,
             momentum: self.momentum,
             betas: adamw.then_some([self.momentum, folo_nn::optim::DEFAULT_BETA2]),
-            weight_decay: effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs),
+            weight_decay: cfg.effective_wd(accumulate),
             batch: cfg.batch as u32,
             accumulate: accumulate as u32,
             nbs: cfg.nbs as u32,

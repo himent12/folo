@@ -280,13 +280,15 @@ impl Fuse for WsQARepConv3x3 {
             let _g = no_grad();
             self.effective_weight()?
         };
-        let bn = self.bn.take().expect("unfused WsQARepConv3x3 has bn");
+        let bn = self.bn.as_ref().expect("unfused WsQARepConv3x3 has bn");
         let dtype = w_eff.dtype();
         let (w, b) =
             fuse_conv_bn(&w_eff, None, &bn.weight, &bn.bias, &bn.running_mean, &bn.running_var, bn.eps)?;
         let (w, b) = (w.to_dtype(dtype)?, b.to_dtype(dtype)?);
         let cfg = Conv2dConfig::new(self.in_channels, self.out_channels, 3).stride(1).padding(1);
-        self.fused = Some(Conv2d::from_tensors(cfg, w, Some(b))?);
+        let fused = Conv2d::from_tensors(cfg, w, Some(b))?;
+        self.fused = Some(fused);
+        self.bn = None;
         self.branches = None;
         Ok(())
     }
@@ -400,15 +402,22 @@ impl HyperContext {
         let av = self.av_proj.forward(x)?;
         let a_logits = av.narrow(1, 0, self.m_edges)?.reshape([b, self.m_edges, n])?;
         let v = av.narrow(1, self.m_edges, self.c_g)?.reshape([b, self.c_g, n])?;
-        let a = a_logits.softmax(-1)?; // [B, M, N]
-        let e = v.matmul(&a.transpose(1, 2)?)?; // [B, C_g, M]
+        let a_gather = a_logits.softmax(-1)?; // [B, M, N]: gather over spatial tokens
+        let a_bcast = a_logits.softmax(1)?; // [B, M, N]: convex combination over hyperedges (H*W-invariant)
+        let e = v.matmul(&a_gather.transpose(1, 2)?)?; // [B, C_g, M]
         let e_t = e.transpose(1, 2)?; // [B, M, C_g]
         let e_ffn = self.ffn2.forward(&self.ffn1.forward(&e_t)?.silu()?)?;
         let e_prime_t = e_t.add(&e_ffn)?; // [B, M, C_g]
         let g_scene = e_prime_t.mean(1, false)?; // [B, C_g]
         let e_prime = e_prime_t.transpose(1, 2)?; // [B, C_g, M]
-        let y_ctx = e_prime.matmul(&a)?.reshape([b, self.c_g, h, w])?;
-        let out = x.add(&self.out_proj.forward(&y_ctx)?)?;
+        let y_ctx = e_prime.matmul(&a_bcast)?.reshape([b, self.c_g, h, w])?;
+        let proj = self.out_proj.forward(&y_ctx)?;
+        let x_res = if x.dtype() != proj.dtype() && folo_core::autocast_dtype().is_some() {
+            x.to_dtype(proj.dtype())?
+        } else {
+            x.clone()
+        };
+        let out = x_res.add(&proj)?;
         Ok((out, g_scene))
     }
 }
@@ -461,6 +470,11 @@ impl FullPadGate {
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         let (b, c, _, _) = feat.dims4()?;
         let gate = self.proj.forward(g_scene)?.tanh()?.add_scalar(1.0)?.reshape([b, c, 1, 1])?;
+        let gate = if gate.dtype() != feat.dtype() && folo_core::autocast_dtype().is_some() {
+            gate.to_dtype(feat.dtype())?
+        } else {
+            gate
+        };
         Ok(feat.mul(&gate)?)
     }
 }

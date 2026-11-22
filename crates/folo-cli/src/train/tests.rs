@@ -118,6 +118,38 @@ fn teacher_flag_and_distill_keys() {
     let c = apply_sets(with, &sets(&["distill.temperature=2", "distill.cls_gain=0.25"])).unwrap();
     let d = c.distill.unwrap();
     assert_eq!((d.temperature, d.cls_gain, d.dfl_gain), (2.0, 0.25, 1.5));
+
+    // Wave-7 keys (including skip_serializing_if defaults `wd_eff`, `distill.bckd_gamma`, `distill.gt_verify`)
+    // must be reachable through `--set`.
+    let with_w7 = TrainConfig {
+        distill: Some(folo_vision::DistillConfig::new("folo-s-coco")),
+        ..TrainConfig::default()
+    };
+    let c = apply_sets(
+        with_w7,
+        &sets(&[
+            "wd_eff=0.004",
+            "decoupled_wd=true",
+            "cautious_wd=true",
+            "gauge_norm=true",
+            "bn_freeze_close_mosaic=true",
+            "cls_lr_close_scale=0.333",
+            "loss.mal_gamma=1.5",
+            "loss.nwd_weight=0.5",
+            "loss.tal.nwd_weight=0.5",
+            "loss.tal.eps_free=true",
+            "distill.bckd_gamma=1.5",
+            "distill.gt_verify=true",
+        ]),
+    )
+    .unwrap();
+    assert_eq!(c.wd_eff, Some(0.004));
+    assert!(c.decoupled_wd && c.cautious_wd && c.gauge_norm && c.bn_freeze_close_mosaic);
+    assert!((c.cls_lr_close_scale - 0.333).abs() < 1e-9);
+    assert_eq!((c.loss.mal_gamma, c.loss.nwd_weight, c.loss.tal.nwd_weight), (1.5, 0.5, 0.5));
+    assert!(c.loss.tal.eps_free);
+    let d = c.distill.unwrap();
+    assert_eq!((d.bckd_gamma, d.gt_verify), (1.5, true));
     let e = apply_sets(TrainConfig::default(), &sets(&["distill.cls_gain=1"])).unwrap_err();
     assert_eq!(e.code, "invalid_config");
 }

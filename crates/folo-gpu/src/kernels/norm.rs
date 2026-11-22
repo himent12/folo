@@ -30,14 +30,16 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 const COMMON: &str = include_str!("../shaders/bn_common.wgsl");
 const WELFORD: &str = include_str!("../shaders/bn_welford.wgsl");
 
-/// Tests set this to exercise the portable shared-memory fallback even on hardware with 32-wide subgroups.
+// Tests set this thread-locally to exercise the portable shared-memory fallback even on hardware with 32-wide
+// subgroups, without racing concurrent test threads or leaking across panics.
 #[cfg(test)]
-pub(crate) static FORCE_NO_SUBGROUPS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    pub(crate) static FORCE_NO_SUBGROUPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn use_subgroups(ctx: &GpuContext) -> bool {
     #[cfg(test)]
-    if FORCE_NO_SUBGROUPS.load(std::sync::atomic::Ordering::Relaxed) {
+    if FORCE_NO_SUBGROUPS.with(std::cell::Cell::get) {
         return false;
     }
     let caps = ctx.caps();
@@ -59,10 +61,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let mean = t.y;
     let m2 = t.z;
     let sg_n = subgroupAdd(cnt);
-    let sg_sum = subgroupAdd(select(0.0, cnt * mean, cnt > 0.0));
-    let sg_mean = select(0.0, sg_sum / sg_n, sg_n > 0.0);
+    let inv_sg_n = select(0.0, 1.0 / sg_n, sg_n > 0.0);
+    let sg_mean = subgroupAdd(select(0.0, (cnt * inv_sg_n) * mean, cnt > 0.0));
     let sg_d = mean - sg_mean;
-    let sg_m2 = subgroupAdd(select(0.0, m2 + cnt * sg_d * sg_d, cnt > 0.0));
+    let sg_m2 = subgroupAdd(select(0.0, m2 + (cnt * sg_d) * sg_d, cnt > 0.0));
     let sg = min(sgid, 7u);
     if (lane == 0u) {
         wn[sg] = sg_n;

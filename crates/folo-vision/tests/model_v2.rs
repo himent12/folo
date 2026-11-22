@@ -454,4 +454,130 @@ fn cpu_gpu_forward_and_backward_parity() {
         .to_vec::<f32>()
         .unwrap();
     assert!(g_stem.iter().all(|v| v.is_finite()), "non-finite GPU stem grad");
+
+    // 4. GPU autocast (F16) training forward + backward with dual o2o head (`PeakSuppress` F16/F32 dtype).
+    if folo_core::backend::computes_f16(gpu) {
+        let mut m_amp = FoloV2Model::with_rng(
+            FoloV2Config::new("n", 5).unwrap().with_head(HeadMode::O2o),
+            &mut Rng::seed(33),
+        )
+        .unwrap();
+        m_amp.to_device(gpu).unwrap();
+        let out_amp = {
+            let _ac = folo_core::autocast();
+            m_amp.forward(&x_gpu).unwrap()
+        };
+        let (ob, oc) = out_amp.o2o.expect("o2o under autocast");
+        let loss = out_amp
+            .box_raw
+            .to_dtype(DType::F32)
+            .unwrap()
+            .square()
+            .unwrap()
+            .mean_all()
+            .unwrap()
+            .add(&ob.to_dtype(DType::F32).unwrap().square().unwrap().mean_all().unwrap())
+            .unwrap()
+            .add(&oc.to_dtype(DType::F32).unwrap().square().unwrap().mean_all().unwrap())
+            .unwrap();
+        let g_amp = loss.backward().unwrap();
+        let alpha_g = g_amp
+            .get(&m_amp.head.o2o_cls.as_ref().unwrap()[0].suppress.alpha_raw)
+            .expect("PeakSuppress alpha_raw grad under autocast")
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(alpha_g.iter().all(|v| v.is_finite()), "non-finite PeakSuppress grad under autocast");
+    }
+}
+
+#[test]
+fn v2_config_validation_o2o_detach_and_hypercontext_invariance() {
+    // 1. Invalid reg_max / bn_eps / bn_momentum rejected.
+    let mut c = FoloV2Config::new("n", 4).unwrap();
+    c.reg_max = 1;
+    assert!(c.validate().is_err());
+    let mut c = FoloV2Config::new("n", 4).unwrap();
+    c.bn_eps = -2.0;
+    assert!(c.validate().is_err());
+    let mut c = FoloV2Config::new("n", 4).unwrap();
+    c.bn_eps = f64::NAN;
+    assert!(c.validate().is_err());
+    let mut c = FoloV2Config::new("n", 4).unwrap();
+    c.bn_momentum = 1.5;
+    assert!(c.validate().is_err());
+
+    // 2. HyperContext broadcast stays invariant to spatial resolution (H*W) on constant spatial fields.
+    {
+        let mut rng = Rng::seed(71);
+        let mut init_ctx = Init { rng: &mut rng, bn_eps: 1e-3, bn_momentum: 0.03 };
+        let hc = HyperContext::new(16, 4, &mut init_ctx);
+        hc.eval();
+        let _g = no_grad();
+        let base: Vec<f32> = (0..16).map(|c| 0.1 * (c as f32 + 1.0)).collect();
+        let make_const = |h: usize, w: usize| {
+            let mut data = Vec::with_capacity(16 * h * w);
+            for &v in &base {
+                data.extend(std::iter::repeat_n(v, h * w));
+            }
+            Tensor::from_vec(data, [1, 16, h, w]).unwrap()
+        };
+        let y4 = hc.forward(&make_const(4, 4)).unwrap().to_vec::<f32>().unwrap();
+        let y8 = hc.forward(&make_const(8, 8)).unwrap().to_vec::<f32>().unwrap();
+        for c_idx in 0..16 {
+            let v4 = y4[c_idx * 16];
+            let v8 = y8[c_idx * 64];
+            assert!((v4 - v8).abs() < 1e-5, "HyperContext scale drift ch {c_idx}: 4x4={v4} vs 8x8={v8}");
+        }
+    }
+
+    // 3. o2o_detach=true stops gradients at backbone/neck `feats` while still training shared `box_branch`.
+    let m = FoloV2Model::with_rng(
+        FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o),
+        &mut Rng::seed(73),
+    )
+    .unwrap();
+    assert!(m.head.o2o_detach);
+    let mut rng = Rng::seed(74);
+    let p3 = Tensor::randn([1, 64, 8, 8], 0.0, 0.5, &mut rng).requires_grad_();
+    let p4 = Tensor::randn([1, 128, 4, 4], 0.0, 0.5, &mut rng).requires_grad_();
+    let p5 = Tensor::randn([1, 256, 2, 2], 0.0, 0.5, &mut rng).requires_grad_();
+    let (b_o2m, _, _) = m.head.forward([&p3, &p4, &p5]).unwrap();
+    let (b_o2o, c_o2o, _) = m.head.forward_o2o([&p3, &p4, &p5], Some(&b_o2m)).unwrap().unwrap();
+    let loss = b_o2o
+        .square()
+        .unwrap()
+        .mean_all()
+        .unwrap()
+        .add(&c_o2o.square().unwrap().mean_all().unwrap())
+        .unwrap();
+    let grads = loss.backward().unwrap();
+    assert!(grads.get(&p3).is_none(), "o2o_detach must block gradient to feature inputs");
+    let box_w_grad = grads
+        .get(&m.head.levels[0].box_branch.out.weight)
+        .expect("o2o box loss must train shared box_branch weights")
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(box_w_grad.iter().any(|&v| v.abs() > 1e-8), "shared box_branch gradient was zero");
+
+    // 4. Train-mode WsQARepConv3x3 finite-difference check on auxiliary branch weights.
+    let mut rng = Rng::seed(75);
+    let mut init_ctx = Init { rng: &mut rng, bn_eps: 1e-3, bn_momentum: 0.03 };
+    let rep = WsQARepConv3x3::new(4, 4, &mut init_ctx);
+    let x_t = Tensor::randn([2, 4, 5, 5], 0.0, 0.6, &mut rng);
+    let br = rep.branches.as_ref().unwrap();
+    grad_check_with(
+        |inputs| {
+            let mut copy = WsQARepConv3x3::new(
+                4,
+                4,
+                &mut Init { rng: &mut Rng::seed(75), bn_eps: 1e-3, bn_momentum: 0.03 },
+            );
+            copy.branches.as_mut().unwrap().w1x1 = inputs[0].clone();
+            copy.branches.as_mut().unwrap().gamma_id = Some(inputs[1].clone());
+            copy.forward(&x_t).unwrap().square()?.mean_all()
+        },
+        &[br.w1x1.clone(), br.gamma_id.clone().unwrap()],
+        &GradCheck { eps: 1e-3, atol: 3e-3, rtol: 2e-2, ..GradCheck::default() },
+    )
+    .unwrap();
 }

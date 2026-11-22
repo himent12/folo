@@ -647,6 +647,16 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
 | `distill` | none | distillation from a frozen teacher (§8.9); absent: none |
+| `loss.mal_gamma` | 0.0 | opt-in Matchability-Aligned Loss (MAL) negative focal exponent `γ ∈ [0, 5]`; `0` keeps standard BCE. When `> 0`, fresh class-head output biases initialize to `-4.59512` (`ln(0.01/0.99)`) and transfer runs linearly ramp `γ` over warmup epochs |
+| `loss.nwd_weight` | 0.0 | opt-in scale-adaptive Normalized Wasserstein Distance weight `∈ [0, 1]` blended with CIoU on small boxes (`λ(box) = w · exp(−area / 32²)`); `0` keeps pure CIoU |
+| `loss.tal.nwd_weight` | 0.0 | opt-in scale-adaptive NWD weight `∈ [0, 1]` inside the task-aligned assigner metric (CPU and GPU); `0` keeps pure CIoU |
+| `loss.tal.eps_free` | false | opt-in epsilon-free TAL target normalization (`t = m · iou_max / m_max` when `m_max > 0`, removing `+ eps` small-target shrinkage) |
+| `decoupled_wd` | false | opt-in decoupled weight decay for SGD and MuSGD (`p *= 1 − lr · wd` outside Nesterov momentum; AdamW already decouples decay) |
+| `cautious_wd` | false | opt-in cautious decoupled weight decay (`u · p > 0` mask) for SGD and MuSGD; refused with AdamW |
+| `wd_eff` | none | optional explicit effective weight decay overriding `weight_decay · batch · accumulate / nbs` (applied to the optimizer and recorded in `resolved.weight_decay`) |
+| `gauge_norm` | false | opt-in exact function-preserving Floor Conv+BN Gauge Normalization applied on `--weights` transfer load (raises small-norm filters to the target norm floor while scaling BN `γ` inversely) |
+| `bn_freeze_close_mosaic` | false | opt-in eval-mode BatchNorm (frozen running stats) during closed-mosaic annealing epochs (intended for mature Stage-2 runs) |
+| `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -971,6 +981,8 @@ and the HTTP API do not change: the teacher exists only in the trainer.
 | `cls_gain` | 0.5 | `λc`, 0 to 1e6 |
 | `dfl_gain` | 1.5 | `λd`, 0 to 1e6 |
 | `temperature` | 4.0 | `T`, 0.05 to 100 (DFL term only; 4 beat 1 on the proxy, docs/notes/hill/r4-distill.md) |
+| `bckd_gamma` | 0.0 | opt-in conflict-free Binary Classification KD exponent `γ >= 0` (`\|p_S − p_T\|^γ` focal weighting with positive teacher target clamping `max(p_T, t_GT)`); `0` keeps standard Bernoulli KL |
+| `gt_verify` | false | opt-in positive-only GT-verified DFL KD: distills box DFL only at supervised positive anchors where `IoU(teacher, GT) > IoU(student, GT) + 0.02` and `IoU(teacher, GT) > 0.50` |
 
 **Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
 an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,
@@ -1230,7 +1242,7 @@ does so bit for bit too: a class pass lists each image's candidates and the pixe
 fixed-capacity lists on the device, the 3×3 box convs run the dense implicit GEMM (regular or tensor-core) with
 one column per listed pixel and the dense conv's split-K chunks, `out` runs the dense GEMM over the candidates'
 columns, and one decode appends the boxes to one record list per image, read back once; an image with more
-candidates on a level than the list holds (1024, 512, 256 for P3, P4, P5) takes the dense head instead. The dense
+candidates on a level than the list holds (1024, 512, 512 for P3, P4, P5) takes the dense head instead. The dense
 raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
 `conf = 0.001`), export and every other consumer of them use the dense forward. Box fusion (§9.4) is served as on
 the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its
