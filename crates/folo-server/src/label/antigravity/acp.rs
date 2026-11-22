@@ -72,7 +72,6 @@ impl SessionState {
         if let Some(model_opt) = find_model_option(&opts) {
             self.model_option_seen = true;
             if self.pin_default_model
-                && self.enforce_mode
                 && self.expected_model.is_none()
                 && let Some(cur) = model_opt.current_value.as_deref()
             {
@@ -353,68 +352,77 @@ pub(super) fn drive_acp_with_exit(
     drive_acp_inner(req, work, timeout, CANCEL_GRACE, send, recv, stderr_text, parent_exited)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn drive_acp_inner(
-    req: &AgentRequest<'_>,
-    work: &Path,
-    timeout: Duration,
+/// Stateful JSON-RPC transport driver so `drain` and `call` share `send`, `recv`, and `parent_exited` cleanly.
+struct RpcDriver<'a> {
+    req: &'a AgentRequest<'a>,
+    deadline: Instant,
     cancel_grace: Duration,
-    send: &mut dyn FnMut(&Value) -> bool,
-    recv: &mpsc::Receiver<String>,
-    stderr_text: &dyn Fn() -> String,
-    parent_exited: &mut dyn FnMut() -> bool,
-) -> DriveOutcome {
-    let deadline = Instant::now() + timeout;
-    let mut next_id: u64 = 1;
-    let mut state = SessionState {
-        pin_default_model: req.model.map(str::trim).is_none_or(str::is_empty),
-        ..SessionState::default()
-    };
+    next_id: u64,
+    send: &'a mut dyn FnMut(&Value) -> bool,
+    recv: &'a mpsc::Receiver<String>,
+    stderr_text: &'a dyn Fn() -> String,
+    parent_exited: &'a mut dyn FnMut() -> bool,
+}
 
-    let mut rpc_call = |method: &str,
-                        params: Value,
-                        collect_reply: bool,
-                        state: &mut SessionState|
-     -> Result<Value, AgentError> {
-        let id = next_id;
-        next_id += 1;
+impl RpcDriver<'_> {
+    fn drain(&mut self, state: &mut SessionState) -> Result<(), AgentError> {
+        drain_pending(
+            self.recv,
+            state,
+            self.send,
+            self.stderr_text,
+            self.req.cancel,
+            self.deadline,
+            self.parent_exited,
+        )
+    }
+
+    fn call(
+        &mut self,
+        method: &str,
+        params: Value,
+        collect_reply: bool,
+        state: &mut SessionState,
+    ) -> Result<Value, AgentError> {
+        let id = self.next_id;
+        self.next_id += 1;
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         // Drain any already-queued notifications, verify active invariants, and check cancellation/deadline right
         // before dispatching so a late mode/config drift or stop never sends a billable prompt.
-        drain_pending(recv, state, send, stderr_text, req.cancel, deadline, parent_exited)?;
+        self.drain(state)?;
         if state.enforce_mode {
             state.verify_mode()?;
         }
         if state.enforce_config {
             state.verify_expected_config().map_err(|why| AgentError::Failed(Failure::new(why)))?;
         }
-        if req.cancel.load(Ordering::Relaxed) {
+        if self.req.cancel.load(Ordering::Relaxed) {
             state.kill_immediately = true;
             return Err(AgentError::Cancelled(state.usage.to_usage(0)));
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= self.deadline {
             state.kill_immediately = true;
             return Err(AgentError::Timeout(state.usage.to_usage(0)));
         }
         state.mode_notified_in_call = false;
         state.config_updated_in_call = false;
-        if !send(&msg) {
-            return Err(unexpected_exit(&state.usage, stderr_text));
+        if !(self.send)(&msg) {
+            return Err(unexpected_exit(&state.usage, self.stderr_text));
         }
         let mut cancel_deadline: Option<Instant> = None;
         let mut exit_drain_deadline: Option<Instant> = None;
         let mut next_exit_poll = Instant::now();
         loop {
-            if cancel_deadline.is_none() && req.cancel.load(Ordering::Relaxed) {
+            if cancel_deadline.is_none() && self.req.cancel.load(Ordering::Relaxed) {
                 state.kill_immediately = true;
                 if let Some(sid) = state.session_id.as_deref() {
-                    let _ = send(&json!({
+                    let _ = (self.send)(&json!({
                         "jsonrpc": "2.0",
                         "method": "session/cancel",
                         "params": { "sessionId": sid }
                     }));
-                    if collect_reply && !cancel_grace.is_zero() {
-                        cancel_deadline = Some(Instant::now() + cancel_grace);
+                    if collect_reply && !self.cancel_grace.is_zero() {
+                        cancel_deadline = Some(Instant::now() + self.cancel_grace);
                     } else {
                         return Err(AgentError::Cancelled(state.usage.to_usage(0)));
                     }
@@ -426,7 +434,7 @@ pub(super) fn drive_acp_inner(
             // Poll immediate parent exit on an independent timer so a chatty helper holding stdout open
             // cannot starve exit detection until the full 5-minute call deadline.
             if exit_drain_deadline.is_none() && now >= next_exit_poll {
-                if parent_exited() {
+                if (self.parent_exited)() {
                     exit_drain_deadline = Some(now + EXIT_DRAIN);
                 } else {
                     next_exit_poll = now + POLL;
@@ -441,9 +449,9 @@ pub(super) fn drive_acp_inner(
                 && now >= end
             {
                 state.kill_immediately = true;
-                return Err(unexpected_exit(&state.usage, stderr_text));
+                return Err(unexpected_exit(&state.usage, self.stderr_text));
             }
-            let mut wait_until = deadline;
+            let mut wait_until = self.deadline;
             if let Some(end) = cancel_deadline {
                 wait_until = wait_until.min(end);
             }
@@ -457,11 +465,11 @@ pub(super) fn drive_acp_inner(
                 }
                 if exit_drain_deadline.is_some() {
                     state.kill_immediately = true;
-                    return Err(unexpected_exit(&state.usage, stderr_text));
+                    return Err(unexpected_exit(&state.usage, self.stderr_text));
                 }
                 state.kill_immediately = true;
                 if let Some(sid) = state.session_id.as_deref() {
-                    let _ = send(&json!({
+                    let _ = (self.send)(&json!({
                         "jsonrpc": "2.0",
                         "method": "session/cancel",
                         "params": { "sessionId": sid }
@@ -474,7 +482,7 @@ pub(super) fn drive_acp_inner(
             } else {
                 remaining.min(POLL)
             };
-            match recv.recv_timeout(poll_wait) {
+            match self.recv.recv_timeout(poll_wait) {
                 Ok(line) => {
                     if let Some(resp) = handle_incoming_line(
                         &line,
@@ -482,7 +490,7 @@ pub(super) fn drive_acp_inner(
                         collect_reply,
                         cancel_deadline.is_some(),
                         state,
-                        send,
+                        self.send,
                     )? {
                         if let Some(res) = resp.get("result")
                             && collect_reply
@@ -503,11 +511,31 @@ pub(super) fn drive_acp_inner(
                     if cancel_deadline.is_some() {
                         return Err(AgentError::Cancelled(state.usage.to_usage(0)));
                     }
-                    return Err(unexpected_exit(&state.usage, stderr_text));
+                    return Err(unexpected_exit(&state.usage, self.stderr_text));
                 }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive_acp_inner(
+    req: &AgentRequest<'_>,
+    work: &Path,
+    timeout: Duration,
+    cancel_grace: Duration,
+    send: &mut dyn FnMut(&Value) -> bool,
+    recv: &mpsc::Receiver<String>,
+    stderr_text: &dyn Fn() -> String,
+    parent_exited: &mut dyn FnMut() -> bool,
+) -> DriveOutcome {
+    let deadline = Instant::now() + timeout;
+    let mut state = SessionState {
+        pin_default_model: req.model.map(str::trim).is_none_or(str::is_empty),
+        ..SessionState::default()
     };
+    let mut driver =
+        RpcDriver { req, deadline, cancel_grace, next_id: 1, send, recv, stderr_text, parent_exited };
 
     macro_rules! try_drive {
         ($expr:expr) => {
@@ -519,7 +547,7 @@ pub(super) fn drive_acp_inner(
     }
 
     // 1. Handshake (`initialize`): require protocol v1 and explicit image support for image-bearing calls.
-    let init = try_drive!(rpc_call(
+    let init = try_drive!(driver.call(
         "initialize",
         json!({
             "protocolVersion": 1,
@@ -568,7 +596,7 @@ pub(super) fn drive_acp_inner(
         );
         new_params["_meta"] = json!({ "antigravity": { "systemPrompt": { "append": append } } });
     }
-    let session = try_drive!(rpc_call("session/new", new_params, false, &mut state));
+    let session = try_drive!(driver.call("session/new", new_params, false, &mut state));
     let sid = try_drive!(
         session["sessionId"]
             .as_str()
@@ -577,10 +605,18 @@ pub(super) fn drive_acp_inner(
     .to_string();
     state.session_id = Some(sid.clone());
     state.apply_config_snapshot(parse_config_options(session.get("configOptions")));
+    if state.pin_default_model
+        && state.expected_model.is_none()
+        && let Some(cur) = session.get("models").and_then(|m| m["currentModelId"].as_str())
+    {
+        state.expected_model = Some(cur.to_string());
+    }
     if !state.mode_notified_in_call && !state.mode_option_seen {
         state.legacy_mode =
             session.get("modes").and_then(|m| m["currentModeId"].as_str()).map(str::to_string);
     }
+    // Drain any updates queued right after `session/new` before enforcing mode or resolving model/effort.
+    try_drive!(driver.drain(&mut state));
 
     // 2b. Enforce an allowlisted restricted execution mode whenever a mode selector is advertised.
     if let Some(mode_opt) = find_mode_option(&state.config_options).cloned() {
@@ -591,7 +627,7 @@ pub(super) fn drive_acp_inner(
                     "`agy acp` started in non-restricted mode `{cur}` and offers no restricted mode"
                 ))
             }));
-            let updated = try_drive!(rpc_call(
+            let updated = try_drive!(driver.call(
                 "session/set_config_option",
                 json!({ "sessionId": sid, "configId": mode_opt.id, "value": safe }),
                 false,
@@ -627,7 +663,7 @@ pub(super) fn drive_acp_inner(
                     "`agy acp` started in non-restricted mode `{cur}` and offers no restricted mode"
                 ))
             }));
-            let _ = try_drive!(rpc_call(
+            let _ = try_drive!(driver.call(
                 "session/set_mode",
                 json!({ "sessionId": sid, "modeId": safe }),
                 false,
@@ -641,6 +677,7 @@ pub(super) fn drive_acp_inner(
     }
     try_drive!(state.verify_mode());
     state.enforce_mode = true;
+    try_drive!(driver.drain(&mut state));
 
     // 3. Configure model and reasoning effort (`session/set_config_option`, requiring the complete updated
     // `configOptions` snapshot per ACP v1, or legacy `session/set_model`), then verify all settings before prompting.
@@ -667,7 +704,7 @@ pub(super) fn drive_acp_inner(
         if let Some(opt) = find_model_option(&state.config_options).cloned() {
             state.expected_model = Some(model.clone());
             if !opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&model)) {
-                let updated = try_drive!(rpc_call(
+                let updated = try_drive!(driver.call(
                     "session/set_config_option",
                     json!({ "sessionId": sid, "configId": opt.id, "value": model }),
                     false,
@@ -700,7 +737,7 @@ pub(super) fn drive_acp_inner(
             };
             state.expected_model = Some(target.clone());
             if !legacy_opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&target)) {
-                let _ = try_drive!(rpc_call(
+                let _ = try_drive!(driver.call(
                     "session/set_model",
                     json!({ "sessionId": sid, "modelId": target }),
                     false,
@@ -735,13 +772,15 @@ pub(super) fn drive_acp_inner(
                 kill_immediately: state.kill_immediately,
             };
         }
-    } else if let Some(cur) = find_model_option(&state.config_options)
-        .and_then(|o| o.current_value.as_deref())
-        .or(verified_legacy_model.as_deref())
+    } else if state.expected_model.is_none()
+        && let Some(cur) = find_model_option(&state.config_options)
+            .and_then(|o| o.current_value.as_deref())
+            .or(verified_legacy_model.as_deref())
     {
         // Pin the session's reported default model so a later setter or mid-prompt update cannot drift away.
         state.expected_model = Some(cur.to_string());
     }
+    try_drive!(driver.drain(&mut state));
 
     if let Some(opt) = find_effort_option(&state.config_options).cloned() {
         let effort_value = try_drive!(
@@ -750,7 +789,7 @@ pub(super) fn drive_acp_inner(
         );
         state.expected_effort = Some(effort_value.clone());
         if !opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&effort_value)) {
-            let updated = try_drive!(rpc_call(
+            let updated = try_drive!(driver.call(
                 "session/set_config_option",
                 json!({ "sessionId": sid, "configId": opt.id, "value": effort_value }),
                 false,
@@ -801,9 +840,10 @@ pub(super) fn drive_acp_inner(
         state.effort_encoded_on_model = true;
     }
 
-    // Lock in configuration enforcement and verify all invariants before building the prompt; `rpc_call` also
+    // Lock in configuration enforcement and verify all invariants before building the prompt; `driver.call` also
     // drains any queued notifications and rechecks invariants/cancel/deadline right before writing `session/prompt`.
     state.enforce_config = true;
+    try_drive!(driver.drain(&mut state));
     try_drive!(state.verify_mode());
     try_drive!(state.verify_expected_config().map_err(|why| AgentError::Failed(Failure::new(why))));
 
@@ -824,7 +864,7 @@ pub(super) fn drive_acp_inner(
 
     // 4. Send the single-turn prompt with inline base64 JPEG images (`session/prompt`).
     let blocks = prompt_blocks(req, system_append_supported);
-    let prompt_result = try_drive!(rpc_call(
+    let prompt_result = try_drive!(driver.call(
         "session/prompt",
         json!({ "sessionId": sid, "prompt": blocks }),
         true,
@@ -833,8 +873,8 @@ pub(super) fn drive_acp_inner(
 
     // 5. Best-effort clean session close.
     if close_supported {
-        let close_id = next_id;
-        let _ = send(&json!({
+        let close_id = driver.next_id;
+        let _ = (driver.send)(&json!({
             "jsonrpc": "2.0",
             "id": close_id,
             "method": "session/close",

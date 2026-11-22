@@ -861,4 +861,124 @@ fn legacy_model_switch_invalidates_effort_default_model_pins_base_resolves_varia
         out.result,
         Err(AgentError::Failed(f)) if f.message.contains("selected model `gemini-3.8-flash` instead of requested `gemini-4-neon`")
     ));
+
+    // 7. Default-model run pins Neon reported in `session/new` even before mode negotiation, so switching mode
+    // from `auto` to `default` cannot silently swap the model to Flash.
+    let (out_tx, out_rx) = mpsc::channel::<String>();
+    let mut send = |msg: &Value| -> bool {
+        let id = msg.get("id").and_then(Value::as_u64);
+        match msg["method"].as_str() {
+            Some("initialize") => {
+                let _ = out_tx.send(init_ok(id, true, false, false));
+            }
+            Some("session/new") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [
+                                { "id": "mode", "category": "mode", "currentValue": "auto", "options": [{ "value": "auto" }, { "value": "default" }] },
+                                { "id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-3.8-flash" }] },
+                                { "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            Some("session/set_config_option") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "configOptions": [
+                                { "id": "mode", "category": "mode", "currentValue": "default", "options": [{ "value": "auto" }, { "value": "default" }] },
+                                { "id": "model", "category": "model", "currentValue": "gemini-3.8-flash", "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-3.8-flash" }] },
+                                { "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            _ => {}
+        }
+        true
+    };
+    assert!(matches!(
+        drive_acp(&default_req, &work, Duration::from_secs(5), &mut send, &out_rx, &String::new),
+        Err(AgentError::Failed(f)) if f.message.contains("selected model `gemini-3.8-flash` instead of requested `gemini-4-neon`")
+    ));
+
+    // 8. Queued `config_option_update` right after `session/new` advertising `[gemini-4-neon, gemini-4-neon-high]`
+    // with no effort selector is drained before model resolution so `gemini-4-neon` at High picks `gemini-4-neon-high`.
+    let (out_tx, out_rx) = mpsc::channel::<String>();
+    let mut picked = None;
+    let mut send = |msg: &Value| -> bool {
+        let id = msg.get("id").and_then(Value::as_u64);
+        match msg["method"].as_str() {
+            Some("initialize") => {
+                let _ = out_tx.send(init_ok(id, true, false, false));
+            }
+            Some("session/new") => {
+                let _ = out_tx
+                    .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" } }).to_string());
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "config_option_update",
+                                "configOptions": [{
+                                    "id": "model",
+                                    "category": "model",
+                                    "currentValue": "gemini-4-neon",
+                                    "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-4-neon-high" }]
+                                }]
+                            }
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            Some("session/set_config_option") => {
+                picked = msg["params"]["value"].as_str().map(str::to_string);
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "configOptions": [{
+                                "id": "model",
+                                "category": "model",
+                                "currentValue": picked.as_deref().unwrap_or(""),
+                                "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-4-neon-high" }]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            Some("session/prompt") => {
+                let _ = out_tx.send(
+                    json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "{\"images\":[]}" } } } })
+                        .to_string(),
+                );
+                let _ = out_tx.send(
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } }).to_string(),
+                );
+            }
+            _ => {}
+        }
+        true
+    };
+    assert_eq!(
+        drive_acp(&high_base, &work, Duration::from_secs(5), &mut send, &out_rx, &String::new).unwrap().text,
+        r#"{"images":[]}"#
+    );
+    assert_eq!(picked.as_deref(), Some("gemini-4-neon-high"));
 }
