@@ -5,7 +5,36 @@
 //! `folo mcp` goes through it). The address is a hint: a reader checks that the server there serves this data dir.
 
 use std::fs::{File, OpenOptions, TryLockError};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+
+/// The local URL another process on this machine can connect to for a listener bound to `addr`: unspecified
+/// wildcard hosts (`0.0.0.0`, `::`) become loopback (`127.0.0.1`, `[::1]`) because connecting to a wildcard
+/// address fails on Windows (`WSAEADDRNOTAVAIL`). Specific binds, including scoped IPv6 addresses, are
+/// formatted as bound.
+pub fn local_url(addr: SocketAddr) -> String {
+    match addr.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => format!("http://127.0.0.1:{}", addr.port()),
+        IpAddr::V6(v6) if v6.is_unspecified() => format!("http://[::1]:{}", addr.port()),
+        _ => format!("http://{addr}"),
+    }
+}
+
+/// Normalizes a `serve.json` URL read from an existing server: an older server bound to a wildcard host wrote
+/// `http://0.0.0.0:<port>` or `http://[::]:<port>`, which fails to connect on Windows. Specific binds are kept
+/// as written.
+fn normalize_local_url(url: String) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url;
+    };
+    if let Some(port) = rest.strip_prefix("0.0.0.0:") {
+        return format!("{scheme}://127.0.0.1:{port}");
+    }
+    if let Some(port) = rest.strip_prefix("[::]:") {
+        return format!("{scheme}://[::1]:{port}");
+    }
+    url
+}
 
 /// The data dir's serve lock, held until dropped; dropping it also removes `serve.json`.
 pub struct ServeLock {
@@ -37,7 +66,8 @@ pub fn acquire(dir: &Path) -> std::io::Result<Acquire> {
             let url = std::fs::read(&info)
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .and_then(|v| v["url"].as_str().map(str::to_string));
+                .and_then(|v| v["url"].as_str().map(str::to_string))
+                .map(normalize_local_url);
             Ok(Acquire::InUse { url })
         }
         Err(TryLockError::Error(e)) => Err(e),
@@ -156,5 +186,39 @@ mod tests {
         let ms = Duration::from_millis;
         assert!(!serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(50)));
         assert!(serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(5000)));
+    }
+
+    #[test]
+    fn wildcard_bind_addresses_publish_loopback_urls() {
+        assert_eq!(local_url("0.0.0.0:8080".parse().unwrap()), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::]:8080".parse().unwrap()), "http://[::1]:8080");
+        assert_eq!(local_url("127.0.0.1:8080".parse().unwrap()), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::1]:8080".parse().unwrap()), "http://[::1]:8080");
+        assert_eq!(local_url("192.168.1.5:8080".parse().unwrap()), "http://192.168.1.5:8080");
+        let scoped = SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1234".parse().unwrap(), 8080, 0, 7));
+        assert_eq!(local_url(scoped), "http://[fe80::1234%7]:8080");
+    }
+
+    #[test]
+    fn acquire_normalizes_wildcard_urls_from_older_servers() {
+        let dir = TestDir::new("serve-lock-wildcard-read");
+        let Acquire::Held(_first) = acquire(dir.path()).unwrap() else { panic!("the first takes the lock") };
+        for (stored, want) in [
+            ("http://0.0.0.0:4242", "http://127.0.0.1:4242"),
+            ("http://[::]:4242", "http://[::1]:4242"),
+            ("http://127.0.0.1:4242", "http://127.0.0.1:4242"),
+            ("http://192.168.1.5:4242", "http://192.168.1.5:4242"),
+            ("http://[fe80::1234%7]:4242", "http://[fe80::1234%7]:4242"),
+        ] {
+            std::fs::write(
+                dir.path().join("serve.json"),
+                serde_json::to_vec(&serde_json::json!({ "url": stored, "pid": 1 })).unwrap(),
+            )
+            .unwrap();
+            match acquire(dir.path()).unwrap() {
+                Acquire::InUse { url } => assert_eq!(url.as_deref(), Some(want), "stored={stored}"),
+                Acquire::Held(_) => panic!("the lock is held"),
+            }
+        }
     }
 }

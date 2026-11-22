@@ -371,6 +371,123 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
 }
 
+/// Reads one line from `r` within `timeout`, failing cleanly instead of hanging if the child never answers.
+fn read_line_within(r: impl std::io::Read + Send + 'static, timeout: std::time::Duration) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(r).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    rx.recv_timeout(timeout).expect("child wrote a line before the deadline")
+}
+
+/// Reads lines from `r` until one matches `pred`, within `timeout`.
+fn find_line_within(
+    r: impl std::io::Read + Send + 'static,
+    timeout: std::time::Duration,
+    pred: fn(&str) -> bool,
+) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(r).lines().map_while(Result::ok) {
+            if pred(&line) {
+                let _ = tx.send(line);
+                break;
+            }
+        }
+    });
+    rx.recv_timeout(timeout).expect("child answered before the deadline")
+}
+
+/// A `serve.json` written by an older server bound to `0.0.0.0` is normalized to loopback when read, so a second
+/// `folo serve` reports a connectable URL and `folo mcp` auto-proxies to the owner without binding a wildcard
+/// listener in the test.
+#[test]
+fn mcp_auto_proxies_through_a_wildcard_serve_json_record() {
+    use std::io::Write;
+    use std::time::Duration;
+    let dir = TestDir::new("serve-wildcard-record");
+    let mut server: ChildGuard = folo_cmd()
+        .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let line = read_line_within(server.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+    assert_eq!(listening["event"], "listening", "{line}");
+    let url = listening["url"].as_str().unwrap().to_string();
+    let port = url.rsplit(':').next().unwrap();
+
+    // Warm `/api/system` before `folo mcp` checks the owner so the first hardware sample never races `serves()`.
+    folo_client::Client::with_timeouts(&url, Duration::from_secs(5), Duration::from_secs(60))
+        .get::<Value>("/system")
+        .unwrap();
+
+    let serve_json: Value = serde_json::from_slice(&std::fs::read(dir.join("serve.json")).unwrap()).unwrap();
+    assert_eq!(serve_json["url"], format!("http://127.0.0.1:{port}"), "{serve_json}");
+
+    // Simulate a `serve.json` written by an older server bound to `0.0.0.0`.
+    std::fs::write(
+        dir.join("serve.json"),
+        serde_json::to_vec(&serde_json::json!({ "url": format!("http://0.0.0.0:{port}"), "pid": 1 }))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut second: ChildGuard = folo_cmd()
+        .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let first_line = read_line_within(second.stdout.take().unwrap(), Duration::from_secs(30));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match second.try_wait().unwrap() {
+            Some(s) => break Some(s),
+            None if std::time::Instant::now() > deadline => break None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "second serve did not exit 1: {first_line:?}");
+    let in_use: Value = serde_json::from_str(&first_line).unwrap_or_else(|e| panic!("{e}: {first_line:?}"));
+    assert_eq!(in_use["event"], "data_dir_in_use", "{in_use}");
+    assert_eq!(in_use["url"], format!("http://127.0.0.1:{port}"), "{in_use}");
+
+    let mut mcp: ChildGuard = folo_cmd()
+        .args(["mcp", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut stdin = mcp.stdin.take().unwrap();
+    for msg in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+    ] {
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    let info =
+        find_line_within(mcp.stdout.take().unwrap(), Duration::from_secs(30), |l| l.contains(r#""id":2"#));
+    drop(stdin);
+    assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
+}
+
 /// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
 /// stderr, not an error envelope on stdout. So is a usage error clap reports, wherever `--json` is; other commands
 /// keep their JSON usage error.

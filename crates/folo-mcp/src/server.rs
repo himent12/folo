@@ -450,7 +450,7 @@ impl ServerHandler for FoloMcp {
                 .and_then(|n| n.parse::<usize>().ok())
                 .ok_or_else(|| McpError::invalid_params(format!("invalid cursor `{c}`"), None))?,
         };
-        let end = (offset + resources::PAGE).min(all.len());
+        let end = offset.saturating_add(resources::PAGE).min(all.len());
         let mut res = ListResourcesResult::with_all_items(all.get(offset..end).unwrap_or_default().to_vec());
         res.next_cursor = (end < all.len()).then(|| format!("o{end}"));
         Ok(res)

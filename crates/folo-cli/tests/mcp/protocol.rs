@@ -517,3 +517,17 @@ fn results_stay_under_the_size_limit() {
     assert_eq!(seen, 6);
     c.finish();
 }
+
+#[test]
+fn resources_list_handles_large_cursors_without_overflow() {
+    let mut c = spawn(&["--mock"], None);
+    init_old(&mut c);
+    let first = c.result("resources/list", json!({}));
+    assert!(!first["resources"].as_array().unwrap().is_empty(), "{first}");
+    for cursor in [format!("o{}", usize::MAX - 95), format!("o{}", usize::MAX)] {
+        let r = c.result("resources/list", json!({ "cursor": cursor }));
+        assert_eq!(r["resources"], json!([]), "{r}");
+        assert!(r.get("nextCursor").is_none_or(Value::is_null), "{r}");
+    }
+    c.finish();
+}

@@ -79,7 +79,15 @@ impl PathPolicy {
         let full = if Path::new(pattern).is_absolute() {
             pattern.to_string()
         } else {
-            self.data_dir.join(pattern).to_string_lossy().into_owned()
+            let raw = self.data_dir.to_string_lossy();
+            let escaped = if cfg!(windows)
+                && let Some(rest) = raw.strip_prefix(r"\\?\")
+            {
+                format!(r"\\?\{}", glob::Pattern::escape(rest))
+            } else {
+                glob::Pattern::escape(&raw)
+            };
+            PathBuf::from(escaped).join(pattern).to_string_lossy().into_owned()
         };
         let entries =
             glob::glob(&full).map_err(|e| invalid_arguments(format!("glob `{pattern}` is invalid: {e}")))?;
@@ -186,5 +194,59 @@ mod tests {
         let p = PathPolicy { data_dir: d.to_path_buf(), confine: false };
         assert_eq!(p.expand_glob("*.jpg").unwrap_err().body.code, "too_many_inputs");
         assert_eq!(p.expand_glob("000*.jpg").unwrap().len(), 10);
+    }
+
+    #[test]
+    fn relative_glob_escapes_metacharacters_in_data_dir() {
+        let root = tmp("glob-meta");
+        // A sibling folder that an unescaped `data [v2]` character class would match.
+        let sibling = root.join("data 2");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("secret.png"), b"s").unwrap();
+        for name in ["data [v2]", "data [1"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.png"), b"x").unwrap();
+            for confine in [false, true] {
+                let p = PathPolicy { data_dir: dir.clone(), confine };
+                let matched = p.expand_glob("*.png").unwrap();
+                assert_eq!(matched.len(), 1, "{name} confine={confine}: {matched:?}");
+                assert_eq!(matched[0].file_name().and_then(|s| s.to_str()), Some("a.png"));
+                assert_eq!(
+                    std::fs::canonicalize(&matched[0]).unwrap(),
+                    std::fs::canonicalize(dir.join("a.png")).unwrap(),
+                    "{name} confine={confine}: {matched:?}"
+                );
+            }
+        }
+        // Plain data dirs keep native path separators when `--confine` is off (no mixed `/` and `\` on Windows).
+        let plain = root.join("plain");
+        std::fs::create_dir_all(plain.join("sub")).unwrap();
+        let target = plain.join("sub").join("a.png");
+        std::fs::write(&target, b"x").unwrap();
+        let p = PathPolicy { data_dir: plain.clone(), confine: false };
+        let matched = p.expand_glob("sub/*.png").unwrap();
+        assert_eq!(matched, vec![target.clone()]);
+        assert_eq!(matched[0].to_string_lossy(), target.to_string_lossy());
+
+        // On Windows, a verbatim `\\?\` data dir keeps its prefix verbatim while still escaping metacharacters after it.
+        #[cfg(windows)]
+        {
+            let canon_plain = std::fs::canonicalize(&plain).unwrap();
+            assert!(canon_plain.to_string_lossy().starts_with(r"\\?\"), "{canon_plain:?}");
+            let want_plain = canon_plain.join("sub").join("a.png");
+            let p = PathPolicy { data_dir: canon_plain, confine: false };
+            let matched = p.expand_glob("sub/*.png").unwrap();
+            assert_eq!(matched, vec![want_plain.clone()]);
+            assert_eq!(matched[0].to_string_lossy(), want_plain.to_string_lossy());
+
+            let canon_meta = std::fs::canonicalize(root.join("data [v2]")).unwrap();
+            assert!(canon_meta.to_string_lossy().starts_with(r"\\?\"), "{canon_meta:?}");
+            let want_meta = canon_meta.join("a.png");
+            let p = PathPolicy { data_dir: canon_meta, confine: false };
+            let matched = p.expand_glob("*.png").unwrap();
+            assert_eq!(matched, vec![want_meta.clone()]);
+            assert_eq!(matched[0].to_string_lossy(), want_meta.to_string_lossy());
+        }
     }
 }

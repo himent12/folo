@@ -618,3 +618,36 @@ async fn a_missing_path_leaves_no_empty_job() {
     assert_eq!(code(&s, "create_label_job", no_classes).await, "invalid_arguments");
     store.shutdown();
 }
+
+/// Cursors near `u64::MAX` return an empty page with no `next_cursor` and a non-wrapping summary instead of
+/// overflowing `offset + 1`, while normal cursors keep reporting the 1-based offset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_label_images_handles_max_cursor_without_overflow() {
+    let home = TestDir::new("mcp-label-cursor");
+    images(&home.join("photos"));
+    let store = store(home.path());
+    let s = FoloMcp::new(store.clone(), None, options(home.path(), false));
+    let photos = folo_api::json::path(home.join("photos"));
+    let job = ok(&s, "create_label_job", json!({ "name": "x", "classes": ["car"], "paths": [photos] })).await
+        ["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (mid, mid_summary, _) =
+        call(&s, "list_label_images", json!({ "job_id": job, "cursor": "o2", "limit": 2 })).await.unwrap();
+    assert_eq!(mid["items"].as_array().unwrap().len(), 2);
+    assert_eq!(mid["total"], 5);
+    assert_eq!(mid["next_cursor"], "o4");
+    assert_eq!(mid_summary, "2 of 5 images (from 3)");
+
+    let (page, summary, _) =
+        call(&s, "list_label_images", json!({ "job_id": job, "cursor": format!("o{}", u64::MAX) }))
+            .await
+            .unwrap();
+    assert_eq!(page["items"], json!([]));
+    assert_eq!(page["total"], 5);
+    assert!(page["next_cursor"].is_null(), "{page}");
+    assert_eq!(summary, "0 of 5 images");
+    store.shutdown();
+}
