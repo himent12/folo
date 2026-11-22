@@ -699,6 +699,7 @@ pub(super) fn drive_acp_inner(
     );
     let mut verified_legacy_model: Option<String> =
         legacy_model_opt.as_ref().and_then(|o| o.current_value.clone());
+    let mut legacy_switched_to: Option<String> = None;
 
     if let Some(model) = res.model {
         if let Some(opt) = find_model_option(&state.config_options).cloned() {
@@ -743,25 +744,7 @@ pub(super) fn drive_acp_inner(
                     false,
                     &mut state,
                 ));
-                // Legacy `session/set_model` returns `{}` without refreshed `configOptions`: invalidate any prior
-                // effort reading unless a live `config_option_update` during the call explicitly confirmed BOTH
-                // `model == target` and its effort option.
-                let confirmed_target = state.config_updated_in_call
-                    && find_model_option(&state.config_options)
-                        .and_then(|o| o.current_value.as_deref())
-                        .is_some_and(|m| m.eq_ignore_ascii_case(&target));
-                if !confirmed_target {
-                    for opt in &mut state.config_options {
-                        let is_effort = opt.category.as_deref() == Some("thought_level")
-                            || matches!(
-                                opt.id.to_ascii_lowercase().as_str(),
-                                "thought_level" | "thinking_level" | "effort"
-                            );
-                        if is_effort {
-                            opt.current_value = None;
-                        }
-                    }
-                }
+                legacy_switched_to = Some(target.clone());
             }
             verified_legacy_model = Some(target);
         } else {
@@ -781,6 +764,27 @@ pub(super) fn drive_acp_inner(
         state.expected_model = Some(cur.to_string());
     }
     try_drive!(driver.drain(&mut state));
+    if let Some(target) = legacy_switched_to.as_deref() {
+        // Legacy `session/set_model` returns `{}` without refreshed `configOptions`: invalidate any prior or
+        // queued effort reading unless a `config_option_update` explicitly confirmed BOTH `model == target` and
+        // its effort option.
+        let confirmed_target = state.config_updated_in_call
+            && find_model_option(&state.config_options)
+                .and_then(|o| o.current_value.as_deref())
+                .is_some_and(|m| m.eq_ignore_ascii_case(target));
+        if !confirmed_target {
+            for opt in &mut state.config_options {
+                let is_effort = opt.category.as_deref() == Some("thought_level")
+                    || matches!(
+                        opt.id.to_ascii_lowercase().as_str(),
+                        "thought_level" | "thinking_level" | "effort"
+                    );
+                if is_effort {
+                    opt.current_value = None;
+                }
+            }
+        }
+    }
 
     if let Some(opt) = find_effort_option(&state.config_options).cloned() {
         let effort_value = try_drive!(

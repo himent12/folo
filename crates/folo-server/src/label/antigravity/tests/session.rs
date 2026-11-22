@@ -724,68 +724,58 @@ fn legacy_model_switch_invalidates_effort_default_model_pins_base_resolves_varia
     assert!(out.kill_immediately && !saw_prompt);
     assert!(matches!(out.result, Err(AgentError::Failed(f)) if f.message.contains("flooded stdout")));
 
-    // 5. Legacy `session/set_model` with an in-flight unrelated `config_option_update` (still reporting Flash's
-    // `low`, without confirming `model == gemini-4-neon`) still invalidates effort and forces explicit re-setting.
-    let (out_tx, out_rx) = mpsc::channel::<String>();
-    let mut saw_effort_set_unrelated = false;
-    let mut send = |msg: &Value| -> bool {
-        let id = msg.get("id").and_then(Value::as_u64);
-        match msg["method"].as_str() {
-            Some("initialize") => {
-                let _ = out_tx.send(init_ok(id, true, false, false));
-            }
-            Some("session/new") => {
-                let _ = out_tx.send(
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
+    // 5. Legacy `session/set_model` with an effort-only `config_option_update` (either BEFORE or IMMEDIATELY
+    // AFTER `{}` ack, without confirming `model == gemini-4-neon`) invalidates effort and forces re-setting.
+    for after_ack in [false, true] {
+        let (out_tx, out_rx) = mpsc::channel::<String>();
+        let mut saw_effort_set_unrelated = false;
+        let mut send = |msg: &Value| -> bool {
+            let id = msg.get("id").and_then(Value::as_u64);
+            match msg["method"].as_str() {
+                Some("initialize") => {
+                    let _ = out_tx.send(init_ok(id, true, false, false));
+                }
+                Some("session/new") => {
+                    let _ = out_tx.send(json!({
+                        "jsonrpc": "2.0", "id": id,
                         "result": {
                             "sessionId": "s1",
                             "models": { "currentModelId": "gemini-3.8-flash", "availableModels": [{ "modelId": "gemini-3.8-flash" }, { "modelId": "gemini-4-neon" }] },
                             "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] }]
                         }
-                    })
-                    .to_string(),
-                );
+                    }).to_string());
+                }
+                Some("session/set_model") => {
+                    let upd = json!({
+                        "jsonrpc": "2.0", "method": "session/update",
+                        "params": { "update": { "sessionUpdate": "config_option_update", "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] }] } }
+                    }).to_string();
+                    let ack = json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string();
+                    if after_ack {
+                        let _ = out_tx.send(ack);
+                        let _ = out_tx.send(upd);
+                    } else {
+                        let _ = out_tx.send(upd);
+                        let _ = out_tx.send(ack);
+                    }
+                }
+                Some("session/set_config_option") => {
+                    saw_effort_set_unrelated = true;
+                    let _ = out_tx.send(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "high", "options": [{ "value": "low" }, { "value": "high" }] }] }
+                    }).to_string());
+                }
+                _ => {}
             }
-            Some("session/set_model") => {
-                let _ = out_tx.send(
-                    json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "update": {
-                                "sessionUpdate": "config_option_update",
-                                "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] }]
-                            }
-                        }
-                    })
-                    .to_string(),
-                );
-                let _ = out_tx.send(json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string());
-            }
-            Some("session/set_config_option") => {
-                saw_effort_set_unrelated = true;
-                let _ = out_tx.send(
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "high", "options": [{ "value": "low" }, { "value": "high" }] }]
-                        }
-                    })
-                    .to_string(),
-                );
-            }
-            _ => {}
-        }
-        true
-    };
-    assert!(matches!(
-        drive_acp(&low_neon, &work, Duration::from_secs(5), &mut send, &out_rx, &String::new),
-        Err(AgentError::Failed(f)) if f.message.contains("selected effort `high` instead of requested `low`")
-    ));
-    assert!(saw_effort_set_unrelated);
+            true
+        };
+        assert!(matches!(
+            drive_acp(&low_neon, &work, Duration::from_secs(5), &mut send, &out_rx, &String::new),
+            Err(AgentError::Failed(f)) if f.message.contains("selected effort `high` instead of requested `low`")
+        ));
+        assert!(saw_effort_set_unrelated, "after_ack={after_ack}");
+    }
 
     // 6. Default-model run where `model` is first reported in a pre-dispatch `config_option_update` pins Neon and
     // rejects a mid-prompt switch to Flash.
