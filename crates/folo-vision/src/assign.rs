@@ -53,12 +53,64 @@ pub struct TalConfig {
     /// After conflict resolution each gt keeps only this many of its positives, the highest-metric ones
     /// (`Some(1)` for the one-to-one head, MODEL.md §6.6). `None` (the default) keeps them all.
     pub topk2: Option<usize>,
+    /// Epsilon-free target normalization: `m * u_max / m_max` when `m_max > 0`, else `0` (eliminates `eps`
+    /// attenuation on small objects at initialization). Default `false`.
+    pub eps_free: bool,
+    /// Scale-adaptive Plain-IoU + NWD blending weight `λ₀` in `[0, 1]`: when `> 0`, replaces `max(CIoU, 0)` with
+    /// `(1 − λ(s_g)) · IoU + λ(s_g) · NWD(C=12.8px)` where `λ(s_g) = λ₀ · exp(−(s_g / 24)²)` (zero distortion on
+    /// Medium/Large objects). Default `0.0` (legacy CIoU).
+    pub nwd_weight: f32,
 }
 
 impl Default for TalConfig {
     fn default() -> Self {
-        Self { topk: 10, alpha: 0.5, beta: 6.0, eps: 1e-9, min_box_size: 16.0, topk2: None }
+        Self {
+            topk: 10,
+            alpha: 0.5,
+            beta: 6.0,
+            eps: 1e-9,
+            min_box_size: 16.0,
+            topk2: None,
+            eps_free: false,
+            nwd_weight: 0.0,
+        }
     }
+}
+
+/// Plain IoU of two `xyxy` boxes (with `eps = 1e-7` in denominator).
+#[inline]
+pub fn iou_plain(a: &Xyxy, b: &Xyxy) -> f32 {
+    const EPS: f32 = 1e-7;
+    let w1 = (a.x2 - a.x1).max(0.0);
+    let h1 = (a.y2 - a.y1).max(0.0);
+    let w2 = (b.x2 - b.x1).max(0.0);
+    let h2 = (b.y2 - b.y1).max(0.0);
+    let iw = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0);
+    let ih = (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+    let inter = iw * ih;
+    inter / (w1 * h1 + w2 * h2 - inter + EPS)
+}
+
+/// Normalized Wasserstein Distance (NWD) between two `xyxy` boxes modeled as 2D Gaussians, with scale constant `c`
+/// in the boxes' coordinate units.
+#[inline]
+pub fn nwd_box(a: &Xyxy, b: &Xyxy, c: f32) -> f32 {
+    let dcx = 0.5 * (a.x1 + a.x2 - b.x1 - b.x2);
+    let dcy = 0.5 * (a.y1 + a.y2 - b.y1 - b.y2);
+    let dw = (a.x2 - a.x1) - (b.x2 - b.x1);
+    let dh = (a.y2 - a.y1) - (b.y2 - b.y1);
+    let w2_sq = dcx * dcx + dcy * dcy + 0.25 * (dw * dw + dh * dh);
+    (-(w2_sq + 1e-6).sqrt() / c).exp()
+}
+
+/// Scale-adaptive NWD weight `λ(s_g) = weight · exp(−(s_g / 24)²)` for a GT box in image pixels (`s_g² = w · h`).
+#[inline]
+pub fn nwd_lambda(gt_px: &Xyxy, weight: f32) -> f32 {
+    if weight <= 0.0 {
+        return 0.0;
+    }
+    let area = (gt_px.x2 - gt_px.x1).max(0.0) * (gt_px.y2 - gt_px.y1).max(0.0);
+    weight * (-area / (24.0 * 24.0)).exp()
 }
 
 impl TalConfig {
@@ -174,10 +226,16 @@ pub fn assign(
     let topk_for = |g: usize| -> Vec<Pick> {
         let cb = candidate_box(&gt_bboxes[g], cfg.min_box_size);
         let class = gt_labels[g] as usize;
+        let lam = nwd_lambda(&gt_bboxes[g], cfg.nwd_weight);
         let mut cands: Vec<Pick> = Vec::new();
         for (a, p) in anchor_points.iter().enumerate() {
             if cb.contains_point(p[0], p[1], cfg.eps) {
-                let u = ciou_eps(&gt_bboxes[g], &pd_bboxes[a]).max(0.0);
+                let u = if cfg.nwd_weight > 0.0 {
+                    (1.0 - lam) * iou_plain(&gt_bboxes[g], &pd_bboxes[a])
+                        + lam * nwd_box(&gt_bboxes[g], &pd_bboxes[a], 12.8)
+                } else {
+                    ciou_eps(&gt_bboxes[g], &pd_bboxes[a]).max(0.0)
+                };
                 let m = pd_scores[a * num_classes + class].powf(cfg.alpha) * u.powf(cfg.beta);
                 cands.push(Pick { anchor: a as u32, m, u });
             }
@@ -240,7 +298,11 @@ pub fn assign(
         out.target_gt[a] = g;
         out.target_labels[a] = gt_labels[g];
         out.target_bboxes[a] = gt_bboxes[g];
-        out.target_scores[a] = p.m * u_max[g] / (m_max[g] + cfg.eps);
+        out.target_scores[a] = if cfg.eps_free {
+            if m_max[g] > 0.0 { p.m * u_max[g] / m_max[g] } else { 0.0 }
+        } else {
+            p.m * u_max[g] / (m_max[g] + cfg.eps)
+        };
         out.num_fg += 1;
     }
     out

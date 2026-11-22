@@ -303,18 +303,14 @@ impl Optimizer for MuSgd {
         if self.weights.sgd == 1.0 {
             return self.sgd.step(grads);
         }
-        // The SGD half of a Muon group runs at `sgd · lr`; the groups' own LRs are put back afterwards.
-        let lrs: Vec<f64> = self.sgd.groups().iter().map(|g| g.lr).collect();
-        for g in self.sgd.groups_mut() {
-            if is_muon_group(&g.name) {
-                g.lr *= self.weights.sgd;
-            }
-        }
-        let r = self.sgd.step(grads);
-        for (g, lr) in self.sgd.groups_mut().iter_mut().zip(lrs) {
-            g.lr = lr;
-        }
-        r
+        // The SGD half of a Muon group runs at `sgd · lr`, while decoupled/cautious weight decay uses unscaled `lr`.
+        let scales: Vec<f64> = self
+            .sgd
+            .groups()
+            .iter()
+            .map(|g| if is_muon_group(&g.name) { self.weights.sgd } else { 1.0 })
+            .collect();
+        self.sgd.step_with_lr_scales(grads, Some(&scales))
     }
 
     fn step_count(&self) -> u64 {

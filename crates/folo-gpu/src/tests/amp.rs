@@ -147,3 +147,55 @@ fn autocast_conv_and_matmul_train_f32_leaves() {
     let xc = randn(&[1, 2, 5, 5], 12);
     assert_eq!(xc.conv2d(&randn(&[3, 2, 3, 3], 13), None, 1, 1, 1, 1).unwrap().dtype(), DType::F32);
 }
+
+/// B4 verification: vectorized `vec4` + block-shifted 0-div `bn_stats` / `bn_bwd_reduce` match between the
+/// 32-wide subgroup fast path and the portable shared-memory fallback across both `hw % 4 == 0` (VEC4) and
+/// odd `hw`, all activations, and large shifted means (`+500.0`, verifying zero catastrophic cancellation).
+#[test]
+fn batch_norm_subgroups_and_portable_fallback_agree() {
+    use std::sync::atomic::Ordering;
+    let dev = dev16!();
+    let _g = no_grad();
+    for &(shape, act, shift) in &[
+        ([4, 16, 20, 20], Some(UnaryOp::Silu), 500.0f32),
+        ([3, 8, 9, 11], Some(UnaryOp::Silu), 120.0f32),
+        ([2, 12, 8, 8], Some(UnaryOp::Relu), -300.0f32),
+        ([2, 8, 16, 16], None, 0.0f32),
+    ] {
+        let c = shape[1];
+        let x = q(&randn(&shape, 41).add_scalar(shift).unwrap()).to_device(dev).unwrap();
+        let g = q(&randn(&shape, 42)).to_device(dev).unwrap();
+        let w = randn(&[c], 43).add_scalar(1.0).unwrap().to_device(dev).unwrap();
+        let b = randn(&[c], 44).to_device(dev).unwrap();
+        let run = |force_portable: bool, dtype: DType| {
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.store(force_portable, Ordering::Relaxed);
+            let xd = x.to_dtype(dtype).unwrap();
+            let gd = g.to_dtype(dtype).unwrap();
+            let out = xd.batch_norm_act_train(&w, &b, 1e-3, act, None).unwrap().expect("kernels");
+            let (dx, dw, db) = xd
+                .batch_norm_act_train_backward(&gd, &w, &b, &out.mean, &out.invstd, act)
+                .unwrap()
+                .expect("kernels");
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.store(false, Ordering::Relaxed);
+            (
+                out.y.to_dtype(DType::F32).unwrap(),
+                out.mean,
+                out.invstd,
+                dx.to_dtype(DType::F32).unwrap(),
+                dw,
+                db,
+            )
+        };
+        for dtype in [DType::F32, DType::F16] {
+            let (y_sg, m_sg, iv_sg, dx_sg, dw_sg, db_sg) = run(false, dtype);
+            let (y_fb, m_fb, iv_fb, dx_fb, dw_fb, db_fb) = run(true, dtype);
+            let what = format!("bn sg vs portable {shape:?} {act:?} {dtype:?} shift={shift}");
+            assert_close_t(&m_sg, &m_fb, 1e-4, 1e-5, &format!("{what} mean"));
+            assert_close_t(&iv_sg, &iv_fb, 1e-4, 1e-4, &format!("{what} invstd"));
+            assert_close_t(&y_sg, &y_fb, 2e-3, 2e-3, &format!("{what} y"));
+            assert_close_t(&dx_sg, &dx_fb, 2e-3, 2e-3, &format!("{what} dx"));
+            assert_close_t(&dw_sg, &dw_fb, 2e-3, 1e-3, &format!("{what} dw"));
+            assert_close_t(&db_sg, &db_fb, 2e-3, 2e-3, &format!("{what} db"));
+        }
+    }
+}

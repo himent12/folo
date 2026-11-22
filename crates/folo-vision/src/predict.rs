@@ -63,8 +63,9 @@ pub struct PredictConfig {
     pub fusion: BoxFusion,
     /// The cluster IoU of [`PredictConfig::fusion`] ([`NmsConfig::fusion_iou`]).
     pub fusion_iou: f32,
-    /// How the kept boxes are scored ([`NmsConfig::score`]; off by default). The cluster is the candidates above
-    /// `conf`, so at a high `conf` it holds fewer of them than at validation's 0.001.
+    /// How the kept boxes are scored ([`NmsConfig::score`]; off by default). `elc` and `dfl-consensus` preserve
+    /// the `[0, 1]` score scale (pulling supporting anchors down to `0.10` before filtering final scores by
+    /// `conf`); `consensus` rescales scores by up to `1 / √10`.
     pub score: ScoreRule,
 }
 
@@ -401,6 +402,9 @@ impl Predictor {
     }
 
     fn run_here(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        if self.model.int8_u8_stem_active() {
+            return self.run_here_rgb0_u8(imgs, rect);
+        }
         let t0 = Instant::now();
         let batch = self.prepare(imgs, rect)?;
         self.wait_for_device()?;
@@ -428,6 +432,69 @@ impl Predictor {
         };
         let n = imgs.len() as f64;
         Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
+    }
+
+    /// Direct `u8` RGB0 path for CPU int8 models: letterboxes directly into packed `[R, G, B, 0]` `u32` words
+    /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
+    fn run_here_rgb0_u8(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        if imgs.is_empty() {
+            return Err(Error::Config("cannot predict an empty batch".into()));
+        }
+        let t0 = Instant::now();
+        let s = self.cfg.imgsz;
+        let rect = rect && one_canvas(imgs, s);
+        let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
+        for img in imgs {
+            if img.width == 0 || img.height == 0 {
+                return Err(Error::Config("cannot predict an empty image".into()));
+            }
+        }
+        let letterboxes: Vec<Letterbox> =
+            imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
+        let (rgb0, h, w) = letterbox_on_host_rgb0(imgs, &letterboxes)?;
+        let pre = ms(t0);
+        let nms = self.cfg.nms();
+        let b = imgs.len();
+        let (dets, inf, post) = if self.model.candidates_first_applies(Device::Cpu, &nms) {
+            let t1 = Instant::now();
+            let cands = self.model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+            let inf = ms(t1);
+            let t2 = Instant::now();
+            let dets = cands.into_par_iter().map(|c| self.model.finish_candidates(&c, &nms)).collect();
+            (dets, inf, ms(t2))
+        } else {
+            let t1 = Instant::now();
+            let out = {
+                let _g = no_grad();
+                self.model.forward_rgb0_u8(&rgb0, b, h, w)?
+            };
+            let inf = ms(t1);
+            let t2 = Instant::now();
+            let dets = out.detections(&nms)?;
+            (dets, inf, ms(t2))
+        };
+        folo_core::cpu::q8::recycle(rgb0);
+        let t_unmap = Instant::now();
+        let mapped: Vec<Vec<Detection>> = dets
+            .into_par_iter()
+            .zip(letterboxes.par_iter())
+            .map(|(d, lb)| {
+                d.into_iter()
+                    .map(|d| {
+                        let [x1, y1, x2, y2] = lb.unmap_xyxy([d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2]);
+                        Detection { bbox: Xyxy::new(x1, y1, x2, y2), ..d }
+                    })
+                    .collect()
+            })
+            .collect();
+        let post = post + ms(t_unmap);
+        let n = imgs.len() as f64;
+        let timing = Timing::new(pre / n, inf / n, post / n);
+        Ok(imgs
+            .iter()
+            .zip(mapped)
+            .map(|(img, detections)| Prediction { width: img.width, height: img.height, detections, timing })
+            .collect())
     }
 
     /// Waits for the work queued on the model's device (a no-op on the CPU), so a stage's timer covers its
@@ -576,6 +643,19 @@ pub fn letterbox_on_host(imgs: &[Image], boxes: &[Letterbox]) -> Result<Tensor> 
         lb.apply_planar_f32(img, folo_data::PAD_VALUE, INV_255, dst);
     });
     Ok(Tensor::from_vec(input, [imgs.len(), 3, h as usize, w as usize])?)
+}
+
+/// Packed `[B, H, W]` `u32` `[R, G, B, 0]` letterbox canvases for the direct `u8` CPU int8 stem.
+fn letterbox_on_host_rgb0(imgs: &[Image], boxes: &[Letterbox]) -> Result<(Vec<u32>, usize, usize)> {
+    let [w, h] = check_letterbox(imgs, boxes)?;
+    let plane = (w * h) as usize;
+    let mut out = folo_core::cpu::q8::alloc(imgs.len(), 4, plane);
+    out[..imgs.len() * plane].par_chunks_mut(plane).zip(imgs.par_iter().zip(boxes)).for_each(
+        |(dst, (img, lb))| {
+            lb.apply_rgb0_u8(img, folo_data::PAD_VALUE, dst);
+        },
+    );
+    Ok((out, h as usize, w as usize))
 }
 
 /// [`letterbox_on_host`] on `device` from the raw `u8` images, bit-exact with it (`None` when the device has

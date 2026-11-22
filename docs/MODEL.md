@@ -1184,6 +1184,36 @@ before those runs, but τ 0.75 had itself been read on val2017, on folo-n v3 and
 fixed in advance gave +0.0007, not significant). So the folo-s numbers are optimistic, and only the folo-n v5 ones are
 on weights that played no part in the choice, on the same images.
 
+**Exclusive Logit-Space Consensus (`--score elc`) and DFL-Precision Consensus (`--score dfl-consensus`, opt-in).**
+Two scale-preserving successors to `--score consensus` that fix two flaws of the probability-space rule: (1) surviving
+duplicate boxes can steal cluster mass from a higher-scoring kept box's suppressed candidates, and (2) multiplying a
+high-confidence probability `s ≈ 0.90` by `√(M/s / 10)` amplifies its log-odds penalty by `1 / (1 − s) ≈ 10×`, which
+caused `folo-s`'s `AP_L` to fall by 0.0035. Both rules restrict each kept box `k`'s cluster `C_excl(k)` to candidates
+`j` of `k`'s own class with `IoU(b_k, b_j) >= 0.75` that were **exclusively owned** by `k` (the first kept box of `j`'s
+class to suppress `j` in NMS, or `j = k` itself; under `agnostic` NMS, ownership is still computed class-locally) and
+update log-odds in `f64` with a branch-safe sigmoid:
+
+    M_excl,k     = Σ_{j ∈ C_excl(k)} s_j
+    σ̄_bin,k      = (1/4) Σ_{e=0..4} ( (Σ_{j ∈ C_excl(k)} s_j · (max(σ²_{j,e} − f(1 − f), 0) + 0.1)^{-1}) / M_excl,k )^{-1/2}
+    logit(s'_k)  = logit(clamp(s_k, 1e-6, 1 − 1e-6))
+                   + 0.65 · ln(min(M_excl,k / s_k, 10) / 4.0)                          (`elc`)
+                   − 0.60 · ln(max(σ̄_bin,k, 0.1) / 0.50)                               (added by `dfl-consensus`)
+
+`dfl-consensus` reuses the exact DFL moments already computed for `--fusion dfl` (zero extra GPU readback) and falls
+back cleanly to `elc` when callers provide boxes without DFL moments (`nms_detections`, `folo-wasm`). Because both
+rules preserve the `[0, 1]` score scale, single-label prediction with `conf > 0.10` lowers pre-NMS candidate extraction
+to `0.10` so nearby supporting anchors enter the cluster before filtering final calibrated scores by `score > conf`;
+validation (`multi_label`, `conf = 0.001`) extracts at `conf` and re-ranks all kept boxes without post-filtering.
+With exclusive ownership demoting duplicates, keeping `--iou 0.70` (instead of `B*`'s `0.65`) recovers high-IoU boxes:
+on a locked 50/50 val2017 dev/test split (1,000 paired bootstrap resamples), `--fusion dfl --iou 0.7 --max-det 1000`
+with `--score elc` / `--score dfl-consensus` reaches **0.3758 / 0.3759** on `folo-n v5` (`+0.0058` over B0, `+0.0010`
+over `B* + consensus`, `P(≤0) = 0.000`; held-out test `+0.0010 / +0.0008`, `P = 0.004 / 0.011`) and **0.4209 / 0.4214**
+on `folo-s` (`+0.0048 / +0.0052` over B0, `+0.0012 / +0.0016` over `B* + consensus`, `P = 0.000 / 0.003`; held-out test
+`+0.0011 / +0.0013`, `P = 0.000 / 0.020`), lifting `folo-s` `AP_L` to `0.5882` (`+0.0043` over `B* + consensus`) and
+cutting `predict` (`conf = 0.25`) 10-bin ECE from `0.209 / 0.171` (B0) to `0.145 / 0.110` while raising `F1@50` and
+`F1@75`. (`elc` requires no DFL moments and improves every size bucket S/M/L; `dfl-consensus` trades ~0.002 `AP_S` for
+higher `AP_L`, F1 and calibration.)
+
 ### 9.5 Candidate-first evaluation
 Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
 `conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and

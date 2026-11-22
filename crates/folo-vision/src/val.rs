@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
+#[cfg(test)]
 use crate::fusion::BoxFusion;
 use crate::metrics::{EvalReport, Evaluator, Truth};
 use crate::model::{FoloModel, HeadMode};
@@ -196,12 +197,8 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
             let (nc, mode) = (output.num_classes, output.mode);
             let a = output.num_anchors();
             let cap = pair_capacity(most.load(Ordering::Relaxed), a, nc);
-            // DFL fusion's side precisions, read before the decode is handed over (`None` unless asked for).
-            let prec = if cfg.nms.fusion == BoxFusion::Dfl && mode == HeadMode::O2m {
-                Some(output.side_precisions()?)
-            } else {
-                None
-            };
+            // DFL fusion / DFL consensus precisions, read once before the decode is handed over.
+            let (prec, bin_prec) = output.dfl_precisions_for(&cfg.nms)?;
             let images = if output.box_raw.device().is_cpu() {
                 Outputs::Host(output.decode_images()?)
             } else if let Some(cap) = cap
@@ -211,7 +208,8 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
             {
                 // `[B, 4 + nc, A]`: the transpose of the `[B, A, 4 + nc]` view is the dense decode itself.
                 let decoded = output.decoded_on_device()?.transpose(1, 2)?;
-                let pairs = folo_gpu::detect::multi_label_candidates(&decoded, cfg.nms.conf, cap)?;
+                let pairs =
+                    folo_gpu::detect::multi_label_candidates(&decoded, cfg.nms.candidate_conf(), cap)?;
                 let boxes = decoded.narrow(1, 0, 4)?;
                 Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a }
             } else {
@@ -219,7 +217,7 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
                 Outputs::Device(output.decoded_on_device()?, a)
             };
             drop(output);
-            if tx.send(Decoded { images, prec, nc, mode, truths, meta: batch.meta }).is_err() {
+            if tx.send(Decoded { images, prec, bin_prec, nc, mode, truths, meta: batch.meta }).is_err() {
                 break; // the post-processing thread failed; joining it below reports why
             }
         }
@@ -275,8 +273,10 @@ pub fn check_config(model: &FoloModel, classes: usize, cfg: &ValConfig) -> Resul
 /// One batch's decoded outputs and ground truth, on their way to [`Post`].
 struct Decoded {
     images: Outputs,
-    /// Per image, every anchor's side precisions for [`BoxFusion::Dfl`].
+    /// Per image, every anchor's side precisions for [`crate::fusion::BoxFusion::Dfl`].
     prec: Option<Vec<Vec<[f32; 4]>>>,
+    /// Per image, every anchor's scale-free DFL bin precisions for [`crate::fusion::ScoreRule::DflConsensus`].
+    bin_prec: Option<Vec<Vec<[f32; 4]>>>,
     nc: usize,
     mode: HeadMode,
     truths: Vec<Vec<Truth>>,
@@ -340,10 +340,11 @@ struct Post<'a> {
 impl Post<'_> {
     fn add(&mut self, d: Decoded, ds: &dyn Dataset, cfg: &ValConfig) -> Result<()> {
         use rayon::prelude::*;
-        let Decoded { images, prec, nc, mode, truths, meta } = d;
+        let Decoded { images, prec, bin_prec, nc, mode, truths, meta } = d;
         let prec_of = |i: usize| prec.as_ref().map(|p| p[i].as_slice());
+        let bprec_of = |i: usize| bin_prec.as_ref().map(|p| p[i].as_slice());
         let post = |(i, (b, s)): (usize, (Vec<Xyxy>, Vec<f32>))| {
-            crate::nms::postprocess_with(&b, &s, prec_of(i), nc, &cfg.nms, mode)
+            crate::nms::postprocess_with_dfl(&b, &s, prec_of(i), bprec_of(i), nc, &cfg.nms, mode)
         };
         let dets: Vec<Vec<Detection>> = match images {
             Outputs::Host(images) => images.into_par_iter().enumerate().map(post).collect(),
@@ -354,7 +355,13 @@ impl Post<'_> {
                     all.par_chunks_exact(a * (4 + nc))
                         .enumerate()
                         .map(|(i, rows)| {
-                            crate::nms::non_max_suppression_rows_with(rows, prec_of(i), nc, &cfg.nms)
+                            crate::nms::non_max_suppression_rows_with_dfl(
+                                rows,
+                                prec_of(i),
+                                bprec_of(i),
+                                nc,
+                                &cfg.nms,
+                            )
                         })
                         .collect()
                 } else {
@@ -362,9 +369,17 @@ impl Post<'_> {
                     images.into_par_iter().enumerate().map(post).collect()
                 }
             }
-            Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a } => {
-                self.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &cfg.nms, prec.as_deref())?
-            }
+            Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a } => self.pairs_nms(
+                &pairs,
+                &boxes,
+                &decoded,
+                cap,
+                a,
+                nc,
+                &cfg.nms,
+                prec.as_deref(),
+                bin_prec.as_deref(),
+            )?,
         };
         for (i, dets) in dets.into_iter().enumerate() {
             let meta = &meta[i];
@@ -413,6 +428,7 @@ impl Post<'_> {
         nc: usize,
         nms: &NmsConfig,
         prec: Option<&[Vec<[f32; 4]>]>,
+        bin_prec: Option<&[Vec<[f32; 4]>]>,
     ) -> Result<Vec<Vec<Detection>>> {
         use rayon::prelude::*;
         let words = pairs.to_vec::<u32>()?;
@@ -439,8 +455,9 @@ impl Post<'_> {
             .into_par_iter()
             .map(|i| {
                 let p = prec.map(|p| p[i].as_slice());
+                let bp = bin_prec.map(|p| p[i].as_slice());
                 if let Some(rows) = &full[i] {
-                    return Ok(crate::nms::non_max_suppression_rows_with(rows, p, nc, nms));
+                    return Ok(crate::nms::non_max_suppression_rows_with_dfl(rows, p, bp, nc, nms));
                 }
                 let n = counts[i];
                 let recs = &words[i * region + 1..][..folo_gpu::detect::CANDIDATE_RECORD_WORDS * n];
@@ -460,7 +477,7 @@ impl Post<'_> {
                     let j = j as usize;
                     Xyxy::new(bx[j], bx[a + j], bx[2 * a + j], bx[3 * a + j])
                 };
-                Ok(crate::nms::non_max_suppression_pairs_with(list, bbox, p, nms))
+                Ok(crate::nms::non_max_suppression_pairs_with_dfl(list, bbox, p, bp, nms))
             })
             .collect()
     }
@@ -536,6 +553,7 @@ mod tests {
         let d = Decoded {
             images,
             prec: None,
+            bin_prec: None,
             nc: 1,
             mode: HeadMode::O2m,
             truths: vec![vec![truth]],
@@ -725,12 +743,12 @@ mod tests {
             let words = pairs.to_vec::<u32>().unwrap();
             let region = folo_gpu::detect::candidate_region_words(cap);
             assert_eq!((0..b).map(|i| words[i * region] as usize).collect::<Vec<_>>(), counts, "cap {cap}");
-            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &nms, None).unwrap();
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &nms, None, None).unwrap();
             assert_eq!(got, want, "cap {cap}");
             assert_eq!(post.from_pairs, served, "cap {cap}");
-            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &dfl, Some(&prec)).unwrap();
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &dfl, Some(&prec), None).unwrap();
             assert_eq!(got, want_dfl, "cap {cap}, DFL fusion");
-            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &consensus, None).unwrap();
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &consensus, None, None).unwrap();
             assert_eq!(got, want_consensus, "cap {cap}, consensus");
         }
         assert_eq!(most.load(Ordering::Relaxed), *counts.iter().max().unwrap());

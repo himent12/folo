@@ -10,9 +10,10 @@ use folo_nn::Module;
 use folo_nn::io::ModelFile;
 
 use crate::error::{Error, Result};
+use crate::loss::DistillAssignment;
 use crate::loss::distill::{
-    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_fused,
-    fused_supported,
+    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss_fused_with_context,
+    distill_loss_with_context, fused_supported, gt_verify_weights_cpu,
 };
 use crate::model::{FoloModel, HeadMode};
 
@@ -140,16 +141,17 @@ impl Teacher {
             return Ok(TeacherBatch::Raw { box_raw: out.box_raw, cls_raw: out.cls_raw });
         }
         let view = TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, self.cfg.temperature)?;
-        Ok(TeacherBatch::Targets(DistillTargets::new(&view)?))
+        let raw_box = self.cfg.gt_verify.then_some(out.box_raw);
+        Ok(TeacherBatch::Targets { targets: DistillTargets::new(&view)?, raw_box, reg_max: out.reg_max })
     }
 }
 
 /// One batch's teacher outputs, as [`Teacher::batch`] gives them.
 pub(super) enum TeacherBatch {
-    /// The raw head outputs (`F16` under mixed precision), for [`distill_loss_fused`].
+    /// The raw head outputs (`F16` under mixed precision), for [`distill_loss_fused_with_context`].
     Raw { box_raw: Tensor, cls_raw: Tensor },
-    /// The constants of [`distill_loss`].
-    Targets(DistillTargets),
+    /// The constants of [`distill_loss_with_context`].
+    Targets { targets: DistillTargets, raw_box: Option<Tensor>, reg_max: usize },
 }
 
 impl TeacherBatch {
@@ -158,14 +160,40 @@ impl TeacherBatch {
         &self,
         box_raw: &Tensor,
         cls_raw: &Tensor,
+        anchors: &crate::decode::Anchors,
         target_score_sum: f32,
         cfg: &DistillConfig,
+        asg: Option<&DistillAssignment>,
     ) -> Result<DistillLoss> {
         Ok(match self {
             TeacherBatch::Raw { box_raw: tb, cls_raw: tc } => {
-                distill_loss_fused(box_raw, cls_raw, tb, tc, target_score_sum, cfg)?
+                let dev_asg = match asg {
+                    Some(DistillAssignment::Device(a)) => Some(a),
+                    _ => None,
+                };
+                distill_loss_fused_with_context(box_raw, cls_raw, tb, tc, target_score_sum, cfg, dev_asg)?
             }
-            TeacherBatch::Targets(t) => distill_loss(box_raw, cls_raw, t, target_score_sum, cfg)?,
+            TeacherBatch::Targets { targets, raw_box, reg_max } => {
+                let host_asg = match asg {
+                    Some(DistillAssignment::Host(a)) => Some(a),
+                    _ => None,
+                };
+                let ver_w = match (cfg.gt_verify, raw_box, host_asg) {
+                    (true, Some(tb), Some(a)) => {
+                        Some(gt_verify_weights_cpu(box_raw, tb, anchors, a, *reg_max)?)
+                    }
+                    _ => None,
+                };
+                distill_loss_with_context(
+                    box_raw,
+                    cls_raw,
+                    targets,
+                    target_score_sum,
+                    cfg,
+                    host_asg,
+                    ver_w.as_ref(),
+                )?
+            }
         })
     }
 }

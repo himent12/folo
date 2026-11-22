@@ -111,6 +111,10 @@ pub struct ParamGroup {
     pub lr: f64,
     /// Current momentum / β1.
     pub momentum: f64,
+    /// Decouple weight decay from SGD/MuSGD momentum (`p -= lr·u + lr_unscaled·wd·p`).
+    pub decoupled_wd: bool,
+    /// Cautious decoupled weight decay: apply decoupled decay only where `u · p > 0`.
+    pub cautious_wd: bool,
 }
 
 /// AdamW's β2 of every [`ParamGroup`] unless [`ParamGroup::adam`] sets another (FOLO's trainer never does).
@@ -131,6 +135,8 @@ impl ParamGroup {
             eps: 1e-8,
             lr: 0.01,
             momentum: 0.937,
+            decoupled_wd: false,
+            cautious_wd: false,
         }
     }
 
@@ -164,6 +170,18 @@ impl ParamGroup {
     pub fn adam(mut self, beta2: f64, eps: f64) -> Self {
         self.beta2 = beta2;
         self.eps = eps;
+        self
+    }
+
+    /// Enable or disable decoupled weight decay (SGD / MuSGD).
+    pub fn decoupled_wd(mut self, on: bool) -> Self {
+        self.decoupled_wd = on;
+        self
+    }
+
+    /// Enable or disable cautious decoupled weight decay (SGD / MuSGD).
+    pub fn cautious_wd(mut self, on: bool) -> Self {
+        self.cautious_wd = on;
         self
     }
 
@@ -323,6 +341,16 @@ pub struct GroupContract {
     /// AdamW ε.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eps: Option<f64>,
+    /// Decoupled weight decay (SGD / MuSGD; omitted when false so older files match byte for byte).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decoupled_wd: bool,
+    /// Cautious decoupled weight decay (SGD / MuSGD; omitted when false).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cautious_wd: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl GroupContract {
@@ -337,6 +365,8 @@ impl GroupContract {
             weight_decay: g.weight_decay,
             betas: (!sgd).then_some([g.base_momentum, g.beta2]),
             eps: (!sgd).then_some(g.eps),
+            decoupled_wd: sgd && g.decoupled_wd,
+            cautious_wd: sgd && g.cautious_wd,
         }
     }
 
@@ -348,6 +378,8 @@ impl GroupContract {
             OptimKind::Sgd | OptimKind::MuSgd => {
                 g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
                 g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
+                g.decoupled_wd = self.decoupled_wd;
+                g.cautious_wd = self.cautious_wd;
             }
             OptimKind::AdamW => {
                 let [b1, b2] = self.betas.ok_or_else(|| missing("betas"))?;

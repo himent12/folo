@@ -10,7 +10,9 @@ pub mod exec;
 pub mod fake;
 pub mod walk;
 
-pub use calib::{Calibration, Method, calibrate, calibrate_sample};
+pub use calib::{
+    Calibration, Method, VERSION_V1, VERSION_V2, calibrate, calibrate_sample, default_sensitivity_f32_convs,
+};
 pub use exec::Int8Plan;
 pub use fake::FakeQuant;
 
@@ -53,20 +55,43 @@ pub(crate) fn int8_able(
         .filter(|&(oh, ow)| res.is_none_or(|r| r == [n, o, oh, ow]))
 }
 
+/// The output size of the 3-channel `stem` when it runs directly on `u8` `[R, G, B, 0]` pixels via
+/// [`folo_core::cpu::q8::stem_u8`]; `None` when it falls back to `f32`.
+pub(crate) fn stem_int8_able(conv: &ConvBnAct, [n, c, h, w]: [usize; 4]) -> Option<(usize, usize)> {
+    let cfg = conv.conv.config();
+    let (o, k) = (cfg.out_channels, cfg.kernel);
+    let fits = conv.bn.is_none()
+        && cfg.groups == 1
+        && cfg.dilation == 1
+        && matches!(conv.act, Activation::Silu | Activation::Identity)
+        && cfg.in_channels == 3
+        && c == 3
+        && conv.conv.weight.dims() == [o, 3, k, k]
+        && conv.conv.bias.as_ref().is_none_or(|b| b.dims() == [o])
+        && folo_core::cpu::q8::QStem::supports((o, 3, k), cfg.stride, cfg.padding);
+    if !fits || n == 0 {
+        return None;
+    }
+    folo_core::cpu::q8::out_size(h, w, k, cfg.stride, cfg.padding)
+}
+
 /// The `.folo` metadata key that holds a model's [`Calibration`] (JSON), written by `folo quantize`.
 pub const META_KEY: &str = "folo.quant";
 
 impl Calibration {
-    /// The calibration a file's metadata holds ([`META_KEY`]), if any.
+    /// The calibration a file's metadata holds ([`META_KEY`]), if any. Rejects unsupported future schema
+    /// versions cleanly while remaining backward-compatible with `version: 1` checkpoints.
     pub fn from_metadata(meta: &Metadata) -> Result<Option<Calibration>> {
         let Some(s) = meta.extra.get(META_KEY) else { return Ok(None) };
-        serde_json::from_str(s)
-            .map(Some)
-            .map_err(|e| Error::Metadata(format!("`{META_KEY}` is not a calibration: {e}")))
+        let cal: Calibration = serde_json::from_str(s)
+            .map_err(|e| Error::Metadata(format!("`{META_KEY}` is not a calibration: {e}")))?;
+        cal.check_version()?;
+        Ok(Some(cal))
     }
 
     /// Store this calibration in `meta` ([`META_KEY`]).
     pub fn store(&self, meta: &mut Metadata) -> Result<()> {
+        self.check_version()?;
         let s = serde_json::to_string(self).map_err(|e| Error::Metadata(e.to_string()))?;
         meta.extra.insert(META_KEY.to_string(), s);
         Ok(())

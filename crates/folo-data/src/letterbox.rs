@@ -125,13 +125,11 @@ impl Letterbox {
         }
         let [rw, rh] = self.resized.map(|v| v as usize);
         let [left, top] = self.pad.map(|v| v as usize);
-        // `v as f32 * scale` for every byte value: one lookup per channel instead of a convert and a multiply.
         let lut: [f32; 256] = std::array::from_fn(|v| v as f32 * scale);
         let pad = lut[pad_value as usize];
         let rows = RowResizer::new(img, rw as u32, rh as u32);
         let (r, rest) = dst.split_at_mut(plane);
         let (g, b) = rest.split_at_mut(plane);
-        // A band of output rows: `y0` is its first row, `r`, `g`, `b` its rows of each plane.
         let band = |y0: usize, r: &mut [f32], g: &mut [f32], b: &mut [f32]| {
             let mut px = vec![0u8; rw * 3];
             for (i, ((r, g), b)) in
@@ -157,7 +155,6 @@ impl Letterbox {
                 }
             }
         };
-        // About 64 KiB of output per task.
         let band_rows = (64 * 1024 / (12 * ow)).max(1);
         if crate::par::is_serial() || 12 * plane < 64 * 1024 {
             band(0, r, g, b);
@@ -168,6 +165,49 @@ impl Letterbox {
                 .zip(b.par_chunks_mut(n))
                 .enumerate()
                 .for_each(|(t, ((r, g), b))| band(t * band_rows, r, g, b));
+        }
+    }
+
+    /// [`Letterbox::apply`] straight into packed `[out_h, out_w]` `u32` words `[R, G, B, 0]` (`u32::from_le_bytes([r,
+    /// g, b, 0])`), with no intermediate image and 3× less write traffic than [`Letterbox::apply_planar_f32`] —
+    /// feeds `folo_core::cpu::q8::stem_u8` directly. Bit for bit the bytes of `apply(img, pad_value)`.
+    ///
+    /// # Panics
+    /// If the geometry was computed for another image size, or `dst.len() != out_w * out_h`.
+    pub fn apply_rgb0_u8(&self, img: &Image, pad_value: u8, dst: &mut [u32]) {
+        assert_eq!([img.width, img.height], self.orig, "letterbox geometry computed for another size");
+        let [ow, oh] = self.out.map(|v| v as usize);
+        let plane = ow * oh;
+        assert_eq!(dst.len(), plane, "rgb0 letterbox: dst holds {} words, not {ow} x {oh}", dst.len());
+        if plane == 0 {
+            return;
+        }
+        let [rw, rh] = self.resized.map(|v| v as usize);
+        let [left, top] = self.pad.map(|v| v as usize);
+        let pad_word = u32::from_le_bytes([pad_value, pad_value, pad_value, 0]);
+        let rows = RowResizer::new(img, rw as u32, rh as u32);
+        let band = |y0: usize, out: &mut [u32]| {
+            let mut px = vec![0u8; rw * 3];
+            for (i, drow) in out.chunks_exact_mut(ow).enumerate() {
+                let y = y0 + i;
+                if y < top || y >= top + rh {
+                    drow.fill(pad_word);
+                    continue;
+                }
+                rows.row(y - top, &mut px);
+                drow[..left].fill(pad_word);
+                drow[left + rw..].fill(pad_word);
+                for (d, p) in drow[left..left + rw].iter_mut().zip(px.as_chunks::<3>().0) {
+                    *d = u32::from_le_bytes([p[0], p[1], p[2], 0]);
+                }
+            }
+        };
+        let band_rows = (64 * 1024 / (4 * ow)).max(1);
+        if crate::par::is_serial() || 4 * plane < 64 * 1024 {
+            band(0, dst);
+        } else {
+            let n = band_rows * ow;
+            dst.par_chunks_mut(n).enumerate().for_each(|(t, o)| band(t * band_rows, o));
         }
     }
 
@@ -268,7 +308,6 @@ mod tests {
         let rect = LetterboxOptions { stride: Some(32), ..Default::default() };
         let corner = LetterboxOptions { center: false, ..Default::default() };
         let no_up = LetterboxOptions { scale_up: false, ..Default::default() };
-        // Identity, upscale, mild and >= 2x (box-prefiltered) downscales, rect, uncentred, tiny.
         let cases: [(u32, u32, u32, &LetterboxOptions); 9] = [
             (640, 640, 640, &rect),
             (1280, 720, 640, &rect),
@@ -293,6 +332,43 @@ mod tests {
             let mut serial = vec![f32::NAN; want.len()];
             crate::par::serial(|| lb.apply_planar_f32(&img, 7, 0.5, &mut serial));
             assert_eq!(serial, planar_reference(&lb, &img, 7, 0.5), "{w}x{h} serial");
+        }
+    }
+
+    #[test]
+    fn rgb0_u8_is_bit_exact_with_apply() {
+        let rect = LetterboxOptions { stride: Some(32), ..Default::default() };
+        let corner = LetterboxOptions { center: false, ..Default::default() };
+        let no_up = LetterboxOptions { scale_up: false, ..Default::default() };
+        let cases: [(u32, u32, u32, &LetterboxOptions); 7] = [
+            (640, 640, 640, &rect),
+            (1280, 720, 640, &rect),
+            (1280, 720, 640, &LetterboxOptions::default()),
+            (333, 999, 640, &rect),
+            (100, 50, 640, &no_up),
+            (7, 3, 64, &corner),
+            (1, 1, 32, &rect),
+        ];
+        for (w, h, s, opts) in cases {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            for (i, v) in img.data.iter_mut().enumerate() {
+                *v = (i.wrapping_mul(2654435761) >> 7) as u8;
+            }
+            let lb = Letterbox::compute(w, h, s, s, opts);
+            let canvas = lb.apply(&img, PAD_VALUE);
+            let want: Vec<u32> = canvas
+                .data
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0]))
+                .collect();
+            let mut got = vec![u32::MAX; want.len()];
+            lb.apply_rgb0_u8(&img, PAD_VALUE, &mut got);
+            assert_eq!(got, want, "{w}x{h} parallel");
+            let mut serial = vec![u32::MAX; want.len()];
+            crate::par::serial(|| lb.apply_rgb0_u8(&img, PAD_VALUE, &mut serial));
+            assert_eq!(serial, want, "{w}x{h} serial");
         }
     }
 

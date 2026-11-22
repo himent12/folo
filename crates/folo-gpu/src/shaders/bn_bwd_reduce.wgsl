@@ -1,22 +1,18 @@
-// Pass 1 of the BatchNorm backward: per (channel, chunk) partial sums of dz and dz · x̂, where
-// x̂ = (x - mean) · invstd, z = x̂ · w + b and dz = g · act'(z); X and G are T (f32 or f16), the sums f32.
-// Grid: (chunks, C). Params as bn_stats.wgsl.
-// PART is [C, chunks, 2].
-@group(0) @binding(1) var<storage, read> X: array<T>;
-@group(0) @binding(2) var<storage, read> G: array<T>;
+// Pass 1 of the BatchNorm backward: per-thread partial sums of dz and dz · x̂, where
+// x̂ = (x - mean) · invstd, z = x̂ · w + b and dz = g · act'(z); X and G are E (f32/f16 or vec4<f32>/vec4<f16>),
+// the sums f32. Evaluates bn_act_grad on 4 real lanes when VEC4 is enabled (and scalar bn_act_grad_f32 on
+// odd hw), eliminating the 4x redundant exp() computation. `norm.rs` appends either the 1-barrier 32-wide
+// subgroupAdd reduction or the portable 8-barrier shared-memory tree fallback.
+// Grid: (chunks, C). Params as bn_stats.wgsl. PART is [C, chunks, 2].
+@group(0) @binding(1) var<storage, read> X: array<E>;
+@group(0) @binding(2) var<storage, read> G: array<E>;
 @group(0) @binding(3) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(4) var<storage, read> INVSTD: array<f32>;
 @group(0) @binding(5) var<storage, read> W: array<f32>;
 @group(0) @binding(6) var<storage, read> B: array<f32>;
 @group(0) @binding(7) var<storage, read_write> PART: array<f32>;
 
-var<workgroup> s1: array<f32, 256>;
-var<workgroup> s2: array<f32, 256>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let c = wid.y;
-    let chunk = wid.x;
+fn bn_bwd_reduce_thread(c: u32, chunk: u32, lid: u32) -> vec2<f32> {
     let channels = pu(0u);
     let hw = pu(1u);
     let start = chunk * pu(3u);
@@ -25,34 +21,33 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let inv = INVSTD[c];
     let wc = W[c];
     let bc = B[c];
-    var a1 = 0.0;
-    var a2 = 0.0;
+    var a1 = vec4<f32>(0.0);
+    var a2 = vec4<f32>(0.0);
     var w = bn_walk_start(start, lid, hw);
     loop {
         if (w.e >= end) { break; }
         let idx = (w.n * channels + c) * hw + w.i;
-        let xh = (f32(X[idx]) - m) * inv;
-        var dz = f32(G[idx]);
-        if (ACT != 0u) {
-            dz *= bn_act_grad(vec4<f32>(xh * wc + bc)).x;
+        if (VEC) {
+            let xh = (V4(X[idx]) - vec4<f32>(m)) * inv;
+            var dz = V4(G[idx]);
+            if (ACT != 0u) {
+                dz *= bn_act_grad(xh * wc + vec4<f32>(bc));
+            }
+            a1 += dz;
+            a2 += dz * xh;
+        } else {
+            let xh = (V4(X[idx]).x - m) * inv;
+            var dz = V4(G[idx]).x;
+            if (ACT != 0u) {
+                dz *= bn_act_grad_f32(xh * wc + bc);
+            }
+            a1.x += dz;
+            a2.x += dz * xh;
         }
-        a1 += dz;
-        a2 += dz * xh;
         bn_walk_next(&w, hw);
     }
-    s1[lid] = a1;
-    s2[lid] = a2;
-    workgroupBarrier();
-    for (var s = 128u; s > 0u; s >>= 1u) {
-        if (lid < s) {
-            s1[lid] += s1[lid + s];
-            s2[lid] += s2[lid + s];
-        }
-        workgroupBarrier();
-    }
-    if (lid == 0u) {
-        let o = (c * pu(4u) + chunk) * 2u;
-        PART[o] = s1[0];
-        PART[o + 1u] = s2[0];
-    }
+    return vec2<f32>(
+        select(a1.x, (a1.x + a1.y) + (a1.z + a1.w), VEC),
+        select(a2.x, (a2.x + a2.y) + (a2.z + a2.w), VEC),
+    );
 }

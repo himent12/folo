@@ -110,3 +110,38 @@ fn log_ge1(z: f32) -> f32 {
     let f = bitcast<f32>((bits & 0x007fffffu) | 0x3f800000u);
     return f32(k) * 0.6931471805599453 + log1p_unit(f - 1.0);
 }
+
+// x^y for x >= 0, y >= 0, safe at x = 0 (WGSL leaves pow(0, y) undefined).
+fn pow_pos(x: f32, y: f32) -> f32 {
+    if (y == 0.0) { return 1.0; }
+    if (x <= 0.0) { return 0.0; }
+    return pow(x, y);
+}
+
+// Plain IoU of xyxy boxes a and b (with eps = 1e-7 in denominator).
+fn iou_plain(a: vec4<f32>, b: vec4<f32>) -> f32 {
+    let eps = 1e-7;
+    let w1 = max(a.z - a.x, 0.0);
+    let h1 = max(a.w - a.y, 0.0);
+    let w2 = max(b.z - b.x, 0.0);
+    let h2 = max(b.w - b.y, 0.0);
+    let inter = max(min(a.z, b.z) - max(a.x, b.x), 0.0) * max(min(a.w, b.w) - max(a.y, b.y), 0.0);
+    return inter / (w1 * h1 + w2 * h2 - inter + eps);
+}
+
+// Normalized Wasserstein Distance (NWD) between xyxy boxes a and b with scale constant c (in boxes' units).
+fn nwd_box(a: vec4<f32>, b: vec4<f32>, c: f32) -> f32 {
+    let dcx = 0.5 * (a.x + a.z - b.x - b.z);
+    let dcy = 0.5 * (a.y + a.w - b.y - b.w);
+    let dw = (a.z - a.x) - (b.z - b.x);
+    let dh = (a.w - a.y) - (b.w - b.y);
+    let w2_sq = dcx * dcx + dcy * dcy + 0.25 * (dw * dw + dh * dh);
+    return fexp(-sqrt(w2_sq + 1e-6) / c);
+}
+
+// Scale-adaptive NWD blending weight lambda(s_g) = weight * exp(-(s_g / 24)^2), with s_g^2 = gt_w_px * gt_h_px.
+fn nwd_lambda(gt_w_px: f32, gt_h_px: f32, weight: f32) -> f32 {
+    if (weight <= 0.0) { return 0.0; }
+    let area = max(gt_w_px, 0.0) * max(gt_h_px, 0.0);
+    return weight * fexp(-area / (24.0 * 24.0));
+}

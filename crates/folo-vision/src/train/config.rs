@@ -133,6 +133,21 @@ pub struct TrainConfig {
     /// of a build without the key. Stored with the run, so a resume loads the same teacher.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distill: Option<crate::loss::DistillConfig>,
+    /// Decouple weight decay from SGD/MuSGD Nesterov momentum (P3; default `false` keeps v1 bit-identical).
+    pub decoupled_wd: bool,
+    /// Cautious decoupled weight decay (`u · p > 0` mask) on SGD/MuSGD (P3; default `false`).
+    pub cautious_wd: bool,
+    /// Optional explicit effective weight decay overriding `effective_weight_decay(weight_decay, ...)` (P3 sweep
+    /// `{2e-3, 4e-3, 6e-3}` for decoupled/cautious WD). Default `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wd_eff: Option<f64>,
+    /// Apply exact function-preserving Floor Conv+BN Gauge Normalization on `--weights` load (P3; default `false`).
+    pub gauge_norm: bool,
+    /// Freeze BatchNorm running stats / use eval-mode BN during closed-mosaic epochs (P3; default `false`).
+    pub bn_freeze_close_mosaic: bool,
+    /// Multiplier applied to `.cls` parameter groups' LR during closed-mosaic epochs (e.g. `1/3` decays `3x -> 1x`;
+    /// default `1.0` = no change).
+    pub cls_lr_close_scale: f64,
 }
 
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, and the
@@ -194,6 +209,12 @@ impl Default for TrainConfig {
             musgd: MuSgdConfig::default(),
             transfer: false,
             distill: None,
+            decoupled_wd: false,
+            cautious_wd: false,
+            wd_eff: None,
+            gauge_norm: false,
+            bn_freeze_close_mosaic: false,
+            cls_lr_close_scale: 1.0,
         }
     }
 }
@@ -376,6 +397,26 @@ impl TrainConfig {
         }
         if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
             return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
+        }
+        if !(0.0..=5.0).contains(&l.mal_gamma) {
+            return bad(format!("loss.mal_gamma must be in 0..=5, got {}", l.mal_gamma));
+        }
+        if !(0.0..=1.0).contains(&l.nwd_weight) {
+            return bad(format!("loss.nwd_weight must be in 0..=1, got {}", l.nwd_weight));
+        }
+        if !(0.0..=1.0).contains(&l.tal.nwd_weight) {
+            return bad(format!("loss.tal.nwd_weight must be in 0..=1, got {}", l.tal.nwd_weight));
+        }
+        if let Some(w) = self.wd_eff
+            && !(w.is_finite() && w >= 0.0)
+        {
+            return bad(format!("wd_eff must be a finite number >= 0, got {w}"));
+        }
+        if !(self.cls_lr_close_scale.is_finite() && self.cls_lr_close_scale > 0.0) {
+            return bad(format!(
+                "cls_lr_close_scale must be a finite number > 0, got {}",
+                self.cls_lr_close_scale
+            ));
         }
         if let Some(d) = &self.distill {
             d.validate().map_err(Error::Config)?;

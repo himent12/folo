@@ -143,12 +143,31 @@ pub fn side_precision(mean: f32, var: f32, stride: f32) -> f32 {
     1.0 / (stride * stride * (excess + crate::fusion::DFL_FUSION_EPS))
 }
 
+/// Scale-free DFL bin precision `1 / (max(var − f·(1 − f), 0) + ε)` (in bins⁻²), where `f = mean − floor(mean)`
+/// and `ε =` [`crate::fusion::DFL_FUSION_EPS`]: [`side_precision`] without the `1 / stride²` pixel scaling, used
+/// by [`crate::fusion::ScoreRule::DflConsensus`] (docs/MODEL.md §9.4).
+#[inline]
+pub fn bin_precision(mean: f32, var: f32) -> f32 {
+    let f = mean - mean.floor();
+    let excess = (var - f * (1.0 - f)).max(0.0);
+    1.0 / (excess + crate::fusion::DFL_FUSION_EPS)
+}
+
 /// The four [`side_precision`]s (`l, t, r, b`) of one anchor from its `4 * reg_max` DFL logits (one row of
 /// [`dfl_decode_into`]'s `reg`), at `stride`.
 pub fn side_precisions(row: &[f32], reg_max: usize, stride: f32) -> [f32; 4] {
     std::array::from_fn(|side| {
         let (mean, var) = softmax_moments(&row[side * reg_max..(side + 1) * reg_max]);
         side_precision(mean, var, stride)
+    })
+}
+
+/// The four [`bin_precision`]s (`l, t, r, b`) of one anchor from its `4 * reg_max` DFL logits (one row of
+/// [`dfl_decode_into`]'s `reg`), in bins⁻².
+pub fn bin_precisions(row: &[f32], reg_max: usize) -> [f32; 4] {
+    std::array::from_fn(|side| {
+        let (mean, var) = softmax_moments(&row[side * reg_max..(side + 1) * reg_max]);
+        bin_precision(mean, var)
     })
 }
 

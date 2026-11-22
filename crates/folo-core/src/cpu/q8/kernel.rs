@@ -4,10 +4,14 @@
 //! (`vpdpbusd`) and a portable one, chosen at run time; both give the same integers.
 //!
 //! The epilogue turns a finished tile into outputs: [`Epi::apply`] (portable) and its AVX2 twin, bit for bit the
-//! same (the SiLU is [`silu_q8`], whose scalar and vector forms run the same operations). The twin runs on any CPU
-//! with AVX2 and FMA, VNNI or not; `FOLO_Q8_SCALAR` turns off both vector paths.
+//! same (the SiLU is [`super::silu::silu_q8`], division-free and bit-exact on both paths). The twin runs on any
+//! CPU with AVX2 and FMA, VNNI or not; `FOLO_Q8_SCALAR` turns off both vector paths.
 
 use std::sync::OnceLock;
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) use super::silu::silu_q8_avx2;
+use super::silu::{maxps, minps, silu_q8};
 
 /// Output channels per tile: one C4 group.
 pub const MR: usize = 4;
@@ -16,6 +20,10 @@ pub const NR: usize = 24;
 
 /// A finished tile of i32 accumulators.
 pub type Tile = [[i32; NR]; MR];
+
+/// An L1-resident `f32` tile (`4 × 24 × 4 = 384` bytes) for register-safe sequential per-part concat
+/// accumulation (`tile_f32[r][j] += (acc_p[r][j] - corr_p[r]) * scale_p[r]`).
+pub type TileF32 = [[f32; NR]; MR];
 
 /// `acc = A_panel · B` over `ks` K steps: `a` is the `[ks][MR]` panel, B's row `p` is the `NR` words at
 /// `rows[p] + col`.
@@ -137,88 +145,63 @@ unsafe fn kernel_vnni(ks: usize, a: *const i32, rows: *const *const u32, col: us
     }
 }
 
-/// `max(a, b)` as `vmaxps` computes it (`b` when either is NaN).
-#[inline(always)]
-fn maxps(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
+/// Fold one part's finished `i32` tile into `dst`: `dst[r][j] = (acc[r][j] - corr[r]) * scale[r] + dst[r][j]`.
+/// Scalar and AVX2 execute the exact same FMA operations in the same order.
+pub(crate) fn accumulate_part_f32(acc: &Tile, corr: &[i32; MR], scale: &[f32; MR], dst: &mut TileF32) {
+    #[cfg(target_arch = "x86_64")]
+    if uses_avx2() {
+        // SAFETY: AVX2 and FMA were detected.
+        return unsafe { accumulate_part_f32_avx2(acc, corr, scale, dst) };
+    }
+    for r in 0..MR {
+        let (cr, sr) = (corr[r], scale[r]);
+        for j in 0..NR {
+            dst[r][j] = (acc[r][j].wrapping_sub(cr) as f32).mul_add(sr, dst[r][j]);
+        }
+    }
 }
 
-/// `min(a, b)` as `vminps` computes it (`b` when either is NaN).
-#[inline(always)]
-fn minps(a: f32, b: f32) -> f32 {
-    if a < b { a } else { b }
-}
-
-/// The epilogue's SiLU, `x / (1 + e^{−x})` with the exponent clamped to `±87` (so `e` and `2ⁿ` stay normal) and
-/// `x` to at least `−88` (below it SiLU is under 1e-36): folo-core's `exp` polynomial (as in its vectorised
-/// SiLU, relative error about 1e-7) with one power-of-two scale. The AVX2 epilogue computes the same operations
-/// in the same order (FMAs as `mul_add`), so the same bits. NaN stays NaN.
-#[inline]
-pub fn silu_q8(x: f32) -> f32 {
-    const LOG2E: f32 = std::f32::consts::LOG2_E;
-    let x = maxps(-88.0, x);
-    let t = maxps(minps(-x, 87.0), -87.0);
-    let n = (t * LOG2E).round_ties_even();
-    let r = (-n).mul_add(0.693_359_4, t);
-    let r = (-n).mul_add(-2.121_944_4e-4, r);
-    let mut p: f32 = 1.987_569_1e-4;
-    p = p.mul_add(r, 1.398_199_9e-3);
-    p = p.mul_add(r, 8.333_452e-3);
-    p = p.mul_add(r, 4.166_579_6e-2);
-    p = p.mul_add(r, 1.666_666_5e-1);
-    p = p.mul_add(r, 0.5);
-    let y = (p * r).mul_add(r, r) + 1.0;
-    let e = y * f32::from_bits(((n as i32 + 127) as u32) << 23);
-    x / (1.0 + e)
-}
-
-/// [`silu_q8`] on 8 lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-#[inline]
-pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+unsafe fn accumulate_part_f32_avx2(acc: &Tile, corr: &[i32; MR], scale: &[f32; MR], dst: &mut TileF32) {
     use std::arch::x86_64::*;
-    let x = _mm256_max_ps(_mm256_set1_ps(-88.0), x);
-    let neg = _mm256_xor_ps(x, _mm256_set1_ps(-0.0));
-    let t = _mm256_max_ps(_mm256_min_ps(neg, _mm256_set1_ps(87.0)), _mm256_set1_ps(-87.0));
-    let n = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(_mm256_mul_ps(
-        t,
-        _mm256_set1_ps(std::f32::consts::LOG2_E),
-    ));
-    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693_359_4), t);
-    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.121_944_4e-4), r);
-    let mut p = _mm256_set1_ps(1.987_569_1e-4);
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.398_199_9e-3));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.333_452e-3));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.166_579_6e-2));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.666_666_5e-1));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
-    let y = _mm256_add_ps(_mm256_fmadd_ps(_mm256_mul_ps(p, r), r, r), _mm256_set1_ps(1.0));
-    let s = _mm256_slli_epi32::<23>(_mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)));
-    let e = _mm256_mul_ps(y, _mm256_castsi256_ps(s));
-    _mm256_div_ps(x, _mm256_add_ps(_mm256_set1_ps(1.0), e))
+    // SAFETY: local arrays of fixed length `MR × NR` (`NR = 24 = 3 * 8`).
+    unsafe {
+        for r in 0..MR {
+            let vc = _mm256_set1_epi32(corr[r]);
+            let vs = _mm256_set1_ps(scale[r]);
+            for k in 0..NR / 8 {
+                let a = _mm256_loadu_si256(acc[r].as_ptr().add(8 * k) as *const __m256i);
+                let t = _mm256_cvtepi32_ps(_mm256_sub_epi32(a, vc));
+                let cur = _mm256_loadu_ps(dst[r].as_ptr().add(8 * k));
+                let next = _mm256_fmadd_ps(t, vs, cur);
+                _mm256_storeu_ps(dst[r].as_mut_ptr().add(8 * k), next);
+            }
+        }
+    }
 }
 
-/// The output of a tile's epilogue.
+/// The output of a tile's epilogue (supports per-channel C4 grids at zero extra SIMD cost).
 #[derive(Clone, Copy)]
-pub(crate) enum Out {
-    /// u8 codes on the grid `(inv_scale, zero)`, packed four channels to a word (C4).
-    U8 { inv: f32, zero: i32 },
+pub(crate) enum Out<'a> {
+    /// u8 codes on per-channel grids `(inv_scale[r], zero[r])`, packed four channels to a word (C4).
+    U8 { inv: &'a [f32; MR], zero: &'a [i32; MR] },
     /// `f32` values.
     F32,
 }
 
-/// One output channel group's epilogue: `y = (acc − corr) · scale + bias`, SiLU if `silu`, `+ rs · (r − rz)`
-/// with a residual, then quantised (`clamp(round(y · inv) + zero, 0, 255)`, ties to even) or kept `f32`.
+/// One output channel group's epilogue: `y = (acc − corr) · scale + bias` (or `tile_f32 + bias`), SiLU if `silu`,
+/// `+ rs[r] · (byte(res, r) − rz[r])` with a residual, then quantised per channel (`clamp(round(y · inv[r]) +
+/// zero[r], 0, 255)`, ties to even) or kept `f32`.
 #[derive(Clone, Copy)]
 pub(crate) struct Epi<'a> {
     pub corr: &'a [i32; MR],
     pub scale: &'a [f32; MR],
     pub bias: &'a [f32; MR],
     pub silu: bool,
-    /// Residual grid `(scale, zero)`.
-    pub res: Option<(f32, i32)>,
-    pub out: Out,
+    /// Per-channel residual grids `(scale[r], zero[r])`.
+    pub res: Option<(&'a [f32; MR], &'a [i32; MR])>,
+    pub out: Out<'a>,
 }
 
 /// The value of row `r` of word `w` (C4: byte `r`).
@@ -229,15 +212,20 @@ fn byte(w: u32, r: usize) -> i32 {
 
 impl Epi<'_> {
     #[inline(always)]
-    fn value(&self, r: usize, acc: i32, res: u32) -> f32 {
-        let mut y = (acc.wrapping_sub(self.corr[r]) as f32).mul_add(self.scale[r], self.bias[r]);
+    fn finish_value(&self, r: usize, mut y: f32, res: u32) -> f32 {
         if self.silu {
             y = silu_q8(y);
         }
         if let Some((rs, rz)) = self.res {
-            y = rs.mul_add((byte(res, r) - rz) as f32, y);
+            y = rs[r].mul_add((byte(res, r) - rz[r]) as f32, y);
         }
         y
+    }
+
+    #[inline(always)]
+    fn value(&self, r: usize, acc: i32, res: u32) -> f32 {
+        let y = (acc.wrapping_sub(self.corr[r]) as f32).mul_add(self.scale[r], self.bias[r]);
+        self.finish_value(r, y, res)
     }
 
     /// The portable epilogue of `acc` for the first `n` columns: C4 words into `q` (with `res` the residual
@@ -257,8 +245,33 @@ impl Epi<'_> {
                 match self.out {
                     Out::F32 => f[r][j] = y,
                     Out::U8 { inv, zero } => {
-                        let v = minps(maxps(y * inv, -512.0), 512.0).round_ties_even() as i32;
-                        word |= ((v + zero).clamp(0, 255) as u32) << (8 * r);
+                        let v = minps(maxps(y * inv[r], -512.0), 512.0).round_ties_even() as i32;
+                        word |= ((v + zero[r]).clamp(0, 255) as u32) << (8 * r);
+                    }
+                }
+            }
+            q[j] = word;
+        }
+    }
+
+    /// Portable epilogue from a pre-accumulated `TileF32` (adds `bias`, runs SiLU/residual/requant).
+    pub(crate) fn apply_f32(
+        &self,
+        tile: &TileF32,
+        n: usize,
+        res: &[u32; NR],
+        q: &mut [u32; NR],
+        f: &mut [[f32; NR]; MR],
+    ) {
+        for j in 0..n {
+            let mut word = 0u32;
+            for r in 0..MR {
+                let y = self.finish_value(r, tile[r][j] + self.bias[r], res[j]);
+                match self.out {
+                    Out::F32 => f[r][j] = y,
+                    Out::U8 { inv, zero } => {
+                        let v = minps(maxps(y * inv[r], -512.0), 512.0).round_ties_even() as i32;
+                        word |= ((v + zero[r]).clamp(0, 255) as u32) << (8 * r);
                     }
                 }
             }
@@ -276,9 +289,24 @@ impl Epi<'_> {
         self.apply(acc, NR, res, q, f)
     }
 
-    /// The AVX2 epilogue, 8 columns at a time. u8 outputs: the four rows' codes (`|v| ≤ 512`, so exact in i16)
-    /// are packed to i16 with signed saturation, the zero point is added, the result is packed to u8 with unsigned
-    /// saturation (the clamp to `[0, 255]`), and each 128-bit lane's 4 × 4 bytes are transposed into C4 words.
+    /// [`Epi::apply_f32`] for all `NR` columns, vectorised when the CPU has AVX2 and FMA; the same bits.
+    pub(crate) fn apply_f32_full(
+        &self,
+        tile: &TileF32,
+        res: &[u32; NR],
+        q: &mut [u32; NR],
+        f: &mut [[f32; NR]; MR],
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        if uses_avx2() {
+            // SAFETY: AVX2 and FMA were detected.
+            return unsafe { self.apply_f32_avx2(tile, res, q, f) };
+        }
+        self.apply_f32(tile, NR, res, q, f)
+    }
+
+    /// The AVX2 epilogue, 8 columns at a time. Per-channel zero points are packed into `z01` / `z23` once before
+    /// the loop so per-channel C4 quantisation costs zero extra SIMD instructions.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn apply_avx2(
@@ -292,11 +320,20 @@ impl Epi<'_> {
         // SAFETY: every pointer is to a local array of the right length.
         unsafe {
             let (lo, hi) = (_mm256_set1_ps(-512.0), _mm256_set1_ps(512.0));
-            // Within each 128-bit lane: row-major bytes (row r, pixel i at 4r + i) to pixel-major (4i + r).
             let transpose = _mm256_setr_epi8(
                 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14,
                 3, 7, 11, 15,
             );
+            let (z01, z23) = match self.out {
+                Out::U8 { zero, .. } => {
+                    let (z0, z1, z2, z3) = (zero[0] as i16, zero[1] as i16, zero[2] as i16, zero[3] as i16);
+                    (
+                        _mm256_setr_epi16(z0, z0, z0, z0, z1, z1, z1, z1, z0, z0, z0, z0, z1, z1, z1, z1),
+                        _mm256_setr_epi16(z2, z2, z2, z2, z3, z3, z3, z3, z2, z2, z2, z2, z3, z3, z3, z3),
+                    )
+                }
+                Out::F32 => (_mm256_setzero_si256(), _mm256_setzero_si256()),
+            };
             for k in 0..NR / 8 {
                 let w = _mm256_loadu_si256(res.as_ptr().add(8 * k) as *const __m256i);
                 let mut v = [_mm256_setzero_si256(); MR];
@@ -313,22 +350,89 @@ impl Epi<'_> {
                             _mm256_srlv_epi32(w, _mm256_set1_epi32(8 * r as i32)),
                             _mm256_set1_epi32(0xFF),
                         );
-                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz)));
-                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs), d, y);
+                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz[r])));
+                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs[r]), d, y);
                     }
                     match self.out {
                         Out::F32 => _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y),
                         Out::U8 { inv, .. } => {
-                            let y =
-                                _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv)), lo), hi);
+                            let y = _mm256_min_ps(
+                                _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv[r])), lo),
+                                hi,
+                            );
                             *vr = _mm256_cvtps_epi32(y);
                         }
                     }
                 }
-                if let Out::U8 { zero, .. } = self.out {
-                    let z = _mm256_set1_epi16(zero as i16);
-                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z);
-                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z);
+                if matches!(self.out, Out::U8 { .. }) {
+                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
+                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
+                    let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
+                    _mm256_storeu_si256(q.as_mut_ptr().add(8 * k) as *mut __m256i, bytes);
+                }
+            }
+        }
+    }
+
+    /// AVX2 epilogue from a pre-accumulated `TileF32`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn apply_f32_avx2(
+        &self,
+        tile: &TileF32,
+        res: &[u32; NR],
+        q: &mut [u32; NR],
+        f: &mut [[f32; NR]; MR],
+    ) {
+        use std::arch::x86_64::*;
+        // SAFETY: every pointer is to a local array of the right length.
+        unsafe {
+            let (lo, hi) = (_mm256_set1_ps(-512.0), _mm256_set1_ps(512.0));
+            let transpose = _mm256_setr_epi8(
+                0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14,
+                3, 7, 11, 15,
+            );
+            let (z01, z23) = match self.out {
+                Out::U8 { zero, .. } => {
+                    let (z0, z1, z2, z3) = (zero[0] as i16, zero[1] as i16, zero[2] as i16, zero[3] as i16);
+                    (
+                        _mm256_setr_epi16(z0, z0, z0, z0, z1, z1, z1, z1, z0, z0, z0, z0, z1, z1, z1, z1),
+                        _mm256_setr_epi16(z2, z2, z2, z2, z3, z3, z3, z3, z2, z2, z2, z2, z3, z3, z3, z3),
+                    )
+                }
+                Out::F32 => (_mm256_setzero_si256(), _mm256_setzero_si256()),
+            };
+            for k in 0..NR / 8 {
+                let w = _mm256_loadu_si256(res.as_ptr().add(8 * k) as *const __m256i);
+                let mut v = [_mm256_setzero_si256(); MR];
+                for (r, vr) in v.iter_mut().enumerate() {
+                    let t = _mm256_loadu_ps(tile[r].as_ptr().add(8 * k));
+                    let mut y = _mm256_add_ps(t, _mm256_set1_ps(self.bias[r]));
+                    if self.silu {
+                        y = silu_q8_avx2(y);
+                    }
+                    if let Some((rs, rz)) = self.res {
+                        let b = _mm256_and_si256(
+                            _mm256_srlv_epi32(w, _mm256_set1_epi32(8 * r as i32)),
+                            _mm256_set1_epi32(0xFF),
+                        );
+                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz[r])));
+                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs[r]), d, y);
+                    }
+                    match self.out {
+                        Out::F32 => _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y),
+                        Out::U8 { inv, .. } => {
+                            let y = _mm256_min_ps(
+                                _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv[r])), lo),
+                                hi,
+                            );
+                            *vr = _mm256_cvtps_epi32(y);
+                        }
+                    }
+                }
+                if matches!(self.out, Out::U8 { .. }) {
+                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
+                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
                     let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
                     _mm256_storeu_si256(q.as_mut_ptr().add(8 * k) as *mut __m256i, bytes);
                 }

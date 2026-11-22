@@ -355,6 +355,11 @@ pub enum ScoreArg {
     None,
     /// The class score scaled by the score mass of the box's cluster.
     Consensus,
+    /// Exclusive logit-space consensus: each candidate votes only for the kept box that suppressed it.
+    Elc,
+    /// Scale-free exclusive logit-space consensus combined with fused DFL excess-variance precision.
+    #[value(name = "dfl-consensus")]
+    DflConsensus,
 }
 
 impl From<ScoreArg> for folo_vision::fusion::ScoreRule {
@@ -362,6 +367,8 @@ impl From<ScoreArg> for folo_vision::fusion::ScoreRule {
         match s {
             ScoreArg::None => folo_vision::fusion::ScoreRule::None,
             ScoreArg::Consensus => folo_vision::fusion::ScoreRule::Consensus,
+            ScoreArg::Elc => folo_vision::fusion::ScoreRule::Elc,
+            ScoreArg::DflConsensus => folo_vision::fusion::ScoreRule::DflConsensus,
         }
     }
 }
@@ -473,9 +480,10 @@ pub struct ValArgs {
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
-    /// Score of each kept box (docs/MODEL.md §9.4): `consensus` scales it by the score mass of its cluster and
-    /// re-sorts. Boxes and the kept set do not change, but the score scale does (a box that fired alone is divided
-    /// by up to 3.16). Off by default.
+    /// Score of each kept box (docs/MODEL.md §9.4): `elc` updates log-odds from exclusive NMS suppressor mass,
+    /// `dfl-consensus` adds scale-free fused DFL precision (both preserve the `[0, 1]` scale and work best with
+    /// `--fusion dfl --iou 0.7 --max-det 1000`), and `consensus` scales probabilities by cluster mass (changes the
+    /// score scale). Off by default.
     #[arg(long, value_enum, default_value_t = ScoreArg::None)]
     pub score: ScoreArg,
     /// Head to evaluate [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
@@ -536,9 +544,10 @@ pub struct PredictArgs {
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
-    /// Score of each kept box (docs/MODEL.md §9.4): `consensus` scales it by the score mass of its cluster (the
-    /// candidates above --conf) and re-sorts. Boxes and the kept set do not change, but the score scale does (a box
-    /// that fired alone is divided by up to 3.16), and --conf still applies to the class score. Off by default.
+    /// Score of each kept box (docs/MODEL.md §9.4): `elc` and `dfl-consensus` update log-odds from exclusive
+    /// suppressor mass (and fused DFL precision) while preserving the `[0, 1]` scale, gathering supporting anchors
+    /// down to 0.10 before filtering final scores by --conf; `consensus` scales probabilities by cluster mass
+    /// (changes the score scale). Off by default.
     #[arg(long, value_enum, default_value_t = ScoreArg::None)]
     pub score: ScoreArg,
     /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`

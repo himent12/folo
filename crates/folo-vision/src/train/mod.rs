@@ -53,6 +53,7 @@ mod device;
 mod epoch;
 mod events;
 mod feed;
+pub mod gauge;
 mod run;
 mod setup;
 mod teacher;
@@ -65,6 +66,7 @@ pub use config::{
 };
 pub use device::{amp_available, amp_not_supported, amp_support, can_place, place_model};
 pub use events::{EventSink, channel_sink, event_record, rfc3339_now};
+pub use gauge::{GAUGE_TARGET_NORM, GaugeNormReport, apply_floor_gauge_norm};
 pub use run::update_best;
 pub use setup::{resumed_close_mosaic, schedule_warnings};
 pub use teacher::resolve_teacher;

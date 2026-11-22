@@ -27,7 +27,9 @@ use folo_gpu::GpuContext;
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::head::{HeadLevel, HeadMode};
-use super::predict::{candidates_of_records, dfl_moments_with, moment_bins, precision_from_moments};
+use super::predict::{
+    bin_precision_from_moments, candidates_of_records, dfl_moments_with, moment_bins, precision_from_moments,
+};
 use super::{FoloModel, HeadOutput, ImageCandidates, each_tensor};
 use crate::nms::NmsConfig;
 
@@ -41,7 +43,7 @@ const SITES_PLAN: u64 = 1;
 /// Candidate slots per image of the P3, P4 and P5 levels (at most the level's pixels). At `conf = 0.25` over COCO
 /// val2017 with the published weights the most any image has is far below (docs/notes/hill/r3-lazy-head.md); the
 /// slots past an image's candidates cost a workgroup that returns at once.
-pub const GPU_SITE_SLOTS: [usize; 3] = [1024, 512, 256];
+pub const GPU_SITE_SLOTS: [usize; 3] = [1024, 512, 512];
 
 /// `c` (a fused `Conv` block) at the sites `sites` ([`Tensor::conv2d_act_sites`]); `None` when the device has no
 /// kernel for it.
@@ -76,8 +78,10 @@ impl FoloModel {
         let (h, w) = self.check_input(x)?;
         let levels = self.site_levels();
         let o2o = self.head_mode == HeadMode::O2o && self.head.o2o.is_some();
-        let bins =
-            self.wants_precisions(nms).then(|| device_bins(x.device(), self.head.reg_max)).transpose()?;
+        let want_side = self.wants_precisions(nms);
+        let want_bin = self.wants_bin_precisions(nms);
+        let cand_conf = nms.candidate_conf_for(self.head_mode);
+        let bins = (want_side || want_bin).then(|| device_bins(x.device(), self.head.reg_max)).transpose()?;
         let tensors = |f: &mut dyn FnMut(&Tensor)| {
             each_tensor(self, f);
             bins.iter().for_each(&mut *f);
@@ -86,13 +90,13 @@ impl FoloModel {
         // parameter block), the slots, and whether the moments and site lists are results. The rest of `nms` is
         // the host's post-process.
         let [s3, s4, s5] = GPU_SITE_SLOTS.map(|s| s as u64);
-        let key = [SITES_PLAN, o2o as u64, bins.is_some() as u64, nms.conf.to_bits() as u64, s3, s4, s5];
+        let key = [SITES_PLAN, o2o as u64, bins.is_some() as u64, cand_conf.to_bits() as u64, s3, s4, s5];
         // The features of a call that found no site kernel, for the dense head. Such a call returns no results, so
         // it is never a plan, and every call of it runs (and fills this).
         let mut unsited = None;
         let out = self.plans.run(&key, x, &tensors, |x| {
             let feats = self.features(x, None)?;
-            let out = self.sites_on_device(levels, &feats, nms.conf, bins.as_ref())?;
+            let out = self.sites_on_device(levels, &feats, cand_conf, bins.as_ref())?;
             if out.is_none() {
                 unsited = Some(feats);
             }
@@ -102,7 +106,7 @@ impl FoloModel {
             // No site kernel on this device: the dense head on the same features.
             return self.dense_candidates(x, unsited, nms, h, w);
         }
-        let (cands, fits) = self.read_sites(&out, levels, h, w)?;
+        let (cands, fits) = self.read_sites(&out, levels, h, w, want_side, want_bin)?;
         if fits.iter().all(|&f| f) {
             return Ok(cands);
         }
@@ -206,6 +210,8 @@ impl FoloModel {
         levels: &[HeadLevel],
         h: usize,
         w: usize,
+        want_side: bool,
+        want_bin: bool,
     ) -> Result<(Vec<ImageCandidates>, Vec<bool>)> {
         let words = out[0].dims()[1];
         let v = out[0].to_vec::<u32>()?;
@@ -213,8 +219,11 @@ impl FoloModel {
         let mut fits = Vec::with_capacity(cands.capacity());
         for row in v.chunks_exact(words) {
             let n = (row[0] as usize).min((words - 2) / 7);
-            cands
-                .push(ImageCandidates { cands: candidates_of_records(&row[2..2 + 7 * n]), precisions: None });
+            cands.push(ImageCandidates {
+                cands: candidates_of_records(&row[2..2 + 7 * n]),
+                precisions: None,
+                bin_precisions: None,
+            });
             fits.push(row[1] == 0);
         }
         if let [_, moments, sites @ ..] = out {
@@ -230,15 +239,13 @@ impl FoloModel {
                     (s.dims()[1] - 1, lv.stride as f32, at)
                 })
                 .collect();
-            self.site_precisions(moments, sites, &layout, &mut cands, &fits)?;
+            self.site_precisions(moments, sites, &layout, &mut cands, &fits, want_side, want_bin)?;
         }
         Ok((cands, fits))
     }
 
-    /// DFL fusion's side precisions of the fitting images' candidates: [`precision_from_moments`] at each
-    /// candidate's column of `moments` ([`super::predict::dfl_moments`] of the levels' box-logit columns side by
-    /// side; `layout` holds each level's cap, stride and first anchor). A candidate's column holds its anchor's
-    /// dense box logits bit for bit, so its precisions are the dense path's bit for bit.
+    /// DFL fusion / DFL consensus precisions of the fitting images' candidates from the site columns' `moments`.
+    #[allow(clippy::too_many_arguments)]
     fn site_precisions(
         &self,
         moments: &Tensor,
@@ -246,6 +253,8 @@ impl FoloModel {
         layout: &[(usize, f32, usize)],
         cands: &mut [ImageCandidates],
         fits: &[bool],
+        want_side: bool,
+        want_bin: bool,
     ) -> Result<()> {
         let cols: usize = layout.iter().map(|l| l.0).sum();
         let m = moments.to_vec::<f32>()?;
@@ -268,17 +277,21 @@ impl FoloModel {
                 col0 += cap;
             }
             let img = &m[i * 8 * cols..(i + 1) * 8 * cols];
-            let prec = c
-                .cands
-                .iter()
-                .map(|c| {
-                    let &(j, stride) = at.get(&c.anchor).ok_or_else(|| {
-                        folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", c.anchor))
-                    })?;
-                    Ok(precision_from_moments(img, cols, j, stride))
-                })
-                .collect::<Result<_>>()?;
-            c.precisions = Some(prec);
+            let mut prec = want_side.then(|| Vec::with_capacity(c.cands.len()));
+            let mut bprec = want_bin.then(|| Vec::with_capacity(c.cands.len()));
+            for cand in &c.cands {
+                let &(j, stride) = at.get(&cand.anchor).ok_or_else(|| {
+                    folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", cand.anchor))
+                })?;
+                if let Some(p) = prec.as_mut() {
+                    p.push(precision_from_moments(img, cols, j, stride));
+                }
+                if let Some(bp) = bprec.as_mut() {
+                    bp.push(bin_precision_from_moments(img, cols, j));
+                }
+            }
+            c.precisions = prec;
+            c.bin_precisions = bprec;
         }
         Ok(())
     }

@@ -40,6 +40,10 @@ pub struct TalSettings {
     pub eps: f32,
     /// Candidate boxes widen sides shorter than this (pixels).
     pub min_box_size: f32,
+    /// Epsilon-free TAL target normalization.
+    pub eps_free: bool,
+    /// Scale-adaptive NWD blending weight in TAL (`0.0` = legacy CIoU).
+    pub nwd_weight: f32,
 }
 
 /// Loss settings (folo-vision's `LossConfig`).
@@ -51,6 +55,10 @@ pub struct LossSettings {
     pub gains: [f32; 3],
     /// Assigner settings.
     pub tal: TalSettings,
+    /// Matchability-Aware Loss exponent on background (`0.0` = plain BCE).
+    pub mal_gamma: f32,
+    /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
+    pub nwd_weight: f32,
 }
 
 /// The anchors: points in grid units and the stride of each.
@@ -81,7 +89,7 @@ pub struct Assignment {
     pub slots: Tensor,
     /// `[2, B, A]` u32: per anchor `label + 1` (0 = background), then `t` bits.
     pub dense: Tensor,
-    meta: Tensor,
+    pub(crate) meta: Tensor,
     misc: Tensor,
 }
 
@@ -218,6 +226,10 @@ fn check(
         beta: tal.beta,
         eps: tal.eps,
         min_box_size: tal.min_box_size,
+        eps_free: tal.eps_free,
+        tal_nwd_weight: tal.nwd_weight,
+        mal_gamma: 0.0,
+        box_nwd_weight: 0.0,
     })
 }
 
@@ -344,9 +356,23 @@ pub fn detection_loss(
     gts: &[ImageGt<'_>],
     s: &LossSettings,
 ) -> Result<DeviceLoss> {
+    Ok(detection_loss_with_assignment(box_raw, cls_raw, anchors, gts, s)?.0)
+}
+
+/// [`detection_loss`], also returning the device [`Assignment`] so distillation (`bckd_gamma`, `gt_verify`)
+/// can reuse it without running the assigner twice.
+pub fn detection_loss_with_assignment(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &AnchorTable<'_>,
+    gts: &[ImageGt<'_>],
+    s: &LossSettings,
+) -> Result<(DeviceLoss, Assignment)> {
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
-    let d = asg.desc;
+    let mut d = asg.desc;
+    d.mal_gamma = s.mal_gamma;
+    d.box_nwd_weight = s.nwd_weight;
     let ctx = &bufs.ctx;
     let raw = |t: &Tensor| dense_buffer(t).ok_or_else(|| err("assignment tensor is not dense"));
     let (dense_b, misc_b, slot_b, pick_b, meta_b) =
@@ -376,8 +402,7 @@ pub fn detection_loss(
     // The caller gets a copy of the stats, so nothing it does to them can change the backward.
     let (public, public_b) = bufs.alloc(DType::F32, &[12], false)?;
     ctx.copy(&stats_b, 0, &public_b, 0, 48);
-    drop(asg);
-    Ok(DeviceLoss { total, stats: public })
+    Ok((DeviceLoss { total, stats: public }, asg))
 }
 
 /// The multi-label candidates of a decoded head (validation's NMS input) on the device, so only they are

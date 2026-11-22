@@ -52,8 +52,11 @@ mod tests;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
-pub use distill::{DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss};
-pub use terms::{ciou, loss_with_assignment};
+pub use distill::{
+    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_with_context,
+    gt_verify_weights_cpu,
+};
+pub use terms::{ciou, loss_with_assignment, nwd_loss};
 
 use crate::assign::TalConfig;
 use crate::boxes::Xyxy;
@@ -83,11 +86,24 @@ pub struct LossConfig {
     pub reg_max: usize,
     /// Assigner settings.
     pub tal: TalConfig,
+    /// Matchability-Aware Loss (MAL) background focal exponent (`0.0` = plain BCE). When `> 0`, negatives use
+    /// `p^γ · softplus(x)` while positives keep 100% unweighted BCE.
+    pub mal_gamma: f32,
+    /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = pure CIoU).
+    pub nwd_weight: f32,
 }
 
 impl Default for LossConfig {
     fn default() -> Self {
-        Self { box_gain: 7.5, cls_gain: 0.5, dfl_gain: 1.5, reg_max: 16, tal: TalConfig::default() }
+        Self {
+            box_gain: 7.5,
+            cls_gain: 0.5,
+            dfl_gain: 1.5,
+            reg_max: 16,
+            tal: TalConfig::default(),
+            mal_gamma: 0.0,
+            nwd_weight: 0.0,
+        }
     }
 }
 
@@ -359,6 +375,40 @@ pub fn detection_loss(
         return detection_loss_device(box_raw, cls_raw, anchors, targets, cfg);
     }
     detection_loss_host(box_raw, cls_raw, anchors, targets, cfg)
+}
+
+/// Supervised assignment context kept alongside [`LossOutput`] when distillation needs GT verification or
+/// conflict-free BCKD clamping (zero duplicate assigner pass).
+pub enum DistillAssignment {
+    /// Host assignment.
+    Host(BatchAssignment),
+    /// Device assignment buffers on `folo-gpu`.
+    Device(folo_gpu::detect::Assignment),
+}
+
+/// [`detection_loss`], also returning the supervised [`DistillAssignment`] when `keep_assignment` is true.
+pub fn detection_loss_for_distill(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+    keep_assignment: bool,
+) -> Result<(LossOutput, Option<DistillAssignment>)> {
+    if !keep_assignment {
+        return Ok((detection_loss(box_raw, cls_raw, anchors, targets, cfg)?, None));
+    }
+    if device_loss_supported(box_raw, cfg) {
+        let (out, asg) =
+            device::detection_loss_device_with_assignment(box_raw, cls_raw, anchors, targets, cfg)?;
+        return Ok((out, asg.map(DistillAssignment::Device)));
+    }
+    let asg = assign_batch(box_raw, cls_raw, anchors, targets, cfg)?;
+    if !asg.inputs_finite {
+        return Ok((nan_loss(cls_raw.device())?, None));
+    }
+    let out = loss_with_assignment(box_raw, cls_raw, anchors, &asg, cfg)?;
+    Ok((out, Some(DistillAssignment::Host(asg))))
 }
 
 /// Whether [`detection_loss`] runs on the device for these outputs: they live on a folo-gpu device and `topk`

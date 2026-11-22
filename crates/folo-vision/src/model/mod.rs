@@ -40,6 +40,7 @@ mod lazy;
 mod lazy_gpu;
 mod predict;
 pub mod quant;
+pub mod v2;
 
 use folo_core::rng::Rng;
 use std::sync::Arc;
@@ -567,6 +568,28 @@ impl FoloModel {
         self.forward_impl(x, Some(trace), self.head_mode)
     }
 
+    /// Whether CPU int8 inference with the direct `u8` stem is active for this model.
+    pub(crate) fn int8_u8_stem_active(&self) -> bool {
+        self.int8
+            .as_ref()
+            .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
+            && self.device().is_cpu()
+            && !self.is_training()
+            && self.config.in_channels == 3
+    }
+
+    /// Forward pass reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas straight into the direct `u8`
+    /// int8 stem (skipping `f32` canvas materialisation).
+    pub(crate) fn forward_rgb0_u8(&self, rgb0: &[u32], b: usize, h: usize, w: usize) -> Result<HeadOutput> {
+        self.check_hw(b, h, w)?;
+        let plan = self
+            .int8
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("forward_rgb0_u8 requires an int8 plan".into()))?;
+        let feats = quant::exec::features_rgb0_u8(self, plan, rgb0, b, h, w)?;
+        self.head_from_features(feats, h, w, self.head_mode)
+    }
+
     /// The forward pass: [`FoloModel::features`], then the head.
     fn forward_impl(
         &self,
@@ -575,7 +598,17 @@ impl FoloModel {
         head_mode: HeadMode,
     ) -> Result<HeadOutput> {
         let (h, w) = self.check_input(x)?;
-        let [x16, x19, x22] = self.features(x, trace)?;
+        let feats = self.features(x, trace)?;
+        self.head_from_features(feats, h, w, head_mode)
+    }
+
+    fn head_from_features(
+        &self,
+        [x16, x19, x22]: [Tensor; 3],
+        h: usize,
+        w: usize,
+        head_mode: HeadMode,
+    ) -> Result<HeadOutput> {
         let feats = [&x16, &x19, &x22];
         let (mode, (box_raw, cls_raw), o2o) = if self.is_training() {
             (HeadMode::O2m, self.head.forward(feats)?, self.head.forward_o2o(feats)?)
@@ -655,16 +688,24 @@ impl FoloModel {
         Ok([x16, x19, x22])
     }
 
+    fn check_hw(&self, b: usize, h: usize, w: usize) -> Result<()> {
+        let s = *self.config.strides.last().expect("validated") as usize;
+        if b == 0 || h == 0 || w == 0 || !h.is_multiple_of(s) || !w.is_multiple_of(s) {
+            return Err(Error::Invalid(format!(
+                "FoloModel::forward: input [{b}, {}, {h}, {w}] must be non-empty with H and W multiples of {s}",
+                self.config.in_channels
+            )));
+        }
+        Ok(())
+    }
+
     fn check_input(&self, x: &Tensor) -> Result<(usize, usize)> {
         let bad = |why: &str| Error::Invalid(format!("FoloModel::forward: input {:?} {why}", x.dims()));
         let (b, c, h, w) = x.dims4().map_err(|_| bad("must be [B, 3, H, W]"))?;
         if c != self.config.in_channels {
             return Err(bad(&format!("must have {} channels", self.config.in_channels)));
         }
-        let s = *self.config.strides.last().expect("validated") as usize;
-        if b == 0 || h == 0 || w == 0 || !h.is_multiple_of(s) || !w.is_multiple_of(s) {
-            return Err(bad(&format!("must be non-empty with H and W multiples of {s}")));
-        }
+        self.check_hw(b, h, w)?;
         Ok((h, w))
     }
 

@@ -3,25 +3,23 @@
 //! parameters, the statistics and every sum are f32.
 //!
 //! Forward, three dispatches:
-//! 1. `bn_stats`: each workgroup takes one channel and one chunk of its `N·H·W` values and writes a Welford
-//!    partial (count, mean, M2), merged across the workgroup with Chan et al.'s pairwise formula. Chunks are
-//!    sized so the GPU fills up even when there are few channels and long planes.
+//! 1. `bn_stats`: each workgroup takes one channel and one chunk of its `N·H·W` values (`vec4` when `H·W` is a
+//!    multiple of 4), computes block-shifted 2-moment sums per thread (zero divisions in the hot loop, zero
+//!    catastrophic cancellation), converts once to Welford `(count, mean, M2)` and merges across the workgroup
+//!    using 1-barrier 32-wide `subgroupAdd` + Chan's parallel variance identity when the device supports 32-wide
+//!    subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (WARP / Lavapipe).
 //! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance,
 //!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
 //!    place.
-//! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4. Centring
-//!    first matters: the expanded `x · scale + shift` loses everything to cancellation when the mean is large
-//!    against the spread.
+//! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4.
 //!
 //! Backward (the analytic BatchNorm gradient through the activation), three dispatches:
-//! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂`, where
-//!    `x̂ = (x − mean) · invstd`, `z = x̂ · w + b` is recomputed and `dz = g · act'(z)`;
+//! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂` (`vec4` when `H·W` is a multiple
+//!    of 4, evaluating `bn_act_grad` on 4 real lanes at once and `bn_act_grad_f32` on odd `H·W`; 1-barrier
+//!    `subgroupAdd` when available, portable shared-memory fallback otherwise);
 //! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂`;
-//! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, with `x̂` and `z` recomputed by
-//!    the same expressions as the forward and the reduction pass.
-//!
-//! So a forward reads `x` twice and writes `y` once, and a backward reads `x` and `g` twice and writes `dx`
-//! once, against about ten passes forward and twenty backward for BatchNorm + SiLU as separate ops.
+//! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, `vec4` when `H·W` is a multiple
+//!    of 4.
 
 use super::{check_buf, prod, vec_prelude, vec_prelude_f16};
 use crate::DType;
@@ -31,6 +29,145 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 const COMMON: &str = include_str!("../shaders/bn_common.wgsl");
 const WELFORD: &str = include_str!("../shaders/bn_welford.wgsl");
+
+/// Tests set this to exercise the portable shared-memory fallback even on hardware with 32-wide subgroups.
+#[cfg(test)]
+pub(crate) static FORCE_NO_SUBGROUPS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn use_subgroups(ctx: &GpuContext) -> bool {
+    #[cfg(test)]
+    if FORCE_NO_SUBGROUPS.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let caps = ctx.caps();
+    caps.subgroups && caps.subgroup_size == (32, 32)
+}
+
+const STATS_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> wn: array<f32, 8>;
+var<workgroup> wm: array<f32, 8>;
+var<workgroup> wq: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let c = wid.y;
+    let chunk = wid.x;
+    let t = bn_stats_thread(c, chunk, lid);
+    let cnt = t.x;
+    let mean = t.y;
+    let m2 = t.z;
+    let sg_n = subgroupAdd(cnt);
+    let sg_sum = subgroupAdd(select(0.0, cnt * mean, cnt > 0.0));
+    let sg_mean = select(0.0, sg_sum / sg_n, sg_n > 0.0);
+    let sg_d = mean - sg_mean;
+    let sg_m2 = subgroupAdd(select(0.0, m2 + cnt * sg_d * sg_d, cnt > 0.0));
+    let sg = min(sgid, 7u);
+    if (lane == 0u) {
+        wn[sg] = sg_n;
+        wm[sg] = sg_mean;
+        wq[sg] = sg_m2;
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        var na = wn[0];
+        var ma = wm[0];
+        var qa = wq[0];
+        for (var i = 1u; i < 8u; i += 1u) {
+            let nb = wn[i];
+            if (na == 0.0) {
+                na = nb;
+                ma = wm[i];
+                qa = wq[i];
+            } else if (nb > 0.0) {
+                let n = na + nb;
+                let d = wm[i] - ma;
+                ma += d * (nb / n);
+                qa += wq[i] + d * d * (na * nb / n);
+                na = n;
+            }
+        }
+        let o = (c * pu(4u) + chunk) * 3u;
+        PART[o] = na;
+        PART[o + 1u] = ma;
+        PART[o + 2u] = qa;
+    }
+}
+"#;
+
+const STATS_MAIN_PORTABLE: &str = r#"
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let c = wid.y;
+    let chunk = wid.x;
+    let t = bn_stats_thread(c, chunk, lid);
+    wn[lid] = t.x;
+    wm[lid] = t.y;
+    wq[lid] = t.z;
+    workgroupBarrier();
+    bn_tree_merge(lid);
+    if (lid == 0u) {
+        let o = (c * pu(4u) + chunk) * 3u;
+        PART[o] = wn[0];
+        PART[o + 1u] = wm[0];
+        PART[o + 2u] = wq[0];
+    }
+}
+"#;
+
+const BWD_REDUCE_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> s1: array<f32, 8>;
+var<workgroup> s2: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let c = wid.y;
+    let chunk = wid.x;
+    let a = bn_bwd_reduce_thread(c, chunk, lid);
+    let r1 = subgroupAdd(a.x);
+    let r2 = subgroupAdd(a.y);
+    let sg = min(sgid, 7u);
+    if (lane == 0u) {
+        s1[sg] = r1;
+        s2[sg] = r2;
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        let o = (c * pu(4u) + chunk) * 2u;
+        PART[o] = ((s1[0] + s1[1]) + (s1[2] + s1[3])) + ((s1[4] + s1[5]) + (s1[6] + s1[7]));
+        PART[o + 1u] = ((s2[0] + s2[1]) + (s2[2] + s2[3])) + ((s2[4] + s2[5]) + (s2[6] + s2[7]));
+    }
+}
+"#;
+
+const BWD_REDUCE_MAIN_PORTABLE: &str = r#"
+var<workgroup> s1: array<f32, 256>;
+var<workgroup> s2: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let c = wid.y;
+    let chunk = wid.x;
+    let a = bn_bwd_reduce_thread(c, chunk, lid);
+    s1[lid] = a.x;
+    s2[lid] = a.y;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            s1[lid] += s1[lid + s];
+            s2[lid] += s2[lid + s];
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u) {
+        let o = (c * pu(4u) + chunk) * 2u;
+        PART[o] = s1[0];
+        PART[o + 1u] = s2[0];
+    }
+}
+"#;
 
 /// The activation fused after the normalisation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,26 +225,33 @@ pub struct BnRunning<'a> {
     pub momentum: f32,
 }
 
-fn gen_stats(_: &Spec) -> String {
-    format!("{COMMON}{WELFORD}{}", include_str!("../shaders/bn_stats.wgsl"))
+/// The element prelude of the passes: f32 or f16 storage (`spec.is_f16()`), scalar or vec4.
+fn prelude(spec: &Spec) -> &'static str {
+    let vec = spec.get_bool("VEC4");
+    if spec.is_f16() { vec_prelude_f16(vec) } else { vec_prelude(vec) }
+}
+
+fn gen_stats(spec: &Spec) -> String {
+    let body = include_str!("../shaders/bn_stats.wgsl");
+    if spec.get_bool("SUBGROUPS") {
+        format!("{}{COMMON}{body}{STATS_MAIN_SUBGROUPS}", prelude(spec))
+    } else {
+        format!("{}{COMMON}{WELFORD}{body}{STATS_MAIN_PORTABLE}", prelude(spec))
+    }
 }
 
 fn gen_finalize(_: &Spec) -> String {
     format!("{COMMON}{WELFORD}{}", include_str!("../shaders/bn_finalize.wgsl"))
 }
 
-/// The element prelude of the elementwise passes: f32 or f16 storage (`spec.is_f16()`), scalar or vec4.
-fn prelude(spec: &Spec) -> &'static str {
-    let vec = spec.get_bool("VEC4");
-    if spec.is_f16() { vec_prelude_f16(vec) } else { vec_prelude(vec) }
-}
-
 fn gen_apply(spec: &Spec) -> String {
     format!("{}{COMMON}{}", prelude(spec), include_str!("../shaders/bn_apply.wgsl"))
 }
 
-fn gen_bwd_reduce(_: &Spec) -> String {
-    format!("{COMMON}{}", include_str!("../shaders/bn_bwd_reduce.wgsl"))
+fn gen_bwd_reduce(spec: &Spec) -> String {
+    let body = include_str!("../shaders/bn_bwd_reduce.wgsl");
+    let main = if spec.get_bool("SUBGROUPS") { BWD_REDUCE_MAIN_SUBGROUPS } else { BWD_REDUCE_MAIN_PORTABLE };
+    format!("{}{COMMON}{body}{main}", prelude(spec))
 }
 
 fn gen_bwd_finalize(_: &Spec) -> String {
@@ -142,11 +286,11 @@ static BWD_FINALIZE: KernelDef = KernelDef {
 static BWD_DX: KernelDef =
     KernelDef { name: "bn_bwd_dx", storage: &[R, R, R, RW], source: Source::Generated(gen_bwd_dx) };
 
-/// Chunking of each channel's `m = n · hw` values: `(chunks, chunk length)`. About 2048 workgroups in total
-/// and at least 4 values per thread.
-fn plan(m: usize, c: usize) -> (usize, usize) {
+/// Chunking of each channel's `m` units (`n · hw` scalar or `n · (hw/4)` vec4): `(chunks, chunk length)`.
+fn plan(m: usize, c: usize, vec4: bool) -> (usize, usize) {
     let want = 2048usize.div_ceil(c.max(1));
-    let chunks = want.min(m.div_ceil(256 * 4)).clamp(1, 65535);
+    let min_per_wg = if vec4 { 256 * 2 } else { 256 * 4 };
+    let chunks = want.min(m.div_ceil(min_per_wg)).clamp(1, 65535);
     let len = m.div_ceil(chunks);
     (m.div_ceil(len), len)
 }
@@ -160,22 +304,21 @@ impl BnDesc {
         if m == 0 || self.c == 0 {
             return Err(shape_err(format!("batch_norm: empty problem {self:?}")));
         }
-        // Indices and the walk's `e + 256` stay below 2^32.
         if total >= (1usize << 31) || self.c > 65535 {
             return Err(GpuError::Limit(format!("batch_norm: {self:?} is too large for one dispatch")));
         }
         Ok((total, m))
     }
 
-    fn walk_params(&self, m: usize, chunks: usize, len: usize) -> Result<Params> {
+    fn walk_params(&self, hw_units: usize, m_units: usize, chunks: usize, len: usize) -> Result<Params> {
         Params::new()
             .uz(self.c)?
-            .uz(self.hw)?
-            .uz(m)?
+            .uz(hw_units)?
+            .uz(m_units)?
             .uz(len)?
             .uz(chunks)?
-            .uz(256 / self.hw)?
-            .uz(256 % self.hw)
+            .uz(256 / hw_units)?
+            .uz(256 % hw_units)
     }
 
     fn elementwise(&self, total: usize) -> (bool, usize) {
@@ -209,13 +352,24 @@ pub fn batch_norm_forward(
         check_buf(r.mean, d.c, DType::F32, "running_mean")?;
         check_buf(r.var, d.c, DType::F32, "running_var")?;
     }
-    let (chunks, len) = plan(m, d.c);
+    let (vec, units) = d.elementwise(total);
+    let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
+    let (chunks, len) = plan(m_u, d.c, vec);
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
     let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
 
     let half = d.dtype == DType::F16;
-    let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0).f16(half))?;
-    ctx.dispatch(&k, &[x, part.raw()], &d.walk_params(m, chunks, len)?, [chunks as u32, d.c as u32, 1])?;
+    let sg = use_subgroups(ctx);
+    let k = ctx.kernel(
+        &STATS,
+        Spec::new().u32("ACT", 0).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg),
+    )?;
+    ctx.dispatch(
+        &k,
+        &[x, part.raw()],
+        &d.walk_params(hw_u, m_u, chunks, len)?,
+        [chunks as u32, d.c as u32, 1],
+    )?;
 
     let k = ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()))?;
     let mom = running.as_ref().map_or(0.0, |r| r.momentum);
@@ -224,7 +378,6 @@ pub fn batch_norm_forward(
     let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
     ctx.dispatch(&k, &[part.raw(), w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
 
-    let (vec, units) = d.elementwise(total);
     let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half))?;
     let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
     ctx.dispatch(&k, &[x, coef.raw(), y], &p, ctx.grid_1d(units as u64, 256)?)
@@ -255,21 +408,26 @@ pub fn batch_norm_backward(
     {
         check_buf(buf, d.c, DType::F32, what)?;
     }
-    let (chunks, len) = plan(m, d.c);
+    let (vec, units) = d.elementwise(total);
+    let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
+    let (chunks, len) = plan(m_u, d.c, vec);
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
     let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
     let act = d.act.code();
     let half = d.dtype == DType::F16;
+    let sg = use_subgroups(ctx);
 
-    let k = ctx.kernel(&BWD_REDUCE, Spec::new().u32("ACT", act).f16(half))?;
-    let p = d.walk_params(m, chunks, len)?;
+    let k = ctx.kernel(
+        &BWD_REDUCE,
+        Spec::new().u32("ACT", act).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg),
+    )?;
+    let p = d.walk_params(hw_u, m_u, chunks, len)?;
     ctx.dispatch(&k, &[x, g, mean, invstd, w, b, part.raw()], &p, [chunks as u32, d.c as u32, 1])?;
 
     let k = ctx.kernel(&BWD_FINALIZE, Spec::new().u32("ACT", 0))?;
     let p = Params::new().uz(d.c)?.uz(chunks)?.f((1.0 / m as f64) as f32);
     ctx.dispatch(&k, &[part.raw(), mean, invstd, w, b, dw, db, coef.raw()], &p, [d.c as u32, 1, 1])?;
 
-    let (vec, units) = d.elementwise(total);
     let k = ctx.kernel(&BWD_DX, Spec::new().u32("ACT", act).bool("VEC4", vec).f16(half))?;
     let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
     ctx.dispatch(&k, &[x, g, coef.raw(), dx], &p, ctx.grid_1d(units as u64, 256)?)

@@ -8,7 +8,7 @@
 //
 // Spec: K, WG (threads), ALPHA_SQRT (alpha = 0.5), BETA_INT (beta as a small integer, 0 = use pow).
 // Params: 0 = A, 1 = NC, 2 = G, 3 = gt box word offset, 4 = label offset, 5 = count offset, 6 = eps,
-// 7 = min box size, 8 = alpha, 9 = beta.
+// 7 = min box size, 8 = alpha, 9 = beta, 10 = nwd_weight (0 = legacy CIoU).
 // PICK: [B, G, K] × (anchor, m bits, u bits).
 @group(0) @binding(1) var<storage, read> PD: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> CLS: array<f32>;
@@ -89,6 +89,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     }
     let seg = lid * K;
     var len = 0u;
+    let nwd_w = pf(10u);
+    let lam = nwd_lambda(gt.z - gt.x, gt.w - gt.y, nwd_w);
     if (real) {
         let cls_row = (b * nc + label) * na;
         for (var a = lid; a < na; a += WG) {
@@ -96,8 +98,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
             let px = bitcast<f32>(META[3u * a]) * s;
             let py = bitcast<f32>(META[3u * a + 1u]) * s;
             if (min(min(px - cb.x, py - cb.y), min(cb.z - px, cb.w - py)) > eps) {
-                let c = ciou_eps(gt, PD[b * na + a]);
-                let u = select(0.0, c, c > 0.0);
+                var u = 0.0;
+                if (nwd_w > 0.0) {
+                    let pd_a = PD[b * na + a];
+                    u = (1.0 - lam) * iou_plain(gt, pd_a) + lam * nwd_box(gt, pd_a, 12.8);
+                } else {
+                    let c = ciou_eps(gt, PD[b * na + a]);
+                    u = select(0.0, c, c > 0.0);
+                }
                 let score = 1.0 / (1.0 + fexp(-CLS[cls_row + a]));
                 let m = pow_alpha(score) * pow_beta(u);
                 // Anchors arrive in increasing order, so an equal m ranks after every entry already listed.

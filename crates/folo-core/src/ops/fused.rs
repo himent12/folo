@@ -404,7 +404,7 @@ impl Tensor {
             )));
         }
         let want = match step {
-            OptimStep::Sgd { .. } => state.len() <= 1,
+            OptimStep::Sgd { .. } | OptimStep::SgdDecoupled { .. } => state.len() <= 1,
             OptimStep::AdamW { .. } => state.len() == 2,
             OptimStep::Axpby { .. } => state.is_empty(),
         };
@@ -527,7 +527,7 @@ impl Tensor {
         }
         for s in states {
             let want = match step {
-                OptimStep::Sgd { .. } => s.len() <= 1,
+                OptimStep::Sgd { .. } | OptimStep::SgdDecoupled { .. } => s.len() <= 1,
                 OptimStep::AdamW { .. } => s.len() == 2,
                 OptimStep::Axpby { .. } => s.is_empty(),
             };

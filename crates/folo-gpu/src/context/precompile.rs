@@ -222,9 +222,11 @@ impl GpuContext {
         n
     }
 
-    /// Whether this context can build `key` at all (f16 and tensor-core kernels need their device features).
+    /// Whether this context can build `key` at all (f16, tensor-core and subgroup kernels need their device features).
     fn can_build(&self, key: &KernelKey) -> bool {
-        (!key.spec.is_f16() || self.inner.caps.shader_f16) && (!key.spec.is_coop() || self.inner.experimental)
+        (!key.spec.is_f16() || self.inner.caps.shader_f16)
+            && (!key.spec.is_coop() || self.inner.experimental)
+            && (!key.spec.is_subgroups() || self.inner.caps.subgroups)
     }
 
     /// The first use of `key` in this context (its pipeline was not in the context's map): the precompiled

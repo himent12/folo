@@ -22,10 +22,16 @@
 //! cost is therefore `O(n log n + max_det * n)` instead of the `O(n²)` worst case of textbook greedy NMS.
 
 use crate::boxes::Xyxy;
-use crate::fusion::{BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, fuse_boxes};
+use crate::fusion::{
+    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_consensus_scores, elc_scores, fuse_boxes,
+};
 use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus`) when `conf` is higher:
+/// nearby supporting anchors down to `0.10` join the cluster before final scores are filtered by `score > conf`.
+pub const CALIBRATED_PRE_CONF: f32 = 0.10;
 
 /// Remaining-box count above which one suppression pass is split across threads.
 const PAR_SUPPRESS: usize = 1 << 14;
@@ -101,15 +107,46 @@ impl NmsConfig {
     pub fn val() -> Self {
         Self { conf: 0.001, multi_label: true, ..Self::default() }
     }
+
+    /// Pre-NMS candidate threshold: `0.10` for single-label calibrated scoring (`Elc` / `DflConsensus`) when
+    /// `conf > 0.10`, else `self.conf` unchanged.
+    #[inline]
+    pub fn candidate_conf(&self) -> f32 {
+        if self.post_filter_calibrated() { CALIBRATED_PRE_CONF } else { self.conf }
+    }
+
+    /// Like [`NmsConfig::candidate_conf`], but returns `self.conf` unchanged for [`HeadMode::O2o`]
+    /// (which skips NMS and score rules).
+    #[inline]
+    pub fn candidate_conf_for(&self, mode: HeadMode) -> f32 {
+        if mode == HeadMode::O2m { self.candidate_conf() } else { self.conf }
+    }
+
+    /// Whether final detections are filtered by `score > self.conf` after calibrated re-scoring.
+    #[inline]
+    pub(crate) fn post_filter_calibrated(&self) -> bool {
+        !self.multi_label && self.score.is_calibrated() && self.conf > CALIBRATED_PRE_CONF
+    }
 }
 
 /// Greedy NMS over `boxes` sorted by descending score. Returns the kept positions in order, stopping after `limit`
 /// survivors. A box is suppressed when its IoU with a kept box is `> iou_thr`.
 pub fn nms_sorted(boxes: &[Xyxy], iou_thr: f32, limit: usize) -> Vec<usize> {
+    nms_sorted_inner(boxes, iou_thr, limit, false).0
+}
+
+/// [`nms_sorted`] also returning, for every input position `i`, the position in `keep` of the kept box that first
+/// suppressed `i` (or `i`'s own position in `keep` when kept; `u32::MAX` if unsuppressed past `limit`).
+pub fn nms_sorted_with_owner(boxes: &[Xyxy], iou_thr: f32, limit: usize) -> (Vec<usize>, Vec<u32>) {
+    nms_sorted_inner(boxes, iou_thr, limit, true)
+}
+
+fn nms_sorted_inner(boxes: &[Xyxy], iou_thr: f32, limit: usize, track_owner: bool) -> (Vec<usize>, Vec<u32>) {
     let n = boxes.len();
     let mut keep = Vec::new();
+    let mut owner = if track_owner { vec![u32::MAX; n] } else { Vec::new() };
     if n == 0 || limit == 0 {
-        return keep;
+        return (keep, owner);
     }
     // Structure-of-arrays so the suppression pass vectorises.
     let x1: Vec<f32> = boxes.iter().map(|b| b.x1).collect();
@@ -123,36 +160,71 @@ pub fn nms_sorted(boxes: &[Xyxy], iou_thr: f32, limit: usize) -> Vec<usize> {
         if suppressed[i] {
             continue;
         }
+        let kp = keep.len() as u32;
         keep.push(i);
-        if keep.len() == limit {
+        if track_owner {
+            owner[i] = kp;
+        } else if keep.len() == limit {
             break;
         }
         let (bx1, by1, bx2, by2, ba) = (x1[i], y1[i], x2[i], y2[i], area[i]);
         let start = i + 1;
-        let pass = |off: usize, sup: &mut [bool]| {
+        let pass = |off: usize, sup: &mut [bool], own: Option<&mut [u32]>| {
             let lo = start + off;
             let hi = lo + sup.len();
             let (cx1, cy1, cx2, cy2, ca) =
                 (&x1[lo..hi], &y1[lo..hi], &x2[lo..hi], &y2[lo..hi], &area[lo..hi]);
-            for k in 0..sup.len() {
-                // Same arithmetic as `box_iou`, so results match it bit for bit.
-                let w = (bx2.min(cx2[k]) - bx1.max(cx1[k])).max(0.0);
-                let h = (by2.min(cy2[k]) - by1.max(cy1[k])).max(0.0);
-                let inter = w * h;
-                let union = ba + ca[k] - inter;
-                let iou = if union > 0.0 { inter / union } else { 0.0 };
-                sup[k] |= iou > iou_thr;
+            if let Some(own) = own {
+                for k in 0..sup.len() {
+                    if sup[k] {
+                        continue;
+                    }
+                    let w = (bx2.min(cx2[k]) - bx1.max(cx1[k])).max(0.0);
+                    let h = (by2.min(cy2[k]) - by1.max(cy1[k])).max(0.0);
+                    let inter = w * h;
+                    let union = ba + ca[k] - inter;
+                    let iou = if union > 0.0 { inter / union } else { 0.0 };
+                    if iou > iou_thr {
+                        sup[k] = true;
+                        own[k] = kp;
+                    }
+                }
+            } else {
+                for k in 0..sup.len() {
+                    // Same arithmetic as `box_iou`, so results match it bit for bit.
+                    let w = (bx2.min(cx2[k]) - bx1.max(cx1[k])).max(0.0);
+                    let h = (by2.min(cy2[k]) - by1.max(cy1[k])).max(0.0);
+                    let inter = w * h;
+                    let union = ba + ca[k] - inter;
+                    let iou = if union > 0.0 { inter / union } else { 0.0 };
+                    sup[k] |= iou > iou_thr;
+                }
             }
         };
-        let rest = &mut suppressed[start..];
-        if rest.len() >= PAR_SUPPRESS {
+        let rest_sup = &mut suppressed[start..];
+        if track_owner {
+            let rest_own = &mut owner[start..];
+            if rest_sup.len() >= PAR_SUPPRESS {
+                const CHUNK: usize = 4096;
+                rest_sup
+                    .par_chunks_mut(CHUNK)
+                    .zip(rest_own.par_chunks_mut(CHUNK))
+                    .enumerate()
+                    .for_each(|(c, (sup, own))| pass(c * CHUNK, sup, Some(own)));
+            } else {
+                pass(0, rest_sup, Some(rest_own));
+            }
+            if keep.len() == limit {
+                break;
+            }
+        } else if rest_sup.len() >= PAR_SUPPRESS {
             const CHUNK: usize = 4096;
-            rest.par_chunks_mut(CHUNK).enumerate().for_each(|(c, sup)| pass(c * CHUNK, sup));
+            rest_sup.par_chunks_mut(CHUNK).enumerate().for_each(|(c, sup)| pass(c * CHUNK, sup, None));
         } else {
-            pass(0, rest);
+            pass(0, rest_sup, None);
         }
     }
-    keep
+    (keep, owner)
 }
 
 /// Order of indices by descending score, ties by ascending index. NaN scores sort last.
@@ -177,11 +249,23 @@ pub fn batched_nms(
     max_det: usize,
     agnostic: bool,
 ) -> Vec<usize> {
+    batched_nms_inner(boxes, scores, classes, iou_thr, max_det, agnostic, false).0
+}
+
+fn batched_nms_inner(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    iou_thr: f32,
+    max_det: usize,
+    agnostic: bool,
+    track_owner: bool,
+) -> (Vec<usize>, Option<Vec<u32>>) {
     assert_eq!(boxes.len(), scores.len(), "batched_nms: boxes/scores length mismatch");
     assert_eq!(boxes.len(), classes.len(), "batched_nms: boxes/classes length mismatch");
     let n = boxes.len();
     if n == 0 || max_det == 0 {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     assert!(n <= u32::MAX as usize, "batched_nms: too many boxes");
     let mut order: Vec<u32> = (0..n as u32).collect();
@@ -189,7 +273,9 @@ pub fn batched_nms(
 
     if agnostic {
         let sorted: Vec<Xyxy> = order.iter().map(|&i| boxes[i as usize]).collect();
-        return nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| order[k] as usize).collect();
+        let kept = nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| order[k] as usize).collect();
+        // Agnostic NMS mixes classes; calibrated score rules derive class-local ownership when `None`.
+        return (kept, None);
     }
 
     // Group the score-ordered indices into per-class buckets, keeping score order inside each bucket: a stable
@@ -225,19 +311,50 @@ pub fn batched_nms(
         }
         (bucketed, ranges)
     };
-    let run_bucket = |&(lo, hi): &(usize, usize)| -> Vec<u32> {
+    if !track_owner {
+        let run_bucket = |&(lo, hi): &(usize, usize)| -> Vec<u32> {
+            let ids = &bucketed[lo..hi];
+            let sorted: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
+            nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| ids[k]).collect()
+        };
+        let mut kept: Vec<u32> = if n >= PAR_BUCKETS {
+            ranges.par_iter().flat_map_iter(run_bucket).collect()
+        } else {
+            ranges.iter().flat_map(run_bucket).collect()
+        };
+        score_order(scores, &mut kept);
+        kept.truncate(max_det);
+        return (kept.into_iter().map(|i| i as usize).collect(), None);
+    }
+    let run_bucket = |&(lo, hi): &(usize, usize)| -> (Vec<u32>, Vec<u32>) {
         let ids = &bucketed[lo..hi];
         let sorted: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
-        nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| ids[k]).collect()
+        let (k, own) = nms_sorted_with_owner(&sorted, iou_thr, max_det);
+        (k.into_iter().map(|m| ids[m]).collect(), own)
     };
-    let mut kept: Vec<u32> = if n >= PAR_BUCKETS {
-        ranges.par_iter().flat_map_iter(run_bucket).collect()
+    let parts: Vec<(Vec<u32>, Vec<u32>)> = if n >= PAR_BUCKETS {
+        ranges.par_iter().map(run_bucket).collect()
     } else {
-        ranges.iter().flat_map(run_bucket).collect()
+        ranges.iter().map(run_bucket).collect()
     };
+    let mut kept: Vec<u32> = parts.iter().flat_map(|(k, _)| k.iter().copied()).collect();
     score_order(scores, &mut kept);
     kept.truncate(max_det);
-    kept.into_iter().map(|i| i as usize).collect()
+    let mut global_pos = vec![u32::MAX; n];
+    for (kp, &cand_id) in kept.iter().enumerate() {
+        global_pos[cand_id as usize] = kp as u32;
+    }
+    let mut owner = vec![u32::MAX; n];
+    for (&(lo, hi), (bk_kept, bk_own)) in ranges.iter().zip(&parts) {
+        let ids = &bucketed[lo..hi];
+        for (&cand_id, &loc_kp) in ids.iter().zip(bk_own) {
+            if loc_kp != u32::MAX {
+                let win = bk_kept[loc_kp as usize] as usize;
+                owner[cand_id as usize] = global_pos[win];
+            }
+        }
+    }
+    (kept.into_iter().map(|i| i as usize).collect(), Some(owner))
 }
 
 /// A compact NMS candidate: score, source index (anchor or input detection) and class.
@@ -261,6 +378,7 @@ fn finish(
     cfg: &NmsConfig,
     bbox_of: impl Fn(u32) -> Xyxy,
     precision: Precisions,
+    bin_precision: Precisions,
 ) -> Vec<Detection> {
     if cands.len() > cfg.max_candidates {
         if cfg.max_candidates == 0 {
@@ -278,14 +396,23 @@ fn finish(
     let boxes: Vec<Xyxy> = cands.iter().map(|c| bbox_of(c.idx)).collect();
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();
-    let kept = batched_nms(&boxes, &scores, &classes, cfg.iou, cfg.max_det, cfg.agnostic);
+    let (kept, owner) = batched_nms_inner(
+        &boxes,
+        &scores,
+        &classes,
+        cfg.iou,
+        cfg.max_det,
+        cfg.agnostic,
+        cfg.score.is_calibrated(),
+    );
+    let cands_slice = cands.as_slice();
     let fused = match cfg.fusion {
         BoxFusion::None => None,
         BoxFusion::Vote => {
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, None))
         }
         BoxFusion::Dfl => {
-            let of = precision.map(|p| move |k: usize| p[cands[k].idx as usize]);
+            let of = precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
             let of = of.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
         }
@@ -299,12 +426,25 @@ fn finish(
             class: classes[k],
         })
         .collect();
-    if cfg.score == ScoreRule::Consensus {
-        for (d, s) in dets.iter_mut().zip(consensus_scores(&kept, &boxes, &scores, &classes)) {
+    let new_scores = match cfg.score {
+        ScoreRule::None => None,
+        ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes)),
+        ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou)),
+        ScoreRule::DflConsensus => {
+            let bp = bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
+            let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
+            Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou, bp))
+        }
+    };
+    if let Some(new_scores) = new_scores {
+        for (d, s) in dets.iter_mut().zip(new_scores) {
             d.score = s;
         }
         // Stable: equal new scores stay in NMS's order.
         dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+        if cfg.post_filter_calibrated() {
+            dets.retain(|d| d.score > cfg.conf);
+        }
     }
     dets
 }
@@ -319,13 +459,14 @@ pub(crate) fn class_allowed(cfg: &NmsConfig, c: u32) -> bool {
 /// If there are more than `u32::MAX` detections.
 pub fn nms_detections(dets: &[Detection], cfg: &NmsConfig) -> Vec<Detection> {
     assert!(dets.len() <= u32::MAX as usize, "nms_detections: too many detections");
+    let conf = cfg.candidate_conf();
     let cands: Vec<Cand> = dets
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.score > cfg.conf && class_allowed(cfg, d.class))
+        .filter(|(_, d)| d.score > conf && class_allowed(cfg, d.class))
         .map(|(i, d)| Cand { score: d.score, idx: i as u32, class: d.class })
         .collect();
-    finish(cands, cfg, |i| dets[i as usize].bbox, None)
+    finish(cands, cfg, |i| dets[i as usize].bbox, None, None)
 }
 
 /// The detector post-process for one image.
@@ -360,7 +501,24 @@ pub fn non_max_suppression_with(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
+    non_max_suppression_with_dfl(boxes, scores, precision, None, num_classes, cfg)
+}
+
+/// [`non_max_suppression_with`] also accepting scale-free per-anchor DFL bin precisions (`[A]`,
+/// [`crate::decode::bin_precisions`]) for [`ScoreRule::DflConsensus`].
+pub fn non_max_suppression_with_dfl(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    precision: Precisions,
+    bin_precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     assert!(precision.is_none_or(|p| p.len() == boxes.len()), "non_max_suppression: precision must be [A]");
+    assert!(
+        bin_precision.is_none_or(|p| p.len() == boxes.len()),
+        "non_max_suppression: bin_precision must be [A]"
+    );
     assert_eq!(
         scores.len(),
         boxes.len() * num_classes,
@@ -371,7 +529,7 @@ pub fn non_max_suppression_with(
         return Vec::new();
     }
     let cands = extract_candidates(scores, boxes.len(), num_classes, num_classes, 0, cfg);
-    finish(cands, cfg, |i| boxes[i as usize], precision)
+    finish(cands, cfg, |i| boxes[i as usize], precision, bin_precision)
 }
 
 /// [`non_max_suppression`] of one image's decoded outputs as rows `[A, 4 + num_classes]` (`x1, y1, x2, y2`, then
@@ -393,6 +551,18 @@ pub fn non_max_suppression_rows_with(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
+    non_max_suppression_rows_with_dfl(rows, precision, None, num_classes, cfg)
+}
+
+/// [`non_max_suppression_rows_with`] also accepting scale-free DFL bin precisions (`[A]`) for
+/// [`ScoreRule::DflConsensus`].
+pub fn non_max_suppression_rows_with_dfl(
+    rows: &[f32],
+    precision: Precisions,
+    bin_precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     let w = 4 + num_classes;
     assert!(rows.len().is_multiple_of(w), "non_max_suppression_rows: rows must be [A, 4 + num_classes]");
     let a = rows.len() / w;
@@ -401,12 +571,16 @@ pub fn non_max_suppression_rows_with(
         return Vec::new();
     }
     assert!(precision.is_none_or(|p| p.len() == a), "non_max_suppression_rows: precision must be [A]");
+    assert!(
+        bin_precision.is_none_or(|p| p.len() == a),
+        "non_max_suppression_rows: bin_precision must be [A]"
+    );
     let cands = extract_candidates(rows, a, num_classes, w, 4, cfg);
     let bbox_of = |i: u32| {
         let r = &rows[i as usize * w..];
         Xyxy::new(r[0], r[1], r[2], r[3])
     };
-    finish(cands, cfg, bbox_of, precision)
+    finish(cands, cfg, bbox_of, precision, bin_precision)
 }
 
 /// Multi-label [`non_max_suppression_rows`] from the `(anchor, class, score)` pairs whose score is `> conf`, in any
@@ -423,19 +597,32 @@ pub fn non_max_suppression_pairs(
 
 /// [`non_max_suppression_pairs`] with the anchors' side precisions (indexed by anchor) for [`BoxFusion::Dfl`].
 pub fn non_max_suppression_pairs_with(
-    mut pairs: Vec<(u32, u32, f32)>,
+    pairs: Vec<(u32, u32, f32)>,
     bbox_of: impl Fn(u32) -> Xyxy,
     precision: Precisions,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
+    non_max_suppression_pairs_with_dfl(pairs, bbox_of, precision, None, cfg)
+}
+
+/// [`non_max_suppression_pairs_with`] also accepting scale-free DFL bin precisions (indexed by anchor) for
+/// [`ScoreRule::DflConsensus`].
+pub fn non_max_suppression_pairs_with_dfl(
+    mut pairs: Vec<(u32, u32, f32)>,
+    bbox_of: impl Fn(u32) -> Xyxy,
+    precision: Precisions,
+    bin_precision: Precisions,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     debug_assert!(cfg.multi_label, "non_max_suppression_pairs is the multi-label path");
+    let conf = cfg.candidate_conf();
     pairs.sort_unstable_by_key(|&(a, c, _)| (a, c));
     let cands = pairs
         .into_iter()
-        .filter(|&(_, c, s)| s > cfg.conf && class_allowed(cfg, c))
+        .filter(|&(_, c, s)| s > conf && class_allowed(cfg, c))
         .map(|(idx, class, score)| Cand { score, idx, class })
         .collect();
-    finish(cands, cfg, bbox_of, precision)
+    finish(cands, cfg, bbox_of, precision, bin_precision)
 }
 
 /// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
@@ -448,10 +635,11 @@ fn extract_candidates(
     offset: usize,
     cfg: &NmsConfig,
 ) -> Vec<Cand> {
+    let conf = cfg.candidate_conf();
     let extract = |a: usize, row: &[f32], out: &mut Vec<Cand>| {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
-                if s > cfg.conf && class_allowed(cfg, c as u32) {
+                if s > conf && class_allowed(cfg, c as u32) {
                     out.push(Cand { score: s, idx: a as u32, class: c as u32 });
                 }
             }
@@ -463,7 +651,7 @@ fn extract_candidates(
                     bs = s;
                 }
             }
-            if bs > cfg.conf && class_allowed(cfg, best as u32) {
+            if bs > conf && class_allowed(cfg, best as u32) {
                 out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
             }
         }
@@ -521,17 +709,33 @@ pub fn nms_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
 /// # Panics
 /// As [`nms_candidates`], or if `precision` is not as long as `cands`.
 pub fn nms_candidates_with(cands: &[Candidate], precision: Precisions, cfg: &NmsConfig) -> Vec<Detection> {
+    nms_candidates_with_dfl(cands, precision, None, cfg)
+}
+
+/// [`nms_candidates_with`] also accepting scale-free DFL bin precisions (parallel to `cands`) for
+/// [`ScoreRule::DflConsensus`].
+pub fn nms_candidates_with_dfl(
+    cands: &[Candidate],
+    precision: Precisions,
+    bin_precision: Precisions,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     assert!(cands.len() <= u32::MAX as usize, "nms_candidates: too many candidates");
     assert!(precision.is_none_or(|p| p.len() == cands.len()), "nms_candidates: precision must match cands");
+    assert!(
+        bin_precision.is_none_or(|p| p.len() == cands.len()),
+        "nms_candidates: bin_precision must match cands"
+    );
     debug_assert!(cands.windows(2).all(|w| w[0].anchor < w[1].anchor), "nms_candidates: unsorted");
+    let conf = cfg.candidate_conf();
     // Positions in anchor order tie-break exactly as anchor indices do.
     let list: Vec<Cand> = cands
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.score > cfg.conf && class_allowed(cfg, c.class))
+        .filter(|(_, c)| c.score > conf && class_allowed(cfg, c.class))
         .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
         .collect();
-    finish(list, cfg, |i| cands[i as usize].bbox, precision)
+    finish(list, cfg, |i| cands[i as usize].bbox, precision, bin_precision)
 }
 
 /// Ranks `(score, key)` pairs by descending score, ties by ascending key (NaN never reaches here: it fails every
@@ -658,201 +862,26 @@ pub fn postprocess_with(
     cfg: &NmsConfig,
     mode: HeadMode,
 ) -> Vec<Detection> {
+    postprocess_with_dfl(boxes, scores, precision, None, num_classes, cfg, mode)
+}
+
+/// [`postprocess_with`] also accepting scale-free DFL bin precisions (`[A]`) for [`ScoreRule::DflConsensus`].
+pub fn postprocess_with_dfl(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    precision: Precisions,
+    bin_precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+    mode: HeadMode,
+) -> Vec<Detection> {
     match mode {
-        HeadMode::O2m => non_max_suppression_with(boxes, scores, precision, num_classes, cfg),
+        HeadMode::O2m => {
+            non_max_suppression_with_dfl(boxes, scores, precision, bin_precision, num_classes, cfg)
+        }
         HeadMode::O2o => topk_detections(boxes, scores, num_classes, cfg),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn b(x1: f32, y1: f32, x2: f32, y2: f32) -> Xyxy {
-        Xyxy::new(x1, y1, x2, y2)
-    }
-
-    #[test]
-    fn suppresses_overlapping_same_class_only() {
-        let boxes = [b(0., 0., 10., 10.), b(1., 1., 11., 11.), b(0., 0., 10., 10.), b(50., 50., 60., 60.)];
-        let scores = [0.9, 0.8, 0.7, 0.6];
-        let classes = [0, 0, 1, 0];
-        // Box 1 overlaps box 0 with IoU 81/119 = 0.68 > 0.5; box 2 is another class.
-        assert_eq!(batched_nms(&boxes, &scores, &classes, 0.5, 300, false), vec![0, 2, 3]);
-        assert_eq!(batched_nms(&boxes, &scores, &classes, 0.5, 300, true), vec![0, 3]);
-        // Threshold is strict: IoU 0.68 is not > 0.7.
-        assert_eq!(batched_nms(&boxes, &scores, &classes, 0.7, 300, false), vec![0, 1, 2, 3]);
-        assert_eq!(batched_nms(&boxes, &scores, &classes, 0.5, 2, false), vec![0, 2]);
-    }
-
-    #[test]
-    fn sparse_class_ids() {
-        let boxes = [b(0., 0., 10., 10.), b(1., 1., 11., 11.), b(0., 0., 10., 10.)];
-        let classes = [u32::MAX, u32::MAX, 7];
-        assert_eq!(batched_nms(&boxes, &[0.9, 0.8, 0.7], &classes, 0.5, 300, false), vec![0, 2]);
-    }
-
-    /// NMS from `[A, 4 + nc]` rows is NMS from the split boxes and scores, single- and multi-label, with ties
-    /// and enough anchors for the parallel extraction.
-    #[test]
-    fn rows_match_split_outputs() {
-        let (a, nc) = (5000usize, 3usize);
-        let mut state = 12345u64;
-        let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (state >> 40) as f32 / (1u64 << 24) as f32
-        };
-        let mut rows = Vec::with_capacity(a * (4 + nc));
-        let (mut boxes, mut scores) = (Vec::new(), Vec::new());
-        for _ in 0..a {
-            let (x, y) = (next() * 600.0, next() * 600.0);
-            let bx = Xyxy::new(x, y, x + 5.0 + next() * 60.0, y + 5.0 + next() * 60.0);
-            rows.extend_from_slice(&[bx.x1, bx.y1, bx.x2, bx.y2]);
-            boxes.push(bx);
-            for _ in 0..nc {
-                let s = (next() * 16.0).floor() / 16.0; // many ties
-                rows.push(s);
-                scores.push(s);
-            }
-        }
-        for multi_label in [false, true] {
-            let cfg = NmsConfig { conf: 0.05, multi_label, max_candidates: 4000, ..NmsConfig::default() };
-            let want = non_max_suppression(&boxes, &scores, nc, &cfg);
-            assert!(want.len() > 50);
-            assert_eq!(non_max_suppression_rows(&rows, nc, &cfg), want, "multi_label {multi_label}");
-        }
-        assert!(non_max_suppression_rows(&[], nc, &NmsConfig::val()).is_empty());
-    }
-
-    /// NMS from shuffled `(anchor, class, score)` pairs is NMS from the rows they come from: tied scores on
-    /// overlapping boxes (the winner is the first in `(anchor, class)` order), scores below, at and above `conf`,
-    /// NaNs, a class filter, agnostic NMS, the candidate cap, and no pairs at all.
-    #[test]
-    fn pairs_match_rows_nms() {
-        let (a, nc) = (40usize, 3usize);
-        let conf = 0.25f32;
-        let levels = [0.5, 0.5, conf, 0.3, f32::NAN, 0.1, 0.5, 0.0, f32::from_bits(conf.to_bits() + 1)];
-        let mut rows = Vec::with_capacity(a * (4 + nc));
-        let mut pairs = Vec::new();
-        for i in 0..a {
-            // Groups of four boxes one pixel apart (IoU about 0.9), the groups far apart.
-            let x = (i / 4 * 30 + i % 4) as f32;
-            rows.extend_from_slice(&[x, 0.0, x + 20.0, 20.0]);
-            for c in 0..nc {
-                let s = levels[(i * 3 + c * 5) % levels.len()];
-                rows.push(s);
-                pairs.push((i as u32, c as u32, s));
-            }
-        }
-        // Two lone boxes with nothing above conf: no detections, though nothing would suppress them.
-        for (i, s) in [(a, [conf, f32::NAN, 0.1]), (a + 1, [0.0, conf, f32::NAN])] {
-            let x = (i * 30) as f32;
-            rows.extend_from_slice(&[x, 0.0, x + 20.0, 20.0]);
-            rows.extend_from_slice(&s);
-            pairs.extend((0..nc).map(|c| (i as u32, c as u32, s[c])));
-        }
-        // A fixed shuffle that puts later anchors before earlier ones.
-        let mut state = 7u64;
-        for k in (1..pairs.len()).rev() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            pairs.swap(k, (state >> 33) as usize % (k + 1));
-        }
-        let bbox = |i: u32| {
-            let r = &rows[i as usize * (4 + nc)..];
-            Xyxy::new(r[0], r[1], r[2], r[3])
-        };
-        let val = NmsConfig { conf, ..NmsConfig::val() };
-        for cfg in [
-            val.clone(),
-            NmsConfig { classes: Some(vec![0, 2]), ..val.clone() },
-            NmsConfig { agnostic: true, ..val.clone() },
-            NmsConfig { max_candidates: 9, max_det: 5, ..val.clone() },
-        ] {
-            let want = non_max_suppression_rows(&rows, nc, &cfg);
-            assert!(want.len() >= 5, "{cfg:?}: {want:?}");
-            assert_eq!(non_max_suppression_pairs(pairs.clone(), bbox, &cfg), want, "{cfg:?}");
-        }
-        // Nothing above conf, as rows or as (no) pairs.
-        let none = NmsConfig { conf: 0.5, ..val };
-        assert!(non_max_suppression_rows(&rows, nc, &none).is_empty());
-        assert!(non_max_suppression_pairs(pairs, bbox, &none).is_empty());
-        assert!(non_max_suppression_pairs(Vec::new(), bbox, &NmsConfig::val()).is_empty());
-    }
-
-    #[test]
-    fn candidates_match_full_nms() {
-        // 50 anchors, 4 classes, many overlapping boxes and tied scores.
-        let (a, nc) = (50usize, 4usize);
-        let boxes: Vec<Xyxy> = (0..a)
-            .map(|i| b((i % 7) as f32, (i % 5) as f32, (i % 7) as f32 + 9.0, (i % 5) as f32 + 9.0))
-            .collect();
-        let scores: Vec<f32> = (0..a * nc).map(|i| ((i * 37) % 11) as f32 / 10.0).collect();
-        for cfg in [
-            NmsConfig { conf: 0.25, iou: 0.5, ..NmsConfig::default() },
-            NmsConfig { conf: 0.05, iou: 0.3, max_det: 7, max_candidates: 20, ..NmsConfig::default() },
-            NmsConfig { classes: Some(vec![1, 3]), agnostic: true, ..NmsConfig::default() },
-        ] {
-            let want = non_max_suppression(&boxes, &scores, nc, &cfg);
-            let cands: Vec<Candidate> = (0..a)
-                .filter_map(|i| {
-                    let row = &scores[i * nc..(i + 1) * nc];
-                    let (mut best, mut bs) = (0, row[0]);
-                    for (c, &s) in row.iter().enumerate().skip(1) {
-                        if s > bs {
-                            (best, bs) = (c, s);
-                        }
-                    }
-                    (bs > cfg.conf).then_some(Candidate {
-                        anchor: i as u32,
-                        class: best as u32,
-                        score: bs,
-                        bbox: boxes[i],
-                    })
-                })
-                .collect();
-            assert_eq!(nms_candidates(&cands, &cfg), want, "{cfg:?}");
-        }
-    }
-
-    #[test]
-    fn ties_keep_lower_index() {
-        let boxes = [b(0., 0., 10., 10.), b(0., 0., 10., 10.)];
-        assert_eq!(batched_nms(&boxes, &[0.5, 0.5], &[0, 0], 0.5, 10, false), vec![0]);
-    }
-
-    #[test]
-    fn post_process_filters() {
-        // Three anchors, two classes.
-        let boxes = [b(0., 0., 10., 10.), b(0., 0., 10., 10.), b(20., 20., 30., 30.)];
-        let scores = [0.9, 0.3, 0.2, 0.8, 0.1, 0.05];
-        let cfg = NmsConfig { conf: 0.25, iou: 0.5, ..NmsConfig::default() };
-        let out = non_max_suppression(&boxes, &scores, 2, &cfg);
-        assert_eq!(out.len(), 2);
-        assert_eq!((out[0].class, out[0].score), (0, 0.9));
-        assert_eq!((out[1].class, out[1].score), (1, 0.8));
-        // Multi-label adds anchor 0's class-1 candidate (0.3), which anchor 1's identical 0.8 box then suppresses.
-        let ml = NmsConfig { multi_label: true, ..cfg.clone() };
-        let out = non_max_suppression(&boxes, &scores, 2, &ml);
-        assert_eq!(out.iter().map(|d| d.score).collect::<Vec<_>>(), vec![0.9, 0.8]);
-        // Class filter after argmax: anchor 1's best class is 1, anchor 0's is 0.
-        let only1 = NmsConfig { classes: Some(vec![1]), ..cfg.clone() };
-        let out = non_max_suppression(&boxes, &scores, 2, &only1);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].class, 1);
-        // Candidate cap keeps the best.
-        let capped = NmsConfig { max_candidates: 1, ..cfg };
-        assert_eq!(non_max_suppression(&boxes, &scores, 2, &capped).len(), 1);
-        assert!(non_max_suppression(&[], &[], 2, &NmsConfig::default()).is_empty());
-    }
-
-    #[test]
-    fn detection_serialises_flat() {
-        let d = Detection { bbox: b(1., 2., 3., 4.), score: 0.5, class: 7 };
-        let v = serde_json::to_value(d).unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!({ "x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0, "score": 0.5, "class": 7 })
-        );
-        assert_eq!(serde_json::from_value::<Detection>(v).unwrap(), d);
-    }
-}
+mod tests;

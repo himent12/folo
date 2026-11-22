@@ -804,6 +804,21 @@ pub enum OptimStep {
         /// Nesterov momentum.
         nesterov: bool,
     },
+    /// Decoupled or Cautious-Decoupled SGD (P3): momentum accumulates raw `g` only (no coupled `wd · p`);
+    /// parameter decay subtracts `wd_step · p` (gated by `u · p > 0` when `cautious` is true), independent of
+    /// `MuSgd`'s `sgd` step weight.
+    SgdDecoupled {
+        /// Learning rate for the gradient / momentum direction `u`.
+        lr: f32,
+        /// `μ` (used only with a momentum buffer).
+        momentum: f32,
+        /// Pre-multiplied decoupled weight-decay step `lr_unscaled · wd`.
+        wd_step: f32,
+        /// Nesterov momentum.
+        nesterov: bool,
+        /// Cautious mask: apply decay only where `u · p > 0`.
+        cautious: bool,
+    },
     /// AdamW: `p = p · decay` (when set); `m = β1 · m + (1 − β1) · g`; `v = β2 · v + (1 − β2) · g²`;
     /// `p = p + (−step_size) · m / (sqrt(v) / bc2_sqrt + eps)`.
     AdamW {

@@ -1,8 +1,10 @@
-//! Range calibration (docs/MODEL.md §9.6): the `f32` model over sample images, a histogram of every quantised
-//! boundary, and a range per boundary chosen from it.
+//! Range calibration (docs/MODEL.md §9.6): the `f32` model over sample images, per-tensor and per-channel
+//! histograms of every quantised boundary, and a range per boundary (and per channel in `version: 2`) chosen
+//! from them.
 //!
 //! Two passes over the same images: the first records each boundary's minimum and maximum, the second a
-//! histogram of [`BINS`] bins between them. [`Calibrator::finish`] then picks each range by [`Method`].
+//! histogram of [`BINS`] (per-tensor) and [`CH_BINS`] (per-channel) bins between them. [`Calibrator::finish`]
+//! then picks each range by [`Method`].
 
 use std::collections::BTreeMap;
 
@@ -13,9 +15,21 @@ use serde::{Deserialize, Serialize};
 use super::QParam;
 use super::walk::{self, Exec};
 use crate::model::FoloModel;
+use crate::model::blocks::{C3k2, C3k2Block};
 
-/// Histogram bins per boundary.
+/// Per-tensor histogram bins per boundary.
 pub const BINS: usize = 2048;
+/// Per-channel histogram bins per boundary (`version: 2`).
+pub const CH_BINS: usize = 256;
+
+/// Schema version 1: per-tensor `ranges` only, `f32` stem.
+pub const VERSION_V1: u32 = 1;
+/// Schema version 2: per-channel C4 `channel_ranges`, per-part concat scale decoupling, and direct `u8` stem.
+pub const VERSION_V2: u32 = 2;
+
+fn default_version() -> u32 {
+    VERSION_V1
+}
 
 /// How a boundary's range is chosen from its histogram.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -33,15 +47,25 @@ pub enum Method {
     Mse,
 }
 
-/// The stored result of calibration: a `[lo, hi]` range per boundary name ([`walk::Exec`]).
+/// The stored result of calibration: a `[lo, hi]` range per boundary name ([`walk::Exec`]), plus optional
+/// per-channel ranges and direct `u8` stem opt-in (`version: 2`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Calibration {
+    /// Schema version (`1`: per-tensor; `2`: per-channel C4 grids + direct `u8` stem).
+    #[serde(default = "default_version")]
+    pub version: u32,
     /// How the ranges were chosen.
     pub method: Method,
     /// Images the ranges were measured on.
     pub images: usize,
-    /// Boundary name to `[lo, hi]`.
+    /// Boundary name to per-tensor `[lo, hi]`.
     pub ranges: BTreeMap<String, [f32; 2]>,
+    /// Per-channel `[lo, hi]` ranges per boundary name (`version >= 2`; empty in `version: 1`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channel_ranges: BTreeMap<String, Vec<[f32; 2]>>,
+    /// Run the 3-channel stem directly on `u8` pixels (`scale = 1/255, zero = 0`) via AVX-VNNI.
+    #[serde(default)]
+    pub u8_stem: bool,
     /// Convs that keep `f32` weights (mixed precision): their inputs are dequantised and their outputs
     /// quantised again.
     #[serde(default)]
@@ -51,28 +75,104 @@ pub struct Calibration {
     pub weights: Option<String>,
 }
 
+fn range_to_param(name: &str, [lo, hi]: [f32; 2]) -> Result<QParam> {
+    let g = (lo.is_finite() && hi.is_finite() && lo <= hi).then(|| QParam::from_range(lo, hi));
+    match g {
+        Some(g) if g.scale.is_finite() && g.inv().is_finite() => Ok(g),
+        _ => Err(folo_nn::Error::Invalid(format!(
+            "int8 calibration range of `{name}` is [{lo}, {hi}]: re-run `folo quantize`"
+        ))),
+    }
+}
+
 impl Calibration {
-    /// The grid of boundary `name`: its range must be finite with `lo <= hi`, and its width too (so the grid's
-    /// step and its inverse are finite; a zero-width range gets a tiny step).
+    /// Validates the calibration schema version (`1..=2`).
+    pub fn check_version(&self) -> Result<()> {
+        if (VERSION_V1..=VERSION_V2).contains(&self.version) {
+            Ok(())
+        } else {
+            Err(folo_nn::Error::Metadata(format!(
+                "unsupported `{}` calibration version {} (supported: {VERSION_V1}..={VERSION_V2})",
+                super::META_KEY,
+                self.version
+            )))
+        }
+    }
+
+    /// The per-tensor grid of boundary `name`: its range must be finite with `lo <= hi`, and its width too (so
+    /// the grid's step and its inverse are finite; a zero-width range gets a tiny step).
     pub fn param(&self, name: &str) -> Result<QParam> {
-        let [lo, hi] = self.ranges.get(name).copied().ok_or_else(|| {
+        self.check_version()?;
+        let r = self.ranges.get(name).copied().ok_or_else(|| {
             folo_nn::Error::Invalid(format!(
                 "int8 calibration has no range for `{name}`: re-run `folo quantize`"
             ))
         })?;
-        let g = (lo.is_finite() && hi.is_finite() && lo <= hi).then(|| QParam::from_range(lo, hi));
-        match g {
-            Some(g) if g.scale.is_finite() && g.inv().is_finite() => Ok(g),
-            _ => Err(folo_nn::Error::Invalid(format!(
-                "int8 calibration range of `{name}` is [{lo}, {hi}]: re-run `folo quantize`"
-            ))),
+        range_to_param(name, r)
+    }
+
+    /// Per-channel grids of length `c` for boundary `name`. Falls back cleanly to `[self.param(name)?; c]` on
+    /// `version: 1` calibrations (or when `channel_ranges` has no entry for `name`).
+    pub fn channel_params(&self, name: &str, c: usize) -> Result<Vec<QParam>> {
+        let fallback = self.param(name)?;
+        let Some(crs) = self.channel_ranges.get(name) else {
+            return Ok(vec![fallback; c]);
+        };
+        if crs.len() != c {
+            return Err(folo_nn::Error::Invalid(format!(
+                "int8 calibration channel_ranges of `{name}` has {} channels, expected {c}",
+                crs.len()
+            )));
         }
+        crs.iter().map(|&r| range_to_param(name, r)).collect()
     }
 
     /// Whether conv `name` keeps `f32` weights.
     pub fn is_f32(&self, name: &str) -> bool {
         self.f32_convs.iter().any(|c| c == name)
     }
+
+    /// Adds the sensitivity-default P5 tail (`neck.out5.*`) conv names to `f32_convs` (deduplicated).
+    pub fn with_p5_tail_f32(mut self, model: &FoloModel) -> Self {
+        for name in default_sensitivity_f32_convs(model) {
+            if !self.is_f32(&name) {
+                self.f32_convs.push(name);
+            }
+        }
+        self
+    }
+}
+
+/// Sensitivity + cost-model default `f32_convs`: the P5 neck tail (`neck.out5.*`), which both has the lowest
+/// weight SQNR in `folo-n`/`folo-s` (36.5–37.7 dB) and sits at 20×20 directly feeding the `f32` head (zero extra
+/// requantisation cost).
+pub fn default_sensitivity_f32_convs(model: &FoloModel) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_c3k2_names("neck.out5", &model.neck.out5, &mut out);
+    out
+}
+
+fn collect_c3k2_names(prefix: &str, b: &C3k2, out: &mut Vec<String>) {
+    out.push(format!("{prefix}.cv1"));
+    for (j, blk) in b.blocks.iter().enumerate() {
+        let bp = format!("{prefix}.block{j}");
+        match blk {
+            C3k2Block::Bottleneck(_) => {
+                out.push(format!("{bp}.cv1"));
+                out.push(format!("{bp}.cv2"));
+            }
+            C3k2Block::C3k(ck) => {
+                out.push(format!("{bp}.cv1"));
+                for k in 0..ck.blocks.len() {
+                    out.push(format!("{bp}.block{k}.cv1"));
+                    out.push(format!("{bp}.block{k}.cv2"));
+                }
+                out.push(format!("{bp}.cv2"));
+                out.push(format!("{bp}.cv3"));
+            }
+        }
+    }
+    out.push(format!("{prefix}.cv2"));
 }
 
 #[derive(Default)]
@@ -84,7 +184,7 @@ struct Stats {
 }
 
 impl Stats {
-    fn add(&mut self, v: &[f32], pass: u8) {
+    fn add(&mut self, v: &[f32], pass: u8, bins: usize) {
         if pass == 0 {
             for &x in v {
                 if !self.seen {
@@ -96,21 +196,22 @@ impl Stats {
             return;
         }
         if self.hist.is_empty() {
-            self.hist = vec![0; BINS];
+            self.hist = vec![0; bins];
         }
-        let (lo, w) = (self.min, (self.max - self.min).max(1e-12) / BINS as f32);
+        let (lo, w) = (self.min, (self.max - self.min).max(1e-12) / bins as f32);
         for &x in v {
-            let b = (((x - lo) / w) as isize).clamp(0, BINS as isize - 1) as usize;
+            let b = (((x - lo) / w) as isize).clamp(0, bins as isize - 1) as usize;
             self.hist[b] += 1;
         }
     }
 
     /// `[lo, hi]` by `method`.
     fn range(&self, method: Method) -> [f32; 2] {
-        if self.hist.is_empty() || method == Method::MinMax {
+        let bins = self.hist.len();
+        if bins == 0 || method == Method::MinMax {
             return [self.min, self.max];
         }
-        let w = (self.max - self.min) as f64 / BINS as f64;
+        let w = (self.max - self.min) as f64 / bins as f64;
         let edge = |i: usize| self.min as f64 + w * i as f64;
         let total: u64 = self.hist.iter().sum();
         match method {
@@ -118,25 +219,23 @@ impl Stats {
             Method::Percentile { p } => {
                 let cut = (p * total as f64) as u64;
                 let (mut lo, mut acc) = (0usize, 0u64);
-                while lo < BINS && acc + self.hist[lo] <= cut {
+                while lo < bins && acc + self.hist[lo] <= cut {
                     acc += self.hist[lo];
                     lo += 1;
                 }
-                let (mut hi, mut acc) = (BINS, 0u64);
+                let (mut hi, mut acc) = (bins, 0u64);
                 while hi > 0 && acc + self.hist[hi - 1] <= cut {
                     acc += self.hist[hi - 1];
                     hi -= 1;
                 }
                 [edge(lo) as f32, edge(hi.max(lo + 1)) as f32]
             }
-            Method::Mse => self.mse_range(w),
+            Method::Mse => self.mse_range(w, bins),
         }
     }
 
-    /// Search `lo` over the lowest and `hi` over the highest edges with prefix sums: the clipping error of the
-    /// bins outside is `Σ n (c − edge)²`, the rounding error inside `n_in · Δ² / 12`.
-    fn mse_range(&self, w: f64) -> [f32; 2] {
-        let n = BINS;
+    /// Search `lo` over the lowest and `hi` over the highest edges with prefix sums.
+    fn mse_range(&self, w: f64, n: usize) -> [f32; 2] {
         let c = |i: usize| self.min as f64 + w * (i as f64 + 0.5);
         let (mut s0, mut s1, mut s2) = (vec![0f64; n + 1], vec![0f64; n + 1], vec![0f64; n + 1]);
         for i in 0..n {
@@ -146,7 +245,6 @@ impl Stats {
             s2[i + 1] = s2[i] + h * x * x;
         }
         let edge = |i: usize| self.min as f64 + w * i as f64;
-        // The edges that keep 0 inside, coarse enough to stay cheap.
         let zero = (((0.0 - self.min as f64) / w).floor().max(0.0) as usize).min(n);
         let step = (n / 512).max(1);
         let los: Vec<usize> = (0..=zero).step_by(step).chain([zero]).collect();
@@ -172,11 +270,17 @@ impl Stats {
     }
 }
 
+#[derive(Default)]
+struct BoundaryStats {
+    tensor: Stats,
+    channels: Vec<Stats>,
+}
+
 /// Collects the boundary statistics of calibration images: [`Calibrator::observe`] every batch, call
 /// [`Calibrator::next_pass`], observe the same batches again, then [`Calibrator::finish`].
 #[derive(Default)]
 pub struct Calibrator {
-    stats: BTreeMap<String, Stats>,
+    stats: BTreeMap<String, BoundaryStats>,
     pass: u8,
     /// Images observed in each pass.
     images: [usize; 2],
@@ -207,8 +311,8 @@ impl Calibrator {
         self.pass = 1;
     }
 
-    /// The ranges by `method`. Refused unless both passes observed the same images, at least one, and no
-    /// observation failed.
+    /// The ranges by `method` (`version: 2`, with per-channel C4 ranges and `u8_stem: true`). Refused unless
+    /// both passes observed the same images, at least one, and no observation failed.
     pub fn finish(&self, method: Method) -> Result<Calibration> {
         let [a, b] = self.images;
         if self.failed {
@@ -219,14 +323,40 @@ impl Calibrator {
                 "int8 calibration needs two passes over the same images, at least one (saw {a}, then {b})"
             )));
         }
-        let ranges = self.stats.iter().map(|(k, s)| (k.clone(), s.range(method))).collect();
-        Ok(Calibration { method, images: a, ranges, f32_convs: Vec::new(), weights: None })
+        let ranges = self.stats.iter().map(|(k, s)| (k.clone(), s.tensor.range(method))).collect();
+        let channel_ranges = self
+            .stats
+            .iter()
+            .map(|(k, s)| (k.clone(), s.channels.iter().map(|cs| cs.range(method)).collect()))
+            .collect();
+        Ok(Calibration {
+            version: VERSION_V2,
+            method,
+            images: a,
+            ranges,
+            channel_ranges,
+            u8_stem: true,
+            f32_convs: Vec::new(),
+            weights: None,
+        })
     }
 
     fn record(&mut self, name: &str, t: &Tensor) -> Result<()> {
+        let (n, c, h, w) = t.dims4()?;
+        let hw = h * w;
         let v = t.to_vec::<f32>()?;
         let pass = self.pass;
-        self.stats.entry(name.to_string()).or_default().add(&v, pass);
+        let entry = self.stats.entry(name.to_string()).or_default();
+        entry.tensor.add(&v, pass, BINS);
+        if entry.channels.len() != c {
+            entry.channels = (0..c).map(|_| Stats::default()).collect();
+        }
+        for img in 0..n {
+            for (ch, ch_stats) in entry.channels.iter_mut().enumerate().take(c) {
+                let base = (img * c + ch) * hw;
+                ch_stats.add(&v[base..base + hw], pass, CH_BINS);
+            }
+        }
         Ok(())
     }
 }
@@ -317,8 +447,8 @@ where
 }
 
 /// [`calibrate`] on `images` images of `part` drawn at random by `seed` (all of them when it has fewer), letterboxed
-/// to `imgsz` as validation does, in batches of `batch` read by `workers` threads (`folo quantize`). Returns the
-/// calibration and the number of images.
+/// to `imgsz` as validation does, in batches of `batch` read by `workers` threads (`folo quantize`). Includes the
+/// P5-tail sensitivity `f32_convs` default (`neck.out5.*`). Returns the calibration and the number of images.
 pub fn calibrate_sample(
     model: &FoloModel,
     part: &folo_data::FileDataset,
@@ -345,7 +475,7 @@ pub fn calibrate_sample(
             Ok(Tensor::from_vec(std::mem::take(&mut b.images), b.shape)?)
         })
     };
-    Ok((calibrate(model, batches, method)?, n))
+    Ok((calibrate(model, batches, method)?.with_p5_tail_f32(model), n))
 }
 
 #[cfg(test)]
@@ -354,26 +484,21 @@ mod tests {
 
     fn stats(v: &[f32]) -> Stats {
         let mut s = Stats::default();
-        s.add(v, 0);
-        s.add(v, 1);
+        s.add(v, 0, BINS);
+        s.add(v, 1, BINS);
         s
     }
 
     #[test]
     fn ranges_have_their_known_answers() {
-        // 0..20480 step 1: about 10 values a bin.
         let v: Vec<f32> = (0..20480).map(|i| i as f32).collect();
         let s = stats(&v);
         assert_eq!(s.range(Method::MinMax), [0.0, 20479.0]);
         assert_eq!(s.range(Method::Percentile { p: 0.0 }), [0.0, 20479.0]);
-        // 1% off each end, to a bin (~10 wide).
         let [lo, hi] = s.range(Method::Percentile { p: 0.01 });
         assert!((lo - 204.8).abs() < 12.0 && (hi - (20479.0 - 204.8)).abs() < 12.0, "[{lo}, {hi}]");
-        // Uniform: clipping costs more than rounding, so MSE keeps (about) the whole range.
         let [lo, hi] = s.range(Method::Mse);
         assert!(lo == 0.0 && hi > 20479.0 * 0.98, "[{lo}, {hi}]");
-        // A million values in [0, 100) and one at 10 000: MSE trades the outlier's clipping, (10⁴ − h)², against
-        // the rounding of the rest, 10⁶ · (h / 255)² / 12, which is least at h ≈ 4 383; min/max keeps 10 000.
         let mut v: Vec<f32> = (0..1_000_000).map(|i| (i % 100) as f32).collect();
         v.push(10_000.0);
         let s = stats(&v);
