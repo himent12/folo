@@ -12,6 +12,12 @@ describe('AgentChoice', () => {
     expect(prefs.labelAgent).toBe('codex');
     // Codex names no default model: the request leaves it to the CLI.
     expect(c.request()).toEqual({ agent: 'codex', model: null, effort: 'low' });
+    c.pick('antigravity');
+    expect(prefs.labelAgent).toBe('antigravity');
+    expect(c.fastOffered).toBe(false);
+    expect(c.request()).toEqual({ agent: 'antigravity', model: null, effort: 'low' });
+    c.model = 'gemini-4-neon';
+    expect(c.request()).toEqual({ agent: 'antigravity', model: 'gemini-4-neon', effort: 'low' });
   });
 
   it('keeps an effort picked by hand for its agent only', () => {

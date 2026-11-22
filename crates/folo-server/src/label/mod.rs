@@ -3,19 +3,20 @@
 //!
 //! [`Labeler`] is the service behind `/api/label`: it keeps the labeling jobs of a data dir (`label/<id>/`), adds
 //! images to them, runs agents over them and writes datasets. The agents are behind the [`Agent`] trait:
-//! [`ClaudeCode`] and [`Codex`] drive the two CLIs as child processes, one model request per call, and tests put
-//! scripted agents in their place ([`Labeler::set_agents`]). How a call is kept cheap is in [`claude`] and
-//! [`codex`]; what a run does when calls fail is in the `run` module.
+//! [`ClaudeCode`], [`Codex`] and [`Antigravity`] drive the CLIs as child processes, one model request per call, and
+//! tests put scripted agents in their place ([`Labeler::set_agents`]). How a call is kept cheap is in [`claude`],
+//! [`codex`] and [`antigravity`]; what a run does when calls fail is in the `run` module.
 //!
 //! Files: this one holds [`Labeler`]; `job` (one job: `job.json`, its state and events), `images` (adding, listing,
 //! editing and removing a job's images), `labeling` (starting and stopping a run), `run` (a run, batch by batch),
-//! [`agent`] (the [`Agent`] trait and running a CLI with a deadline), [`claude`] and [`codex`] (the two agents),
-//! `ask` (one batch's calls: at most two, whatever made the first fail), `faults` (what a CLI's failure says: a
-//! passing fault or a limit), `tree` (a child process with everything
-//! it starts), [`prompt`] (what an agent is asked and how its reply is read),
-//! `validate` (checks of what clients send), `export` and `dataset` (the YOLO dataset a job becomes).
+//! [`agent`] (the [`Agent`] trait and running a CLI with a deadline), [`claude`], [`codex`] and [`antigravity`] (the
+//! agents), `ask` (one batch's calls: at most two, whatever made the first fail), `faults` (what a CLI's failure says:
+//! a passing fault or a limit), `tree` (a child process with everything it starts), [`prompt`] (what an agent is asked
+//! and how its reply is read), `validate` (checks of what clients send), `export` and `dataset` (the YOLO dataset a
+//! job becomes).
 
 pub mod agent;
+pub mod antigravity;
 mod ask;
 pub mod claude;
 pub mod codex;
@@ -43,6 +44,7 @@ use folo_api::{BBox, CreateLabelJob, LabelAgent, LabelEvent, LabelJob, LogLine, 
 use tokio::sync::broadcast;
 
 pub use agent::{Agent, AgentError, AgentReply, AgentRequest};
+pub use antigravity::Antigravity;
 pub use claude::ClaudeCode;
 pub use codex::Codex;
 pub use images::LabelImageQuery;
@@ -166,8 +168,8 @@ fn path_not_found(path: &Path) -> Error {
 }
 
 impl Labeler {
-    /// Opens the jobs under `data_dir` with the real agents (Claude Code and Codex). A job whose file cannot be
-    /// read is left out (and logged), never overwritten.
+    /// Opens the jobs under `data_dir` with the real agents (Claude Code, Codex and Antigravity). A job whose file
+    /// cannot be read is left out (and logged), never overwritten.
     pub fn open(data_dir: &Path) -> Labeler {
         let root = data_dir.join("label");
         // A copy of a job folder is not a second job of its id: it is skipped before loading (which closes an
@@ -186,7 +188,7 @@ impl Labeler {
             thumbs: data_dir.join("cache").join("thumbs"),
             datasets: data_dir.join("datasets"),
             jobs: RwLock::new(jobs),
-            agents: vec![Arc::new(ClaudeCode::new()), Arc::new(Codex::new())],
+            agents: vec![Arc::new(ClaudeCode::new()), Arc::new(Codex::new()), Arc::new(Antigravity::new())],
             save_every: run::SAVE_EVERY,
             backoff: run::TRANSIENT_BACKOFF,
         }

@@ -121,8 +121,8 @@ impl Failure {
     }
 }
 
-/// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`];
-/// tests script their own.
+/// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`],
+/// [`super::antigravity::Antigravity`]; tests script their own.
 pub trait Agent: Send + Sync + 'static {
     /// Which agent this is.
     fn id(&self) -> LabelAgentId;
@@ -140,6 +140,17 @@ pub trait Agent: Send + Sync + 'static {
     fn check_fast(&self, model: Option<&str>) -> Result<(), String> {
         let _ = model;
         Err(format!("{} has no faster service tier", self.id().display_name()))
+    }
+    /// Resolves `(model, effort)` for a request before the run or benchmark entry records them (defaulting to
+    /// `info.default_model` and `info.default_effort`). Agents whose model slugs can carry an effort suffix
+    /// override this so recorded effort matches the effective setting and conflicting explicit efforts are refused.
+    fn resolve_request(
+        &self,
+        model: Option<String>,
+        effort: Option<LabelEffort>,
+    ) -> Result<(Option<String>, LabelEffort), String> {
+        let info = self.info();
+        Ok((model.or(info.default_model), effort.unwrap_or(info.default_effort)))
     }
     /// Something about how this agent's calls are made right now that a run's log should say once (a call that
     /// costs more than it should, and why); `None` when there is nothing to say.
@@ -494,6 +505,7 @@ mod tests {
     fn versions_are_read_from_either_cli() {
         assert_eq!(version_of("2.1.302 (Claude Code)\n").as_deref(), Some("2.1.302"));
         assert_eq!(version_of("codex-cli 0.167.0\n").as_deref(), Some("0.167.0"));
+        assert_eq!(version_of("1.5.13\n").as_deref(), Some("1.5.13"));
         assert_eq!(version_of("command not found"), None);
     }
 

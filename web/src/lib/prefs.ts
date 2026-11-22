@@ -43,7 +43,7 @@ export function sanitize(raw: unknown): Prefs {
     serverUrl: pick(o.serverUrl, (v): v is string => typeof v === 'string', defaults.serverUrl).trim(),
     units: pick(o.units, (v): v is Units => v === 'metric' || v === 'binary', defaults.units),
     sidebarCollapsed: pick(o.sidebarCollapsed, (v): v is boolean => typeof v === 'boolean', defaults.sidebarCollapsed),
-    labelAgent: pick(o.labelAgent, (v): v is LabelAgentId | null => v === null || v === 'claude' || v === 'codex', defaults.labelAgent),
+    labelAgent: pick(o.labelAgent, (v): v is LabelAgentId | null => v === null || v === 'claude' || v === 'codex' || v === 'antigravity', defaults.labelAgent),
   } as Prefs;
 }
 

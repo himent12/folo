@@ -298,6 +298,54 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_agent_is_seeded_and_runs_in_mock_bench() {
+        let m = MockBackend::new(0, true);
+        let agents = m.label_agents().unwrap();
+        let agy = agents.iter().find(|a| a.id == LabelAgentId::Antigravity).expect("antigravity fixture");
+        assert!(agy.available && !agy.fast && agy.default_effort == LabelEffort::Low);
+        assert!(agy.models.iter().any(|model| model.id == "gemini-4-neon"));
+        let design = m
+            .design_bench(
+                "bn_7a04",
+                &DesignBench {
+                    agent: LabelAgentId::Antigravity,
+                    model: None,
+                    effort: None,
+                    note: String::new(),
+                },
+            )
+            .unwrap();
+        let by = design.plan.designed_by.unwrap();
+        assert_eq!((by.agent, by.model.as_deref()), (LabelAgentId::Antigravity, Some("gemini-4-neon")));
+        assert_eq!(design.usage.cost_usd, None);
+        let entry = m
+            .start_bench_entry(
+                "bn_7a04",
+                &StartBenchEntry {
+                    contestant: BenchContestantSpec::Agent {
+                        agent: LabelAgentId::Antigravity,
+                        model: Some("gemini-4-neon".into()),
+                        effort: None,
+                    },
+                    name: None,
+                    max_images: Some(16),
+                    conditions: Some(false),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            entry.contestant,
+            BenchContestant::Agent {
+                agent: LabelAgentId::Antigravity,
+                model: Some("gemini-4-neon".into()),
+                effort: LabelEffort::Low,
+            }
+        );
+        let usage = entry.usage.unwrap();
+        assert_eq!((usage.calls, usage.cost_usd), (2, None));
+    }
+
+    #[test]
     fn external_boxes_with_reversed_corners_or_no_number_are_refused_not_scored() {
         let m = MockBackend::new(0, true);
         let mut images = Vec::new();

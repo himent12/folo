@@ -20,7 +20,7 @@ index.rs           dataset indexes and their Fingerprint
 models.rs          models: finished runs' weights, <data dir>/models, published weights, /eval, exports
 uploads.rs         upload sessions (/api/uploads)
 cloud/             the cloud control plane: connections, ledger, reaper, executor/ (one thread per cloud run)
-label/             agent labeling: jobs, the Agent trait, claude.rs and codex.rs
+label/             agent labeling: jobs, the Agent trait, claude.rs, codex.rs and antigravity/
 bench/             vision benchmarks: storage, entries, scheduling and self-improvement loops
 throughput/        the measured throughput table and run-time estimates
 cli.rs             the `folo train` command of a TrainConfig (GET /api/runs/{id}/cli)
@@ -148,9 +148,9 @@ a run of this server.
 classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine and exported as a YOLO
 dataset that the store registers.
 - `Labeler` is the service behind `/api/label` (the store hands it out through `Store::labeler`; the mock has none).
-- Agents sit behind the `Agent` trait (`label/agent.rs`): `ClaudeCode` runs `claude -p` and `Codex` runs `codex exec`
-  as child processes, one model request per batch of images with every tool, config file and session switched off, so
-  a call costs little more than its images.
+- Agents sit behind the `Agent` trait (`label/agent.rs`): `ClaudeCode` runs `claude -p`, `Codex` runs `codex exec`,
+  and `Antigravity` runs `agy acp` as child processes, one model request per batch of images with tools, config files
+  and sessions switched off (and any ACP permission request rejected), so a call costs little more than its images.
 - A run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the image)
   before storing it, and ends the run at once on a failure that another call would repeat. A provider's passing
   fault (overloaded, a 5xx, a dropped stream, a short rate limit: `label/faults.rs`) or an unreadable reply is

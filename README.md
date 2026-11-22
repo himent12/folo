@@ -19,7 +19,7 @@ a native Desktop app, and first-class agent tooling.
   vision benchmarks, and export to `.folo` or ONNX.
 - **Built for agents.** Every command accepts `--json` with stable exit codes and structured error hints,
   `folo describe --json` exposes the entire CLI and MCP schema surface, and `folo mcp` gives Claude Code, Codex,
-  Devin, or any MCP client 40 tools.
+  Antigravity, Devin, or any MCP client 40 tools.
 - **Runs in the browser.** The same Rust detector compiles to WebAssembly and runs directly in the page on WebGPU or
   wasm CPU (about 14 ms for `folo-n` at 640×640 in Chrome).
 
@@ -205,7 +205,7 @@ the full release build including the in-browser wasm module.
 Alongside an overview and settings, Studio gives you five focused workspaces:
 - **Datasets**: register a YOLO or COCO folder or generate a synthetic one, browse images with their ground-truth
   boxes, and inspect class balance, box-size histograms, and label issues. No labels yet? **Label images** sends
-  unlabeled images to Claude Code or Codex on your machine, shows every proposed box for review and correction, and
+  unlabeled images to Claude Code, Codex or Antigravity on your machine, shows every proposed box for review and correction, and
   exports a clean dataset ([docs/LABELING.md](docs/LABELING.md)).
 - **Runs**: launch a training run, follow live metrics over SSE alongside validation samples, per-class mAP, and logs,
   stop or resume bit-exactly, and compare runs side by side. **Run on** trains on a GPU rented from RunPod for the
@@ -213,7 +213,7 @@ Alongside an overview and settings, Studio gives you five focused workspaces:
   ([docs/CLOUD.md](docs/CLOUD.md)).
 - **Models**: inspect evaluation results, per-class precision/recall curves, and export weights.
 - **Benchmarks**: freeze a set of labeled images into a vision benchmark with a plan of stress conditions (haze, low
-  light, blur, distance, ...), and score any vision model on it — a FOLO model, Claude Code or Codex inspecting the
+  light, blur, distance, ...), and score any vision model on it — a FOLO model, Claude Code, Codex or Antigravity inspecting the
   images, or predictions produced elsewhere. Every entry is graded across five axes (accuracy, robustness,
   self-labeling, calibration, localization), and a self-improvement loop tests whether a model's own labels can train
   its successor ([docs/BENCH.md](docs/BENCH.md)).
@@ -386,7 +386,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the live checklist.
 |---|---|
 | [QUICKSTART](docs/QUICKSTART.md) | Walkthrough: your own data, fine-tuning, export, in-browser inference |
 | [CLI](docs/CLI.md) | Every `folo` command, `--json`, exit codes, dataset tools |
-| [LABELING](docs/LABELING.md) | Unlabeled images to a dataset with Claude Code or Codex: workflow, cost, accuracy |
+| [LABELING](docs/LABELING.md) | Unlabeled images to a dataset with Claude Code, Codex or Antigravity: workflow, cost, accuracy |
 | [BENCH](docs/BENCH.md) | Vision benchmarks from your own images: conditions, the score and its definitions, any model as a contestant, self-improvement loops |
 | [CLOUD](docs/CLOUD.md) | Training on a rented GPU (RunPod) or another FOLO server: lifecycle, safety, providers |
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |

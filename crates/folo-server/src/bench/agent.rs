@@ -1,4 +1,4 @@
-//! Agent entries: a coding agent (Claude Code, Codex) asked for the boxes of a benchmark's images exactly as agent
+//! Agent entries: a coding agent (Claude Code, Codex, Antigravity) asked for the boxes of a benchmark's images exactly as agent
 //! labeling asks for them ([`crate::label::prompt`]: the same system prompt, the benchmark's classes and its
 //! description as the instructions, the same reply checks), with the same batching, parallelism and failure
 //! policy as a labeling run. Agents are IO-bound, so every agent entry has a thread of its own and never waits

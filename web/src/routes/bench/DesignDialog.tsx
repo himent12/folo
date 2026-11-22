@@ -1,5 +1,5 @@
 /**
- * "Design with an agent" (docs/BENCH.md, Designing a plan with an agent): asks Claude Code or Codex once (no tools)
+ * "Design with an agent" (docs/BENCH.md, Designing a plan with an agent): asks Claude Code, Codex or Antigravity once (no tools)
  * for a plan drawn from the catalog, from the benchmark's description, its classes and four of its images. While the
  * request runs, the dialog says that one request is in flight and what it carries. The answer is a proposal shown
  * against the current plan: what it adds, removes and changes, each with the agent's reason, and why the whole; "Use
@@ -13,6 +13,7 @@ import { hub } from '$lib/api/index';
 import type { Bench, BenchCatalog, BenchDesign, BenchPlan, BenchPlanCondition, LabelAgent } from '$lib/api/types';
 import { DESIGN_NOTE_MAX } from '$lib/bench/rules';
 import { diffPlans, planPasses, type PlanChange } from '$lib/bench/plan';
+import { AGENT_NAME } from '$lib/label';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
@@ -66,7 +67,7 @@ export default function DesignDialog(props: DesignDialogProps) {
   const why = computed(() =>
     !agent.get()
       ? props.agents
-        ? 'Install Claude Code or Codex on the server’s machine'
+        ? 'Install Claude Code, Codex or Antigravity on the server’s machine'
         : 'Checking which agents are installed'
       : note.get().length > DESIGN_NOTE_MAX
         ? 'Shorten the note first'
@@ -102,7 +103,7 @@ export default function DesignDialog(props: DesignDialogProps) {
   const proposedBy = computed(() => {
     const by = design.get()?.plan.designed_by;
     return by
-      ? `${by.agent === 'claude' ? 'Claude Code' : 'Codex'}${by.model ? ` (${modelLabel(by.model, props.agents?.find((x) => x.id === by.agent))})` : ''}`
+      ? `${AGENT_NAME[by.agent]}${by.model ? ` (${modelLabel(by.model, props.agents?.find((x) => x.id === by.agent))})` : ''}`
       : asked.get();
   });
 

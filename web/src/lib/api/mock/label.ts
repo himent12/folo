@@ -48,16 +48,65 @@ const PARALLEL_MAX = 8;
 /** Whether an optional count is absent or a whole number in `1..=max`. */
 const inRange = (v: number | null | undefined, max: number) => v === null || v === undefined || (Number.isInteger(v) && v >= 1 && v <= max);
 
-/** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8). */
-const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8 };
+const EFFORT_SUFFIXES = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** Mirrors the server's `check_model`: trims a model name and refuses invalid characters or length. */
+export function checkMockModel(rawModel: string | null | undefined): string | null {
+  const model = rawModel?.trim() || null;
+  if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
+    throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
+  return model;
+}
+
+/** Mirrors the server's `Agent::resolve_request`: validates model, maps Antigravity effort-suffixed slugs, and rejects conflicts. */
+export function resolveAgentRequest(
+  agent: LabelAgentId,
+  rawModel: string | null | undefined,
+  explicitEffort: LabelEffort | null | undefined,
+  defaultModel: string | null,
+  defaultEffort: LabelEffort,
+): { model: string | null; effort: LabelEffort } {
+  const model = checkMockModel(rawModel);
+  if (agent === 'antigravity' && model) {
+    const lower = model.toLowerCase();
+    for (const suffix of EFFORT_SUFFIXES) {
+      const tail = `-${suffix}`;
+      if (lower.endsWith(tail) && model.length > tail.length) {
+        const base = model.slice(0, model.length - tail.length);
+        const mapped: LabelEffort = suffix === 'minimal' || suffix === 'low' ? 'low' : suffix === 'medium' ? 'medium' : 'high';
+        if (explicitEffort && explicitEffort !== mapped) {
+          throw new ApiError(
+            400,
+            'invalid_body',
+            `model '${model}' already specifies effort '${suffix}', which conflicts with effort '${explicitEffort}': omit effort or pass the base model '${base}'`,
+          );
+        }
+        return { model, effort: mapped };
+      }
+    }
+  }
+  return { model: model ?? defaultModel, effort: explicitEffort ?? defaultEffort };
+}
+
+/** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8, Antigravity 8). */
+const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8, antigravity: 8 };
 /** Claude Code's list prices per million tokens, input and output (Codex reports no cost). */
 const PRICE: Record<string, [number, number]> = { sonnet: [3, 15], haiku: [1, 5], opus: [15, 75] };
 /** How well each model finds the objects (the share a call gets right, roughly). */
-const QUALITY: Record<string, number> = { sonnet: 0.86, haiku: 0.74, opus: 0.92 };
+const QUALITY: Record<string, number> = {
+  sonnet: 0.86,
+  haiku: 0.74,
+  opus: 0.92,
+  'gemini-4-neon': 0.91,
+  'gemini-4-hydrogen': 0.88,
+  'gemini-4-carbon': 0.84,
+  'gemini-4-argon': 0.8,
+  'gemini-3.8-flash': 0.78,
+};
 
 /**
- * The agents a server finds, with the real server's models and defaults: Claude Code installed; Codex not installed
- * (its hint says how), except in `all-agents`, where both are.
+ * The agents a server finds, with the real server's models and defaults: Claude Code installed; Codex and Antigravity
+ * not installed (their hints say how), except in `all-agents`, where all three are.
  */
 export function mockAgents(codex: boolean): LabelAgent[] {
   return [
@@ -91,6 +140,25 @@ export function mockAgents(codex: boolean): LabelAgent[] {
       default_effort: 'low',
       fast: true,
       hint: codex ? null : 'Install Codex (npm install -g @openai/codex) and sign in with `codex login`, or set FOLO_CODEX_BIN to its path.',
+    },
+    {
+      id: 'antigravity',
+      name: AGENT_NAME.antigravity,
+      available: codex,
+      version: codex ? '1.5.13' : null,
+      models: [
+        { id: 'gemini-4-neon', label: 'Gemini 4 Neon' },
+        { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
+        { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
+        { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+        { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+      ],
+      default_model: null,
+      default_effort: 'low',
+      fast: false,
+      hint: codex
+        ? null
+        : 'Install Antigravity CLI (https://antigravity.google/docs/getting-started) and sign in by running `agy` once, or set FOLO_ANTIGRAVITY_BIN to its path.',
     },
   ];
 }
@@ -598,13 +666,11 @@ export class MockLabeling {
   start(id: string, body: StartLabeling, now: number): LabelJob {
     const j = this.#job(id);
     this.advance(j, now);
-    if (body.agent !== 'claude' && body.agent !== 'codex')
-      throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\` or \`codex\``);
+    if (body.agent !== 'claude' && body.agent !== 'codex' && body.agent !== 'antigravity')
+      throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\`, \`codex\` or \`antigravity\``);
     // In the server's order: the body's fields, then the agent, then the job.
     if ([...(body.note ?? '')].length > NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${NOTE_MAX} characters`);
-    const model = body.model?.trim() || null;
-    if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
-      throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
+    const model = checkMockModel(body.model);
     if (!inRange(body.batch, BATCH_MAX)) throw new ApiError(400, 'invalid_body', `batch must be in 1..=${BATCH_MAX}`);
     if (!inRange(body.parallel, PARALLEL_MAX)) throw new ApiError(400, 'invalid_body', `parallel must be in 1..=${PARALLEL_MAX}`);
     if (body.fast) {
@@ -619,10 +685,15 @@ export class MockLabeling {
     }
     const agent = mockAgents(this.codex).find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
+    const resolved = resolveAgentRequest(body.agent, model, body.effort, agent.default_model, agent.default_effort);
     if (this.#active(j)) throw new ApiError(409, 'label_job_active', `An agent is already labeling ${j.name}.`, 'Wait for the run to finish, or stop it first.');
     const unknown = body.image_ids?.find((x) => !j.images.some((i) => i.id === x));
     if (unknown) throw new ApiError(400, 'invalid_body', `image_ids: the job has no image '${unknown}'`);
-    this.#run(j, { ...body, model, image_ids: body.image_ids ? [...new Set(body.image_ids)] : body.image_ids }, now);
+    this.#run(
+      j,
+      { ...body, model: resolved.model, effort: resolved.effort, image_ids: body.image_ids ? [...new Set(body.image_ids)] : body.image_ids },
+      now,
+    );
     if (!j.run?.ids.length) {
       j.run = null;
       throw new ApiError(400, 'invalid_body', 'nothing to label: every image of the job is labeled', 'Start with `scope: all` to label them again.');
@@ -807,7 +878,7 @@ export class MockLabeling {
 
   /** What a CLI reports for one call: about 1000 tokens an image plus its fixed prompt (Codex's ~10k), cached after the first call. */
   #usage(j: Job, r: Run, k: number, images: number, boxes: number): LabelUsage {
-    const fixed = r.agent === 'claude' ? 420 + Math.round(j.instructions.length / 4) : 10_200;
+    const fixed = r.agent === 'claude' ? 420 + Math.round(j.instructions.length / 4) : r.agent === 'antigravity' ? 1_200 + Math.round(j.instructions.length / 4) : 10_200;
     const input = fixed + images * 1012 + (hash(`${j.id}:${k}`) % 60);
     const cached = k === 0 ? 0 : Math.round(fixed * 0.86);
     const reasoning = { low: 0, medium: 260, high: 820 }[r.effort] * images;

@@ -42,6 +42,8 @@ describe('agents and images', () => {
     expect(modelLabel('claude-sonnet-5', claude)).toBe('claude-sonnet-5');
     expect(modelLabel(null, claude)).toBe('Default model');
     expect(runAgent({ agent: 'codex', model: null } as LabelRun, [claude])).toEqual(['Codex', 'Default model']);
+    const agy = { id: 'antigravity', models: [{ id: 'gemini-4-neon', label: 'Gemini 4 Neon' }] } as LabelAgent;
+    expect(runAgent({ agent: 'antigravity', model: 'gemini-4-neon' } as LabelRun, [claude, agy])).toEqual(['Antigravity', 'Gemini 4 Neon']);
   });
 
   it("says an image's state", () => {

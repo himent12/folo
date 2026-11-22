@@ -88,7 +88,7 @@ export default function LabelJobs() {
     <>
       <Page
         title="Label images"
-        sub={() => <span>Unlabeled images, boxed by Claude Code or Codex, reviewed by you, then a dataset.</span>}
+        sub={() => <span>Unlabeled images, boxed by Claude Code, Codex or Antigravity, reviewed by you, then a dataset.</span>}
         subPhone={() => <span>Agent-drawn boxes.</span>}
         actions={() => (
           <>
@@ -174,7 +174,7 @@ export default function LabelJobs() {
                         <EmptyState
                           icon={Tags}
                           title="No labeling jobs yet"
-                          description="Add images, name the classes, and Claude Code or Codex draws the boxes for you to review."
+                          description="Add images, name the classes, and Claude Code, Codex or Antigravity draws the boxes for you to review."
                           actions={() => (
                             <Button icon={Plus} onclick={() => creating.set(true)}>
                               New labeling job

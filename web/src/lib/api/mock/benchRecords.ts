@@ -10,6 +10,7 @@ import type {
   BenchSource,
   Box,
   LabelAgent,
+  LabelAgentId,
   LabelUsage,
   Model,
   StartBenchLoop,
@@ -29,7 +30,7 @@ export const MS_PER_IMAGE: Record<string, number> = { 'folo-n': 2.35, 'folo-s': 
 /** Parameters by architecture, as a model reports them. */
 export const PARAMS: Record<string, number> = { 'folo-n': 2_630_000, 'folo-s': 9_100_000, 'folo-m': 20_100_000, 'folo-l': 25_400_000, 'folo-x': 57_000_000 };
 /** An agent answers this many images per call (as agent labeling batches them), a call every 1.5 s. */
-export const PER_CALL: Record<string, number> = { claude: 4, codex: 8 };
+export const PER_CALL: Record<LabelAgentId, number> = { claude: 4, codex: 8, antigravity: 8 };
 export const CALL_MS = 1500;
 /** A stop ends what is in flight within this long. */
 export const STOP_MS = 1000;
@@ -138,9 +139,10 @@ export function fingerprintOf(b: Pick<MBench, 'images' | 'plan' | 'seed'>): stri
 
 /**
  * An agent entry's default name, as the server makes it (crates/folo-server/src/bench/entries.rs): the agent's name
- * with its model in parentheses, `Claude Code (haiku)`, `Codex (gpt-6.1-sol)`; the agent's name alone without a model.
+ * with its model in parentheses, `Claude Code (haiku)`, `Codex (gpt-6.1-sol)`, `Antigravity (gemini-4-neon)`; the
+ * agent's name alone without a model.
  */
-export const agentEntryName = (agent: 'claude' | 'codex', model: string | null) => (model ? `${AGENT_NAME[agent]} (${model})` : AGENT_NAME[agent]);
+export const agentEntryName = (agent: LabelAgentId, model: string | null) => (model ? `${AGENT_NAME[agent]} (${model})` : AGENT_NAME[agent]);
 
 /** A loop's default name, as the server makes it: `<teacher's name> loop`. */
 export const loopName = (teacher: string) => `${teacher} loop`;

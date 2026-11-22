@@ -32,7 +32,7 @@ impl FoloApp {
 
     /// Asks the chosen agent for a plan.
     pub fn ask_design(&mut self, cx: &mut Context<Self>) {
-        // Its button is off then ("Install Claude Code or Codex"): so is Ctrl+Enter.
+        // Its button is off then ("Install Claude Code, Codex or Antigravity"): so is Ctrl+Enter.
         if self.bench_agents().is_empty() {
             return;
         }

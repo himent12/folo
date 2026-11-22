@@ -7,7 +7,7 @@ import type { Time } from './time';
 // ---------- Agent labeling (docs/API.md); servers that have it list `agent_labeling` in `SystemInfo.features` ----------
 
 /** A coding-agent CLI on the server's machine that FOLO can ask for labels. */
-export type LabelAgentId = 'claude' | 'codex';
+export type LabelAgentId = 'claude' | 'codex' | 'antigravity';
 
 /** A model of a `LabelAgent`: `id` is what the CLI takes, `label` the display name. */
 export interface LabelModel {
@@ -20,7 +20,7 @@ export interface LabelModel {
 /** `GET /api/label/agents`: one agent CLI and whether the server found it. */
 export interface LabelAgent {
   id: LabelAgentId;
-  /** Product name: "Claude Code", "Codex". */
+  /** Product name: "Claude Code", "Codex", "Antigravity". */
   name: string;
   /** Its CLI is installed and answered `--version`; whether it is signed in is only known once a run calls it. */
   available: boolean;

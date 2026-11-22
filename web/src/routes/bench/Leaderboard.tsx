@@ -161,7 +161,7 @@ export default function Leaderboard(props: LeaderboardProps) {
           <EmptyState
             icon={Target}
             title="No entries yet"
-            description="An entry is one contestant's run of this benchmark: a model of this server, Claude Code or Codex looking at the images, or any other model's predictions. The first entry fixes the plan, so look over the conditions first."
+            description="An entry is one contestant's run of this benchmark: a model of this server, Claude Code, Codex or Antigravity looking at the images, or any other model's predictions. The first entry fixes the plan, so look over the conditions first."
             actions={() => (
               <Button icon={Plus} onclick={props.onadd}>
                 Add entry

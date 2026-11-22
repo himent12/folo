@@ -7,7 +7,7 @@ import type { Box, LabelAgentId } from './api/types';
 export const LABEL_FEATURE = 'agent_labeling';
 
 /** The agents' product names. */
-export const AGENT_NAME: Record<LabelAgentId, string> = { claude: 'Claude Code', codex: 'Codex' };
+export const AGENT_NAME: Record<LabelAgentId, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity' };
 
 export const JOB_NAME_MAX = 100;
 export const CLASSES_MAX = 80;

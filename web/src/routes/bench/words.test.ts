@@ -29,6 +29,7 @@ describe('words', () => {
   it('says who an entry is without repeating its name', () => {
     expect(contestantFacts(entry({ name: 'Claude Code · Sonnet', contestant: { kind: 'agent', agent: 'claude', model: 'sonnet', effort: 'medium' } }))).toEqual({ facts: ['Agent', 'medium effort'] });
     expect(contestantFacts(entry({ name: 'my agent', contestant: { kind: 'agent', agent: 'codex', model: null, effort: 'low' } }))).toEqual({ facts: ['Agent', 'Codex', 'Default model', 'low effort'] });
+    expect(contestantFacts(entry({ name: 'Antigravity (gemini-4-neon)', contestant: { kind: 'agent', agent: 'antigravity', model: 'gemini-4-neon', effort: 'low' } }))).toEqual({ facts: ['Agent', 'low effort'] });
     expect(contestantFacts(entry({ contestant: { kind: 'model', model_id: 'm', arch: 'folo-s', params: 9_100_000, imgsz: 640 } }))).toEqual({ arch: 'folo-s', facts: ['9.1M params'] });
     expect(contestantFacts(entry({ contestant: { kind: 'external' }, scored: false })).facts).toEqual(['External', 'scored without confidences']);
   });

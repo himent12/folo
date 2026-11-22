@@ -70,7 +70,7 @@ export default function AgentPanel(props: AgentPanelProps) {
       ? 'Add images to label first'
       : !agent.get()
         ? props.agents
-          ? 'Install Claude Code or Codex on the server’s machine'
+          ? 'Install Claude Code, Codex or Antigravity on the server’s machine'
           : 'Checking which agents are installed'
         : instructions.get().length > INSTRUCTIONS_MAX
           ? 'Shorten the instructions first'

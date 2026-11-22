@@ -66,8 +66,8 @@ pub enum Command {
     /// a server running.
     #[command(subcommand)]
     Cloud(CloudCommand),
-    /// Agent labeling (docs/LABELING.md): jobs of unlabeled images, boxes drawn by Claude Code or Codex, review,
-    /// and the dataset made from them.
+    /// Agent labeling (docs/LABELING.md): jobs of unlabeled images, boxes drawn by Claude Code, Codex or
+    /// Antigravity, review, and the dataset made from them.
     #[command(subcommand)]
     Label(LabelCommand),
     /// Run a Model Context Protocol server over stdio so agents can drive FOLO.

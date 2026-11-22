@@ -230,6 +230,7 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
         agent: match a.agent {
             AgentArg::Claude => LabelAgentId::Claude,
             AgentArg::Codex => LabelAgentId::Codex,
+            AgentArg::Antigravity => LabelAgentId::Antigravity,
         },
         model: a.model,
         effort: a.effort.map(|e| match e {

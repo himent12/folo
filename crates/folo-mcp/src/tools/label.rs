@@ -204,6 +204,12 @@ impl Inner {
                 run.total,
                 run.failed
             ));
+            if let Some(err) = &run.error {
+                summary.push_str(&format!(": {err}"));
+            }
+            if let Some(hint) = &run.hint {
+                summary.push_str(&format!(" (hint: {hint})"));
+            }
         }
         let u = &r.usage;
         summary.push_str(&format!("; {} in / {} out tokens", u.input_tokens, u.output_tokens));

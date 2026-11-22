@@ -123,7 +123,10 @@ impl MockBench {
                     Ok(out)
                 }
                 BenchContestantSpec::Agent { agent, model, effort } => {
-                    let eff = effort.unwrap_or(LabelEffort::Medium);
+                    let eff = effort.unwrap_or(match agent {
+                        LabelAgentId::Antigravity => LabelEffort::Low,
+                        LabelAgentId::Claude | LabelAgentId::Codex => LabelEffort::Medium,
+                    });
                     let imgs = req.max_images.unwrap_or(48).min(b.images.len() as u32) as u64;
                     if imgs == 0 {
                         return Err(ApiError::new("invalid_body", "max_images must be at least 1."));
@@ -134,7 +137,11 @@ impl MockBench {
                         Some(m) if !m.is_empty() => format!("{} ({m})", agent.display_name()),
                         _ => agent.display_name().to_string(),
                     };
-                    let calls = total.div_ceil(if *agent == LabelAgentId::Claude { 4 } else { 8 });
+                    let batch = match agent {
+                        LabelAgentId::Claude => 4,
+                        LabelAgentId::Codex | LabelAgentId::Antigravity => 8,
+                    };
+                    let calls = total.div_ceil(batch);
                     let entry = BenchEntry {
                         id: eid,
                         bench_id: b.bench.id.clone(),

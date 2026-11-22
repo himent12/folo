@@ -4,7 +4,7 @@
 // reported using. It spends tokens of the account the CLI is signed in with (a few thousand for a handful of images):
 //   folo serve --data-dir D:/folo-data/label-smoke --port 7979
 //   FOLO_API=http://127.0.0.1:7979 npm run label-smoke -- <out dir> --images <folder of images> \
-//        [--agent claude|codex] [--classes person,car] [--count 6]
+//        [--agent claude|codex|antigravity] [--classes person,car] [--count 6]
 import { mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,10 +20,10 @@ const opt = (name, dflt) => {
 };
 const out = resolve(root, args.find((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--')) ?? 'shots/label-live');
 const agent = opt('agent', 'claude');
-const agentName = { claude: 'Claude Code', codex: 'Codex' }[agent];
+const agentName = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity' }[agent];
 const classes = opt('classes', 'person,car').split(',');
 const folder = opt('images', null);
-if (!folder || !agentName) throw new Error('usage: npm run label-smoke -- <out dir> --images <folder> [--agent claude|codex] [--classes a,b] [--count 6]');
+if (!folder || !agentName) throw new Error('usage: npm run label-smoke -- <out dir> --images <folder> [--agent claude|codex|antigravity] [--classes a,b] [--count 6]');
 const files = readdirSync(folder)
   .filter((f) => /\.(jpe?g|png|bmp|webp)$/i.test(f))
   .slice(0, Number(opt('count', 6)))

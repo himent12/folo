@@ -231,9 +231,9 @@ impl Benches {
                 let model = check_model(model.as_deref())?;
                 let labeler = store.labeler()?;
                 let (agent, backoff) = (labeler.agent(agent_id)?, labeler.transient_backoff());
-                let info = agent.info();
-                let model = model.or(info.default_model);
-                let effort = effort.unwrap_or(info.default_effort);
+                let (model, effort) = agent
+                    .resolve_request(model, effort)
+                    .map_err(|why| Error::new(axum::http::StatusCode::BAD_REQUEST, "invalid_body", why))?;
                 let conditions = req.conditions.unwrap_or(false);
                 let name = name.unwrap_or_else(|| match &model {
                     Some(m) => format!("{} ({m})", agent_id.display_name()),

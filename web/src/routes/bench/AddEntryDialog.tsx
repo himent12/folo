@@ -64,7 +64,7 @@ export interface AddEntryDialogProps {
 
 type Check = { ok: true; predictions: BenchPrediction[]; summary: PredictionSummary } | { ok: false; error: string };
 
-const PER_CALL: Record<string, number> = { claude: 4, codex: 8 };
+const PER_CALL: Record<string, number> = { claude: 4, codex: 8, antigravity: 8 };
 
 export default function AddEntryDialog(props: AddEntryDialogProps) {
   const open = bindable(props, 'open', false);
@@ -262,7 +262,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
                 ? `None of ${m.name}'s classes is a class of this benchmark`
                 : null;
     }
-    if (k === 'agent') return !agent.get() ? (props.agents ? 'Install Claude Code or Codex on the server’s machine' : 'Checking which agents are installed') : null;
+    if (k === 'agent') return !agent.get() ? (props.agents ? 'Install Claude Code, Codex or Antigravity on the server’s machine' : 'Checking which agents are installed') : null;
     const c = check.get();
     return reading.get()
       ? 'Reading the file'

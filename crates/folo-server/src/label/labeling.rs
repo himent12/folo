@@ -31,12 +31,11 @@ impl Labeler {
         }
         let job = self.job(id)?;
         let agent = self.agent(req.agent)?;
-        let info = agent.info();
         if req.fast {
             agent.check_fast(model).map_err(|why| invalid(format!("{why}: send \"fast\": false")))?;
         }
-        let model = model.map(str::to_string).or(info.default_model);
-        let effort = req.effort.unwrap_or(info.default_effort);
+        let (model, effort) =
+            agent.resolve_request(model.map(str::to_string), req.effort).map_err(invalid)?;
 
         // Looked up before the agent was probed, which can take a while: the job may be gone by now.
         let mut state = job.live()?;

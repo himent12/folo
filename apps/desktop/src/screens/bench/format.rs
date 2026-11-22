@@ -63,6 +63,7 @@ pub fn agent_name(a: LabelAgentId) -> &'static str {
     match a {
         LabelAgentId::Claude => "Claude Code",
         LabelAgentId::Codex => "Codex",
+        LabelAgentId::Antigravity => "Antigravity",
     }
 }
 
@@ -386,6 +387,13 @@ mod tests {
         e.contestant = BenchContestant::Agent { agent: LabelAgentId::Claude, model: None, effort };
         assert!(calibration_why_not(&e).starts_with("Agents give no confidences"));
         assert_eq!(calibration_none(&e), "no confidences");
+        assert_eq!(agent_name(LabelAgentId::Antigravity), "Antigravity");
+        e.contestant = BenchContestant::Agent {
+            agent: LabelAgentId::Antigravity,
+            model: Some("gemini-4-neon".into()),
+            effort: crate::api::LabelEffort::Low,
+        };
+        assert_eq!(contestant_line(&e), "Antigravity · gemini-4-neon · low effort");
     }
 
     /// #382: the "partial" badge said nothing of why; Studio's `partialWhy` lists the reasons.

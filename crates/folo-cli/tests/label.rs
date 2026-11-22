@@ -108,17 +108,28 @@ fn kill_tree(child: &mut ChildGuard) {
 struct Env {
     claude: PathBuf,
     no_codex: PathBuf,
+    antigravity: PathBuf,
+    user_home: PathBuf,
     /// Arguments every command gets.
     after: Vec<String>,
 }
 
 impl Env {
     fn new(root: &Path) -> Env {
+        let user_home = root.join("user-home");
+        std::fs::create_dir_all(&user_home).unwrap();
         Env {
             claude: fake_claude(&root.join("bin")),
             no_codex: root.join("bin").join("no-codex"),
+            antigravity: root.join("bin").join("no-antigravity"),
+            user_home,
             after: vec![],
         }
+    }
+
+    fn with_antigravity(mut self, bin: PathBuf) -> Env {
+        self.antigravity = bin;
+        self
     }
 
     /// This environment with `args` after every command's own.
@@ -129,8 +140,11 @@ impl Env {
     fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
         c.env("FOLO_NO_CACHE", "1")
+            .env("HOME", &self.user_home)
+            .env("USERPROFILE", &self.user_home)
             .env("FOLO_CLAUDE_BIN", &self.claude)
             .env("FOLO_CODEX_BIN", &self.no_codex)
+            .env("FOLO_ANTIGRAVITY_BIN", &self.antigravity)
             .env("FOLO_GPU_ADAPTER", "folo-cli-tests-no-such-adapter")
             .env_remove("FOLO_DATA_DIR")
             .env_remove("FOLO_TOKEN");
@@ -180,9 +194,15 @@ fn label_review_and_export_in_this_process() {
     let env = env.after(&["--data-dir", home.to_str().unwrap()]);
 
     let agents = env.ok(&["agents"]);
+    assert_eq!(agents["agents"].as_array().unwrap().len(), 3);
     assert_eq!((s(&agents["agents"][0]["id"]), s(&agents["agents"][0]["version"])), ("claude", "9.9.9"));
     assert_eq!(agents["agents"][1]["available"], false);
     assert!(s(&agents["agents"][1]["hint"]).contains("FOLO_CODEX_BIN"));
+    assert_eq!(
+        (s(&agents["agents"][2]["id"]), agents["agents"][2]["available"].as_bool()),
+        ("antigravity", Some(false))
+    );
+    assert!(s(&agents["agents"][2]["hint"]).contains("FOLO_ANTIGRAVITY_BIN"));
 
     let made = env.ok(&["create", "cars", "--classes", "car,person", "--path", dir.to_str().unwrap()]);
     let job = s(&made["job_id"]).to_string();
@@ -262,7 +282,7 @@ fn label_review_and_export_in_this_process() {
     assert_eq!((s(&e["code"]), s(&e["hint"])), ("label_job_not_found", "`folo label jobs` lists the jobs"));
     let e = env.error(&["start", &job, "--agent", "codex", "--all"], 4);
     assert_eq!(s(&e["code"]), "not_supported");
-    assert!(s(&e["hint"]).contains("--agent"), "{e}");
+    assert!(s(&e["hint"]).contains("--agent") && s(&e["hint"]).contains("antigravity"), "{e}");
     assert_eq!(env.fails(&["view", &job, "nope"], 3), "image_not_found");
     assert_eq!(env.fails(&["view", &job, "--from", "0"], 2), "usage");
     assert_eq!(env.fails(&["images", &job, "--limit", "0"], 2), "usage");
@@ -357,7 +377,13 @@ fn label_through_a_folo_serve() {
 /// `args` go after every command; `server` removes.
 fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&folo_client::Client>) {
     let after = env.after.iter().cloned().chain(args.iter().map(|a| a.to_string())).collect();
-    let env = &Env { claude: env.claude.clone(), no_codex: env.no_codex.clone(), after };
+    let env = &Env {
+        claude: env.claude.clone(),
+        no_codex: env.no_codex.clone(),
+        antigravity: env.antigravity.clone(),
+        user_home: env.user_home.clone(),
+        after,
+    };
     let long = format!("{}.png", "a".repeat(115));
     let photos =
         [t.join("first").join("photo.png"), t.join("second").join("photo.png"), t.join("long").join(long)];
@@ -401,4 +427,224 @@ fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&fol
     let e = env.error(&[&view[..], &[missing.to_str().unwrap()]].concat(), 1);
     assert_eq!(s(&e["code"]), "io_error");
     assert!(s(&e["message"]).contains("missing/x.jpg: "), "{e}");
+}
+
+/// Writes a fake `agy` CLI handling `--version`, `models` and `acp` (ACP v1 JSON-RPC over stdio).
+fn fake_agy(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    if cfg!(windows) {
+        let ps1 = dir.join("fake_agy.ps1");
+        let ps_script = r#"[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$curModel = 'gemini-3.8-flash'
+$curThought = 'high'
+function ConfigOptions {
+    @(
+        @{ id='model'; category='model'; currentValue=$curModel; options=@(
+            @{ value='gemini-4-neon'; name='Gemini 4 Neon' },
+            @{ value='gemini-3.8-flash'; name='Gemini 3.8 Flash' }
+        ) },
+        @{ id='thought_level'; category='thought_level'; currentValue=$curThought; options=@(
+            @{ value='low'; name='Low' },
+            @{ value='medium'; name='Medium' },
+            @{ value='high'; name='High' },
+            @{ value='xhigh'; name='XHigh' }
+        ) }
+    )
+}
+function Emit($obj) {
+    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Depth 12 -Compress))
+    [Console]::Out.Flush()
+}
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    switch ($msg.method) {
+        'initialize' {
+            Emit @{ jsonrpc='2.0'; id=$msg.id; result=@{ protocolVersion=1; agentCapabilities=@{ promptCapabilities=@{ image=$true }; sessionCapabilities=@{ close=@{} }; _meta=@{ antigravity=@{ systemPrompt=@{ append=$true } } } } } }
+        }
+        'session/new' {
+            Emit @{ jsonrpc='2.0'; id=$msg.id; result=@{ sessionId='sess_fake_1'; configOptions=(ConfigOptions) } }
+        }
+        'session/set_config_option' {
+            if ($msg.params.configId -eq 'model') { $curModel = $msg.params.value }
+            elseif ($msg.params.configId -eq 'thought_level') { $curThought = $msg.params.value }
+            Emit @{ jsonrpc='2.0'; id=$msg.id; result=@{ configOptions=(ConfigOptions) } }
+        }
+        'session/prompt' {
+            $hasImg = $false
+            foreach ($b in $msg.params.prompt) {
+                if ($b.type -eq 'image' -and $b.mimeType -eq 'image/jpeg' -and -not [string]::IsNullOrEmpty($b.data)) {
+                    $hasImg = $true
+                }
+            }
+            if (-not $hasImg -or $curModel -ne 'gemini-4-neon' -or $curThought -ne 'low') {
+                Emit @{ jsonrpc='2.0'; id=$msg.id; error=@{ code=-32602; message="unexpected prompt state: img=$hasImg model=$curModel thought=$curThought" } }
+            } else {
+                [Console]::Out.WriteLine('{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_fake_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"images\":[{\"image\":1,\"boxes\":[[\"car\",16,4.8,48,28.8]]}]}"}}}}')
+                [Console]::Out.WriteLine('{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_fake_1","update":{"sessionUpdate":"usage_update","used":600,"size":1000000,"inputTokens":600,"outputTokens":40,"cachedReadTokens":120}}}')
+                [Console]::Out.Flush()
+                Emit @{ jsonrpc='2.0'; id=$msg.id; result=@{ stopReason='end_turn'; usage=@{ inputTokens=600; cachedReadTokens=120; outputTokens=40; totalTokens=640 } } }
+            }
+        }
+        'session/close' {
+            Emit @{ jsonrpc='2.0'; id=$msg.id; result=@{} }
+            exit 0
+        }
+    }
+}
+"#;
+        std::fs::write(&ps1, ps_script).unwrap();
+        let cmd = dir.join("agy.cmd");
+        let wrapper = "@echo off\r\n\
+if \"%~1\"==\"--version\" (\r\n  echo 1.5.13\r\n  exit /b 0\r\n)\r\n\
+if \"%~1\"==\"models\" (\r\n  echo gemini-4-neon-xhigh   Gemini 4 Neon ^(XHigh^)\r\n  echo gemini-3.8-flash-high   Gemini 3.8 Flash ^(High^)\r\n  exit /b 0\r\n)\r\n\
+if \"%~1\"==\"acp\" (\r\n  powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake_agy.ps1\"\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\
+exit /b 1\r\n";
+        std::fs::write(&cmd, wrapper).unwrap();
+        cmd
+    } else {
+        let sh = dir.join("agy");
+        let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "1.5.13"; exit 0; fi
+if [ "$1" = "models" ]; then
+  printf 'gemini-4-neon-xhigh   Gemini 4 Neon (XHigh)\n'
+  printf 'gemini-3.8-flash-high   Gemini 3.8 Flash (High)\n'
+  exit 0
+fi
+if [ "$1" != "acp" ]; then exit 1; fi
+cur_model="gemini-3.8-flash"
+cur_thought="high"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true},"sessionCapabilities":{"close":{}},"_meta":{"antigravity":{"systemPrompt":{"append":true}}}}}}\n' "$id"
+      ;;
+    *'"method":"session/new"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"sess_fake_1","configOptions":[{"id":"model","category":"model","currentValue":"%s","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"},{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}]},{"id":"thought_level","category":"thought_level","currentValue":"%s","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"},{"value":"xhigh","name":"XHigh"}]}]}}\n' "$id" "$cur_model" "$cur_thought"
+      ;;
+    *'"method":"session/set_config_option"'*)
+      case "$line" in
+        *'"configId":"model"'*'"value":"gemini-4-neon"'*) cur_model="gemini-4-neon" ;;
+      esac
+      case "$line" in
+        *'"configId":"thought_level"'*'"value":"low"'*) cur_thought="low" ;;
+      esac
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"id":"model","category":"model","currentValue":"%s","options":[{"value":"gemini-4-neon","name":"Gemini 4 Neon"},{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}]},{"id":"thought_level","category":"thought_level","currentValue":"%s","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"},{"value":"xhigh","name":"XHigh"}]}]}}\n' "$id" "$cur_model" "$cur_thought"
+      ;;
+    *'"method":"session/prompt"'*)
+      case "$line" in
+        *'"type":"image"'*'"mimeType":"image/jpeg"'*)
+          if [ "$cur_model" = "gemini-4-neon" ] && [ "$cur_thought" = "low" ]; then
+            printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_fake_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\\"images\\":[{\\"image\\":1,\\"boxes\\":[[\\"car\\",16,4.8,48,28.8]]}]}"}}}}\n'
+            printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_fake_1","update":{"sessionUpdate":"usage_update","used":600,"size":1000000,"inputTokens":600,"outputTokens":40,"cachedReadTokens":120}}}\n'
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"inputTokens":600,"cachedReadTokens":120,"outputTokens":40,"totalTokens":640}}}\n' "$id"
+          else
+            printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"unexpected config"}}\n' "$id"
+          fi
+          ;;
+        *)
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"missing image block"}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *'"method":"session/close"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#;
+        std::fs::write(&sh, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        sh
+    }
+}
+
+#[test]
+fn antigravity_labels_via_acp() {
+    let t = TestDir::new("cli-label-agy");
+    let home = t.join("home");
+    let dir = t.join("photos");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::from_pixel(64, 48, image::Rgb([80, 120, 160])).save(dir.join("p0.png")).unwrap();
+    let env = Env::new(&t)
+        .with_antigravity(fake_agy(&t.join("bin")))
+        .after(&["--data-dir", home.to_str().unwrap()]);
+
+    let agents = env.ok(&["agents"]);
+    let agy = &agents["agents"][2];
+    assert_eq!(
+        (s(&agy["id"]), agy["available"].as_bool(), s(&agy["version"])),
+        ("antigravity", Some(true), "1.5.13")
+    );
+    assert!(agy["default_model"].is_null());
+    assert_eq!(s(&agy["default_effort"]), "low");
+    let models: Vec<&str> = agy["models"].as_array().unwrap().iter().map(s).collect();
+    assert!(models.contains(&"gemini-4-neon") && models.contains(&"gemini-3.8-flash"), "{models:?}");
+
+    let job = s(
+        &env.ok(&["create", "street", "--classes", "car,person", "--path", dir.to_str().unwrap()])["job_id"],
+    )
+    .to_string();
+    let (code, events, err) = env.label(&[
+        "start",
+        &job,
+        "--agent",
+        "antigravity",
+        "--model",
+        "gemini-4-neon",
+        "--batch",
+        "1",
+        "--wait",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(s(&events[0]["event"]), "started");
+    let finished = events.last().unwrap();
+    assert_eq!((s(&finished["event"]), finished["counts"]["labeled"].as_u64()), ("finished", Some(1)));
+    assert_eq!(
+        (
+            s(&finished["run"]["agent"]),
+            s(&finished["run"]["model"]),
+            s(&finished["run"]["outcome"]),
+            finished["calls"].as_u64(),
+            finished["input_tokens"].as_u64(),
+            finished["output_tokens"].as_u64(),
+        ),
+        ("antigravity", "gemini-4-neon", "completed", Some(1), Some(600), Some(40))
+    );
+    let page = env.ok(&["images", &job, "--boxes"]);
+    assert_eq!(page["items"][0]["boxes"], json!([[0, 16, 5, 48, 29]]));
+    // Strict isolated Antigravity settings were written under the isolated test home (never the user's real home).
+    let settings = std::fs::read_to_string(
+        t.join("user-home").join(".gemini").join("antigravity-cli").join("folo-label").join("settings.json"),
+    )
+    .unwrap();
+    assert!(
+        settings.contains("\"toolPermission\": \"strict\"") && settings.contains("\"read_file(*)\""),
+        "{settings}"
+    );
+    // Conflicting suffixed model + explicit effort is rejected cleanly before calling `agy`.
+    assert_eq!(
+        env.fails(
+            &[
+                "start",
+                &job,
+                "--agent",
+                "antigravity",
+                "--model",
+                "gemini-4-neon-xhigh",
+                "--effort",
+                "low",
+                "--all"
+            ],
+            2
+        ),
+        "usage"
+    );
 }

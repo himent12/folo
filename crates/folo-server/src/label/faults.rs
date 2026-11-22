@@ -33,7 +33,7 @@ const USAGE_LIMIT: [&str; 11] = [
     "out of extra usage",
 ];
 /// Words of the provider's rate limit (requests or tokens per minute), and its status, 429.
-const RATE_LIMIT: [&str; 3] = ["rate limit", "rate_limit", "too many requests"];
+const RATE_LIMIT: [&str; 4] = ["rate limit", "rate_limit", "too many requests", "resource_exhausted"];
 /// Words of a passing fault: the provider overloaded, a server error, the connection broken off. (Codex's "stream
 /// disconnected before completion" is not one of them: it wraps any failed response, a client error too, so it is
 /// a passing fault only when the rest of its message says so.)
@@ -74,14 +74,14 @@ const PASSING_STATUS: [u16; 5] = [500, 502, 503, 504, 529];
 /// it asks for a wait (a short one, then); anything else when it has a server error's status or words.
 pub fn is_transient(message: &str, status: Option<u16>) -> bool {
     let m = message.to_lowercase();
-    if is_usage_limit(&m) {
+    let wait = retry_after(message);
+    if is_usage_limit(&m, wait) {
         return false;
     }
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
     if statuses.iter().any(|&s| (400..500).contains(&s) && s != 429) {
         return false;
     }
-    let wait = retry_after(message);
     if wait.is_some_and(|w| w > SHORT_RATE_LIMIT) {
         return false;
     }
@@ -95,13 +95,44 @@ pub fn is_transient(message: &str, status: Option<u16>) -> bool {
 /// wait longer than [`SHORT_RATE_LIMIT`].
 pub fn is_limit(message: &str, status: Option<u16>) -> bool {
     let m = message.to_lowercase();
+    let wait = retry_after(message);
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
-    is_usage_limit(&m)
-        || is_rate_limit(&m, &statuses)
-        || retry_after(message).is_some_and(|w| w > SHORT_RATE_LIMIT)
+    is_usage_limit(&m, wait) || is_rate_limit(&m, &statuses) || wait.is_some_and(|w| w > SHORT_RATE_LIMIT)
 }
 
-fn is_usage_limit(lower: &str) -> bool {
+/// Unambiguous account/plan exhaustion phrases that stay hard limits even alongside a structured rate-limit signal
+/// (excludes generic `"quota"` / `"billing"` guidance that Google RPC includes on per-minute 429s).
+const HARD_ACCOUNT_LIMIT: [&str; 8] = [
+    "usage limit",
+    "session limit",
+    "weekly limit",
+    "hour limit",
+    "hit your",
+    "credit balance",
+    "spending cap",
+    "out of extra usage",
+];
+
+fn is_usage_limit(lower: &str, wait: Option<Duration>) -> bool {
+    // Structured daily quota violations (e.g. Google's `GenerateRequestsPerDayPerProject`) and explicit account
+    // exhaustion always take precedence over short retry delays, even without generic `"quota"` wording.
+    let daily_quota = lower.contains("perday")
+        || lower.contains("per_day")
+        || (lower.contains("per day")
+            && (lower.contains("quota")
+                || lower.contains("limit")
+                || lower.contains("exceeded")
+                || lower.contains("resource_exhausted")));
+    if daily_quota || HARD_ACCOUNT_LIMIT.iter().any(|w| has_word(lower, w)) {
+        return true;
+    }
+    // Classify structured Google RPC per-minute rate limits (`RATE_LIMIT_EXCEEDED` or `QuotaFailure` `*PerMinute*`
+    // paired with a retry delay) BEFORE generic `"quota"` / `"billing"` text heuristics.
+    let structured_rate =
+        lower.contains("rate_limit_exceeded") || lower.contains("perminute") || lower.contains("per_minute");
+    if structured_rate && wait.is_some() {
+        return false;
+    }
     USAGE_LIMIT.iter().any(|w| has_word(lower, w))
 }
 
@@ -298,8 +329,8 @@ fn stated_reset(message: &str, waits: bool) -> Option<String> {
 pub fn limit_hint(message: &str, status: Option<u16>) -> String {
     let m = message.to_lowercase();
     let statuses = status.map_or_else(|| statuses(&m), |s| vec![s]);
-    let usage = is_usage_limit(&m);
     let wait = longest_wait(message);
+    let usage = is_usage_limit(&m, wait.as_ref().map(|w| w.wait));
     let long = wait.as_ref().is_some_and(|w| w.wait > SHORT_RATE_LIMIT);
     let (what, then) = if usage {
         ("the account's usage limit was reached", "start again once it resets")
@@ -369,6 +400,11 @@ mod tests {
              Please try again in 1.5s.",
             "429 Too Many Requests: retry after 20 seconds",
             "Rate limit reached. Please try again in 59s.",
+            "RESOURCE_EXHAUSTED: Please try again in 15s.",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: Quota exceeded for requests per minute: retry after 15s",
+            // Google's real 429 message pairs generic billing guidance with structured RATE_LIMIT_EXCEEDED or PerMinute.
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: You exceeded your current quota, please check your plan and billing details.: retry after 15s",
+            "Request failed: RESOURCE_EXHAUSTED: You exceeded your current quota, please check your plan and billing details.: GenerateRequestsPerMinutePerProjectPerModel: retry after 15s",
         ] {
             assert!(transient(passing), "{passing}");
         }
@@ -383,6 +419,12 @@ mod tests {
             // Compound waits count in full: a minute and a half is past the cutoff.
             "Rate limit reached. Please try again in 1m30s.",
             "You exceeded your current quota. Please try again in 1.5s.",
+            "RESOURCE_EXHAUSTED: You exceeded your current quota. Please try again in 15s.",
+            "RESOURCE_EXHAUSTED: model capacity limit reached",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: Quota exceeded for requests per minute: retry after 120s",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: You exceeded your current quota, please check your plan and billing details.: GenerateRequestsPerDayPerProjectPerModel: retry after 15s",
+            "Request failed: RESOURCE_EXHAUSTED: GenerateRequestsPerDayPerProject: retry after 15s",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: You exceeded your current quota, please check your plan and billing details.",
             // A server error that asks for a long wait ends the run like a limit.
             "unexpected status 503 Service Unavailable; try again in 2 hours",
             "Invalid API key · Please run /login",

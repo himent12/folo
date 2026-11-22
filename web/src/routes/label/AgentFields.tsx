@@ -1,5 +1,5 @@
 /**
- * Who answers: the agent CLI (Claude Code or Codex, the ones not installed off with how to install them in words),
+ * Who answers: the agent CLI (Claude Code, Codex or Antigravity, the ones not installed off with how to install them in words),
  * its model and its effort, for the `AgentChoice` they set. Agent labeling's rail and the vision benchmarks' agent
  * entry and plan design ask through it, so an agent is picked the same way everywhere. The caller frames it (a rail
  * section, a dialog's fields) and says what the effort costs in its own terms when it has more to say.

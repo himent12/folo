@@ -1,10 +1,10 @@
-//! Agent labeling against the real CLIs: Claude Code and Codex label synthetic shapes whose boxes are known, and
-//! the tests check what the integration promises: one call per batch, a small token bill per call, and boxes that
-//! land on the objects (so the coordinate convention holds end to end).
+//! Agent labeling against the real CLIs: Claude Code, Codex and Antigravity label synthetic shapes whose boxes are
+//! known, and the tests check what the integration promises: one call per batch, a small token bill per call, and
+//! boxes that land on the objects (so the coordinate convention holds end to end).
 //!
 //! Ignored by default: they need the CLI installed and signed in, and they spend (a few thousand) tokens. Run
-//! one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`). They use
-//! the agent's default model and effort; `FOLO_LABEL_LIVE_MODEL` names another model to try.
+//! one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex` /
+//! `antigravity`). They use the agent's default model and effort; `FOLO_LABEL_LIVE_MODEL` names another model to try.
 
 use std::path::Path;
 use std::time::Duration;
@@ -127,4 +127,10 @@ fn claude_code_labels_shapes() {
 fn codex_labels_shapes() {
     // Codex's own instructions are most of this; a default `codex exec` call is about 20000.
     label_shapes(LabelAgentId::Codex, 12_000);
+}
+
+#[test]
+#[ignore = "calls the real Antigravity CLI: needs `agy` installed and signed in, and spends tokens"]
+fn antigravity_labels_shapes() {
+    label_shapes(LabelAgentId::Antigravity, 16_000);
 }

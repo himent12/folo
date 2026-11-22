@@ -244,7 +244,9 @@ export default function Benchmark() {
     // page-level: the dialog has closed (AddEntryDialog closes before it calls this).
     toast.success(
       e.status === 'done' ? 'Entry scored' : 'Entry added',
-      e.status === 'done' && e.score ? `${e.name} · score ${e.score.total.toFixed(1)}` : `${e.name} · ${e.status === 'queued' ? 'waiting for the GPU' : 'running'}`,
+      e.status === 'done' && e.score
+        ? `${e.name} · score ${e.score.total.toFixed(1)}`
+        : `${e.name} · ${e.status === 'queued' ? (e.contestant.kind === 'agent' ? 'starting' : 'waiting for the GPU') : 'running'}`,
     );
   }
 
@@ -572,6 +574,7 @@ export default function Benchmark() {
                       bench={b()}
                       editable={editable.get()}
                       catalog={catalog.data}
+                      agents={agents.data}
                       bind:draft={draft}
                       bind:typed={typed}
                       error={planWhy.get()}

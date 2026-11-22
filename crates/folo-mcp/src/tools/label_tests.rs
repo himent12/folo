@@ -651,3 +651,120 @@ async fn list_label_images_handles_max_cursor_without_overflow() {
     assert_eq!(summary, "0 of 5 images");
     store.shutdown();
 }
+
+/// Scripted Antigravity agent for MCP labeling tests.
+struct ScriptedAntigravity;
+
+impl Agent for ScriptedAntigravity {
+    fn id(&self) -> LabelAgentId {
+        LabelAgentId::Antigravity
+    }
+
+    fn info(&self) -> LabelAgent {
+        LabelAgent {
+            id: LabelAgentId::Antigravity,
+            name: "Antigravity".into(),
+            available: true,
+            version: Some("1.5.13".into()),
+            models: vec![LabelModel {
+                id: "gemini-4-neon".into(),
+                label: "Gemini 4 Neon".into(),
+                fast: false,
+            }],
+            default_model: None,
+            default_effort: LabelEffort::Low,
+            fast: false,
+            hint: None,
+        }
+    }
+
+    fn default_batch(&self) -> usize {
+        8
+    }
+
+    fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
+        if req.prompt.contains("auth-fail") {
+            return Err(AgentError::failed("Authentication required"));
+        }
+        let images: Vec<Value> = (1..=req.images.len())
+            .map(|i| json!({ "image": i, "boxes": [["car", 16, 4.8, 48, 28.8]] }))
+            .collect();
+        let usage = LabelUsage {
+            calls: 1,
+            input_tokens: 600,
+            cached_input_tokens: 120,
+            output_tokens: 40,
+            cost_usd: None,
+        };
+        Ok(AgentReply { text: json!({ "images": images }).to_string(), usage })
+    }
+
+    fn hint(&self, message: &str) -> Option<String> {
+        message
+            .contains("Authentication required")
+            .then(|| "run `agy` (or `agy acp --login`) in a terminal on the server's machine to sign in, then start again".into())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn antigravity_agent_labels_and_rejects_fast() {
+    let home = TestDir::new("mcp-label-agy");
+    images(&home.join("photos"));
+    let store =
+        Arc::new(RealStore::open(home.to_path_buf()).label_agents(vec![Arc::new(ScriptedAntigravity)]));
+    let s = FoloMcp::new(store.clone(), None, options(home.path(), false));
+    let photos = folo_api::json::path(home.join("photos"));
+    let job = ok(&s, "create_label_job", json!({ "name": "street", "classes": ["car"], "paths": [photos] }))
+        .await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Antigravity has no Fast tier: refused before any call.
+    assert_eq!(
+        code(&s, "start_labeling", json!({ "job_id": job, "agent": "antigravity", "fast": true })).await,
+        "invalid_arguments"
+    );
+
+    let started = ok(
+        &s,
+        "start_labeling",
+        json!({ "job_id": job, "agent": "antigravity", "model": "gemini-4-neon", "image_ids": ["1"] }),
+    )
+    .await;
+    assert_eq!(started, json!({ "job_id": job, "total": 1, "model": "gemini-4-neon" }));
+    let status = wait_idle(&s, &job).await;
+    assert_eq!(status["counts"]["labeled"], 1);
+    assert_eq!(status["run"]["agent"], "antigravity");
+    assert_eq!(status["run"]["model"], "gemini-4-neon");
+    assert_eq!(status["run"]["effort"], "low");
+    assert_eq!(status["run"]["outcome"], "completed");
+    assert!(status["run"].get("error").is_none() && status["run"].get("hint").is_none());
+    assert_eq!(
+        (status["calls"].as_u64(), status["input_tokens"].as_u64(), status["output_tokens"].as_u64()),
+        (Some(1), Some(600), Some(40))
+    );
+
+    // Failed run exposes actionable `error` and `hint` directly on `label_status`'s `run` summary.
+    let _ = ok(
+        &s,
+        "start_labeling",
+        json!({ "job_id": job, "agent": "antigravity", "image_ids": ["2"], "note": "auth-fail" }),
+    )
+    .await;
+    let failed = wait_idle(&s, &job).await;
+    assert_eq!(failed["run"]["outcome"], "failed");
+    assert_eq!(failed["run"]["error"], "Authentication required");
+    assert!(failed["run"]["hint"].as_str().unwrap().contains("agy acp --login"));
+
+    let prompt = crate::prompts::get(
+        &s.inner,
+        rmcp::model::GetPromptRequestParams::new("label_folder")
+            .with_arguments(json!({ "folder_path": photos, "classes": "car" }).as_object().unwrap().clone()),
+    )
+    .await
+    .unwrap();
+    let msg = serde_json::to_string(&prompt).unwrap();
+    assert!(msg.contains("`claude`") && msg.contains("`codex`") && msg.contains("`antigravity`"), "{msg}");
+    store.shutdown();
+}
