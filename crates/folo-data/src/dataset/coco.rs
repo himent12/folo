@@ -8,23 +8,56 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Guesses the split from a JSON file name or its folder (`instances_val2017.json`, `valid/_annotations.coco.json`).
+/// Ordinary words that contain `val` or `test` and name no split, so a dataset in a folder called `valves` or `latest`
+/// is not a validation or test set.
+const NOT_A_SPLIT: &[&str] = &[
+    "approval",
+    "arrival",
+    "arrivals",
+    "carnival",
+    "carnivals",
+    "contest",
+    "contests",
+    "fastest",
+    "festival",
+    "festivals",
+    "greatest",
+    "interval",
+    "intervals",
+    "latest",
+    "medieval",
+    "protest",
+    "protests",
+    "removal",
+    "retrieval",
+    "rival",
+    "rivals",
+    "survival",
+    "valley",
+    "valleys",
+    "value",
+    "values",
+    "valve",
+    "valves",
+];
+
+/// Guesses the split from a JSON file name, then its folder's (`instances_val2017.json`,
+/// `valid/_annotations.coco.json`).
 pub(crate) fn guess_split(path: &Path) -> Split {
-    let check = |s: &str| {
-        let s = s.to_ascii_lowercase();
-        if s.contains("train") {
-            Some(Split::Train)
-        } else if s.contains("val") {
-            Some(Split::Val)
-        } else if s.contains("test") {
-            Some(Split::Test)
-        } else {
-            None
-        }
-    };
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let parent = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("");
-    check(stem).or_else(|| check(parent)).unwrap_or(Split::Train)
+    split_in_name(stem).or_else(|| split_in_name(parent)).unwrap_or(Split::Train)
+}
+
+/// The first of `train`, `val`, `test` found anywhere in a name (`valsubset`, `instances_myval`), ignoring the runs of
+/// letters that are exactly a [`NOT_A_SPLIT`] word.
+fn split_in_name(name: &str) -> Option<Split> {
+    let name = name.to_ascii_lowercase();
+    let words = name.split(|c: char| !c.is_alphabetic()).filter(|w| !NOT_A_SPLIT.contains(w));
+    let has = |part: &str| words.clone().any(|w| w.contains(part));
+    [(Split::Train, "train"), (Split::Val, "val"), (Split::Test, "test")]
+        .into_iter()
+        .find_map(|(split, part)| has(part).then_some(split))
 }
 
 fn json_files(dir: &Path) -> Vec<PathBuf> {
@@ -94,6 +127,18 @@ fn id_key(v: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+/// A non-negative whole number as JSON may write it: `1`, or `1.0` (what pandas writes for an id column), the rule
+/// [`id_key`] has for image ids.
+fn whole_number(v: &Value) -> Option<u64> {
+    v.as_u64().or_else(|| {
+        let f = v.as_f64()?;
+        (f.fract() == 0.0 && (0.0..(1u64 << 53) as f64).contains(&f)).then_some(f as u64)
+    })
+}
+
+/// The category id of an annotation that has none, or one that is not a whole number.
+const NO_CATEGORY: u64 = u64::MAX;
 
 /// `(id key, file_name, declared size)` of a COCO image.
 type ImageRow = (String, String, Option<(u32, u32)>);
@@ -412,7 +457,7 @@ pub(crate) fn read_annotations(
         };
         for c in sections.categories.as_ref().and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(name)) =
-                (c.get("id").and_then(Value::as_u64), c.get("name").and_then(Value::as_str))
+                (c.get("id").and_then(whole_number), c.get("name").and_then(Value::as_str))
             else {
                 report.push(IssueKind::BrokenLabel, &path, format!("bad category {c}"));
                 continue;
@@ -449,7 +494,8 @@ pub(crate) fn read_annotations(
         }
         let mut anns = Vec::with_capacity(sections.annotations.len());
         for a in sections.annotations {
-            if a.iscrowd.as_ref().and_then(Value::as_u64) == Some(1) {
+            // `1`, `1.0` (pandas) or `true`: pycocotools takes each as a crowd region.
+            if a.iscrowd.as_ref().is_some_and(|v| v.as_bool() == Some(true) || whole_number(v) == Some(1)) {
                 continue;
             }
             let Some(img) = a.image_id.as_ref().and_then(id_key) else {
@@ -460,7 +506,7 @@ pub(crate) fn read_annotations(
                 );
                 continue;
             };
-            let cat = a.category_id.as_ref().and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let cat = a.category_id.as_ref().and_then(whole_number).unwrap_or(NO_CATEGORY);
             anns.push((img, cat, a.bbox.unwrap_or(Value::Null)));
         }
         parsed.push(Parsed { split, path, images: imgs, anns });
@@ -485,7 +531,10 @@ pub(crate) fn read_annotations(
             }
             let entry = per_image.entry(img.as_str()).or_default();
             let Some(&class) = remap.get(cat) else {
-                entry.1.get_or_insert_with(|| format!("unknown category id {cat}"));
+                entry.1.get_or_insert_with(|| match *cat {
+                    NO_CATEGORY => "category_id is missing or not a whole number".to_string(),
+                    cat => format!("unknown category id {cat}"),
+                });
                 continue;
             };
             // Exactly four numbers; anything else (null, strings, extra values) makes the annotation broken.

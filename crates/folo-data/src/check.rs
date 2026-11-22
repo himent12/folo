@@ -6,7 +6,7 @@
 //! hashes file contents to find exact duplicates. It never modifies anything.
 
 use crate::dataset::labels::{Line, LineError, parse_line};
-use crate::dataset::{IssueKind, OpenOptions, Source, detect, label_path_for, open_with, yolo};
+use crate::dataset::{IssueKind, OpenOptions, Source, detect, open_with, yolo};
 use crate::error::Result;
 use crate::{Format, Split};
 use rayon::prelude::*;
@@ -206,6 +206,7 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
     for (s, _) in &images {
         splits[*s as usize] += 1;
     }
+    let label_paths = yolo::LabelPaths::new(&scan.root);
     let results: Vec<ImageCheck> = images
         .par_iter()
         .map(|(_, image)| {
@@ -213,7 +214,7 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
             let readable = c.hash.is_some();
             // Label problems are reported for unreadable images too, "empty" only for readable ones.
             c.issues.extend(
-                lint_label_file(image, &label_path_for(image), nc)
+                lint_label_file(image, &label_paths.of(image), nc)
                     .into_iter()
                     .filter(|i| readable || i.kind != CheckKind::EmptyImage),
             );
@@ -227,7 +228,7 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
 }
 
 /// Label files whose image is gone: a `.txt` that no image of the dataset reads, in a label folder the loader pairs
-/// (by [`label_path_for`]) with a separate folder still holding at least one image the dataset reads (`labels/train`
+/// (by [`yolo::LabelPaths`]) with a separate folder still holding at least one image the dataset reads (`labels/train`
 /// with `images/train`), whose stem matches no file in those image folders (any extension, any case). Two spellings
 /// of one folder (links) are one folder, and a file beside the label in its own folder is its image too. Only label
 /// folders inside the dataset root are visited (both canonical), and not one whose last image is gone; `classes.txt`
@@ -240,8 +241,9 @@ fn orphan_labels(scan: &yolo::YoloScan) -> Vec<CheckIssue> {
     let mut pairs: BTreeMap<PathBuf, Folder> = BTreeMap::new();
     let mut real: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
     let Ok(root) = std::fs::canonicalize(&scan.root) else { return Vec::new() };
+    let label_paths = yolo::LabelPaths::new(&scan.root);
     for image in scan.splits.values().flatten() {
-        let label = label_path_for(image);
+        let label = label_paths.of(image);
         let (dir, images) = (crate::paths::parent_dir(&label), crate::paths::parent_dir(image));
         let Some(key) = real
             .entry(dir.to_path_buf())

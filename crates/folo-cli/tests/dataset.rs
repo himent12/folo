@@ -308,6 +308,31 @@ fn check_finds_an_orphan_label_from_a_relative_root_and_absolute_list() {
     assert!(orphans[0]["file"].as_str().unwrap().ends_with("gone.txt"), "{issues:?}");
 }
 
+/// Labels beside the images, below a folder called `images`, with an image list naming them by absolute path: the
+/// dataset reads its box by absolute path and as a bare `data.yaml` from inside it.
+#[test]
+fn labels_beside_listed_images_read_the_same_from_any_working_folder() {
+    let t = TestDir::new("cli-labels-beside");
+    let src = synth(&t, "src", &["--val-frac", "0.25", "--image-format", "png"]);
+    let dir = t.join("images/birds");
+    std::fs::create_dir_all(dir.join("train")).unwrap();
+    let image = dir.join("train/a.png");
+    std::fs::copy(src.join("images/train/000000.png"), &image).unwrap();
+    std::fs::write(dir.join("train/a.txt"), "0 0.5 0.5 0.2 0.2\n").unwrap();
+    std::fs::write(dir.join("train.txt"), format!("{}\n", s(&image))).unwrap();
+    std::fs::write(dir.join("data.yaml"), "train: train.txt\nnames: [bird]\n").unwrap();
+
+    let (code, stdout, stderr) = folo(&["dataset", "stats", s(&dir), "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json_lines(&stdout)[0]["stats"]["boxes"], 1, "by absolute path");
+
+    let out =
+        folo_cmd().args(["dataset", "stats", "data.yaml", "--json"]).current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(json_lines(&stdout)[0]["stats"]["boxes"], 1, "as data.yaml from inside");
+}
+
 /// Naming a dataset by a bare file in the working directory (`data.yaml`, `instances_val.json`) or under a single
 /// `annotations/` folder (`annotations/instances_val.json`) still sets `root` to `.` and reports issue paths
 /// relative to it, rather than leaving `root` empty and emitting full absolute paths.

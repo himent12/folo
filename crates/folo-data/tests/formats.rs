@@ -214,6 +214,158 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.stats().class_counts, vec![1, 1, 2]);
 }
 
+/// A folder called `images` above a dataset is not part of its layout unless the dataset's own mirror exists: labels
+/// beside the images are read by the loader and the checker, also next to another dataset's `labels` folder.
+#[test]
+fn labels_beside_images_below_a_folder_called_images() {
+    let t = TempDir::new("labels-beside");
+    let line = "0 0.5 0.5 0.2 0.2\n";
+
+    let beside = t.join("images/birds");
+    write_png(&beside.join("train/a.png"), 8, 8, [0; 3]);
+    write(&beside.join("train/a.txt"), line);
+    write(&beside.join("data.yaml"), "train: train\nnames: [bird]\n");
+    let ds = open(&beside).unwrap();
+    assert_eq!(ds.train.boxes(0).len(), 1, "labels beside the image");
+    assert_eq!(ds.train.entries()[0].label.as_deref(), Some(beside.join("train/a.txt").as_path()));
+    assert!(ds.sources.contains(&t.join("labels/birds")), "creating the mirror changes the dataset");
+    let report = folo_data::check::check(&beside, &Default::default()).unwrap();
+    assert!(report.issues.is_empty(), "{:#?}", report.issues);
+
+    // Another dataset's labels next to the same `images` folder change nothing.
+    write(&t.join("labels/dogs/train/b.txt"), line);
+    assert_eq!(open(&beside).unwrap().train.boxes(0).len(), 1, "an unrelated labels folder");
+}
+
+/// The layouts that pair `images/` with `labels/` read as before, and a stray `.txt` beside an image of a mirrored
+/// dataset is not its label.
+#[test]
+fn label_layouts_that_pair_images_with_labels() {
+    let t = TempDir::new("labels-paired");
+    let line = "0 0.5 0.5 0.2 0.2\n";
+
+    // The standard layout, inside a folder called `images`.
+    let standard = t.join("images/standard");
+    write_png(&standard.join("images/train/a.png"), 8, 8, [0; 3]);
+    write(&standard.join("labels/train/a.txt"), line);
+    write(&standard.join("data.yaml"), "train: images/train\nnames: [x]\n");
+    assert_eq!(open(&standard).unwrap().train.boxes(0).len(), 1);
+
+    // A YAML whose root is the `images` folder, with `labels/` next to it.
+    let rooted = t.join("rooted");
+    write_png(&rooted.join("images/train/a.png"), 8, 8, [0; 3]);
+    write(&rooted.join("labels/train/a.txt"), line);
+    write(&rooted.join("data.yaml"), "path: images\ntrain: train\nnames: [x]\n");
+    assert_eq!(open(&rooted).unwrap().train.boxes(0).len(), 1);
+
+    // A root below `images` whose labels mirror it in a `labels` folder next to that `images`.
+    let mirrored = t.join("mirrored");
+    write_png(&mirrored.join("images/set/train/a.png"), 8, 8, [0; 3]);
+    write(&mirrored.join("labels/set/train/a.txt"), line);
+    write(&mirrored.join("images/set/data.yaml"), "train: train\nnames: [x]\n");
+    assert_eq!(open(mirrored.join("images/set")).unwrap().train.boxes(0).len(), 1);
+
+    // One image of it has no label in the mirror, only a stray file beside it: a background image.
+    write_png(&mirrored.join("images/set/train/b.png"), 8, 8, [0; 3]);
+    write(&mirrored.join("images/set/train/b.txt"), line);
+    let ds = open(mirrored.join("images/set")).unwrap();
+    assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 0), "the stray file is not read");
+}
+
+/// A YAML reached through a folder link, with `path: ../images/birds`: the OS follows the link before the `..`, so the
+/// mirrored labels are in the link target's parent, not the link's.
+#[cfg(unix)]
+#[test]
+fn mirrored_labels_through_a_linked_yaml_folder() {
+    let t = TempDir::new("labels-linked");
+    let release = t.join("releases/v7");
+    write_png(&release.join("images/birds/train/a.png"), 8, 8, [0; 3]);
+    write(&release.join("labels/birds/train/a.txt"), "0 0.5 0.5 0.2 0.2\n");
+    write(&release.join("meta/data.yaml"), "path: ../images/birds\ntrain: train\nnames: [bird]\n");
+    std::fs::create_dir_all(t.join("work")).unwrap();
+    std::os::unix::fs::symlink(release.join("meta"), t.join("work/current")).unwrap();
+    let ds = open(t.join("work/current/data.yaml")).unwrap();
+    assert_eq!(ds.train.boxes(0).len(), 1, "the labels of the link target's parent");
+}
+
+/// Opens a one-image COCO file at each `(path, split)` and checks the image lands in that split.
+fn assert_coco_splits(tag: &str, cases: &[(&str, Split)]) {
+    let t = TempDir::new(tag);
+    let doc = serde_json::json!({
+        "images": [{"id": 1, "file_name": "a.png", "width": 8, "height": 8}],
+        "annotations": [{"image_id": 1, "category_id": 1, "bbox": [1, 1, 4, 4]}],
+        "categories": [{"id": 1, "name": "thing"}]
+    });
+    for (i, &(path, split)) in cases.iter().enumerate() {
+        let json = t.join(i.to_string()).join(path);
+        write_png(&json.with_file_name("a.png"), 8, 8, [0; 3]);
+        write(&json, serde_json::to_vec(&doc).unwrap());
+        let ds = open(&json).unwrap();
+        assert_eq!(ds.split(split).len(), 1, "{path} should be {split}: {:?}", ds.split_sizes());
+    }
+}
+
+/// Names that read the same as before the ordinary-word list: a split word anywhere in a name still counts.
+#[test]
+fn coco_split_names_that_keep_their_split() {
+    assert_coco_splits(
+        "coco-split-keep",
+        &[
+            ("annotations/instances_train2017.json", Split::Train),
+            ("annotations/instances_val2017.json", Split::Val),
+            ("annotations/instances_minival2014.json", Split::Val),
+            ("annotations/instances_valminusminival2014.json", Split::Val),
+            ("annotations/instances_trainval35k.json", Split::Train),
+            ("annotations/image_info_test-dev2017.json", Split::Test),
+            ("annotations/instances_Validation.json", Split::Val),
+            ("annotations/instances_default.json", Split::Train),
+            ("valid/_annotations.coco.json", Split::Val),
+            ("test/_annotations.coco.json", Split::Test),
+            ("d/valAnnotations.json", Split::Val),
+            ("d/valannotations.json", Split::Val),
+            ("d/cocotest.json", Split::Test),
+            ("d/train_val.json", Split::Train),
+            ("coco_val/annotations.json", Split::Val),
+            // Glued names.
+            ("annotations/instances_VALSubset.json", Split::Val),
+            ("d/valsplit.json", Split::Val),
+            ("d/trainsplit.json", Split::Train),
+            ("annotations/instances_myval.json", Split::Val),
+            ("d/valimages.json", Split::Val),
+            ("d/valsubset.json", Split::Val),
+            ("d/testa.json", Split::Test),
+            ("evaluate/annotations.json", Split::Val),
+            ("valsubset/annotations.json", Split::Val),
+            ("myval/annotations.json", Split::Val),
+            ("testa/annotations.json", Split::Test),
+            // An ordinary word beside a split word.
+            ("festival_val/annotations.json", Split::Val),
+            ("val/festival.json", Split::Val),
+            ("d/latest_train.json", Split::Train),
+        ],
+    );
+}
+
+/// An ordinary word that merely contains `val` or `test` names no split: the name's folder decides, else `train`.
+#[test]
+fn coco_split_ordinary_words_are_not_splits() {
+    assert_coco_splits(
+        "coco-split-words",
+        &[
+            ("valves/annotations.json", Split::Train),
+            ("festival/_annotations.coco.json", Split::Train),
+            ("latest/annotations.json", Split::Train),
+            ("contest-2024/annotations.json", Split::Train),
+            ("protest/annotations.json", Split::Train),
+            ("Intervals/annotations.json", Split::Train),
+            ("d/valves.json", Split::Train),
+            ("d/protest_coco.json", Split::Train),
+            ("test/valves.json", Split::Test),
+            ("train/latest.json", Split::Train),
+        ],
+    );
+}
+
 /// An integral float id is the integer: `"image_id": 1.0` names the image `"id": 1` (and the other way round).
 #[test]
 fn coco_integral_float_ids_match_integer_ids() {
@@ -237,6 +389,67 @@ fn coco_integral_float_ids_match_integer_ids() {
     assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
     assert_eq!(ds.split_sizes(), [2, 0, 0]);
     assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 1));
+}
+
+/// Category ids follow the image id rule: `1.0` is `1`, on either side. One that is no whole number is reported as
+/// that, not under an id the file does not hold.
+#[test]
+fn coco_integral_float_category_ids_match_integer_ids() {
+    let t = TempDir::new("coco-float-category");
+    let r = t.path();
+    for name in ["a", "b", "c", "d"] {
+        write_png(&r.join(format!("train/{name}.png")), 10, 10, [0; 3]);
+    }
+    let j = serde_json::json!({
+        "images": [
+            {"id": 1, "file_name": "a.png", "width": 10, "height": 10},
+            {"id": 2, "file_name": "b.png", "width": 10, "height": 10},
+            {"id": 3, "file_name": "c.png", "width": 10, "height": 10},
+            {"id": 4, "file_name": "d.png", "width": 10, "height": 10}
+        ],
+        "annotations": [
+            {"image_id": 1, "category_id": 7.0, "bbox": [0, 0, 5, 5]},
+            {"image_id": 2, "category_id": 9, "bbox": [0, 0, 5, 5]},
+            {"image_id": 3, "category_id": 7.5, "bbox": [0, 0, 5, 5]},
+            {"image_id": 4, "category_id": -7.0, "bbox": [0, 0, 5, 5]}
+        ],
+        "categories": [{"id": 7, "name": "seven"}, {"id": 9.0, "name": "nine"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    assert_eq!(ds.classes, ["seven", "nine"], "{:#?}", ds.report);
+    assert_eq!(ds.split_sizes(), [2, 0, 0], "{:#?}", ds.report);
+    assert_eq!((ds.train.boxes(0)[0].class, ds.train.boxes(1)[0].class), (0, 1));
+    let broken: Vec<&str> = ds
+        .report
+        .issues
+        .iter()
+        .filter(|i| i.kind == IssueKind::BrokenLabel)
+        .map(|i| i.message.as_str())
+        .collect();
+    assert_eq!(broken.len(), 2, "{broken:?}");
+    assert!(broken.iter().all(|m| m.ends_with("category_id is missing or not a whole number")), "{broken:?}");
+}
+
+/// A crowd region is one however the file writes the flag: it never becomes a box to train on.
+#[test]
+fn coco_crowd_flag_in_every_spelling() {
+    let t = TempDir::new("coco-crowd");
+    let r = t.path();
+    write_png(&r.join("train/a.png"), 10, 10, [0; 3]);
+    let ann = |iscrowd: serde_json::Value, x: u32| serde_json::json!({"image_id": 1, "category_id": 1, "bbox": [x, 0, 1, 5], "iscrowd": iscrowd});
+    let j = serde_json::json!({
+        "images": [{"id": 1, "file_name": "a.png", "width": 10, "height": 10}],
+        "annotations": [
+            ann(1.into(), 0), ann(1.0.into(), 1), ann(true.into(), 2),
+            ann(0.into(), 3), ann(0.0.into(), 4), ann(false.into(), 5), ann(serde_json::Value::Null, 6)
+        ],
+        "categories": [{"id": 1, "name": "thing"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    let left: Vec<u32> = ds.train.boxes(0).iter().map(|b| (b.cx * 10.0 - 0.5).round() as u32).collect();
+    assert_eq!(left, [3, 4, 5, 6], "only the boxes that are not crowd regions stay");
 }
 
 /// Two `images` entries with one id: the first keeps its boxes, the second is reported (not silently made a

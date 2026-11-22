@@ -21,8 +21,9 @@ use crate::util::fnv1a;
 pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
-/// split paths are unset.
-pub const INDEX_VERSION: u32 = 6;
+/// split paths are unset. 7: folo-data reads COCO splits, float category ids and crowd flags, and labels below a
+/// folder called `images`, differently.
+pub const INDEX_VERSION: u32 = 7;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or

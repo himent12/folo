@@ -24,7 +24,13 @@ produces plain buffers that the trainer wraps in tensors.
 - Text files (`data.yaml`, image lists, `classes.txt`, label files) may start with a UTF-8 byte order mark, which
   is ignored, and may use CRLF line ends.
 - Label path: the last `images` folder becomes `labels`, the extension `.txt` (`ds/images/train/a.jpg` →
-  `ds/labels/train/a.txt`). A missing label file means a background image.
+  `ds/labels/train/a.txt`). With no `images` folder the label sits next to its image. An `images` folder at or above
+  the dataset root counts only if the root's mirror exists (`x/labels/birds` for a root `x/images/birds`, `x/labels`
+  for `x/images`); without it the labels sit next to the images, and another dataset's folder in `x/labels` changes
+  nothing. With the mirror, a `.txt` beside an image is not its label. The `images` folder is looked for in the
+  image's path as the dataset spells it: a dataset opened as a bare `data.yaml` from inside `x/images/birds` with
+  relative split paths has none in its image paths and reads the labels next to the images, mirror or not (open
+  it by a path that names the `images` folder to use the mirror). A missing label file means a background image.
 - Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding
   box is used). Coordinates may exceed `[0, 1]` by up to 0.01 (clipped, with a warning); exact duplicates are
   removed; zero-size boxes are dropped.
@@ -33,10 +39,16 @@ produces plain buffers that the trainer wraps in tensors.
   normalised.
 
 ### COCO
+- A file's split is the first of `train`, `val`, `test` found anywhere in its name, then in its folder's name
+  (`instances_val2017.json`, `valsubset.json`, `valid/_annotations.coco.json`); with neither it is `train`. A short
+  list of ordinary words that contain `val` or `test` (`valves`, `festival`, `latest`, `contest`, `protest`, ...) does
+  not count when it is a whole run of letters; an unlisted word (`rival` is listed, `strain` is not) still matches.
 - `images[].file_name` is resolved against the first folder that has the files: the JSON's folder, `images/<tag>`,
   `<tag>` (where `instances_train2017.json` has tag `train2017`), `images/<split>`, `<split>`, `images/`, the root.
-- `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.
-- Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
+- `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. Crowd annotations (`iscrowd` of `1`, `1.0` or
+  `true`) are skipped.
+- Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`. An integral
+  float is its integer (`"category_id": 1.0` names `"id": 1`).
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
 - Image ids are numbers or strings; an integral float is its integer (`"image_id": 1.0` names `"id": 1`). Two
   `images` entries with one id: the first is kept with every annotation of the id, the second is left out and

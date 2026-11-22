@@ -186,6 +186,47 @@ fn build_list_and_fingerprint() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `images/birds` with a label beside its image, and the number of boxes the index of it holds.
+fn labels_beside(dir: &Path) -> impl Fn() -> (Index, usize) {
+    let ds = dir.join("images/birds");
+    std::fs::create_dir_all(ds.join("train")).unwrap();
+    std::fs::write(ds.join("data.yaml"), "train: train\nnames: [bird]\n").unwrap();
+    image::RgbImage::new(8, 8).save(ds.join("train/a.png")).unwrap();
+    std::fs::write(ds.join("train/a.txt"), "0 0.5 0.5 0.5 0.5\n").unwrap();
+    move || {
+        let idx = Index::build(ds.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+        let boxes = idx.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len();
+        (idx, boxes)
+    }
+}
+
+/// Removing an empty label mirror makes the labels beside the images count, so a cached index is stale.
+#[test]
+fn removing_a_label_mirror_invalidates_the_index() {
+    let dir = tmp("mirror-removed");
+    let build = labels_beside(&dir);
+    std::fs::create_dir_all(dir.join("labels/birds")).unwrap();
+    let (idx, boxes) = build();
+    assert_eq!(boxes, 0, "the mirror exists and has no label");
+    assert!(idx.is_fresh());
+    std::fs::remove_dir(dir.join("labels/birds")).unwrap();
+    assert!(!idx.is_fresh(), "removing the mirror invalidates the index");
+    assert_eq!(build().1, 1, "the label beside the image");
+}
+
+/// Creating a label mirror makes the labels beside the images stop counting, so a cached index is stale.
+#[test]
+fn creating_a_label_mirror_invalidates_the_index() {
+    let dir = tmp("mirror-created");
+    let build = labels_beside(&dir);
+    let (idx, boxes) = build();
+    assert_eq!(boxes, 1, "the label beside the image");
+    assert!(idx.is_fresh());
+    std::fs::create_dir_all(dir.join("labels/birds")).unwrap();
+    assert!(!idx.is_fresh(), "creating the mirror invalidates the index");
+    assert_eq!(build().1, 0, "the mirror exists and has no label");
+}
+
 #[test]
 fn errors_map_to_api_codes() {
     let dir = tmp("errors");

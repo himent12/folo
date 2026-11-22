@@ -30,6 +30,48 @@ pub fn label_path_for(image: &Path) -> PathBuf {
     out
 }
 
+/// The label files of one dataset's images: [`label_path_for`], except that a folder called `images` at or above the
+/// dataset root counts only if the root's mirror exists (`x/labels/birds` for `x/images/birds`, `x/labels` for
+/// `x/images`). Without it, the labels of the images below the root sit next to them. Whether an image is below the
+/// root is compared on absolute, normalised paths, so it does not depend on how the root or a list entry is spelled.
+/// The mirror is probed with the root's `..` kept: the file system follows a link before a `..`, as it does when it
+/// opens a label at [`label_path_for`].
+pub(crate) struct LabelPaths {
+    /// The dataset root, absolute and normalised.
+    root: PathBuf,
+    /// The root's mirror, when it has one: creating or removing it changes the dataset.
+    mirror: Option<PathBuf>,
+    /// The root has a mirror and it does not exist.
+    beside: bool,
+}
+
+impl LabelPaths {
+    pub(crate) fn new(root: &Path) -> Self {
+        // `.` first: a dataset named by a bare `data.yaml` has an empty root.
+        let spelled = Path::new(".").join(root);
+        let full = std::path::absolute(&spelled).unwrap_or_else(|_| spelled.clone());
+        let root = crate::paths::normalize(&spelled);
+        let comps: Vec<Component> = full.components().collect();
+        let mirror = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images")).map(|i| {
+            let mut mirror: PathBuf = comps[..i].iter().collect();
+            mirror.push("labels");
+            mirror.extend(&comps[i + 1..]);
+            mirror
+        });
+        let beside = mirror.as_ref().is_some_and(|m| !m.is_dir());
+        LabelPaths { root, mirror, beside }
+    }
+
+    /// The label file of `image`. An image outside the root follows [`label_path_for`].
+    pub(crate) fn of(&self, image: &Path) -> PathBuf {
+        let beside = self.beside
+            && crate::paths::normalize(&Path::new(".").join(image))
+                .strip_prefix(&self.root)
+                .is_ok_and(|below| !below.components().any(|c| c.as_os_str() == OsStr::new("images")));
+        if beside { image.with_extension("txt") } else { label_path_for(image) }
+    }
+}
+
 /// A `data.yaml` (or `dataset.yaml`, or any YAML with a `train` key) directly inside `dir`.
 pub(crate) fn find_yaml(dir: &Path) -> Option<PathBuf> {
     for name in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
@@ -222,16 +264,18 @@ pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Re
     }
     let nc = names.as_ref().map(Vec::len);
     let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
+    let labels = LabelPaths::new(&root);
+    deps.extend(labels.mirror.clone());
     for image in splits.values().flatten() {
         deps.insert(crate::paths::parent_dir(image).to_path_buf());
-        deps.insert(crate::paths::parent_dir(&label_path_for(image)).to_path_buf());
+        deps.insert(crate::paths::parent_dir(&labels.of(image)).to_path_buf());
     }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
     for (split, images) in splits {
         let candidates = images
             .into_iter()
             .map(|image| {
-                let label = label_path_for(&image);
+                let label = labels.of(&image);
                 Candidate { image, labels: LabelSource::Yolo(label) }
             })
             .collect();
