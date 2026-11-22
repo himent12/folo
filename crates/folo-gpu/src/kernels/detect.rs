@@ -123,20 +123,36 @@ impl DetectDesc {
         self.b * self.nc * self.a.div_ceil(BCE_CHUNK)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.k == 0 || self.k > MAX_TOPK {
             return Err(shape_err(format!("detect: topk {} must be in 1..={MAX_TOPK}", self.k)));
         }
         if !(2..=MAX_REG_MAX).contains(&self.reg_max) {
             return Err(shape_err(format!("detect: reg_max {} must be in 2..={MAX_REG_MAX}", self.reg_max)));
         }
-        if self.g > 65535 || self.b > 65535 || self.b * self.nc > 65535 {
+        let b_nc = self.b.checked_mul(self.nc).ok_or_else(|| shape_err("detect: b * nc overflow"))?;
+        if self.g > 65535 || self.b > 65535 || b_nc > 65535 {
             return Err(shape_err(format!(
                 "detect: {} images x {} gts x {} classes exceed one dispatch",
                 self.b, self.g, self.nc
             )));
         }
-        let words = self.meta_words().max(self.b * 4 * self.reg_max * self.a).max(self.b * self.nc * self.a);
+        let bg = self.b.checked_mul(self.g).ok_or_else(|| shape_err("detect: b * g overflow"))?;
+        let meta = self
+            .a
+            .checked_mul(3)
+            .and_then(|v| bg.checked_mul(5).and_then(|w| v.checked_add(w)))
+            .and_then(|v| v.checked_add(self.b))
+            .ok_or_else(|| shape_err("detect: meta size overflow"))?;
+        let box_words = self
+            .b
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(self.reg_max))
+            .and_then(|v| v.checked_mul(self.a))
+            .ok_or_else(|| shape_err("detect: box buffer size overflow"))?;
+        let cls_words =
+            b_nc.checked_mul(self.a).ok_or_else(|| shape_err("detect: cls buffer size overflow"))?;
+        let words = meta.max(box_words).max(cls_words);
         if words >= u32::MAX as usize / 4 {
             return Err(shape_err("detect: problem too large for 32-bit indexing"));
         }

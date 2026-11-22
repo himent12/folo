@@ -5,8 +5,8 @@
 //!    with `t = clamp(-x, -86, 86)` so `2^n` and the reciprocal seed stay strictly normal floats.
 //! 2. Economised degree-5 minimax polynomial for `2^f` on `[-0.5, 0.5]` (relative error `< 1e-7`, exact `2^0 = 1`).
 //! 3. Deterministic IEEE-754 bit-hack reciprocal seed `0x7EF3_11C3 - bits(1 + e)` followed by 3 exact FMA
-//!    Newton-Raphson steps (`r ← r · (2 - d · r)`), achieving `< 2e-7` relative error with ZERO `vdivps`
-//!    and ZERO platform-divergent `rcpps`.
+//!    Newton-Raphson steps (`r ← r · (2 - d · r)`), achieving `< 2e-7` hybrid error (`|err| / max(1, |ref|)`,
+//!    max true relative error `~2.4e-6` near `-79`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
 //!
 //! Scalar and AVX2 paths execute the exact same IEEE-754 FMA/mul/add/sub/integer-sub operations in the same
 //! order, so they produce bit-identical results across CPUs.
@@ -34,8 +34,8 @@ const C0: f32 = 1.0;
 /// Bit-hack reciprocal seed constant (`~2 * 127 << 23` tuned for minimax relative error `< 0.0385` on normal `d`).
 const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
-/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 (relative error
-/// `< 2e-7` on `[-86, 86]`, finite at the extremes, `silu_q8(0.0) == 0.0`, NaN stays NaN).
+/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 (`|err| / max(1, |ref|) < 2e-7`
+/// on `[-86, 86]`, max true relative error `~2.4e-6` in the far negative tail, finite at extremes, `silu_q8(0.0) == 0.0`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {
     let x = maxps(-88.0, x);

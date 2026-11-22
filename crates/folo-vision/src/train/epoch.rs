@@ -88,8 +88,10 @@ impl Trainer {
                 need_kd_asg,
             )?;
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
+            // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
+            // where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below runs cleanly.
             let kd = match (&teacher_batch, &self.cfg.distill) {
-                (Some(t), Some(d)) => Some(t.loss(
+                (Some(t), Some(d)) if loss.is_finite() => Some(t.loss(
                     &box_raw,
                     &cls_raw,
                     &out.anchors,

@@ -8,7 +8,7 @@
 //!   adaptive lateral inhibition (`Z_o2o <= Z`), sharing `BoxBranchV2` between `o2m` and `o2o`.
 
 use folo_core::{Tensor, is_grad_enabled, with_no_grad};
-use folo_nn::{Conv2d, Conv2dConfig, ConvBnAct, Forward, Module, Result, TensorKind, init};
+use folo_nn::{Conv2d, Conv2dConfig, ConvBnAct, Forward, Module, Result, RunningStats, TensorKind, init};
 use rayon::prelude::*;
 
 use crate::model::blocks::{Fuse, Init};
@@ -51,6 +51,12 @@ impl BoxBranchV2 {
         let iou_raw = self.iou_out.as_ref().map(|m| m.forward(&feat)).transpose()?;
         Ok((box_raw, iou_raw))
     }
+
+    /// Forward returning only `box_logits [B, 4·reg_max, H, W]` without computing `iou_out`.
+    pub fn forward_box_only(&self, x: &Tensor) -> Result<Tensor> {
+        let feat = self.conv1.forward(&self.conv0.forward(x)?)?;
+        self.out.forward(&feat)
+    }
 }
 
 impl Module for BoxBranchV2 {
@@ -66,7 +72,7 @@ impl Module for BoxBranchV2 {
 
 impl Forward for BoxBranchV2 {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(self.forward_box_iou(x)?.0)
+        self.forward_box_only(x)
     }
 }
 
@@ -164,6 +170,11 @@ impl PeakSuppress {
     /// Apply content-adaptive peak-preserving suppression to `logits [B, nc, H, W]` using `feat [B, c_cls, H, W]`.
     pub fn apply(&self, logits: &Tensor, feat: &Tensor) -> Result<Tensor> {
         let g = self.gate.forward(feat)?.sigmoid()?;
+        let g = if g.dtype() != logits.dtype() && folo_core::autocast_dtype().is_some() {
+            g.to_dtype(logits.dtype())?
+        } else {
+            g
+        };
         let alpha =
             self.alpha_raw.softplus()?.to_dtype(logits.dtype())?.reshape([1, self.num_classes, 1, 1])?;
         let z_max = logits.max_pool2d(3, 1, 1)?;
@@ -415,7 +426,23 @@ impl LazyAlignHead {
         let cls_raw = Tensor::cat(&cls_parts, 2)?;
         let (box_raw, iou_raw) = match (shared_box, detach_feats) {
             (Some(b), false) => (b.clone(), None),
-            _ => {
+            (Some(_), true) => {
+                // Recompute on detached `feats` so `o2o` box+DFL losses train `box_branch` weights without
+                // pushing gradients into the backbone/neck, while keeping `box_branch` BN running stats updated
+                // only once per batch (from the `o2m` pass) and skipping `iou_out`.
+                let mut boxes = Vec::with_capacity(3);
+                for i in 0..3 {
+                    let x = cls_feats[i];
+                    let (b, _, h, w) = x.dims4()?;
+                    let snap = RunningStats::capture(&self.levels[i].box_branch)?;
+                    let res = self.levels[i].box_branch.forward_box_only(x);
+                    snap.restore()?;
+                    let bx = res?;
+                    boxes.push(bx.reshape([b, 4 * self.reg_max, h * w])?);
+                }
+                (Tensor::cat(&boxes, 2)?, None)
+            }
+            (None, _) => {
                 let mut boxes = Vec::with_capacity(3);
                 let mut ious = Vec::with_capacity(3);
                 for i in 0..3 {
@@ -423,17 +450,11 @@ impl LazyAlignHead {
                     let (b, _, h, w) = x.dims4()?;
                     let (bx, iou) = self.levels[i].box_branch.forward_box_iou(x)?;
                     boxes.push(bx.reshape([b, 4 * self.reg_max, h * w])?);
-                    if shared_box.is_none()
-                        && let Some(t) = iou
-                    {
+                    if let Some(t) = iou {
                         ious.push(t.reshape([b, 1, h * w])?);
                     }
                 }
-                let iou_raw = if shared_box.is_none() && self.has_iou_head {
-                    Some(Tensor::cat(&ious, 2)?)
-                } else {
-                    None
-                };
+                let iou_raw = if self.has_iou_head { Some(Tensor::cat(&ious, 2)?) } else { None };
                 (Tensor::cat(&boxes, 2)?, iou_raw)
             }
         };

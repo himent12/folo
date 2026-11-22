@@ -335,9 +335,14 @@ pub fn distill_loss_with_context(
     // DFL: per element weight · (ln s~ − log_softmax(z / T)), row sums per (image, side, bin).
     let z = box_raw.reshape([b, 4, r, a])?;
     let z = if temp == 1.0 { z } else { z.div_scalar(temp)? };
-    let bw = match anchor_ver_w {
-        Some(vw) => targets.box_prob.mul(vw)?,
-        None => targets.box_weight.clone(),
+    let bw = if cfg.gt_verify {
+        let vw = anchor_ver_w.ok_or_else(|| invalid("distill_loss: cfg.gt_verify requires anchor_ver_w"))?;
+        targets.box_prob.mul(vw)?
+    } else {
+        match anchor_ver_w {
+            Some(vw) => targets.box_prob.mul(vw)?,
+            None => targets.box_weight.clone(),
+        }
     };
     let elem_d = targets.box_log_prob.sub(&z.log_softmax(2)?)?.mul(&bw)?;
     let l_kd = sum_fixed_order(&elem_d.sum(3, false)?)?.mul_scalar(cfg.dfl_gain * temp * temp / (4.0 * n))?;

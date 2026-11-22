@@ -4,10 +4,10 @@
 //!
 //! Forward, three dispatches:
 //! 1. `bn_stats`: each workgroup takes one channel and one chunk of its `N·H·W` values (`vec4` when `H·W` is a
-//!    multiple of 4), computes block-shifted 2-moment sums per thread (zero divisions in the hot loop, zero
-//!    catastrophic cancellation), converts once to Welford `(count, mean, M2)` and merges across the workgroup
-//!    using 1-barrier 32-wide `subgroupAdd` + Chan's parallel variance identity when the device supports 32-wide
-//!    subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (WARP / Lavapipe).
+//!    multiple of 4), accumulates 4-lane vectorized Welford `(count, mean, M2)` per thread and merges across the
+//!    workgroup using a 1-barrier 32-wide pairwise Chan `subgroupShuffleDown` reduction when the native device
+//!    supports 32-wide subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (browser WebGPU,
+//!    WARP, Lavapipe).
 //! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance,
 //!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
 //!    place.
@@ -38,12 +38,21 @@ thread_local! {
 }
 
 fn use_subgroups(ctx: &GpuContext) -> bool {
-    #[cfg(test)]
-    if FORCE_NO_SUBGROUPS.with(std::cell::Cell::get) {
+    // Keep browser WebGPU explicitly on the portable path until wgpu exposes both `SUBGROUP` and WGSL `subgroup_id`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = ctx;
         return false;
     }
-    let caps = ctx.caps();
-    caps.subgroups && caps.subgroup_size == (32, 32)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        #[cfg(test)]
+        if FORCE_NO_SUBGROUPS.with(std::cell::Cell::get) {
+            return false;
+        }
+        let caps = ctx.caps();
+        caps.subgroups && caps.subgroup_size == (32, 32)
+    }
 }
 
 const STATS_MAIN_SUBGROUPS: &str = r#"
@@ -57,19 +66,35 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let c = wid.y;
     let chunk = wid.x;
     let t = bn_stats_thread(c, chunk, lid);
-    let cnt = t.x;
-    let mean = t.y;
-    let m2 = t.z;
-    let sg_n = subgroupAdd(cnt);
-    let inv_sg_n = select(0.0, 1.0 / sg_n, sg_n > 0.0);
-    let sg_mean = subgroupAdd(select(0.0, (cnt * inv_sg_n) * mean, cnt > 0.0));
-    let sg_d = mean - sg_mean;
-    let sg_m2 = subgroupAdd(select(0.0, m2 + (cnt * sg_d) * sg_d, cnt > 0.0));
+    var na = t.x;
+    var ma = t.y;
+    var qa = t.z;
+    // Exact pairwise Chan tree merge over the 32-wide subgroup: skips empty lanes and keeps `d == 0`
+    // bit-exact on constant inputs (even partial subgroups of large F16/F32 constants).
+    for (var off = 16u; off > 0u; off = off >> 1u) {
+        let nb = subgroupShuffleDown(na, off);
+        let mb = subgroupShuffleDown(ma, off);
+        let qb = subgroupShuffleDown(qa, off);
+        if (lane < off) {
+            if (na == 0.0) {
+                na = nb;
+                ma = mb;
+                qa = qb;
+            } else if (nb > 0.0) {
+                let n = na + nb;
+                let d = mb - ma;
+                let delta = d * (nb / n);
+                ma += delta;
+                qa += qb + d * (delta * na);
+                na = n;
+            }
+        }
+    }
     let sg = min(sgid, 7u);
     if (lane == 0u) {
-        wn[sg] = sg_n;
-        wm[sg] = sg_mean;
-        wq[sg] = sg_m2;
+        wn[sg] = na;
+        wm[sg] = ma;
+        wq[sg] = qa;
     }
     workgroupBarrier();
     if (lid == 0u) {
@@ -85,8 +110,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
             } else if (nb > 0.0) {
                 let n = na + nb;
                 let d = wm[i] - ma;
-                ma += d * (nb / n);
-                qa += wq[i] + d * d * (na * nb / n);
+                let delta = d * (nb / n);
+                ma += delta;
+                qa += wq[i] + d * (delta * na);
                 na = n;
             }
         }

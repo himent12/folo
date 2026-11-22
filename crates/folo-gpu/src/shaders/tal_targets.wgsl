@@ -58,7 +58,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         var t = 0.0;
         if (pos) {
             if (pu(5u) != 0u) {
-                t = select(0.0, m * UM[0] / MM[0], MM[0] > 0.0);
+                t = select(0.0, (m / MM[0]) * UM[0], MM[0] > 0.0);
             } else {
                 t = m * UM[0] / (MM[0] + pf(4u));
             }

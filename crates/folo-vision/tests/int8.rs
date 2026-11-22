@@ -276,33 +276,29 @@ fn convs_the_kernel_does_not_take_run_in_f32() {
 /// branches have >1.5× scale ratio, while `version: 2` decouples them (matching `FakeQuant` on both).
 #[test]
 fn v1_calibration_keeps_coupled_concat_weights() {
-    let x = input(1, 64, 64, 31);
-    let m = model(30);
+    let x = input(2, 64, 96, 2);
+    let m = model(1);
     let mut cal_v2 = calibrated(&m, &x);
     cal_v2.weights = None;
     cal_v2.u8_stem = false;
-    // Build a v1-style per-tensor map where `neck.td4.cv2`'s concat branches differ in scale by 8×.
+    // Build a v1-style per-tensor map where `neck.td4.cv1`'s concat branches (`psa.cv2` vs `stage4.cv2`)
+    // differ in scale by ~4× (> 1.5× decoupling threshold) without clipping any layer's activations.
     cal_v2.channel_ranges.clear();
-    for (name, r) in cal_v2.ranges.iter_mut() {
-        if name.contains("sppf") {
-            *r = [-0.05, 0.05];
-        } else if name.contains("stage4") {
-            *r = [-4.0, 4.0];
-        }
+    if let Some(r) = cal_v2.ranges.get_mut("backbone.stage4.cv2") {
+        *r = [r[0] * 4.0, r[1] * 4.0];
     }
     let cal_v1 = Calibration { version: quant::VERSION_V1, ..cal_v2.clone() };
     let (fq_v1, fq_v2) = (
         FakeQuant::new(&cal_v1).features(&m, &x).unwrap(),
         FakeQuant::new(&cal_v2).features(&m, &x).unwrap(),
     );
-    let mut m1 = model(30);
-    let mut m2 = model(30);
+    let mut m1 = model(1);
+    let mut m2 = model(1);
     m1.set_int8(Some(cal_v1.clone())).unwrap();
     m2.set_int8(Some(cal_v2.clone())).unwrap();
     let _g = no_grad();
     let (y1, y2) = (m1.forward(&x).unwrap(), m2.forward(&x).unwrap());
-    // Executor matches FakeQuant for v1 as well as v2.
-    let q_p3 = cal_v1.param("neck.out3.cv2").unwrap();
+    // Executor matches FakeQuant for BOTH v1 (coupled) and v2 (decoupled), while v1 and v2 stay distinct.
     let fq_p3_v1 = fq_v1[0].to_vec::<f32>().unwrap();
     let fq_p3_v2 = fq_v2[0].to_vec::<f32>().unwrap();
     assert_ne!(fq_p3_v1, fq_p3_v2, "v1 must not decouple unequal concat branch scales like v2");
@@ -312,5 +308,17 @@ fn v1_calibration_keeps_coupled_concat_weights() {
         to_bits(&y2.box_raw),
         "int8 executor v1 must stay coupled and distinct from v2 decoupled concat"
     );
-    assert!(q_p3.scale > 0.0);
+    for (ver, cal, fq) in [("v1", &cal_v1, &fq_v1), ("v2", &cal_v2, &fq_v2)] {
+        let plan = Int8Plan::new(cal.clone());
+        let exec_f = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+        for (i, name) in ["neck.out3.cv2", "neck.out4.cv2", "neck.out5.cv2"].iter().enumerate() {
+            let s = cal.param(name).unwrap().scale;
+            let (a, b) = (fq[i].to_vec::<f32>().unwrap(), exec_f[i].to_vec::<f32>().unwrap());
+            assert_eq!(a.len(), b.len());
+            let steps: Vec<f32> = a.iter().zip(&b).map(|(p, q)| ((p - q) / s).abs().round()).collect();
+            let exact = steps.iter().filter(|&&d| d == 0.0).count() as f64 / steps.len() as f64;
+            let worst = steps.iter().copied().fold(0f32, f32::max);
+            assert!(exact > 0.99 && worst <= 2.0, "{ver} {name}: {:.4} exact, worst {worst} steps", exact);
+        }
+    }
 }

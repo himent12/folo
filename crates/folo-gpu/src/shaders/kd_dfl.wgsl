@@ -64,9 +64,10 @@ fn anchor(i: u32) -> f32 {
                 }
                 if (bad_zero) { atomicOr(&MISC[0], 1u); }
             } else {
+                let z = GRAD[0] * 0.0;
                 for (var side = 0u; side < 4u; side++) {
                     let base = (b * 4u + side) * R * na + a;
-                    for (var r = 0u; r < R; r++) { OUT[base + r * na] = 0.0; }
+                    for (var r = 0u; r < R; r++) { OUT[base + r * na] = z; }
                 }
             }
             return 0.0;

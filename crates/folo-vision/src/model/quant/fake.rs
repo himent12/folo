@@ -83,8 +83,11 @@ impl<'a> FakeQuant<'a> {
 
     /// Layers 0–22 of `model` on `x` with fake quantisation: the head's three inputs.
     pub fn features(&mut self, model: &FoloModel, x: &Tensor) -> Result<[Tensor; 3]> {
+        self.ch_grids.clear();
         let _g = folo_core::no_grad();
-        folo_core::cpu::in_pool(|| walk::features(model, self, x))
+        let res = folo_core::cpu::in_pool(|| walk::features(model, self, x));
+        self.ch_grids.clear();
+        res
     }
 
     fn grids_of(&self, a: &Fq) -> Vec<QParam> {
@@ -127,31 +130,64 @@ impl<'a> FakeQuant<'a> {
         let o = conv.conv.config().out_channels;
         let taps = conv.conv.config().kernel * conv.conv.config().kernel;
         let orig_w = conv.conv.weight.to_vec::<f32>()?;
-        if decouple && parts.len() > 1 {
-            let mut sum: Option<Tensor> = None;
+        let bias_v: Vec<f32> = match &conv.conv.bias {
+            Some(b) => b.to_vec::<f32>()?,
+            None => vec![0.0; o],
+        };
+        let acc = if decouple && parts.len() > 1 {
+            let mut sum: Option<Vec<f32>> = None;
+            let mut out_dims = Vec::new();
             let mut ch0 = 0;
             for (part_t, pg) in norm_parts.iter().zip(&owned_grids) {
                 let pc = pg.len();
-                let wp = quantized_folded_weight(&orig_w, o, c, taps, ch0, pg)?;
-                let y_p = Tensor::conv2d_act_cat(&[part_t], &wp, None, &p, None)?;
-                sum = Some(match sum {
-                    Some(prev) => prev.add(&y_p)?,
-                    None => y_p,
-                });
+                let (qw, sc) = quantized_folded_weight(&orig_w, o, c, taps, ch0, pg)?;
+                let raw = Tensor::conv2d_act_cat(&[part_t], &qw, None, &p, None)?;
+                let (n, oc_n, oh, ow) = raw.dims4()?;
+                let hw = oh * ow;
+                out_dims = vec![n, oc_n, oh, ow];
+                let rv = raw.to_vec::<f32>()?;
+                let dst = sum.get_or_insert_with(|| vec![0.0; rv.len()]);
+                for img in 0..n {
+                    for (oc, &s) in sc.iter().enumerate().take(oc_n) {
+                        let base = (img * oc_n + oc) * hw;
+                        for idx in base..base + hw {
+                            dst[idx] = rv[idx].round_ties_even().mul_add(s, dst[idx]);
+                        }
+                    }
+                }
                 ch0 += pc;
             }
-            let acc = sum.expect("at least one part");
-            let acc = match &conv.conv.bias {
-                Some(b) => acc.add(&b.reshape([1, o, 1, 1])?)?,
-                None => acc,
-            };
-            conv.act.forward(&acc)
+            let mut dst = sum.expect("at least one part");
+            let (n, oc_n, hw) = (out_dims[0], out_dims[1], out_dims[2] * out_dims[3]);
+            for img in 0..n {
+                for (oc, &b) in bias_v.iter().enumerate().take(oc_n) {
+                    let base = (img * oc_n + oc) * hw;
+                    for v in &mut dst[base..base + hw] {
+                        *v += b;
+                    }
+                }
+            }
+            Tensor::from_vec(dst, out_dims)?
         } else {
             let all_grids: Vec<QParam> = owned_grids.iter().flat_map(|gs| gs.iter().copied()).collect();
-            let wp = quantized_folded_weight(&orig_w, o, c, taps, 0, &all_grids)?;
+            let (qw, sc) = quantized_folded_weight(&orig_w, o, c, taps, 0, &all_grids)?;
             let ts: Vec<&Tensor> = norm_parts.iter().collect();
-            Ok(Tensor::conv2d_act_cat(&ts, &wp, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?)
-        }
+            let raw = Tensor::conv2d_act_cat(&ts, &qw, None, &p, None)?;
+            let (n, oc_n, oh, ow) = raw.dims4()?;
+            let hw = oh * ow;
+            let mut rv = raw.to_vec::<f32>()?;
+            for img in 0..n {
+                for oc in 0..oc_n {
+                    let (s, b) = (sc[oc], bias_v[oc]);
+                    let base = (img * oc_n + oc) * hw;
+                    for v in &mut rv[base..base + hw] {
+                        *v = v.round_ties_even().mul_add(s, b);
+                    }
+                }
+            }
+            Tensor::from_vec(rv, [n, oc_n, oh, ow])?
+        };
+        conv.act.forward(&acc)
     }
 }
 
@@ -172,7 +208,8 @@ fn divide_by_scales(t: &Tensor, grids: &[QParam]) -> Result<Tensor> {
     Ok(Tensor::from_vec(v, [n, c, h, w])?)
 }
 
-/// Quantise `w[:, ch0..ch0 + pg.len()] * pg[ic].scale` per output channel and return `q * s` (no `/ scale`).
+/// Quantise `w[:, ch0..ch0 + pg.len()] * pg[ic].scale` per output channel and return `(q as f32, scale [o])`
+/// so the conv accumulates integers before applying `mul_add(scale, bias)` (matching `QConv`'s exact epilogue).
 fn quantized_folded_weight(
     orig: &[f32],
     o: usize,
@@ -180,7 +217,7 @@ fn quantized_folded_weight(
     taps: usize,
     ch0: usize,
     pg: &[QParam],
-) -> Result<Tensor> {
+) -> Result<(Tensor, Vec<f32>)> {
     let pc = pg.len();
     let k_side = (taps as f64).sqrt().round() as usize;
     let mut folded = Vec::with_capacity(o * pc * taps);
@@ -191,15 +228,8 @@ fn quantized_folded_weight(
         }
     }
     let (q, s) = quantize_weights(&folded, o);
-    let mut out = vec![0f32; o * pc * taps];
-    let stride = pc * taps;
-    for oc in 0..o {
-        let sc = s[oc];
-        for i in 0..stride {
-            out[oc * stride + i] = q[oc * stride + i] as f32 * sc;
-        }
-    }
-    Ok(Tensor::from_vec(out, [o, pc, k_side, k_side])?)
+    let q_f32: Vec<f32> = q.into_iter().map(f32::from).collect();
+    Ok((Tensor::from_vec(q_f32, [o, pc, k_side, k_side])?, s))
 }
 
 impl Exec for FakeQuant<'_> {

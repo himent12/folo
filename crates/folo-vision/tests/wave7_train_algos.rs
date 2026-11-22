@@ -774,6 +774,74 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
         "mismatched assignment anchor count must error"
     );
 
+    // 2b. Public host `distill_loss_with_context` rejects `gt_verify=true` with `anchor_ver_w=None`,
+    //     and accepts an explicit all-zero weight tensor for an empty assignment (`dfl == 0.0`).
+    let view_ok = TeacherView::new(&box_raw, &tc, 16, dcfg.temperature).unwrap();
+    let tgt_ok = DistillTargets::new(&view_ok).unwrap();
+    assert!(
+        distill_loss_with_context(
+            &box_raw,
+            &cls_raw,
+            &tgt_ok,
+            sup_c.target_score_sum,
+            &dcfg,
+            Some(&ha),
+            None
+        )
+        .is_err(),
+        "host distill_loss_with_context must reject gt_verify=true with anchor_ver_w=None"
+    );
+    let zeros_vw = Tensor::zeros([2, 1, 1, a]);
+    let kd_zero = distill_loss_with_context(
+        &box_raw,
+        &cls_raw,
+        &tgt_ok,
+        sup_c.target_score_sum,
+        &dcfg,
+        Some(&ha),
+        Some(&zeros_vw),
+    )
+    .unwrap();
+    assert_eq!(kd_zero.dfl, 0.0, "all-zero anchor_ver_w must produce zero DFL KD");
+
+    // 2c. Oversized public `Assignment::desc.g` returns Err instead of panicking on overflow.
+    let mut bad_da = da;
+    bad_da.desc.g = usize::MAX;
+    assert!(
+        distill_loss_fused_with_context(
+            &sb_g,
+            &sc_g,
+            &box_raw.to_device(dev).unwrap(),
+            &tc_g,
+            1.0,
+            &dcfg,
+            Some(&bad_da)
+        )
+        .is_err(),
+        "oversized Assignment::desc.g must return Err, not panic"
+    );
+
+    // 2d. Epsilon-free TAL `(m / m_max) * u_max` preserves `u_max` even when `m * u_max` would flush to zero.
+    {
+        let u_box = Xyxy::new(10.0, 10.0, 20.0, 20.0);
+        // Concentric 1×1 square inside 10×10 square: identical center & aspect ratio so `ciou == iou == 0.01`,
+        // `m = 1e-32 * 0.01^6 = 1e-44 > 0`, while `m * 0.01 = 1e-46` flushes to 0.0 in f32.
+        let pred_b = [Xyxy::new(14.5, 14.5, 15.5, 15.5)];
+        let tiny_scores = [1e-32f32];
+        let tal_cfg = TalConfig { eps_free: true, alpha: 1.0, beta: 6.0, ..TalConfig::default() };
+        let asg_ef =
+            folo_vision::assign::assign(&tiny_scores, 1, &pred_b, &[[15.0, 15.0]], &[u_box], &[0], &tal_cfg);
+        let iou = folo_vision::boxes::box_iou(&pred_b[0], &u_box);
+        let m_raw = tiny_scores[0].powf(1.0) * iou.powf(6.0);
+        assert!(m_raw > 0.0 && (m_raw * iou) == 0.0, "test setup must underflow m * u_max");
+        assert!(asg_ef.fg_mask[0]);
+        assert!(
+            (asg_ef.target_scores[0] - iou).abs() <= 1e-5 * iou,
+            "eps_free TAL top anchor should preserve u_max ({iou:e}), got {:e}",
+            asg_ef.target_scores[0]
+        );
+    }
+
     // 3. In-place mutation of returned `Assignment.dense` invalidates both detection and BCKD backward.
     let sb_m = box_raw.to_device(dev).unwrap().requires_grad_();
     let sc_m = cls_raw.to_device(dev).unwrap().requires_grad_();
@@ -845,5 +913,69 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     let summary = tr.run().unwrap();
     assert_eq!(summary.epochs_completed, 1);
     assert!(summary.epochs[0].train_loss.total.is_finite());
+
+    // 5. Recoverable non-finite student batch with `distill.gt_verify = true` must be skipped (BN restored),
+    //    NOT hard-abort training with `Error::Config`.
+    //    Image 0 is all 255 (`1.0`), image 1 is all 0 (`0.0`); scaling stem weights to `1e38` makes image 0
+    //    overflow to `+Inf/NaN` (zero assignment) while image 1 stays `0.0` (finite, trains normally).
+    let two_img_ds = |split: Split| {
+        Arc::new(folo_data::InMemoryDataset {
+            samples: vec![
+                folo_data::Sample {
+                    image: folo_data::Image::new(64, 64, [255, 255, 255]),
+                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
+                },
+                folo_data::Sample {
+                    image: folo_data::Image::new(64, 64, [0, 0, 0]),
+                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
+                },
+            ],
+            classes: vec!["circle".into(), "square".into()],
+            split,
+        })
+    };
+    let bad_init = TestFile::new("wave7-nonfinite-gtverify", "init.folo");
+    {
+        let mut init_m = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+        init_m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+        let _g = folo_core::no_grad();
+        let w = &init_m.backbone.stem.conv.weight;
+        let big = Tensor::full(w.dims(), 1e38f32);
+        w.copy_from(&big).unwrap();
+        init_m.save(&bad_init).unwrap();
+    }
+    for dev_str in ["cpu", "gpu:0"] {
+        let nf_data = TrainData {
+            train: two_img_ds(Split::Train),
+            val: two_img_ds(Split::Val),
+            classes: vec!["circle".into(), "square".into()],
+        };
+        let nf_cfg = TrainConfig {
+            epochs: 1,
+            batch: 1,
+            nbs: 1,
+            imgsz: 64,
+            optimizer: OptimizerChoice::Sgd,
+            lr0: 0.001,
+            warmup_epochs: 0.0,
+            workers: 0,
+            device: dev_str.into(),
+            augment: AugmentConfig::none(),
+            distill: Some(DistillConfig {
+                bckd_gamma: 1.5,
+                gt_verify: true,
+                ..DistillConfig::new(teacher_file.path().to_string_lossy())
+            }),
+            ..TrainConfig::default()
+        };
+        let opts = TrainOptions { weights: Some(bad_init.path().to_path_buf()), ..TrainOptions::default() };
+        let mut nf_tr = Trainer::new(nf_cfg, nf_data, opts).unwrap();
+        let nf_summary = nf_tr.run().unwrap();
+        assert_eq!(nf_summary.epochs_completed, 1, "dev={dev_str}");
+        assert!(
+            nf_summary.epochs[0].train_loss.total.is_finite(),
+            "trainer ({dev_str}) with gt_verify=true must skip the non-finite batch and complete the valid batch"
+        );
+    }
     let _ = a;
 }

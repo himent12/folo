@@ -303,6 +303,8 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        // Native only: wgpu 30.0.1's WebGPU backend omits `SUBGROUP` and BatchNorm also needs WGSL `subgroup_id`.
+        #[cfg(not(target_arch = "wasm32"))]
         if adapter.features().contains(wgpu::Features::SUBGROUP) {
             features |= wgpu::Features::SUBGROUP;
         }

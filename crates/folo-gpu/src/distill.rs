@@ -215,6 +215,7 @@ pub fn distill_loss_with_context(
                 ad.b, ad.a, ad.nc, ad.reg_max, d.b, d.a, d.nc, d.reg_max
             )));
         }
+        ad.validate().map_err(gpu)?;
         for (name, t, want_dims) in [
             ("dense", &asg.dense, vec![2, d.b, d.a]),
             ("meta", &asg.meta, vec![ad.meta_words()]),

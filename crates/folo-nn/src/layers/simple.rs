@@ -63,8 +63,11 @@ impl Forward for Linear {
         let rows = x.numel() / i.max(1);
         let mut y = x.reshape([rows, i])?.matmul(&self.weight.t()?)?;
         if let Some(b) = &self.bias {
-            let b = if b.dtype() != y.dtype() && folo_core::autocast_dtype().is_some() {
-                b.to_dtype(y.dtype())?
+            let b = if b.dtype() == folo_core::DType::F32
+                && y.dtype() == folo_core::DType::F16
+                && folo_core::autocast_dtype() == Some(folo_core::DType::F16)
+            {
+                b.to_dtype(folo_core::DType::F16)?
             } else {
                 b.clone()
             };

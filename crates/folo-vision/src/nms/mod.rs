@@ -380,23 +380,48 @@ fn finish(
     precision: Precisions,
     bin_precision: Precisions,
 ) -> Vec<Detection> {
-    if cands.len() > cfg.max_candidates {
-        if cfg.max_candidates == 0 {
-            return Vec::new();
+    let (cands, boxes): (Vec<Cand>, Vec<Xyxy>) = if cfg.score.is_calibrated() {
+        // Filter non-finite scores (+Inf / NaN) and non-finite boxes before `max_candidates` truncation so
+        // malformed high-scoring entries cannot evict valid candidates or survive calibrated NMS.
+        let mut valid: Vec<(Cand, Xyxy)> = cands
+            .into_iter()
+            .filter_map(|c| {
+                if !c.score.is_finite() {
+                    return None;
+                }
+                let bx = bbox_of(c.idx);
+                bx.to_array().iter().all(|v| v.is_finite()).then_some((c, bx))
+            })
+            .collect();
+        if valid.len() > cfg.max_candidates {
+            if cfg.max_candidates == 0 {
+                return Vec::new();
+            }
+            let rank = |a: &(Cand, Xyxy), b: &(Cand, Xyxy)| {
+                b.0.score.total_cmp(&a.0.score).then(a.0.idx.cmp(&b.0.idx)).then(a.0.class.cmp(&b.0.class))
+            };
+            valid.select_nth_unstable_by(cfg.max_candidates - 1, rank);
+            valid.truncate(cfg.max_candidates);
+            valid.sort_unstable_by_key(|(c, _)| (c.idx, c.class));
         }
-        let key = |c: &Cand| if c.score.is_nan() { f32::NEG_INFINITY } else { c.score };
-        let rank = |a: &Cand, b: &Cand| {
-            key(b).total_cmp(&key(a)).then(a.idx.cmp(&b.idx)).then(a.class.cmp(&b.class))
-        };
-        cands.select_nth_unstable_by(cfg.max_candidates - 1, rank);
-        cands.truncate(cfg.max_candidates);
-        // Back to candidate order so NMS tie-breaks by position.
-        cands.sort_unstable_by_key(|c| (c.idx, c.class));
-    }
-    if cfg.score.is_calibrated() {
-        cands.retain(|c| bbox_of(c.idx).to_array().iter().all(|v| v.is_finite()));
-    }
-    let boxes: Vec<Xyxy> = cands.iter().map(|c| bbox_of(c.idx)).collect();
+        valid.into_iter().unzip()
+    } else {
+        if cands.len() > cfg.max_candidates {
+            if cfg.max_candidates == 0 {
+                return Vec::new();
+            }
+            let key = |c: &Cand| if c.score.is_nan() { f32::NEG_INFINITY } else { c.score };
+            let rank = |a: &Cand, b: &Cand| {
+                key(b).total_cmp(&key(a)).then(a.idx.cmp(&b.idx)).then(a.class.cmp(&b.class))
+            };
+            cands.select_nth_unstable_by(cfg.max_candidates - 1, rank);
+            cands.truncate(cfg.max_candidates);
+            // Back to candidate order so NMS tie-breaks by position.
+            cands.sort_unstable_by_key(|c| (c.idx, c.class));
+        }
+        let boxes = cands.iter().map(|c| bbox_of(c.idx)).collect();
+        (cands, boxes)
+    };
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();
     let (kept, owner) = batched_nms_inner(

@@ -377,16 +377,28 @@ fn elc_and_dfl_consensus_edge_case_regressions() {
         multi_label: true,
         ..NmsConfig::default()
     };
+    let cfg_cap1 = NmsConfig { max_candidates: 1, ..cfg_cal.clone() };
     let dets = non_max_suppression_with_dfl(
         &[b(f32::NAN, 0.0, 10.0, 10.0), b(0.0, 0.0, 20.0, 20.0)],
         &[0.95, 0.50],
         None,
         Some(&[[0.0; 4], [2.0; 4]]),
         1,
-        &cfg_cal,
+        &cfg_cap1,
     );
-    assert_eq!(dets.len(), 1, "non-finite box must be excluded before calibrated NMS");
+    assert_eq!(dets.len(), 1, "non-finite box must be excluded before max_candidates truncation");
     assert_eq!(dets[0].bbox, b(0.0, 0.0, 20.0, 20.0));
+    let dets_inf = non_max_suppression_with_dfl(
+        &[b(5.0, 5.0, 25.0, 25.0), b(0.0, 0.0, 20.0, 20.0)],
+        &[f32::INFINITY, 0.50],
+        None,
+        Some(&[[2.0; 4], [2.0; 4]]),
+        1,
+        &cfg_cap1,
+    );
+    assert_eq!(dets_inf.len(), 1, "+Inf score must be excluded before max_candidates truncation");
+    assert_eq!(dets_inf[0].bbox, b(0.0, 0.0, 20.0, 20.0));
+    assert!(dets_inf[0].score.is_finite());
 
     // 2. Tiny `conf = 0` cluster (`1e-15`): 10 coincident members keep M/s = 10 > lone candidate.
     let tiny_boxes = vec![b(0.0, 0.0, 20.0, 20.0); 10];

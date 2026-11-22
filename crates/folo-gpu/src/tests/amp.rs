@@ -148,9 +148,9 @@ fn autocast_conv_and_matmul_train_f32_leaves() {
     assert_eq!(xc.conv2d(&randn(&[3, 2, 3, 3], 13), None, 1, 1, 1, 1).unwrap().dtype(), DType::F32);
 }
 
-/// B4 verification: vectorized `vec4` + block-shifted 0-div `bn_stats` / `bn_bwd_reduce` match between the
-/// 32-wide subgroup fast path and the portable shared-memory fallback across both `hw % 4 == 0` (VEC4) and
-/// odd `hw`, all activations, and large shifted means (`+500.0`, verifying zero catastrophic cancellation).
+/// B4 verification: vectorized `vec4` 4-lane Welford + pairwise Chan subgroup merge `bn_stats` / `bn_bwd_reduce`
+/// match between the 32-wide subgroup fast path and the portable shared-memory fallback across both `hw % 4 == 0`
+/// (VEC4) and odd `hw`, all activations, large shifted means (`+500.0`), and partial-subgroup extreme constants.
 #[test]
 fn batch_norm_subgroups_and_portable_fallback_agree() {
     struct ForceGuard(bool);
@@ -238,8 +238,39 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
                 "{name} portable={force_portable}: mean {m} vs {mean_ref}"
             );
             assert!(
-                (iv - invstd_ref).abs() <= 1e-3 * invstd_ref.max(1e-6),
+                iv > 0.0 && (iv - invstd_ref).abs() <= 1e-3 * invstd_ref,
                 "{name} portable={force_portable}: invstd {iv} vs {invstd_ref}"
+            );
+        }
+    }
+
+    // Partial-subgroup constant inputs (`3` identical elements): pairwise Chan subgroup merge must keep `d == 0`
+    // bit-exact so variance is strictly zero (`invstd = 1/sqrt(eps)`, `y == 0`), including `3 x 65504.0` in F16
+    // and `3 x 1e37` in F32 (where weighted `subgroupAdd` rounding caused fake nonzero variance / M2 overflow).
+    let expected_invstd = (1e-5f64).sqrt().recip() as f32;
+    for (name, dt, val) in
+        [("partial_f16_65504", DType::F16, 65504.0f32), ("partial_f32_1e37", DType::F32, 1e37f32)]
+    {
+        let x = Tensor::from_vec(vec![val; 3], [1, 1, 1, 3])
+            .unwrap()
+            .to_device(dev)
+            .unwrap()
+            .to_dtype(dt)
+            .unwrap();
+        for force_portable in [false, true] {
+            let _guard = ForceGuard::set(force_portable);
+            let out = x.batch_norm_act_train(&w1, &b0, 1e-5, None, None).unwrap().expect("kernels");
+            let m = out.mean.to_vec::<f32>().unwrap()[0];
+            let iv = out.invstd.to_vec::<f32>().unwrap()[0];
+            let yv = out.y.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+            assert_eq!(m, val, "{name} portable={force_portable}: mean drift {m} vs {val}");
+            assert!(
+                (iv - expected_invstd).abs() <= 1e-3 * expected_invstd,
+                "{name} portable={force_portable}: invstd {iv} vs {expected_invstd}"
+            );
+            assert!(
+                yv.iter().all(|&v| v.abs() < 1e-4),
+                "{name} portable={force_portable}: constant BN output non-zero: {yv:?}"
             );
         }
     }

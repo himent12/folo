@@ -487,6 +487,45 @@ fn cpu_gpu_forward_and_backward_parity() {
             .to_vec::<f32>()
             .unwrap();
         assert!(alpha_g.iter().all(|v| v.is_finite()), "non-finite PeakSuppress grad under autocast");
+
+        // 5. Layer-level `Linear` autocast test: F32 master bias receives matching F32 gradients under GPU
+        //    autocast, while non-F32 bias (e.g. U32) is still rejected with DTypeMismatch on both GPU and CPU.
+        let mut rng_l = Rng::seed(37);
+        let lin_ref = folo_nn::Linear::new(16, 8, true, &mut rng_l);
+        let mut lin_gpu = folo_nn::Linear::new(16, 8, true, &mut Rng::seed(37));
+        lin_gpu.to_device(gpu).unwrap();
+        let xl = Tensor::randn([4, 16], 0.0, 0.5, &mut rng_l);
+        let xl_g = xl.to_device(gpu).unwrap();
+        let g_ref = lin_ref.forward(&xl).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        let y_amp = {
+            let _ac = folo_core::autocast();
+            lin_gpu.forward(&xl_g).unwrap()
+        };
+        assert_eq!(y_amp.dtype(), DType::F16);
+        let g_lin =
+            y_amp.to_dtype(DType::F32).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        let db_ref = g_ref.get(lin_ref.bias.as_ref().unwrap()).unwrap().to_vec::<f32>().unwrap();
+        let db_amp = g_lin.get(lin_gpu.bias.as_ref().unwrap()).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(g_lin.get(lin_gpu.bias.as_ref().unwrap()).unwrap().dtype(), DType::F32);
+        for (a, b) in db_ref.iter().zip(&db_amp) {
+            assert!((a - b).abs() <= 5e-3, "Linear autocast master bias grad mismatch: {b} vs {a}");
+        }
+        let bad_lin_cpu = folo_nn::Linear::from_tensors(
+            lin_ref.weight.clone(),
+            Some(Tensor::from_vec(vec![0u32; 8], [8]).unwrap()),
+        )
+        .unwrap();
+        let bad_lin_gpu = folo_nn::Linear::from_tensors(
+            lin_gpu.weight.clone(),
+            Some(Tensor::from_vec(vec![0u32; 8], [8]).unwrap().to_device(gpu).unwrap()),
+        )
+        .unwrap();
+        let _ac = folo_core::autocast();
+        assert!(bad_lin_cpu.forward(&xl).is_err(), "Linear must reject U32 bias on CPU even under autocast");
+        assert!(
+            bad_lin_gpu.forward(&xl_g).is_err(),
+            "Linear must reject U32 bias on GPU even under autocast"
+        );
     }
 }
 
@@ -530,34 +569,76 @@ fn v2_config_validation_o2o_detach_and_hypercontext_invariance() {
         }
     }
 
-    // 3. o2o_detach=true stops gradients at backbone/neck `feats` while still training shared `box_branch`.
-    let m = FoloV2Model::with_rng(
+    // 3. o2o_detach=true stops gradients at backbone/neck `feats`, still trains shared `box_branch`,
+    //    and leaves `box_branch` BN running stats identical to `o2o_detach=false` (no double update!).
+    let m_det = FoloV2Model::with_rng(
         FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o),
         &mut Rng::seed(73),
     )
     .unwrap();
-    assert!(m.head.o2o_detach);
+    let mut m_nodet = FoloV2Model::with_rng(
+        FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o),
+        &mut Rng::seed(73),
+    )
+    .unwrap();
+    m_nodet.head.o2o_detach = false;
+    assert!(m_det.head.o2o_detach);
     let mut rng = Rng::seed(74);
-    let p3 = Tensor::randn([1, 64, 8, 8], 0.0, 0.5, &mut rng).requires_grad_();
-    let p4 = Tensor::randn([1, 128, 4, 4], 0.0, 0.5, &mut rng).requires_grad_();
-    let p5 = Tensor::randn([1, 256, 2, 2], 0.0, 0.5, &mut rng).requires_grad_();
-    let (b_o2m, _, _) = m.head.forward([&p3, &p4, &p5]).unwrap();
-    let (b_o2o, c_o2o, _) = m.head.forward_o2o([&p3, &p4, &p5], Some(&b_o2m)).unwrap().unwrap();
-    let loss = b_o2o
+    let p3_a = Tensor::randn([2, 64, 8, 8], 0.0, 0.5, &mut rng).requires_grad_();
+    let p4_a = Tensor::randn([2, 128, 4, 4], 0.0, 0.5, &mut rng).requires_grad_();
+    let p5_a = Tensor::randn([2, 256, 2, 2], 0.0, 0.5, &mut rng).requires_grad_();
+    let p3_b = p3_a.detach().requires_grad_();
+    let p4_b = p4_a.detach().requires_grad_();
+    let p5_b = p5_a.detach().requires_grad_();
+
+    let (b_o2m_a, _, _) = m_det.head.forward([&p3_a, &p4_a, &p5_a]).unwrap();
+    let (b_o2o_a, c_o2o_a, _) =
+        m_det.head.forward_o2o([&p3_a, &p4_a, &p5_a], Some(&b_o2m_a)).unwrap().unwrap();
+    let grads_a = b_o2o_a
         .square()
         .unwrap()
         .mean_all()
         .unwrap()
-        .add(&c_o2o.square().unwrap().mean_all().unwrap())
+        .add(&c_o2o_a.square().unwrap().mean_all().unwrap())
+        .unwrap()
+        .backward()
         .unwrap();
-    let grads = loss.backward().unwrap();
-    assert!(grads.get(&p3).is_none(), "o2o_detach must block gradient to feature inputs");
-    let box_w_grad = grads
-        .get(&m.head.levels[0].box_branch.out.weight)
+    assert!(grads_a.get(&p3_a).is_none(), "o2o_detach=true must block gradient to feature inputs");
+    let box_w_grad = grads_a
+        .get(&m_det.head.levels[0].box_branch.out.weight)
         .expect("o2o box loss must train shared box_branch weights")
         .to_vec::<f32>()
         .unwrap();
     assert!(box_w_grad.iter().any(|&v| v.abs() > 1e-8), "shared box_branch gradient was zero");
+
+    let (b_o2m_b, _, _) = m_nodet.head.forward([&p3_b, &p4_b, &p5_b]).unwrap();
+    let (b_o2o_b, c_o2o_b, _) =
+        m_nodet.head.forward_o2o([&p3_b, &p4_b, &p5_b], Some(&b_o2m_b)).unwrap().unwrap();
+    let grads_b = b_o2o_b
+        .square()
+        .unwrap()
+        .mean_all()
+        .unwrap()
+        .add(&c_o2o_b.square().unwrap().mean_all().unwrap())
+        .unwrap()
+        .backward()
+        .unwrap();
+    assert!(grads_b.get(&p3_b).is_some(), "o2o_detach=false must pass gradient to feature inputs");
+
+    for lvl in 0..3 {
+        let bn_a = m_det.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap();
+        let bn_b = m_nodet.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap();
+        assert_eq!(
+            bn_a.running_mean.to_vec::<f32>().unwrap(),
+            bn_b.running_mean.to_vec::<f32>().unwrap(),
+            "o2o_detach=true double-updated box_branch level {lvl} running_mean"
+        );
+        assert_eq!(
+            bn_a.running_var.to_vec::<f32>().unwrap(),
+            bn_b.running_var.to_vec::<f32>().unwrap(),
+            "o2o_detach=true double-updated box_branch level {lvl} running_var"
+        );
+    }
 
     // 4. Train-mode WsQARepConv3x3 finite-difference check on auxiliary branch weights.
     let mut rng = Rng::seed(75);

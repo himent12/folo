@@ -299,7 +299,7 @@ pub fn assign(
         out.target_labels[a] = gt_labels[g];
         out.target_bboxes[a] = gt_bboxes[g];
         out.target_scores[a] = if cfg.eps_free {
-            if m_max[g] > 0.0 { p.m * u_max[g] / m_max[g] } else { 0.0 }
+            if m_max[g] > 0.0 { (p.m / m_max[g]) * u_max[g] } else { 0.0 }
         } else {
             p.m * u_max[g] / (m_max[g] + cfg.eps)
         };

@@ -213,8 +213,8 @@ fn check(
     if tal.topk2 == Some(0) {
         return Err(err("topk2 must be at least 1"));
     }
-    if !(tal.nwd_weight.is_finite() && tal.nwd_weight >= 0.0) {
-        return Err(err(format!("tal.nwd_weight {} must be finite and >= 0", tal.nwd_weight)));
+    if !(tal.nwd_weight.is_finite() && (0.0..=1.0).contains(&tal.nwd_weight)) {
+        return Err(err(format!("tal.nwd_weight {} must be finite and in [0, 1]", tal.nwd_weight)));
     }
     Ok(DetectDesc {
         b,
@@ -375,8 +375,8 @@ pub fn detection_loss_with_assignment(
     if !(s.mal_gamma.is_finite() && s.mal_gamma >= 0.0) {
         return Err(err(format!("mal_gamma {} must be finite and >= 0", s.mal_gamma)));
     }
-    if !(s.nwd_weight.is_finite() && s.nwd_weight >= 0.0) {
-        return Err(err(format!("nwd_weight {} must be finite and >= 0", s.nwd_weight)));
+    if !(s.nwd_weight.is_finite() && (0.0..=1.0).contains(&s.nwd_weight)) {
+        return Err(err(format!("nwd_weight {} must be finite and in [0, 1]", s.nwd_weight)));
     }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
