@@ -49,6 +49,8 @@ Wave 6 (2026-11-20):
 - [folo-s continued on full COCO for 48 epochs: val2017 AP 0.4162 to 0.4224, and a mixed fine-tuning
   guard](hill/r6-long-s.md) (weights not published)
 - [A consensus score at decode: the gate on folo-n v5 and folo-s, shipped as an opt-in](hill/r6-consensus.md)
+- [Feature imitation and foreground-gated distillation at the fork gate](hill/r6-distill.md) (no arm passed, no code
+  shipped)
 
 ## Design review logs
 
