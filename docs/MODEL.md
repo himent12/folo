@@ -643,7 +643,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `ema` | true | `false`: no EMA (§8.5) |
 | `ema_run_fraction` | 0.25 | a fine-tune's EMA window as a fraction of its optimizer steps, at most 10,000 (§8.5); `0`: the default window for every run, as in configs written before the key |
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
-| `o2o_keeps_tal` | true | `head = "o2o"`: its one-to-one assigner takes `loss.tal`'s `alpha`, `beta`, `eps`, `min_box_size` (§6.6); `false` in configs written before the key |
+| `o2o_keeps_tal` | true | `head = "o2o"`: its one-to-one assigner takes `loss.tal`'s `alpha`, `beta`, `eps`, `min_box_size` (§6.6); `false` in a config without the key (written before it, or a partial JSON decoded straight into `TrainConfig`) |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
 | `distill` | none | distillation from a frozen teacher (§8.9); absent: none |

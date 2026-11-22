@@ -102,7 +102,9 @@ pub struct TrainConfig {
     pub o2o_attached_epochs: u32,
     /// `head = "o2o"` only: the one-to-one branch's assigner takes `loss.tal`'s `alpha`, `beta`, `eps` and
     /// `min_box_size` (its `topk = 7` and `topk2 = 1` are fixed, MODEL.md §6.6). Missing in configs from before it:
-    /// `false`, the §7.3 defaults those runs trained that branch with, so they resume bit-exactly.
+    /// `false`, the §7.3 defaults those runs trained that branch with, so they resume bit-exactly. Like the other
+    /// versioned keys, a partial JSON decoded straight into this type reads as such a config; new runs of the CLI, of
+    /// the API (`from_api`) and from `TrainConfig::default()` have `true`.
     #[serde(default = "legacy_o2o_keeps_tal")]
     pub o2o_keeps_tal: bool,
     /// Stop after this many epochs without a fitness gain.
@@ -703,6 +705,9 @@ mod tests {
         let mut old = serde_json::to_value(cfg).unwrap();
         old.as_object_mut().unwrap().remove("o2o_keeps_tal");
         assert!(!serde_json::from_value::<TrainConfig>(old).unwrap().o2o_keeps_tal);
+        // A new run through the API, whose config has no such key.
+        let api: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"d"}"#).unwrap();
+        assert!(TrainConfig::from_api(&api).unwrap().o2o_keeps_tal);
     }
 
     /// `ema_run_fraction`: 0.25 by default, so a fine-tune of 400 optimizer steps averages over 100 (decay 0.99,

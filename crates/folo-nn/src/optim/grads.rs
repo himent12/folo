@@ -227,8 +227,9 @@ impl GradAccumulator {
         // The norm of `pre · g` is n = pre · n_b, so with max' = max / pre and eps' = 1e-6 / pre:
         // n > max ⇔ r·sqrt(s) > max'·h, and pre · max / (n + 1e-6) = max / (n_b + eps') = h · (max·h / (r + eps'·h²)),
         // applied as two factors (or `pre` alone below the threshold). If `max / pre` overflows to infinity (a loss
-        // scale near `MAX_SCALE`) the comparison is false and nothing is clipped, which is right: gradients built from
-        // f16 input gradients stay far below `max · S`, and a scale that high needs them all under about 2^-109.
+        // scale near `MAX_SCALE` at the default norm, or an enormous `clip_grad_norm` at any scale), the comparison is
+        // false for finite buffers, so the factors are `pre` and 1: the step is not clipped and no NaN comes from it.
+        // Clipping would need a buffer norm above `max · S`, past `f32::MAX`.
         let (max, pre_f) = (max_norm as f32, pre as f64);
         let clip = r.mul(&root)?.gt(&h.mul_scalar((max_norm / pre_f) as f32)?)?;
         let one = r.ones_like()?;

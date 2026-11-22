@@ -4,8 +4,8 @@ Lane `trainfix` of wave 6 (2026-11-21). A research report listed four defects in
 `D:/folo-wave6/research/formula-neon.md`). Each was checked against FOLO's code and against the trainer FOLO was matched
 to, Ultralytics 8.4.198 (the copy `bench/finetune` uses). **Result: one finding is a real defect and is fixed (3, off the
 default path). Findings 1 and 2 describe behaviour FOLO copied from the reference on purpose; the changes the report
-proposes went through a gate on the COCO proxy and did not pass, so they are not shipped. Finding 4 cannot happen in
-training and got a comment. No default training number changes.** Scratch, scripts and logs:
+proposes went through a gate on the COCO proxy and did not pass, so they are not shipped. Finding 4's NaN cannot happen
+and it got a comment. No default training number changes.** Scratch, scripts and logs:
 `D:/folo-wave6/lanes/trainfix/`; run folders: `D:/folo-data/runs-wave6/trainfix/`.
 
 Terms: **AP** is COCO's mAP50-95, scored by `folo val --coco` (pycocotools-exact). **P1** is the 320 px proxy of
@@ -16,11 +16,11 @@ AMP, `auto` optimizer). **o2m** is the default one-to-many head, **o2o** the opt
 
 | # | the report's claim | verdict | what settles it |
 |---|---|---|---|
-| 1 | the one-to-many weight anneals from 0.8 to 0.1 although the one-to-one branch is detached | **not a defect**: the reference does exactly this. Only `--head o2o` runs reach it; every published COCO run is `o2m`. The proposed weights (1 and 1 while detached) lost | `ultralytics/nn/modules/head.py:196` detaches, `utils/loss.py:1341, 1346` anneals |
+| 1 | the one-to-many weight anneals from 0.8 to 0.1 although the one-to-one branch is detached | **not a defect**: the reference does exactly this. Only runs with a one-to-one head reach it (`--head o2o`, or a fine-tune of an `o2o` checkpoint); every published COCO run is `o2m`. The proposed weights (1 and 1 while detached) lost | `ultralytics/nn/modules/head.py:196` detaches, `utils/loss.py:1341, 1346` anneals |
 | 2a | MuSGD orthogonalises depthwise weights across channels | **not a defect**: the reference routes every rank-2 and rank-4 parameter to Muon. As a candidate improvement: tied alone (`dw`, +0.0003), and +0.0012 with the scale rule (`dws`), under the gate's +0.0030 | `ultralytics/engine/trainer.py:1201` |
 | 2b | `muon_scale` should use the flattened matrix | **not a defect**: the reference uses the last two dimensions of the unflattened gradient. As a candidate improvement: lost | `ultralytics/optim/muon.py:106` |
 | 3 | the one-to-one branch overwrites the user's `loss.tal.*` | **a defect, fixed**: `--set` promises the key, and the branch silently used the defaults | docs/CLI.md (`--set`), `train/epoch.rs` before this change |
-| 4 | AMP clipping overflows to NaN at a loss scale of 2^125 | **cannot happen**, and the overflow would not give a NaN | below |
+| 4 | AMP clipping overflows to NaN at a loss scale of 2^125 | **no NaN**: the overflow means "no clip", and at the default clip norm the scale does not get there | below |
 
 ## The gate
 
@@ -48,19 +48,21 @@ one-seed row says the gate failed; it does not measure how much worse the arm is
 path of every other run of that binary and seed at step 2. It ran while this lane's own `cargo test` used the GPU outside
 the lock. Its reruns agree to the bit: `repa-s0` and `repb-s0` (2 epochs, 626 steps) with each other and with the fix
 build's `repf-s0`, and `octr-s0` (20 epochs) with `ofix-s0`. The contention is the likely cause and was not isolated.
-`ow11` is below both controls. The o2m runs were not repeated, so some of them may carry a disturbance of this size,
-0.0005 AP. That is well under the 0.0018 that `dws` is short of the gate, so no verdict depends on it.
+`ow11` is below both controls. The o2m runs were not repeated, so how far a disturbance could have moved them was not
+measured. The one seen here moved an o2o run by 0.0005 AP, and `dws` is 0.0018 short of the gate.
 
 Run folders, under `D:/folo-data/runs-wave6/trainfix/`: `ctl-s0..2`, `dw-s0..2`, `dws-s0..2`, `scale-s0`, `octl-s0`,
 `octr-s0`, `ow11-s0`, `ofix-s0`, `repa-s0`, `repb-s0`, `repf-s0`.
 
 ## Finding 1: the one-to-one weights while the branch is detached
 
-`step_loss` applies `w_m` only when the model has a one-to-one branch. The default head is `o2m` (`TrainConfig::default`),
-for which `out.o2o` is `None` and the loss is the one-to-many loss unweighted. So **no default run and no published COCO
-run reaches this code** (their `config.json` say `"head": "o2m"`).
+`step_loss` applies `w_m` only when the model has a one-to-one branch. The default head from scratch is `o2m`
+(`TrainConfig::default`), for which `out.o2o` is `None` and the loss is the one-to-many loss unweighted. So **no run from
+scratch on default flags and no published COCO run reaches this code** (their `config.json` say `"head": "o2m"`). A run
+reaches it with `--head o2o`, or by fine-tuning an `o2o` checkpoint without `--head`, because the CLI then takes the
+checkpoint's head.
 
-For `--head o2o` the report's reading of the arithmetic is right: with the branch detached, `w_m` only scales the
+For a run with that head the report's reading of the arithmetic is right: with the branch detached, `w_m` only scales the
 gradient of the backbone, the neck and the one-to-many head, and it falls to 0.1. But the reference does the same thing:
 its `Detect.forward` detaches the features for the one-to-one head (`head.py:196`) and `E2ELoss` anneals
 `o2m` from 0.8 to 0.1 regardless (`loss.py:1341`, `1346`, `1349`). FOLO copied it, so it is not a defect, and the report's
@@ -92,9 +94,9 @@ only the SGD update at the group's LR.
 - `dw` tied the control: +0.0003 on the mean, above it on two seeds of three.
 - `scale` alone finished below the control on seed 0, so it failed the gate there.
 - `dws` (both) was above the control on all three seeds, by +0.0015, +0.0017 and +0.0005, and **+0.0012 on the mean**. The
-  gate asks for +0.0030, so it is not shipped and `auto` is unchanged. Three seeds of three on the same side happen one
-  time in eight by chance alone, so this is a lead for a longer run and not a result: at the size the gate asks for, the
-  report's argument did not show up in training.
+  gate asks for +0.0030, so it is not shipped and `auto` is unchanged. With no real effect and fair signs, all three
+  seeds land above the control one time in eight, so this is a lead for a longer run and not a result: at the size the
+  gate asks for, the report's argument did not show up in training.
 
 ## Finding 3: the one-to-one branch and `loss.tal.*`
 
@@ -129,10 +131,14 @@ harmless:
 2. **Not clipping is the right answer there.** Clipping would need a buffer norm above `max_norm · S`, at least 2^128. The
    weight gradients are built from f16 input gradients (docs/MODEL.md §8.8), which overflow to infinity at 65504 and skip
    the step, so they stay many orders of magnitude below that.
-3. **The scale does not get there.** It starts at 2^16 and doubles after 2000 finite steps in a row, so 2^125 takes at
-   least 218,000 optimizer steps without one overflow, with every f16 input gradient below about 2^-109 in the original
-   units, and a scaled loss still finite in `f32`. The 720 per-epoch scale logs of this wave's COCO and proxy runs never
-   pass **2^17**.
+3. **At the default `clip_grad_norm` the scale does not get there.** From a fresh scaler it starts at 2^16 and doubles
+   after 2000 finite steps in a row, so 2^125 takes at least 218,000 finite optimizer steps (an overflow halves the scale
+   and restarts the count, which only adds to that), with every f16 input gradient below about 2^-109 in the original
+   units, and a scaled loss still finite in `f32`. As an observation, the 720 per-epoch scale logs of this wave's COCO
+   and proxy runs never pass **2^17**.
+
+A very large `--set clip_grad_norm` (1e35) reaches the same overflow at the first step, at any scale. Points 1 and 2 hold
+there too: no NaN, and no clip.
 
 So the fix is a comment at the line (`crates/folo-nn/src/optim/grads.rs`), as the brief asked for this case.
 
