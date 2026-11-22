@@ -120,9 +120,9 @@ Internal mAP50-95 of the trainer, and the reported distillation terms of epoch 3
 
 ## What is not shown
 
-- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training (C3 proposed
-  testing at epoch 44), so this gate rejects them at its own scale and under its fixed bar, and says nothing about
-  epoch 64.
+- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training (C3
+  proposed testing at epoch 44), so this gate rejects them at its own scale and under its fixed bar, and says nothing
+  about epoch 64.
 - **Run-to-run noise.** The intervals resample images for fixed weights, so they do not include training variance,
   which this lane did not measure. Each arm has one seed. The one related number is the cross-binary gap between the
   two controls (`f-t4` and `ctl`, 0.0002 apart), a single difference that mixes the binaries with anything else that
