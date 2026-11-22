@@ -42,7 +42,7 @@ fn use_subgroups(ctx: &GpuContext) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = ctx;
-        return false;
+        false
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

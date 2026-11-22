@@ -152,7 +152,11 @@ impl DetectDesc {
             .ok_or_else(|| shape_err("detect: box buffer size overflow"))?;
         let cls_words =
             b_nc.checked_mul(self.a).ok_or_else(|| shape_err("detect: cls buffer size overflow"))?;
-        let words = meta.max(box_words).max(cls_words);
+        let pick_words = bg
+            .checked_mul(self.k)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| shape_err("detect: pick buffer size overflow"))?;
+        let words = meta.max(box_words).max(cls_words).max(pick_words);
         if words >= u32::MAX as usize / 4 {
             return Err(shape_err("detect: problem too large for 32-bit indexing"));
         }

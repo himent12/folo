@@ -266,6 +266,7 @@ fn assign_impl(
     tal: &TalSettings,
 ) -> Result<(Buffers, Assignment, DenseInput, DenseInput)> {
     let d = check(box_raw, cls_raw, anchors, gts, reg_max, tal)?;
+    d.validate().map_err(gpu)?;
     let device = box_raw.device();
     let ctx = context_for(device).ok_or_else(|| err(format!("{device} is not a folo-gpu device")))?;
     let bufs = Buffers { ctx, device };

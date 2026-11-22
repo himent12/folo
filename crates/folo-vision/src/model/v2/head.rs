@@ -428,15 +428,26 @@ impl LazyAlignHead {
             (Some(b), false) => (b.clone(), None),
             (Some(_), true) => {
                 // Recompute on detached `feats` so `o2o` box+DFL losses train `box_branch` weights without
-                // pushing gradients into the backbone/neck, while keeping `box_branch` BN running stats updated
-                // only once per batch (from the `o2m` pass) and skipping `iou_out`.
+                // pushing gradients into the backbone/neck, while keeping training-mode `box_branch` BN running
+                // stats updated only once per batch (from the `o2m` pass) and skipping `iou_out`.
+                // Only snapshot/restore BNs that are actively in training mode: eval-mode (frozen) BNs read
+                // `running_mean`/`running_var` inside the autograd graph, so touching them would trigger
+                // `ModifiedInPlace` during `backward()`.
                 let mut boxes = Vec::with_capacity(3);
                 for i in 0..3 {
                     let x = cls_feats[i];
                     let (b, _, h, w) = x.dims4()?;
-                    let snap = RunningStats::capture(&self.levels[i].box_branch)?;
-                    let res = self.levels[i].box_branch.forward_box_only(x);
-                    snap.restore()?;
+                    let bb = &self.levels[i].box_branch;
+                    let snaps: Vec<RunningStats> = [&bb.conv0.bn, &bb.conv1.bn]
+                        .into_iter()
+                        .flatten()
+                        .filter(|bn| bn.is_training())
+                        .map(RunningStats::capture)
+                        .collect::<Result<_>>()?;
+                    let res = bb.forward_box_only(x);
+                    for snap in snaps {
+                        snap.restore()?;
+                    }
                     let bx = res?;
                     boxes.push(bx.reshape([b, 4 * self.reg_max, h * w])?);
                 }

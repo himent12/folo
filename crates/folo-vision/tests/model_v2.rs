@@ -510,18 +510,12 @@ fn cpu_gpu_forward_and_backward_parity() {
         for (a, b) in db_ref.iter().zip(&db_amp) {
             assert!((a - b).abs() <= 5e-3, "Linear autocast master bias grad mismatch: {b} vs {a}");
         }
-        let bad_lin_cpu = folo_nn::Linear::from_tensors(
-            lin_ref.weight.clone(),
-            Some(Tensor::from_vec(vec![0u32; 8], [8]).unwrap()),
-        )
-        .unwrap();
         let bad_lin_gpu = folo_nn::Linear::from_tensors(
             lin_gpu.weight.clone(),
             Some(Tensor::from_vec(vec![0u32; 8], [8]).unwrap().to_device(gpu).unwrap()),
         )
         .unwrap();
         let _ac = folo_core::autocast();
-        assert!(bad_lin_cpu.forward(&xl).is_err(), "Linear must reject U32 bias on CPU even under autocast");
         assert!(
             bad_lin_gpu.forward(&xl_g).is_err(),
             "Linear must reject U32 bias on GPU even under autocast"
@@ -626,18 +620,73 @@ fn v2_config_validation_o2o_detach_and_hypercontext_invariance() {
     assert!(grads_b.get(&p3_b).is_some(), "o2o_detach=false must pass gradient to feature inputs");
 
     for lvl in 0..3 {
-        let bn_a = m_det.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap();
-        let bn_b = m_nodet.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap();
-        assert_eq!(
-            bn_a.running_mean.to_vec::<f32>().unwrap(),
-            bn_b.running_mean.to_vec::<f32>().unwrap(),
-            "o2o_detach=true double-updated box_branch level {lvl} running_mean"
-        );
-        assert_eq!(
-            bn_a.running_var.to_vec::<f32>().unwrap(),
-            bn_b.running_var.to_vec::<f32>().unwrap(),
-            "o2o_detach=true double-updated box_branch level {lvl} running_var"
-        );
+        for (tag, bn_a, bn_b) in [
+            (
+                "conv0",
+                m_det.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap(),
+                m_nodet.head.levels[lvl].box_branch.conv0.bn.as_ref().unwrap(),
+            ),
+            (
+                "conv1",
+                m_det.head.levels[lvl].box_branch.conv1.bn.as_ref().unwrap(),
+                m_nodet.head.levels[lvl].box_branch.conv1.bn.as_ref().unwrap(),
+            ),
+        ] {
+            assert_eq!(
+                bn_a.running_mean.to_vec::<f32>().unwrap(),
+                bn_b.running_mean.to_vec::<f32>().unwrap(),
+                "o2o_detach=true double-updated box_branch level {lvl} {tag} running_mean"
+            );
+            assert_eq!(
+                bn_a.running_var.to_vec::<f32>().unwrap(),
+                bn_b.running_var.to_vec::<f32>().unwrap(),
+                "o2o_detach=true double-updated box_branch level {lvl} {tag} running_var"
+            );
+        }
+    }
+
+    // 3b. Frozen BatchNorm (`bn.eval()`, e.g. `bn_freeze_close_mosaic`) with `o2o_detach=true` must NOT
+    //     mutate `running_mean`/`running_var` storage versions or break `backward()` with `ModifiedInPlace`.
+    {
+        let m_frozen = FoloV2Model::with_rng(
+            FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o),
+            &mut Rng::seed(76),
+        )
+        .unwrap();
+        for lvl in &m_frozen.head.levels {
+            lvl.box_branch.conv0.bn.as_ref().unwrap().eval();
+            lvl.box_branch.conv1.bn.as_ref().unwrap().eval();
+        }
+        let p3_f = p3_a.detach().requires_grad_();
+        let p4_f = p4_a.detach().requires_grad_();
+        let p5_f = p5_a.detach().requires_grad_();
+        let (b_m, _, _) = m_frozen.head.forward([&p3_f, &p4_f, &p5_f]).unwrap();
+        let (b_o, c_o, _) = m_frozen.head.forward_o2o([&p3_f, &p4_f, &p5_f], Some(&b_m)).unwrap().unwrap();
+        let loss_f = b_m
+            .square()
+            .unwrap()
+            .mean_all()
+            .unwrap()
+            .add(&b_o.square().unwrap().mean_all().unwrap())
+            .unwrap()
+            .add(&c_o.square().unwrap().mean_all().unwrap())
+            .unwrap();
+        let g_f = loss_f.backward().unwrap();
+        assert!(g_f.get(&m_frozen.head.levels[0].box_branch.out.weight).is_some());
+    }
+
+    // 3c. CPU `Linear` rejects non-F32 (U32) bias even while `autocast()` is active (runs without a GPU).
+    {
+        let mut rng_c = Rng::seed(77);
+        let lin = folo_nn::Linear::new(8, 4, false, &mut rng_c);
+        let bad = folo_nn::Linear::from_tensors(
+            lin.weight.clone(),
+            Some(Tensor::from_vec(vec![0u32; 4], [4]).unwrap()),
+        )
+        .unwrap();
+        let xc = Tensor::randn([2, 8], 0.0, 0.5, &mut rng_c);
+        let _ac = folo_core::autocast();
+        assert!(bad.forward(&xc).is_err(), "Linear must reject U32 bias on CPU even under autocast");
     }
 
     // 4. Train-mode WsQARepConv3x3 finite-difference check on auxiliary branch weights.

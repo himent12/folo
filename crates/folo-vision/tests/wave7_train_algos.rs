@@ -708,12 +708,12 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
     use std::sync::Arc;
 
-    let Some(dev) = gpu() else { return };
     let (box_raw, cls_raw, anchors, targets) = sample_batch(99);
     let a = anchors.len();
     let cfg = LossConfig::default();
 
-    // 1. Corrupt teacher box_raw with +Inf on a zero-object batch (all gt_verify weights == 0): BOTH CPU & GPU must report NaN.
+    // --- CPU regressions (always execute, even on CPU-only CI runners without a GPU) ---
+    // 1a. Corrupt teacher box_raw with +Inf on a zero-object batch (all gt_verify weights == 0): CPU reports NaN.
     let empty_targets = vec![ImageTargets { boxes: vec![], labels: vec![] }; 2];
     let mut tb_vec = box_raw.to_vec::<f32>().unwrap();
     tb_vec[0] = f32::INFINITY;
@@ -739,42 +739,7 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     .unwrap();
     assert!(kd_c.dfl.is_nan(), "CPU gt_verify must propagate NaN from +Inf teacher box logit");
 
-    let sb_g = box_raw.to_device(dev).unwrap().requires_grad_();
-    let sc_g = cls_raw.to_device(dev).unwrap().requires_grad_();
-    let tb_g = tb_bad.to_device(dev).unwrap();
-    let tc_g = tc.to_device(dev).unwrap();
-    let (sup_g, asg_g) =
-        detection_loss_for_distill(&sb_g, &sc_g, &anchors, &empty_targets, &cfg, true).unwrap();
-    let Some(DistillAssignment::Device(da)) = asg_g else { panic!("expected device assignment") };
-    let kd_g =
-        distill_loss_fused_with_context(&sb_g, &sc_g, &tb_g, &tc_g, sup_g.target_score_sum, &dcfg, Some(&da))
-            .unwrap();
-    assert!(kd_g.dfl.is_nan(), "GPU gt_verify must not swallow +Inf teacher box logit on zero-weight anchor");
-
-    // 2. Reject gt_verify=true without Assignment, and reject mismatched Assignment dimensions.
-    assert!(
-        distill_loss_fused_with_context(
-            &sb_g,
-            &sc_g,
-            &box_raw.to_device(dev).unwrap(),
-            &tc_g,
-            1.0,
-            &dcfg,
-            None
-        )
-        .is_err(),
-        "gt_verify without assignment must error"
-    );
-    let small_anchors = make_anchors(32, 32, &[8, 16, 32], 0.5);
-    let mut rng = Rng::seed(101);
-    let sb_s = Tensor::randn([2, 64, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
-    let sc_s = Tensor::randn([2, 4, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
-    assert!(
-        distill_loss_fused_with_context(&sb_s, &sc_s, &sb_s, &sc_s, 1.0, &dcfg, Some(&da)).is_err(),
-        "mismatched assignment anchor count must error"
-    );
-
-    // 2b. Public host `distill_loss_with_context` rejects `gt_verify=true` with `anchor_ver_w=None`,
+    // 1b. Public host `distill_loss_with_context` rejects `gt_verify=true` with `anchor_ver_w=None`,
     //     and accepts an explicit all-zero weight tensor for an empty assignment (`dfl == 0.0`).
     let view_ok = TeacherView::new(&box_raw, &tc, 16, dcfg.temperature).unwrap();
     let tgt_ok = DistillTargets::new(&view_ok).unwrap();
@@ -804,24 +769,7 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     .unwrap();
     assert_eq!(kd_zero.dfl, 0.0, "all-zero anchor_ver_w must produce zero DFL KD");
 
-    // 2c. Oversized public `Assignment::desc.g` returns Err instead of panicking on overflow.
-    let mut bad_da = da;
-    bad_da.desc.g = usize::MAX;
-    assert!(
-        distill_loss_fused_with_context(
-            &sb_g,
-            &sc_g,
-            &box_raw.to_device(dev).unwrap(),
-            &tc_g,
-            1.0,
-            &dcfg,
-            Some(&bad_da)
-        )
-        .is_err(),
-        "oversized Assignment::desc.g must return Err, not panic"
-    );
-
-    // 2d. Epsilon-free TAL `(m / m_max) * u_max` preserves `u_max` even when `m * u_max` would flush to zero.
+    // 1c. Epsilon-free TAL `(m / m_max) * u_max` preserves `u_max` even when `m * u_max` would flush to zero.
     {
         let u_box = Xyxy::new(10.0, 10.0, 20.0, 20.0);
         // Concentric 1×1 square inside 10×10 square: identical center & aspect ratio so `ciou == iou == 0.01`,
@@ -841,6 +789,125 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
             asg_ef.target_scores[0]
         );
     }
+
+    // 1d. Recoverable non-finite student batch with `distill.gt_verify = true` must be skipped (BN restored),
+    //     NOT hard-abort training with `Error::Config` (runs on CPU always, and on GPU below when available).
+    let teacher_file = TestFile::new("wave7-topk65", "teacher.folo");
+    let mut tm = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+    tm.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    tm.save(&teacher_file).unwrap();
+    let two_img_ds = |split: Split| {
+        Arc::new(folo_data::InMemoryDataset {
+            samples: vec![
+                folo_data::Sample {
+                    image: folo_data::Image::new(64, 64, [255, 255, 255]),
+                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
+                },
+                folo_data::Sample {
+                    image: folo_data::Image::new(64, 64, [0, 0, 0]),
+                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
+                },
+            ],
+            classes: vec!["circle".into(), "square".into()],
+            split,
+        })
+    };
+    let bad_init = TestFile::new("wave7-nonfinite-gtverify", "init.folo");
+    {
+        let mut init_m = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+        init_m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+        let _g = folo_core::no_grad();
+        let w = &init_m.backbone.stem.conv.weight;
+        let big = Tensor::full(w.dims(), 1e38f32);
+        w.copy_from(&big).unwrap();
+        init_m.save(&bad_init).unwrap();
+    }
+    let run_nonfinite_recovery = |dev_str: &str| {
+        let nf_data = TrainData {
+            train: two_img_ds(Split::Train),
+            val: two_img_ds(Split::Val),
+            classes: vec!["circle".into(), "square".into()],
+        };
+        let nf_cfg = TrainConfig {
+            epochs: 1,
+            batch: 1,
+            nbs: 1,
+            imgsz: 64,
+            optimizer: OptimizerChoice::Sgd,
+            lr0: 0.001,
+            warmup_epochs: 0.0,
+            workers: 0,
+            device: dev_str.into(),
+            augment: AugmentConfig::none(),
+            distill: Some(DistillConfig {
+                bckd_gamma: 1.5,
+                gt_verify: true,
+                ..DistillConfig::new(teacher_file.path().to_string_lossy())
+            }),
+            ..TrainConfig::default()
+        };
+        let opts = TrainOptions { weights: Some(bad_init.path().to_path_buf()), ..TrainOptions::default() };
+        let mut nf_tr = Trainer::new(nf_cfg, nf_data, opts).unwrap();
+        let nf_summary = nf_tr.run().unwrap();
+        assert_eq!(nf_summary.epochs_completed, 1, "dev={dev_str}");
+        assert!(
+            nf_summary.epochs[0].train_loss.total.is_finite(),
+            "trainer ({dev_str}) with gt_verify=true must skip the non-finite batch and complete the valid batch"
+        );
+    };
+    run_nonfinite_recovery("cpu");
+
+    // --- GPU regressions ---
+    let Some(dev) = gpu() else { return };
+    let sb_g = box_raw.to_device(dev).unwrap().requires_grad_();
+    let sc_g = cls_raw.to_device(dev).unwrap().requires_grad_();
+    let tb_g = tb_bad.to_device(dev).unwrap();
+    let tc_g = tc.to_device(dev).unwrap();
+    let (sup_g, asg_g) =
+        detection_loss_for_distill(&sb_g, &sc_g, &anchors, &empty_targets, &cfg, true).unwrap();
+    let Some(DistillAssignment::Device(da)) = asg_g else { panic!("expected device assignment") };
+    let kd_g =
+        distill_loss_fused_with_context(&sb_g, &sc_g, &tb_g, &tc_g, sup_g.target_score_sum, &dcfg, Some(&da))
+            .unwrap();
+    assert!(kd_g.dfl.is_nan(), "GPU gt_verify must not swallow +Inf teacher box logit on zero-weight anchor");
+
+    // 2. Reject gt_verify=true without Assignment, mismatched Assignment dimensions, and oversized desc.g.
+    assert!(
+        distill_loss_fused_with_context(
+            &sb_g,
+            &sc_g,
+            &box_raw.to_device(dev).unwrap(),
+            &tc_g,
+            1.0,
+            &dcfg,
+            None
+        )
+        .is_err(),
+        "gt_verify without assignment must error"
+    );
+    let small_anchors = make_anchors(32, 32, &[8, 16, 32], 0.5);
+    let mut rng = Rng::seed(101);
+    let sb_s = Tensor::randn([2, 64, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+    let sc_s = Tensor::randn([2, 4, small_anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+    assert!(
+        distill_loss_fused_with_context(&sb_s, &sc_s, &sb_s, &sc_s, 1.0, &dcfg, Some(&da)).is_err(),
+        "mismatched assignment anchor count must error"
+    );
+    let mut bad_da = da;
+    bad_da.desc.g = usize::MAX;
+    assert!(
+        distill_loss_fused_with_context(
+            &sb_g,
+            &sc_g,
+            &box_raw.to_device(dev).unwrap(),
+            &tc_g,
+            1.0,
+            &dcfg,
+            Some(&bad_da)
+        )
+        .is_err(),
+        "oversized Assignment::desc.g must return Err, not panic"
+    );
 
     // 3. In-place mutation of returned `Assignment.dense` invalidates both detection and BCKD backward.
     let sb_m = box_raw.to_device(dev).unwrap().requires_grad_();
@@ -863,11 +930,7 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     assert!(kd_m.total.backward().is_err(), "mutating Assignment.dense must invalidate BCKD backward");
 
     // 4. GPU Trainer run with `loss.tal.topk = 65` (host TAL fallback) + `gt_verify` + `bckd_gamma`,
-    //    exercising both an empty-object image and a matched-positive image.
-    let teacher_file = TestFile::new("wave7-topk65", "teacher.folo");
-    let mut tm = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
-    tm.set_classes(vec!["circle".into(), "square".into()]).unwrap();
-    tm.save(&teacher_file).unwrap();
+    //    exercising both an empty-object image and a matched-positive image, plus GPU bad-batch recovery.
     let syn = SyntheticConfig {
         images: 4,
         classes: vec!["circle".into(), "square".into()],
@@ -913,69 +976,5 @@ fn gpu_distill_safety_and_topk65_fallback_regressions() {
     let summary = tr.run().unwrap();
     assert_eq!(summary.epochs_completed, 1);
     assert!(summary.epochs[0].train_loss.total.is_finite());
-
-    // 5. Recoverable non-finite student batch with `distill.gt_verify = true` must be skipped (BN restored),
-    //    NOT hard-abort training with `Error::Config`.
-    //    Image 0 is all 255 (`1.0`), image 1 is all 0 (`0.0`); scaling stem weights to `1e38` makes image 0
-    //    overflow to `+Inf/NaN` (zero assignment) while image 1 stays `0.0` (finite, trains normally).
-    let two_img_ds = |split: Split| {
-        Arc::new(folo_data::InMemoryDataset {
-            samples: vec![
-                folo_data::Sample {
-                    image: folo_data::Image::new(64, 64, [255, 255, 255]),
-                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
-                },
-                folo_data::Sample {
-                    image: folo_data::Image::new(64, 64, [0, 0, 0]),
-                    boxes: vec![folo_data::BBox::new(0, 0.5, 0.5, 0.4, 0.4)],
-                },
-            ],
-            classes: vec!["circle".into(), "square".into()],
-            split,
-        })
-    };
-    let bad_init = TestFile::new("wave7-nonfinite-gtverify", "init.folo");
-    {
-        let mut init_m = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
-        init_m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
-        let _g = folo_core::no_grad();
-        let w = &init_m.backbone.stem.conv.weight;
-        let big = Tensor::full(w.dims(), 1e38f32);
-        w.copy_from(&big).unwrap();
-        init_m.save(&bad_init).unwrap();
-    }
-    for dev_str in ["cpu", "gpu:0"] {
-        let nf_data = TrainData {
-            train: two_img_ds(Split::Train),
-            val: two_img_ds(Split::Val),
-            classes: vec!["circle".into(), "square".into()],
-        };
-        let nf_cfg = TrainConfig {
-            epochs: 1,
-            batch: 1,
-            nbs: 1,
-            imgsz: 64,
-            optimizer: OptimizerChoice::Sgd,
-            lr0: 0.001,
-            warmup_epochs: 0.0,
-            workers: 0,
-            device: dev_str.into(),
-            augment: AugmentConfig::none(),
-            distill: Some(DistillConfig {
-                bckd_gamma: 1.5,
-                gt_verify: true,
-                ..DistillConfig::new(teacher_file.path().to_string_lossy())
-            }),
-            ..TrainConfig::default()
-        };
-        let opts = TrainOptions { weights: Some(bad_init.path().to_path_buf()), ..TrainOptions::default() };
-        let mut nf_tr = Trainer::new(nf_cfg, nf_data, opts).unwrap();
-        let nf_summary = nf_tr.run().unwrap();
-        assert_eq!(nf_summary.epochs_completed, 1, "dev={dev_str}");
-        assert!(
-            nf_summary.epochs[0].train_loss.total.is_finite(),
-            "trainer ({dev_str}) with gt_verify=true must skip the non-finite batch and complete the valid batch"
-        );
-    }
-    let _ = a;
+    run_nonfinite_recovery("gpu:0");
 }

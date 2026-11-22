@@ -110,8 +110,8 @@ impl Spec {
         self
     }
 
-    /// Enables WGSL subgroup built-ins (`enable subgroups;`). Only valid when [`crate::Capabilities::subgroups`]
-    /// is true on the device.
+    /// Marks a pipeline variant as using native WGSL subgroup built-ins (enabled via `wgpu::Features::SUBGROUP`
+    /// in Naga without a WGSL `enable` directive; browser WebGPU stays on the portable fallback).
     #[allow(dead_code)]
     pub fn subgroups(mut self, on: bool) -> Self {
         self.subgroups = on;
