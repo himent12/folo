@@ -107,8 +107,9 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
                  a class unclear (look-alikes, what to skip, partly hidden objects).\n\
                  2. Try the instructions on a sample: `list_label_images` (limit 20) and `start_labeling` with \
                  those `image_ids` and agent `claude` (leave model and effort out: its defaults are the cheapest \
-                 that label well). If it answers `not_supported` (not installed), use `codex`; if neither is, \
-                 tell the user what the error's `hint` says and stop. Poll `label_status` every 20-30 s until \
+                 that label well). If it answers `not_supported` (not installed), try `codex` or `antigravity`; if \
+                 none is installed, tell the user what the error's `hint` says and stop. Poll `label_status` every \
+                 20-30 s until \
                  `status` is `idle`; if the run failed, report the error its `log` shows and stop.\n\
                  3. Review the sample one image at a time: `view_label_image` without `image_id` shows the next \
                  image to review, its boxes numbered, pixel ticks on the edges, the box list [class, x1, y1, x2, \

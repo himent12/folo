@@ -867,28 +867,31 @@ run does not block it, runs created through the API do).
 
 ## Agent labeling
 Turns a set of unlabeled images into a detection dataset: a coding-agent CLI on the server's machine (**Claude
-Code**, `claude`, or **Codex**, `codex`) looks at the images and draws the boxes, a person reviews and corrects
-them, and the labeled images become a YOLO dataset that trains like any other. Servers with these endpoints list
-`agent_labeling` in `/api/system`'s `features` (real mode only: the mock answers `501 not_implemented`).
+Code**, `claude`, **Codex**, `codex`, or **Antigravity**, `agy`) looks at the images and draws the boxes, a person
+reviews and corrects them, and the labeled images become a YOLO dataset that trains like any other. Servers with
+these endpoints list `agent_labeling` in `/api/system`'s `features` (real mode only: the mock answers
+`501 not_implemented`).
 
 A **labeling job** holds the images, the class list, the instructions for the agent and the labels so far. It is
 long-lived: images can be added, labeled in several agent runs (also by different agents), corrected by hand and
 exported more than once.
 
-- `GET /api/label/agents` → `{ "agents": [LabelAgent] }`: Claude Code, then Codex, each with whether its CLI is
-  installed. The server looks for `claude` / `codex` on its `PATH` (`FOLO_CLAUDE_BIN` / `FOLO_CODEX_BIN` name
-  another executable) and runs `--version`; the result is cached for 60 s. `available` says nothing about being
-  signed in: a run finds that out on its first call and fails with the CLI's own message. `models` are Claude
-  Code's model aliases (`haiku`, `sonnet`, `opus`), and for Codex the models of its own catalog that take images
-  (`codex debug models`). `default_model` and `default_effort` are what a run uses when it names none: Claude
-  Code `haiku` at `low`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
-  them). `fast` says the agent's default model has a faster service tier a run can ask for
+- `GET /api/label/agents` → `{ "agents": [LabelAgent] }`: Claude Code, Codex, then Antigravity, each with whether
+  its CLI is installed. The server looks for `claude` / `codex` / `agy` on its `PATH` (`FOLO_CLAUDE_BIN` /
+  `FOLO_CODEX_BIN` / `FOLO_ANTIGRAVITY_BIN` name another executable) and runs `--version`; the result is cached for
+  60 s. `available` says nothing about being signed in: a run finds that out on its first call and fails with the
+  CLI's own message. `models` are Claude Code's model aliases (`haiku`, `sonnet`, `opus`), for Codex the models of
+  its own catalog that take images (`codex debug models`), and for Antigravity the models `agy models` prints with
+  effort suffixes collapsed (falling back to curated models including `gemini-4-neon`, `gemini-4-hydrogen`,
+  `gemini-4-carbon`, `gemini-4-argon` and `gemini-3.8-flash` when `agy models` cannot be read). `default_model` and
+  `default_effort` are what a run uses when it names none: Claude Code `haiku` at `low`, Codex its own default model
+  at `low`, and Antigravity its own default model at `low` (docs/LABELING.md has the measurements behind them).
+  `fast` says the agent's default model has a faster service tier a run can ask for
   (`StartLabeling.fast`): Codex's Fast (priority processing, which uses more of the plan's usage); a model's own
   `fast` says whether it offers it (Codex: its catalog entry lists the `priority` tier). No Codex model offers it
   when the user's Codex `config.toml` sets `model_catalog_json`, `profile`, `openai_base_url` or
   `chatgpt_base_url`, or exists but cannot be read (the catalog FOLO reads may then not be its calls'; `start`
-  with `fast` says so). Claude Code
-  has none for `claude -p`.
+  with `fast` says so). Claude Code and Antigravity have none for FOLO's calls.
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "/data/photos" }`
   → `201 LabelJob`. `name` must not be blank (one line of at most 100 characters); `classes`: 1 to 80 distinct,
@@ -983,11 +986,12 @@ exported more than once.
   (the `log` events), as `GET /api/runs/{id}/logs`.
 
 **How a run works** (and what it costs)
-- The run splits its images into batches (`batch` images per agent call: Claude Code 4, Codex 8 by default) and
-  keeps `parallel` calls (default 3) in flight. Each call is **one model request with no tools**: the images are
-  attached to the prompt (downscaled to at most 1024 px on the long side for Claude Code and 768 px for Codex, and
-  re-encoded as JPEG, so an image costs about 1050 and 650 input tokens whatever the file's size), the prompt
-  gives each image's size as sent, and the reply is one JSON object with a box list per image, each box
+- The run splits its images into batches (`batch` images per agent call: Claude Code 4, Codex 8, Antigravity 8 by
+  default) and keeps `parallel` calls (default 3) in flight. Each call is **one model request with no tools**: the
+  images are attached to the prompt (downscaled to at most 1024 px on the long side for Claude Code and Antigravity
+  and 768 px for Codex, and re-encoded as JPEG, so an image costs about 1050 and 650 input tokens for Claude Code
+  and Codex whatever the file's size), the prompt gives each image's size as sent, and the reply is one JSON object
+  with a box list per image, each box
   `["<class>", x1, y1, x2, y2]` in pixels of the image as sent (the older `{"label", "box"}` objects are read
   too, also as pixels). The server clips each box to the image and scales it to pixels of the original.
 - Claude Code is started as `claude -p` with its system prompt replaced by FOLO's labeling prompt, no tools, no
@@ -1002,9 +1006,14 @@ exported more than once.
   used no tokens, is made again without it, and that Codex version's calls go without it), the images as
   `--image` attachments and
   the reply shape as `--output-schema` (class names limited to the job's classes), and with `fast` its
-  `service_tier` set to `priority`; that takes a call's fixed cost from about 20000 tokens to about 700. Both run
-  in an empty scratch folder and use the account the CLI is signed in with. The eval
-  `crates/folo-server/examples/label_eval.rs` measures both on COCO photos (docs/LABELING.md).
+  `service_tier` set to `priority`; that takes a call's fixed cost from about 20000 tokens to about 700.
+  Antigravity is started as `agy acp --include-default-customizations=false --disable-telemetry` over ACP v1
+  JSON-RPC on stdio with `mcpServers: []`, FOLO's instructions in `_meta.antigravity.systemPrompt.append`, the
+  model and `thought_level` configured via `session/set_config_option` (effort-suffixed slugs such as
+  `gemini-4-neon-xhigh` select the base model and that effort), the images sent inline as base64 JPEGs in
+  `session/prompt`, and every `session/request_permission` call rejected so no tools execute. All three run in an
+  empty scratch folder and use the account the CLI is signed in with. The eval
+  `crates/folo-server/examples/label_eval.rs` measures them on COCO photos (docs/LABELING.md).
 - A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
   without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and the
   call has failed (below) for an image the reply does not mention or whose every box was dropped. One bad box costs only itself, and the JSON is found with text
@@ -1032,7 +1041,7 @@ exported more than once.
   the ones in flight are killed. `POST …/start` again continues with what is left.
 - `usage` adds up what the CLIs report per call, a failed call's too (Claude Code reports what a call that failed
   used), whatever became of the batch (stopped during a wait, timed out; a call killed after the CLI printed
-  what it used counts that, and a Codex turn that completed without a reply counts its tokens). `cost_usd` is Claude Code's own figure (list prices, also on a subscription); Codex reports none.
+  what it used counts that, and a Codex turn that completed without a reply counts its tokens). `cost_usd` is Claude Code's own figure (list prices, also on a subscription), or Antigravity's when an ACP `usage_update` reports USD; Codex reports none.
 
 **Making the dataset**
 - `POST /api/label/jobs/{id}/dataset` body `{ "name"?, "val_fraction"?: 0.2, "seed"?: 0 }` → `201 Dataset` with
@@ -1051,7 +1060,7 @@ exported more than once.
 
 ```jsonc
 // LabelAgent
-{ "id": "claude|codex", "name": "Claude Code", "available": true, "version": "2.1.302" | null,
+{ "id": "claude|codex|antigravity", "name": "Claude Code", "available": true, "version": "2.1.302" | null,
   "models": [{ "id": "haiku", "label": "Haiku", "fast"?: true }], // suggestions (`model` takes any name the CLI
                                                        // accepts); `fast`: it offers the faster tier
   "default_model": "haiku" | null,                     // null: the CLI's own default
@@ -1143,7 +1152,7 @@ A **plan** is `{ "conditions": [{ "condition": "haze", "severities": [1, 3, 5], 
 most once, `severities` are 1 to 5 distinct values in `1..=5` in ascending order, and `0 < weight <= 10`. An
 empty `conditions` runs the unchanged images only. Text is trimmed (empty becomes `null`).
 
-- `POST /api/bench/benchmarks/{id}/design` body `{ "agent": "claude" | "codex", "model"?, "effort"?, "note"?: "" }`
+- `POST /api/bench/benchmarks/{id}/design` body `{ "agent": "claude" | "codex" | "antigravity", "model"?, "effort"?, "note"?: "" }`
   → `BenchDesign` `{ "plan": BenchPlan, "usage": LabelUsage }` (a design that fails is a `502 agent_failed`
   without its usage). One call to the agent (as agent labeling makes
   them: no tools, one request; `model` and `effort` default to the agent's, `model` checked as for labeling,

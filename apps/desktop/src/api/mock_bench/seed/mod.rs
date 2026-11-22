@@ -48,6 +48,23 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             fast: true,
             hint: None,
         },
+        LabelAgent {
+            id: LabelAgentId::Antigravity,
+            name: "Antigravity".into(),
+            available: true,
+            version: Some("1.5.13".into()),
+            models: vec![
+                LabelModel { id: "gemini-4-neon".into(), label: "Gemini 4 Neon".into(), fast: false },
+                LabelModel { id: "gemini-4-hydrogen".into(), label: "Gemini 4 Hydrogen".into(), fast: false },
+                LabelModel { id: "gemini-4-carbon".into(), label: "Gemini 4 Carbon".into(), fast: false },
+                LabelModel { id: "gemini-4-argon".into(), label: "Gemini 4 Argon".into(), fast: false },
+                LabelModel { id: "gemini-3.8-flash".into(), label: "Gemini 3.8 Flash".into(), fast: false },
+            ],
+            default_model: None,
+            default_effort: LabelEffort::Low,
+            fast: false,
+            hint: None,
+        },
     ];
     let jobs = vec![LabelJob {
         id: "lb_4f10".into(),

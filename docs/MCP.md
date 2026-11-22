@@ -1,7 +1,7 @@
 # `folo mcp`: FOLO for agents
 
 `folo mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. With it, an agent
-(Claude Code, Codex, any MCP client) can label images, build datasets, train, evaluate, run and export FOLO models without screen
+(Claude Code, Codex, Antigravity, any MCP client) can label images, build datasets, train, evaluate, run and export FOLO models without screen
 scraping. It exposes the same operations as the CLI and `docs/API.md`, with the same error codes.
 
 ```jsonc
@@ -42,7 +42,7 @@ it:
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 | `cloud_*`, `train` with `compute` | the data dir's connections and instance ledger; cloud runs on their worker (docs/CLOUD.md) | the mock's RunPod connection `cc_4d2a`, simulated cloud runs | `/api/cloud/...`, `POST /api/runs` |
-| labeling (`*_label_*`, `start_labeling`, `stop_labeling`, `label_status`) | the data dir's labeling jobs; runs call the `claude` / `codex` CLI of this machine (docs/LABELING.md) | `not_implemented` (the mock has no labeler) | `/api/label/...` |
+| labeling (`*_label_*`, `start_labeling`, `stop_labeling`, `label_status`) | the data dir's labeling jobs; runs call the `claude` / `codex` / `agy` CLI of this machine (docs/LABELING.md) | `not_implemented` (the mock has no labeler) | `/api/label/...` |
 | benchmarks (`bench_*`, `*_benchmark*`, `*_bench_entry`) | the data dir's benchmarks; a model entry runs in this process on `--device` and stops with the session | `not_implemented` (the mock has no benchmarks) | `/api/bench/...` (a server that lists `vision_bench`, else `not_implemented`); entries run in the server and outlive the session |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
@@ -167,7 +167,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 has the run's `cloud` (phase, instance, cost).
 
 ### Labeling
-Ten tools take unlabeled images to a dataset with a Claude Code or Codex agent (docs/LABELING.md), and let the
+Ten tools take unlabeled images to a dataset with a Claude Code, Codex or Antigravity agent (docs/LABELING.md), and let the
 calling agent check and correct the boxes itself; the `label_folder` prompt walks through them. A box is
 `[class, x1, y1, x2, y2]`: the class index into the job's `classes`, the corners in **pixels of a view of the
 image**: the image scaled so its long side is the view's `size` (default 1024, never upscaled), the frame vision
@@ -197,7 +197,7 @@ empty defaults and `null` in optional types.
 |---|---|---|
 | `list_label_jobs` | paging | page of `{ id, name, status: "idle"\|"running"\|"stopping", classes, counts: { images, pending, labeled, failed, boxes }, dataset_id }`, newest first |
 | `create_label_job` | `{ name, classes: string[] (1–80), instructions?: "", paths?: string[] (max 100) }`, or `{ job_id, paths }` to add images to a job | `{ job_id, images, added, skipped, skipped_first? }` (`skipped_first`: the first 5 files left out, with the reason). `paths` are folders (searched recursively) or image files, read in place. A path that fails before any image was added leaves no job behind; a later one fails with a hint naming the job to add the rest to |
-| `start_labeling` | `{ job_id, agent: "claude"\|"codex", model?, effort?: "low"\|"medium"\|"high", fast?: false, scope?: "unlabeled"\|"all", image_ids?: string[], note?: "", batch?: 1–16, parallel?: 1–8 }` | `{ job_id, total, model }` (`model`: `null` for the CLI's default); returns at once. `image_ids` relabels exactly those images (hand edits too), e.g. a sample first, or "ask again" with a `note` saying what was wrong. An agent whose CLI is not installed is `not_supported`, with how to install it in the hint (`folo label agents` lists them). `fast` asks for Codex's Fast tier (more of the plan's usage), only with a model that offers it; through a server that does not list it for that model (one from before the Fast tier, which would ignore it) it is refused before the start (`invalid_arguments`) |
+| `start_labeling` | `{ job_id, agent: "claude"\|"codex"\|"antigravity", model?, effort?: "low"\|"medium"\|"high", fast?: false, scope?: "unlabeled"\|"all", image_ids?: string[], note?: "", batch?: 1–16, parallel?: 1–8 }` | `{ job_id, total, model }` (`model`: `null` for the CLI's default); returns at once. `image_ids` relabels exactly those images (hand edits too), e.g. a sample first, or "ask again" with a `note` saying what was wrong. An agent whose CLI is not installed is `not_supported`, with how to install it in the hint (`folo label agents` lists them). `fast` asks for Codex's Fast tier (more of the plan's usage), only with a model that offers it; through a server that does not list it for that model (one from before the Fast tier, which would ignore it) it is refused before the start (`invalid_arguments`) |
 | `stop_labeling` | `{ job_id }` | `{ job_id, status }`; labeled images stay |
 | `label_status` | `{ job_id, log_lines?: 5 (max 50) }` | `{ id, name, status, classes, counts, reviewed, run: { agent, model, effort, total, done, failed, outcome }, calls, input_tokens, cached_input_tokens, output_tokens, cost_usd, dataset_id, log }` (the tokens of every run of the job; `log`: the last lines, `warn: ` / `error: ` before those levels, where a failed run's error is) |
 | `list_label_images` | `{ job_id, status?: "pending"\|"labeling"\|"labeled"\|"failed", reviewed?: boolean, include_boxes?: false }` + paging (limit up to 200) | page of `{ id, file, status, num_boxes, source: "agent"\|"manual"\|null, reviewed, error?, size?, revision?, boxes? }` in the order the images were added; `include_boxes` adds the default view's `size`, the `revision` and the `boxes` in that view |
@@ -301,7 +301,7 @@ calls tools itself.
   the stats and `folo_info` devices, call `train`, and explain the choices to the user.
 - `label_folder` (arguments: `folder_path` and `classes` (comma-separated) required; `instructions` optional):
   returns the labeling walk-through: `create_label_job` on the folder, label a sample of about 20 images first
-  (`start_labeling` with `image_ids` and agent `claude`, else `codex`) and follow it with `label_status`, review the
+  (`start_labeling` with `image_ids` and agent `claude`, `codex` or `antigravity`) and follow it with `label_status`, review the
   sample one image at a time (`view_label_image`, then `review_label_images` or `set_label_boxes` with the
   revision, before the next view), ask again with a `note` when the agent got something wrong systematically,
   label the rest, review, `export_label_dataset`, then offer `train`.

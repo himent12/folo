@@ -94,17 +94,23 @@ describe('MockApi agent labeling: a run', () => {
     await expect(api.stopLabeling('lb_7c21')).rejects.toMatchObject({ status: 409, code: 'label_job_not_active' });
   });
 
-  it('refuses Codex where it is not installed, with its hint, and runs it where it is', async () => {
+  it('refuses Codex and Antigravity where they are not installed, with their hints, and runs them where they are', async () => {
     await expect(new MockApi('normal', 0).startLabeling('lb_7c21', { agent: 'codex' })).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    await expect(new MockApi('normal', 0).startLabeling('lb_7c21', { agent: 'antigravity' })).rejects.toMatchObject({ status: 501, code: 'not_supported' });
     const agents = await new MockApi('normal', 0).labelAgents();
     expect(agents.map((a) => [a.id, a.available, !!a.hint])).toEqual([
       ['claude', true, false],
       ['codex', false, true],
+      ['antigravity', false, true],
     ]);
     const j = await new MockApi('all-agents', 0).startLabeling('lb_7c21', { agent: 'codex' });
     expect(j.run).toMatchObject({ agent: 'codex', model: null, effort: 'low' });
+    const agy = await new MockApi('all-agents', 0).startLabeling('lb_7c21', { agent: 'antigravity', model: 'gemini-4-neon' });
+    expect(agy.run).toMatchObject({ agent: 'antigravity', model: 'gemini-4-neon', effort: 'low' });
+    await expect(new MockApi('all-agents', 0).startLabeling('lb_7c21', { agent: 'antigravity', fast: true })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
     expect(agents.map((a) => [a.default_model, a.default_effort])).toEqual([
       ['haiku', 'low'],
+      [null, 'low'],
       [null, 'low'],
     ]);
   });

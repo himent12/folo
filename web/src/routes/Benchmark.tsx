@@ -572,6 +572,7 @@ export default function Benchmark() {
                       bench={b()}
                       editable={editable.get()}
                       catalog={catalog.data}
+                      agents={agents.data}
                       bind:draft={draft}
                       bind:typed={typed}
                       error={planWhy.get()}

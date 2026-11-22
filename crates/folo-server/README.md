@@ -19,7 +19,7 @@ it.
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
 | `src/runs/` | The real store's training runs: `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs`, `registry.rs`, `resume.rs` |
 | `src/cloud/` | The cloud control plane (docs/CLOUD.md): `Cloud` in `mod.rs`, `connections.rs`, `ledger.rs`, `reaper.rs`, `worker.rs`, `state.rs`, `files.rs`, and `executor/` (a cloud run's thread: `launch.rs`, `sync.rs`, `train.rs`, `mirror.rs`) |
-| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `ask.rs` (one batch's calls: two at most, usage kept whatever the outcome), `faults.rs` (passing faults and limits in a CLI's failure), `claude.rs`, `codex.rs`, `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
+| `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `ask.rs` (one batch's calls: two at most, usage kept whatever the outcome), `faults.rs` (passing faults and limits in a CLI's failure), `claude.rs`, `codex.rs`, `antigravity/` (ACP driver and tests), `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
 | `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs`, `source.rs`, `design.rs`, `loops.rs` |
 | `src/throughput/` | The measured throughput table and run-time estimates: `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the predictor cache of `/api/predict` |
@@ -89,7 +89,7 @@ A cloud run takes the same first two steps, then `Runs::create_cloud` registers 
 | Add an endpoint | The request / response types in `crates/folo-api/src/<section>.rs`; a `Store` method in `src/store.rs` (a default that answers `501` if not every store has it); its implementations in `src/real/store.rs` and `src/mock/store.rs`, and in `crates/folo-mcp/src/proxy.rs` (`HttpStore`) when it has no default; the handler in `src/routes/<area>.rs` and its path in `routes::api`; tests in `tests/api/` (mock) and the real-store test binary of the area; the section in `docs/API.md`; `web/src/lib/api/types/<section>.ts` |
 | Announce an optional API feature | A `FEATURE_*` constant in folo-api; list it in `system` (`src/routes/system.rs`) or in the store's `Store::features` |
 | Add an error code | `CODES` in `crates/folo-api/src/codes.rs`; raise it with `Error::new(status, "code", message).hint(..)`; the Errors table in `docs/API.md` (`crates/folo-cli/tests/codes.rs` fails on a code that is not listed) |
-| Add a labeling agent | The variant and its names in `LabelAgentId` (`crates/folo-api/src/label.rs`); an `Agent` implementation next to `src/label/claude.rs` and `src/label/codex.rs`; the `agents` list in `Labeler::open` (`src/label/mod.rs`); `agent_name` in `apps/desktop/src/screens/bench/format.rs` (an exhaustive match); Studio's `LabelAgentId` in `web/src/lib/api/types/label.ts`, `AGENT_NAME` in `web/src/lib/label.ts` and `DEFAULT_BATCH` in `web/src/lib/api/mock/label.ts`; docs/LABELING.md |
+| Add a labeling agent | The variant and its names in `LabelAgentId` (`crates/folo-api/src/label.rs`); an `Agent` implementation next to `src/label/claude.rs`, `src/label/codex.rs` and `src/label/antigravity/`; the `agents` list in `Labeler::open` (`src/label/mod.rs`); `AgentArg` in `crates/folo-cli/src/cli/label.rs` and `crates/folo-cli/src/label/mod.rs`; `agent_name` in `apps/desktop/src/screens/bench/format.rs` (an exhaustive match); Studio's `LabelAgentId` in `web/src/lib/api/types/label.ts`, `AGENT_NAME` in `web/src/lib/label.ts` and `DEFAULT_BATCH` in `web/src/lib/api/mock/label.ts`; docs/LABELING.md |
 | Add a file under the data dir | The code that writes it, and the data dir list in the module doc of `src/real/mod.rs` |
 
 ## Tests and benchmarks
@@ -105,12 +105,13 @@ live next to the code (`src/**/tests.rs` and `mod tests` blocks). Each folder un
 | `real_datasets`, `issues` | The real store's datasets, index cache and re-indexing; `GET /api/datasets/{id}/issues` |
 | `uploads`, `transfer`, `weights` | `/api/uploads`; `folo_client::transfer` against a real server; `GET /api/models/{id}/weights` |
 | `cloud`, `mock_cloud`, `worker` | The cloud control plane against in-process workers; the mock's cloud; what a cloud worker serves |
-| `label`, `label_live` | Agent labeling with scripted agents; the real Claude Code and Codex CLIs |
+| `label`, `label_live` | Agent labeling with scripted agents; the real Claude Code, Codex and Antigravity CLIs |
 | `bench` | Vision benchmarks end to end with tiny datasets, untrained models and scripted agents |
 | `token`, `real_system` | `folo serve --token`; `/api/system` `capabilities` (checks the refusal without a GPU) |
 
-The two tests in `label_live.rs` are `#[ignore]`d: they need the CLI installed and signed in, and they spend tokens.
-Run one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`). The crate
+The tests in `label_live.rs` are `#[ignore]`d: they need the CLI installed and signed in, and they spend tokens.
+Run one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex` /
+`antigravity`). The crate
 has no benchmarks; its one example, `examples/label_eval.rs`, measures agent labeling with the real CLIs on 60 COCO
 val2017 photos (found, right, IoU, tokens, cost and time per setting: docs/LABELING.md, How good the labels are).
 

@@ -121,8 +121,8 @@ impl Failure {
     }
 }
 
-/// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`];
-/// tests script their own.
+/// A coding agent that can label images. Implementations: [`super::claude::ClaudeCode`], [`super::codex::Codex`],
+/// [`super::antigravity::Antigravity`]; tests script their own.
 pub trait Agent: Send + Sync + 'static {
     /// Which agent this is.
     fn id(&self) -> LabelAgentId;
@@ -494,6 +494,7 @@ mod tests {
     fn versions_are_read_from_either_cli() {
         assert_eq!(version_of("2.1.302 (Claude Code)\n").as_deref(), Some("2.1.302"));
         assert_eq!(version_of("codex-cli 0.167.0\n").as_deref(), Some("0.167.0"));
+        assert_eq!(version_of("1.5.13\n").as_deref(), Some("1.5.13"));
         assert_eq!(version_of("command not found"), None);
     }
 

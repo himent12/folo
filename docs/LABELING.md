@@ -1,12 +1,13 @@
 # Agent labeling
 
-You have images and no labels. FOLO can have a coding agent draw the boxes: it drives **Claude Code** or **Codex**
-on your machine, shows you every box for review, and turns the result into a dataset that trains like any other.
+You have images and no labels. FOLO can have a coding agent draw the boxes: it drives **Claude Code**, **Codex** or
+**Antigravity** on your machine, shows you every box for review, and turns the result into a dataset that trains like
+any other.
 
 ```
 unlabeled images ──► labeling job ──► agent run ──► review and correct ──► dataset ──► folo train
-   (upload or a          (classes +      (Claude Code      (Studio, or an    (YOLO folder,
-    folder)              instructions)    or Codex)         agent via MCP)    registered)
+   (upload or a          (classes +      (Claude Code,     (Studio, or an    (YOLO folder,
+    folder)              instructions)    Codex or Agy)     agent via MCP)    registered)
 ```
 
 The agents' boxes are a draft. On everyday photos they find most objects and place most boxes well (numbers
@@ -15,14 +16,16 @@ view is built for that.
 
 ## What you need
 - `folo serve` (the real server, not `--mock`), or `folo mcp` / `folo label` on a data dir.
-- At least one of the two CLIs on the machine that runs `folo serve`, signed in:
+- At least one of the three CLIs on the machine that runs `folo serve`, signed in:
   - Claude Code: install it from <https://claude.com/claude-code>, then run `claude` once and sign in.
   - Codex: install it from <https://developers.openai.com/codex/cli>, then run `codex login`.
+  - Antigravity: install it from <https://antigravity.google/docs/getting-started>, then run `agy` (or `agy acp --login`) once and sign in.
 
-  FOLO finds `claude` and `codex` on the `PATH`; `FOLO_CLAUDE_BIN` and `FOLO_CODEX_BIN` name another executable.
+  FOLO finds `claude`, `codex` and `agy` on the `PATH`; `FOLO_CLAUDE_BIN`, `FOLO_CODEX_BIN` and
+  `FOLO_ANTIGRAVITY_BIN` name another executable.
   Studio shows which agents were found. Labeling uses that CLI's account: its plan limits and its bill.
 
-The images are sent to the agent's provider (Anthropic or OpenAI), as with any use of those tools. Do not label
+The images are sent to the agent's provider (Anthropic, OpenAI or Google), as with any use of those tools. Do not label
 images you may not share with them.
 
 ## In Studio
@@ -47,7 +50,7 @@ images you may not share with them.
    boxes is kept as a background image. The job stays, so you can add images, label them and export again.
 
 ## From a script or an agent
-An agent (Claude Code, Codex, any MCP client) can run the whole loop itself through FOLO's MCP server
+An agent (Claude Code, Codex, Antigravity, any MCP client) can run the whole loop itself through FOLO's MCP server
 ([MCP.md](MCP.md), Labeling): `create_label_job` on a folder, `start_labeling` (a sample of about 20 images first,
 with `image_ids`), `label_status` until the run is idle, then for each image `view_label_image` (the image with its
 boxes drawn and numbered, as an image the model sees, plus the boxes as text and their revision) and either
@@ -97,14 +100,14 @@ to its defaults loads its coding instructions, tool definitions, your project's 
 request, and would read each image through a tool call, one request per step. FOLO switches all of that off and
 attaches the images to the prompt.
 
-| | Claude Code | Codex |
-|---|---|---|
-| Images per call (default) | 4 | 8 |
-| Images sent at, long side at most | 1024 px | 768 px |
-| Fixed input tokens per call | about 900 (FOLO's instructions) | about 700 (FOLO's instructions and reply schema; 20000 with Codex's defaults) |
-| Input tokens per photo, all told | about 1280 for a photo of 1024 px or more, 620 for a 640 px one | about 650 for a photo of 768 px or more, 460 for a 640 px one |
-| Output tokens per photo | about 165 (Haiku at low effort, mostly its reasoning) | about 40 |
-| Calls in flight | 3 | 3 |
+| | Claude Code | Codex | Antigravity |
+|---|---|---|---|
+| Images per call (default) | 4 | 8 | 8 |
+| Images sent at, long side at most | 1024 px | 768 px | 1024 px |
+| Fixed input tokens per call | about 900 (FOLO's instructions) | about 700 (FOLO's instructions and reply schema; 20000 with Codex's defaults) | FOLO's instructions via ACP (`--include-default-customizations=false`) |
+| Input tokens per photo, all told | about 1280 for a photo of 1024 px or more, 620 for a 640 px one | about 650 for a photo of 768 px or more, 460 for a 640 px one | depends on the model (`gemini-4-neon`, `gemini-3.8-flash`, ...) |
+| Output tokens per photo | about 165 (Haiku at low effort, mostly its reasoning) | about 40 | low effort by default (effort-suffixed slugs like `gemini-4-neon-xhigh` also work) |
+| Calls in flight | 3 | 3 | 3 |
 
 Larger images cost more, up to a cap: images are scaled down before they are sent, so a 12-megapixel photo costs
 what a 1024 px one does (768 px for Codex). The prompt gives each image's size as sent, the boxes come back in
@@ -139,6 +142,13 @@ defaults before and after):
   (`model_catalog_json`, `profile`, `openai_base_url` or `chatgpt_base_url` at its top level) or exists but
   cannot be read, or Codex refuses the file as it starts, calls go without it at the old cost, and the run's log
   says so once. A refusal holds for the version of Codex that refused, until another one is installed.
+- Antigravity runs `agy acp --include-default-customizations=false --disable-telemetry` over ACP v1 JSON-RPC on
+  stdio in an empty scratch folder with no MCP servers: the images go inline as base64 JPEGs in a single
+  `session/prompt` turn, FOLO's instructions attach through `_meta.antigravity.systemPrompt.append`, the model and
+  `thought_level` are selected via `session/set_config_option` (accepting base ids like `gemini-4-neon` as well as
+  effort-suffixed slugs like `gemini-4-neon-xhigh`), and any `session/request_permission` call is rejected so no
+  tools ever execute. Models come from `agy models` with a curated fallback (`gemini-4-neon`, `gemini-4-hydrogen`,
+  `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash`).
 - A box is a list, `["car", x1, y1, x2, y2]`, instead of `{"label": "car", "box": [x1, y1, x2, y2]}`: Codex
   writes 25% fewer output tokens for the same labels.
 - Haiku runs at low effort and Codex sends images at 768 px (the reasons are in the next section).
@@ -149,7 +159,7 @@ agent panel shows a Fast switch when the Codex model picked offers it (it is set
 follow you to another), and the API takes `"fast": true` (refused, before any call, with a model that does not
 offer it). When your Codex `config.toml` sets one of the keys above, FOLO cannot tell which models a call has, so
 it offers Fast for none (asking for it says why). On the 60 photos it took 28 s instead of 35, with the same
-labels and tokens. Claude Code offers no fast mode to `claude -p`.
+labels and tokens. Claude Code and Antigravity offer no fast mode to FOLO's calls.
 
 A run stops spending as soon as spending is pointless. If the CLI is missing, signed out, refuses the model or
 hits its plan's usage limit, or a rate limit (or any fault) that asks for a wait of more than a minute, the run
@@ -215,7 +225,7 @@ pass; COCO val2017 and its annotations are a free download):
 `cargo run -p folo-server --release --example label_eval -- --coco <coco dir> --agent claude --out eval.jsonl`,
 with `--model`, `--effort`, `--batch`, `--side` and `--fast` to try other settings, and `--table eval.jsonl` to
 print the passes side by side. On clean synthetic shapes `cargo test -p folo-server --test label_live --
---ignored --nocapture` checks both CLIs end to end (`FOLO_LABEL_LIVE_MODEL` picks a model). `npm run
+--ignored --nocapture` checks the real CLIs end to end (`FOLO_LABEL_LIVE_MODEL` picks a model). `npm run
 label-smoke` in `web/` drives the whole flow through Studio against a running `folo serve` and a real agent, with
 a folder of your own images, and prints what the agent reported using.
 

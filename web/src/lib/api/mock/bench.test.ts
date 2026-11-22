@@ -230,6 +230,9 @@ describe('MockApi vision benchmarks: making and changing them', () => {
     // Not saved.
     expect((await api.bench('bn_9f03')).plan.designed_by).toBeNull();
     await expect(api.designBench('bn_9f03', { agent: 'codex' })).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    await expect(api.designBench('bn_9f03', { agent: 'antigravity' })).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    const agyDesign = await new MockApi('all-agents', 0).designBench('bn_9f03', { agent: 'antigravity', model: 'gemini-4-neon', note: '' });
+    expect(agyDesign.plan.designed_by).toEqual({ agent: 'antigravity', model: 'gemini-4-neon' });
     await expect(new MockApi('bench-agent-fails', 0).designBench('bn_9f03', { agent: 'claude' })).rejects.toMatchObject({ status: 502, code: 'agent_failed' });
   });
 
@@ -271,6 +274,9 @@ describe('MockApi vision benchmarks: entries run', () => {
     expect(done.status).toBe('done');
     expect(done.usage!.calls).toBe(12);
     await expect(api.startBenchEntry('bn_9f03', { contestant: { kind: 'agent', agent: 'codex' } })).rejects.toMatchObject({ status: 501 });
+    await expect(api.startBenchEntry('bn_9f03', { contestant: { kind: 'agent', agent: 'antigravity' } })).rejects.toMatchObject({ status: 501 });
+    const agyEntry = await new MockApi('all-agents', 0).startBenchEntry('bn_9f03', { contestant: { kind: 'agent', agent: 'antigravity', model: 'gemini-4-neon' } });
+    expect(agyEntry).toMatchObject({ images: 48, conditions: false, scored: false, name: 'Antigravity (gemini-4-neon)' });
   });
 
   it('refuses a model with none of the classes (bench_class_mismatch)', async () => {

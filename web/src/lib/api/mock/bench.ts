@@ -25,6 +25,7 @@ import type {
   Box,
   CreateBench,
   DesignBench,
+  LabelAgentId,
   LabelUsage,
   Model,
   StartBenchEntry,
@@ -202,8 +203,8 @@ export class MockBench extends MockBenchState {
   design(id: string, body: DesignBench, now: number): BenchDesign {
     const b = this.bench(id);
     this.advance(now);
-    if (body.agent !== 'claude' && body.agent !== 'codex')
-      throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\` or \`codex\``);
+    if (body.agent !== 'claude' && body.agent !== 'codex' && body.agent !== 'antigravity')
+      throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\`, \`codex\` or \`antigravity\``);
     if ((body.note ?? '').length > DESIGN_NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${DESIGN_NOTE_MAX} characters`);
     const agent = this.host.agents().find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
@@ -334,7 +335,7 @@ export class MockBench extends MockBenchState {
       };
       e.duration = images * this.passes(e, b).length * (MS_PER_PASS[m.arch] ?? 5);
     } else if (c.kind === 'agent') {
-      if (c.agent !== 'claude' && c.agent !== 'codex') throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(c.agent)}\``);
+      if (c.agent !== 'claude' && c.agent !== 'codex' && c.agent !== 'antigravity') throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(c.agent)}\``);
       const agent = this.host.agents().find((a) => a.id === c.agent);
       if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[c.agent]} is not installed on the server's machine.`, agent?.hint);
       const model = c.model?.trim() || agent.default_model;
@@ -665,9 +666,16 @@ export class MockBench extends MockBenchState {
 }
 
 /** What an agent finds, by agent and model: no confidences, high precision, recall by how capable the model is. */
-export function agentSkill(agent: 'claude' | 'codex', model: string | null, effort: string, salt: string): Skill {
+export function agentSkill(agent: LabelAgentId, model: string | null, effort: string, salt: string): Skill {
   const r = rng(hash(`agent:${salt}`));
-  const q = agent === 'claude' ? ({ haiku: 0.62, sonnet: 0.72, opus: 0.78 } as Record<string, number>)[model ?? 'haiku'] ?? 0.66 : 0.6;
+  const q =
+    agent === 'claude'
+      ? (({ haiku: 0.62, sonnet: 0.72, opus: 0.78 } as Record<string, number>)[model ?? 'haiku'] ?? 0.66)
+      : agent === 'antigravity'
+        ? (({ 'gemini-4-neon': 0.76, 'gemini-4-hydrogen': 0.73, 'gemini-4-carbon': 0.69, 'gemini-4-argon': 0.66, 'gemini-3.8-flash': 0.64 } as Record<string, number>)[
+            model ?? 'gemini-4-neon'
+          ] ?? 0.72)
+        : 0.6;
   const lift = effort === 'high' ? 0.04 : effort === 'medium' ? 0.02 : 0;
   return {
     map: 0.22 + (q + lift) * 0.22 + r() * 0.02,
@@ -681,10 +689,10 @@ export function agentSkill(agent: 'claude' | 'codex', model: string | null, effo
 }
 
 /** What an agent's calls use for `passes` image passes, as agent labeling's calls do (./label). */
-export function agentUsage(agent: 'claude' | 'codex', model: string | null, effort: string, passes: number, description: string, salt: string): LabelUsage {
+export function agentUsage(agent: LabelAgentId, model: string | null, effort: string, passes: number, description: string, salt: string): LabelUsage {
   const per = PER_CALL[agent]!;
   const calls = Math.ceil(passes / per);
-  const fixed = agent === 'claude' ? 420 + Math.round(description.length / 4) : 10_200;
+  const fixed = agent === 'claude' ? 420 + Math.round(description.length / 4) : agent === 'antigravity' ? 1_200 + Math.round(description.length / 4) : 10_200;
   const input = calls * fixed + passes * 1012 + (hash(salt) % 400);
   const cached = Math.round((calls - 1) * fixed * 0.86);
   const reasoning = ({ low: 0, medium: 260, high: 820 } as Record<string, number>)[effort] ?? 0;

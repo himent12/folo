@@ -71,6 +71,14 @@ describe('preferences across tabs', () => {
     expect([b.theme, b.units, b.sidebarCollapsed]).toEqual(['dark', 'binary', false]);
   });
 
+  it('accepts antigravity as a stored labeling agent and preserves it across saves', () => {
+    localStorage.setItem(KEY, JSON.stringify({ labelAgent: 'antigravity' }));
+    const a = new PrefsStore();
+    expect(a.labelAgent).toBe('antigravity');
+    a.units = 'metric';
+    expect(read()).toMatchObject({ labelAgent: 'antigravity', units: 'metric' });
+  });
+
   it('turns single-key shortcuts off and on as another tab does', () => {
     fromOtherTab('folo.singleKeys', 'off');
     expect(keyPrefs.singleKeys).toBe(false);

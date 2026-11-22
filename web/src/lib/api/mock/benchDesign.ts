@@ -1,6 +1,6 @@
 // The mock's "Design with an agent" (docs/BENCH.md, Designing a plan with an agent): a plan drawn from the catalog that
 // follows what the benchmark's description (and the request's note) says about the camera, with a reason per
-// condition and one for the whole, as Claude Code or Codex would answer it. Pure: the same words give the same plan.
+// condition and one for the whole, as Claude Code, Codex or Antigravity would answer it. Pure: the same words give the same plan.
 
 import type { BenchPlan, BenchPlanCondition, LabelAgentId, LabelUsage } from '../types';
 import { CONDITIONS, conditionName } from './benchCatalog';
@@ -118,7 +118,7 @@ export function designPlan(text: string, agent: LabelAgentId, model: string | nu
 
 /** What the design call reports it used: one request with the description, the classes and four images. */
 export function designUsage(text: string, agent: LabelAgentId, model: string | null): LabelUsage {
-  const input = (agent === 'claude' ? 1_840 : 10_900) + 4 * 1_012 + Math.round(text.length / 4) + (hash(text) % 90);
+  const input = (agent === 'claude' ? 1_840 : agent === 'antigravity' ? 2_200 : 10_900) + 4 * 1_012 + Math.round(text.length / 4) + (hash(text) % 90);
   const output = 610 + (hash(`${text}:out`) % 240);
   const price: Record<string, [number, number]> = { sonnet: [3, 15], haiku: [1, 5], opus: [15, 75] };
   const p = agent === 'claude' ? price[model ?? 'haiku'] : undefined;

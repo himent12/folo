@@ -21,14 +21,14 @@ pub const DEFAULT_VIEW_SIZE: u32 = 1024;
 /// `folo label agents` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelAgentsResult {
-    /// Claude Code, then Codex.
+    /// Claude Code, Codex, then Antigravity.
     pub agents: Vec<LabelAgentSummary>,
 }
 
 /// One agent CLI on the server's machine.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelAgentSummary {
-    /// `claude` or `codex`: `start_labeling`'s `agent`.
+    /// `claude`, `codex` or `antigravity`: `start_labeling`'s `agent`.
     pub id: LabelAgentId,
     /// Its CLI is installed (signed in is only known once a run calls it).
     pub available: bool,

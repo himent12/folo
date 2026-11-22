@@ -1,5 +1,5 @@
-//! The measuring stick of agent labeling: real Claude Code or Codex calls on a fixed pick of COCO val2017 photos,
-//! scored against COCO's own boxes, with the tokens, the reported cost and the wall time of the run.
+//! The measuring stick of agent labeling: real Claude Code, Codex or Antigravity calls on a fixed pick of COCO
+//! val2017 photos, scored against COCO's own boxes, with the tokens, the reported cost and the wall time of the run.
 //!
 //! ```sh
 //! cargo run -p folo-server --release --example label_eval -- --coco D:/folo-data/coco --agent claude
@@ -47,7 +47,7 @@ use folo_server::api::{BBox, LabelAgentId, LabelEffort, LabelUsage};
 use folo_server::label::agent::{BatchError, Event, ask};
 use folo_server::label::prompt::ImageSize;
 use folo_server::label::{
-    Agent, AgentImage, AgentRequest, ClaudeCode, Codex, TRANSIENT_BACKOFF, agent_jpeg, prompt,
+    Agent, AgentImage, AgentRequest, Antigravity, ClaudeCode, Codex, TRANSIENT_BACKOFF, agent_jpeg, prompt,
 };
 use folo_test_support::TestDir;
 use serde::{Deserialize, Serialize};
@@ -117,7 +117,7 @@ fn objects_schema(classes: &[String]) -> serde_json::Value {
     })
 }
 
-const USAGE: &str = "usage: label_eval --coco <dir> --agent claude|codex [--model M] [--effort low|medium|high] \
+const USAGE: &str = "usage: label_eval --coco <dir> --agent claude|codex|antigravity [--model M] [--effort low|medium|high] \
 [--batch N] [--side PX] [--fit] [--format pixels|lists|objects] [--fast] [--parallel N] [--images N] [--note TEXT] \
 [--out FILE.jsonl] [--replies DIR]\n       label_eval --table FILE.jsonl";
 
@@ -244,6 +244,7 @@ fn main() {
     let agent: Box<dyn Agent> = match args.agent {
         LabelAgentId::Claude => Box::new(ClaudeCode::new()),
         LabelAgentId::Codex => Box::new(Codex::new()),
+        LabelAgentId::Antigravity => Box::new(Antigravity::new()),
     };
     let info = agent.info();
     if !info.available {
@@ -339,7 +340,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         let number = |v: String| v.parse::<usize>().map_err(|e| format!("{flag}: {e}"));
         match flag.as_str() {
             "--coco" => a.coco = PathBuf::from(value()?),
-            "--agent" => a.agent = LabelAgentId::parse(&value()?).ok_or("--agent: claude or codex")?,
+            "--agent" => {
+                a.agent = LabelAgentId::parse(&value()?).ok_or("--agent: claude, codex or antigravity")?
+            }
             "--model" => a.model = Some(value()?),
             "--effort" => {
                 let v = value()?;

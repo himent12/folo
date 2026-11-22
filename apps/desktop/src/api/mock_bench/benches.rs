@@ -256,7 +256,11 @@ pub(super) fn propose_plan(bench: &Bench, req: &DesignBench) -> BenchPlan {
         designed_by: Some(BenchDesigner {
             agent: req.agent,
             model: req.model.clone().or_else(|| {
-                Some(if req.agent == LabelAgentId::Claude { "sonnet".into() } else { "o3".into() })
+                Some(match req.agent {
+                    LabelAgentId::Claude => "sonnet".into(),
+                    LabelAgentId::Codex => "o3".into(),
+                    LabelAgentId::Antigravity => "gemini-4-neon".into(),
+                })
             }),
         }),
     }

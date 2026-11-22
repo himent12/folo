@@ -5,7 +5,7 @@ questions you care about before you rely on a model: does it still work in bad l
 Can you trust its confidence? Could it label new images well enough to train its successor?
 
 FOLO lets you make such a benchmark from your own images and run **any vision model** on it: a FOLO model, a
-coding agent (Claude Code, Codex) looking at the images, or a model that runs somewhere else and sends its
+coding agent (Claude Code, Codex, Antigravity) looking at the images, or a model that runs somewhere else and sends its
 predictions.
 
 ```
@@ -148,7 +148,7 @@ right.
 - **A FOLO model**: any model of the server, run as validation runs it (so its mAP on the unchanged images is the
   one `folo val` reports on them). Its classes are matched to the benchmark's by name (without case); a
   benchmark class the model does not know scores 0 and is listed on the entry.
-- **A coding agent**: Claude Code or Codex, asked for boxes exactly as agent labeling asks
+- **A coding agent**: Claude Code, Codex or Antigravity, asked for boxes exactly as agent labeling asks
   ([LABELING.md](LABELING.md), same CLIs, same cost per call). Agents give no confidences. By default an agent
   runs the first 48 images, unchanged only: every condition is another call per image.
 - **Anything else**: fetch the images, run your model, send the predictions.
@@ -181,7 +181,7 @@ Python function.
 ## Designing a plan with an agent
 The default plan runs every condition at severities 1, 3 and 5 with equal weight. A benchmark for a camera in a
 pond should weigh haze and a green cast, not JPEG artifacts. **Design with an agent** sends the benchmark's
-description, its classes and a few of its images to Claude Code or Codex (the connection agent labeling uses),
+description, its classes and a few of its images to Claude Code, Codex or Antigravity (the connection agent labeling uses),
 and gets back a plan drawn from the catalog: which conditions, how severe, how much each counts, and why. It is
 a proposal: you see it next to the current plan, change what you disagree with, and save it. One model request,
 no tools (a second one only when the first answer cannot be read).

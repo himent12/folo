@@ -20,7 +20,7 @@ pub(super) fn agents(r: &LabelAgentsResult, out: Out) {
     for a in &r.agents {
         if a.available {
             out.human(format!(
-                "{:<7} {} (default {} at {} effort; models: {})",
+                "{:<12} {} (default {} at {} effort; models: {})",
                 a.id.as_str(),
                 a.version.as_deref().unwrap_or("installed"),
                 a.default_model.as_deref().unwrap_or("its own"),
@@ -29,7 +29,7 @@ pub(super) fn agents(r: &LabelAgentsResult, out: Out) {
             ));
         } else {
             out.human(format!(
-                "{:<7} not installed{}",
+                "{:<12} not installed{}",
                 a.id.as_str(),
                 a.hint.as_deref().map(|h| format!(": {h}")).unwrap_or_default()
             ));

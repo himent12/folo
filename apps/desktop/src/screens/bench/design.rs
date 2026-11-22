@@ -200,7 +200,7 @@ impl FoloApp {
                     "Ask",
                     Btn::Primary,
                     Some("icons/sparkles.svg"),
-                    "Install Claude Code or Codex on the server's machine",
+                    "Install Claude Code, Codex or Antigravity on the server's machine",
                     window,
                     cx,
                 )

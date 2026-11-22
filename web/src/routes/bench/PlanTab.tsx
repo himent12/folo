@@ -9,7 +9,7 @@ import Eye from '$icons/eye';
 import Lock from '$icons/lock';
 import Sparkles from '$icons/sparkles';
 import { bindable, computed, css, For, signal, untrack, type Signal } from 'fw';
-import type { Bench, BenchCatalog, BenchCondition, BenchPlan } from '$lib/api/types';
+import type { Bench, BenchCatalog, BenchCondition, BenchPlan, LabelAgent } from '$lib/api/types';
 import { planCondition, planPasses, setWeight, toggleCondition, toggleSeverity, unreadableWeight, weightError } from '$lib/bench/plan';
 import { GROUP_NAME, GROUPS, SEVERITIES } from '$lib/bench/rules';
 import { AGENT_NAME } from '$lib/label';
@@ -27,6 +27,7 @@ export interface PlanTabProps {
   /** The plan can still change: no entry finished or is under way ($lib/bench/rules planEditable). */
   editable: boolean;
   catalog: BenchCatalog;
+  agents?: readonly LabelAgent[];
   /** Bindable: the plan as edited (the page holds it, saved or not). */
   draft?: BenchPlan;
   /** Bindable: the weight fields as typed, per condition (the page holds them, so every save can check them). */
@@ -63,7 +64,10 @@ export default function PlanTab(props: PlanTabProps) {
   );
   const designer = computed(() => {
     const by = plan.get().designed_by;
-    return by ? `${AGENT_NAME[by.agent]}${by.model ? ` (${by.model[0]!.toUpperCase()}${by.model.slice(1)})` : ''}` : null;
+    if (!by) return null;
+    const matched = props.agents?.find((x) => x.id === by.agent);
+    const label = by.model ? (matched?.models.find((m) => m.id === by.model)?.label ?? `${by.model[0]!.toUpperCase()}${by.model.slice(1)}`) : null;
+    return `${AGENT_NAME[by.agent]}${label ? ` (${label})` : ''}`;
   });
   const isDefault = computed(() => {
     const p = plan.get();

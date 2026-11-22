@@ -33,7 +33,7 @@ const USAGE_LIMIT: [&str; 11] = [
     "out of extra usage",
 ];
 /// Words of the provider's rate limit (requests or tokens per minute), and its status, 429.
-const RATE_LIMIT: [&str; 3] = ["rate limit", "rate_limit", "too many requests"];
+const RATE_LIMIT: [&str; 4] = ["rate limit", "rate_limit", "too many requests", "resource_exhausted"];
 /// Words of a passing fault: the provider overloaded, a server error, the connection broken off. (Codex's "stream
 /// disconnected before completion" is not one of them: it wraps any failed response, a client error too, so it is
 /// a passing fault only when the rest of its message says so.)
@@ -369,6 +369,7 @@ mod tests {
              Please try again in 1.5s.",
             "429 Too Many Requests: retry after 20 seconds",
             "Rate limit reached. Please try again in 59s.",
+            "RESOURCE_EXHAUSTED: Please try again in 15s.",
         ] {
             assert!(transient(passing), "{passing}");
         }
@@ -383,6 +384,8 @@ mod tests {
             // Compound waits count in full: a minute and a half is past the cutoff.
             "Rate limit reached. Please try again in 1m30s.",
             "You exceeded your current quota. Please try again in 1.5s.",
+            "RESOURCE_EXHAUSTED: You exceeded your current quota. Please try again in 15s.",
+            "RESOURCE_EXHAUSTED: model capacity limit reached",
             // A server error that asks for a long wait ends the run like a limit.
             "unexpected status 503 Service Unavailable; try again in 2 hours",
             "Invalid API key · Please run /login",

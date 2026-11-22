@@ -189,7 +189,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       { id: 'new-run', group: 'Actions', label: 'New training run', keys: 'N', icon: Plus, run: go('/runs/new') },
       { id: 'compare', group: 'Actions', label: 'Compare runs', icon: GitCompare, run: go('/runs/compare') },
       // Agent labeling, under Datasets (no nav item of its own).
-      { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex'], icon: Tags, run: go('/datasets/label') },
+      { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex', 'Antigravity'], icon: Tags, run: go('/datasets/label') },
       // Not on a server whose health said it cannot label (`folo serve --mock`): its form could only fail (#324).
       ...(hub.lacks(LABEL_FEATURE) ? [] : [{ id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') }]),
       // Vision benchmarks: offered where the server has them (its list answered).

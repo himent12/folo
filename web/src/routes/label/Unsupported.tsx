@@ -12,7 +12,7 @@ export default function Unsupported() {
       <EmptyState
         icon={Tags}
         title="This server cannot label images"
-        description="Labeling asks Claude Code or Codex on the server's machine, so it needs a current `folo serve` started without `--mock`."
+        description="Labeling asks Claude Code, Codex or Antigravity on the server's machine, so it needs a current `folo serve` started without `--mock`."
         actions={() => (
           <Button icon={ArrowLeft} href={href('/datasets')}>
             All datasets

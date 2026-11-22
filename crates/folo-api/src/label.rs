@@ -1,5 +1,6 @@
 //! Agent labeling (docs/API.md, *Agent labeling*): unlabeled images, boxes drawn by a coding-agent CLI on the
-//! server's machine (Claude Code, Codex), and the YOLO dataset made from them. Everything under `/api/label`.
+//! server's machine (Claude Code, Codex, Antigravity), and the YOLO dataset made from them. Everything under
+//! `/api/label`.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,17 +51,20 @@ pub enum LabelAgentId {
     Claude,
     /// Codex (`codex`).
     Codex,
+    /// Antigravity (`agy`).
+    Antigravity,
 }
 
 impl LabelAgentId {
     /// Every agent, in the order they are listed.
-    pub const ALL: [LabelAgentId; 2] = [LabelAgentId::Claude, LabelAgentId::Codex];
+    pub const ALL: [LabelAgentId; 3] = [LabelAgentId::Claude, LabelAgentId::Codex, LabelAgentId::Antigravity];
 
-    /// The serialised name (`claude`, `codex`).
+    /// The serialised name (`claude`, `codex`, `antigravity`).
     pub fn as_str(self) -> &'static str {
         match self {
             LabelAgentId::Claude => "claude",
             LabelAgentId::Codex => "codex",
+            LabelAgentId::Antigravity => "antigravity",
         }
     }
 
@@ -69,11 +73,12 @@ impl LabelAgentId {
         LabelAgentId::ALL.into_iter().find(|v| v.as_str() == s)
     }
 
-    /// The product name (`Claude Code`, `Codex`).
+    /// The product name (`Claude Code`, `Codex`, `Antigravity`).
     pub fn display_name(self) -> &'static str {
         match self {
             LabelAgentId::Claude => "Claude Code",
             LabelAgentId::Codex => "Codex",
+            LabelAgentId::Antigravity => "Antigravity",
         }
     }
 }
@@ -108,7 +113,7 @@ pub struct LabelAgent {
     pub default_effort: LabelEffort,
     /// The agent's default model offers a faster service tier that uses more of the account's usage
     /// ([`StartLabeling::fast`]): Codex's Fast (priority processing). Which other models offer it is
-    /// [`LabelModel::fast`]. Claude Code offers none to FOLO's calls.
+    /// [`LabelModel::fast`]. Claude Code and Antigravity offer none to FOLO's calls.
     #[serde(default)]
     pub fast: bool,
     /// How to make the agent available (install, sign in); `null` when it is.
@@ -215,7 +220,7 @@ pub enum LabelEffort {
 }
 
 impl LabelEffort {
-    /// The serialised name (`low`, `medium`, `high`), which is also what both CLIs call it.
+    /// The serialised name (`low`, `medium`, `high`), which is also what the CLIs call it.
     pub fn as_str(self) -> &'static str {
         match self {
             LabelEffort::Low => "low",
@@ -561,7 +566,7 @@ pub struct StartLabeling {
     /// An extra instruction for this run only, e.g. what the previous labels got wrong.
     #[serde(default)]
     pub note: String,
-    /// Images per agent call (1 to 16); absent uses the agent's default (Claude Code 4, Codex 8).
+    /// Images per agent call (1 to 16); absent uses the agent's default (Claude Code 4, Codex 8, Antigravity 8).
     #[serde(default)]
     pub batch: Option<u32>,
     /// Agent calls in flight at once (1 to 8, default 3).
@@ -665,6 +670,8 @@ mod tests {
     fn start_defaults_and_wire_names() {
         let s: StartLabeling = serde_json::from_str(r#"{"agent":"codex"}"#).unwrap();
         assert_eq!(s.agent, LabelAgentId::Codex);
+        let a: StartLabeling = serde_json::from_str(r#"{"agent":"antigravity"}"#).unwrap();
+        assert_eq!(a.agent, LabelAgentId::Antigravity);
         assert_eq!((s.effort, s.scope), (None, LabelScope::Unlabeled));
         assert!(s.model.is_none() && s.image_ids.is_none() && s.batch.is_none() && s.note.is_empty());
         assert!(serde_json::from_str::<StartLabeling>(r#"{"agent":"gemini"}"#).is_err());

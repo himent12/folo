@@ -58,10 +58,9 @@ pub fn decorate(mut e: Error, front: Front) -> Error {
             "label images first: `folo label start JOB`, or `folo label set`"
         }),
         "not_supported" if e.body.message.contains("is not installed") => {
-            let other =
-                if mcp { "start_labeling with the other agent" } else { "--agent with the other one" };
+            let other = if mcp { "start_labeling with another agent" } else { "--agent with another one" };
             let install = e.body.hint.as_deref().unwrap_or("install it on the server's machine");
-            e.body.hint = Some(format!("{other} (claude or codex), or: {install}"));
+            e.body.hint = Some(format!("{other} (claude, codex or antigravity), or: {install}"));
             None
         }
         "invalid_arguments" if !mcp => Some("see `folo label <command> --help`"),
@@ -114,5 +113,13 @@ mod tests {
         assert_eq!(decorate(gone, Front::Mcp).body.hint.unwrap(), "put the folder back where it was");
         let unknown = Error::new(StatusCode::NOT_FOUND, "image_not_found", "image 'x' does not exist");
         assert!(decorate(unknown, Front::Mcp).body.hint.unwrap().contains("list_label_images"));
+        let missing_agent = || {
+            Error::new(StatusCode::NOT_IMPLEMENTED, "not_supported", "Codex is not installed")
+                .hint("Install Codex")
+        };
+        let mcp_hint = decorate(missing_agent(), Front::Mcp).body.hint.unwrap();
+        assert!(mcp_hint.contains("start_labeling") && mcp_hint.contains("(claude, codex or antigravity)"));
+        let cli_hint = decorate(missing_agent(), Front::Cli).body.hint.unwrap();
+        assert!(cli_hint.contains("--agent") && cli_hint.contains("(claude, codex or antigravity)"));
     }
 }

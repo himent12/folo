@@ -9,7 +9,7 @@ use clap::{Args, Subcommand, ValueEnum};
 /// `folo label`.
 #[derive(Debug, Subcommand)]
 pub enum LabelCommand {
-    /// The agent CLIs that can label images (Claude Code, Codex): installed or not, models, defaults.
+    /// The agent CLIs that can label images (Claude Code, Codex, Antigravity): installed or not, models, defaults.
     Agents(LabelServerArgs),
     /// The labeling jobs, newest first, with their image counts.
     Jobs(LabelServerArgs),
@@ -99,6 +99,8 @@ pub enum AgentArg {
     Claude,
     /// Codex (`codex`).
     Codex,
+    /// Antigravity (`agy`).
+    Antigravity,
 }
 
 /// A reasoning effort.
