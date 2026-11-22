@@ -13,10 +13,10 @@ use folo_api::{LabelEffort, LabelUsage};
 use serde_json::{Value, json};
 
 use super::protocol::{
-    Isolation, LABEL_AGENT_NAME, LABEL_CLI_DIR, UsageTracker, find_effort_option, find_mode_option,
-    find_model_option, is_permissive_mode, match_option_value, parse_config_options, parse_legacy_models,
-    pick_safe_mode, prepare_isolation, prompt_blocks, reject_permission, resolve_effort_value,
-    resolve_executable, resolve_model_and_effort, rpc_failure,
+    ConfigOption, Isolation, LABEL_AGENT_NAME, LABEL_CLI_DIR, UsageTracker, find_effort_option,
+    find_mode_option, find_model_option, is_restricted_mode, match_option_value, parse_config_options,
+    parse_legacy_models, pick_safe_mode, prepare_isolation, prompt_blocks, reject_permission,
+    resolve_effort_value, resolve_executable, resolve_model_and_effort, rpc_failure,
 };
 use crate::label::agent::{AgentError, AgentReply, AgentRequest, Failure, POLL, last_line};
 use crate::label::tree::Tree;
@@ -25,8 +25,8 @@ use crate::label::tree::Tree;
 const CLOSE_GRACE: Duration = Duration::from_millis(250);
 /// How long to wait for a responsive `agy acp` child to acknowledge `session/cancel` and emit final usage.
 pub(super) const CANCEL_GRACE: Duration = Duration::from_millis(500);
-/// How long to wait for stderr to reach EOF after stdout closes before classifying an unexpected exit.
-const STDERR_DRAIN: Duration = Duration::from_millis(250);
+/// How long to drain buffered stdout/stderr after the parent process has exited before reporting early exit.
+const EXIT_DRAIN: Duration = Duration::from_millis(250);
 /// Maximum bytes retained from child stderr (most recent tail).
 pub(super) const MAX_STDERR_BYTES: usize = 64 * 1024;
 
@@ -78,7 +78,8 @@ impl StderrTail {
 }
 
 /// Process-tree guard for `agy acp`: tracks child exit separately from process-group termination so descendants on
-/// Unix (or Windows job members) are always killed even when the immediate child exits cleanly.
+/// Unix (and Windows job members, required via [`Tree::start_strict`]) are always killed even when the immediate
+/// child exits cleanly.
 struct AcpProcess {
     child: Child,
     tree: Tree,
@@ -94,7 +95,7 @@ impl AcpProcess {
         let program = cmd.get_program().to_string_lossy().into_owned();
         let unavailable = |e: std::io::Error| AgentError::Unavailable(format!("starting `{program}`: {e}"));
         let mut child = cmd.spawn().map_err(unavailable)?;
-        let tree = Tree::start(&child).map_err(|e| {
+        let tree = Tree::start_strict(&child).map_err(|e| {
             let _ = child.kill();
             let _ = child.wait();
             unavailable(e)
@@ -102,13 +103,17 @@ impl AcpProcess {
         Ok(AcpProcess { child, tree, child_exited: false, tree_killed: false })
     }
 
+    fn poll_exited(&mut self) -> bool {
+        if !self.child_exited && matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.child_exited = true;
+        }
+        self.child_exited
+    }
+
     fn finish_gracefully(&mut self, stdout_ended: &AtomicBool, stderr_ended: &AtomicBool) {
         let deadline = Instant::now() + CLOSE_GRACE;
         while Instant::now() < deadline {
-            if !self.child_exited && matches!(self.child.try_wait(), Ok(Some(_))) {
-                self.child_exited = true;
-            }
-            if self.child_exited
+            if self.poll_exited()
                 && stdout_ended.load(Ordering::Acquire)
                 && stderr_ended.load(Ordering::Acquire)
             {
@@ -147,27 +152,41 @@ pub(super) fn acp_command(path: &Path, iso: &Isolation) -> Command {
     cmd
 }
 
+/// Outcome of driving one ACP conversation, plus whether the caller must kill the child tree immediately (skipping
+/// any graceful exit window, e.g. on cancellation, timeout, or a tool/mode policy violation).
+pub(super) struct DriveOutcome {
+    pub result: Result<AgentReply, AgentError>,
+    pub kill_immediately: bool,
+}
+
 /// Spawns `agy acp`, drives one ACP v1 labeling turn, and cleans up the entire child tree and reader threads.
 pub(super) fn run_acp(
     path: &Path,
     req: &AgentRequest<'_>,
     timeout: Duration,
 ) -> Result<AgentReply, AgentError> {
-    run_acp_with_home(path, req, timeout, None)
+    run_acp_checked(path, req, timeout, None).0
 }
 
-pub(super) fn run_acp_with_home(
+/// Same as [`run_acp`], returning `(result, pipes_closed)` for deterministic descendant-cleanup tests.
+pub(super) fn run_acp_checked(
     path: &Path,
     req: &AgentRequest<'_>,
     timeout: Duration,
     home: Option<&Path>,
-) -> Result<AgentReply, AgentError> {
+) -> (Result<AgentReply, AgentError>, bool) {
     if req.cancel.load(Ordering::Relaxed) {
-        return Err(AgentError::Cancelled(LabelUsage::default()));
+        return (Err(AgentError::Cancelled(LabelUsage::default())), true);
     }
-    let iso = prepare_isolation(req.scratch, home)?;
+    let iso = match prepare_isolation(req.scratch, home) {
+        Ok(iso) => iso,
+        Err(e) => return (Err(e), true),
+    };
 
-    let mut proc = AcpProcess::spawn(path, &iso)?;
+    let mut proc = match AcpProcess::spawn(path, &iso) {
+        Ok(p) => p,
+        Err(e) => return (Err(e), true),
+    };
     let stdin = proc.child.stdin.take().expect("stdin is piped");
     let stdout = proc.child.stdout.take().expect("stdout is piped");
     let stderr = proc.child.stderr.take().expect("stderr is piped");
@@ -215,34 +234,46 @@ pub(super) fn run_acp_with_home(
         bytes.push(b'\n');
         in_tx.send(bytes).is_ok()
     };
-    let read_stderr = || stderr_tail.drain_text(STDERR_DRAIN);
+    let read_stderr = || stderr_tail.drain_text(EXIT_DRAIN);
+    let mut parent_exited = || proc.poll_exited();
 
-    let result = drive_acp(req, &iso.work, timeout, &mut send, &out_rx, &read_stderr);
+    let outcome = drive_acp_inner(
+        req,
+        &iso.work,
+        timeout,
+        CANCEL_GRACE,
+        &mut send,
+        &out_rx,
+        &read_stderr,
+        &mut parent_exited,
+    );
 
-    // Close stdin and wait briefly for a clean exit; always kill the process group / job afterwards so no
-    // descendant survives holding pipes open.
+    // Close stdin; kill immediately on cancel, timeout, or policy violation, otherwise allow a brief clean exit
+    // before always killing the process group / job so no descendant outlives the call.
     drop(in_tx);
-    match &result {
-        Err(AgentError::Cancelled(_) | AgentError::Timeout(_)) => proc.kill(),
-        Ok(_) | Err(_) => proc.finish_gracefully(&stdout_ended, &stderr_tail.ended),
+    if outcome.kill_immediately {
+        proc.kill();
+    } else {
+        proc.finish_gracefully(&stdout_ended, &stderr_tail.ended);
     }
-    // Wait briefly for the reader threads to observe EOF once the tree is dead so they do not outlive the call.
-    join_bounded(out_thread, &stdout_ended, STDERR_DRAIN);
-    join_bounded(err_thread, &stderr_tail.ended, STDERR_DRAIN);
-    result
+    let out_closed = join_bounded(out_thread, &stdout_ended, EXIT_DRAIN);
+    let err_closed = join_bounded(err_thread, &stderr_tail.ended, EXIT_DRAIN);
+    (outcome.result, out_closed && err_closed)
 }
 
-fn join_bounded(handle: JoinHandle<()>, ended: &AtomicBool, wait: Duration) {
+fn join_bounded(handle: JoinHandle<()>, ended: &AtomicBool, wait: Duration) -> bool {
     let deadline = Instant::now() + wait;
     while !ended.load(Ordering::Acquire) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
     if ended.load(Ordering::Acquire) {
         let _ = handle.join();
+        true
+    } else {
+        false
     }
 }
 
-/// What stopped a single ACP RPC call early.
 fn unexpected_exit(usage: &UsageTracker, stderr_text: &dyn Fn() -> String) -> AgentError {
     if let Some(why) = last_line(&stderr_text()) {
         return AgentError::Failed(Failure { used: usage.to_usage(0), ..Failure::new(why) });
@@ -256,8 +287,44 @@ fn unexpected_exit(usage: &UsageTracker, stderr_text: &dyn Fn() -> String) -> Ag
     AgentError::Unavailable("`agy` exited before replying".into())
 }
 
+/// Checks that any advertised mode selector (config option or legacy mode state) is on an explicitly allowed
+/// restricted mode. Fails closed on missing, dropped, or unrecognized mode ids.
+fn verify_restricted_mode(
+    options: &[ConfigOption],
+    legacy_mode: Option<&str>,
+    require_mode_option: bool,
+) -> Result<(), AgentError> {
+    if let Some(opt) = find_mode_option(options) {
+        match opt.current_value.as_deref() {
+            Some(cur) if is_restricted_mode(cur) => Ok(()),
+            Some(cur) => Err(AgentError::Unavailable(format!(
+                "`agy acp` is in non-restricted mode `{cur}`; refusing to run in labeling mode"
+            ))),
+            None => Err(AgentError::Unavailable(
+                "`agy acp` advertised a mode selector without a current restricted mode".into(),
+            )),
+        }
+    } else if require_mode_option {
+        Err(AgentError::Unavailable(
+            "`agy acp` omitted `mode` from its updated `configOptions`; refusing to run in labeling mode"
+                .into(),
+        ))
+    } else if let Some(cur) = legacy_mode {
+        if is_restricted_mode(cur) {
+            Ok(())
+        } else {
+            Err(AgentError::Unavailable(format!(
+                "`agy acp` is in non-restricted mode `{cur}`; refusing to run in labeling mode"
+            )))
+        }
+    } else {
+        Ok(())
+    }
+}
+
 /// The ACP v1 JSON-RPC conversation for one labeling call, decoupled from OS processes so unit tests can drive it
 /// directly over in-memory channels.
+#[cfg(test)]
 pub(super) fn drive_acp(
     req: &AgentRequest<'_>,
     work: &Path,
@@ -266,9 +333,11 @@ pub(super) fn drive_acp(
     recv: &mpsc::Receiver<String>,
     stderr_text: &dyn Fn() -> String,
 ) -> Result<AgentReply, AgentError> {
-    drive_acp_with_grace(req, work, timeout, CANCEL_GRACE, send, recv, stderr_text)
+    let mut never_exited = || false;
+    drive_acp_inner(req, work, timeout, CANCEL_GRACE, send, recv, stderr_text, &mut never_exited).result
 }
 
+#[cfg(test)]
 pub(super) fn drive_acp_with_grace(
     req: &AgentRequest<'_>,
     work: &Path,
@@ -277,19 +346,42 @@ pub(super) fn drive_acp_with_grace(
     send: &mut dyn FnMut(&Value) -> bool,
     recv: &mpsc::Receiver<String>,
     stderr_text: &dyn Fn() -> String,
-) -> Result<AgentReply, AgentError> {
+) -> DriveOutcome {
+    let mut never_exited = || false;
+    drive_acp_inner(req, work, timeout, cancel_grace, send, recv, stderr_text, &mut never_exited)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_acp_inner(
+    req: &AgentRequest<'_>,
+    work: &Path,
+    timeout: Duration,
+    cancel_grace: Duration,
+    send: &mut dyn FnMut(&Value) -> bool,
+    recv: &mpsc::Receiver<String>,
+    stderr_text: &dyn Fn() -> String,
+    parent_exited: &mut dyn FnMut() -> bool,
+) -> DriveOutcome {
     let deadline = Instant::now() + timeout;
     let mut next_id: u64 = 1;
     let mut usage = UsageTracker::default();
     let mut reply_text = String::new();
     let mut session_id: Option<String> = None;
+    let mut kill_immediately = false;
+    let mut enforce_mode = false;
+    let mut mode_selector_advertised = false;
+    let mut notified_mode: Option<String> = None;
 
     let mut rpc_call = |method: &str,
                         params: Value,
                         collect_reply: bool,
                         session_id: &Option<String>,
+                        enforce_mode: bool,
+                        mode_selector_advertised: bool,
+                        notified_mode: &mut Option<String>,
                         usage: &mut UsageTracker,
-                        reply_text: &mut String|
+                        reply_text: &mut String,
+                        kill_immediately: &mut bool|
      -> Result<Value, AgentError> {
         let id = next_id;
         next_id += 1;
@@ -298,15 +390,16 @@ pub(super) fn drive_acp_with_grace(
             return Err(unexpected_exit(usage, stderr_text));
         }
         let mut cancel_deadline: Option<Instant> = None;
+        let mut exit_drain_deadline: Option<Instant> = None;
         loop {
             if cancel_deadline.is_none() && req.cancel.load(Ordering::Relaxed) {
+                *kill_immediately = true;
                 if let Some(sid) = session_id {
                     let _ = send(&json!({
                         "jsonrpc": "2.0",
                         "method": "session/cancel",
                         "params": { "sessionId": sid }
                     }));
-                    // Give a responsive child a short bounded grace period to acknowledge cancel and emit final usage.
                     if collect_reply && !cancel_grace.is_zero() {
                         cancel_deadline = Some(Instant::now() + cancel_grace);
                     } else {
@@ -316,20 +409,35 @@ pub(super) fn drive_acp_with_grace(
                     return Err(AgentError::Cancelled(usage.to_usage(0)));
                 }
             }
+            let now = Instant::now();
             if let Some(end) = cancel_deadline
-                && Instant::now() >= end
+                && now >= end
             {
                 return Err(AgentError::Cancelled(usage.to_usage(0)));
             }
-            let wait_until = match cancel_deadline {
-                Some(end) => end.min(deadline),
-                None => deadline,
-            };
-            let remaining = wait_until.saturating_duration_since(Instant::now());
+            if let Some(end) = exit_drain_deadline
+                && now >= end
+            {
+                *kill_immediately = true;
+                return Err(unexpected_exit(usage, stderr_text));
+            }
+            let mut wait_until = deadline;
+            if let Some(end) = cancel_deadline {
+                wait_until = wait_until.min(end);
+            }
+            if let Some(end) = exit_drain_deadline {
+                wait_until = wait_until.min(end);
+            }
+            let remaining = wait_until.saturating_duration_since(now);
             if remaining.is_zero() {
                 if cancel_deadline.is_some() {
                     return Err(AgentError::Cancelled(usage.to_usage(0)));
                 }
+                if exit_drain_deadline.is_some() {
+                    *kill_immediately = true;
+                    return Err(unexpected_exit(usage, stderr_text));
+                }
+                *kill_immediately = true;
                 if let Some(sid) = session_id {
                     let _ = send(&json!({
                         "jsonrpc": "2.0",
@@ -342,7 +450,7 @@ pub(super) fn drive_acp_with_grace(
             match recv.recv_timeout(remaining.min(POLL)) {
                 Ok(line) => {
                     let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-                    // Server -> client request: answer immediately so the agent never deadlocks waiting for tools.
+                    // Server -> client request: deny immediately so the agent never deadlocks waiting for tools.
                     if let (Some(req_id), Some(req_method)) = (msg.get("id"), msg["method"].as_str()) {
                         let response = if req_method == "session/request_permission" {
                             reject_permission(req_id, &msg["params"])
@@ -369,7 +477,7 @@ pub(super) fn drive_acp_with_grace(
                             }
                             Some("usage_update") => usage.observe_usage_update(update),
                             Some("tool_call" | "tool_call_update") => {
-                                // Fail closed if a tool ever executes despite the restricted agent & strict settings.
+                                *kill_immediately = true;
                                 if let Some(sid) = session_id {
                                     let _ = send(&json!({
                                         "jsonrpc": "2.0",
@@ -377,9 +485,53 @@ pub(super) fn drive_acp_with_grace(
                                         "params": { "sessionId": sid }
                                     }));
                                 }
-                                return Err(AgentError::Unavailable(
-                                    "Antigravity attempted to invoke a tool in labeling mode".into(),
-                                ));
+                                return Err(AgentError::Failed(Failure {
+                                    used: usage.to_usage(0),
+                                    ..Failure::new("Antigravity attempted to invoke a tool in labeling mode")
+                                }));
+                            }
+                            Some("current_mode_update") => {
+                                let mode = update["currentModeId"].as_str().unwrap_or("");
+                                *notified_mode = Some(mode.to_string());
+                                if enforce_mode && !is_restricted_mode(mode) {
+                                    *kill_immediately = true;
+                                    if let Some(sid) = session_id {
+                                        let _ = send(&json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "session/cancel",
+                                            "params": { "sessionId": sid }
+                                        }));
+                                    }
+                                    return Err(AgentError::Failed(Failure {
+                                        used: usage.to_usage(0),
+                                        ..Failure::new(format!(
+                                            "Antigravity switched to non-restricted mode `{mode}` in labeling mode"
+                                        ))
+                                    }));
+                                }
+                            }
+                            Some("config_option_update") => {
+                                let updated_opts = parse_config_options(update.get("configOptions"));
+                                if enforce_mode
+                                    && let Err(AgentError::Unavailable(why)) = verify_restricted_mode(
+                                        &updated_opts,
+                                        None,
+                                        mode_selector_advertised && !updated_opts.is_empty(),
+                                    )
+                                {
+                                    *kill_immediately = true;
+                                    if let Some(sid) = session_id {
+                                        let _ = send(&json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "session/cancel",
+                                            "params": { "sessionId": sid }
+                                        }));
+                                    }
+                                    return Err(AgentError::Failed(Failure {
+                                        used: usage.to_usage(0),
+                                        ..Failure::new(why)
+                                    }));
+                                }
                             }
                             _ => {}
                         }
@@ -401,7 +553,13 @@ pub(super) fn drive_acp_with_grace(
                         return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // If the immediate `agy` child already exited while a descendant holds stdout open, drain
+                    // briefly for buffered output instead of stalling until the full 5-minute call deadline.
+                    if exit_drain_deadline.is_none() && parent_exited() {
+                        exit_drain_deadline = Some(Instant::now() + EXIT_DRAIN);
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if cancel_deadline.is_some() {
                         return Err(AgentError::Cancelled(usage.to_usage(0)));
@@ -412,8 +570,17 @@ pub(super) fn drive_acp_with_grace(
         }
     };
 
+    macro_rules! try_drive {
+        ($expr:expr) => {
+            match $expr {
+                Ok(v) => v,
+                Err(e) => return DriveOutcome { result: Err(e), kill_immediately },
+            }
+        };
+    }
+
     // 1. Handshake (`initialize`): require protocol v1 and explicit image support for image-bearing calls.
-    let init = rpc_call(
+    let init = try_drive!(rpc_call(
         "initialize",
         json!({
             "protocolVersion": 1,
@@ -422,28 +589,40 @@ pub(super) fn drive_acp_with_grace(
         }),
         false,
         &session_id,
+        enforce_mode,
+        mode_selector_advertised,
+        &mut notified_mode,
         &mut usage,
         &mut reply_text,
-    )?;
+        &mut kill_immediately,
+    ));
     if init["protocolVersion"].as_u64() != Some(1) {
         let got = &init["protocolVersion"];
-        return Err(AgentError::Unavailable(format!(
-            "`agy acp` negotiated unsupported ACP protocol version ({got}); expected 1"
-        )));
+        return DriveOutcome {
+            result: Err(AgentError::Unavailable(format!(
+                "`agy acp` negotiated unsupported ACP protocol version ({got}); expected 1"
+            ))),
+            kill_immediately,
+        };
     }
     let caps = &init["agentCapabilities"];
     if !req.images.is_empty() && caps["promptCapabilities"]["image"].as_bool() != Some(true) {
-        return Err(AgentError::Unavailable(
-            "`agy acp` does not advertise inline image prompt support".into(),
-        ));
+        return DriveOutcome {
+            result: Err(AgentError::Unavailable(
+                "`agy acp` does not advertise inline image prompt support".into(),
+            )),
+            kill_immediately,
+        };
     }
     let system_append_supported =
         caps["_meta"]["antigravity"]["systemPrompt"]["append"].as_bool() == Some(true);
     let close_supported = caps["sessionCapabilities"].get("close").is_some_and(|v| !v.is_null());
 
     // 2. Open an isolated session in the scratch folder (`session/new`) with an absolute `cwd`.
-    let cwd = super::protocol::abs_dir(work)
-        .map_err(|e| AgentError::Unavailable(format!("resolving session cwd: {e}")))?;
+    let cwd = try_drive!(
+        super::protocol::abs_dir(work)
+            .map_err(|e| AgentError::Unavailable(format!("resolving session cwd: {e}")))
+    );
     let mut new_params = json!({
         "cwd": folo_api::json::path(&cwd),
         "mcpServers": [],
@@ -456,158 +635,285 @@ pub(super) fn drive_acp_with_grace(
         );
         new_params["_meta"] = json!({ "antigravity": { "systemPrompt": { "append": append } } });
     }
-    let session = rpc_call("session/new", new_params, false, &session_id, &mut usage, &mut reply_text)?;
-    let sid = session["sessionId"]
-        .as_str()
-        .ok_or_else(|| AgentError::Unavailable("`agy acp` returned no sessionId".into()))?
-        .to_string();
+    let session = try_drive!(rpc_call(
+        "session/new",
+        new_params,
+        false,
+        &session_id,
+        enforce_mode,
+        mode_selector_advertised,
+        &mut notified_mode,
+        &mut usage,
+        &mut reply_text,
+        &mut kill_immediately,
+    ));
+    let sid = try_drive!(
+        session["sessionId"]
+            .as_str()
+            .ok_or_else(|| AgentError::Unavailable("`agy acp` returned no sessionId".into()))
+    )
+    .to_string();
     session_id = Some(sid.clone());
     let mut config_options = parse_config_options(session.get("configOptions"));
+    mode_selector_advertised = find_mode_option(&config_options).is_some();
+    let mut legacy_mode = session
+        .get("modes")
+        .and_then(|m| m["currentModeId"].as_str())
+        .map(str::to_string)
+        .or_else(|| notified_mode.clone());
 
-    // 2b. Ensure the session is not in an auto-approving execution mode (fail closed if stuck in one).
-    if let Some(mode_opt) = find_mode_option(&config_options).cloned()
-        && let Some(cur) = mode_opt.current_value.as_deref()
-        && is_permissive_mode(cur)
-    {
-        let safe = pick_safe_mode(&mode_opt.values).ok_or_else(|| {
-            AgentError::Unavailable(format!(
-                "`agy acp` started in auto-approving mode `{cur}` and offers no restricted mode"
-            ))
-        })?;
-        let updated = rpc_call(
-            "session/set_config_option",
-            json!({ "sessionId": sid, "configId": mode_opt.id, "value": safe }),
-            false,
-            &session_id,
-            &mut usage,
-            &mut reply_text,
-        )?;
-        let refreshed = parse_config_options(updated.get("configOptions"));
-        if !refreshed.is_empty() {
-            config_options = refreshed;
-            if let Some(after) = find_mode_option(&config_options).and_then(|o| o.current_value.as_deref())
-                && is_permissive_mode(after)
-            {
-                return Err(AgentError::Unavailable(format!(
-                    "`agy acp` remained in auto-approving mode `{after}` after requesting `{safe}`"
-                )));
+    // 2b. Enforce a known restricted execution mode whenever a mode selector is advertised.
+    if let Some(mode_opt) = find_mode_option(&config_options).cloned() {
+        if !mode_opt.current_value.as_deref().is_some_and(is_restricted_mode) {
+            let cur = mode_opt.current_value.as_deref().unwrap_or("<unset>");
+            let safe = try_drive!(pick_safe_mode(&mode_opt.values).ok_or_else(|| {
+                AgentError::Unavailable(format!(
+                    "`agy acp` started in non-restricted mode `{cur}` and offers no restricted mode"
+                ))
+            }));
+            let updated = try_drive!(rpc_call(
+                "session/set_config_option",
+                json!({ "sessionId": sid, "configId": mode_opt.id, "value": safe }),
+                false,
+                &session_id,
+                enforce_mode,
+                mode_selector_advertised,
+                &mut notified_mode,
+                &mut usage,
+                &mut reply_text,
+                &mut kill_immediately,
+            ));
+            let refreshed = parse_config_options(updated.get("configOptions"));
+            if refreshed.is_empty() {
+                return DriveOutcome {
+                    result: Err(AgentError::Unavailable(
+                        "`agy acp` did not return updated `configOptions` after setting mode".into(),
+                    )),
+                    kill_immediately,
+                };
             }
+            config_options = refreshed;
         }
-    } else if let Some(modes) = session.get("modes")
-        && let Some(cur) = modes["currentModeId"].as_str()
-        && is_permissive_mode(cur)
-    {
-        let avail: Vec<(String, String)> = modes["availableModes"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        let id = m["id"].as_str()?;
-                        Some((id.to_string(), m["name"].as_str().unwrap_or(id).to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let safe = pick_safe_mode(&avail).ok_or_else(|| {
-            AgentError::Unavailable(format!(
-                "`agy acp` started in auto-approving mode `{cur}` and offers no restricted mode"
-            ))
-        })?;
-        let _ = rpc_call(
-            "session/set_mode",
-            json!({ "sessionId": sid, "modeId": safe }),
-            false,
-            &session_id,
-            &mut usage,
-            &mut reply_text,
-        )?;
+    } else if let Some(modes) = session.get("modes").filter(|m| !m.is_null()) {
+        let cur = legacy_mode.as_deref().unwrap_or("<unset>");
+        if !is_restricted_mode(cur) {
+            let avail: Vec<(String, String)> = modes["availableModes"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let id = m["id"].as_str()?;
+                            Some((id.to_string(), m["name"].as_str().unwrap_or(id).to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let safe = try_drive!(pick_safe_mode(&avail).ok_or_else(|| {
+                AgentError::Unavailable(format!(
+                    "`agy acp` started in non-restricted mode `{cur}` and offers no restricted mode"
+                ))
+            }));
+            let _ = try_drive!(rpc_call(
+                "session/set_mode",
+                json!({ "sessionId": sid, "modeId": safe }),
+                false,
+                &session_id,
+                enforce_mode,
+                mode_selector_advertised,
+                &mut notified_mode,
+                &mut usage,
+                &mut reply_text,
+                &mut kill_immediately,
+            ));
+            legacy_mode = Some(safe);
+        }
     }
+    try_drive!(verify_restricted_mode(&config_options, legacy_mode.as_deref(), mode_selector_advertised));
+    enforce_mode = true;
 
-    // 3. Configure model and reasoning effort (`session/set_config_option`, with legacy `session/set_model` fallback).
-    // Fail closed if an explicitly requested model or non-default effort cannot be configured in this session.
-    let res = resolve_model_and_effort(req.model, req.effort, find_model_option(&config_options));
+    // 3. Configure model and reasoning effort (`session/set_config_option`, requiring the complete updated
+    // `configOptions` snapshot per ACP v1, or legacy `session/set_model`), then verify all settings before prompting.
+    let legacy_model_opt = if find_model_option(&config_options).is_none() {
+        session.get("models").filter(|m| !m.is_null()).map(|models| ConfigOption {
+            id: "model".into(),
+            category: Some("model".into()),
+            current_value: models["currentModelId"].as_str().map(str::to_string),
+            values: parse_legacy_models(models),
+        })
+    } else {
+        None
+    };
+    let res = resolve_model_and_effort(
+        req.model,
+        req.effort,
+        find_model_option(&config_options).or(legacy_model_opt.as_ref()),
+    );
+    let mut expected_model: Option<String> = None;
+    let mut expected_effort: Option<String> = None;
+
     if let Some(model) = res.model {
         if let Some(opt) = find_model_option(&config_options).cloned() {
+            expected_model = Some(model.clone());
             if !opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&model)) {
-                let updated = rpc_call(
+                let updated = try_drive!(rpc_call(
                     "session/set_config_option",
                     json!({ "sessionId": sid, "configId": opt.id, "value": model }),
                     false,
                     &session_id,
+                    enforce_mode,
+                    mode_selector_advertised,
+                    &mut notified_mode,
                     &mut usage,
                     &mut reply_text,
-                )?;
+                    &mut kill_immediately,
+                ));
                 let refreshed = parse_config_options(updated.get("configOptions"));
-                if !refreshed.is_empty() {
-                    config_options = refreshed;
-                    if let Some(actual) =
-                        find_model_option(&config_options).and_then(|o| o.current_value.as_deref())
-                        && !actual.eq_ignore_ascii_case(&model)
-                    {
-                        return Err(AgentError::Failed(Failure::new(format!(
-                            "`agy acp` selected model `{actual}` instead of requested `{model}`"
-                        ))));
-                    }
+                if refreshed.is_empty() {
+                    return DriveOutcome {
+                        result: Err(AgentError::Failed(Failure::new(format!(
+                            "`agy acp` did not return updated `configOptions` confirming model `{model}`"
+                        )))),
+                        kill_immediately,
+                    };
                 }
+                config_options = refreshed;
             }
-        } else if let Some(models) = session.get("models").filter(|m| !m.is_null()) {
-            let avail = parse_legacy_models(models);
-            let target = match_option_value(&avail, &model).unwrap_or(&model).to_string();
-            let current = models["currentModelId"].as_str();
-            if !current.is_some_and(|cur| cur.eq_ignore_ascii_case(&target)) {
-                let _ = rpc_call(
+        } else if let Some(legacy_opt) = legacy_model_opt.as_ref() {
+            let target = match match_option_value(&legacy_opt.values, &model) {
+                Some(matched) => matched.to_string(),
+                None if legacy_opt.values.is_empty() => model.clone(),
+                None => {
+                    return DriveOutcome {
+                        result: Err(AgentError::Failed(Failure::new(format!(
+                            "`agy acp` does not offer model `{model}` in this session"
+                        )))),
+                        kill_immediately,
+                    };
+                }
+            };
+            if !legacy_opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&target)) {
+                let _ = try_drive!(rpc_call(
                     "session/set_model",
                     json!({ "sessionId": sid, "modelId": target }),
                     false,
                     &session_id,
+                    enforce_mode,
+                    mode_selector_advertised,
+                    &mut notified_mode,
                     &mut usage,
                     &mut reply_text,
-                )?;
+                    &mut kill_immediately,
+                ));
             }
         } else {
-            return Err(AgentError::Failed(Failure::new(format!(
-                "`agy acp` does not allow selecting model `{model}` in this session"
-            ))));
+            return DriveOutcome {
+                result: Err(AgentError::Failed(Failure::new(format!(
+                    "`agy acp` does not allow selecting model `{model}` in this session"
+                )))),
+                kill_immediately,
+            };
         }
     }
+
     if let Some(opt) = find_effort_option(&config_options).cloned() {
-        if let Some(effort_value) = resolve_effort_value(&res.desired_effort, &opt)
-            && !opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&effort_value))
-        {
-            let updated = rpc_call(
+        let effort_value = try_drive!(
+            resolve_effort_value(&res.desired_effort, &opt)
+                .map_err(|why| AgentError::Failed(Failure::new(why)))
+        );
+        expected_effort = Some(effort_value.clone());
+        if !opt.current_value.as_deref().is_some_and(|cur| cur.eq_ignore_ascii_case(&effort_value)) {
+            let updated = try_drive!(rpc_call(
                 "session/set_config_option",
                 json!({ "sessionId": sid, "configId": opt.id, "value": effort_value }),
                 false,
                 &session_id,
+                enforce_mode,
+                mode_selector_advertised,
+                &mut notified_mode,
                 &mut usage,
                 &mut reply_text,
-            )?;
+                &mut kill_immediately,
+            ));
             let refreshed = parse_config_options(updated.get("configOptions"));
-            if !refreshed.is_empty()
-                && let Some(actual) = find_effort_option(&refreshed).and_then(|o| o.current_value.as_deref())
-                && !actual.eq_ignore_ascii_case(&effort_value)
-            {
-                return Err(AgentError::Failed(Failure::new(format!(
-                    "`agy acp` selected effort `{actual}` instead of requested `{effort_value}`"
-                ))));
+            if refreshed.is_empty() {
+                return DriveOutcome {
+                    result: Err(AgentError::Failed(Failure::new(format!(
+                        "`agy acp` did not return updated `configOptions` confirming effort `{effort_value}`"
+                    )))),
+                    kill_immediately,
+                };
             }
+            config_options = refreshed;
         }
     } else if res.stripped_suffix || (!res.suffix_on_model && req.effort != LabelEffort::Low) {
-        return Err(AgentError::Failed(Failure::new(format!(
-            "`agy acp` does not allow setting reasoning effort `{}` in this session",
-            res.desired_effort
-        ))));
+        return DriveOutcome {
+            result: Err(AgentError::Failed(Failure::new(format!(
+                "`agy acp` does not allow setting reasoning effort `{}` in this session",
+                res.desired_effort
+            )))),
+            kill_immediately,
+        };
+    }
+
+    // Final pre-prompt invariant check against the latest configuration snapshot: mode must still be restricted,
+    // and both requested model and effort must still match.
+    try_drive!(verify_restricted_mode(&config_options, legacy_mode.as_deref(), mode_selector_advertised));
+    if let Some(want) = expected_model.as_deref() {
+        match find_model_option(&config_options).and_then(|o| o.current_value.as_deref()) {
+            Some(actual) if actual.eq_ignore_ascii_case(want) => {}
+            Some(actual) => {
+                return DriveOutcome {
+                    result: Err(AgentError::Failed(Failure::new(format!(
+                        "`agy acp` selected model `{actual}` instead of requested `{want}`"
+                    )))),
+                    kill_immediately,
+                };
+            }
+            None => {
+                return DriveOutcome {
+                    result: Err(AgentError::Failed(Failure::new(format!(
+                        "`agy acp` omitted model `{want}` from its latest `configOptions`"
+                    )))),
+                    kill_immediately,
+                };
+            }
+        }
+    }
+    if let Some(want) = expected_effort.as_deref() {
+        match find_effort_option(&config_options).and_then(|o| o.current_value.as_deref()) {
+            Some(actual) if actual.eq_ignore_ascii_case(want) => {}
+            Some(actual) => {
+                return DriveOutcome {
+                    result: Err(AgentError::Failed(Failure::new(format!(
+                        "`agy acp` selected effort `{actual}` instead of requested `{want}`"
+                    )))),
+                    kill_immediately,
+                };
+            }
+            None => {
+                return DriveOutcome {
+                    result: Err(AgentError::Failed(Failure::new(format!(
+                        "`agy acp` omitted effort `{want}` from its latest `configOptions`"
+                    )))),
+                    kill_immediately,
+                };
+            }
+        }
     }
 
     // 4. Send the single-turn prompt with inline base64 JPEG images (`session/prompt`).
-    let prompt_result = rpc_call(
+    let prompt_result = try_drive!(rpc_call(
         "session/prompt",
         json!({ "sessionId": sid, "prompt": prompt_blocks(req, system_append_supported) }),
         true,
         &session_id,
+        enforce_mode,
+        mode_selector_advertised,
+        &mut notified_mode,
         &mut usage,
         &mut reply_text,
-    )?;
+        &mut kill_immediately,
+    ));
 
     // 5. Best-effort clean session close.
     if close_supported {
@@ -622,21 +928,30 @@ pub(super) fn drive_acp_with_grace(
 
     let stop_reason = prompt_result["stopReason"].as_str().unwrap_or("end_turn");
     if stop_reason == "cancelled" {
-        return Err(AgentError::Cancelled(usage.to_usage(0)));
+        return DriveOutcome {
+            result: Err(AgentError::Cancelled(usage.to_usage(0))),
+            kill_immediately: true,
+        };
     }
     if stop_reason == "refusal" {
-        return Err(AgentError::Failed(Failure {
-            used: usage.to_usage(1),
-            ..Failure::new("Antigravity refused the prompt")
-        }));
+        return DriveOutcome {
+            result: Err(AgentError::Failed(Failure {
+                used: usage.to_usage(1),
+                ..Failure::new("Antigravity refused the prompt")
+            })),
+            kill_immediately,
+        };
     }
     if reply_text.trim().is_empty() {
         let used = usage.to_usage(0);
-        return Err(if usage.seen() {
-            AgentError::Failed(Failure { used, ..Failure::new("`agy` printed no reply") })
-        } else {
-            AgentError::Unavailable("`agy` printed no reply".into())
-        });
+        return DriveOutcome {
+            result: Err(if usage.seen() {
+                AgentError::Failed(Failure { used, ..Failure::new("`agy` printed no reply") })
+            } else {
+                AgentError::Unavailable("`agy` printed no reply".into())
+            }),
+            kill_immediately,
+        };
     }
-    Ok(AgentReply { text: reply_text, usage: usage.to_usage(1) })
+    DriveOutcome { result: Ok(AgentReply { text: reply_text, usage: usage.to_usage(1) }), kill_immediately }
 }

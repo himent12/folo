@@ -101,7 +101,26 @@ pub fn is_limit(message: &str, status: Option<u16>) -> bool {
         || retry_after(message).is_some_and(|w| w > SHORT_RATE_LIMIT)
 }
 
+/// Words of an account billing/plan limit that stay non-retryable even when paired with `RATE_LIMIT_EXCEEDED`.
+const BILLING_LIMIT: [&str; 10] = [
+    "usage limit",
+    "session limit",
+    "weekly limit",
+    "hour limit",
+    "hit your",
+    "credits",
+    "credit balance",
+    "spend",
+    "billing",
+    "out of extra usage",
+];
+
 fn is_usage_limit(lower: &str) -> bool {
+    // Google RPC rate limits carry `reason: "RATE_LIMIT_EXCEEDED"` alongside per-minute `"quota metric"` text:
+    // treat those as provider rate limits unless billing/plan exhaustion words are also present.
+    if lower.contains("rate_limit_exceeded") {
+        return BILLING_LIMIT.iter().any(|w| has_word(lower, w));
+    }
     USAGE_LIMIT.iter().any(|w| has_word(lower, w))
 }
 
@@ -370,6 +389,7 @@ mod tests {
             "429 Too Many Requests: retry after 20 seconds",
             "Rate limit reached. Please try again in 59s.",
             "RESOURCE_EXHAUSTED: Please try again in 15s.",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: Quota exceeded for requests per minute: retry after 15s",
         ] {
             assert!(transient(passing), "{passing}");
         }
@@ -386,6 +406,7 @@ mod tests {
             "You exceeded your current quota. Please try again in 1.5s.",
             "RESOURCE_EXHAUSTED: You exceeded your current quota. Please try again in 15s.",
             "RESOURCE_EXHAUSTED: model capacity limit reached",
+            "Request failed: RESOURCE_EXHAUSTED: RATE_LIMIT_EXCEEDED: Quota exceeded for requests per minute: retry after 120s",
             // A server error that asks for a long wait ends the run like a limit.
             "unexpected status 503 Service Unavailable; try again in 2 hours",
             "Invalid API key · Please run /login",

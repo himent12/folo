@@ -261,8 +261,13 @@ fn main() {
     if let Some(notice) = agent.notice() {
         eprintln!("{}: {notice}", info.name);
     }
-    let model = args.model.clone().or(info.default_model.clone());
-    let effort = args.effort.unwrap_or(info.default_effort);
+    let (model, effort) = match agent.resolve_request(args.model.clone(), args.effort) {
+        Ok(pair) => pair,
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(2);
+        }
+    };
     let batch = args.batch.unwrap_or_else(|| agent.default_batch());
     let side = args.side.unwrap_or_else(|| agent.image_side());
     let format = args.format.as_str();

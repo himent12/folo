@@ -38,10 +38,23 @@ impl Tree {
     /// Takes the just-spawned `child` of a [`Tree::prepare`]d command into a tree and lets it run. An error
     /// means the child cannot run (it is still suspended): the caller kills it.
     pub fn start(child: &Child) -> std::io::Result<Tree> {
+        Self::start_inner(child, false)
+    }
+
+    /// Like [`Tree::start`], but on Windows fails closed if a job object cannot be assigned so descendant
+    /// termination never depends on finding children through an already-exited parent.
+    pub fn start_strict(child: &Child) -> std::io::Result<Tree> {
+        Self::start_inner(child, true)
+    }
+
+    fn start_inner(child: &Child, require_job: bool) -> std::io::Result<Tree> {
         #[cfg(windows)]
         {
-            // Without a job (Windows refused one) the call still runs; its tree is then found through the child.
+            // Without a job (Windows refused one) normal calls still run; strict calls fail closed before resuming.
             let job = windows::JobObject::holding(child);
+            if require_job && job.is_none() {
+                return Err(std::io::Error::other("could not assign child process to a Windows job object"));
+            }
             if !windows::resume(child.id()) {
                 return Err(std::io::Error::other("the process was created but could not be started"));
             }
@@ -49,7 +62,7 @@ impl Tree {
         }
         #[cfg(not(windows))]
         {
-            let _ = child;
+            let _ = (child, require_job);
             Ok(Tree {})
         }
     }

@@ -232,38 +232,24 @@ pub(super) fn find_mode_option(options: &[ConfigOption]) -> Option<&ConfigOption
         .or_else(|| options.iter().find(|o| o.id.eq_ignore_ascii_case("mode")))
 }
 
-pub(super) fn is_permissive_mode(mode: &str) -> bool {
-    matches!(
-        mode.trim().to_ascii_lowercase().as_str(),
-        "auto"
-            | "accept-edits"
-            | "accept_edits"
-            | "acceptedits"
-            | "bypass"
-            | "bypass-permissions"
-            | "bypass_permissions"
-            | "bypasspermissions"
-            | "turbo"
-            | "yolo"
-            | "always-proceed"
-            | "always_proceed"
-            | "full-access"
-            | "full_access"
-            | "dontask"
-            | "dont-ask"
-    )
+/// ACP session mode ids explicitly known to keep tool execution restricted / gated.
+const RESTRICTED_MODES: &[&str] =
+    &["strict", "default", "request-review", "request_review", "ask", "read-only", "read_only", "plan"];
+
+/// Returns true only for explicitly allowlisted restricted modes; unknown or permissive modes fail closed.
+pub(super) fn is_restricted_mode(mode: &str) -> bool {
+    let norm = mode.trim().to_ascii_lowercase();
+    RESTRICTED_MODES.contains(&norm.as_str())
 }
 
-/// Picks the strictest safe non-auto execution mode from `values`, if any is offered.
+/// Picks the strictest allowlisted restricted execution mode from `values`, or `None` if none is offered.
 pub(super) fn pick_safe_mode(values: &[(String, String)]) -> Option<String> {
-    for preferred in
-        ["strict", "default", "request-review", "request_review", "ask", "read-only", "read_only", "plan"]
-    {
-        if let Some(v) = match_option_value(values, preferred) {
-            return Some(v.to_string());
+    for preferred in RESTRICTED_MODES {
+        if let Some((v, _)) = values.iter().find(|(v, _)| v.trim().eq_ignore_ascii_case(preferred)) {
+            return Some(v.clone());
         }
     }
-    values.iter().find(|(v, _)| !is_permissive_mode(v)).map(|(v, _)| v.clone())
+    None
 }
 
 pub(super) fn match_option_value<'a>(values: &'a [(String, String)], query: &str) -> Option<&'a str> {
@@ -362,29 +348,32 @@ pub(super) fn parse_legacy_models(models: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Maps a desired effort string onto one of the session's available `thought_level` values.
-pub(super) fn resolve_effort_value(desired: &str, opt: &ConfigOption) -> Option<String> {
+/// Maps a desired effort string strictly onto an exact (or documented same-tier equivalent) `thought_level` value.
+/// Never crosses reasoning tiers or falls back to the first option so a run never spends tokens at a different
+/// effort than its record claims.
+pub(super) fn resolve_effort_value(desired: &str, opt: &ConfigOption) -> Result<String, String> {
     if opt.values.is_empty() {
-        return Some(desired.to_string());
+        return Ok(desired.to_string());
     }
     if let Some(exact) = match_option_value(&opt.values, desired) {
-        return Some(exact.to_string());
+        return Ok(exact.to_string());
     }
-    let fallbacks: &[&str] = match desired.to_ascii_lowercase().as_str() {
-        "minimal" => &["low", "medium"],
-        "low" => &["minimal", "medium"],
-        "medium" => &["low", "high"],
-        "high" => &["xhigh", "max", "medium"],
-        "xhigh" => &["max", "high", "medium"],
-        "max" => &["xhigh", "high", "medium"],
+    // Only `low` and `minimal` share the `LabelEffort::Low` tier; all other tiers require an exact match.
+    let equivalent: &[&str] = match desired.to_ascii_lowercase().as_str() {
+        "low" => &["minimal"],
+        "minimal" => &["low"],
         _ => &[],
     };
-    for cand in fallbacks {
+    for cand in equivalent {
         if let Some(v) = match_option_value(&opt.values, cand) {
-            return Some(v.to_string());
+            return Ok(v.to_string());
         }
     }
-    opt.values.first().map(|(v, _)| v.clone())
+    let offered: Vec<&str> = opt.values.iter().map(|(v, _)| v.as_str()).collect();
+    Err(format!(
+        "`agy acp` does not offer reasoning effort `{desired}` for this model (available: {})",
+        offered.join(", ")
+    ))
 }
 
 /// Accumulates billed token and USD cost readings across `usage_update` notifications and the final
