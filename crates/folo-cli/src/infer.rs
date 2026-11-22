@@ -290,13 +290,29 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
 /// Every image under `sources` (folders recursively, in name order), with its path relative to the folder it was
 /// found in (just the file name for a file source).
 fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliError> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, ancestors: &mut Vec<PathBuf>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let mut entries: Vec<PathBuf> =
             std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                walk(&p, out)?;
+                match std::fs::canonicalize(&p) {
+                    Ok(canon) => {
+                        // Skip only real cycles (a directory already among the ancestors on the current walk),
+                        // so non-cyclic links to the same folder (e.g. `latest -> run-3` beside `run-3/`) are
+                        // still walked as before.
+                        if ancestors.contains(&canon) {
+                            continue;
+                        }
+                        ancestors.push(canon);
+                        let res = walk(&p, ancestors, out);
+                        ancestors.pop();
+                        res?;
+                    }
+                    // When identity cannot be established (e.g. a share whose ancestor metadata cannot be
+                    // queried), walk it as before rather than silently dropping its images.
+                    Err(_) => walk(&p, ancestors, out)?,
+                }
             } else if folo_data::is_image_path(&p) {
                 out.push(p);
             }
@@ -306,8 +322,9 @@ fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliErr
     let mut out = Vec::new();
     for s in sources {
         if s.is_dir() {
+            let mut ancestors: Vec<PathBuf> = std::fs::canonicalize(s).into_iter().collect();
             let mut found = Vec::new();
-            walk(s, &mut found).map_err(|e| {
+            walk(s, &mut ancestors, &mut found).map_err(|e| {
                 CliError::new(
                     ExitCode::Runtime,
                     "io_error",
@@ -694,9 +711,10 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     if fused {
         file.export(output.tmp(), dtype)
     } else {
-        // The inference tensor set (EMA when present), unfused, written as a plain weights file.
+        // The inference tensor set (EMA when present), unfused, written as a plain weights file
+        // preserving the source file's non-checkpoint metadata (folo.metrics, folo.created, unknown folo.* keys).
         FoloModel::from_file(&file, folo_nn::io::Purpose::Inference)
-            .and_then(|(model, _)| model.save(output.tmp()))
+            .and_then(|(model, _)| folo_nn::io::save_weights(output.tmp(), file.metadata(), &model))
     }
     .map_err(|e| nn_error("export", e))?;
     let output = output.publish()?;

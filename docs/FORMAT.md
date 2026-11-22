@@ -159,7 +159,11 @@ object and the optimizer groups, the LR and momentum of every group at any itera
 ## Export (`folo export`)
 Take the EMA state (or the model namespace), fuse Conv+BN in **F32**, then optionally convert every floating tensor to
 `F16`. Write a `weights` file with `folo.fused = "true"` and `folo.dtype` set accordingly. No `ema.`, `optim.` or
-`sched.` tensors.
+`sched.` tensors. Unfused export (`--format weights`) writes the same source weights (EMA or model namespace) in `F32`
+without fusing (`folo.fused` unset), keeping the BatchNorm tensors. Every weights export drops the checkpoint-only
+metadata keys listed above (`folo.train`, `folo.optim`, `folo.sched`, `folo.ema`, `folo.rng`, `folo.epoch`, `folo.best`,
+`folo.amp`), preserves `folo.metrics`, `folo.created` and unknown `folo.*` keys, and stamps `folo.version` with the
+exporter's version.
 
 ## Implementation notes
 Readers memory-map the file where possible. Writers compute all offsets up front from the shapes and dtypes, write

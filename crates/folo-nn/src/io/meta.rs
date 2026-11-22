@@ -10,8 +10,8 @@ use crate::{Error, Result};
 pub const FORMAT_VERSION: &str = "1";
 
 /// Keys only checkpoints carry. They are dropped when a checkpoint's metadata is reused for a weights file.
-pub(crate) const CHECKPOINT_KEYS: [&str; 7] =
-    ["folo.train", "folo.optim", "folo.sched", "folo.ema", "folo.rng", "folo.epoch", "folo.best"];
+pub(crate) const CHECKPOINT_KEYS: [&str; 8] =
+    ["folo.train", "folo.optim", "folo.sched", "folo.ema", "folo.rng", "folo.epoch", "folo.best", "folo.amp"];
 
 /// `folo.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,10 +368,12 @@ impl Metadata {
         m
     }
 
-    /// This metadata as a `weights` file's: kind `weights`, checkpoint-only keys dropped, unknown keys kept.
+    /// This metadata as a `weights` file's: kind `weights`, `folo.version` stamped with this writer's version,
+    /// checkpoint-only keys dropped, unknown keys kept.
     pub fn for_weights(&self) -> Metadata {
         let mut m = self.clone();
         m.kind = FileKind::Weights;
+        m.version = Some(env!("CARGO_PKG_VERSION").to_string());
         m.extra.retain(|k, _| !CHECKPOINT_KEYS.contains(&k.as_str()));
         m
     }
@@ -415,5 +417,51 @@ mod tests {
         map.insert("folo.format".into(), "2".into());
         assert!(Metadata::from_map(&map).unwrap_err().to_string().contains("not supported"));
         assert!(Metadata::from_map(&BTreeMap::new()).unwrap_err().to_string().contains("import"));
+    }
+
+    #[test]
+    fn for_weights_drops_all_checkpoint_keys_and_keeps_unknown() {
+        let mut m = Metadata::new(
+            FileKind::Checkpoint,
+            ModelConfig::new("n", 2).unwrap(),
+            vec!["a".into(), "b".into()],
+            64,
+        )
+        .unwrap();
+        m.created = Some("2026-11-21T00:00:00Z".into());
+        m.version = Some("0.0.1".into());
+        for k in [
+            "folo.train",
+            "folo.optim",
+            "folo.sched",
+            "folo.ema",
+            "folo.rng",
+            "folo.epoch",
+            "folo.best",
+            "folo.amp",
+        ] {
+            m.extra.insert(k.into(), "1".into());
+        }
+        m.extra.insert("folo.nonfinite_streak".into(), "2".into());
+        m.extra.insert("folo.custom".into(), "keep".into());
+
+        let w = m.for_weights();
+        assert_eq!(w.kind, FileKind::Weights);
+        assert_eq!(w.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(w.created.as_deref(), Some("2026-11-21T00:00:00Z"));
+        assert_eq!(w.extra.get("folo.nonfinite_streak").map(String::as_str), Some("2"));
+        assert_eq!(w.extra.get("folo.custom").map(String::as_str), Some("keep"));
+        for k in [
+            "folo.amp",
+            "folo.train",
+            "folo.optim",
+            "folo.sched",
+            "folo.ema",
+            "folo.rng",
+            "folo.epoch",
+            "folo.best",
+        ] {
+            assert!(!w.extra.contains_key(k), "checkpoint key `{k}` leaked into weights metadata");
+        }
     }
 }
