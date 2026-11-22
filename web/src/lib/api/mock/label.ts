@@ -48,6 +48,38 @@ const PARALLEL_MAX = 8;
 /** Whether an optional count is absent or a whole number in `1..=max`. */
 const inRange = (v: number | null | undefined, max: number) => v === null || v === undefined || (Number.isInteger(v) && v >= 1 && v <= max);
 
+const EFFORT_SUFFIXES = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** Mirrors the server's `Agent::resolve_request`: maps Antigravity effort-suffixed slugs and rejects conflicts. */
+export function resolveAgentRequest(
+  agent: LabelAgentId,
+  rawModel: string | null | undefined,
+  explicitEffort: LabelEffort | null | undefined,
+  defaultModel: string | null,
+  defaultEffort: LabelEffort,
+): { model: string | null; effort: LabelEffort } {
+  const model = rawModel?.trim() || null;
+  if (agent === 'antigravity' && model) {
+    const lower = model.toLowerCase();
+    for (const suffix of EFFORT_SUFFIXES) {
+      const tail = `-${suffix}`;
+      if (lower.endsWith(tail) && model.length > tail.length) {
+        const base = model.slice(0, model.length - tail.length);
+        const mapped: LabelEffort = suffix === 'minimal' || suffix === 'low' ? 'low' : suffix === 'medium' ? 'medium' : 'high';
+        if (explicitEffort && explicitEffort !== mapped) {
+          throw new ApiError(
+            400,
+            'invalid_body',
+            `model '${model}' already specifies effort '${suffix}', which conflicts with effort '${explicitEffort}': omit effort or pass the base model '${base}'`,
+          );
+        }
+        return { model, effort: mapped };
+      }
+    }
+  }
+  return { model: model ?? defaultModel, effort: explicitEffort ?? defaultEffort };
+}
+
 /** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8, Antigravity 8). */
 const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8, antigravity: 8 };
 /** Claude Code's list prices per million tokens, input and output (Codex reports no cost). */
@@ -647,10 +679,15 @@ export class MockLabeling {
     }
     const agent = mockAgents(this.codex).find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
+    const resolved = resolveAgentRequest(body.agent, model, body.effort, agent.default_model, agent.default_effort);
     if (this.#active(j)) throw new ApiError(409, 'label_job_active', `An agent is already labeling ${j.name}.`, 'Wait for the run to finish, or stop it first.');
     const unknown = body.image_ids?.find((x) => !j.images.some((i) => i.id === x));
     if (unknown) throw new ApiError(400, 'invalid_body', `image_ids: the job has no image '${unknown}'`);
-    this.#run(j, { ...body, model, image_ids: body.image_ids ? [...new Set(body.image_ids)] : body.image_ids }, now);
+    this.#run(
+      j,
+      { ...body, model: resolved.model, effort: resolved.effort, image_ids: body.image_ids ? [...new Set(body.image_ids)] : body.image_ids },
+      now,
+    );
     if (!j.run?.ids.length) {
       j.run = null;
       throw new ApiError(400, 'invalid_body', 'nothing to label: every image of the job is labeled', 'Start with `scope: all` to label them again.');

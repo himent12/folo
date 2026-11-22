@@ -413,6 +413,22 @@ describe('MockApi vision benchmarks: entries run', () => {
     expect((await api.benchEntries('bn_3c90')).some((e) => e.id === 'be_f108')).toBe(false);
     close();
   });
+
+  it('resolves Antigravity effort-suffixed models in benchmark entries and design and rejects conflicts', async () => {
+    const api = new MockApi('all-agents', 0);
+    await expect(
+      api.designBench('bn_9f03', { agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'low' }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/conflicts/) });
+    await expect(
+      api.startBenchEntry('bn_9f03', {
+        contestant: { kind: 'agent', agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'low' },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/conflicts/) });
+    const entry = await api.startBenchEntry('bn_9f03', {
+      contestant: { kind: 'agent', agent: 'antigravity', model: 'gemini-4-neon-xhigh' },
+    });
+    expect(entry.contestant).toEqual({ kind: 'agent', agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'high' });
+  });
 });
 
 describe('MockApi vision benchmarks: loops', () => {

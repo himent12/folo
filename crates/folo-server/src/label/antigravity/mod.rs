@@ -16,6 +16,7 @@
 //! including `gemini-4-neon` when `agy models` cannot be read.
 
 mod acp;
+mod process;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -87,7 +88,7 @@ impl Antigravity {
 
     fn call_with_timeout(&self, req: &AgentRequest<'_>, timeout: Duration) -> Result<AgentReply, AgentError> {
         let path = self.cli.path()?;
-        acp::run_acp(&path, req, timeout)
+        process::run_acp(&path, req, timeout)
     }
 }
 

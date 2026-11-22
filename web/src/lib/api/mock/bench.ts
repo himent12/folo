@@ -32,6 +32,7 @@ import type {
   StartBenchLoop,
   UpdateBench,
 } from '../types';
+import { resolveAgentRequest } from './label';
 import { AGENT_NAME } from '../../label';
 import { boxesKey, checkPredictions, predictionKey } from '../../bench/external';
 import { clonePlan, planError } from '../../bench/plan';
@@ -208,7 +209,7 @@ export class MockBench extends MockBenchState {
     if ((body.note ?? '').length > DESIGN_NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${DESIGN_NOTE_MAX} characters`);
     const agent = this.host.agents().find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
-    const model = body.model?.trim() || agent.default_model;
+    const { model } = resolveAgentRequest(body.agent, body.model, body.effort, agent.default_model, agent.default_effort);
     if (this.designFails)
       throw new ApiError(
         502,
@@ -338,8 +339,7 @@ export class MockBench extends MockBenchState {
       if (c.agent !== 'claude' && c.agent !== 'codex' && c.agent !== 'antigravity') throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(c.agent)}\``);
       const agent = this.host.agents().find((a) => a.id === c.agent);
       if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[c.agent]} is not installed on the server's machine.`, agent?.hint);
-      const model = c.model?.trim() || agent.default_model;
-      const effort = c.effort ?? agent.default_effort;
+      const { model, effort } = resolveAgentRequest(c.agent, c.model, c.effort, agent.default_model, agent.default_effort);
       const images = body.max_images ?? Math.min(AGENT_IMAGES, b.images.length);
       const conditions = body.conditions ?? false;
       e = {

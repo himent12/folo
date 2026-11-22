@@ -11,7 +11,7 @@ use serde_json::json;
 use super::test_req;
 use crate::label::agent::{Agent, AgentError, cancel_when};
 use crate::label::antigravity::Antigravity;
-use crate::label::antigravity::acp::run_acp_checked;
+use crate::label::antigravity::process::run_acp_checked;
 
 #[derive(Copy, Clone)]
 enum FakeMode {
@@ -28,8 +28,10 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let cancel = AtomicBool::new(false);
     let imgs = vec![vec![0xff, 0xd8, 0xff, 0xd9]];
 
-    // 1. Clean exit while a sleeping helper inherits stdio: returns reply promptly and kills the helper
-    // (proven deterministically by `pipes_closed == true`: dead processes close inherited fds before reaping).
+    // 1. Clean exit while a sleeping helper has ALREADY started and inherited stdio pipes (proven by
+    // `helper_started` written by the helper before `session/prompt` replies): returns reply promptly and kills
+    // the helper (proven deterministically by `pipes_closed == true`: dead processes close inherited fds before
+    // reaping).
     let bin = write_fake_agy(&dir.join("clean"), FakeMode::CleanWithHelper);
     let agy = Antigravity::new();
     agy.cli.remember(bin.to_str().unwrap(), "1.5.13");
@@ -45,19 +47,21 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let t0 = Instant::now();
     let (res, pipes_closed) = run_acp_checked(&bin, &req, Duration::from_secs(30), Some(&home));
     let reply = res.unwrap();
+    assert!(clean_scratch.join("work/helper_started").is_file(), "helper never acquired stdio before exit");
     assert!(pipes_closed, "helper holding stdout/stderr survived clean ACP exit");
     assert!(t0.elapsed() < Duration::from_secs(20), "call hung waiting on descendant: {:?}", t0.elapsed());
     assert_eq!(reply.text, r#"{"images":[{"image":1,"boxes":[["car",1,2,30,40]]}]}"#);
     assert_eq!((reply.usage.calls, reply.usage.input_tokens, reply.usage.output_tokens), (1, 512, 32));
 
-    // 2. Parent exits BEFORE responding to `session/prompt` while a sleeping helper inherits stdout: must detect
-    // parent exit promptly (never stall until the 30s timeout), kill the helper, and close all pipes.
+    // 2. Parent exits BEFORE responding to `session/prompt` after its helper has already started and inherited
+    // stdio: must detect parent exit promptly (never stall until the 30s timeout), kill the helper, and close pipes.
     let early_bin = write_fake_agy(&dir.join("early"), FakeMode::EarlyExitWithHelper);
     let early_scratch = dir.join("s-early");
     let early_req = test_req(&early_scratch, &[], None, LabelEffort::Low, &schema, &cancel);
     let t1 = Instant::now();
     let (res, pipes_closed) = run_acp_checked(&early_bin, &early_req, Duration::from_secs(30), Some(&home));
     assert!(matches!(res, Err(AgentError::Failed(ref f)) if f.message.contains("early crash")), "{res:?}");
+    assert!(early_scratch.join("work/helper_started").is_file(), "helper never acquired stdio before crash");
     assert!(pipes_closed, "helper survived early parent exit");
     assert!(t1.elapsed() < Duration::from_secs(15), "early exit with helper stalled: {:?}", t1.elapsed());
 
@@ -78,25 +82,31 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     if cfg!(windows) {
         let ps1 = dir.join("fake_agy.ps1");
+        let spawn_helper_ps = r#"$evName = 'Local\folo-helper-' + [Guid]::NewGuid().ToString('N')
+            $ev = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $evName)
+            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[IO.File]::WriteAllText('helper_started','1'); [Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
+            $psi.UseShellExecute = $false
+            [Diagnostics.Process]::Start($psi) | Out-Null
+            [void]$ev.WaitOne(10000)
+            $ev.Dispose()"#;
         let prompt_body = match mode {
-            FakeMode::CleanWithHelper => {
-                r#"Write-Output '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"images\":[{\"image\":1,\"boxes\":[[\"car\",1,2,30,40]]}]}"}}}}'
-            Write-Output (@{ jsonrpc='2.0'; id=$msg.id; result=@{ stopReason='end_turn'; usage=@{ inputTokens=512; outputTokens=32 } } } | ConvertTo-Json -Depth 5 -Compress)"#
-            }
-            FakeMode::EarlyExitWithHelper => {
-                r#"[Console]::Error.WriteLine('early crash')
-            Start-Process -NoNewWindow -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' | Out-Null
+            FakeMode::CleanWithHelper => format!(
+                r#"{spawn_helper_ps}
+            Write-Output '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"images\":[{{\"image\":1,\"boxes\":[[\"car\",1,2,30,40]]}}]}}"}}}}}}}}'
+            Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ stopReason='end_turn'; usage=@{{ inputTokens=512; outputTokens=32 }} }} }} | ConvertTo-Json -Depth 5 -Compress)"#
+            ),
+            FakeMode::EarlyExitWithHelper => format!(
+                r#"{spawn_helper_ps}
+            [Console]::Error.WriteLine('early crash')
             exit 1"#
-            }
-            FakeMode::WedgedOnPrompt => {
-                r#"[IO.File]::WriteAllText('wedged', '1')
+            ),
+            FakeMode::WedgedOnPrompt => r#"[IO.File]::WriteAllText('wedged', '1')
             Start-Sleep -Seconds 60"#
-            }
+                .to_string(),
         };
         let close_body = match mode {
             FakeMode::CleanWithHelper => {
                 r#"Write-Output (@{ jsonrpc='2.0'; id=$msg.id; result=@{} } | ConvertTo-Json -Compress)
-            Start-Process -NoNewWindow -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' | Out-Null
             exit 0"#
             }
             FakeMode::EarlyExitWithHelper | FakeMode::WedgedOnPrompt => "exit 0",
@@ -105,6 +115,13 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
             r#"[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $curModel = 'gemini-3.8-flash'
+$curThought = 'high'
+function ConfigOptions {{
+    @(
+        @{{ id='model'; category='model'; currentValue=$curModel; options=@(@{{ value='gemini-4-neon'; name='Gemini 4 Neon' }}, @{{ value='gemini-3.8-flash'; name='Gemini 3.8 Flash' }}) }},
+        @{{ id='thought_level'; category='thought_level'; currentValue=$curThought; options=@(@{{ value='low'; name='Low' }}, @{{ value='high'; name='High' }}) }}
+    )
+}}
 while ($null -ne ($line = [Console]::In.ReadLine())) {{
     if ([string]::IsNullOrWhiteSpace($line)) {{ continue }}
     $msg = $line | ConvertFrom-Json
@@ -113,11 +130,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
             Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ protocolVersion=1; agentCapabilities=@{{ promptCapabilities=@{{ image=$true }}; sessionCapabilities=@{{ close=@{{}} }}; _meta=@{{ antigravity=@{{ systemPrompt=@{{ append=$true }} }} }} }} }} }} | ConvertTo-Json -Depth 10 -Compress)
         }}
         'session/new' {{
-            Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ sessionId='s1'; configOptions=@(@{{ id='model'; category='model'; currentValue=$curModel; options=@(@{{ value='gemini-4-neon'; name='Gemini 4 Neon' }}) }}) }} }} | ConvertTo-Json -Depth 10 -Compress)
+            Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ sessionId='s1'; configOptions=(ConfigOptions) }} }} | ConvertTo-Json -Depth 10 -Compress)
         }}
         'session/set_config_option' {{
             if ($msg.params.configId -eq 'model') {{ $curModel = $msg.params.value }}
-            Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ configOptions=@(@{{ id='model'; category='model'; currentValue=$curModel; options=@(@{{ value='gemini-4-neon'; name='Gemini 4 Neon' }}) }}) }} }} | ConvertTo-Json -Depth 10 -Compress)
+            elseif ($msg.params.configId -eq 'thought_level') {{ $curThought = $msg.params.value }}
+            Write-Output (@{{ jsonrpc='2.0'; id=$msg.id; result=@{{ configOptions=(ConfigOptions) }} }} | ConvertTo-Json -Depth 10 -Compress)
         }}
         'session/prompt' {{
             {prompt_body}
@@ -150,25 +168,29 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
         cmd
     } else {
         let sh = dir.join("agy");
+        let spawn_helper_sh = r#"fifo="$PWD/helper_ready.fifo"
+      rm -f "$fifo"
+      mkfifo "$fifo"
+      ( printf '1\n' > helper_started; printf 'ready\n' > "$fifo"; exec sleep 60 ) &
+      read -r _ < "$fifo""#;
         let prompt_body = match mode {
-            FakeMode::CleanWithHelper => {
-                r#"printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\\"images\\":[{\\"image\\":1,\\"boxes\\":[[\\"car\\",1,2,30,40]]}]}"}}}}\n'
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"inputTokens":512,"outputTokens":32}}}\n' "$id""#
-            }
-            FakeMode::EarlyExitWithHelper => {
-                r#"printf 'early crash\n' >&2
-      sleep 60 &
+            FakeMode::CleanWithHelper => format!(
+                r#"{spawn_helper_sh}
+      printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\\"images\\":[{{\\"image\\":1,\\"boxes\\":[[\\"car\\",1,2,30,40]]}}]}}"}}}}}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"stopReason":"end_turn","usage":{{"inputTokens":512,"outputTokens":32}}}}}}\n' "$id""#
+            ),
+            FakeMode::EarlyExitWithHelper => format!(
+                r#"{spawn_helper_sh}
+      printf 'early crash\n' >&2
       exit 1"#
-            }
-            FakeMode::WedgedOnPrompt => {
-                r#"touch wedged
+            ),
+            FakeMode::WedgedOnPrompt => r#"touch wedged
       sleep 60"#
-            }
+                .to_string(),
         };
         let close_body = match mode {
             FakeMode::CleanWithHelper => {
                 r#"printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-      sleep 60 &
       exit 0"#
             }
             FakeMode::EarlyExitWithHelper | FakeMode::WedgedOnPrompt => "exit 0",
@@ -182,6 +204,7 @@ if [ "$1" = "models" ]; then
   exit 0
 fi
 cur_model="gemini-3.8-flash"
+cur_thought="high"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
@@ -189,11 +212,17 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":1,"agentCapabilities":{{"promptCapabilities":{{"image":true}},"sessionCapabilities":{{"close":{{}}}},"_meta":{{"antigravity":{{"systemPrompt":{{"append":true}}}}}}}}}}}}\n' "$id"
       ;;
     *'"method":"session/new"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"sessionId":"s1","configOptions":[{{"id":"model","category":"model","currentValue":"%s","options":[{{"value":"gemini-4-neon","name":"Gemini 4 Neon"}}]}}]}}}}\n' "$id" "$cur_model"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"sessionId":"s1","configOptions":[{{"id":"model","category":"model","currentValue":"%s","options":[{{"value":"gemini-4-neon","name":"Gemini 4 Neon"}},{{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}}]}},{{"id":"thought_level","category":"thought_level","currentValue":"%s","options":[{{"value":"low","name":"Low"}},{{"value":"high","name":"High"}}]}}]}}}}\n' "$id" "$cur_model" "$cur_thought"
       ;;
     *'"method":"session/set_config_option"'*)
-      case "$line" in *'"value":"gemini-4-neon"'*) cur_model="gemini-4-neon" ;; esac
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"configOptions":[{{"id":"model","category":"model","currentValue":"%s","options":[{{"value":"gemini-4-neon","name":"Gemini 4 Neon"}}]}}]}}}}\n' "$id" "$cur_model"
+      case "$line" in
+        *'"configId":"model"'*'"value":"gemini-4-neon"'*) cur_model="gemini-4-neon" ;;
+      esac
+      case "$line" in
+        *'"configId":"thought_level"'*'"value":"low"'*) cur_thought="low" ;;
+        *'"configId":"thought_level"'*'"value":"high"'*) cur_thought="high" ;;
+      esac
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"configOptions":[{{"id":"model","category":"model","currentValue":"%s","options":[{{"value":"gemini-4-neon","name":"Gemini 4 Neon"}},{{"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}}]}},{{"id":"thought_level","category":"thought_level","currentValue":"%s","options":[{{"value":"low","name":"Low"}},{{"value":"high","name":"High"}}]}}]}}}}\n' "$id" "$cur_model" "$cur_thought"
       ;;
     *'"method":"session/prompt"'*)
       {prompt_body}

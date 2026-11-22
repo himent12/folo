@@ -286,4 +286,15 @@ describe('MockApi agent labeling: servers without it', () => {
     await expect(api.labelJobs()).rejects.toMatchObject({ status: 501, code: 'not_implemented' });
     expect((await new MockApi('normal', 0).system()).features).toContain('agent_labeling');
   });
+
+  it('resolves Antigravity effort-suffixed models and rejects conflicting explicit effort', async () => {
+    const api = new MockApi('all-agents', 0);
+    const job = await api.createLabelJob({ name: 'agy-suffix', classes: ['bolt'] });
+    await api.importLabelImages(job.id, 'D:/data/fasteners-mini');
+    await expect(
+      api.startLabeling(job.id, { agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'low' }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/conflicts/) });
+    const started = await api.startLabeling(job.id, { agent: 'antigravity', model: 'gemini-4-neon-xhigh' });
+    expect(started.run).toMatchObject({ agent: 'antigravity', model: 'gemini-4-neon-xhigh', effort: 'high' });
+  });
 });

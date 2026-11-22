@@ -1,5 +1,6 @@
 //! Unit and fake-subprocess tests for the Antigravity ACP labeling driver.
 
+mod session;
 mod subprocess;
 
 use std::path::{Path, PathBuf};
@@ -12,7 +13,8 @@ use folo_api::{LabelEffort, LabelModel, LabelUsage};
 use folo_test_support::TestDir;
 use serde_json::{Value, json};
 
-use super::acp::{MAX_STDERR_BYTES, StderrTail, acp_command, drive_acp, drive_acp_with_grace};
+use super::acp::{drive_acp, drive_acp_with_grace};
+use super::process::{MAX_STDERR_BYTES, StderrTail, acp_command};
 use super::protocol::{
     LABEL_AGENT_NAME, LABEL_CLI_DIR, find_effort_option, find_model_option, parse_config_options,
     prepare_isolation, resolve_effort_value, resolve_executable, resolve_model_and_effort, rpc_failure,
@@ -546,7 +548,15 @@ fn handshake_config_verification_mode_recheck_and_policy_aborts_fail_closed() {
                 }
                 Some("session/new") => {
                     let _ = out_tx.send(
-                        json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" } }).to_string(),
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "sessionId": "s1",
+                                "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                            }
+                        })
+                        .to_string(),
                     );
                 }
                 Some("session/prompt") => {
@@ -602,8 +612,17 @@ fn usage_does_not_invent_context_occupancy_and_preserves_quiet_exit_and_cancel_u
                 let _ = out_tx.send(init_ok(id, true, false, false));
             }
             Some("session/new") => {
-                let _ = out_tx
-                    .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" } }).to_string());
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
             }
             Some("session/prompt") => {
                 let _ = out_tx.send(
@@ -644,8 +663,17 @@ fn usage_does_not_invent_context_occupancy_and_preserves_quiet_exit_and_cancel_u
                 let _ = tx.send(init_ok(id, true, false, false));
             }
             Some("session/new") => {
-                let _ = tx
-                    .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" } }).to_string());
+                let _ = tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
             }
             Some("session/prompt") => {
                 let _ = tx.send(
@@ -683,8 +711,17 @@ fn usage_does_not_invent_context_occupancy_and_preserves_quiet_exit_and_cancel_u
                 let _ = out_tx.send(init_ok(id, true, false, false));
             }
             Some("session/new") => {
-                let _ = out_tx
-                    .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" } }).to_string());
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
             }
             Some("session/prompt") => {
                 prompt_id = id.unwrap();

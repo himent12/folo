@@ -348,6 +348,14 @@ pub(super) fn parse_legacy_models(models: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Whether a model's effort suffix (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) matches `desired` within
+/// the same reasoning tier (exact match, or `low` <-> `minimal`).
+pub(super) fn suffix_matches_effort(suffix: &str, desired: &str) -> bool {
+    suffix.eq_ignore_ascii_case(desired)
+        || (desired.eq_ignore_ascii_case("low") && suffix.eq_ignore_ascii_case("minimal"))
+        || (desired.eq_ignore_ascii_case("minimal") && suffix.eq_ignore_ascii_case("low"))
+}
+
 /// Maps a desired effort string strictly onto an exact (or documented same-tier equivalent) `thought_level` value.
 /// Never crosses reasoning tiers or falls back to the first option so a run never spends tokens at a different
 /// effort than its record claims.
@@ -521,12 +529,22 @@ pub(super) fn rpc_failure(err: &Value, used: LabelUsage) -> Failure {
         {
             append(text);
         }
-        // Google RPC error `details` arrays can carry `reason`, `message`, or `retryDelay` (e.g. `15s`).
+        // Google RPC error `details` arrays can carry `reason`, `message`, `retryDelay` (e.g. `15s`), and
+        // `QuotaFailure.violations[].quotaId` / `description`.
         for arr in [data["error"]["details"].as_array(), data["details"].as_array()].into_iter().flatten() {
             for item in arr {
                 for key in ["reason", "message"] {
                     if let Some(s) = item[key].as_str() {
                         append(s);
+                    }
+                }
+                if let Some(violations) = item["violations"].as_array() {
+                    for v in violations {
+                        for key in ["quotaId", "quotaMetric", "description"] {
+                            if let Some(s) = v[key].as_str() {
+                                append(s);
+                            }
+                        }
                     }
                 }
                 if let Some(delay) = item["retryDelay"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
