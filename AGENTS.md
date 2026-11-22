@@ -22,30 +22,34 @@ and WGSL GPU kernels, training, evaluation, benchmarking, and export) with two f
 
 ## Agentic team & subagents
 
-FOLO is developed agentically in T3 Code using four specialized roles. The main orchestrator coordinates work and
-delegates to dedicated subagents so implementation, play-testing/review, and writing each run on the model best
-suited for the job:
+FOLO is developed agentically in T3 Code using specialized roles and independent dual-model PR reviews. **Gemini 4 Neon
+(`high`)** is a first-class, all-purpose default that is great for everything — orchestration, research, architecture,
+engine/GPU/UI implementation, PR review, and documentation — alongside **Claude Opus 5.5 / Fable 5.2** and **GPT-6.2
+Sol / Astra**:
 
 | Role | Model & settings | Harness / provider | What they own |
 |---|---|---|---|
-| **Main orchestrator** | **Claude Opus 5.5** (`effort: high`) or **Claude Fable 5.2** (`effort: high`) | `claudeAgent` (`claude-opus-5-5` / `claude-fable-5-2`) | Top-level planning, breaking work into focused PRs, dispatching subagents, tracking CI/reviews/play-testing, merging approved PRs, and updating `docs/ROADMAP.md`. |
-| **Main code implementer & doer** *(subagent)* | **Claude Opus 5.5** (`effort: high`) | `claudeAgent` (`claude-opus-5-5`) | The primary builder and doer: implements engine, CLI, server, and UI code, writes tests, runs checks, opens PRs, and fixes review and play-test findings. |
-| **App play-tester & reviewer** *(subagent)* | **GPT-6.2 Sol** (`reasoningEffort: high`, **fast** / `serviceTier: priority`) or **GPT-6.2 Astra** (`reasoningEffort: high`, **standard — not fast** / `serviceTier: default`) | `codex` (`gpt-6.2-sol` / `gpt-6.2-astra`) | Play-tests the real app end to end (FOLO Studio, FOLO Desktop, CLI, MCP, edge cases, live states) like a demanding user, and runs independent code/PR reviews against `origin/main`. |
-| **Writer & creative writer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) | Antigravity CLI in T3 Code (`antigravity`, `gemini-4-neon`) | Owns documentation clarity, `README.md` storytelling, user guides, release notes, changelogs, and creative/UX copy so the project is clear and pleasant to read. When the owner asks for it, takes any role Opus 5.5 has (see below). |
+| **Main orchestrator** | **Gemini 4 Neon** (`thought_level: high`), **Claude Opus 5.5** (`effort: high`), or **Claude Fable 5.2** (`effort: high`) | `antigravity` (`gemini-4-neon`) / `claudeAgent` (`claude-opus-5-5` / `claude-fable-5-2`) | Top-level planning, breaking work into focused PRs to `main`, dispatching subagents, tracking CI and dual reviews/play-testing, merging approved PRs, and updating `docs/ROADMAP.md`. |
+| **Main code implementer & doer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) or **Claude Opus 5.5** (`effort: high`) | `antigravity` (`gemini-4-neon`) / `claudeAgent` (`claude-opus-5-5`) | Primary builders and doers: research, design, and implement engine, GPU, CLI, server, and UI code, write tests, run checks, open PRs to `main`, and fix review and play-test findings. |
+| **PR reviewer & app play-tester** *(subagent)* | **Dual PR review (required on every PR):** **GPT-6.2 Sol** (`reasoningEffort: high`, **fast** / `serviceTier: priority`) **and** **Gemini 4 Neon** (`thought_level: high`); **GPT-6.2 Astra** (`reasoningEffort: high`, **standard — not fast** / `serviceTier: default`) for deep play-testing sweeps | `codex` (`gpt-6.2-sol` / `gpt-6.2-astra`) + `antigravity` (`gemini-4-neon`) | Runs independent code/PR reviews against `origin/main` until both **GPT-6.2 Sol (`high`, fast)** and **Gemini 4 Neon (`high`)** report no blocking findings, and play-tests the real app end to end (FOLO Studio, FOLO Desktop, CLI, MCP, edge cases, live states). |
+| **Writer & creative writer** *(subagent)* | **Gemini 4 Neon** (`thought_level: high`) | Antigravity CLI in T3 Code (`antigravity`, `gemini-4-neon`) | Owns documentation clarity, `README.md` storytelling, user guides, release notes, changelogs, and creative/UX copy so the project is clear and pleasant to read. |
 
 Subagent guidelines:
-- Delegate by role rather than having one model do everything: let **Opus 5.5** implement and fix code, **GPT-6.2 Sol
-  (high, fast)** or **GPT-6.2 Astra (high, standard — not fast)** play-test the app and review diffs, and **Gemini 4
-  Neon** (via the Antigravity CLI in T3 Code) write and polish docs and creative copy.
-- **Gemini 4 Neon can replace Opus 5.5 in everything when the owner asks for it**: main orchestration, implementing
-  and fixing code, research. The table's models are the defaults and Opus 5.5 stays one; the swap is the owner's
-  call, per task or per wave, and every other rule here (PRs, disjoint worktrees) applies to Neon as it does to Opus.
-  A Neon agent splits its own work with Antigravity's agent spawning and checks what its sub-agents return; PR
-  reviews still run on a fresh GPT reviewer through T3 Code, never on one of its own sub-agents.
+- **Gemini 4 Neon (`high`) is good for everything:** it is a default first-class model for any role — main
+  orchestration, research, architecture, implementing and fixing code across the whole stack, PR review, and writing.
+  No special owner opt-in is needed to use Gemini 4 Neon (`high`) for any task.
+- **Always make a PR to `main` and dual-review it with GPT-6.2 Sol (`high`, fast) + Gemini 4 Neon (`high`) until good
+  to merge:** every change opens a pull request against `main`, and every review round runs fresh, independent reviews
+  on **both** **GPT-6.2 Sol (`reasoningEffort: high`, `serviceTier: priority` / fast)** **and** **Gemini 4 Neon
+  (`thought_level: high`)**. Fix findings and repeat fresh review rounds until **both** reviewers have zero blocking
+  findings and CI is green before merging.
+- **Never grade your own PR:** code review and app play-testing always run on fresh, independent reviewer subagents.
+  When a Gemini 4 Neon agent splits its own implementation work with Antigravity's agent spawning, it checks what its
+  sub-agents return, and PR review still runs on fresh independent **GPT-6.2 Sol (`high`, fast)** and **Gemini 4 Neon
+  (`high`)** reviewers — never the implementing agent grading itself.
 - Keep worktrees disjoint when running subagents in parallel so two subagents never edit the same checkout or files.
-- Never grade your own PR: code review and app play-testing always run on a fresh play-tester/reviewer subagent.
 - [docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code `delegate_task` target configs, prompts, and
-  PR review loop.
+  dual PR review loop.
 
 ## Ground rules
 - **Rust stable, edition 2024.** `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and
@@ -80,14 +84,16 @@ Subagent guidelines:
    own git worktree when several agents share a machine.
 2. Keep PRs focused and reviewable; a big feature can be a stack of PRs.
 3. Commit messages and PR titles: `area: imperative summary` (e.g. `core: add broadcasting binary ops`).
-4. Open the PR against `main` with a description: what, why, how it was tested, benchmark numbers if relevant.
-5. Play-test & review: app-facing changes are play-tested and every PR is reviewed for bugs before it merges; findings
-   are fixed or answered until the reviewer has no blocking findings.
-6. The orchestrator or a maintainer merges (squash) once CI is green and review is clean. Do not merge your own PR
-   unless your task says so.
+4. Always open a PR against `main` (unless the owner explicitly asks for a direct push) with a description: what, why,
+   how it was tested, benchmark numbers if relevant.
+5. Play-test & dual review: app-facing changes are play-tested and every PR is reviewed by **both GPT-6.2 Sol (`high`,
+   fast) and Gemini 4 Neon (`high`)** in fresh, independent reviewer passes before it merges; findings are fixed or
+   answered and re-reviewed until **both** reviewers have no blocking findings and the PR is good to merge.
+6. The orchestrator or a maintainer merges (squash) once CI is green and both Sol and Neon reviews are clean. Do not
+   merge your own PR unless your task says so.
 7. Rebase on `main` if you fall behind; never force-push someone else's branch.
 
-[docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code subagent procedure.
+[docs/notes/PROCESS.md](docs/notes/PROCESS.md) has the exact T3 Code subagent procedure and dual review loop.
 
 ## Tests and temp dirs
 - Tests put their scratch folders (`folo-*`) under `FOLO_TEST_TMP` when it is set, else the system temp dir, and

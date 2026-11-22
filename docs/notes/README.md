@@ -12,7 +12,7 @@ states what was true on its date; where a later one disagrees, the later one and
 
 | file | what it is |
 |---|---|
-| [PROCESS](PROCESS.md) | How the maintainers' agents work in T3 Code: orchestrator, implementer, play-tester/reviewer, and writer subagents |
+| [PROCESS](PROCESS.md) | How the maintainers' agents work in T3 Code: Gemini 4 Neon (high), Opus/Fable, and the dual Sol + Neon PR review loop |
 | [BOAT](BOAT.md) | The CPU sandboxes those agents may offload work to |
 | [DOGFOOD-1](DOGFOOD-1.md), [-2](DOGFOOD-2.md), [-3](DOGFOOD-3.md) | Reports from agents that used FOLO as a newcomer would (CLI, MCP, Studio, Desktop, the docs), with what got in their way; the fixes are in the [changelog](../../CHANGELOG.md) |
 | [DOGFOOD-4](DOGFOOD-4.md) | The stress round of Studio and Desktop (2026-11-14 and 15): 16 agents each used one area as a hard user would and fixed what broke; the lane reports are indexed in [stress/](stress/README.md) |
