@@ -15,12 +15,14 @@ Both came from research reports of this wave, as hypotheses with a gate.
 
 - **F1, feature imitation** (`D:/folo-wave6/research/formula.md`, F1; expected +0.003, a guess from the literature,
   range −0.002 to +0.008). A training-only 1×1 adapter per level maps the student's neck map to the teacher's width.
-  With `ẑ` a map standardised per channel over the batch and the positions:
+  With `ẑ = (x − μ_c) / sqrt(σ_c² + 1e-12)`, a map standardised per channel over the batch and the positions:
 
-      L_f = Σ_l (1/2) · mean (ẑ_S − ẑ_T)²  =  Σ_l (1 − mean_c r_c)
+      L_f = Σ_l (1/2) · mean (ẑ_S − ẑ_T)²  ≈  Σ_l (1 − mean_c r_c)
 
-  where `r_c` is a channel's Pearson correlation, and `λf = 0.5` multiplies it. The adapters had their own AdamW
-  (lr 1e-3) and were outside the model, its optimizer, the EMA and the checkpoints.
+  where `r_c` is the Pearson correlation of a channel of the adapted student map and the teacher's, and `λf = 0.5`
+  multiplies the term. The two sides are equal only while the stabiliser `1e-12` is negligible against the channel
+  variances. The adapters had their own AdamW (lr 1e-3) and were outside the model, its optimizer, the EMA and the
+  checkpoints.
 - **C3, foreground-gated terms and T = 2** (`D:/folo-wave6/research/formula-neon.md`, Candidate 3; expected +0.004 to
   +0.010 AP, concentrated in AP75 to AP95). The per-element `L_kc` and `L_kd` are multiplied by the assigner's
   foreground mask, with the same gains and the same normaliser as the dense terms, and the DFL temperature drops from
@@ -52,7 +54,7 @@ the gate binary, and its two runs were identical too.
 | arm | what | AP | − ctl [95% interval] | P(≤ 0) | verdict |
 |---|---|---:|---:|---:|---|
 | `ctl` | today's distillation (dense, T = 4) | 0.3251 | | | control |
-| `f-t4` | the same recipe, hill 5's binary and run | 0.3249 | −0.0002 [−0.0006, +0.0003] | 0.778 | noise floor |
+| `f-t4` | the same recipe, hill 5's binary and run | 0.3249 | −0.0002 [−0.0006, +0.0003] | 0.778 | cross-binary control gap |
 | `t2` | `distill.temperature=2` | 0.3249 | −0.0002 [−0.0007, +0.0005] | 0.521 | fail |
 | `fg4` | `distill.foreground=true` | 0.3245 | −0.0006 [−0.0013, +0.0001] | 0.940 | fail |
 | `fg2` | `distill.foreground=true`, `distill.temperature=2` | 0.3244 | −0.0006 [−0.0012, +0.0001] | 0.939 | fail |
@@ -95,33 +97,37 @@ Internal mAP50-95 of the trainer, and the reported distillation terms of epoch 3
 
 - **Claim: foreground gating adds +0.004 to +0.010 AP.** Not at this gate. Both gated arms are 0.0006 below the
   control, and the upper end of both intervals is +0.0001.
-- **Claim: gating and T = 2 recover the AP95 lost to distillation (−0.0034).** Not at this gate. AP95 is −0.0007 for
-  both gated arms, with upper ends +0.0007 and +0.0010, below the +0.0034 the claim needs. `t2` alone is +0.0005
-  [−0.0006, +0.0017]. These differences are the size of the distance between the two controls (`f-t4` − `ctl` is
-  −0.0005 at AP95 and +0.0007 at AP90). The largest tight-IoU gain of the gated arms, `fg2` at AP90 (+0.0011), has an
-  interval that includes 0, and it is one of many comparisons read here.
+- **Claim: gating and T = 2 recover the AP95 lost to distillation (−0.0034).** Not shown at this gate. The −0.0034 is
+  a historical size: it compares a distilled and an undistilled model at epoch 64, and the report proposed its own
+  test at epoch 44. This gate compares each arm with dense distillation at epoch 36 and has no undistilled arm. There,
+  AP95 is −0.0007 for both gated arms, with upper ends +0.0007 and +0.0010, and `t2` alone is +0.0005
+  [−0.0006, +0.0017]. These differences are the size of the gap between the two controls (`f-t4` − `ctl` is −0.0005 at
+  AP95 and +0.0007 at AP90). The largest tight-IoU gain of the gated arms, `fg2` at AP90 (+0.0011), has an interval
+  that includes 0, and it is one of many comparisons read here.
 - **Claim: T = 4 is what costs tight boxes.** `t2` changes AP90 by +0.0001 and AP95 by +0.0005, both with intervals
   that include 0. At T = 2 the logged DFL term is 0.73 of its T = 4 value, and AP does not move.
 - **Claim: hill-climb 4 already screened T in {2, 4}** (the neon report, repeated in this lane's brief). The table in
   [r4-distill.md](r4-distill.md) has T = 1 and T = 4 only, so `t2` is the first measurement of T = 2.
 - **Claim: feature imitation adds about +0.003.** Measured −0.0011 [−0.0016, −0.0004], with AP75 −0.0015. The term was
   not mis-scaled: at epoch 36 it is 0.463 against `L_kc` 0.469 and `L_kd` 0.494, so the one extra `λf` the brief
-  allowed for a mis-scaled term was not justified and not run. It did train: the logged term implies a mean Pearson
-  correlation rising from about 0.57 (first quarter of epoch 33) to about 0.69 (last quarter of epoch 36). As with the
-  rank term in [r5-accuracy.md](r5-accuracy.md), moving the student toward the teacher on the term's own measure did
-  not move AP up.
-- **Where the dense terms' mass is.** The foreground anchors hold about 41% of the dense class term's value and about
-  51% of the DFL term's at T = 4 (`fg4` against `ctl` at epoch 36, two different trajectories). The gated arms
-  therefore drop more than half of the class term, which fits the idea that its background part is not just
-  pollution. This fit is an inference: no arm measured the teacher's false positives directly.
+  allowed for a mis-scaled term was not justified and not run. The term fell during training. Read through
+  `1 − loss / (0.5 × 3)`, with the stabiliser taken as negligible, the logged values give a correlation proxy for the
+  **adapted** maps of 0.568 (first quarter of epoch 33) and 0.693 (last quarter of epoch 36). The adapters train too,
+  so this rise cannot be assigned to the student alone. It did not come with a higher AP.
+- **The size of the gated terms.** At epoch 36 the logged `fg4` terms are 0.41 (class) and 0.51 (DFL) of `ctl`'s. These
+  are ratios of two arms' means, from students that trained on different objectives for four epochs. They do not
+  measure the foreground share of the dense loss, which would need both losses on the same predictions and batches.
 
 ## What is not shown
 
-- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training, so this
-  gate rejects them at its own scale and under its fixed bar, and says nothing about epoch 64.
-- **Run-to-run noise.** The intervals resample images for fixed weights. They do not include training noise. The only
-  estimate of that is one pair of controls (`f-t4` and `ctl`, different binaries), 0.0002 apart, and each arm has one
-  seed. `feat`'s −0.0011 is therefore a measured difference at this gate, not proof that the term harms a long run.
+- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training (C3's own
+  test was at epoch 44), so this gate rejects them at its own scale and under its fixed bar, and says nothing about
+  epoch 64.
+- **Run-to-run noise.** The intervals resample images for fixed weights, so they do not include training variance,
+  which this lane did not measure. Each arm has one seed. The one related number is the cross-binary gap between the
+  two controls (`f-t4` and `ctl`, 0.0002 apart), a single difference that mixes the binaries with anything else that
+  differed between the runs. `feat`'s −0.0011 is therefore a measured difference at this gate, not proof that the
+  term harms a long run.
 - **Cost.** Epoch times are not comparable: other lanes' builds and trainings shared the machine (`ctl` 285–308 s per
   epoch, `fg2` 1,183–2,994 s with the GPU waiting on a loaded host). The foreground arms also leave the fused GPU
   kernel for the tensor path, so their time would not represent a shipped version anyway.
@@ -134,12 +140,13 @@ Internal mAP50-95 of the trainer, and the reported distillation terms of epoch 3
 | `ctl`, `t2`, `fg4`, `fg2`, `feat` | `D:/folo-data/runs-wave6/distill/<arm>` | `D:/folo-wave6/lanes/distill/eval/dets-<arm>.json` |
 | `f-t4` (hill 5) | see [r5-accuracy.md](r5-accuracy.md) | `D:/folo-data/runs-hill5/accuracy/eval/dets-f-t4-e32.json` |
 
-`feat` needed three attempts. The first two died on a failed host allocation: 39,321,600 bytes after epoch 34's log
-lines, and 19,660,800 bytes 21 seconds after start with the host at 92% memory load. Their run folders are
+`feat` needed three attempts. The first two died on a failed host allocation: 39,321,600 bytes after epoch 34's
+training log lines, before its validation was recorded, and 19,660,800 bytes 21 seconds after the second attempt took
+the lock. A memory check by hand just after the second crash read 92% load (not saved in a log). Their run folders are
 `feat-crash1` and `feat-crash2`, their logs `logs/feat-crash{1,2}.*`. The third attempt waited for 12 GB of commit and
-6 GB of physical memory before taking the GPU lock, and finished. Its epochs 33 and 34 give the same feature terms as
-the first attempt (0.54180 and 0.48346) and the same internal mAP at epoch 33 (0.31657), so the measured run is the
-run the first attempt would have been.
+6 GB of physical memory before taking the GPU lock, and is the only attempt that reached epoch 36. It reproduced what
+the first attempt had recorded: the loss fields of all 14,786 overlapping step records, the feature terms of epochs 33
+and 34 (0.54180 and 0.48346) and the internal mAP of epoch 33 (0.31657).
 
 Since no arm passed, the keys `distill.foreground` and `distill.feature_gain` are not in the code. The implementation
 and its tests are kept outside the repository's history, in `D:/folo-wave6/lanes/distill/distill-gates-code.patch`
