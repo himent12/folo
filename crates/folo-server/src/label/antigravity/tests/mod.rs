@@ -145,21 +145,34 @@ fn model_and_effort_resolution_preserves_suffix_and_never_crosses_tiers() {
     let model_opt = find_model_option(&config).unwrap();
     let effort_opt = find_effort_option(&config).unwrap();
 
-    let plain = resolve_model_and_effort(Some("gemini-4-neon"), LabelEffort::Low, Some(model_opt));
+    let plain = resolve_model_and_effort(Some("gemini-4-neon"), LabelEffort::Low, Some(model_opt), true);
     assert_eq!(
         (plain.model.as_deref(), plain.desired_effort.as_str(), plain.stripped_suffix),
         (Some("gemini-4-neon"), "low", false)
     );
-    let exact = resolve_model_and_effort(Some("gemini-4-neon-xhigh"), LabelEffort::Low, Some(model_opt));
+    let exact =
+        resolve_model_and_effort(Some("gemini-4-neon-xhigh"), LabelEffort::Low, Some(model_opt), true);
     assert_eq!(
         (exact.model.as_deref(), exact.desired_effort.as_str(), exact.stripped_suffix, exact.suffix_on_model),
         (Some("gemini-4-neon-xhigh"), "xhigh", false, true)
     );
     let stripped =
-        resolve_model_and_effort(Some("gemini-4-hydrogen-xhigh"), LabelEffort::Low, Some(model_opt));
+        resolve_model_and_effort(Some("gemini-4-hydrogen-xhigh"), LabelEffort::Low, Some(model_opt), true);
     assert_eq!(
         (stripped.model.as_deref(), stripped.desired_effort.as_str(), stripped.stripped_suffix),
         (Some("gemini-4-hydrogen"), "xhigh", true)
+    );
+    // Without an effort selector, prefer an advertised suffixed variant even when the bare base ID also exists.
+    let both = parse_config_options(Some(&json!([{
+        "id": "model",
+        "category": "model",
+        "currentValue": "gemini-4-neon",
+        "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-4-neon-high" }]
+    }])));
+    let variant = resolve_model_and_effort(Some("gemini-4-neon"), LabelEffort::High, Some(&both[0]), false);
+    assert_eq!(
+        (variant.model.as_deref(), variant.desired_effort.as_str(), variant.suffix_on_model),
+        (Some("gemini-4-neon-high"), "high", true)
     );
 
     // Unsupported tiers (`low` and `max` here) fail closed instead of silently running `medium` or `xhigh`.

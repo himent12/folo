@@ -278,11 +278,13 @@ pub(super) struct ModelResolution {
 
 /// Resolves the requested model string and effort against the session's `model` config option.
 /// Supports both base ids (`gemini-4-neon`) and effort-suffixed slugs (`gemini-4-neon-xhigh`), preserving suffix
-/// effort even when the suffixed slug itself appears verbatim as a model option.
+/// effort even when the suffixed slug itself appears verbatim as a model option, and preferring an advertised
+/// effort-suffixed variant when no separate `thought_level` selector exists (`!has_effort_opt`).
 pub(super) fn resolve_model_and_effort(
     requested_model: Option<&str>,
     req_effort: LabelEffort,
     model_opt: Option<&ConfigOption>,
+    has_effort_opt: bool,
 ) -> ModelResolution {
     let default_effort = req_effort.as_str().to_string();
     let Some(raw) = requested_model.map(str::trim).filter(|m| !m.is_empty()) else {
@@ -294,6 +296,20 @@ pub(super) fn resolve_model_and_effort(
         };
     };
     let values = model_opt.map(|o| o.values.as_slice()).unwrap_or(&[]);
+    // Without a separate `thought_level` selector, an unsuffixed base ID cannot prove/apply the requested effort;
+    // prefer an advertised suffixed variant (`gemini-4-neon-high`) over the bare base ID (`gemini-4-neon`) when one
+    // exists at the requested tier.
+    if !has_effort_opt
+        && split_effort_suffix(raw).is_none()
+        && let Some((variant, var_suffix)) = find_suffixed_model_variant(values, raw, &default_effort)
+    {
+        return ModelResolution {
+            model: Some(variant.to_string()),
+            desired_effort: var_suffix.to_string(),
+            stripped_suffix: false,
+            suffix_on_model: true,
+        };
+    }
     if let Some(exact) = match_option_value(values, raw) {
         let (desired_effort, suffix_on_model) = match split_effort_suffix(raw) {
             Some((_, suffix)) => (suffix.to_string(), true),

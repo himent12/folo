@@ -723,4 +723,142 @@ fn legacy_model_switch_invalidates_effort_default_model_pins_base_resolves_varia
     );
     assert!(out.kill_immediately && !saw_prompt);
     assert!(matches!(out.result, Err(AgentError::Failed(f)) if f.message.contains("flooded stdout")));
+
+    // 5. Legacy `session/set_model` with an in-flight unrelated `config_option_update` (still reporting Flash's
+    // `low`, without confirming `model == gemini-4-neon`) still invalidates effort and forces explicit re-setting.
+    let (out_tx, out_rx) = mpsc::channel::<String>();
+    let mut saw_effort_set_unrelated = false;
+    let mut send = |msg: &Value| -> bool {
+        let id = msg.get("id").and_then(Value::as_u64);
+        match msg["method"].as_str() {
+            Some("initialize") => {
+                let _ = out_tx.send(init_ok(id, true, false, false));
+            }
+            Some("session/new") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "models": { "currentModelId": "gemini-3.8-flash", "availableModels": [{ "modelId": "gemini-3.8-flash" }, { "modelId": "gemini-4-neon" }] },
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            Some("session/set_model") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "config_option_update",
+                                "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }, { "value": "high" }] }]
+                            }
+                        }
+                    })
+                    .to_string(),
+                );
+                let _ = out_tx.send(json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string());
+            }
+            Some("session/set_config_option") => {
+                saw_effort_set_unrelated = true;
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "high", "options": [{ "value": "low" }, { "value": "high" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            _ => {}
+        }
+        true
+    };
+    assert!(matches!(
+        drive_acp(&low_neon, &work, Duration::from_secs(5), &mut send, &out_rx, &String::new),
+        Err(AgentError::Failed(f)) if f.message.contains("selected effort `high` instead of requested `low`")
+    ));
+    assert!(saw_effort_set_unrelated);
+
+    // 6. Default-model run where `model` is first reported in a pre-dispatch `config_option_update` pins Neon and
+    // rejects a mid-prompt switch to Flash.
+    let (out_tx, out_rx) = mpsc::channel::<String>();
+    let mut send = |msg: &Value| -> bool {
+        let id = msg.get("id").and_then(Value::as_u64);
+        match msg["method"].as_str() {
+            Some("initialize") => {
+                let _ = out_tx.send(init_ok(id, true, false, false));
+            }
+            Some("session/new") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                        }
+                    })
+                    .to_string(),
+                );
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "config_option_update",
+                                "configOptions": [
+                                    { "id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-3.8-flash" }] },
+                                    { "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }
+                                ]
+                            }
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            Some("session/prompt") => {
+                let _ = out_tx.send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "config_option_update",
+                                "configOptions": [
+                                    { "id": "model", "category": "model", "currentValue": "gemini-3.8-flash", "options": [{ "value": "gemini-4-neon" }, { "value": "gemini-3.8-flash" }] },
+                                    { "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }
+                                ]
+                            }
+                        }
+                    })
+                    .to_string(),
+                );
+            }
+            _ => {}
+        }
+        true
+    };
+    let out = drive_acp_with_grace(
+        &default_req,
+        &work,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        &mut send,
+        &out_rx,
+        &String::new,
+    );
+    assert!(out.kill_immediately);
+    assert!(matches!(
+        out.result,
+        Err(AgentError::Failed(f)) if f.message.contains("selected model `gemini-3.8-flash` instead of requested `gemini-4-neon`")
+    ));
 }

@@ -53,6 +53,8 @@ struct SessionState {
     enforce_mode: bool,
     /// Set once step 3 verifies model and effort; any later `config_option_update` drift fails closed immediately.
     enforce_config: bool,
+    /// True when the caller left `model` unset so the first reported default model is pinned against later drift.
+    pin_default_model: bool,
     expected_model: Option<String>,
     expected_effort: Option<String>,
     /// True when no `thought_level` selector exists and the verified model ID itself encodes `expected_effort`.
@@ -67,8 +69,15 @@ impl SessionState {
         if find_mode_option(&opts).is_some() {
             self.mode_option_seen = true;
         }
-        if find_model_option(&opts).is_some() {
+        if let Some(model_opt) = find_model_option(&opts) {
             self.model_option_seen = true;
+            if self.pin_default_model
+                && self.enforce_mode
+                && self.expected_model.is_none()
+                && let Some(cur) = model_opt.current_value.as_deref()
+            {
+                self.expected_model = Some(cur.to_string());
+            }
         }
         if find_effort_option(&opts).is_some() {
             self.effort_option_seen = true;
@@ -282,6 +291,18 @@ fn drain_pending(
                 }
                 drained += 1;
                 let _ = handle_incoming_line(&line, None, false, false, state, send)?;
+                let after = Instant::now();
+                if after >= deadline {
+                    state.kill_immediately = true;
+                    return Err(AgentError::Timeout(state.usage.to_usage(0)));
+                }
+                if after >= drain_deadline {
+                    state.kill_immediately = true;
+                    return Err(AgentError::Failed(Failure {
+                        used: state.usage.to_usage(0),
+                        ..Failure::new("`agy acp` flooded stdout before the next request")
+                    }));
+                }
             }
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => return Err(unexpected_exit(&state.usage, stderr_text)),
@@ -345,7 +366,10 @@ pub(super) fn drive_acp_inner(
 ) -> DriveOutcome {
     let deadline = Instant::now() + timeout;
     let mut next_id: u64 = 1;
-    let mut state = SessionState::default();
+    let mut state = SessionState {
+        pin_default_model: req.model.map(str::trim).is_none_or(str::is_empty),
+        ..SessionState::default()
+    };
 
     let mut rpc_call = |method: &str,
                         params: Value,
@@ -634,6 +658,7 @@ pub(super) fn drive_acp_inner(
         req.model,
         req.effort,
         find_model_option(&state.config_options).or(legacy_model_opt.as_ref()),
+        find_effort_option(&state.config_options).is_some(),
     );
     let mut verified_legacy_model: Option<String> =
         legacy_model_opt.as_ref().and_then(|o| o.current_value.clone());
@@ -682,8 +707,13 @@ pub(super) fn drive_acp_inner(
                     &mut state,
                 ));
                 // Legacy `session/set_model` returns `{}` without refreshed `configOptions`: invalidate any prior
-                // effort reading from the old model unless a live `config_option_update` already refreshed it.
-                if !state.config_updated_in_call {
+                // effort reading unless a live `config_option_update` during the call explicitly confirmed BOTH
+                // `model == target` and its effort option.
+                let confirmed_target = state.config_updated_in_call
+                    && find_model_option(&state.config_options)
+                        .and_then(|o| o.current_value.as_deref())
+                        .is_some_and(|m| m.eq_ignore_ascii_case(&target));
+                if !confirmed_target {
                     for opt in &mut state.config_options {
                         let is_effort = opt.category.as_deref() == Some("thought_level")
                             || matches!(
