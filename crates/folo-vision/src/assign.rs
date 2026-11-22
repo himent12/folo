@@ -64,7 +64,13 @@ impl Default for TalConfig {
 impl TalConfig {
     /// The one-to-one head's assignment (MODEL.md §6.6): §7.3 with `topk = 7`, then `topk2 = 1`.
     pub fn o2o() -> Self {
-        Self { topk: 7, topk2: Some(1), ..Self::default() }
+        Self::default().one_to_one()
+    }
+
+    /// These settings with the one-to-one selection of MODEL.md §6.6: `topk = 7`, then `topk2 = 1`, whatever they
+    /// were. The metric and the candidates (`alpha`, `beta`, `eps`, `min_box_size`) stay.
+    pub fn one_to_one(self) -> Self {
+        Self { topk: 7, topk2: Some(1), ..self }
     }
 }
 

@@ -9,7 +9,7 @@ use folo_nn::{GradScaler, Module, RunningStats, ScaleUpdate};
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
-use crate::loss::{LossConfig, LossItems, detection_loss, o2m_weight, step_loss, targets_from_normalized};
+use crate::loss::{LossItems, detection_loss, o2m_weight, step_loss, targets_from_normalized};
 use crate::val::batch_tensor;
 
 impl Trainer {
@@ -76,7 +76,7 @@ impl Trainer {
             let o2o = match &out.o2o {
                 Some((b, c)) => {
                     let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
-                    let cfg = LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg };
+                    let cfg = self.loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
                     Some(detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &cfg)?)
                 }
                 None => None,

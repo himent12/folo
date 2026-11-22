@@ -53,6 +53,8 @@ Wave 6 (2026-11-20):
   shipped)
 - [Why a continued model first gets worse: the warm-up and EMA arms on the proxy and on full
   COCO](hill/r6-continue.md) (no arm passed, no code shipped)
+- [Four trainer findings from a research report: one fixed, the rest match the reference or lost the
+  gate](hill/r6-trainfix.md) (no default changed)
 
 ## Design review logs
 

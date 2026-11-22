@@ -494,7 +494,10 @@ both branches and are trained with dual assignment; `head = "o2m"` files (every 
   from `o2m` weights copies the o2m head into the o2o branch (as YOLOv10 initialises it).
 - Loss: `L = w_m · L_o2m + w_o · L_o2o`. `L_o2o` is §7 with `top_k = 7` and a second filter `top_k2 = 1` after
   conflict resolution: each ground truth keeps only its highest-metric positive (ties: smaller anchor); the anchors
-  it drops become background, and its soft target (§7.3 step 5, over that single positive) is about its IoU.
+  it drops become background, and its soft target (§7.3 step 5, over that single positive) is about its IoU. The
+  run's `loss.tal.alpha`, `beta`, `eps` and `min_box_size` apply to both branches; `loss.tal.topk` and `topk2` are the
+  one-to-many branch's. (`TrainConfig.o2o_keeps_tal`, on by default; configs written before the key mean off, the §7.3
+  values in this branch, so such a run resumes bit-exactly.)
   Weights after `e` completed epochs: `w_m = max(1 − e / max(E − 1, 1), 0) · (0.8 − 0.1) + 0.1`, `w_o = 1 − w_m`
   (starting at `w_m = 0.8`, ending at 0.1). The reported loss items (§7.4) are the same weighted sums of the two
   branches' items. With `amp` (§8.8) both branches run under autocast and both losses in f32 on f32 copies of their
@@ -640,6 +643,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `ema` | true | `false`: no EMA (§8.5) |
 | `ema_run_fraction` | 0.25 | a fine-tune's EMA window as a fraction of its optimizer steps, at most 10,000 (§8.5); `0`: the default window for every run, as in configs written before the key |
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
+| `o2o_keeps_tal` | true | `head = "o2o"`: its one-to-one assigner takes `loss.tal`'s `alpha`, `beta`, `eps`, `min_box_size` (§6.6); `false` in a config without the key (written before it, or a partial JSON decoded straight into `TrainConfig`) |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
 | `distill` | none | distillation from a frozen teacher (§8.9); absent: none |
