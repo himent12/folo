@@ -20,8 +20,8 @@ Both came from research reports of this wave, as hypotheses with a gate.
       L_f = Σ_l (1/2) · mean (ẑ_S − ẑ_T)²  ≈  Σ_l (1 − mean_c r_c)
 
   where `r_c` is the Pearson correlation of a channel of the adapted student map and the teacher's, and `λf = 0.5`
-  multiplies the term. The two sides are equal only while the stabiliser `1e-12` is negligible against the channel
-  variances. The adapters had their own AdamW (lr 1e-3) and were outside the model, its optimizer, the EMA and the
+  multiplies the term. The Pearson expression approximates the implemented loss when the channel variances are large
+  against `1e-12`. The adapters had their own AdamW (lr 1e-3) and were outside the model, its optimizer, the EMA and the
   checkpoints.
 - **C3, foreground-gated terms and T = 2** (`D:/folo-wave6/research/formula-neon.md`, Candidate 3; expected +0.004 to
   +0.010 AP, concentrated in AP75 to AP95). The per-element `L_kc` and `L_kd` are multiplied by the assigner's
@@ -120,8 +120,8 @@ Internal mAP50-95 of the trainer, and the reported distillation terms of epoch 3
 
 ## What is not shown
 
-- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training (C3's own
-  test was at epoch 44), so this gate rejects them at its own scale and under its fixed bar, and says nothing about
+- **A full run.** Each arm is four epochs from epoch 32. The reports' expected gains are for longer training (C3 proposed
+  testing at epoch 44), so this gate rejects them at its own scale and under its fixed bar, and says nothing about
   epoch 64.
 - **Run-to-run noise.** The intervals resample images for fixed weights, so they do not include training variance,
   which this lane did not measure. Each arm has one seed. The one related number is the cross-binary gap between the
