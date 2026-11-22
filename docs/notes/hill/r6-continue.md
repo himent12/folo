@@ -1,0 +1,116 @@
+# Wave 6, lane continue: why a continued model first gets worse (lab notebook)
+
+Lane `continue` of wave 6 (2026-11-21). **Result: no arm passed the gate written beforehand, so no rule ships and the
+trainer is unchanged.** An EMA that starts as if it had been running removes the visible dip (epoch 3 of the full COCO
+continuation: 0.4125 against 0.3760), but epoch 8 is 0.4112 against a bar of 0.414. The training loss of that arm is
+the same as the baseline's to three decimals in all eight epochs: the arm changes what validation reads, not what the
+model learns. Scratch, scripts and logs: `D:/folo-wave6/lanes/continue/`. Run folders:
+`D:/folo-data/runs-wave6/continue/`.
+
+Terms: **mAP** is the trainer's internal mAP50-95 on val2017 (or on the proxy's validation set). **W** is the number of
+warm-up epochs. **EMA running** means the EMA's update counter starts at `ceil(10 · tau)` instead of 0, so its decay is
+at full strength from the first step (docs/MODEL.md §8.5 gives the ramp).
+
+## The question
+
+Every model trained further with `--weights` on the same data first lost accuracy. The published folo-s (internal mAP
+0.4120) continued for 48 epochs at lr0 0.003 (`D:/folo-data/runs-wave6/long/s-cont-lr03`) fell to 0.3760 at epoch 3 and
+was back only at epoch 18. Which warm-up setting causes that, and can a rule for continuations remove it?
+
+The gate, fixed in the brief before any run: on the exact command of `s-cont-lr03`, with only the arm's settings
+changed and stopped after epoch 8, **epoch 3 ≥ 0.405 and epoch 8 ≥ 0.414**. Under that, one more arm at most, then stop.
+
+## Proxy: the dip does not reproduce
+
+The 320 px proxy (`mini320`, folo-n, batch 64, AMP). Base: `base-s0`, 20 epochs, `--close-mosaic 5`, final mAP 0.1250,
+its EMA exported as weights. Each arm continues those weights for 6 epochs with lr0 0.01, seeds 0 to 2, in the folders
+`c<arm>-s<seed>`. Means, with the range over the seeds:
+
+| arm | setting | epoch 1 | epoch 3 | epoch 6 (final) | lowest of epochs 1–3 against 0.1250 |
+|---|---|---:|---:|---:|---:|
+| A | today (`auto`: W 3, bias LR from 0.1) | 0.1228 (0.1212..0.1240) | 0.1258 (0.1253..0.1266) | 0.1296 (0.1292..0.1303) | −0.0022, worst seed −0.0038 |
+| B | W 0 | 0.0982 (0.0968..0.1005) | 0.1180 (0.1175..0.1183) | 0.1299 (0.1288..0.1306) | −0.0267, worst −0.0281 |
+| C | W 3, bias LR from lr0 | 0.1231 (0.1223..0.1237) | 0.1260 (0.1256..0.1266) | 0.1305 (0.1292..0.1312) | −0.0019, worst −0.0027 |
+| D | C with W 0.5 | 0.0990 (0.0976..0.1015) | 0.1182 (0.1172..0.1197) | 0.1286 (0.1276..0.1295) | −0.0260, worst −0.0274 |
+| E | W 0, EMA running | 0.1230 (0.1228..0.1232) | 0.1215 (0.1213..0.1218) | 0.1302 (0.1294..0.1307) | −0.0042, worst −0.0044 |
+| F | W 3, EMA running | 0.1258 (0.1257..0.1258) | 0.1270 (0.1267..0.1276) | 0.1296 (0.1293..0.1302) | +0.0008, worst +0.0007 |
+
+- **The proxy did not show the dip.** Arm A stays within 0.005 of the start, the brief's test for a reproduction. The
+  proxy's base model is far from converged (0.125), so it has little to lose. Its arms say little about full COCO.
+- With W 0 there is no warm-up branch at all, so the bias LR does not ramp either, and B starts at full LR with empty
+  momentum buffers. D ramps for half an epoch. Both lose about 0.026 at epoch 1 and recover by the end.
+- `--weights` on a checkpoint loads its **live** weights, not its EMA: only inference and export read the EMA
+  (`crates/folo-nn/src/io/file.rs`, the source choice in `load`). One extra run from the raw checkpoint, `cL-s0` (one
+  seed), gave 0.1234, 0.1233, 0.1258 at epochs 1 to 3 and 0.1297 at the end, like `cA-s0`.
+- **A choice that was mine.** The brief says to skip the screen and go to full COCO with fewer arms when the proxy shows
+  no dip. I ran it anyway because it cost minutes. Its rule for the arm to carry forward (the simplest arm within 0.003
+  of the start, final not below A) would pick C, and A itself is within 0.003 on the mean. I carried F instead, the only
+  arm that never fell below the start, and used the one extra arm on F plus C's setting. **C alone was not run at full
+  scale.**
+
+## Full COCO: the dip is gone from the reading, the bar is missed
+
+The command of `s-cont-lr03` from the published folo-s, 48-epoch schedule, seed 0, stopped after epoch 8. Binary: main
+at 38bf347a plus a measurement key for the EMA start (`D:/folo-wave6/lanes/continue/bin/folo-ema.patch`). One seed per
+arm.
+
+- `s-F`: `--set ema_warm_start=true`.
+- `s-FC`: the same and `--set warmup_bias_lr=0.003`, a bias LR never above lr0.
+
+| epoch | `s-cont-lr03` mAP | `s-F` mAP | `s-FC` mAP | train loss, baseline | train loss, `s-F` | train loss, `s-FC` |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.4035 | 0.4120 | 0.4118 | 3.314 | 3.314 | 3.320 |
+| 2 | 0.3932 | 0.4122 | 0.4124 | 3.345 | 3.345 | 3.344 |
+| **3** | 0.3760 | **0.4125** | **0.4127** | 3.468 | 3.468 | 3.467 |
+| 4 | 0.3784 | 0.4126 | 0.4129 | 3.610 | 3.610 | 3.611 |
+| 5 | 0.3853 | 0.4125 | 0.4124 | 3.626 | 3.626 | 3.627 |
+| 6 | 0.3935 | 0.4123 | 0.4121 | 3.622 | 3.622 | 3.625 |
+| 7 | 0.3966 | 0.4121 | 0.4116 | 3.619 | 3.619 | 3.621 |
+| **8** | 0.3995 | **0.4112** | **0.4106** | 3.614 | 3.614 | 3.615 |
+
+Both arms pass epoch 3 (≥ 0.405) and **both miss epoch 8 (≥ 0.414)**. As the brief says, the work stops there. The
+48-epoch end of these arms was not run.
+
+### What the numbers say
+
+- **The running EMA hides the dip; it does not prevent it.** The EMA does not feed back into training, and `s-F`'s
+  training loss equals the baseline's in every epoch. With the counter at 20,000 and decay 0.9999, the EMA still holds
+  79 % of the starting weights after epoch 1, 53 % after epoch 3 and 21 % after epoch 8. From `updates = 0` that share
+  is zero after one epoch. So `s-F` reads mostly the old model early on, and its slide from 0.4126 (epoch 4) to 0.4112
+  (epoch 8) is the average taking in the live weights. This reading is an inference: the live weights' own mAP was not
+  measured.
+- **The bias LR shows no effect once the EMA runs.** Capping it at lr0 moved mAP by at most 0.0006 and the epoch's
+  training loss by at most 0.006, in either direction, one seed each. That does not test the cap without the running
+  EMA at full scale.
+- **What is left is an untested lead.** The training loss rises from 3.31 to 3.62 while the LR ramps up to lr0, and the
+  earlier run at a higher lr0 dipped more (epoch 3: 0.3760 at 0.003, 0.3035 at 0.01, in
+  `D:/folo-data/runs-wave6/long/s-cont`). A model that ended its schedule at a learning rate near zero may simply be
+  disturbed by a restart at lr0. No arm here changed lr0.
+
+## The research report's claims
+
+`D:/folo-wave6/research/formula-neon.md`, Candidate 1, read as hypotheses:
+
+- **"The EMA wipes 99.95 % of the loaded weights at step 1": wrong as stated.** With `updates = 0` the EMA follows the
+  live weights, and at step 1 the live weights are the loaded weights plus one small step. It is missing smoothing, and
+  the table above shows what that does to the reading.
+- **Weight decay coupled to the momentum: read, not tested.** The code matches the description
+  (`crates/folo-nn/src/optim/sgd.rs`: the decay enters the gradient before the momentum, and MuSGD's SGD half runs at
+  `sgd · lr`, so a Muon group decays twice as fast at the continuation weights 0.2/1.0 as at the from-scratch 0.5/0.5).
+  Every arm here used the same weights and decay, so nothing here says whether it matters. Out of scope for this lane.
+- **The mosaic-off epochs: not the cause of this dip.** The schedule closes mosaic for the last 10 of 48 epochs, and the
+  dip is at epochs 1 to 3, with mosaic on. Mosaic closing itself was not tested.
+
+## The rule, the guard
+
+No rule ships. The code written for it (the EMA starts running only when every tensor loaded and the class list and
+head match, explicit key to turn it off, tests that a from-scratch run and a fine-tune with a new class head resolve the
+same settings) is kept outside the repository: `D:/folo-wave6/lanes/continue/bin/rule-not-shipped.patch`, against
+7b8ce7e3. **The BCCD guard was not run**, because it was conditional on the gate.
+
+## What went wrong along the way
+
+- The PC rebooted during `s-F`'s epoch 7. The run continued from its epoch-6 checkpoint with `--resume`; its training
+  loss at epochs 7 and 8 still equals the baseline's.
+- The first start of `s-FC` died out of host memory before training (`s-FC-failed-oom-1`; about 8 GB of commit was free
+  just after). It measured nothing and is not counted as an arm. The arm was started again under the same lock.

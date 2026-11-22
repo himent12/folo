@@ -51,6 +51,8 @@ Wave 6 (2026-11-20):
 - [A consensus score at decode: the gate on folo-n v5 and folo-s, shipped as an opt-in](hill/r6-consensus.md)
 - [Feature imitation and foreground-gated distillation at the fork gate](hill/r6-distill.md) (no arm passed, no code
   shipped)
+- [Why a continued model first gets worse: the warm-up and EMA arms on the proxy and on full
+  COCO](hill/r6-continue.md) (no arm passed, no code shipped)
 
 ## Design review logs
 
