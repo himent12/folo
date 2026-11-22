@@ -5,13 +5,18 @@
 //! (`promptCapabilities.image`), dynamic `model` and `thought_level` configuration (`configOptions`), system-prompt
 //! appending (`_meta.antigravity.systemPrompt.append`), and immediate JSON-RPC errors when signed out.
 //!
-//! Each labeling call runs `agy acp --include-default-customizations=false --disable-telemetry` in an empty scratch
-//! folder with `mcpServers: []`, attaches the batch's JPEGs inline as base64 image blocks in one `session/prompt`
-//! turn, and rejects any `session/request_permission` request so no tools ever execute. Model suggestions come from
-//! `agy models` (effort suffixes collapsed into base model ids) with a curated fallback list including
-//! `gemini-4-neon` when `agy models` cannot be read.
+//! Each labeling call runs `agy acp` in an isolated scratch workspace containing a dedicated `folo-labeler` custom
+//! agent (`tools: [send_message]`, `commandExecutionPolicy: "off"`, `inheritMcp: false`,
+//! `inheritCustomizations: false`), paired with an isolated CLI settings profile (`--cli_dir_name folo-label`) whose
+//! `settings.json` sets `toolPermission: "strict"` and denies all file, command, URL, and MCP actions, plus
+//! `--sandbox`, `--include-default-customizations=false`, `--disable-telemetry`, and `mcpServers: []`. The ACP
+//! session also rejects auto-approving modes, rejects any `session/request_permission` request, answers `-32601` to
+//! client tool methods, and aborts closed if a `tool_call` update ever appears. Model suggestions come from
+//! `agy models` (ANSI-stripped, effort suffixes collapsed into base model ids) with a curated fallback list
+//! including `gemini-4-neon` when `agy models` cannot be read.
 
 mod acp;
+mod protocol;
 #[cfg(test)]
 mod tests;
 
@@ -125,6 +130,29 @@ impl Agent for Antigravity {
         8
     }
 
+    fn resolve_request(
+        &self,
+        model: Option<String>,
+        effort: Option<LabelEffort>,
+    ) -> Result<(Option<String>, LabelEffort), String> {
+        if let Some(m) = model.as_deref()
+            && let Some((base, suffix)) = split_effort_suffix(m)
+        {
+            let mapped = effort_for_suffix(suffix);
+            if let Some(explicit) = effort
+                && explicit != mapped
+            {
+                return Err(format!(
+                    "model '{m}' already specifies effort '{suffix}', which conflicts with effort '{}': omit effort \
+                     or pass the base model '{base}'",
+                    explicit.as_str()
+                ));
+            }
+            return Ok((model, mapped));
+        }
+        Ok((model, effort.unwrap_or(LabelEffort::Low)))
+    }
+
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
         self.call_with_timeout(req, CALL_TIMEOUT)
     }
@@ -175,6 +203,16 @@ fn fallback_models() -> Vec<LabelModel> {
     FALLBACK_MODELS.map(|(id, label)| LabelModel { id: id.into(), label: label.into(), fast: false }).to_vec()
 }
 
+/// Maps an Antigravity effort suffix onto the closest [`LabelEffort`] tier for run/benchmark metadata.
+fn effort_for_suffix(suffix: &str) -> LabelEffort {
+    match suffix {
+        "minimal" | "low" => LabelEffort::Low,
+        "medium" => LabelEffort::Medium,
+        "high" | "xhigh" | "max" => LabelEffort::High,
+        _ => LabelEffort::Low,
+    }
+}
+
 /// Splits an effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, `-max`, `-minimal`) off a model slug.
 pub(super) fn split_effort_suffix(slug: &str) -> Option<(&str, &'static str)> {
     let lower = slug.to_ascii_lowercase();
@@ -200,20 +238,62 @@ fn strip_effort_label(label: &str) -> &str {
     trimmed
 }
 
-/// Parses `agy models` plain-text output (`<slug>   <Display Name>`) into base models, deduplicating effort-suffixed
-/// variants and skipping multi-model coding orchestrators.
+/// Strips ANSI CSI (`ESC [ ... final`) and OSC (`ESC ] ... BEL/ST`) escape sequences from one line of CLI output.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(ch) = chars.next() {
+                    if ch == '\x07' || (ch == '\x1b' && chars.peek() == Some(&'\\')) {
+                        if ch == '\x1b' {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// Parses `agy models` plain-text output (`<slug>   <Display Name>`) into base models, stripping ANSI formatting,
+/// ignoring diagnostics/timestamps/prose, deduplicating effort-suffixed variants, and skipping multi-model
+/// orchestrators.
 fn parse_models(stdout: &str) -> Vec<LabelModel> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
+    for raw_line in stdout.lines() {
+        let cleaned = strip_ansi(raw_line);
+        let trimmed = cleaned.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let mut parts = trimmed.splitn(2, char::is_whitespace);
-        let Some(raw_slug) = parts.next() else { continue };
-        let raw_label = parts.next().map(str::trim).unwrap_or("");
-        if !looks_like_model_slug(raw_slug) {
+        let slug_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let raw_slug = &trimmed[..slug_end];
+        let rest = &trimmed[slug_end..];
+        let tabular = rest.starts_with("  ") || rest.starts_with('\t');
+        let raw_label = rest.trim();
+        if !looks_like_model_slug(raw_slug, tabular, raw_label) {
             continue;
         }
         let lower = raw_slug.to_ascii_lowercase();
@@ -234,37 +314,49 @@ fn parse_models(stdout: &str) -> Vec<LabelModel> {
     out
 }
 
-fn looks_like_model_slug(s: &str) -> bool {
+fn looks_like_model_slug(s: &str, tabular: bool, label: &str) -> bool {
     if s.is_empty() || s.len() > 100 {
         return false;
     }
     let bytes = s.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+    // Model slugs start with an ASCII letter (rules out ISO timestamps like `2026-11-22T...` and numbers) and end
+    // with an alphanumeric character (rules out `Error:` / `Warning:`).
+    if !bytes[0].is_ascii_alphabetic() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
         return false;
     }
     if !bytes.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/')) {
         return false;
     }
-    if !bytes.iter().any(|b| b.is_ascii_alphabetic()) {
+    let has_sep = bytes.iter().any(|b| matches!(b, b'-' | b'_' | b'/'));
+    let has_digit = bytes.iter().any(|b| b.is_ascii_digit());
+    if !has_sep && !has_digit {
         return false;
     }
-    if !bytes.iter().any(|b| b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'/')) {
+    // Without a digit in the slug, require tabular `<slug>   <Display Name>` formatting so hyphenated prose lines
+    // like `sign-in required` never become bogus models.
+    if !has_digit && (!tabular || label.is_empty()) {
+        return false;
+    }
+    if let Some(first_word) = label.split_whitespace().next()
+        && matches!(
+            first_word.to_ascii_uppercase().trim_end_matches(':'),
+            "WARNING" | "WARN" | "ERROR" | "ERR" | "INFO" | "DEBUG" | "TRACE" | "FATAL"
+        )
+    {
         return false;
     }
     let lower = s.to_ascii_lowercase();
     !matches!(
         lower.as_str(),
-        "model"
-            | "models"
-            | "id"
-            | "slug"
-            | "name"
-            | "available"
-            | "error"
-            | "warning"
-            | "usage"
-            | "authentication"
-            | "please"
-            | "no"
+        "sign-in"
+            | "log-in"
+            | "opt-in"
+            | "re-run"
+            | "rate-limit"
+            | "not-found"
+            | "non-zero"
+            | "no-auth"
+            | "pre-release"
+            | "model-id"
     )
 }

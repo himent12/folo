@@ -207,9 +207,9 @@ pub(super) fn design(
     let model = check_model(req.model.as_deref())?;
     let labeler = store.labeler()?;
     let (agent, backoff) = (labeler.agent(req.agent)?, labeler.transient_backoff());
-    let info = agent.info();
-    let model = model.or(info.default_model);
-    let effort = req.effort.unwrap_or(info.default_effort);
+    let (model, effort) = agent
+        .resolve_request(model, req.effort)
+        .map_err(|why| Error::new(StatusCode::BAD_REQUEST, "invalid_body", why))?;
     let file = slot.live()?.file.clone();
     let side = agent.image_side();
     let jpegs = file

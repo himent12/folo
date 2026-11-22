@@ -142,13 +142,16 @@ defaults before and after):
   (`model_catalog_json`, `profile`, `openai_base_url` or `chatgpt_base_url` at its top level) or exists but
   cannot be read, or Codex refuses the file as it starts, calls go without it at the old cost, and the run's log
   says so once. A refusal holds for the version of Codex that refused, until another one is installed.
-- Antigravity runs `agy acp --include-default-customizations=false --disable-telemetry` over ACP v1 JSON-RPC on
-  stdio in an empty scratch folder with no MCP servers: the images go inline as base64 JPEGs in a single
-  `session/prompt` turn, FOLO's instructions attach through `_meta.antigravity.systemPrompt.append`, the model and
-  `thought_level` are selected via `session/set_config_option` (accepting base ids like `gemini-4-neon` as well as
-  effort-suffixed slugs like `gemini-4-neon-xhigh`), and any `session/request_permission` call is rejected so no
-  tools ever execute. Models come from `agy models` with a curated fallback (`gemini-4-neon`, `gemini-4-hydrogen`,
-  `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash`).
+- Antigravity runs `agy acp --agent folo-labeler --cli_dir_name folo-label --sandbox --include-default-customizations=false --disable-telemetry`
+  over ACP v1 JSON-RPC on stdio in an isolated scratch workspace with no MCP servers: FOLO writes a restricted
+  `folo-labeler` custom agent (native file/shell tools and inherited customizations disabled) and a strict deny-all
+  `folo-label/settings.json` profile so user auto-approve settings cannot execute tools, enforces a non-auto ACP
+  mode, rejects any `session/request_permission` request, and fails closed if a `tool_call` update ever appears.
+  The images go inline as base64 JPEGs in a single `session/prompt` turn, FOLO's instructions attach through
+  `_meta.antigravity.systemPrompt.append`, and the model and `thought_level` are selected and verified via
+  `session/set_config_option` (accepting base ids like `gemini-4-neon` as well as effort-suffixed slugs like
+  `gemini-4-neon-xhigh`). Models come from `agy models` with a curated fallback (`gemini-4-neon`,
+  `gemini-4-hydrogen`, `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash`).
 - A box is a list, `["car", x1, y1, x2, y2]`, instead of `{"label": "car", "box": [x1, y1, x2, y2]}`: Codex
   writes 25% fewer output tokens for the same labels.
 - Haiku runs at low effort and Codex sends images at 768 px (the reasons are in the next section).

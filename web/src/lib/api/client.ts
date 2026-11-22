@@ -192,7 +192,7 @@ export interface Api {
   terminateCloudInstance(id: string): Promise<CloudInstance>;
 
   // Agent labeling (docs/API.md; servers list `agent_labeling`).
-  /** Claude Code, then Codex, each with whether its CLI is installed on the server's machine. */
+  /** Registered labeling agents (Claude Code, Codex, Antigravity), each with whether its CLI is installed on the server's machine. */
   labelAgents(signal?: AbortSignal): Promise<LabelAgent[]>;
   /** Newest first. */
   labelJobs(signal?: AbortSignal): Promise<LabelJob[]>;
@@ -248,7 +248,7 @@ export interface Api {
   /** The benchmark, its images, entries and loops (never a model, run or dataset a loop made). `409 bench_active` while one is active. */
   deleteBench(id: string): Promise<void>;
   /**
-   * One request to Claude Code or Codex (no tools; up to two minutes) for a plan drawn from the catalog: a proposal,
+   * One request to a registered labeling agent (no tools; up to two minutes) for a plan drawn from the catalog: a proposal,
    * not saved (`updateBench` adopts it). `501 not_supported` without the agent's CLI, `502 agent_failed` (message, hint).
    */
   designBench(id: string, body: DesignBench, signal?: AbortSignal): Promise<BenchDesign>;

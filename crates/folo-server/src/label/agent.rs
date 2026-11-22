@@ -141,6 +141,17 @@ pub trait Agent: Send + Sync + 'static {
         let _ = model;
         Err(format!("{} has no faster service tier", self.id().display_name()))
     }
+    /// Resolves `(model, effort)` for a request before the run or benchmark entry records them (defaulting to
+    /// `info.default_model` and `info.default_effort`). Agents whose model slugs can carry an effort suffix
+    /// override this so recorded effort matches the effective setting and conflicting explicit efforts are refused.
+    fn resolve_request(
+        &self,
+        model: Option<String>,
+        effort: Option<LabelEffort>,
+    ) -> Result<(Option<String>, LabelEffort), String> {
+        let info = self.info();
+        Ok((model.or(info.default_model), effort.unwrap_or(info.default_effort)))
+    }
     /// Something about how this agent's calls are made right now that a run's log should say once (a call that
     /// costs more than it should, and why); `None` when there is nothing to say.
     fn notice(&self) -> Option<String> {

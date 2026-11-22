@@ -170,8 +170,8 @@ pub struct LabelJobState {
     pub status: LabelJobStatus,
 }
 
-/// An agent run of a job, without its timestamps, tokens and error (`label_status` has the job's tokens, its
-/// log the error).
+/// An agent run of a job, without its timestamps and per-run tokens (`label_status` has the job's tokens, and
+/// includes `error` and `hint` when a run fails).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LabelRunSummary {
     /// The agent.
@@ -188,6 +188,12 @@ pub struct LabelRunSummary {
     pub failed: u64,
     /// `null` while it runs.
     pub outcome: Option<LabelOutcome>,
+    /// Why a failed run stopped; omitted unless the run failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Actionable recovery guidance for `error`; omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl From<LabelRun> for LabelRunSummary {
@@ -200,6 +206,8 @@ impl From<LabelRun> for LabelRunSummary {
             done: r.done,
             failed: r.failed,
             outcome: r.outcome,
+            error: r.error,
+            hint: r.hint,
         }
     }
 }

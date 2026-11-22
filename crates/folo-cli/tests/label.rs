@@ -109,16 +109,20 @@ struct Env {
     claude: PathBuf,
     no_codex: PathBuf,
     antigravity: PathBuf,
+    user_home: PathBuf,
     /// Arguments every command gets.
     after: Vec<String>,
 }
 
 impl Env {
     fn new(root: &Path) -> Env {
+        let user_home = root.join("user-home");
+        std::fs::create_dir_all(&user_home).unwrap();
         Env {
             claude: fake_claude(&root.join("bin")),
             no_codex: root.join("bin").join("no-codex"),
             antigravity: root.join("bin").join("no-antigravity"),
+            user_home,
             after: vec![],
         }
     }
@@ -136,6 +140,8 @@ impl Env {
     fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
         c.env("FOLO_NO_CACHE", "1")
+            .env("HOME", &self.user_home)
+            .env("USERPROFILE", &self.user_home)
             .env("FOLO_CLAUDE_BIN", &self.claude)
             .env("FOLO_CODEX_BIN", &self.no_codex)
             .env("FOLO_ANTIGRAVITY_BIN", &self.antigravity)
@@ -375,6 +381,7 @@ fn view_keeps_the_photos(env: &Env, t: &Path, args: &[&str], server: Option<&fol
         claude: env.claude.clone(),
         no_codex: env.no_codex.clone(),
         antigravity: env.antigravity.clone(),
+        user_home: env.user_home.clone(),
         after,
     };
     let long = format!("{}.png", "a".repeat(115));
@@ -613,4 +620,31 @@ fn antigravity_labels_via_acp() {
     );
     let page = env.ok(&["images", &job, "--boxes"]);
     assert_eq!(page["items"][0]["boxes"], json!([[0, 16, 5, 48, 29]]));
+    // Strict isolated Antigravity settings were written under the isolated test home (never the user's real home).
+    let settings = std::fs::read_to_string(
+        t.join("user-home").join(".gemini").join("antigravity-cli").join("folo-label").join("settings.json"),
+    )
+    .unwrap();
+    assert!(
+        settings.contains("\"toolPermission\": \"strict\"") && settings.contains("\"read_file(*)\""),
+        "{settings}"
+    );
+    // Conflicting suffixed model + explicit effort is rejected cleanly before calling `agy`.
+    assert_eq!(
+        env.fails(
+            &[
+                "start",
+                &job,
+                "--agent",
+                "antigravity",
+                "--model",
+                "gemini-4-neon-xhigh",
+                "--effort",
+                "low",
+                "--all"
+            ],
+            2
+        ),
+        "usage"
+    );
 }

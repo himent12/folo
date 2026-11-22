@@ -683,6 +683,9 @@ impl Agent for ScriptedAntigravity {
     }
 
     fn label(&self, req: &AgentRequest<'_>) -> Result<AgentReply, AgentError> {
+        if req.prompt.contains("auth-fail") {
+            return Err(AgentError::failed("Authentication required"));
+        }
         let images: Vec<Value> = (1..=req.images.len())
             .map(|i| json!({ "image": i, "boxes": [["car", 16, 4.8, 48, 28.8]] }))
             .collect();
@@ -694,6 +697,12 @@ impl Agent for ScriptedAntigravity {
             cost_usd: None,
         };
         Ok(AgentReply { text: json!({ "images": images }).to_string(), usage })
+    }
+
+    fn hint(&self, message: &str) -> Option<String> {
+        message
+            .contains("Authentication required")
+            .then(|| "run `agy` (or `agy acp --login`) in a terminal on the server's machine to sign in, then start again".into())
     }
 }
 
@@ -730,10 +739,23 @@ async fn antigravity_agent_labels_and_rejects_fast() {
     assert_eq!(status["run"]["model"], "gemini-4-neon");
     assert_eq!(status["run"]["effort"], "low");
     assert_eq!(status["run"]["outcome"], "completed");
+    assert!(status["run"].get("error").is_none() && status["run"].get("hint").is_none());
     assert_eq!(
         (status["calls"].as_u64(), status["input_tokens"].as_u64(), status["output_tokens"].as_u64()),
         (Some(1), Some(600), Some(40))
     );
+
+    // Failed run exposes actionable `error` and `hint` directly on `label_status`'s `run` summary.
+    let _ = ok(
+        &s,
+        "start_labeling",
+        json!({ "job_id": job, "agent": "antigravity", "image_ids": ["2"], "note": "auth-fail" }),
+    )
+    .await;
+    let failed = wait_idle(&s, &job).await;
+    assert_eq!(failed["run"]["outcome"], "failed");
+    assert_eq!(failed["run"]["error"], "Authentication required");
+    assert!(failed["run"]["hint"].as_str().unwrap().contains("agy acp --login"));
 
     let prompt = crate::prompts::get(
         &s.inner,
