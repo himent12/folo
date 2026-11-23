@@ -3,7 +3,8 @@
 //! own tiles only.
 
 use super::conv::{
-    ConvGeom, ConvInput, ConvPart, transform_weights, winograd_calls, winograd_forward, winograd_forward_at,
+    ConvGeom, ConvInput, ConvPart, transform_weights, transform_weights4, winograd_calls, winograd_forward,
+    winograd_forward_at, winograd4_forward, winograd4_forward_at,
 };
 use crate::rng::Rng;
 use crate::{Conv2dParams, Tensor, UnaryOp, no_grad};
@@ -66,8 +67,13 @@ fn check(
 #[test]
 fn winograd_sites_are_the_dense_values() {
     let mut rng = Rng::seed(3);
-    for (n, c, o, h, w) in [(2, 64, 64, 13, 11), (1, 96, 64, 20, 20), (3, 64, 64, 1, 7), (1, 64, 72, 11, 11)]
-    {
+    for (n, c, o, h, w) in [
+        (2, 64, 64, 13, 11),
+        (1, 96, 64, 20, 20),
+        (2, 32, 32, 35, 37),
+        (3, 64, 64, 1, 7),
+        (1, 64, 72, 11, 11),
+    ] {
         let x = Tensor::randn([n, c, h, w], 0.0, 1.0, &mut rng);
         let wt = Tensor::randn([o, c, 3, 3], 0.0, 0.05, &mut rng);
         let b = Tensor::randn([o], 0.0, 0.1, &mut rng);
@@ -155,6 +161,38 @@ fn tile_list_writes_its_tiles_only() {
                 assert_eq!(got.to_bits(), want.to_bits(), "{threads} threads: element {i}");
             } else {
                 assert!(got.is_nan(), "{threads} threads: element {i} outside the list was written");
+            }
+        }
+    }
+}
+
+#[test]
+fn tile_list4_writes_its_tiles_only() {
+    let mut rng = Rng::seed(7);
+    let (n, c, o, h, w) = (2, 32, 32, 29, 27);
+    let x = Tensor::randn([n, c, h, w], 0.0, 1.0, &mut rng).to_vec::<f32>().unwrap();
+    let wt = Tensor::randn([o, c, 3, 3], 0.0, 0.05, &mut rng).to_vec::<f32>().unwrap();
+    let g = ConvGeom { n, c, h, w, o, kh: 3, kw: 3, oh: h, ow: w, p: P3 };
+    let u = transform_weights4(&wt, o, c);
+    let part = [ConvPart::contiguous(&x, c, h * w)];
+    let input = ConvInput { parts: &part };
+    let (tw, all) = (w.div_ceil(4), h.div_ceil(4) * w.div_ceil(4));
+    let mut dense = vec![0f32; n * o * h * w];
+    winograd4_forward(input, &u, &mut dense, &g, None);
+    let list: Vec<u32> =
+        vec![0, 1, 2, 4, (tw + 2) as u32, (2 * tw - 1) as u32, (all - 2) as u32, (all - 1) as u32];
+    let lists = vec![list.clone(), Vec::new()];
+    for threads in [1, 3, rayon::current_num_threads()] {
+        let mut out = vec![f32::NAN; n * o * h * w];
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| winograd4_forward_at(input, &u, &mut out, &g, None, &lists));
+        for (i, (&got, &want)) in out.iter().zip(&dense).enumerate() {
+            let (img, pix) = (i / (o * h * w), i % (h * w));
+            let tile = ((pix / w) / 4 * tw + (pix % w) / 4) as u32;
+            if img == 0 && list.contains(&tile) {
+                assert_eq!(got.to_bits(), want.to_bits(), "{threads} threads: element {i}");
+            } else {
+                assert!(got.is_nan(), "{threads} threads: element {i} outside the F(4x4) list was written");
             }
         }
     }

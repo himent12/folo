@@ -11,21 +11,31 @@ use super::im2col::PlaneRows;
 use super::{ChannelEpilogue, ConvGeom, ConvInput};
 use crate::cpu::gemm::{KC, Strided, gemm_ex};
 
-/// Per image, the ascending distinct 2x2 output tiles (`ty · ⌈OW/2⌉ + tx`) holding one of the sites `at` (flat
-/// `img · OH·OW + oy · OW + ox`, each `< N · OH · OW`).
-pub(crate) fn winograd_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
-    let (ohw, tw) = (g.ohw(), g.ow.div_ceil(2));
+/// Per image, the ascending distinct `tile x tile` output tiles (`ty · ⌈OW/tile⌉ + tx`) holding one of the sites
+/// `at` (flat `img · OH·OW + oy · OW + ox`, each `< N · OH · OW`).
+fn tiles_at(g: &ConvGeom, at: &[usize], tile: usize) -> Vec<Vec<u32>> {
+    let (ohw, tw) = (g.ohw(), g.ow.div_ceil(tile));
     let mut lists = vec![Vec::new(); g.n];
     for &s in at {
         let (img, pix) = (s / ohw, s % ohw);
         let (oy, ox) = (pix / g.ow, pix % g.ow);
-        lists[img].push(((oy / 2) * tw + ox / 2) as u32);
+        lists[img].push(((oy / tile) * tw + ox / tile) as u32);
     }
     for l in &mut lists {
         l.sort_unstable();
         l.dedup();
     }
     lists
+}
+
+/// Per image, the ascending distinct 2x2 output tiles (`ty · ⌈OW/2⌉ + tx`) holding one of the sites `at`.
+pub(crate) fn winograd_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
+    tiles_at(g, at, 2)
+}
+
+/// Per image, the ascending distinct 4x4 output tiles (`ty · ⌈OW/4⌉ + tx`) holding one of the sites `at`.
+pub(crate) fn winograd4_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
+    tiles_at(g, at, 4)
 }
 
 /// A pointwise conv (`g` 1x1, stride 1, no padding, one group) at the output sites `at` (as in

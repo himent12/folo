@@ -31,23 +31,28 @@ fn fresh(t: &Tensor) -> Tensor {
     Tensor::from_vec(t.to_vec::<f32>().unwrap(), t.dims().to_vec()).unwrap()
 }
 
-/// A 3x3 stride-1 conv with 32 channels at 32x32 runs as Winograd F(2x2, 3x3) through the fused inference entry
-/// point, and as the direct conv through the autograd one: close, not bit for bit (without an activation both
-/// take the same direct path otherwise, so equal bits would mean no Winograd).
+/// 3x3 stride-1 convs take Winograd (`F(2x2)` on 32->32 32x32 and `F(4x4)` on 64->64 40x40) through the fused
+/// inference entry point, and the direct conv through the autograd one: close, not bit for bit.
 #[test]
 fn inference_conv_takes_winograd() {
     let mut rng = Rng::seed(1);
-    let x = Tensor::randn([1, 32, 32, 32], 0.0, 1.0, &mut rng);
-    let w = Tensor::randn([32, 32, 3, 3], 0.0, 0.1, &mut rng);
-    let b = Tensor::randn([32], 0.0, 0.1, &mut rng);
-    let (direct, calls) = counting(|| x.conv2d_with(&w, Some(&b), &P).unwrap().to_vec::<f32>().unwrap());
-    assert_eq!(calls, [0, 0], "the autograd conv ran Winograd");
-    let _g = no_grad();
-    let (wino, calls) = counting(|| x.conv2d_act(&w, Some(&b), &P, None).unwrap().to_vec::<f32>().unwrap());
-    assert_eq!(calls, [1, 1], "the inference conv did not run Winograd (or not once)");
-    let max_err = direct.iter().zip(&wino).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-    assert!(max_err < 1e-5, "Winograd and direct differ by {max_err}");
-    assert!(direct.iter().zip(&wino).any(|(a, b)| a.to_bits() != b.to_bits()), "bit for bit the direct conv");
+    for (c, hw) in [(32usize, 32usize), (64, 40)] {
+        let x = Tensor::randn([1, c, hw, hw], 0.0, 1.0, &mut rng);
+        let w = Tensor::randn([c, c, 3, 3], 0.0, 0.1, &mut rng);
+        let b = Tensor::randn([c], 0.0, 0.1, &mut rng);
+        let (direct, calls) = counting(|| x.conv2d_with(&w, Some(&b), &P).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls, [0, 0], "the autograd conv ran Winograd ({c}@{hw})");
+        let _g = no_grad();
+        let (wino, calls) =
+            counting(|| x.conv2d_act(&w, Some(&b), &P, None).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls, [1, 1], "the inference conv did not run Winograd ({c}@{hw})");
+        let max_err = direct.iter().zip(&wino).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(max_err < 1e-4, "Winograd and direct differ by {max_err} ({c}@{hw})");
+        assert!(
+            direct.iter().zip(&wino).any(|(a, b)| a.to_bits() != b.to_bits()),
+            "bit for bit the direct conv ({c}@{hw})"
+        );
+    }
 }
 
 /// The transformed weights are made once and reused while the weights are unchanged, made again after every

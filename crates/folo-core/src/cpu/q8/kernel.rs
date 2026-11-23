@@ -305,8 +305,8 @@ impl Epi<'_> {
         self.apply_f32(tile, NR, res, q, f)
     }
 
-    /// The AVX2 epilogue, 8 columns at a time. Per-channel zero points are packed into `z01` / `z23` once before
-    /// the loop so per-channel C4 quantisation costs zero extra SIMD instructions.
+    /// The AVX2 epilogue, 8 columns at a time, specialised by `(silu, res, out)` so broadcasts are hoisted
+    /// out of the `NR / 8` loop and zero branches execute inside it.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn apply_avx2(
@@ -316,62 +316,157 @@ impl Epi<'_> {
         q: &mut [u32; NR],
         f: &mut [[f32; NR]; MR],
     ) {
+        // SAFETY: forwarded; `q` has `NR` writable words.
+        unsafe { self.apply_avx2_ptr(acc, res.as_ptr(), q.as_mut_ptr(), f) }
+    }
+
+    /// [`apply_full`] writing a full `NR`-word contiguous C4 tile directly to `q_dst` (skipping the `qw` copy).
+    ///
+    /// # Safety
+    /// `q_dst` is writable for `NR` words; `res_ptr` is readable for `NR` words when `self.res.is_some()`.
+    pub(crate) unsafe fn apply_full_u8_direct(&self, acc: &Tile, res_ptr: *const u32, q_dst: *mut u32) {
+        #[cfg(target_arch = "x86_64")]
+        if uses_avx2() {
+            let mut dummy = [[0f32; NR]; MR];
+            // SAFETY: AVX2 and FMA were detected; pointers guaranteed by caller.
+            return unsafe { self.apply_avx2_ptr(acc, res_ptr, q_dst, &mut dummy) };
+        }
+        let mut resw = [0u32; NR];
+        if self.res.is_some() {
+            // SAFETY: `res_ptr` is readable for `NR` words.
+            unsafe { std::ptr::copy_nonoverlapping(res_ptr, resw.as_mut_ptr(), NR) };
+        }
+        let mut qw = [0u32; NR];
+        let mut dummy = [[0f32; NR]; MR];
+        self.apply(acc, NR, &resw, &mut qw, &mut dummy);
+        // SAFETY: `q_dst` is writable for `NR` words.
+        unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), q_dst, NR) };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn apply_avx2_ptr(&self, acc: &Tile, res: *const u32, q: *mut u32, f: &mut [[f32; NR]; MR]) {
+        // SAFETY: pointer contract forwarded.
+        unsafe {
+            match (self.silu, self.res.is_some(), matches!(self.out, Out::U8 { .. })) {
+                (true, false, true) => self.apply_avx2_spec::<true, false, true>(acc, res, q, f),
+                (false, false, true) => self.apply_avx2_spec::<false, false, true>(acc, res, q, f),
+                (true, true, true) => self.apply_avx2_spec::<true, true, true>(acc, res, q, f),
+                (false, true, true) => self.apply_avx2_spec::<false, true, true>(acc, res, q, f),
+                (true, false, false) => self.apply_avx2_spec::<true, false, false>(acc, res, q, f),
+                (false, false, false) => self.apply_avx2_spec::<false, false, false>(acc, res, q, f),
+                (true, true, false) => self.apply_avx2_spec::<true, true, false>(acc, res, q, f),
+                (false, true, false) => self.apply_avx2_spec::<false, true, false>(acc, res, q, f),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    #[inline]
+    unsafe fn apply_avx2_spec<const SILU: bool, const HAS_RES: bool, const OUT_U8: bool>(
+        &self,
+        acc: &Tile,
+        res: *const u32,
+        q: *mut u32,
+        f: &mut [[f32; NR]; MR],
+    ) {
         use std::arch::x86_64::*;
-        // SAFETY: every pointer is to a local array of the right length.
+        // SAFETY: every pointer is valid for `NR` words / `MR x NR` elements per caller contract.
         unsafe {
             let (lo, hi) = (_mm256_set1_ps(-512.0), _mm256_set1_ps(512.0));
             let transpose = _mm256_setr_epi8(
                 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14,
                 3, 7, 11, 15,
             );
-            let (z01, z23) = match self.out {
-                Out::U8 { zero, .. } => {
+            let (inv_arr, z01, z23) = match self.out {
+                Out::U8 { inv, zero } if OUT_U8 => {
                     let (z0, z1, z2, z3) = (zero[0] as i16, zero[1] as i16, zero[2] as i16, zero[3] as i16);
                     (
+                        *inv,
                         _mm256_setr_epi16(z0, z0, z0, z0, z1, z1, z1, z1, z0, z0, z0, z0, z1, z1, z1, z1),
                         _mm256_setr_epi16(z2, z2, z2, z2, z3, z3, z3, z3, z2, z2, z2, z2, z3, z3, z3, z3),
                     )
                 }
-                Out::F32 => (_mm256_setzero_si256(), _mm256_setzero_si256()),
+                _ => ([0.0; MR], _mm256_setzero_si256(), _mm256_setzero_si256()),
             };
+            let (rs_arr, rz_arr) = match self.res {
+                Some((rs, rz)) if HAS_RES => (*rs, *rz),
+                _ => ([0.0; MR], [0; MR]),
+            };
+            let mask_ff = _mm256_set1_epi32(0xFF);
             for k in 0..NR / 8 {
-                let w = _mm256_loadu_si256(res.as_ptr().add(8 * k) as *const __m256i);
+                let w = if HAS_RES {
+                    _mm256_loadu_si256(res.add(8 * k) as *const __m256i)
+                } else {
+                    _mm256_setzero_si256()
+                };
                 let mut v = [_mm256_setzero_si256(); MR];
                 for (r, vr) in v.iter_mut().enumerate() {
                     let a = _mm256_loadu_si256(acc[r].as_ptr().add(8 * k) as *const __m256i);
                     let t = _mm256_cvtepi32_ps(_mm256_sub_epi32(a, _mm256_set1_epi32(self.corr[r])));
                     let mut y =
                         _mm256_fmadd_ps(t, _mm256_set1_ps(self.scale[r]), _mm256_set1_ps(self.bias[r]));
-                    if self.silu {
+                    if SILU {
                         y = silu_q8_avx2(y);
                     }
-                    if let Some((rs, rz)) = self.res {
-                        let b = _mm256_and_si256(
-                            _mm256_srlv_epi32(w, _mm256_set1_epi32(8 * r as i32)),
-                            _mm256_set1_epi32(0xFF),
-                        );
-                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz[r])));
-                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs[r]), d, y);
+                    if HAS_RES {
+                        let shifted = match r {
+                            0 => w,
+                            1 => _mm256_srli_epi32::<8>(w),
+                            2 => _mm256_srli_epi32::<16>(w),
+                            _ => _mm256_srli_epi32::<24>(w),
+                        };
+                        let b = _mm256_and_si256(shifted, mask_ff);
+                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz_arr[r])));
+                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs_arr[r]), d, y);
                     }
-                    match self.out {
-                        Out::F32 => _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y),
-                        Out::U8 { inv, .. } => {
-                            let y = _mm256_min_ps(
-                                _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv[r])), lo),
-                                hi,
-                            );
-                            *vr = _mm256_cvtps_epi32(y);
-                        }
+                    if OUT_U8 {
+                        let y = _mm256_min_ps(
+                            _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv_arr[r])), lo),
+                            hi,
+                        );
+                        *vr = _mm256_cvtps_epi32(y);
+                    } else {
+                        _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y);
                     }
                 }
-                if matches!(self.out, Out::U8 { .. }) {
+                if OUT_U8 {
                     let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
                     let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
                     let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
-                    _mm256_storeu_si256(q.as_mut_ptr().add(8 * k) as *mut __m256i, bytes);
+                    _mm256_storeu_si256(q.add(8 * k) as *mut __m256i, bytes);
                 }
             }
         }
+    }
+
+    /// [`apply_f32_full`] writing a full `NR`-word contiguous C4 tile directly to `q_dst`.
+    ///
+    /// # Safety
+    /// `q_dst` is writable for `NR` words; `res_ptr` is readable for `NR` words when `self.res.is_some()`.
+    pub(crate) unsafe fn apply_f32_full_u8_direct(
+        &self,
+        tile: &TileF32,
+        res_ptr: *const u32,
+        q_dst: *mut u32,
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        if uses_avx2() {
+            let mut dummy = [[0f32; NR]; MR];
+            // SAFETY: AVX2 and FMA were detected; pointers guaranteed by caller.
+            return unsafe { self.apply_f32_avx2_ptr(tile, res_ptr, q_dst, &mut dummy) };
+        }
+        let mut resw = [0u32; NR];
+        if self.res.is_some() {
+            // SAFETY: `res_ptr` is readable for `NR` words.
+            unsafe { std::ptr::copy_nonoverlapping(res_ptr, resw.as_mut_ptr(), NR) };
+        }
+        let mut qw = [0u32; NR];
+        let mut dummy = [[0f32; NR]; MR];
+        self.apply_f32(tile, NR, &resw, &mut qw, &mut dummy);
+        // SAFETY: `q_dst` is writable for `NR` words.
+        unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), q_dst, NR) };
     }
 
     /// AVX2 epilogue from a pre-accumulated `TileF32`.
@@ -384,57 +479,107 @@ impl Epi<'_> {
         q: &mut [u32; NR],
         f: &mut [[f32; NR]; MR],
     ) {
+        // SAFETY: forwarded.
+        unsafe { self.apply_f32_avx2_ptr(tile, res.as_ptr(), q.as_mut_ptr(), f) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn apply_f32_avx2_ptr(
+        &self,
+        tile: &TileF32,
+        res: *const u32,
+        q: *mut u32,
+        f: &mut [[f32; NR]; MR],
+    ) {
+        // SAFETY: pointer contract forwarded.
+        unsafe {
+            match (self.silu, self.res.is_some(), matches!(self.out, Out::U8 { .. })) {
+                (true, false, true) => self.apply_f32_avx2_spec::<true, false, true>(tile, res, q, f),
+                (false, false, true) => self.apply_f32_avx2_spec::<false, false, true>(tile, res, q, f),
+                (true, true, true) => self.apply_f32_avx2_spec::<true, true, true>(tile, res, q, f),
+                (false, true, true) => self.apply_f32_avx2_spec::<false, true, true>(tile, res, q, f),
+                (true, false, false) => self.apply_f32_avx2_spec::<true, false, false>(tile, res, q, f),
+                (false, false, false) => self.apply_f32_avx2_spec::<false, false, false>(tile, res, q, f),
+                (true, true, false) => self.apply_f32_avx2_spec::<true, true, false>(tile, res, q, f),
+                (false, true, false) => self.apply_f32_avx2_spec::<false, true, false>(tile, res, q, f),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    #[inline]
+    unsafe fn apply_f32_avx2_spec<const SILU: bool, const HAS_RES: bool, const OUT_U8: bool>(
+        &self,
+        tile: &TileF32,
+        res: *const u32,
+        q: *mut u32,
+        f: &mut [[f32; NR]; MR],
+    ) {
         use std::arch::x86_64::*;
-        // SAFETY: every pointer is to a local array of the right length.
+        // SAFETY: pointers valid for `NR` words / `MR x NR` elements per caller contract.
         unsafe {
             let (lo, hi) = (_mm256_set1_ps(-512.0), _mm256_set1_ps(512.0));
             let transpose = _mm256_setr_epi8(
                 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14,
                 3, 7, 11, 15,
             );
-            let (z01, z23) = match self.out {
-                Out::U8 { zero, .. } => {
+            let (inv_arr, z01, z23) = match self.out {
+                Out::U8 { inv, zero } if OUT_U8 => {
                     let (z0, z1, z2, z3) = (zero[0] as i16, zero[1] as i16, zero[2] as i16, zero[3] as i16);
                     (
+                        *inv,
                         _mm256_setr_epi16(z0, z0, z0, z0, z1, z1, z1, z1, z0, z0, z0, z0, z1, z1, z1, z1),
                         _mm256_setr_epi16(z2, z2, z2, z2, z3, z3, z3, z3, z2, z2, z2, z2, z3, z3, z3, z3),
                     )
                 }
-                Out::F32 => (_mm256_setzero_si256(), _mm256_setzero_si256()),
+                _ => ([0.0; MR], _mm256_setzero_si256(), _mm256_setzero_si256()),
             };
+            let (rs_arr, rz_arr) = match self.res {
+                Some((rs, rz)) if HAS_RES => (*rs, *rz),
+                _ => ([0.0; MR], [0; MR]),
+            };
+            let mask_ff = _mm256_set1_epi32(0xFF);
             for k in 0..NR / 8 {
-                let w = _mm256_loadu_si256(res.as_ptr().add(8 * k) as *const __m256i);
+                let w = if HAS_RES {
+                    _mm256_loadu_si256(res.add(8 * k) as *const __m256i)
+                } else {
+                    _mm256_setzero_si256()
+                };
                 let mut v = [_mm256_setzero_si256(); MR];
                 for (r, vr) in v.iter_mut().enumerate() {
                     let t = _mm256_loadu_ps(tile[r].as_ptr().add(8 * k));
                     let mut y = _mm256_add_ps(t, _mm256_set1_ps(self.bias[r]));
-                    if self.silu {
+                    if SILU {
                         y = silu_q8_avx2(y);
                     }
-                    if let Some((rs, rz)) = self.res {
-                        let b = _mm256_and_si256(
-                            _mm256_srlv_epi32(w, _mm256_set1_epi32(8 * r as i32)),
-                            _mm256_set1_epi32(0xFF),
-                        );
-                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz[r])));
-                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs[r]), d, y);
+                    if HAS_RES {
+                        let shifted = match r {
+                            0 => w,
+                            1 => _mm256_srli_epi32::<8>(w),
+                            2 => _mm256_srli_epi32::<16>(w),
+                            _ => _mm256_srli_epi32::<24>(w),
+                        };
+                        let b = _mm256_and_si256(shifted, mask_ff);
+                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz_arr[r])));
+                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs_arr[r]), d, y);
                     }
-                    match self.out {
-                        Out::F32 => _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y),
-                        Out::U8 { inv, .. } => {
-                            let y = _mm256_min_ps(
-                                _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv[r])), lo),
-                                hi,
-                            );
-                            *vr = _mm256_cvtps_epi32(y);
-                        }
+                    if OUT_U8 {
+                        let y = _mm256_min_ps(
+                            _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv_arr[r])), lo),
+                            hi,
+                        );
+                        *vr = _mm256_cvtps_epi32(y);
+                    } else {
+                        _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y);
                     }
                 }
-                if matches!(self.out, Out::U8 { .. }) {
+                if OUT_U8 {
                     let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
                     let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
                     let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
-                    _mm256_storeu_si256(q.as_mut_ptr().add(8 * k) as *mut __m256i, bytes);
+                    _mm256_storeu_si256(q.add(8 * k) as *mut __m256i, bytes);
                 }
             }
         }

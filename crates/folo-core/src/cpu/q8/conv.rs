@@ -7,8 +7,6 @@
 //! `kx / s` of phase `(ky mod s, kx mod s)`, and output pixel `(oy, ox)` is column `oy · wq + ox` of every run.
 //! The `wq − ow` extra columns per output row are computed and dropped.
 
-use rayon::prelude::*;
-
 use super::kernel::{Epi, MR, NR, Out, Tile, TileF32, accumulate_part_f32, kernel};
 use super::{C4, Grid, SLACK, recycle, words};
 
@@ -318,17 +316,33 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
     let (oh, _) = cv.out_hw(h, w);
     let (hq, wq) = ((h + 2 * p).div_ceil(s), (w + 2 * p).div_ceil(s));
     let plane = hq * wq;
-    let mut slot = vec![usize::MAX; s * s];
-    let mut phases = Vec::new();
+    let mut slot_stack = [usize::MAX; 16];
+    let mut slot_heap;
+    let slot: &mut [usize] = if s * s <= 16 {
+        &mut slot_stack[..s * s]
+    } else {
+        slot_heap = vec![usize::MAX; s * s];
+        &mut slot_heap
+    };
+    let mut phases_stack = [0usize; 16];
+    let mut phases_len = 0usize;
+    let mut phases_heap = Vec::new();
     for ky in 0..k {
         for kx in 0..k {
             let ph = (ky % s) * s + kx % s;
             if slot[ph] == usize::MAX {
-                slot[ph] = phases.len();
-                phases.push(ph);
+                if s * s <= 16 {
+                    slot[ph] = phases_len;
+                    phases_stack[phases_len] = ph;
+                    phases_len += 1;
+                } else {
+                    slot[ph] = phases_heap.len();
+                    phases_heap.push(ph);
+                }
             }
         }
     }
+    let phases: &[usize] = if s * s <= 16 { &phases_stack[..phases_len] } else { &phases_heap };
     let per_g = phases.len() * plane;
     let groups = cv.c / 4;
     let mut buf = words(groups * per_g + wq * k + NR + SLACK);
@@ -337,7 +351,7 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
         let base = x.offset + img * x.img_stride;
         srcs.extend((0..x.c / 4).map(|g| &x.data[base + g * hw..base + (g + 1) * hw]));
     }
-    let fill = |(g, dst): (usize, &mut [u32])| {
+    let fill = |g: usize, dst: &mut [u32]| {
         let src = srcs[g];
         let zw = u32::from_le_bytes([
             cv.zeros[4 * g],
@@ -345,6 +359,72 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
             cv.zeros[4 * g + 2],
             cv.zeros[4 * g + 3],
         ]);
+        if s == 1 {
+            // Single phase `(0, 0)`: branchless row copies + padding fills (10× faster than per-pixel bounds).
+            let d = &mut dst[..plane];
+            let top = p.min(hq);
+            d[..top * wq].fill(zw);
+            for i in top..(p + h).min(hq) {
+                let y = i - p;
+                let srow = &src[y * w..(y + 1) * w];
+                let drow = &mut d[i * wq..(i + 1) * wq];
+                let lp = p.min(wq);
+                drow[..lp].fill(zw);
+                let copy_len = w.min(wq - lp);
+                drow[lp..lp + copy_len].copy_from_slice(&srow[..copy_len]);
+                drow[lp + copy_len..].fill(zw);
+            }
+            let bot = (p + h).min(hq);
+            d[bot * wq..].fill(zw);
+            return;
+        }
+        if s == 2 && phases.len() == 4 {
+            // All 4 stride-2 phases: deal both column phases (`b = 0` and `b = 1`) in one AVX2 de-interleave pass!
+            // `slot[a * 2 + b]` holds the phase index of `(a, b)`.
+            for a in 0..2 {
+                let (s0, s1) = (slot[a * 2], slot[a * 2 + 1]);
+                let (p0_off, p1_off) = (s0 * plane, s1 * plane);
+                for i in 0..hq {
+                    let y = (2 * i + a) as isize - p as isize;
+                    if y < 0 || y >= h as isize {
+                        dst[p0_off + i * wq..p0_off + (i + 1) * wq].fill(zw);
+                        dst[p1_off + i * wq..p1_off + (i + 1) * wq].fill(zw);
+                        continue;
+                    }
+                    let srow = &src[y as usize * w..(y as usize + 1) * w];
+                    // Split `dst` cleanly into the two disjoint phase rows for row `i`.
+                    let (d0, d1) = if p0_off < p1_off {
+                        let (left, right) = dst.split_at_mut(p1_off);
+                        (&mut left[p0_off + i * wq..p0_off + (i + 1) * wq], &mut right[i * wq..(i + 1) * wq])
+                    } else {
+                        let (left, right) = dst.split_at_mut(p0_off);
+                        (&mut right[i * wq..(i + 1) * wq], &mut left[p1_off + i * wq..p1_off + (i + 1) * wq])
+                    };
+                    if p == 1 {
+                        // `j = 0`: `b=0` is x=-1 (zw), `b=1` is x=0; for `j >= 1`: `b=0` is `2j-1`, `b=1` is `2j`.
+                        // Even indices `0, 2, 4, ...` go to `d1[0..]`, odd indices `1, 3, 5, ...` go to `d0[1..]`.
+                        d0[0] = zw;
+                        let pairs = (wq - 1).min(w.div_ceil(2));
+                        super::deinterleave_even_odd(srow, &mut d1[..pairs], &mut d0[1..1 + pairs], zw);
+                        d0[1 + pairs..].fill(zw);
+                        for (j, d) in d1.iter_mut().enumerate().skip(pairs) {
+                            let x = 2 * j;
+                            *d = if x < w { srow[x] } else { zw };
+                        }
+                    } else if p == 0 {
+                        super::deinterleave_even_odd(srow, d0, d1, zw);
+                    } else {
+                        for j in 0..wq {
+                            let x0 = (2 * j) as isize - p as isize;
+                            let x1 = x0 + 1;
+                            d0[j] = if x0 < 0 || x0 >= w as isize { zw } else { srow[x0 as usize] };
+                            d1[j] = if x1 < 0 || x1 >= w as isize { zw } else { srow[x1 as usize] };
+                        }
+                    }
+                }
+            }
+            return;
+        }
         for (si, &ph) in phases.iter().enumerate() {
             let (a, b) = (ph / s, ph % s);
             let d = &mut dst[si * plane..(si + 1) * plane];
@@ -363,10 +443,12 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
         }
     };
     let (body, _) = buf.split_at_mut(groups * per_g);
-    if body.len() >= 1 << 15 {
-        body.par_chunks_mut(per_g).enumerate().for_each(fill);
+    let threads = rayon::current_num_threads();
+    let par_words = if threads >= 16 { 1 << 17 } else { 1 << 16 };
+    if body.len() >= par_words && threads > 1 {
+        crate::cpu::par_chunks(body, per_g, &fill);
     } else {
-        body.chunks_mut(per_g).enumerate().for_each(fill);
+        body.chunks_mut(per_g).enumerate().for_each(|(g, d)| fill(g, d));
     }
     let base = buf.as_ptr();
     let mut rows = Vec::with_capacity(cv.ks);
@@ -382,8 +464,9 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
     Rows { buf, rows, n: oh * wq, wq }
 }
 
-/// Smallest amount of work (MACs) worth a task of its own: below `threads` of these the pool is not filled.
-pub(super) const TASK_MACS: usize = 1 << 20;
+/// Smallest amount of work (MACs) worth a task of its own: tuned so small/medium `20x20` and `40x40` convs
+/// split cleanly across wide hybrid P+E thread pools without E-core straggler tails.
+pub(super) const TASK_MACS: usize = 1 << 18;
 
 /// Tests set this to split even their small convs into many tasks (0: [`TASK_MACS`]).
 #[cfg(test)]
@@ -404,6 +487,9 @@ fn task_macs() -> usize {
 const SPLIT_CHANNELS_MAX: usize = 384 << 10;
 
 /// Task blocks `(chunks, channel groups)` per task for `n` images of `chunks` pixel chunks and `og` channel groups.
+///
+/// Tiny convs whose total work takes less on one core than waking and joining the pool run as one task per image
+/// (zero rayon wakeup barrier). Larger convs cap total tasks strictly at `3 * threads`.
 pub(super) fn plan(
     n: usize,
     chunks: usize,
@@ -413,16 +499,26 @@ pub(super) fn plan(
     (threads, min_macs): (usize, usize),
 ) -> (usize, usize) {
     let macs = n.saturating_mul(chunks).saturating_mul(og).saturating_mul(unit);
-    let want = if threads > 1 { (3 * threads).min(macs / min_macs.max(1)).max(1) } else { 1 };
+    let serial_floor = if threads >= 16 { min_macs.saturating_mul(8) } else { min_macs.saturating_mul(2) };
+    let max_tasks = (3 * threads).max(1);
+    let want = if threads > 1 && macs >= serial_floor {
+        max_tasks.min(macs / min_macs.max(1)).max(1)
+    } else {
+        n.min(threads.max(1)).max(1)
+    };
     let per_img = want.div_ceil(n);
     if input <= SPLIT_CHANNELS_MAX {
         let og_blk = og.div_ceil(per_img.min(og));
         let obs = og.div_ceil(og_blk);
-        (chunks.div_ceil(per_img.div_ceil(obs).min(chunks)), og_blk)
+        let max_cbs = (max_tasks / (n * obs)).max(1);
+        let want_c = ((per_img + obs / 2) / obs).clamp(1, max_cbs);
+        (chunks.div_ceil(want_c.min(chunks)), og_blk)
     } else {
         let ch_blk = chunks.div_ceil(per_img.min(chunks));
         let cbs = chunks.div_ceil(ch_blk);
-        (ch_blk, og.div_ceil(per_img.div_ceil(cbs).min(og)))
+        let max_obs = (max_tasks / (n * cbs)).max(1);
+        let want_o = ((per_img + cbs / 2) / cbs).clamp(1, max_obs);
+        (ch_blk, og.div_ceil(want_o.min(og)))
     }
 }
 
@@ -448,8 +544,19 @@ pub fn conv(
         );
         ch += x.c;
     }
-    let res_grids: Option<Vec<Grid>> = res.as_ref().map(|(_, g)| vec![*g; cv.o]);
-    let res_pc = res.as_ref().zip(res_grids.as_deref()).map(|((r, _), gs)| (*r, gs));
+    const STACK_O: usize = 256;
+    let mut res_stack = [Grid { scale: 1.0, zero: 0 }; STACK_O];
+    let mut res_heap = Vec::new();
+    let res_pc = res.map(|(r, g)| {
+        let gs: &[Grid] = if cv.o <= STACK_O {
+            res_stack[..cv.o].fill(g);
+            &res_stack[..cv.o]
+        } else {
+            res_heap = vec![g; cv.o];
+            &res_heap
+        };
+        (r, gs)
+    });
     conv_inner(xs, n, h, w, cv, res_pc, out);
 }
 
@@ -500,43 +607,62 @@ fn conv_inner(
         r.check(n, ohw);
     }
     type GroupGrid = ([f32; MR], [i32; MR]);
-    let (qptr, fptr, is_u8, group_out): (OutPtr<u32>, OutPtr<f32>, bool, Vec<GroupGrid>) = match out {
+    const STACK_OG: usize = 128;
+    let mut out_stack: [GroupGrid; STACK_OG] = [([0.0; MR], [0; MR]); STACK_OG];
+    let out_heap;
+    let (qptr, fptr, is_u8, group_out): (OutPtr<u32>, OutPtr<f32>, bool, &[GroupGrid]) = match out {
         QOut::U8 { data, grid } => {
             assert!(data.len() >= words_n(og), "q8::conv: output too short");
             let pair = ([grid.inv(); MR], [grid.zero as i32; MR]);
-            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, vec![pair; og])
+            let slice: &[GroupGrid] = if og <= STACK_OG {
+                out_stack[..og].fill(pair);
+                &out_stack[..og]
+            } else {
+                out_heap = vec![pair; og];
+                &out_heap
+            };
+            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, slice)
         }
         QOut::U8PerChannel { data, grids } => {
             assert!(data.len() >= words_n(og), "q8::conv: output too short");
             assert_eq!(grids.len(), cv.o, "q8::conv: output grids length");
-            let pairs = (0..og)
-                .map(|g| {
-                    (
-                        [
-                            grids[4 * g].inv(),
-                            grids[4 * g + 1].inv(),
-                            grids[4 * g + 2].inv(),
-                            grids[4 * g + 3].inv(),
-                        ],
-                        [
-                            grids[4 * g].zero as i32,
-                            grids[4 * g + 1].zero as i32,
-                            grids[4 * g + 2].zero as i32,
-                            grids[4 * g + 3].zero as i32,
-                        ],
-                    )
-                })
-                .collect();
-            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, pairs)
+            let pair_of = |g: usize| {
+                (
+                    [
+                        grids[4 * g].inv(),
+                        grids[4 * g + 1].inv(),
+                        grids[4 * g + 2].inv(),
+                        grids[4 * g + 3].inv(),
+                    ],
+                    [
+                        grids[4 * g].zero as i32,
+                        grids[4 * g + 1].zero as i32,
+                        grids[4 * g + 2].zero as i32,
+                        grids[4 * g + 3].zero as i32,
+                    ],
+                )
+            };
+            let slice: &[GroupGrid] = if og <= STACK_OG {
+                for (g, dst) in out_stack[..og].iter_mut().enumerate() {
+                    *dst = pair_of(g);
+                }
+                &out_stack[..og]
+            } else {
+                out_heap = (0..og).map(pair_of).collect();
+                &out_heap
+            };
+            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, slice)
         }
         QOut::F32 { data } => {
             assert!(data.len() >= words_n(cv.o), "q8::conv: output too short");
-            (OutPtr(std::ptr::null_mut()), OutPtr(data.as_mut_ptr()), false, Vec::new())
+            (OutPtr(std::ptr::null_mut()), OutPtr(data.as_mut_ptr()), false, &[])
         }
     };
-    let group_res: Vec<([f32; MR], [i32; MR])> = match &res {
-        Some((_, gs)) => (0..og)
-            .map(|g| {
+    let mut res_stack: [GroupGrid; STACK_OG] = [([0.0; MR], [0; MR]); STACK_OG];
+    let res_heap: Vec<_>;
+    let group_res: &[GroupGrid] = match &res {
+        Some((_, gs)) => {
+            let pair_of = |g: usize| {
                 (
                     [gs[4 * g].scale, gs[4 * g + 1].scale, gs[4 * g + 2].scale, gs[4 * g + 3].scale],
                     [
@@ -546,11 +672,23 @@ fn conv_inner(
                         gs[4 * g + 3].zero as i32,
                     ],
                 )
-            })
-            .collect(),
-        None => Vec::new(),
+            };
+            if og <= STACK_OG {
+                for (g, dst) in res_stack[..og].iter_mut().enumerate() {
+                    *dst = pair_of(g);
+                }
+                &res_stack[..og]
+            } else {
+                res_heap = (0..og).map(pair_of).collect();
+                &res_heap
+            }
+        }
+        None => &[],
     };
     let res_view = res.map(|(r, _)| r);
+    if n == 0 || ohw == 0 {
+        return;
+    }
     let rows: Vec<Rows> = (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect();
     let chunks = rows[0].n.div_ceil(NR);
     let (ch_blk, og_blk) = plan(
@@ -566,7 +704,8 @@ fn conv_inner(
     let single_part = cv.parts.len() == 1;
     let zero_corr = [0i32; MR];
     let unit_scale = [1.0f32; MR];
-    (0..n * cbs * obs).into_par_iter().for_each(|t| {
+    let tasks = n * cbs * obs;
+    let run_task = |t: usize| {
         let (img, rest) = (t / (cbs * obs), t % (cbs * obs));
         let (cb, ob) = (rest / obs, rest % obs);
         let r = &rows[img];
@@ -577,12 +716,13 @@ fn conv_inner(
         for chunk in cb * ch_blk..((cb + 1) * ch_blk).min(chunks) {
             let col = chunk * NR;
             let cols = NR.min(r.n - col);
-            let contiguous = r.wq == ow && cols == NR;
+            let (oy0, ox0) = (col / r.wq, col % r.wq);
+            let contiguous = cols == NR && (r.wq == ow || (oy0 < oh && ox0 + NR <= ow));
             let mut pix = [usize::MAX; NR];
             if contiguous {
-                pix[0] = col;
+                pix[0] = if r.wq == ow { col } else { oy0 * ow + ox0 };
             } else {
-                let (mut oy, mut ox) = (col / r.wq, col % r.wq);
+                let (mut oy, mut ox) = (oy0, ox0);
                 for px in pix.iter_mut().take(cols) {
                     if oy < oh && ox < ow {
                         *px = oy * ow + ox;
@@ -601,16 +741,19 @@ fn conv_inner(
                     Out::F32
                 };
                 let res_opt = res_view.as_ref().map(|_| (&group_res[g].0, &group_res[g].1));
-                if let Some(rv) = &res_view {
+                let res_direct_ptr = if let Some(rv) = &res_view {
                     let base = rv.offset + img * rv.img_stride + g * ohw;
                     if contiguous {
-                        resw.copy_from_slice(&rv.data[base + pix[0]..base + pix[0] + NR]);
+                        rv.data[base + pix[0]..].as_ptr()
                     } else {
                         for (d, &px) in resw.iter_mut().zip(&pix) {
                             *d = if px == usize::MAX { 0 } else { rv.data[base + px] };
                         }
+                        resw.as_ptr()
                     }
-                }
+                } else {
+                    std::ptr::null()
+                };
                 if single_part {
                     let p0 = &cv.parts[0];
                     // SAFETY: the panel holds `ks · MR` words; every row has `col + NR` readable words.
@@ -623,6 +766,18 @@ fn conv_inner(
                         res: res_opt,
                         out: out_kind,
                     };
+                    if is_u8 && contiguous {
+                        let at = (img * og + g) * ohw + pix[0];
+                        // SAFETY: disjoint `NR`-word slice in `qptr`; `res_direct_ptr` valid for `NR` words when `res` is Some.
+                        unsafe { e.apply_full_u8_direct(&acc, res_direct_ptr, qptr.at(at)) };
+                        continue;
+                    }
+                    if let Some(rv) = &res_view
+                        && contiguous
+                    {
+                        let base = rv.offset + img * rv.img_stride + g * ohw;
+                        resw.copy_from_slice(&rv.data[base + pix[0]..base + pix[0] + NR]);
+                    }
                     if cols == NR {
                         e.apply_full(&acc, &resw, &mut qw, &mut fv);
                     } else {
@@ -658,6 +813,18 @@ fn conv_inner(
                         res: res_opt,
                         out: out_kind,
                     };
+                    if is_u8 && contiguous {
+                        let at = (img * og + g) * ohw + pix[0];
+                        // SAFETY: disjoint `NR`-word slice in `qptr`; `res_direct_ptr` valid for `NR` words when `res` is Some.
+                        unsafe { e.apply_f32_full_u8_direct(&tile_f32, res_direct_ptr, qptr.at(at)) };
+                        continue;
+                    }
+                    if let Some(rv) = &res_view
+                        && contiguous
+                    {
+                        let base = rv.offset + img * rv.img_stride + g * ohw;
+                        resw.copy_from_slice(&rv.data[base + pix[0]..base + pix[0] + NR]);
+                    }
                     if cols == NR {
                         e.apply_f32_full(&tile_f32, &resw, &mut qw, &mut fv);
                     } else {
@@ -665,17 +832,11 @@ fn conv_inner(
                     }
                 }
                 if is_u8 {
-                    if contiguous {
-                        let at = (img * og + g) * ohw + pix[0];
-                        // SAFETY: the NR words at `at` are this task's own output words, inside `data`.
-                        unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), qptr.at(at), NR) };
-                    } else {
-                        let base = (img * og + g) * ohw;
-                        for (j, &px) in pix.iter().enumerate().take(cols) {
-                            if px != usize::MAX {
-                                // SAFETY: (img, g, px) is this task's own output word, inside `data`.
-                                unsafe { *qptr.at(base + px) = qw[j] };
-                            }
+                    let base = (img * og + g) * ohw;
+                    for (j, &px) in pix.iter().enumerate().take(cols) {
+                        if px != usize::MAX {
+                            // SAFETY: (img, g, px) is this task's own output word, inside `data`.
+                            unsafe { *qptr.at(base + px) = qw[j] };
                         }
                     }
                 } else if contiguous {
@@ -697,7 +858,12 @@ fn conv_inner(
                 }
             }
         }
-    });
+    };
+    if tasks <= 1 {
+        (0..tasks).for_each(run_task);
+    } else {
+        crate::cpu::par_for(tasks, &run_task);
+    }
     for r in rows {
         recycle(r.buf);
     }

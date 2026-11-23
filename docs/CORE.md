@@ -72,47 +72,59 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
 - Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; with AVX2 at stride 1: the plane copied once with
   its padding, every output vector its taps' FMAs in registers).
 - So do convs with at most 4 input channels (one group, not pointwise, `c·kh·kw <= 256`: the 3-channel stem,
-  `cpu/conv/small_c.rs`): per output row the
-  `c·kh·kw` taps are gathered into L1 and every output channel is that many FMAs per pixel in the GEMM's order, bit
-  for bit the GEMM result, without the per-channel phase copy.
+  `cpu/conv/small_c.rs`): per output row the `c·kh·kw` taps are gathered into L1 (with an AVX2 stride-2 de-interleave
+  fast path for `3×3 s2 p1`), and every output channel is that many FMAs per pixel in the GEMM's order with bias and
+  SiLU fused in registers before storing directly to the output, bit for bit the GEMM result, without the per-channel
+  phase copy.
 - Bias and activation run as an epilogue on each finished output (`Tensor::conv2d_act`, used by fused `ConvBnAct`
   blocks and by eval-mode blocks under `no_grad`): bias and SiLU on the micro-kernel's accumulators before they are
-  stored, other activations as a pass over each finished block. SiLU there is an 8-lane AVX2 `x · sigmoid(x)` with
-  relative error below `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
+  stored, other activations as a pass over each finished block. SiLU there is a division-free, bit-exact scalar and
+  8-lane AVX2 `x · sigmoid(x)` (Cody-Waite reduction with `1.5·2^23` rounding, degree-5 minimax `exp(r)`, and
+  bit-hack seed + 4-FMA factored Householder-6 reciprocal, zero `vdivps`/`vroundps`) with relative error below
+  `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
 - A batch of several images splits the pool between them: only as many images run at once (`lanes`) as their
   shifted-rows copies or unfolded gradients fit in 16 MiB, each lane taking its images one after another, and each
   image's GEMMs get `threads / lanes` threads (work stealing spreads the tiles).
 
 ### Winograd F(2x2, 3x3)
-- The fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run a dense 3x3 stride-1 conv with at
-  least 16 input and 8 output channels (at most 4096 together, which bounds the per-thread scratch), and at least
-  256 2x2 output tiles (`⌈OH/2⌉ · ⌈OW/2⌉ >= 256`) or `c · o >= 4096`, as Winograd F(2x2, 3x3)
-  (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36.
-- The weights are transformed once per weight tensor and kept with its storage until the storage is next written
-  (`View::derived`: every write lock clears it; a view whose `storage` field was pointed elsewhere neither uses nor
-  fills it). `Tensor::derived_f32` offers the same store outside the backend (folo-vision's int8 plan keeps its
-  packed convs there): unlike a check of the storage version, which a write bumps before it waits for the lock, a
-  value made under the read lock never outlives the data it was made from.
-- The tiles are cut into blocks; a block transforms its input patches, runs 16 small GEMMs through the row-pointer
-  micro-kernel and transforms the results into its output tiles while they are in L2. An image with too few blocks
-  for the pool runs in two passes: the input transforms split by input channels, then the GEMMs and output transforms
-  by output channels.
-- Not bit for bit the direct conv: an output is within `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` of the exact sum
+- The fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run dense 3x3 stride-1 convs with at
+  least 16 input and 8 output channels through Winograd F(4x4, 3x3) (below) or Winograd F(2x2, 3x3)
+  (`cpu/conv/winograd.rs`, for remaining shapes with `C + O <= 4096` and either `⌈OH/2⌉ · ⌈OW/2⌉ >= 256` or
+  `C · O >= 4096`, such as 20x20 feature maps): 16 multiplies per 2x2 output tile and channel pair instead of 36.
+- The weights are transformed once per weight tensor (in `f64`, rounded once to `f32`) and kept with its storage until
+  the storage is next written (`View::derived`: every write lock clears it; a view whose `storage` field was pointed
+  elsewhere neither uses nor fills it). `Tensor::derived_f32` offers the same store outside the backend (folo-vision's
+  int8 plan keeps its packed convs there): unlike a check of the storage version, which a write bumps before it waits
+  for the lock, a value made under the read lock never outlives the data it was made from.
+- Tiles are cut into L2-sized blocks (transforming inputs, running 16 small GEMMs through the row-pointer micro-kernel,
+  and transforming outputs while in L2) and switch to a two-pass split (`C` then `O`, keeping per-task `M` in L1/L2
+  scratch) when an image has fewer than half as many blocks as threads.
+- Not bit for bit the direct conv: an F(2x2) output is within `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` of the exact sum
   (`D_c`, `G_c`: the sums of |inputs| over its tile's 4x4 input patch and of |weights| over its 3x3 kernel in channel
-  c; derived in the module doc, tested; it assumes no step overflows or underflows, and inputs within a factor ~4 of
-  `f32::MAX` can overflow in the input transform where the direct sum would not), an error that grows with C like the
-  direct conv's `K · 2^-23 · Σ|terms|`; COCO val AP of folo-n-coco changed by less than 1e-6.
+  c; derived in the module doc and tested); COCO val AP of folo-n-coco changed by less than 1e-6.
 - The same bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
+
+### Winograd F(4x4, 3x3)
+- On larger dense 3x3 stride-1 inference convs (`OH, OW >= 24`, `C >= 16`, `O >= 8`, `C + O <= 2048`, and either at
+  least 56 4x4 tiles with `C · O >= 2048` or at least 200 4x4 tiles), `cpu/conv/winograd4.rs` runs Winograd
+  F(4x4, 3x3) before F(2x2): 36 multiplies per 4x4 output tile and channel pair instead of 144 (4.0x FLOP reduction vs
+  direct, 1.78x vs F(2x2)).
+- Uses well-conditioned interpolation points `(0, ±1/2, ±1, ∞)` rather than `(0, ±1, ±2, ∞)` so every constant in `Bᵀ`
+  and `Aᵀ` is an exact power of two (`±1, ±1/2, ±1/4, ±1/8`), with explicit 8-tile AVX2/FMA + 4-tile SSE/FMA
+  transforms bit-exact with the scalar path, register-fused bias + SiLU/ReLU direct stores, and the same two-pass
+  L1/L2 split and `View::derived` weight cache as F(2x2).
+- Error is bounded by `(C + 16) · 2^-23 · 140 · Σ_c D_c · G_c` (`D_c` over the 6x6 patch; tested including 512-channel
+  all-ones), and results are bitwise deterministic across thread counts and batches.
 
 ### Convs at some output sites
 - `Tensor::conv2d_act_at` (`Backend::conv2d_act_at`) is the same inference conv needed only at some output sites
   (flat `n · OH·OW + oy · OW + ox`, a `U32` vector): the result has the full output shape, the sites hold the dense
   conv's values and every other element is unspecified.
-- On the CPU a Winograd conv runs the block code over the list of 2x2 tiles that hold a site
-  (`winograd_forward_at`: a tile's arithmetic and its GEMM sums do not depend on which tiles share its block) and a
-  pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites' columns gathered
-  into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as
-  does a backend without the kernel.
+- On the CPU a Winograd conv runs the block code over the list of 2x2 or 4x4 tiles that hold a site
+  (`winograd_forward_at` / `winograd4_forward_at`: a tile's arithmetic and its GEMM sums do not depend on which tiles
+  share its block) and a pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites'
+  columns gathered into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv
+  runs densely, as does a backend without the kernel.
 - A site reads only its receptive field: in Winograd F(2x2, 3x3) each output of a tile reads only its own 3x3 window
   of the 4x4 patch (tested with NaN everywhere else).
 - On the GPU, `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the
@@ -175,15 +187,20 @@ these kernels:
   zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
-  (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
-  `silu8`'s `exp` polynomial, one power-of-two scale and no blend (within 2e-6 of SiLU); the AVX2 requantise packs
-  four channels' codes with saturating `packs` / `packus` and one byte shuffle into C4 words. Work is split into
-  (image, pixel block, channel block) tasks: about three per thread, none under 2²⁰ multiply-adds. An image whose
+  (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
+  AVX2 `x / (1 + e^{−x})` using base-2 range reduction (`1.5·2^23 + 127` magic rounding, single-shift `2^n`), a
+  degree-5 minimax `2^f` polynomial, and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2e-7` hybrid
+  error on `[-86, 86]`); the specialised AVX2 epilogue writes contiguous 24-pixel tiles directly to the C4 output
+  (for both 1×1 and within-row `k×k` chunks), packing four channels' codes with saturating `packs` / `packus` and
+  one byte shuffle. Work is split into (image, pixel block, channel block) tasks: capped at `3 · threads`, none
+  under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool). An image whose
   input fits in 384 KiB (a core's L2) is split by channel blocks first, so tasks write whole output planes; pixel
   blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
-  are split by pixel blocks first, so each task reads its own part once.
-- **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
-  bytes; exact since the grid is monotonic), nearest 2× upsampling.
+  are split by pixel blocks first, so each task reads its own part once. `q8::stem_u8` runs 3-channel `u8` `[R, G, B, 0]`
+  stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving.
+- **Others.** AVX2-vectorised `quantize` / `dequantize` (4 channels per C4 word read) between `f32` NCHW and C4
+  codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic), and AVX2 nearest
+  2× upsampling, all with serial fast paths below `PAR_MIN`.
 
 Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
 with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`

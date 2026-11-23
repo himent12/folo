@@ -625,12 +625,13 @@ impl Backend for CpuBackend {
 }
 
 /// conv2d forward over the channel concatenation of `xs` with bias and activation, for every conv entry point.
-/// `inference` (the fused entry points, which never record a gradient) may take Winograd F(2x2, 3x3), which is
-/// not bit for bit the direct conv; the autograd forward keeps the direct conv that its backward matches.
+/// `inference` (the fused entry points, which never record a gradient) may take Winograd F(4x4, 3x3) or
+/// F(2x2, 3x3), which are not bit for bit the direct conv; the autograd forward keeps the direct conv that its
+/// backward matches.
 ///
 /// With `sites` (flat output indices, `conv2d_act_at`), only those outputs need their values: a Winograd conv
-/// computes the 2x2 tiles that hold them and a pointwise conv their columns (`conv::sites`), each bit for bit
-/// what the dense call gives; the other elements of the output are unspecified. Any other conv runs densely.
+/// computes the 4x4 or 2x2 tiles that hold them and a pointwise conv their columns (`conv::sites`), each bit for
+/// bit what the dense call gives; the other elements of the output are unspecified. Any other conv runs densely.
 fn conv_forward(
     xs: &[View<'_>],
     w: View<'_>,
@@ -669,6 +670,18 @@ fn conv_forward(
         let epi = gemm::BiasAct { bias: bd.as_deref(), act };
         let fused = bd.is_some() || act.is_some();
         let input = conv::ConvInput { parts: &parts };
+        if inference && conv::uses_winograd4(&g) {
+            let key = derived_key("winograd f(4x4, 3x3)", w.layout);
+            let u = w.derived(key, || conv::transform_weights4(&wd, o, c));
+            match sites {
+                Some(at) => {
+                    let tiles = conv::winograd4_tiles_at(&g, at);
+                    conv::winograd4_forward_at(input, &u, &mut out, &g, fused.then_some(epi), &tiles);
+                }
+                None => conv::winograd4_forward(input, &u, &mut out, &g, fused.then_some(epi)),
+            }
+            return Ok(f32_storage(out));
+        }
         if inference && conv::uses_winograd(&g) {
             // Transformed once per weight tensor, and kept with it until it is written.
             let key = derived_key("winograd f(2x2, 3x3)", w.layout);

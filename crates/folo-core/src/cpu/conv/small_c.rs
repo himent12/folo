@@ -2,6 +2,8 @@
 //! into L1 and every output channel is that many FMAs per pixel, bit for bit the GEMM path's result.
 
 use super::{ChannelEpilogue, ConvGeom, ConvInput, valid_cols};
+#[cfg(target_arch = "x86_64")]
+use crate::backend::UnaryOp;
 use crate::cpu::elementwise::SendPtr;
 use crate::cpu::par_for;
 
@@ -36,6 +38,8 @@ pub(super) fn small_c_forward(
     epi: Option<ChannelEpilogue<'_>>,
 ) {
     let (hw, ohw, k) = (g.h * g.w, g.ohw(), g.kdim());
+    assert!(out.len() >= g.n * g.o * ohw, "small_c: output buffer too short");
+    assert!(wt.len() >= g.o * k, "small_c: weight buffer too short");
     let owp = g.ow.div_ceil(SMALL_C_TILE) * SMALL_C_TILE;
     let planes: Vec<Vec<&[f32]>> = (0..g.n).map(|img| x.planes(img, hw)).collect();
     #[cfg(target_arch = "x86_64")]
@@ -53,8 +57,27 @@ pub(super) fn small_c_forward(
             small_c_gather(&planes[img], g, oy, owp, &mut gat);
             for oc in 0..g.o {
                 let w = &wt[oc * k..(oc + 1) * k];
+                // SAFETY: row `oy` of channel `oc` of image `img` is inside `out` (`[n, o, oh, ow]`), and only
+                // this task (which owns output row `r` of every channel) touches it.
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(optr.0.add((img * g.o + oc) * ohw + oy * g.ow), g.ow)
+                };
                 #[cfg(target_arch = "x86_64")]
                 if avx2 {
+                    let fused_ok = match epi {
+                        None => true,
+                        Some(e) => matches!(e.act, None | Some(UnaryOp::Silu)),
+                    };
+                    if fused_ok {
+                        let bias_val = epi.and_then(|e| e.bias).map_or(0.0, |b| b[oc]);
+                        let silu = epi.is_some_and(|e| e.act == Some(UnaryOp::Silu));
+                        let add_bias = silu || bias_val != 0.0;
+                        // SAFETY: AVX2 and FMA were detected above.
+                        unsafe {
+                            small_c_row_avx2_fused(w, &gat, owp, dst, &mut orow, add_bias, bias_val, silu);
+                        }
+                        continue;
+                    }
                     // SAFETY: AVX2 and FMA were detected above.
                     unsafe { small_c_row_avx2(w, &gat, owp, &mut orow) };
                 } else {
@@ -62,11 +85,6 @@ pub(super) fn small_c_forward(
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 small_c_row(w, &gat, owp, &mut orow);
-                // SAFETY: row `oy` of channel `oc` of image `img` is inside `out` (`[n, o, oh, ow]`), and only
-                // this task (which owns output row `r` of every channel) touches it.
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(optr.0.add((img * g.o + oc) * ohw + oy * g.ow), g.ow)
-                };
                 dst.copy_from_slice(&orow[..g.ow]);
                 if let Some(e) = epi {
                     e.apply(oc, dst);
@@ -82,18 +100,92 @@ pub(super) fn small_c_forward(
     }
 }
 
+/// De-interleave `srow[0..w]` into `even[ox] = srow[2*ox]` and `odd[ox] = srow[2*ox + 1]` (zero outside `w`),
+/// for `0 <= ox < ow`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn deinterleave_f32_avx2(srow: &[f32], even: &mut [f32], odd: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let w = srow.len();
+    let ow = even.len();
+    let full = (w / 16).min(ow / 8);
+    let mut ox = 0;
+    // SAFETY: `2 * (ox + 8) <= w` and `ox + 8 <= ow`.
+    unsafe {
+        for _ in 0..full {
+            let sp = srow.as_ptr().add(2 * ox);
+            let lo = _mm256_loadu_ps(sp);
+            let hi = _mm256_loadu_ps(sp.add(8));
+            let ev = _mm256_castsi256_ps(_mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(
+                _mm256_shuffle_ps::<0x88>(lo, hi),
+            )));
+            let od = _mm256_castsi256_ps(_mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(
+                _mm256_shuffle_ps::<0xDD>(lo, hi),
+            )));
+            _mm256_storeu_ps(even.as_mut_ptr().add(ox), ev);
+            _mm256_storeu_ps(odd.as_mut_ptr().add(ox), od);
+            ox += 8;
+        }
+    }
+    for (off, (e, o)) in even[ox..].iter_mut().zip(&mut odd[ox..]).enumerate() {
+        let x = 2 * (ox + off);
+        *e = if x < w { srow[x] } else { 0.0 };
+        *o = if x + 1 < w { srow[x + 1] } else { 0.0 };
+    }
+}
+
 /// The `K x owp` taps of output row `oy`: `gat[kk * owp + ox]` is the input element that tap
 /// `kk = (ci, ky, kx)` of output pixel `(oy, ox)` reads, zero where it falls in the padding and for `ox >= ow`.
 fn small_c_gather(planes: &[&[f32]], g: &ConvGeom, oy: usize, owp: usize, gat: &mut [f32]) {
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
+    let fast_s2k3p1 = sw == 2 && g.kw == 3 && pw == 1 && dw == 1;
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = fast_s2k3p1 && std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
     let mut rows = gat.chunks_exact_mut(owp);
     for plane in planes {
         for ky in 0..g.kh {
             let iy = oy as isize * sh - ph + ky as isize * dh;
             let src =
                 (0..g.h as isize).contains(&iy).then(|| &plane[iy as usize * g.w..(iy as usize + 1) * g.w]);
+            if fast_s2k3p1 {
+                let d0 = rows.next().expect("kx=0");
+                let d1 = rows.next().expect("kx=1");
+                let d2 = rows.next().expect("kx=2");
+                let Some(src) = src else {
+                    d0.fill(0.0);
+                    d1.fill(0.0);
+                    d2.fill(0.0);
+                    continue;
+                };
+                let ow = g.ow;
+                #[cfg(target_arch = "x86_64")]
+                if avx2 {
+                    // SAFETY: AVX2 and FMA were detected above.
+                    unsafe { deinterleave_f32_avx2(src, &mut d1[..ow], &mut d2[..ow]) };
+                } else {
+                    for (ox, (e, o)) in d1[..ow].iter_mut().zip(&mut d2[..ow]).enumerate() {
+                        let x = 2 * ox;
+                        *e = if x < src.len() { src[x] } else { 0.0 };
+                        *o = if x + 1 < src.len() { src[x + 1] } else { 0.0 };
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                for (ox, (e, o)) in d1[..ow].iter_mut().zip(&mut d2[..ow]).enumerate() {
+                    let x = 2 * ox;
+                    *e = if x < src.len() { src[x] } else { 0.0 };
+                    *o = if x + 1 < src.len() { src[x + 1] } else { 0.0 };
+                }
+                d0[0] = 0.0;
+                if ow > 1 {
+                    d0[1..ow].copy_from_slice(&d2[..ow - 1]);
+                }
+                d0[ow..].fill(0.0);
+                d1[ow..].fill(0.0);
+                d2[ow..].fill(0.0);
+                continue;
+            }
             for kx in 0..g.kw {
                 let dst = rows.next().expect("one gathered row per tap");
                 let Some(src) = src else {
@@ -131,6 +223,82 @@ fn small_c_row(w: &[f32], gat: &[f32], owp: usize, orow: &mut [f32]) {
             }
         }
         *o = acc;
+    }
+}
+
+/// [`small_c_row_avx2`] with bias + optional SiLU fused in registers and stored directly to `dst` (bit-exact
+/// with [`crate::cpu::gemm`] + [`crate::cpu::elementwise::silu_bias_inplace`]).
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn small_c_row_avx2_fused(
+    w: &[f32],
+    gat: &[f32],
+    owp: usize,
+    dst: &mut [f32],
+    orow: &mut [f32],
+    add_bias: bool,
+    bias_val: f32,
+    silu: bool,
+) {
+    use std::arch::x86_64::*;
+    assert!(
+        gat.len() >= w.len() * owp
+            && orow.len() == owp
+            && dst.len() <= owp
+            && owp.is_multiple_of(SMALL_C_TILE)
+    );
+    let ow = dst.len();
+    let vb = _mm256_set1_ps(bias_val);
+    for x0 in (0..owp).step_by(SMALL_C_TILE) {
+        let (mut c0, mut c1, mut c2, mut c3) =
+            (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
+        for (kk, wv) in w.iter().enumerate() {
+            // SAFETY: row `kk` of `gat` holds `owp` floats and `x0 + SMALL_C_TILE <= owp`.
+            unsafe {
+                let p = gat.as_ptr().add(kk * owp + x0);
+                let a = _mm256_broadcast_ss(wv);
+                c0 = _mm256_fmadd_ps(a, _mm256_loadu_ps(p), c0);
+                c1 = _mm256_fmadd_ps(a, _mm256_loadu_ps(p.add(8)), c1);
+                c2 = _mm256_fmadd_ps(a, _mm256_loadu_ps(p.add(16)), c2);
+                c3 = _mm256_fmadd_ps(a, _mm256_loadu_ps(p.add(24)), c3);
+            }
+        }
+        if add_bias {
+            c0 = _mm256_add_ps(c0, vb);
+            c1 = _mm256_add_ps(c1, vb);
+            c2 = _mm256_add_ps(c2, vb);
+            c3 = _mm256_add_ps(c3, vb);
+        }
+        if silu {
+            c0 = crate::cpu::elementwise::silu8(c0);
+            c1 = crate::cpu::elementwise::silu8(c1);
+            c2 = crate::cpu::elementwise::silu8(c2);
+            c3 = crate::cpu::elementwise::silu8(c3);
+        }
+        if x0 + SMALL_C_TILE <= ow {
+            // SAFETY: `x0 + SMALL_C_TILE <= dst.len()`.
+            unsafe {
+                let o = dst.as_mut_ptr().add(x0);
+                _mm256_storeu_ps(o, c0);
+                _mm256_storeu_ps(o.add(8), c1);
+                _mm256_storeu_ps(o.add(16), c2);
+                _mm256_storeu_ps(o.add(24), c3);
+            }
+        } else {
+            // SAFETY: `orow` holds `owp >= x0 + SMALL_C_TILE` floats.
+            unsafe {
+                let o = orow.as_mut_ptr();
+                _mm256_storeu_ps(o, c0);
+                _mm256_storeu_ps(o.add(8), c1);
+                _mm256_storeu_ps(o.add(16), c2);
+                _mm256_storeu_ps(o.add(24), c3);
+            }
+            dst[x0..ow].copy_from_slice(&orow[..ow - x0]);
+        }
     }
 }
 
