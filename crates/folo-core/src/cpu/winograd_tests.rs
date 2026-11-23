@@ -222,12 +222,20 @@ fn winograd4_large_finite_weight_falls_back_without_nan() {
     }
     let at = Tensor::from_vec(vec![0u32, 41, 1599], [3]).unwrap();
     let attempts_before = transform4_attempts();
-    let (got_at, calls4) =
-        counting4(|| x_zero.conv2d_act_at(&w, None, &P, None, &at).unwrap().to_vec::<f32>().unwrap());
-    assert_eq!(transform4_attempts() - attempts_before, 0, "conv2d_act_at must reuse cached None rejection");
+    let (got_tiles, calls4) =
+        counting4(|| x_zero.conv2d_act_at_tiles(&w, None, &P, None, &at).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(
+        transform4_attempts() - attempts_before,
+        0,
+        "conv2d_act_at_tiles must reuse cached None rejection"
+    );
     assert_eq!(calls4, [0, 0]);
+    let (got_at, calls4_at) =
+        counting4(|| x_zero.conv2d_act_at(&w, None, &P, None, &at).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(calls4_at, [0, 0]);
     for &s in &[0usize, 41, 1599] {
         for oc in 0..64 {
+            assert_eq!(got_tiles[oc * 1600 + s].to_bits(), 0);
             assert_eq!(got_at[oc * 1600 + s].to_bits(), 0);
         }
     }
@@ -247,7 +255,7 @@ fn winograd4_large_finite_weight_falls_back_without_nan() {
 
 /// Transform-domain GEMM (`U * V`) or input-transform (`Bᵀ d B`) overflow with finite `U`:
 /// per-tile pre-epilogue finiteness detection falls back to the exact direct 3x3 sum for the overflowing
-/// `(oc, tile)` so neither `conv2d_act` nor `conv2d_act_at` emits `NaN`/`inf` even under `ReLU`/`SiLU`/`Sigmoid`.
+/// `(oc, tile)` so neither `conv2d_act` nor `conv2d_act_at_tiles` emits `NaN`/`inf` even under `ReLU`/`SiLU`/`Sigmoid`.
 #[test]
 fn winograd4_transform_domain_gemm_overflow_falls_back_per_tile() {
     let _g = no_grad();
@@ -275,18 +283,26 @@ fn winograd4_transform_domain_gemm_overflow_falls_back_per_tile() {
             assert_eq!(dense[4 * 40 + 4], 0.0, "act={act:?}: (4,4)");
             assert_eq!(dense[6 * 40 + 6], 4e37_f32, "act={act:?}: (6,6)");
         }
-        let (sparse, calls4_at) =
-            counting4(|| x.conv2d_act_at(&w, None, &P, act, &at).unwrap().to_vec::<f32>().unwrap());
-        assert_eq!(calls4_at, [0, 1], "act={act:?}: expected F(4x4) sparse dispatch");
+        let (sparse_tiles, calls4_tiles) =
+            counting4(|| x.conv2d_act_at_tiles(&w, None, &P, act, &at).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4_tiles, [0, 1], "act={act:?}: expected F(4x4) tiled sparse dispatch");
         for &s in &sites_idx {
             for oc in 0..64 {
                 let idx = oc * 1600 + s;
                 assert_eq!(
-                    sparse[idx].to_bits(),
+                    sparse_tiles[idx].to_bits(),
                     dense[idx].to_bits(),
-                    "act={act:?}: sparse != dense at oc={oc}, s={s}"
+                    "act={act:?}: sparse_tiles != dense at oc={oc}, s={s}"
                 );
             }
+        }
+        // `conv2d_act_at` must stay off F(4x4) and also produce exact finite results.
+        let (sparse_rf, calls4_rf) =
+            counting4(|| x.conv2d_act_at(&w, None, &P, act, &at).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4_rf, [0, 0], "act={act:?}: conv2d_act_at must not run F(4x4)");
+        if act.is_none() || act == Some(UnaryOp::Relu) {
+            assert_eq!(sparse_rf[4 * 40 + 4], 0.0, "act={act:?}: conv2d_act_at (4,4)");
+            assert_eq!(sparse_rf[6 * 40 + 6], 4e37_f32, "act={act:?}: conv2d_act_at (6,6)");
         }
     }
 
@@ -299,4 +315,44 @@ fn winograd4_transform_domain_gemm_overflow_falls_back_per_tile() {
         counting4(|| x_huge.conv2d_act(&w_zero, None, &P, None).unwrap().to_vec::<f32>().unwrap());
     assert_eq!(calls4, [1, 1]);
     assert!(got.iter().all(|&v| v.to_bits() == 0), "V overflow with zero weight must return exact zeros");
+}
+
+/// Per-tile direct fallback accumulates in `f64`, so canceling terms whose intermediate product exceeds
+/// `f32::MAX` (e.g. `-2e38 * 1 + 2e38 * 2 = 2e38`, in either channel order) return the exact finite `2e38`
+/// rather than overflowing to `+inf` before canceling.
+#[test]
+fn winograd4_direct_fallback_cancellation_stays_finite() {
+    let _g = no_grad();
+    let site = 4 * 40 + 4;
+    let at = Tensor::from_vec(vec![site as u32], [1]).unwrap();
+    let bias = Tensor::from_vec(vec![0.5f32; 64], [64]).unwrap();
+
+    // Test both `(-2e38 * 1) + (2e38 * 2)` and `(2e38 * 2) + (-2e38 * 1)` channel orders.
+    for (a_val, a_wt, b_val, b_wt) in
+        [(-2e38_f32, 1.0f32, 2e38_f32, 2.0f32), (2e38_f32, 2.0f32, -2e38_f32, 1.0f32)]
+    {
+        let mut w_data = vec![0.0f32; 64 * 64 * 9];
+        w_data[0] = a_wt; // (oc=0, ic=0, ky=0, kx=0) reads input (3, 3) for output (4, 4)
+        w_data[9] = b_wt; // (oc=0, ic=1, ky=0, kx=0) reads input (3, 3) for output (4, 4)
+        let w = Tensor::from_vec(w_data, [64, 64, 3, 3]).unwrap();
+        let mut x_data = vec![0.0f32; 64 * 40 * 40];
+        x_data[3 * 40 + 3] = a_val;
+        x_data[1600 + 3 * 40 + 3] = b_val;
+        let x = Tensor::from_vec(x_data, [1, 64, 40, 40]).unwrap();
+
+        for (i, (b_opt, act)) in [(None, None), (Some(&bias), Some(UnaryOp::Silu))].into_iter().enumerate() {
+            let (dense, calls4) =
+                counting4(|| x.conv2d_act(&w, b_opt, &P, act).unwrap().to_vec::<f32>().unwrap());
+            assert_eq!(calls4, [usize::from(i == 0), 1], "expected F(4x4) with per-tile direct fallback");
+            assert!(dense.iter().all(|v| v.is_finite()), "non-finite output on cancellation case");
+            assert_eq!(dense[site], 2e38_f32, "expected exact finite 2e38 at (4,4)");
+            let (sparse, calls4_at) = counting4(|| {
+                x.conv2d_act_at_tiles(&w, b_opt, &P, act, &at).unwrap().to_vec::<f32>().unwrap()
+            });
+            assert_eq!(calls4_at, [0, 1]);
+            for oc in 0..64 {
+                assert_eq!(sparse[oc * 1600 + site].to_bits(), dense[oc * 1600 + site].to_bits());
+            }
+        }
+    }
 }

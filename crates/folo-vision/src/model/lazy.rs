@@ -5,9 +5,10 @@
 //! level feature, so the class scores, and with them the candidate set, are the dense forward's. A candidate's
 //! box needs `out` at its own pixel, `conv1` at that pixel and `conv0` on the input patch `conv1` reads (that
 //! pixel's 3×3 receptive field, or the full 6×6 patch of its 4×4 tile when `conv1` may take Winograd F(4×4)). The
-//! convs run through [`Tensor::conv2d_act_at`], which on the CPU computes only the Winograd 2×2 or 4×4 tiles (and
-//! 1×1 columns) that hold a site with the dense conv's own arithmetic, and whose site values depend only on that
-//! patch: every value a candidate reads is then the dense forward's, and every box is the dense path's bit for bit.
+//! 3×3 convs run through [`Tensor::conv2d_act_at_tiles`] (and 1×1 `out` through [`Tensor::conv2d_act_at`]), which
+//! on the CPU compute only the Winograd 2×2 or 4×4 tiles (and 1×1 columns) that hold a site with the dense conv's
+//! own arithmetic, and whose site values depend only on that patch: every value a candidate reads is then the dense
+//! forward's, and every box is the dense path's bit for bit.
 
 use folo_core::{DType, Device, Tensor, no_grad, with_no_grad};
 use folo_nn::{ConvBnAct, Forward, Module, Result};
@@ -33,11 +34,11 @@ pub struct ImageCandidates {
     pub bin_precisions: Option<Vec<[f32; 4]>>,
 }
 
-/// `c` (a fused `Conv` block) at the output sites `at` ([`Tensor::conv2d_act_at`]).
+/// `c` (a fused `Conv` block) at the output sites `at` ([`Tensor::conv2d_act_at_tiles`]).
 fn conv_at(c: &ConvBnAct, x: &Tensor, at: &Tensor) -> Result<Tensor> {
     debug_assert!(c.is_fused(), "candidate-first prediction needs a fused model");
     let p = c.conv.config().params();
-    Ok(x.conv2d_act_at(&c.conv.weight, c.conv.bias.as_ref(), &p, c.act.unary_op(), at)?)
+    Ok(x.conv2d_act_at_tiles(&c.conv.weight, c.conv.bias.as_ref(), &p, c.act.unary_op(), at)?)
 }
 
 /// The single-label candidates of one image's level map `cl` (`[nc, a]`), in anchor order, in blocks of

@@ -435,7 +435,8 @@ unsafe fn direct_bad_tiles(
             let mut row_out = [0.0f32; 4];
             for (col, slot) in row_out[..cols].iter_mut().enumerate() {
                 let ox = ox0 + col;
-                let mut sum = 0.0f32;
+                // Accumulate in f64 so intermediate products like `2e38 * 2` cannot overflow before canceling.
+                let mut sum = 0.0f64;
                 for (ci, plane) in planes.iter().enumerate() {
                     let kern = &w_oc[ci * 9..ci * 9 + 9];
                     for ky in 0..3 {
@@ -447,12 +448,12 @@ unsafe fn direct_bad_tiles(
                         for kx in 0..3 {
                             let ix = ox as isize + kx as isize - pw;
                             if (0..w).contains(&ix) {
-                                sum += row[ix as usize] * kern[ky * 3 + kx];
+                                sum += f64::from(row[ix as usize]) * f64::from(kern[ky * 3 + kx]);
                             }
                         }
                     }
                 }
-                *slot = sum;
+                *slot = sum as f32;
             }
             if let Some(e) = epi {
                 e.apply(oc, &mut row_out[..cols]);

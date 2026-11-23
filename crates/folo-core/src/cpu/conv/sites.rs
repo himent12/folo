@@ -1,5 +1,7 @@
-//! Forward convs evaluated only at some output sites (`Backend::conv2d_act_at`): the inference forward's own
-//! arithmetic on fewer outputs, so every site gets the value the dense conv computes there, bit for bit.
+//! Forward convs evaluated only at some output sites (`Backend::conv2d_act_at` and
+//! `Backend::conv2d_act_at_tiles`): the inference forward's own arithmetic on fewer outputs, so every site gets
+//! the dense value bit for bit (`conv2d_act_at` restricts Winograd to F(2x2) to preserve strict 3x3 receptive-field
+//! isolation; `conv2d_act_at_tiles` also enables F(4x4) for callers that populate full 6x6 tile patches).
 //!
 //! - A Winograd conv ([`super::uses_winograd`] / [`super::uses_winograd4`]) runs the block code over the list of
 //!   2x2 or 4x4 output tiles that hold a site ([`super::winograd_forward_at`] / [`super::winograd4_forward_at`]).

@@ -118,19 +118,23 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   all-ones), and results are bitwise deterministic across thread counts and batches.
 
 ### Convs at some output sites
-- `Tensor::conv2d_act_at` (`Backend::conv2d_act_at`) is the same inference conv needed only at some output sites
-  (flat `n · OH·OW + oy · OW + ox`, a `U32` vector): the result has the full output shape, the sites hold the dense
-  conv's values and every other element is unspecified.
+- `Tensor::conv2d_act_at` (`Backend::conv2d_act_at`) is the inference conv needed only at some output sites
+  (flat `n · OH·OW + oy · OW + ox`, a `U32` vector): the result has the full output shape, every site depends strictly
+  on its kernel's own receptive field in the input (never F(4x4)), and every other element is unspecified.
+- `Tensor::conv2d_act_at_tiles` (`Backend::conv2d_act_at_tiles`) is the opt-in tile-patched variant for callers (such
+  as candidate-first prediction) that populate each requested 4x4 tile's full 6x6 input patch and want bit-for-bit
+  parity with dense `conv2d_act` including Winograd F(4x4, 3x3).
 - On the CPU a Winograd conv runs the block code over the list of 2x2 or 4x4 tiles that hold a site
-  (`winograd_forward_at` / `winograd4_forward_at`: a tile's arithmetic and its GEMM sums do not depend on which tiles
-  share its block) and a pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites'
-  columns gathered into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv
-  runs densely, as does a backend without the kernel.
-- Patch isolation: in Winograd F(2x2, 3x3) each output of a tile depends only on its own 3x3 window of the 4x4 patch
-  (tested with NaN everywhere else). In Winograd F(4x4, 3x3) the transform combines inputs across the 4x4 tile's 6x6
-  input patch (`4·ty − pad_h .. 4·ty − pad_h + 6` by `4·tx − pad_w .. 4·tx − pad_w + 6`), so inputs must be valid
-  across every requested tile's 6x6 patch (candidate-first prediction populates that patch in `conv0` whenever `conv1`
-  may take F(4x4)). For image-contiguous inputs, the sparse kernels never read outside those patches (tested with NaN);
+  (`winograd_forward_at` for `conv2d_act_at`; `winograd4_forward_at` also permitted for `conv2d_act_at_tiles`: a
+  tile's arithmetic and its GEMM sums do not depend on which tiles share its block) and a pointwise conv (one group,
+  fewer than 2048 input channels) runs the dense GEMM over the sites' columns gathered into planes of their own
+  (`cpu/conv/sites.rs`); any other conv runs densely, as does a backend without the kernel.
+- Patch isolation: in `conv2d_act_at` (Winograd F(2x2, 3x3), pointwise, or direct) each site depends strictly on its
+  own 3x3 (or 1x1) receptive field — garbage, `1e20`, or `NaN` anywhere else never affects the site. In
+  `conv2d_act_at_tiles` with Winograd F(4x4, 3x3), the transform combines inputs across the 4x4 tile's 6x6 input patch
+  (`4·ty − pad_h .. 4·ty − pad_h + 6` by `4·tx − pad_w .. 4·tx − pad_w + 6`), so inputs must be valid across every
+  requested tile's 6x6 patch (candidate-first prediction populates that patch in `conv0` whenever `conv1` may take
+  F(4x4)). For image-contiguous inputs, the sparse kernels never read outside those tiles/columns (tested with NaN);
   non-contiguous views are materialized before dispatch, though elements outside those patches still cannot affect the
   requested sites.
 - On the GPU, `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the

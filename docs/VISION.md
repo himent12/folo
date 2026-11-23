@@ -106,9 +106,10 @@ preprocess / inference / postprocess timing split.
 - The neck's Concat layers are never written (`C3k2::forward_cat`).
 - The head is evaluated candidate-first (MODEL.md §9.5, `FoloModel::predict_candidates`, `model/lazy.rs`): the three
   class branches run side by side, each level's candidates come straight from its class map (blocks of 1024 anchors
-  in parallel), and the three box branches then run only at the candidates (`conv2d_act_at`; `conv0` on the input
-  patches `conv1` reads — their 3x3 receptive fields, or the 6x6 input patches of their 4x4 tiles when `conv1` may
-  take Winograd F(4x4); with DFL box fusion also the candidates' side precisions), so the dense box outputs and the
+  in parallel), and the three box branches then run only at the candidates (`conv2d_act_at_tiles` for the 3x3 convs
+  and `conv2d_act_at` for 1x1 `out`; `conv0` on the input patches `conv1` reads — their 3x3 receptive fields, or the
+  6x6 input patches of their 4x4 tiles when `conv1` may take Winograd F(4x4); with DFL box fusion also the candidates'
+  side precisions), so the dense box outputs and the
   head's `cat` are never made; the detections are the dense path's bit for bit.
 - The candidate extraction and the box branch count as inference, NMS and the letterbox inverse as postprocess.
 - `Predictor::predict_batch` runs chunks of two images as concurrent forwards, the same predictions as one pass.
