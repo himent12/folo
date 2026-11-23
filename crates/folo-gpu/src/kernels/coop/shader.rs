@@ -284,12 +284,14 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         let (o, i) = (pb.outer(u), pb.inner_expr());
         let body = if mode == 1 && tap_mask {
             let _ = i;
-            let kcheck = if check { "k < K && " } else { "" };
-            format!(
-                "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k - ci * (KH * KW);\n\
-                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
-                 \x20       rb{u} = MB[wbase + ci * IHW + (r / KW) * DHIW + (r % KW) * DW];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            crate::kernels::conv::fwd_tap_mask_load(
+                "MB",
+                "wbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if mode == 1 {
             let _ = i;
@@ -302,12 +304,14 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             )
         } else if phase_tap_mask {
             let _ = i;
-            let kcheck = if check { "k < K && " } else { "" };
-            format!(
-                "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k - co * (PTH * PTW);\n\
-                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
-                 \x20       rb{u} = MB[pbase + co * OHW - (r / PTW) * OW - (r % PTW)];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            crate::kernels::conv::phase_tap_mask_load(
+                "MB",
+                "pbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if phase {
             format!(
@@ -321,12 +325,14 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             )
         } else if dx_tap_mask {
             let _ = i;
-            let kcheck = if check { "k < K && " } else { "" };
-            format!(
-                "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k - co * (KH * KW);\n\
-                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
-                 \x20       rb{u} = MB[wbase + co * OHW - (r / KW) * DHOW - (r % KW) * DW];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            crate::kernels::conv::dx_tap_mask_load(
+                "MB",
+                "wbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if mode == 2 {
             format!(

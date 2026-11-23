@@ -1,5 +1,7 @@
-//! The weight gradient ([`conv2d_backward_weight_as`]): implicit GEMM (`CONV_MODE` 3) over `K = N·OH·OW`,
-//! split along `K` into f32 partial slabs when the weight has too few tiles, and the direct depthwise kernel.
+//! The weight gradient ([`conv2d_backward_weight_as`]): division-free contiguous `vec4` per-image split-K `A·Bᵀ`
+//! GEMM (`CONV_MODE` 0, `TRANS_B`) for 1×1 stride-1 unpadded convs, implicit GEMM (`CONV_MODE` 3, per-image
+//! `PER_IMG` when splits cover `N`) for windowed convs, the `vec4` `conv2d_wgrad_reduce` partial-slab reducer,
+//! and the direct depthwise kernel.
 
 use super::depthwise::DEPTHWISE_GRAD;
 use super::{Conv2dDesc, check_grad_desc, conv_spec, coop_grad};
@@ -163,7 +165,8 @@ pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> T
 const STEM: TileConfig = TileConfig { bm: 16, bn: 32, bk: 32, tm: 4, tn: 4 };
 
 /// Whether the weight gradient of an `m × n` weight takes the regular kernels' [`STEM`] tile even on tensor
-/// cores (their narrowest tile is 16×256, 89 % padding at `N = 27`).
+/// cores (their 16-row tile is 16×256 and `C32X32` leaves half its rows idle at `M <= 16`; wider narrow weights
+/// such as `3→32` take `C32X32` on tensor cores).
 pub(crate) fn stem_shaped(m: usize, n: usize) -> bool {
     m <= 16 && n <= 32
 }
@@ -642,15 +645,19 @@ mod tests {
     use super::*;
     use crate::kernels::gemm::gen_gemm;
 
-    /// Workgroup bytes a generated GEMM shader declares (its `var<workgroup>` arrays of arrays of `vec4<f32>`).
+    /// Workgroup bytes a generated GEMM shader declares (`var<workgroup>` arrays of `vec4<f32>` or scalar `f32`).
     fn declared_workgroup_bytes(wgsl: &str) -> u32 {
         wgsl.lines()
             .filter_map(|l| l.strip_prefix("var<workgroup> "))
             .map(|l| {
-                let dims = l.split_once("vec4<f32>, ").expect("vec4 tile").1;
+                let (elem_bytes, dims) = if let Some((_, d)) = l.split_once("vec4<f32>, ") {
+                    (16u32, d)
+                } else {
+                    (4u32, l.split_once("f32, ").expect("f32 tile").1)
+                };
                 let (inner, rest) = dims.split_once(">, ").expect("inner length");
                 let outer = rest.split_once('>').expect("outer length").0;
-                16 * inner.parse::<u32>().unwrap() * outer.parse::<u32>().unwrap()
+                elem_bytes * inner.parse::<u32>().unwrap() * outer.parse::<u32>().unwrap()
             })
             .sum()
     }
@@ -674,5 +681,30 @@ mod tests {
         assert_eq!(TileConfig::SMALL.workgroup_bytes(), 16384);
         assert!(!wgrad_pad(TileConfig::SMALL, 16384));
         assert!(wgrad_pad(TileConfig::SMALL, 32768));
+    }
+
+    /// Generated `gemm` shaders never emit multi-invocation component writes (`[... & 3u]`) into `vec4`
+    /// workgroup tiles across plain, transposed, sub-pixel, phase, and weight-gradient modes.
+    #[test]
+    fn gemm_workgroup_tiles_avoid_vec4_lane_writes() {
+        let g = GemmDesc::new(64, 64, 64, false, false, 1);
+        for (mode, ta, tb, va, vb) in [
+            (0, false, false, true, true),
+            (0, false, true, true, true),
+            (0, true, false, true, true),
+            (0, false, false, false, false),
+            (1, false, false, true, false),
+            (2, false, false, true, false),
+            (3, false, false, true, false),
+        ] {
+            let spec = base_spec(&g, TileConfig::SMALL)
+                .u32("CONV_MODE", mode)
+                .bool("TRANS_A", ta)
+                .bool("TRANS_B", tb)
+                .bool("VEC_A", va)
+                .bool("VEC_B", vb);
+            let wgsl = gen_gemm(&spec);
+            assert!(!wgsl.contains("& 3u] ="), "mode={mode} ta={ta} tb={tb} va={va} vb={vb}");
+        }
     }
 }

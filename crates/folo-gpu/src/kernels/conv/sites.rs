@@ -66,6 +66,25 @@ pub(crate) fn fwd_tap_mask_setup(kh_n: u32, kw_n: u32, dh_n: u32, dw_n: u32, bas
     s
 }
 
+/// WGSL of a single tap-masked forward `CONV_MODE` 1 B-tile load (shared by `gemm` and `coop/shader`).
+pub(crate) fn fwd_tap_mask_load(
+    buf: &str,
+    base: &str,
+    dst: &str,
+    cast: &str,
+    zero: &str,
+    o: &str,
+    check: bool,
+) -> String {
+    let kcheck = if check { "k < K && " } else { "" };
+    format!(
+        "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k - ci * (KH * KW);\n\
+         \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+         \x20       {dst} = {cast}({buf}[{base} + ci * IHW + (r / KW) * DHIW + (r % KW) * DW]);\n\
+         \x20     }} else {{ {dst} = {zero}; }} }}\n"
+    )
+}
+
 /// `y = act(conv2d(x, weight) + bias)` at listed output pixels. `sites` (u32 `[N, 1 + cap]`) holds per image a
 /// count, then up to `cap` output pixels `oy·OW + ox`; `y` is `[N, C_out, cap]`: column `j < min(count, cap)` of
 /// image `n` is the conv at the image's `j`-th pixel, bit for bit [`super::conv2d`]'s value there for the same

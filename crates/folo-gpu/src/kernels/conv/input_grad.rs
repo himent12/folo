@@ -1,7 +1,8 @@
-//! The input gradient ([`conv2d_backward_input`]): a transposed conv as implicit GEMM (`CONV_MODE` 2), a fused
-//! 2×2 sub-pixel conv (`CONV_MODE` 1 with `SUBPIXEL`) for 3×3 stride-2 convs, per-stride-phase decomposition
-//! ([`Phase`]) for other strided convs, a GEMM over the transposed weight for 1×1 convs, and the direct depthwise
-//! kernel.
+//! The input gradient ([`conv2d_backward_input`]): a transposed conv as implicit GEMM (`CONV_MODE` 2, tap-masked
+//! for stride-1 and stride-phase windows up to 32 taps), a fused 2×2 sub-pixel conv (`CONV_MODE` 1 with `SUBPIXEL`)
+//! for 3×3 stride-2 convs (which assumes finite `dY` inputs under WGSL's finite-math contract, since packed
+//! out-of-phase zero taps multiply adjacent `dY` elements by `0.0`), per-stride-phase decomposition ([`Phase`]) for
+//! other strided convs, a GEMM over the transposed weight for 1×1 convs, and the direct depthwise kernel.
 
 use std::fmt::Write as _;
 
@@ -54,6 +55,44 @@ pub(crate) fn phase_tap_mask_setup(pth: u32, ptw: u32, base_var: &str) -> String
     let _ =
         writeln!(s, "  }}\n  let {base_var} = offB + bitcast<u32>(ca * i32(OW) + cb);\n  let OHW = OH * OW;");
     s
+}
+
+/// WGSL of a single tap-masked stride-1 `CONV_MODE` 2 B-tile load (shared by `gemm` and `coop/shader`).
+pub(crate) fn dx_tap_mask_load(
+    buf: &str,
+    base: &str,
+    dst: &str,
+    cast: &str,
+    zero: &str,
+    o: &str,
+    check: bool,
+) -> String {
+    let kcheck = if check { "k < K && " } else { "" };
+    format!(
+        "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k - co * (KH * KW);\n\
+         \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+         \x20       {dst} = {cast}({buf}[{base} + co * OHW - (r / KW) * DHOW - (r % KW) * DW]);\n\
+         \x20     }} else {{ {dst} = {zero}; }} }}\n"
+    )
+}
+
+/// WGSL of a single tap-masked stride-phase `CONV_MODE` 2 B-tile load (shared by `gemm` and `coop/shader`).
+pub(crate) fn phase_tap_mask_load(
+    buf: &str,
+    base: &str,
+    dst: &str,
+    cast: &str,
+    zero: &str,
+    o: &str,
+    check: bool,
+) -> String {
+    let kcheck = if check { "k < K && " } else { "" };
+    format!(
+        "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k - co * (PTH * PTW);\n\
+         \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+         \x20       {dst} = {cast}({buf}[{base} + co * OHW - (r / PTW) * OW - (r % PTW)]);\n\
+         \x20     }} else {{ {dst} = {zero}; }} }}\n"
+    )
 }
 
 /// Packs a 3×3 stride-2 conv weight `[C_out, C_in/groups, 3, 3]` into the 2×2 sub-pixel conv weight
@@ -330,6 +369,10 @@ impl Phase {
 /// Whether the input gradient of `d` takes the fused 2×2 sub-pixel conv reformulation: 3×3, stride 2, dilation
 /// 1, not depthwise, always on tensor cores and up to `C_in/groups <= 32` on the regular f32/f16 kernels (above
 /// which wider f32 layers are strictly compute-bound and prefer 1×-FLOP tap-masked stride phases).
+///
+/// Assumes finite `dY` inputs (WGSL finite-math contract): out-of-phase entries in the packed 2×2 weight are
+/// `0.0`, so multiplying against an `±inf` in an adjacent `dY` pixel can yield `NaN` (`0 * inf`), whereas the
+/// CPU reference and stride-phase path skip out-of-phase taps.
 fn subpixel_eligible(d: &Conv2dDesc, coop: bool) -> bool {
     let cin_g = d.c_in / d.groups;
     d.win.kernel == (3, 3)

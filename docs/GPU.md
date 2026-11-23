@@ -444,7 +444,9 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   `vec4` stores when `W % 4 == 0`, scalar bounds-checked stores otherwise) with zero intermediate shuffle buffer —
   2 dispatches instead of 5. Tensor cores always take this path (with `C64X128` for `M ≥ 128, N ≥ 1600`), while
   the regular generator uses it for `C_in/g ≤ 32` and switches to tap-masked stride phases above that where
-  compute FLOPs (`1×` vs `16/9×`) dominate.
+  compute FLOPs (`1×` vs `16/9×`) dominate. Like WGSL shaders generally, this path assumes finite `dY` inputs:
+  out-of-phase taps in the packed 2×2 weight are `0.0`, so an `±inf` in an adjacent `dY` pixel can yield `NaN`
+  (`0 · inf`), whereas the CPU reference and stride-phase path skip out-of-phase taps.
 - **Stride phases** (`CONV_MODE = 2` with `PHASE`): for other strided convs with dilation 1 (not depthwise), only
   the taps `kh ≡ (ih + PH) mod SH` (and likewise for `kw`) reach input row `ih`, so the plain transposed conv
   multiplies by zero for 3/4 of its `K` at 3×3 stride 2. The input pixels split into `SH·SW` phases by
@@ -562,20 +564,22 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   experimental device safely: `ctx.device()` is `None` on such a context (the raw device is behind the `unsafe`
   `device_unchecked`, whose contract is the two conditions before), and `ctx.destroy_device()` covers what tests
   used the raw device for.
-- **Kernel.** 256 invocations = 8 subgroups per workgroup, each owning `FM × FN` 16×16 f32 accumulators of a
-  `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so they are uniform per subgroup). `K` is walked
-  32 at a time with the f32 generator's scheme: the next `A` / `B` tiles are loaded into registers (vec4 when
-  aligned, the conv's `B` gathered straight from the NCHW image) while the current ones, double-buffered f16 in
-  workgroup memory, row-major with 8 halves of padding per row, feed `coopLoadT` + `coopMultiplyAdd`; one barrier
-  per step. The K loop starts each half with a `break` check instead of wrapping it in an `if`, because naga
-  treats values derived from the loop counter as non-uniform. Epilogue: cooperative matrices have no per-element
-  access, so each subgroup stores one fragment at a time into its own 1 KiB f32 scratch slice, and its 32 lanes
-  apply `alpha`, bias and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2
-  fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32` and 16×256 for `M ≤ 16` (folo-n's 16- and 32-channel
-  early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv input gradients (the weight
-  gradients have their own `pick_config_weight_grad`). The forward
-  convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without a
-  config) pick through `coop::pick_config_conv` instead:
+- **Kernel.** 256 invocations = 8 subgroups per workgroup (or 128 invocations = 4 subgroups for `32×32`), each
+  owning `FM × FN` 16×16 f32 accumulators of a `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so
+  they are uniform per subgroup). `K` is walked 32 at a time with the f32 generator's scheme: the next `A` / `B`
+  tiles are loaded into registers (vec4 when aligned, the conv's `B` gathered straight from the NCHW image) while
+  the current ones, double-buffered f16 in workgroup memory, row-major with 8 halves of padding per row, feed
+  `coopLoadT` + `coopMultiplyAdd`; one barrier per step. The K loop starts each half with a `break` check instead
+  of wrapping it in an `if`, because naga treats values derived from the loop counter as non-uniform. Epilogue:
+  cooperative matrices have no per-element access, so each subgroup stores one fragment at a time into its own
+  1 KiB f32 scratch slice, and its 32 lanes apply `alpha`, bias and activation to 8 elements each and store them
+  with bounds checks. Configs: 128×128 (4×2 fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32`, 32×32
+  (1×1 fragment per subgroup, 128 threads, 14 KiB) for small batch-1 planes and narrow weights, and 16×256 for
+  `M ≤ 16` (folo-n's 16- and 32-channel early layers); `coop::pick_config` picks by `M` and occupancy for plain
+  GEMMs, `pick_config_conv` / `pick_config_stride2_dx` pick for conv input gradients (with `C64X128` for stride-2
+  `M ≥ 128, N ≥ 1600`), and weight gradients have `pick_config_weight_grad` / `pick_config_pointwise_wgrad`. The
+  forward convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without
+  a config) pick through `coop::pick_config_conv` (`pick_config_conv_batched` for batch-1 `32×32`) instead:
   the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels per group and 6400 pixels
   (80 px and up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64
   took 14–63% less time than it at 40 and 20 px and on the stride-2 convs; the switch raised folo-s's batch-16

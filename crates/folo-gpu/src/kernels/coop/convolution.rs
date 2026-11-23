@@ -321,32 +321,41 @@ pub(crate) fn encode_conv_backward_input_subpixel(
     Ok(true)
 }
 
+/// Maximum workgroups per grid dimension (WebGPU / Vulkan Y and Z guarantee).
+const MAX_WG: usize = 65_535;
+
 /// Tile configuration for a windowed weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns):
-/// `C32X32` for narrow weights (e.g. `folo-s`'s `3→32` stem with `N = 27`), otherwise capped at `C64X128`/`C64X64`
-/// (never `C128X128`, avoiding Ada shared-memory occupancy cliffs in the `CONV_MODE` 3 gather).
+/// `C32X32` for narrow weights (e.g. `folo-s`'s `3→32` stem with `N = 27`, when it fits `MAX_WG`), otherwise
+/// capped at `C64X128`/`C64X64` (falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
 fn pick_config_weight_grad(m: usize, n: usize) -> CoopConfig {
-    if n <= 32 || (m <= 32 && n <= 64) {
+    if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
         return CoopConfig::C32X32;
+    }
+    if m.div_ceil(64) > MAX_WG {
+        return CoopConfig::C128X128;
     }
     match m {
         0..=16 => CoopConfig::C16X256,
         17..=32 => CoopConfig::C32X128,
-        _ if n >= 128 => CoopConfig::C64X128,
+        _ if n >= 128 || n.div_ceil(64) > MAX_WG => CoopConfig::C64X128,
         _ => CoopConfig::C64X64,
     }
 }
 
-/// Tile configuration for the 1×1 `A · Bᵀ` weight gradient: `C32X32` for narrow `N <= 32` (avoids wasted
-/// columns), `C64X128` for wide `N >= 128`, `C64X64` elsewhere (stays at 24–35 KiB shared memory so Ada keeps
-/// full occupancy, never `C128X128`).
+/// Tile configuration for the 1×1 `A · Bᵀ` weight gradient: `C32X32` for narrow `N <= 32` (when it fits
+/// `MAX_WG`), `C64X128` for wide `N >= 128`, `C64X64` elsewhere (stays at 24–35 KiB shared memory so Ada keeps
+/// full occupancy, falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
 fn pick_config_pointwise_wgrad(m: usize, n: usize) -> CoopConfig {
+    if m.div_ceil(64) > MAX_WG {
+        return CoopConfig::C128X128;
+    }
     if m <= 16 && n >= 128 {
         CoopConfig::C16X256
     } else if m <= 32 && n >= 96 {
         CoopConfig::C32X128
-    } else if n <= 32 || (m <= 32 && n <= 64) {
+    } else if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
         CoopConfig::C32X32
-    } else if n >= 128 {
+    } else if n >= 128 || n.div_ceil(64) > MAX_WG {
         CoopConfig::C64X128
     } else {
         CoopConfig::C64X64
@@ -429,9 +438,10 @@ pub(crate) fn encode_conv_backward_weight(
     }
     let Some(cfg) = resolve(ctx, None, || pick_config_weight_grad(g.m, g.n))? else { return Ok(false) };
     let bk = cfg.bk as usize;
-    // Aim for ~512 workgroups, each at least 16 K tiles deep.
+    // Aim for ~512 workgroups (scaled for narrower 128-thread tiles), each at least 16 K tiles deep.
     let tiles = g.m.div_ceil(cfg.bm as usize) * g.n.div_ceil(cfg.bn as usize) * d.groups;
-    let want = 512usize
+    let want = (512 * 256 / cfg.threads() as usize)
+        .min(1024)
         .div_ceil(tiles)
         .min(np.div_ceil(16 * bk))
         .min(MAX_PARTIAL_ELEMS / wn.max(1))
@@ -536,4 +546,21 @@ pub(crate) fn encode_conv_backward_weight(
         crate::kernels::conv::finish_wgrad(ctx, t.raw(), splits, wn, gw, out)?;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Narrow `C32X32` falls back to a wider tile whenever `M` (or `N`) would exceed `MAX_WG` (65,535).
+    #[test]
+    fn weight_grad_tile_pick_respects_grid_limit() {
+        assert_eq!(pick_config_weight_grad(32, 27), CoopConfig::C32X32);
+        assert_eq!(pick_config_pointwise_wgrad(32, 32), CoopConfig::C32X32);
+        assert_eq!(pick_config_weight_grad(2_097_121, 9), CoopConfig::C64X64);
+        assert_eq!(pick_config_pointwise_wgrad(2_097_121, 16), CoopConfig::C64X64);
+        assert_eq!(pick_config_weight_grad(4_194_241, 9), CoopConfig::C128X128);
+        assert_eq!(pick_config_pointwise_wgrad(4_194_241, 16), CoopConfig::C128X128);
+        assert_eq!(pick_config_weight_grad(64, 4_194_241), CoopConfig::C64X128);
+    }
 }
