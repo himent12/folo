@@ -499,3 +499,58 @@ fn winograd4_is_deterministic() {
         }
     }
 }
+
+/// Direct AVX2/SSE == scalar bit-parity for Winograd F(4x4, 3x3) across ragged tile-segment lengths
+/// (`1..=3`, `4..=7`, `8..=15`, `>= 16`), clipped right/bottom edges, and every epilogue combination.
+#[test]
+fn winograd4_avx2_matches_scalar_bit_for_bit() {
+    let p = params([1, 1], [1, 1], [1, 1], 1);
+    // Widths exercising 1..3 tiles, 4..7 tiles (SSE tail), 8..15 tiles (AVX2 + SSE/scalar), >= 16 tiles,
+    // plus clipped right/bottom edges (`w % 4 != 0`, `h % 4 != 0`).
+    let shapes = [
+        (1, 4, [5, 5], 4),
+        (1, 4, [7, 11], 6),
+        (1, 8, [9, 15], 8),
+        (1, 8, [13, 21], 8),
+        (1, 8, [17, 27], 12),
+        (1, 8, [19, 31], 8),
+        (1, 8, [21, 35], 12),
+        (1, 8, [25, 46], 8),
+        (1, 8, [25, 50], 8),
+        (1, 8, [11, 67], 8),
+        (2, 16, [24, 80], 16),
+    ];
+    for (idx, (n, c, hw, o)) in shapes.into_iter().enumerate() {
+        let g = geom(n, c, hw, o, [3, 3], p);
+        let x = data(n * c * hw[0] * hw[1], 91 + idx as u32);
+        let wt = data(o * g.kdim(), 910 + idx as u32);
+        let u = transform_weights4(&wt, o, c);
+        let part = [ConvPart::contiguous(&x, c, hw[0] * hw[1])];
+        let input = ConvInput { parts: &part };
+        let zeros = vec![0.0f32; o];
+        let mut bias: Vec<f32> = (0..o).map(|k| k as f32 * 0.17 - 0.5).collect();
+        if o > 1 {
+            bias[1] = 0.0;
+        }
+        let epis = [
+            None,
+            Some(BiasAct { bias: Some(&zeros), act: None }),
+            Some(BiasAct { bias: Some(&bias), act: None }),
+            Some(BiasAct { bias: None, act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&zeros), act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: None, act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&zeros), act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Sigmoid) }),
+        ];
+        for (ei, epi) in epis.into_iter().enumerate() {
+            let mut got = vec![f32::NAN; n * o * g.ohw()];
+            let mut want = vec![f32::NAN; n * o * g.ohw()];
+            winograd4_forward(input, &u, &mut got, &g, epi);
+            super::winograd4::winograd4_forward_scalar(input, &u, &mut want, &g, epi);
+            let bad = got.iter().zip(&want).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert_eq!(bad, None, "shape {idx} ({n}x{c}->{o}@{hw:?}) epi {ei}: AVX2 vs scalar bit mismatch");
+        }
+    }
+}

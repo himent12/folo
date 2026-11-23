@@ -98,9 +98,11 @@ fn f32_to_pixel_u8(x: f32) -> u8 {
 /// Pack `[n, 3, h, w]` `f32` inputs in `[0, 1]` into `[n, h, w]` `u32` words `[R, G, B, 0]`, bit-exact between
 /// scalar and AVX2.
 pub fn pack_f32_to_rgb0_u8(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u32]) {
-    let hw = h * w;
-    assert!(x.len() >= n * 3 * hw && out.len() >= n * hw, "pack_f32_to_rgb0_u8: buffer too short");
-    if n * hw == 0 {
+    let hw = h.checked_mul(w).expect("pack_f32_to_rgb0_u8: h * w overflow");
+    let n_hw = n.checked_mul(hw).expect("pack_f32_to_rgb0_u8: n * h * w overflow");
+    let x_need = n_hw.checked_mul(3).expect("pack_f32_to_rgb0_u8: n * 3 * h * w overflow");
+    assert!(x.len() >= x_need && out.len() >= n_hw, "pack_f32_to_rgb0_u8: buffer too short");
+    if n_hw == 0 {
         return;
     }
     const BLOCK: usize = 4096;

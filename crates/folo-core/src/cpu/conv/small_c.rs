@@ -108,6 +108,7 @@ unsafe fn deinterleave_f32_avx2(srow: &[f32], even: &mut [f32], odd: &mut [f32])
     use std::arch::x86_64::*;
     let w = srow.len();
     let ow = even.len();
+    assert!(odd.len() >= ow, "deinterleave_f32_avx2: odd buffer too short");
     let full = (w / 16).min(ow / 8);
     let mut ox = 0;
     // SAFETY: `2 * (ox + 8) <= w` and `ox + 8 <= ow`.

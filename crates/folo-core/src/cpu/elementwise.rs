@@ -362,7 +362,7 @@ const EXP_MAGIC_0_BITS: i32 = 0x4B40_0000;
 /// Minimax IEEE-754 reciprocal seed magic (`max |1 - d * r0| ≈ 0.05051`, exact `r(1.0) == 1.0`, `r(2.0) == 0.5`).
 const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
-/// Division-free, bit-exact scalar twin of [`silu8`]: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
+/// Division-free, bit-exact scalar twin of `silu8`: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
 /// minimax polynomial, `1 / (1 + e)` via bit-hack seed + 4-FMA Householder-6 `(1 + e0)(1 + e0^2 + e0^4)`
 /// (error `e0^6 <= 1.66e-8`), `sigmoid = r` for `x >= 0` else `e * r`.
 #[inline]
@@ -397,7 +397,7 @@ pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
 }
 
 /// `v[i] = silu(v[i] + bias)` in place: the fused-epilogue SiLU. With AVX2 + FMA (detected at runtime) eight
-/// lanes at a time through [`silu8`] (a ragged tail too, padded), whose error against the exact SiLU is
+/// lanes at a time through `silu8` (a ragged tail too, padded), whose error against the exact SiLU is
 /// bounded by [`SILU_MAX_REL_ERR`] (tested); otherwise the bit-exact scalar twin [`silu_epilogue_scalar`]. Either
 /// way every element's result depends only on its value, never on its position in `v` or the CPU's ISA.
 pub(crate) fn silu_bias_inplace(v: &mut [f32], bias: f32) {

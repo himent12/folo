@@ -95,8 +95,10 @@ impl C4<'_> {
     /// Panics unless `n` images of `hw` pixels and the slack are inside `data`.
     pub fn check(&self, n: usize, hw: usize) {
         assert!(self.c.is_multiple_of(4), "C4: {} channels", self.c);
-        let end = n
-            .saturating_sub(1)
+        if n == 0 {
+            return;
+        }
+        let end = (n - 1)
             .checked_mul(self.img_stride)
             .and_then(|v| v.checked_add(self.offset))
             .and_then(|v| (self.c / 4).checked_mul(hw).and_then(|p| v.checked_add(p)))
@@ -112,7 +114,13 @@ impl C4<'_> {
 /// A C4 buffer for `n` images of `c` channels and `hw` pixels, with the slack, from folo-core's CPU buffer cache
 /// (contents unspecified). Give it back with [`recycle`].
 pub fn alloc(n: usize, c: usize, hw: usize) -> Vec<u32> {
-    words(n * c / 4 * hw + SLACK)
+    assert!(c.is_multiple_of(4), "q8::alloc: {c} channels");
+    let len = n
+        .checked_mul(c / 4)
+        .and_then(|v| v.checked_mul(hw))
+        .and_then(|v| v.checked_add(SLACK))
+        .expect("q8::alloc: size overflow");
+    words(len)
 }
 
 /// `n` words from the CPU buffer cache, contents unspecified.
@@ -264,8 +272,10 @@ unsafe fn deinterleave_even_odd_avx2(src: &[u32], even: &mut [u32], odd: &mut [u
 
 /// `[n][c][hw]` `f32` (`c` a multiple of 4) into C4 codes on `grid`.
 pub fn quantize(x: &[f32], n: usize, c: usize, hw: usize, grid: Grid, out: &mut [u32]) {
-    assert!(c.is_multiple_of(4) && x.len() >= n * c * hw && out.len() >= n * c / 4 * hw);
-    let total = n * c * hw;
+    assert!(c.is_multiple_of(4), "q8::quantize: {c} channels");
+    let total = n.checked_mul(c).and_then(|v| v.checked_mul(hw)).expect("q8::quantize: size overflow");
+    let out_words = total / 4;
+    assert!(x.len() >= total && out.len() >= out_words, "q8::quantize: buffer too short");
     let groups = c / 4;
     if total == 0 {
         return;
@@ -296,7 +306,7 @@ pub fn quantize(x: &[f32], n: usize, c: usize, hw: usize, grid: Grid, out: &mut 
         let p0 = b * BLOCK;
         let len = BLOCK.min(hw - p0);
         let base = (img * c + 4 * g) * hw + p0;
-        // SAFETY: each `(ig, b)` owns disjoint words `ig * hw + p0..+len` inside `out`.
+        // SAFETY: each `(ig, b)` owns disjoint words `ig * hw + p0..+len` inside `out` (`out_words <= out.len()`).
         let o = unsafe { std::slice::from_raw_parts_mut(optr.0.add(ig * hw + p0), len) };
         quantize_group(
             &x[base..base + len],
@@ -311,8 +321,12 @@ pub fn quantize(x: &[f32], n: usize, c: usize, hw: usize, grid: Grid, out: &mut 
 
 /// `[n][c][hw]` `f32` (`c` a multiple of 4) into C4 codes on per-channel `grids` (`grids.len() == c`).
 pub fn quantize_per_channel(x: &[f32], n: usize, c: usize, hw: usize, grids: &[Grid], out: &mut [u32]) {
-    assert!(c.is_multiple_of(4) && grids.len() == c && x.len() >= n * c * hw && out.len() >= n * c / 4 * hw);
-    let total = n * c * hw;
+    assert!(c.is_multiple_of(4), "q8::quantize_per_channel: {c} channels");
+    assert_eq!(grids.len(), c, "q8::quantize_per_channel: grids length");
+    let total =
+        n.checked_mul(c).and_then(|v| v.checked_mul(hw)).expect("q8::quantize_per_channel: size overflow");
+    let out_words = total / 4;
+    assert!(x.len() >= total && out.len() >= out_words, "q8::quantize_per_channel: buffer too short");
     let groups = c / 4;
     if total == 0 {
         return;
@@ -345,7 +359,7 @@ pub fn quantize_per_channel(x: &[f32], n: usize, c: usize, hw: usize, grids: &[G
         let len = BLOCK.min(hw - p0);
         let base = (img * c + 4 * g) * hw + p0;
         let gs = [grids[4 * g], grids[4 * g + 1], grids[4 * g + 2], grids[4 * g + 3]];
-        // SAFETY: each `(ig, b)` owns disjoint words `ig * hw + p0..+len` inside `out`.
+        // SAFETY: each `(ig, b)` owns disjoint words `ig * hw + p0..+len` inside `out` (`out_words <= out.len()`).
         let o = unsafe { std::slice::from_raw_parts_mut(optr.0.add(ig * hw + p0), len) };
         quantize_group(
             &x[base..base + len],
@@ -446,8 +460,9 @@ unsafe fn dequantize_group_avx2(
 pub fn dequantize(x: C4<'_>, n: usize, hw: usize, grid: Grid, out: &mut [f32]) {
     x.check(n, hw);
     let c = x.c;
-    assert!(out.len() >= n * c * hw);
-    if n * c * hw == 0 {
+    let total = n.checked_mul(c).and_then(|v| v.checked_mul(hw)).expect("q8::dequantize: size overflow");
+    assert!(out.len() >= total, "q8::dequantize: output buffer too short");
+    if total == 0 {
         return;
     }
     let groups = c / 4;
@@ -459,12 +474,12 @@ pub fn dequantize(x: C4<'_>, n: usize, hw: usize, grid: Grid, out: &mut [f32]) {
         let (p2, p3) = rest.split_at_mut(hw);
         dequantize_group(src, [grid; 4], p0, p1, p2, p3);
     };
-    if n * c * hw < crate::cpu::PAR_MIN {
-        for (ig, o) in out[..n * c * hw].chunks_exact_mut(4 * hw).enumerate() {
+    if total < crate::cpu::PAR_MIN {
+        for (ig, o) in out[..total].chunks_exact_mut(4 * hw).enumerate() {
             run(ig, o);
         }
     } else {
-        crate::cpu::par_chunks(&mut out[..n * c * hw], 4 * hw, &run);
+        crate::cpu::par_chunks(&mut out[..total], 4 * hw, &run);
     }
 }
 
@@ -473,8 +488,10 @@ pub fn dequantize_per_channel(x: C4<'_>, n: usize, hw: usize, grids: &[Grid], ou
     x.check(n, hw);
     let c = x.c;
     assert_eq!(grids.len(), c, "q8::dequantize_per_channel: grids length");
-    assert!(out.len() >= n * c * hw);
-    if n * c * hw == 0 {
+    let total =
+        n.checked_mul(c).and_then(|v| v.checked_mul(hw)).expect("q8::dequantize_per_channel: size overflow");
+    assert!(out.len() >= total, "q8::dequantize_per_channel: output buffer too short");
+    if total == 0 {
         return;
     }
     let groups = c / 4;
@@ -487,12 +504,12 @@ pub fn dequantize_per_channel(x: C4<'_>, n: usize, hw: usize, grids: &[Grid], ou
         let (p2, p3) = rest.split_at_mut(hw);
         dequantize_group(src, gs, p0, p1, p2, p3);
     };
-    if n * c * hw < crate::cpu::PAR_MIN {
-        for (ig, o) in out[..n * c * hw].chunks_exact_mut(4 * hw).enumerate() {
+    if total < crate::cpu::PAR_MIN {
+        for (ig, o) in out[..total].chunks_exact_mut(4 * hw).enumerate() {
             run(ig, o);
         }
     } else {
-        crate::cpu::par_chunks(&mut out[..n * c * hw], 4 * hw, &run);
+        crate::cpu::par_chunks(&mut out[..total], 4 * hw, &run);
     }
 }
 
@@ -506,21 +523,23 @@ fn max4(a: u32, b: u32) -> u32 {
 fn max_pool_plane(src: &[u32], h: usize, w: usize, r: usize, tmp: &mut [u32], o: &mut [u32]) {
     let hw = h.checked_mul(w).expect("q8::max_pool_plane: h * w overflow");
     assert!(src.len() >= hw && tmp.len() >= hw && o.len() >= hw);
+    if hw == 0 {
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if kernel::uses_avx2() {
         // SAFETY: AVX2 was detected; buffer lengths asserted above.
         return unsafe { max_pool_plane_avx2(src, h, w, r, tmp, o) };
     }
-    let ri = r as isize;
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
         for xo in 0..w {
-            let (lo, hi) = ((xo as isize - ri).max(0) as usize, ((xo as isize + ri) as usize).min(w - 1));
+            let (lo, hi) = (xo.saturating_sub(r), xo.saturating_add(r).min(w - 1));
             tmp[y * w + xo] = row[lo..=hi].iter().fold(0u32, |m, &v| max4(m, v));
         }
     }
     for y in 0..h {
-        let (lo, hi) = ((y as isize - ri).max(0) as usize, ((y as isize + ri) as usize).min(h - 1));
+        let (lo, hi) = (y.saturating_sub(r), y.saturating_add(r).min(h - 1));
         for xo in 0..w {
             o[y * w + xo] = (lo..=hi).fold(0u32, |m, yy| max4(m, tmp[yy * w + xo]));
         }
@@ -531,20 +550,20 @@ fn max_pool_plane(src: &[u32], h: usize, w: usize, r: usize, tmp: &mut [u32], o:
 #[target_feature(enable = "avx2,fma")]
 unsafe fn max_pool_plane_avx2(src: &[u32], h: usize, w: usize, r: usize, tmp: &mut [u32], o: &mut [u32]) {
     use std::arch::x86_64::*;
-    let ri = r as isize;
-    let span = 2 * r + 1;
+    let span = r.saturating_mul(2).saturating_add(1);
     // Horizontal pass: 8 C4 words (= 32 bytes) per `_mm256_max_epu8`.
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
         let dst = &mut tmp[y * w..(y + 1) * w];
         let left_end = r.min(w);
         for (xo, d) in dst.iter_mut().enumerate().take(left_end) {
-            let hi = (xo + r).min(w - 1);
+            let hi = xo.saturating_add(r).min(w - 1);
             *d = row[0..=hi].iter().fold(0u32, |m, &v| max4(m, v));
         }
         let mut xo = left_end;
         let inner_end = w.saturating_sub(r);
-        // SAFETY: for `xo >= r` and `xo + 8 <= w - r`, `xo - r + d + 8 <= w` for all `d in 0..span`.
+        // SAFETY: `xo >= r` and `xo + 8 <= w - r` implies `2 * r + 8 <= w`, so `span = 2*r + 1 < w` and
+        // `xo - r + d + 8 <= w` for all `d in 0..span`.
         unsafe {
             while xo + 8 <= inner_end {
                 let base = row.as_ptr().add(xo - r);
@@ -557,14 +576,14 @@ unsafe fn max_pool_plane_avx2(src: &[u32], h: usize, w: usize, r: usize, tmp: &m
             }
         }
         for (xx, d) in dst.iter_mut().enumerate().skip(xo) {
-            let (lo, hi) = ((xx as isize - ri).max(0) as usize, ((xx as isize + ri) as usize).min(w - 1));
+            let (lo, hi) = (xx.saturating_sub(r), xx.saturating_add(r).min(w - 1));
             *d = row[lo..=hi].iter().fold(0u32, |m, &v| max4(m, v));
         }
     }
     // Vertical pass: 8 C4 words per `_mm256_max_epu8`.
     for y in 0..h {
         let lo = y.saturating_sub(r);
-        let hi = (y + r).min(h - 1);
+        let hi = y.saturating_add(r).min(h - 1);
         let dst = &mut o[y * w..(y + 1) * w];
         let mut xo = 0;
         // SAFETY: `yy * w + xo + 8 <= h * w`.
@@ -590,24 +609,25 @@ unsafe fn max_pool_plane_avx2(src: &[u32], h: usize, w: usize, r: usize, tmp: &m
 /// `k × k` max pool, stride 1, padding `k / 2` (padding never wins), of C4 codes into a contiguous C4 `out`
 /// (`[n][c / 4][h · w]`). Exact: max commutes with a monotone quantiser (per-tensor or per-channel).
 pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u32]) {
-    let hw = h * w;
+    let hw = h.checked_mul(w).expect("q8::max_pool: h * w overflow");
     x.check(n, hw);
     let groups = x.c / 4;
-    assert!(out.len() >= n * groups * hw);
-    if n * groups * hw == 0 {
+    let total = n.checked_mul(groups).and_then(|v| v.checked_mul(hw)).expect("q8::max_pool: size overflow");
+    assert!(out.len() >= total, "q8::max_pool: output buffer too short");
+    if total == 0 {
         return;
     }
     let r = k / 2;
-    if n * groups * hw < crate::cpu::PAR_MIN {
+    if total < crate::cpu::PAR_MIN {
         let mut tmp = vec![0u32; hw];
-        for (ig, o) in out[..n * groups * hw].chunks_exact_mut(hw).enumerate() {
+        for (ig, o) in out[..total].chunks_exact_mut(hw).enumerate() {
             let (img, g) = (ig / groups, ig % groups);
             let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
             max_pool_plane(src, h, w, r, &mut tmp, o);
         }
         return;
     }
-    crate::cpu::par_chunks(&mut out[..n * groups * hw], hw, &|ig, o| {
+    crate::cpu::par_chunks(&mut out[..total], hw, &|ig, o| {
         let (img, g) = (ig / groups, ig % groups);
         let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
         let mut tmp = vec![0u32; hw];
@@ -617,8 +637,9 @@ pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u3
 
 fn upsample2_plane(src: &[u32], h: usize, w: usize, o: &mut [u32]) {
     let hw = h.checked_mul(w).expect("q8::upsample2_plane: h * w overflow");
-    let ow = 2 * w;
-    assert!(src.len() >= hw && o.len() >= 4 * hw);
+    let ow = w.checked_mul(2).expect("q8::upsample2_plane: width overflow");
+    let ohw = hw.checked_mul(4).expect("q8::upsample2_plane: output size overflow");
+    assert!(src.len() >= hw && o.len() >= ohw);
     #[cfg(target_arch = "x86_64")]
     if kernel::uses_avx2() {
         // SAFETY: AVX2 was detected; buffer lengths asserted above.
@@ -672,23 +693,24 @@ unsafe fn upsample2_plane_avx2(src: &[u32], h: usize, w: usize, o: &mut [u32]) {
 
 /// Nearest-neighbour upsample by 2 of C4 codes into a contiguous C4 `out` (`[n][c / 4][2h · 2w]`).
 pub fn upsample2(x: C4<'_>, n: usize, h: usize, w: usize, out: &mut [u32]) {
-    let hw = h * w;
+    let hw = h.checked_mul(w).expect("q8::upsample2: h * w overflow");
     x.check(n, hw);
     let groups = x.c / 4;
-    let ohw = 4 * hw;
-    assert!(out.len() >= n * groups * ohw);
-    if n * groups * ohw == 0 {
+    let ohw = hw.checked_mul(4).expect("q8::upsample2: output plane overflow");
+    let total = n.checked_mul(groups).and_then(|v| v.checked_mul(ohw)).expect("q8::upsample2: size overflow");
+    assert!(out.len() >= total, "q8::upsample2: output buffer too short");
+    if total == 0 {
         return;
     }
-    if n * groups * ohw < 2 * crate::cpu::PAR_MIN {
-        for (ig, o) in out[..n * groups * ohw].chunks_exact_mut(ohw).enumerate() {
+    if total < 2 * crate::cpu::PAR_MIN {
+        for (ig, o) in out[..total].chunks_exact_mut(ohw).enumerate() {
             let (img, g) = (ig / groups, ig % groups);
             let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
             upsample2_plane(src, h, w, o);
         }
         return;
     }
-    crate::cpu::par_chunks(&mut out[..n * groups * ohw], ohw, &|ig, o| {
+    crate::cpu::par_chunks(&mut out[..total], ohw, &|ig, o| {
         let (img, g) = (ig / groups, ig % groups);
         let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
         upsample2_plane(src, h, w, o);

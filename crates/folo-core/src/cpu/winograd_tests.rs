@@ -3,7 +3,7 @@
 //! observed through the calls counted on the test's thread (`conv::winograd_calls`).
 
 use super::CpuBackend;
-use super::conv::winograd_calls;
+use super::conv::{winograd_calls, winograd4_calls};
 use crate::backend::Backend;
 use crate::rng::Rng;
 use crate::{Conv2dParams, CpuStorage, Storage, Tensor, UnaryOp, no_grad};
@@ -15,6 +15,14 @@ fn counting<R>(f: impl FnOnce() -> R) -> (R, [usize; 2]) {
     let before = winograd_calls();
     let r = f();
     let after = winograd_calls();
+    (r, [after[0] - before[0], after[1] - before[1]])
+}
+
+/// `f`'s result and `[F(4x4) transforms, F(4x4) forwards]` on this thread.
+fn counting4<R>(f: impl FnOnce() -> R) -> (R, [usize; 2]) {
+    let before = winograd4_calls();
+    let r = f();
+    let after = winograd4_calls();
     (r, [after[0] - before[0], after[1] - before[1]])
 }
 
@@ -36,16 +44,21 @@ fn fresh(t: &Tensor) -> Tensor {
 #[test]
 fn inference_conv_takes_winograd() {
     let mut rng = Rng::seed(1);
-    for (c, hw) in [(32usize, 32usize), (64, 40)] {
+    for (c, hw, expect_f4) in [(32usize, 32usize, false), (64, 40, true)] {
         let x = Tensor::randn([1, c, hw, hw], 0.0, 1.0, &mut rng);
         let w = Tensor::randn([c, c, 3, 3], 0.0, 0.1, &mut rng);
         let b = Tensor::randn([c], 0.0, 0.1, &mut rng);
         let (direct, calls) = counting(|| x.conv2d_with(&w, Some(&b), &P).unwrap().to_vec::<f32>().unwrap());
         assert_eq!(calls, [0, 0], "the autograd conv ran Winograd ({c}@{hw})");
         let _g = no_grad();
-        let (wino, calls) =
-            counting(|| x.conv2d_act(&w, Some(&b), &P, None).unwrap().to_vec::<f32>().unwrap());
+        let ((wino, calls4), calls) =
+            counting(|| counting4(|| x.conv2d_act(&w, Some(&b), &P, None).unwrap().to_vec::<f32>().unwrap()));
         assert_eq!(calls, [1, 1], "the inference conv did not run Winograd ({c}@{hw})");
+        assert_eq!(
+            calls4,
+            if expect_f4 { [1, 1] } else { [0, 0] },
+            "unexpected F(4x4) dispatch for ({c}@{hw})"
+        );
         let max_err = direct.iter().zip(&wino).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(max_err < 1e-4, "Winograd and direct differ by {max_err} ({c}@{hw})");
         assert!(
@@ -131,4 +144,48 @@ fn rebound_view_does_not_use_the_cache() {
     assert_eq!(calls, [1, 1], "the rebound view did not transform its own weights");
     assert!(zero.iter().all(|&v| v == 0.0), "the rebound view used the first storage's weights");
     assert_eq!(run(false), (ones, [0, 1]), "the rebound view replaced the first storage's weights");
+}
+
+/// Public `conv2d_act` edge cases around Winograd F(4x4) dispatch:
+/// - `groups > 1`, `dilation > 1`, and `stride != 1` never take Winograd and stay bit-exact with direct conv.
+/// - Non-unit and asymmetric paddings (`[0,0]`, `[2,2]`, `[5,5]`, `[0,2]`) with odd sizes take F(4x4) and
+///   match direct conv within `1e-4`.
+#[test]
+fn winograd4_public_conv_edge_cases() {
+    let mut rng = Rng::seed(3);
+    let _g = no_grad();
+    // Non-Winograd geometries must bypass Winograd completely and match `conv2d_with` bit for bit.
+    let bypass = [
+        (64, 64, 32, 32, Conv2dParams { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 2 }),
+        (64, 64, 32, 32, Conv2dParams { stride: [1, 1], padding: [2, 2], dilation: [2, 2], groups: 1 }),
+        (64, 64, 32, 32, Conv2dParams { stride: [2, 2], padding: [1, 1], dilation: [1, 1], groups: 1 }),
+    ];
+    for (c, o, h, w_dim, p) in bypass {
+        let x = Tensor::randn([1, c, h, w_dim], 0.0, 1.0, &mut rng);
+        let w = Tensor::randn([o, c / p.groups, 3, 3], 0.0, 0.1, &mut rng);
+        let b = Tensor::randn([o], 0.0, 0.1, &mut rng);
+        let direct = x.conv2d_with(&w, Some(&b), &p).unwrap().to_vec::<f32>().unwrap();
+        let ((got, calls4), calls) =
+            counting(|| counting4(|| x.conv2d_act(&w, Some(&b), &p, None).unwrap().to_vec::<f32>().unwrap()));
+        assert_eq!(calls, [0, 0], "unexpected Winograd call for {p:?}");
+        assert_eq!(calls4, [0, 0], "unexpected F(4x4) call for {p:?}");
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            direct.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "bypass mismatch for {p:?}"
+        );
+    }
+    // Non-unit and asymmetric paddings with odd spatial dimensions take F(4x4) cleanly.
+    let x = Tensor::randn([1, 64, 33, 35], 0.0, 1.0, &mut rng);
+    let b = Tensor::randn([64], 0.0, 0.1, &mut rng);
+    for padding in [[0, 0], [2, 2], [5, 5], [0, 2]] {
+        let p = Conv2dParams { stride: [1, 1], padding, dilation: [1, 1], groups: 1 };
+        let w = Tensor::randn([64, 64, 3, 3], 0.0, 0.1, &mut rng);
+        let direct = x.conv2d_with(&w, Some(&b), &p).unwrap().to_vec::<f32>().unwrap();
+        let (got, calls4) =
+            counting4(|| x.conv2d_act(&w, Some(&b), &p, None).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4, [1, 1], "expected F(4x4) for padding {padding:?}");
+        let max_err = direct.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(max_err < 2e-4, "F(4x4) padding {padding:?} max_err {max_err}");
+    }
 }

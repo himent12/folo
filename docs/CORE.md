@@ -109,10 +109,11 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   least 56 4x4 tiles with `C · O >= 2048` or at least 200 4x4 tiles), `cpu/conv/winograd4.rs` runs Winograd
   F(4x4, 3x3) before F(2x2): 36 multiplies per 4x4 output tile and channel pair instead of 144 (4.0x FLOP reduction vs
   direct, 1.78x vs F(2x2)).
-- Uses well-conditioned interpolation points `(0, ±1/2, ±1, ∞)` rather than `(0, ±1, ±2, ∞)` so every constant in `Bᵀ`
-  and `Aᵀ` is an exact power of two (`±1, ±1/2, ±1/4, ±1/8`), with explicit 8-tile AVX2/FMA + 4-tile SSE/FMA
-  transforms bit-exact with the scalar path, register-fused bias + SiLU/ReLU direct stores, and the same two-pass
-  L1/L2 split and `View::derived` weight cache as F(2x2).
+- Uses well-conditioned interpolation points `(0, ±1/2, ±1, ∞)` rather than `(0, ±1, ±2, ∞)` so every multiplier in
+  the factored `Bᵀ` and `Aᵀ` butterflies is an exact power of two (`±1, ±1/2, ±1/4, ±1/8`; unfactored `Bᵀ` has
+  `-5/4` entries), with explicit 8-tile AVX2/FMA + 4-tile SSE/FMA transforms bit-exact with the scalar path,
+  register-fused bias + SiLU/ReLU direct stores, and the same two-pass L1/L2 split and `View::derived` weight cache
+  as F(2x2).
 - Error is bounded by `(C + 16) · 2^-23 · 140 · Σ_c D_c · G_c` (`D_c` over the 6x6 patch; tested including 512-channel
   all-ones), and results are bitwise deterministic across thread counts and batches.
 
@@ -125,8 +126,11 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   share its block) and a pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites'
   columns gathered into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv
   runs densely, as does a backend without the kernel.
-- A site reads only its receptive field: in Winograd F(2x2, 3x3) each output of a tile reads only its own 3x3 window
-  of the 4x4 patch (tested with NaN everywhere else).
+- Patch isolation: in Winograd F(2x2, 3x3) each output of a tile reads only its own 3x3 window of the 4x4 patch
+  (tested with NaN everywhere else). In Winograd F(4x4, 3x3) the transform combines inputs across the 4x4 tile's 6x6
+  input patch (`4·ty − pad_h .. 4·ty − pad_h + 6` by `4·tx − pad_w .. 4·tx − pad_w + 6`), so inputs must be valid
+  across every requested tile's 6x6 patch (candidate-first prediction populates that patch in `conv0` whenever `conv1`
+  may take F(4x4); anything outside those patches is never read, tested with NaN).
 - On the GPU, `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the
   pixels): folo-gpu's implicit GEMM with `SITES` (`kernels/conv/sites.rs`; regular and tensor-core generators) maps
   column `j` to the image's `j`-th listed pixel, runs the dense conv's tile config and split-K chunks (planned for the

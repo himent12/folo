@@ -567,3 +567,229 @@ fn conv_size_refuses_buffers_that_overflow() {
     assert_eq!(wide.is_none(), usize::BITS == 32);
     assert_eq!(conv_size(1, 4, 4, 1, 2, 3, 1, 0), None, "kernel larger than the input");
 }
+
+#[test]
+fn qconv_rejects_zero_channels_and_handles_empty_batch() {
+    assert!(!QConv::supports((0, 4, 3), 1, 1), "zero output channels");
+    assert!(!QConv::supports((4, 0, 3), 1, 1), "zero input channels");
+    let g = Grid { scale: 0.05, zero: 10 };
+    let cv = QConv::new(&[0.1; 4 * 4 * 9], &[0.0; 4], (4, 4, 3), 1, 1, true, &[g; 4]);
+    let x = vec![0u32; SLACK];
+    let view = C4 { data: &x, offset: 0, img_stride: 0, c: 4, zero: g.zero };
+    let mut out = vec![0u32; SLACK];
+    conv(&[view], 0, 8, 8, &cv, None, QOut::U8 { data: &mut out, grid: g });
+}
+
+/// Wide (`w >= 25`) tests exercising AVX2 `max_pool`, `upsample2`, `quantize`/`dequantize` (both serial and
+/// parallel `>= PAR_MIN`), `k=3` within-row `contiguous` direct-store (with/without residual, single-part and
+/// decoupled multi-part), stride-2 `image_rows` (`p=0` and `p=1`), and wide `stem_u8`.
+#[test]
+fn wide_avx2_helpers_and_k3_direct_store_match_reference() {
+    let mut rng = Rng::seed(42);
+    // Wide max_pool (k = 3, 5, and huge k = usize::MAX saturating check) + upsample2.
+    for (h, w) in [(11usize, 27usize), (27, 35)] {
+        let (n, c, hw) = (2, 8, h * w);
+        let g = Grid::from_range(-1.2, 3.4);
+        let x: Vec<f32> = (0..n * c * hw).map(|_| rng.uniform(-1.5, 3.8)).collect();
+        let mut q = alloc(n, c, hw);
+        quantize(&x, n, c, hw, g, &mut q);
+        let view = C4 { data: &q, offset: 0, img_stride: c / 4 * hw, c, zero: g.zero };
+        let mut back = vec![0f32; n * c * hw];
+        dequantize(view, n, hw, g, &mut back);
+        for (a, b) in x.iter().zip(&back) {
+            assert_eq!(g.dequantize(g.quantize(*a)), *b);
+        }
+        // Per-channel quantize + dequantize on large plane (>= PAR_MIN on 27x35x8x2? 15120 -> also test c=32).
+        for k in [3usize, 5, usize::MAX] {
+            let mut mp = alloc(n, c, hw);
+            max_pool(view, n, h, w, k, &mut mp);
+            let r = k / 2;
+            for img in 0..n {
+                for ch in 0..c {
+                    let plane = &back[(img * c + ch) * hw..][..hw];
+                    for y in (0..h).step_by(3) {
+                        for xo in (0..w).step_by(3) {
+                            let mut m = f32::NEG_INFINITY;
+                            for yy in y.saturating_sub(r)..=y.saturating_add(r).min(h - 1) {
+                                for xx in xo.saturating_sub(r)..=xo.saturating_add(r).min(w - 1) {
+                                    m = m.max(plane[yy * w + xx]);
+                                }
+                            }
+                            let got = (mp[(img * c / 4 + ch / 4) * hw + y * w + xo] >> (8 * (ch % 4))) as u8;
+                            assert_eq!(
+                                g.dequantize(got),
+                                m,
+                                "max_pool k={k} ({h}x{w}) ({img},{ch},{y},{xo})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut up = alloc(n, c, 4 * hw);
+        upsample2(view, n, h, w, &mut up);
+        for img in 0..n {
+            for ch in 0..c {
+                let plane = &back[(img * c + ch) * hw..][..hw];
+                for y in (0..h).step_by(3) {
+                    for xo in (0..w).step_by(3) {
+                        for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                            let u = (up[(img * c / 4 + ch / 4) * 4 * hw + (2 * y + dy) * 2 * w + 2 * xo + dx]
+                                >> (8 * (ch % 4))) as u8;
+                            assert_eq!(g.dequantize(u), plane[y * w + xo]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Parallel quantize / quantize_per_channel / dequantize_per_channel (>= PAR_MIN = 32768).
+    {
+        let (n, c, hw) = (2, 16, 1200);
+        let grids: Vec<Grid> =
+            (0..c).map(|i| Grid::from_range(-0.5 - 0.1 * i as f32, 2.0 + 0.2 * i as f32)).collect();
+        let x: Vec<f32> = (0..n * c * hw).map(|_| rng.uniform(-2.0, 4.0)).collect();
+        let mut q = alloc(n, c, hw);
+        quantize_per_channel(&x, n, c, hw, &grids, &mut q);
+        let view = C4 { data: &q, offset: 0, img_stride: c / 4 * hw, c, zero: grids[0].zero };
+        let mut back = vec![0f32; n * c * hw];
+        dequantize_per_channel(view, n, hw, &grids, &mut back);
+        for img in 0..n {
+            for (ch, grid) in grids.iter().enumerate() {
+                for p in (0..hw).step_by(17) {
+                    let idx = (img * c + ch) * hw + p;
+                    assert_eq!(back[idx], grid.dequantize(grid.quantize(x[idx])));
+                }
+            }
+        }
+    }
+    // Wide k=3 convs hitting within-row contiguous direct-store (ow >= 24) and AVX2 stride-2 (p=0, p=1).
+    let base = Case {
+        n: 1,
+        parts: vec![8],
+        o: 8,
+        h: 9,
+        w: 35,
+        k: 3,
+        s: 1,
+        pad: 1,
+        silu: true,
+        res: false,
+        f32_out: false,
+        gap: 0,
+    };
+    let wide_cases = [
+        Case { res: false, ..base.clone() },
+        Case { res: true, ..base.clone() },
+        Case { res: true, silu: false, w: 27, ..base.clone() },
+        Case { s: 2, pad: 1, h: 15, w: 55, ..base.clone() },
+        Case { s: 2, pad: 0, h: 15, w: 55, res: true, ..base.clone() },
+        Case { s: 2, pad: 1, h: 11, w: 34, parts: vec![4, 8], o: 12, ..base.clone() },
+    ];
+    for (i, c) in wide_cases.iter().enumerate() {
+        run_case(c, 500 + i as u64);
+    }
+    // Wide decoupled multi-part k=3 (hits `apply_f32_full_u8_direct` with & without residual).
+    for has_res in [false, true] {
+        let (h, w, o) = (7usize, 31usize, 8usize);
+        let hw = h * w;
+        let g0 = Grid { scale: 0.01, zero: 15 };
+        let g1 = Grid { scale: 0.25, zero: 90 };
+        let gout = Grid { scale: 0.05, zero: 32 };
+        let gres = Grid { scale: 0.04, zero: 20 };
+        let x0 = codes(&mut rng, hw);
+        let x1 = codes(&mut rng, 2 * hw);
+        let res_buf = codes(&mut rng, o / 4 * hw);
+        let wt: Vec<f32> = (0..o * 12 * 9).map(|_| rng.uniform(-0.4, 0.4)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-1.0, 1.0)).collect();
+        let pg0 = [g0; 4];
+        let pg1 = [g1; 8];
+        let cv = QConv::new_parts(&wt, &bias, (o, 12, 3), 1, 1, true, &[&pg0, &pg1], true);
+        assert_eq!(cv.num_parts(), 2);
+        let v0 = C4 { data: &x0, offset: 0, img_stride: hw, c: 4, zero: g0.zero };
+        let v1 = C4 { data: &x1, offset: 0, img_stride: 2 * hw, c: 8, zero: g1.zero };
+        let rv = has_res.then_some((
+            C4 { data: &res_buf, offset: 0, img_stride: o / 4 * hw, c: o, zero: gres.zero },
+            gres,
+        ));
+        let mut got1 = alloc(1, o, hw);
+        let mut got8 = alloc(1, o, hw);
+        pool(1).install(|| conv(&[v0, v1], 1, h, w, &cv, rv, QOut::U8 { data: &mut got1, grid: gout }));
+        pool(8).install(|| conv(&[v0, v1], 1, h, w, &cv, rv, QOut::U8 { data: &mut got8, grid: gout }));
+        assert_eq!(got1[..o / 4 * hw], got8[..o / 4 * hw], "multi-part k3 res={has_res}");
+    }
+    // Wide stem_u8 (w = 54, ow = 27 >= NR: hits AVX2 de-interleave, rotating slots, direct store and tail).
+    {
+        let (h, w, o) = (14usize, 54usize, 8usize);
+        let rgb: Vec<f32> = (0..3 * h * w).map(|_| rng.uniform(0.0, 1.0)).collect();
+        let mut rgb0 = alloc(1, 4, h * w);
+        pack_f32_to_rgb0_u8(&rgb, 1, h, w, &mut rgb0);
+        let wt: Vec<f32> = (0..o * 3 * 9).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let qs = QStem::new(&wt, &bias, (o, 3), 2, 1, true);
+        let (oh, ow) = qs.out_hw(h, w);
+        assert_eq!((oh, ow), (7, 27));
+        let gout = Grid::from_range(-0.3, 4.0);
+        let mut out1 = alloc(1, o, oh * ow);
+        let mut out4 = alloc(1, o, oh * ow);
+        pool(1).install(|| stem_u8(&rgb0, 1, h, w, &qs, QOut::U8 { data: &mut out1, grid: gout }));
+        pool(4).install(|| stem_u8(&rgb0, 1, h, w, &qs, QOut::U8 { data: &mut out4, grid: gout }));
+        assert_eq!(out1[..o / 4 * oh * ow], out4[..o / 4 * oh * ow]);
+    }
+}
+
+/// Every public q8 helper must panic cleanly on size overflow instead of wrapping and writing out of bounds.
+#[test]
+fn q8_public_apis_reject_size_overflow() {
+    let g = Grid { scale: 0.1, zero: 0 };
+    let big_n = (usize::MAX / 4) + 10_000;
+    let x_f = vec![0.0f32; 64];
+    let in_q = vec![0u32; 64 + SLACK];
+    let mut out_q = vec![0u32; 64 + SLACK];
+    let mut out_f = vec![0.0f32; 64];
+    let view = C4 { data: &in_q, offset: 0, img_stride: 0, c: 4, zero: 0 };
+
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            quantize(&x_f, big_n, 4, 1, g, &mut out_q);
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            quantize_per_channel(&x_f, big_n, 4, 1, &[g; 4], &mut out_q);
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dequantize(view, big_n, 1, g, &mut out_f);
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dequantize_per_channel(view, big_n, 1, &[g; 4], &mut out_f);
+        }))
+        .is_err()
+    );
+    let mut out_mp = vec![0u32; 64];
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            max_pool(view, usize::MAX, 1, 2, 3, &mut out_mp);
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            upsample2(view, big_n, 1, 1, &mut out_mp);
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pack_f32_to_rgb0_u8(&x_f, (usize::MAX / 3) + 4, 1, 1, &mut out_mp);
+        }))
+        .is_err()
+    );
+}

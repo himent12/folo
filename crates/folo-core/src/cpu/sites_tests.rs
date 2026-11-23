@@ -4,7 +4,7 @@
 
 use super::conv::{
     ConvGeom, ConvInput, ConvPart, transform_weights, transform_weights4, winograd_calls, winograd_forward,
-    winograd_forward_at, winograd4_forward, winograd4_forward_at,
+    winograd_forward_at, winograd4_calls, winograd4_forward, winograd4_forward_at,
 };
 use crate::rng::Rng;
 use crate::{Conv2dParams, Tensor, UnaryOp, no_grad};
@@ -63,29 +63,91 @@ fn check(
     ran
 }
 
-/// Winograd convs (odd sides, two images, a single-tile-wide map, every site) give the dense bits at their sites.
+/// Winograd convs (both F(2x2) and F(4x4), odd sides, two images, single-tile-wide map, every site) give the
+/// dense bits at their sites.
 #[test]
 fn winograd_sites_are_the_dense_values() {
     let mut rng = Rng::seed(3);
-    for (n, c, o, h, w) in [
-        (2, 64, 64, 13, 11),
-        (1, 96, 64, 20, 20),
-        (2, 32, 32, 35, 37),
-        (3, 64, 64, 1, 7),
-        (1, 64, 72, 11, 11),
+    // `(n, c, o, h, w, expects_winograd4)`
+    for (n, c, o, h, w, expect_f4) in [
+        (2, 64, 64, 13, 11, false),
+        (1, 96, 64, 20, 20, false),
+        (2, 32, 32, 35, 37, false),
+        (2, 64, 32, 35, 37, true),
+        (1, 16, 32, 80, 44, true),
+        (3, 64, 64, 1, 7, false),
+        (1, 64, 72, 11, 11, false),
     ] {
         let x = Tensor::randn([n, c, h, w], 0.0, 1.0, &mut rng);
         let wt = Tensor::randn([o, c, 3, 3], 0.0, 0.05, &mut rng);
         let b = Tensor::randn([o], 0.0, 0.1, &mut rng);
         let at = sites(n, h, w, 9, &mut rng);
+        let before4 = winograd4_calls()[1];
         assert_eq!(
             check(&x, &wt, Some(&b), &P3, Some(UnaryOp::Silu), &at),
             1,
             "{n}x{c}x{h}x{w}: not Winograd"
         );
+        let ran4 = winograd4_calls()[1] - before4;
+        assert_eq!(ran4, usize::from(expect_f4) * 2, "{n}x{c}->{o}@{h}x{w}: unexpected F(4x4) dispatch");
         let all: Vec<u32> = (0..(n * h * w) as u32).rev().collect();
         assert_eq!(check(&x, &wt, None, &P3, None, &all), 1);
         assert_eq!(check(&x, &wt, Some(&b), &P3, None, &[]), 1);
+    }
+}
+
+/// `conv2d_act_at` never reads outside each site's documented input patch: 3×3 receptive field for F(2x2), and
+/// the full 6×6 patch of each requested 4×4 tile for F(4x4) — NaNs anywhere else leave every requested site
+/// bit-identical to the dense forward.
+#[test]
+fn winograd_sites_isolate_outside_patch() {
+    let mut rng = Rng::seed(11);
+    let _g = no_grad();
+    // (c, o, h, w, is_f4)
+    for (c, o, h, w, is_f4) in [(64usize, 64usize, 20usize, 20usize, false), (64, 32, 35, 37, true)] {
+        let x_vec = Tensor::randn([1, c, h, w], 0.0, 1.0, &mut rng).to_vec::<f32>().unwrap();
+        let x_dense = Tensor::from_vec(x_vec.clone(), [1, c, h, w]).unwrap();
+        let wt = Tensor::randn([o, c, 3, 3], 0.0, 0.05, &mut rng);
+        let b = Tensor::randn([o], 0.0, 0.1, &mut rng);
+        let dense = bits(&x_dense.conv2d_act(&wt, Some(&b), &P3, Some(UnaryOp::Silu)).unwrap());
+        let chosen = [(0usize, 0usize), (4, 4), (5, 7), (h - 1, w - 1)];
+        let at_vec: Vec<u32> = chosen.iter().map(|&(y, x)| (y * w + x) as u32).collect();
+        let mut keep = vec![false; h * w];
+        for &(y0, x0) in &chosen {
+            let (y_lo, y_hi, x_lo, x_hi) = if is_f4 {
+                let (ty, tx) = (y0 / 4, x0 / 4);
+                (
+                    (4 * ty).saturating_sub(1),
+                    (4 * ty + 5).min(h),
+                    (4 * tx).saturating_sub(1),
+                    (4 * tx + 5).min(w),
+                )
+            } else {
+                (y0.saturating_sub(1), (y0 + 2).min(h), x0.saturating_sub(1), (x0 + 2).min(w))
+            };
+            for y in y_lo..y_hi {
+                keep[y * w + x_lo..y * w + x_hi].fill(true);
+            }
+        }
+        let mut poisoned = vec![f32::NAN; c * h * w];
+        for ci in 0..c {
+            for p in 0..h * w {
+                if keep[p] {
+                    poisoned[ci * h * w + p] = x_vec[ci * h * w + p];
+                }
+            }
+        }
+        let x_nan = Tensor::from_vec(poisoned, [1, c, h, w]).unwrap();
+        let at_t = Tensor::from_vec(at_vec.clone(), [at_vec.len()]).unwrap();
+        let before4 = winograd4_calls()[1];
+        let y = bits(&x_nan.conv2d_act_at(&wt, Some(&b), &P3, Some(UnaryOp::Silu), &at_t).unwrap());
+        assert_eq!(winograd4_calls()[1] - before4, usize::from(is_f4));
+        for &s in &at_vec {
+            for oc in 0..o {
+                let i = oc * h * w + s as usize;
+                assert_eq!(y[i], dense[i], "is_f4={is_f4} site={s} oc={oc}");
+            }
+        }
     }
 }
 

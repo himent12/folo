@@ -224,10 +224,12 @@ impl QConv {
         self.parts.len()
     }
 
-    /// Whether [`QConv::new`] takes this geometry: `o` and `c` multiples of 4, `k ≥ 1`, `c · k²` at most
+    /// Whether [`QConv::new`] takes this geometry: positive `o` and `c` multiples of 4, `k ≥ 1`, `c · k²` at most
     /// [`MAX_REDUCTION`], stride in `1..=`[`MAX_STRIDE`] and padding at most [`MAX_PAD`].
     pub fn supports((o, c, k): (usize, usize, usize), stride: usize, pad: usize) -> bool {
-        o.is_multiple_of(4)
+        o > 0
+            && c > 0
+            && o.is_multiple_of(4)
             && c.is_multiple_of(4)
             && k >= 1
             && (1..=MAX_STRIDE).contains(&stride)
@@ -343,9 +345,14 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
         }
     }
     let phases: &[usize] = if s * s <= 16 { &phases_stack[..phases_len] } else { &phases_heap };
-    let per_g = phases.len() * plane;
+    let per_g = phases.len().checked_mul(plane).expect("q8::conv: phase buffer overflow");
     let groups = cv.c / 4;
-    let mut buf = words(groups * per_g + wq * k + NR + SLACK);
+    let buf_len = groups
+        .checked_mul(per_g)
+        .and_then(|v| v.checked_add(wq.checked_mul(k)?))
+        .and_then(|v| v.checked_add(NR + SLACK))
+        .expect("q8::conv: padded copy size overflow");
+    let mut buf = words(buf_len);
     let mut srcs = Vec::with_capacity(groups);
     for x in xs {
         let base = x.offset + img * x.img_stride;
@@ -686,7 +693,7 @@ fn conv_inner(
         None => &[],
     };
     let res_view = res.map(|(r, _)| r);
-    if n == 0 || ohw == 0 {
+    if n == 0 || ohw == 0 || og == 0 {
         return;
     }
     let rows: Vec<Rows> = (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect();
