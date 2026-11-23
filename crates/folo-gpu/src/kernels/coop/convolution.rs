@@ -246,6 +246,12 @@ fn pick_config_stride2_dx(m: usize, n: usize) -> CoopConfig {
     if m >= 128 && n >= 1600 { CoopConfig::C64X128 } else { pick_config_conv(m, n) }
 }
 
+/// `(BM, BN)` of the tile [`encode_conv_backward_input_subpixel`] will pick, for pre-dispatch grid checks.
+pub(crate) fn stride2_dx_tile(m: usize, n: usize) -> (usize, usize) {
+    let cfg = pick_config_stride2_dx(m, n);
+    (cfg.bm as usize, cfg.bn as usize)
+}
+
 /// One stride phase of the f16 conv `d`'s input gradient on tensor cores (`CONV_MODE` 2 with `PHASE`, see
 /// [`crate::kernels::conv`]'s stride-phase decomposition): `g` is the phase's GEMM view (`M = C_in/groups`, `N` its
 /// pixels, `K = C_out/groups · th · tw`), `packed` the phase-packed weight. Returns `false` (nothing encoded) when

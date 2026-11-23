@@ -366,26 +366,75 @@ impl Phase {
     }
 }
 
+/// Pure grid & binding-limit check for [`subpixel_eligible`]: verifies the 2×2 sub-pixel conv (`4·C_in/g` rows,
+/// `⌈H/2⌉·⌈W/2⌉` cells, `16·groups·(C_in/g)·(C_out/g)` packed weights) fits `max_wg` in all three grid dimensions
+/// and `max_binding` bytes before any packed buffer is allocated.
+fn subpixel_fits(
+    d: &Conv2dDesc,
+    coop: bool,
+    tile_mn: (usize, usize),
+    max_wg: usize,
+    max_binding: u64,
+) -> bool {
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    if d.win.kernel != (3, 3)
+        || d.win.stride != (2, 2)
+        || d.win.dilation != (1, 1)
+        || d.win.padding.0 > i32::MAX as usize
+        || d.win.padding.1 > i32::MAX as usize
+        || d.is_depthwise()
+        || (!coop && cin_g > 32)
+    {
+        return false;
+    }
+    let Some(m) = cin_g.checked_mul(4) else { return false };
+    let Some(k) = cout_g.checked_mul(4) else { return false };
+    let Some(n_cells) = d.h.div_ceil(2).checked_mul(d.w.div_ceil(2)) else { return false };
+    let Some(batch) = d.n.checked_mul(d.groups) else { return false };
+    let Some(packed_elems) = d.groups.checked_mul(m).and_then(|v| v.checked_mul(k)) else { return false };
+    if packed_elems > u32::MAX as usize {
+        return false;
+    }
+    let packed_bytes = d.dtype.bytes(packed_elems);
+    let max_wg64 = max_wg as u64;
+    let pack_groups = (packed_elems as u64).div_ceil(256);
+    let z_limit = if coop { max_wg.min(65_535) } else { max_wg };
+    packed_bytes <= max_binding
+        && pack_groups <= max_wg64.saturating_mul(max_wg64)
+        && m.div_ceil(tile_mn.0) <= max_wg
+        && n_cells.div_ceil(tile_mn.1) <= max_wg
+        && batch <= z_limit
+}
+
 /// Whether the input gradient of `d` takes the fused 2×2 sub-pixel conv reformulation: 3×3, stride 2, dilation
 /// 1, not depthwise, always on tensor cores and up to `C_in/groups <= 32` on the regular f32/f16 kernels (above
-/// which wider f32 layers are strictly compute-bound and prefer 1×-FLOP tap-masked stride phases).
+/// which wider f32 layers are strictly compute-bound and prefer 1×-FLOP tap-masked stride phases), provided the
+/// 4×-row tile grid and packed weight fit the device's dispatch and storage-binding limits.
 ///
 /// Assumes finite `dY` inputs (WGSL finite-math contract): out-of-phase entries in the packed 2×2 weight are
 /// `0.0`, so multiplying against an `±inf` in an adjacent `dY` pixel can yield `NaN` (`0 * inf`), whereas the
 /// CPU reference and stride-phase path skip out-of-phase taps.
-fn subpixel_eligible(d: &Conv2dDesc, coop: bool) -> bool {
-    let cin_g = d.c_in / d.groups;
-    d.win.kernel == (3, 3)
-        && d.win.stride == (2, 2)
-        && d.win.dilation == (1, 1)
-        && d.win.padding.0 <= i32::MAX as usize
-        && d.win.padding.1 <= i32::MAX as usize
-        && !d.is_depthwise()
-        && (coop || cin_g <= 32)
+fn subpixel_eligible(ctx: &GpuContext, d: &Conv2dDesc, coop: bool) -> bool {
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    let Some(m) = cin_g.checked_mul(4) else { return false };
+    let Some(k) = cout_g.checked_mul(4) else { return false };
+    let Some(n_cells) = d.h.div_ceil(2).checked_mul(d.w.div_ceil(2)) else { return false };
+    let tile_mn = if coop {
+        coop::stride2_dx_tile(m, n_cells)
+    } else {
+        let mut g = GemmDesc::new(m, n_cells, k, false, false, d.n);
+        g.batch = (d.n, d.groups);
+        let cfg = gemm::pick_config_conv(ctx, &g);
+        (cfg.bm as usize, cfg.bn as usize)
+    };
+    let caps = ctx.caps();
+    let max_binding = caps.max_buffer_size.min(caps.max_storage_buffer_binding_size);
+    subpixel_fits(d, coop, tile_mn, caps.max_workgroups_per_dim as usize, max_binding)
 }
 
 /// The input gradient of a 3×3 stride-2 dilation-1 conv as ONE 2×2 stride-1 sub-pixel conv (`C_out → 4·C_in`)
 /// over `grad`, with the 2×2 pixel shuffle fused directly into the GEMM epilogue (`CONV_MODE` 1 + `SUBPIXEL`).
+/// Returns `Ok(false)` without dispatching if tensor-core fallback would exceed the regular kernel's grid limit.
 fn conv2d_backward_input_subpixel(
     ctx: &GpuContext,
     d: &Conv2dDesc,
@@ -393,7 +442,7 @@ fn conv2d_backward_input_subpixel(
     weight: &wgpu::Buffer,
     gx: &wgpu::Buffer,
     coop: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let dt = d.dtype;
     let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
@@ -429,9 +478,13 @@ fn conv2d_backward_input_subpixel(
             gx,
         )?
     {
-        return Ok(());
+        return Ok(true);
     }
     let cfg = gemm::pick_config_conv(ctx, &g);
+    let max_wg = ctx.caps().max_workgroups_per_dim as usize;
+    if m.div_ceil(cfg.bm as usize) > max_wg || n_cells.div_ceil(cfg.bn as usize) > max_wg {
+        return Ok(false);
+    }
     gemm::check_config(ctx, cfg)?;
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
@@ -460,7 +513,8 @@ fn conv2d_backward_input_subpixel(
         m.div_ceil(cfg.bm as usize) as u32,
         u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
     ];
-    ctx.dispatch(&kernel, &[packed.raw(), grad, ctx.dummy(), gx], &p, groups)
+    ctx.dispatch(&kernel, &[packed.raw(), grad, ctx.dummy(), gx], &p, groups)?;
+    Ok(true)
 }
 
 /// Whether the input gradient of `d` takes the stride-phase decomposition: strided, dilation 1, not depthwise.
@@ -580,8 +634,8 @@ pub fn conv2d_backward_input(
         return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(total as u64, 256)?);
     }
     let coop = coop_grad(ctx, d);
-    if subpixel_eligible(d, coop) {
-        return conv2d_backward_input_subpixel(ctx, d, grad, weight, gx, coop);
+    if subpixel_eligible(ctx, d, coop) && conv2d_backward_input_subpixel(ctx, d, grad, weight, gx, coop)? {
+        return Ok(());
     }
     if phased(d) {
         return conv2d_backward_input_phased(ctx, d, grad, weight, gx, coop);
@@ -652,4 +706,46 @@ pub fn conv2d_backward_input(
         u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
     ];
     ctx.dispatch(&kernel, &[wt.raw(), grad, ctx.dummy(), gx], &p, groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::elementwise::UnaryOp;
+    use crate::kernels::pooling::Window2d;
+
+    fn s2_desc(c_in: usize, h: usize, w: usize, c_out: usize) -> Conv2dDesc {
+        Conv2dDesc {
+            n: 1,
+            c_in,
+            h,
+            w,
+            c_out,
+            groups: 1,
+            win: Window2d::square(3, 2, 1),
+            act: UnaryOp::Identity,
+            dtype: DType::F16,
+        }
+    }
+
+    /// Fused 2×2 sub-pixel `dX` declines shapes whose 4×-row grid or packed weight would exceed device limits,
+    /// falling back cleanly to stride phases before any packed buffer is allocated.
+    #[test]
+    fn subpixel_respects_grid_and_binding_limits() {
+        let normal = s2_desc(128, 80, 80, 128);
+        assert!(subpixel_fits(&normal, true, coop::stride2_dx_tile(4 * 128, 1600), 65_535, 128 << 20));
+        // 4 * 1_100_000 / 64 = 68_750 > 65_535 Y workgroups on C64X64 -> must fall back to stride phases.
+        let huge_cin = s2_desc(1_100_000, 3, 3, 1);
+        assert!(!subpixel_fits(&huge_cin, true, coop::stride2_dx_tile(4 * 1_100_000, 4), 65_535, u64::MAX));
+        // Wide spatial plane exceeding X workgroup limit.
+        let huge_hw = s2_desc(16, 8192, 4096, 16);
+        let cells = 4096 * 2048;
+        assert!(!subpixel_fits(&huge_hw, true, coop::stride2_dx_tile(64, cells), 65_535, u64::MAX));
+        // Packed weight (16 * 2048 * 2048 * 2 B = 128 MiB) respects max storage-buffer binding size.
+        let big_w = s2_desc(2048, 8, 8, 2048);
+        assert!(!subpixel_fits(&big_w, true, coop::stride2_dx_tile(4 * 2048, 16), 65_535, 64 << 20));
+        assert!(subpixel_fits(&big_w, true, coop::stride2_dx_tile(4 * 2048, 16), 65_535, 128 << 20));
+        // Regular f32/f16 kernels still cap sub-pixel at C_in/groups <= 32.
+        assert!(!subpixel_fits(&normal, false, (64, 64), 65_535, 128 << 20));
+    }
 }

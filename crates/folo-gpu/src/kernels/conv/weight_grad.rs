@@ -688,23 +688,30 @@ mod tests {
     #[test]
     fn gemm_workgroup_tiles_avoid_vec4_lane_writes() {
         let g = GemmDesc::new(64, 64, 64, false, false, 1);
-        for (mode, ta, tb, va, vb) in [
-            (0, false, false, true, true),
-            (0, false, true, true, true),
-            (0, true, false, true, true),
-            (0, false, false, false, false),
-            (1, false, false, true, false),
-            (2, false, false, true, false),
-            (3, false, false, true, false),
+        for (mode, ta, tb, va, vb, subpixel, phase) in [
+            (0, false, false, true, true, false, false),
+            (0, false, true, true, true, false, false),
+            (0, true, false, true, true, false, false),
+            (0, false, false, false, false, false, false),
+            (1, false, false, true, false, false, false),
+            (1, false, false, true, false, true, false),
+            (2, false, false, true, false, false, false),
+            (2, false, false, true, false, false, true),
+            (3, false, false, true, false, false, false),
         ] {
             let spec = base_spec(&g, TileConfig::SMALL)
                 .u32("CONV_MODE", mode)
                 .bool("TRANS_A", ta)
                 .bool("TRANS_B", tb)
                 .bool("VEC_A", va)
-                .bool("VEC_B", vb);
+                .bool("VEC_B", vb)
+                .bool("SUBPIXEL", subpixel)
+                .bool("PHASE", phase);
             let wgsl = gen_gemm(&spec);
-            assert!(!wgsl.contains("& 3u] ="), "mode={mode} ta={ta} tb={tb} va={va} vb={vb}");
+            assert!(
+                !wgsl.contains("& 3u] ="),
+                "mode={mode} ta={ta} tb={tb} va={va} vb={vb} subpixel={subpixel} phase={phase}"
+            );
         }
     }
 }

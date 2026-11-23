@@ -539,7 +539,8 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   1×1 input gradients run as the plain tensor-core GEMM over the once-transposed weight; other input gradients use
   `CONV_MODE = 2` (tap-masked for stride-1 and stride-phase windows up to 32 taps). For weight gradients, 1×1
   stride-1 unpadded convs run as the division-free `vec4` per-image split-K `A·Bᵀ` GEMM (`CONV_MODE = 0`, `TRANS_B`
-  with `C32X32` / `C64X64` / `C64X128` tiles, never `C128X128`), and windowed convs run `CONV_MODE = 3` (with
+  with `C32X32` / `C64X64` / `C64X128` tiles, falling back to `C128X128` only when 64-row tiles exceed the 65,535
+  grid limit), and windowed convs run `CONV_MODE = 3` (with
   `PER_IMG` per-image split-K + hoisted column decoding when `want ≥ N`, `C32X32` for narrow weights like `folo-s`'s
   3→32 stem, and the regular `STEM` tile for `M ≤ 16, N ≤ 32`), reducing f32 partial slabs through
   `conv2d_wgrad_reduce`. The loop bounds derive from `workgroup_id` and uniforms, so they stay uniform. The weight
