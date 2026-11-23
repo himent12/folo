@@ -92,34 +92,46 @@ fn gen_gather(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X: array<f32>;", 2 * j + 1);
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> PART: array<f32>;", 2 * j + 2);
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> TBL: array<u32>;", 2 * j + 3);
-    s.push_str("var<workgroup> red: array<f32, 256>;\n");
+    s.push_str("var<workgroup> red: array<f32, 256>;\nvar<workgroup> big_flag: atomic<u32>;\n");
     s.push_str(ORIENT);
     many_prologue(&mut s, j);
     s.push_str(
-        "  let r = TBL[q]; let c = TBL[q + 1u]; let ld_c = (c + 3u) & 0xfffffffcu;\n\
+        "  if (lid == 0u) { atomicStore(&big_flag, 0u); }\n\
+         \x20 workgroupBarrier();\n\
+         \x20 let r = TBL[q]; let c = TBL[q + 1u]; let ld_c = (c + 3u) & 0xfffffffcu;\n\
          \x20 var g = 0.0; var m = 0.0;\n  if (ok) {\n  switch t {\n",
     );
     for t in 0..j {
         let _ = writeln!(s, "  case {t}u: {{ g = G{t}[e]; m = M{t}[e]; }}");
     }
     // `u = (g · (1 − μ)) · 1 + m · μ`; trailing elements `n .. r * ld_c` zero-fill align4 pad columns.
+    // Downscale by exact 2^-80 (`0x17800000`) when any element exceeds 2^48 (`0x57800000`) so `u * u` never
+    // overflows f32 under WGSL finite-math semantics (bit-exact no-op on normal gradients).
     s.push_str(
         "  default: {}\n  }\n  }\n\
          \x20 var u = m;\n\
          \x20 if (NESTEROV) { u = (g * pf(2u)) * 1.0 + m * pf(1u); }\n\
          \x20 if (ok) {\n\
          \x20   X[TBL[q + 3u] + oriented_pad(e, r, c, ld_c, TBL[q + 2u] != 0u)] = u;\n\
+         \x20   if (abs(u) > bitcast<f32>(0x57800000u)) { atomicStore(&big_flag, 1u); }\n\
          \x20 } else if (e < r * ld_c) {\n\
          \x20   let pe = e - n; let pad = ld_c - c;\n\
          \x20   X[TBL[q + 3u] + (pe / pad) * ld_c + c + pe % pad] = 0.0;\n\
          \x20 }\n\
-         \x20 red[lid] = select(0.0, u * u, ok);\n\
+         \x20 workgroupBarrier();\n\
+         \x20 let is_big = atomicLoad(&big_flag) != 0u;\n\
+         \x20 let u_s = select(u, u * bitcast<f32>(0x17800000u), is_big);\n\
+         \x20 red[lid] = select(0.0, u_s * u_s, ok);\n\
          \x20 workgroupBarrier();\n\
          \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
          \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
          \x20   workgroupBarrier();\n\
          \x20 }\n\
-         \x20 if (lid == 0u && e < r * ld_c) { PART[TBL[q + 5u] + lw] = red[0]; }\n}\n",
+         \x20 if (lid == 0u && e < r * ld_c) {\n\
+         \x20   let pidx = (TBL[q + 5u] + lw) * 2u;\n\
+         \x20   PART[pidx] = red[0];\n\
+         \x20   PART[pidx + 1u] = select(0.0, 1.0, is_big);\n\
+         \x20 }\n}\n",
     );
     s
 }
@@ -150,7 +162,8 @@ fn gen_apply(spec: &Spec) -> String {
     s
 }
 
-/// One workgroup per matrix: `D[i] = sqrt(Σ partials) + eps` over the matrix's partials in a fixed order.
+/// One workgroup per matrix: `D[i] = ‖U · sc‖_F + eps · sc` and `D[count + i] = sc` (`1.0` for normal inputs,
+/// `2^-80` when any element exceeded `2^48`) over the matrix's `(partial, is_big)` pairs in a fixed order.
 pub(super) static NORM: KernelDef = KernelDef {
     name: "muon_norm",
     storage: &[Access::Read, Access::ReadWrite, Access::Read],
@@ -163,20 +176,44 @@ pub(super) static NORM: KernelDef = KernelDef {
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
          \x20 let i = wid.y * nwg.x + wid.x;\n\
-         \x20 let ok = i < pu(0u);\n\
-         \x20 let q = min(i, pu(0u) - 1u) * 8u;\n\
+         \x20 let count = pu(0u);\n\
+         \x20 if (i >= count) { return; }\n\
+         \x20 let q = i * 8u;\n\
          \x20 let first = TBL[q + 5u];\n\
          \x20 let ld_c = (TBL[q + 1u] + 3u) & 0xfffffffcu;\n\
-         \x20 let n = select(0u, (TBL[q] * ld_c + 255u) / 256u, ok);\n\
+         \x20 let n = (TBL[q] * ld_c + 255u) / 256u;\n\
+         \x20 var any_big = 0.0;\n\
+         \x20 for (var e = lid; e < n; e += 256u) { any_big = max(any_big, PART[(first + e) * 2u + 1u]); }\n\
+         \x20 red[lid] = any_big;\n\
+         \x20 workgroupBarrier();\n\
+         \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
+         \x20   if (lid < h) { red[lid] = max(red[lid], red[lid + h]); }\n\
+         \x20   workgroupBarrier();\n\
+         \x20 }\n\
+         \x20 let big = red[0] != 0.0;\n\
+         \x20 workgroupBarrier();\n\
          \x20 var acc = 0.0;\n\
-         \x20 for (var e = lid; e < n; e += 256u) { acc += PART[first + e]; }\n\
+         \x20 for (var e = lid; e < n; e += 256u) {\n\
+         \x20   let pv = PART[(first + e) * 2u];\n\
+         \x20   let pb = PART[(first + e) * 2u + 1u] != 0.0;\n\
+         \x20   if (big && !pb) {\n\
+         \x20     let s = sqrt(pv) * bitcast<f32>(0x17800000u);\n\
+         \x20     acc += s * s;\n\
+         \x20   } else {\n\
+         \x20     acc += pv;\n\
+         \x20   }\n\
+         \x20 }\n\
          \x20 red[lid] = acc;\n\
          \x20 workgroupBarrier();\n\
          \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
          \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
          \x20   workgroupBarrier();\n\
          \x20 }\n\
-         \x20 if (ok && lid == 0u) { D[i] = sqrt(red[0]) + pf(1u); }\n}\n",
+         \x20 if (lid == 0u) {\n\
+         \x20   let sc = select(1.0, bitcast<f32>(0x17800000u), big);\n\
+         \x20   D[i] = sqrt(red[0]) + pf(1u) * sc;\n\
+         \x20   D[count + i] = sc;\n\
+         \x20 }\n}\n",
     ),
 };
 
@@ -186,7 +223,7 @@ pub(super) static DIVIDE: KernelDef = KernelDef {
     source: Source::Generated(gen_divide),
 };
 
-/// `X /= D[i]` over every matrix's padded elements (256 per workgroup, as the gather's partials).
+/// `X = (X * sc) / D[i]` over every matrix's padded elements (256 per workgroup, as the gather's partials).
 fn gen_divide(_: &Spec) -> String {
     let mut s = String::from(
         "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
@@ -207,12 +244,16 @@ fn gen_divide(_: &Spec) -> String {
          \x20 let e = (w - TBL[q + 5u]) * 256u + lid;\n\
          \x20 if (e >= TBL[q] * ld_c) {{ return; }}\n\
          \x20 let at = TBL[q + 3u] + e;\n\
-         \x20 X[at] = X[at] / D[i];\n}}"
+         \x20 let sc = D[pu(0u) + i];\n\
+         \x20 var v = X[at];\n\
+         \x20 if (sc != 1.0) {{ v = v * sc; }}\n\
+         \x20 X[at] = v / D[i];\n}}"
     );
     s
 }
 
-/// One workgroup per matrix: `1 / (‖A₀‖_F^(1/2) + eps / D[i])` into `TBL[count * 9 + i]`, over `A₀` as `vec4<f32>`.
+/// One workgroup per matrix: `1 / (‖A₀‖_F^(1/2) + (eps · sc) / D[i])` into `TBL[count * 9 + i]`, over `A₀` as
+/// `vec4<f32>`.
 pub(super) static S4_NORM: KernelDef = KernelDef {
     name: "muon_s4",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
@@ -226,12 +267,12 @@ pub(super) static S4_NORM: KernelDef = KernelDef {
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
          \x20 let i = wid.y * nwg.x + wid.x;\n\
          \x20 let count = pu(0u);\n\
-         \x20 let ok = i < count;\n\
-         \x20 let q = min(i, count - 1u) * 8u;\n\
+         \x20 if (i >= count) { return; }\n\
+         \x20 let q = i * 8u;\n\
          \x20 let r = TBL[q];\n\
          \x20 let ld_r = (r + 3u) & 0xfffffffcu;\n\
          \x20 let base4 = TBL[q + 4u] >> 2u;\n\
-         \x20 let n4 = select(0u, r * (ld_r >> 2u), ok);\n\
+         \x20 let n4 = r * (ld_r >> 2u);\n\
          \x20 var acc = 0.0;\n\
          \x20 for (var e = lid; e < n4; e += 256u) {\n\
          \x20   let v = A4[base4 + e];\n\
@@ -243,8 +284,8 @@ pub(super) static S4_NORM: KernelDef = KernelDef {
          \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
          \x20   workgroupBarrier();\n\
          \x20 }\n\
-         \x20 if (ok && lid == 0u) {\n\
-         \x20   let alpha = sqrt(sqrt(red[0])) + pf(1u) / D[i];\n\
+         \x20 if (lid == 0u) {\n\
+         \x20   let alpha = sqrt(sqrt(red[0])) + (pf(1u) * D[count + i]) / D[i];\n\
          \x20   let inv_a = select(1.0 / alpha, 0.0, alpha == 0.0);\n\
          \x20   TBL[count * 9u + i] = bitcast<u32>(inv_a);\n\
          \x20 }\n}\n",
@@ -278,7 +319,7 @@ fn gen_grouped(spec: &Spec) -> String {
     let wgx = bn / tn;
     let wgy = bm / tm;
     let threads = wgx * wgy;
-    let (bm4, bn4, d4, tm4, tn4) = (bm / 4, bn / 4, depth / 4, tm / 4, tn / 4);
+    let (bn4, d4, tm4, tn4) = (bn / 4, depth / 4, tm / 4, tn / 4);
     let sh_rows = if dbuf { 2 * depth } else { depth };
 
     let pa_count = (bm * d4) / threads;
@@ -297,8 +338,14 @@ fn gen_grouped(spec: &Spec) -> String {
          @group(0) @binding(4) var<storage, read_write> SC: array<vec4<f32>>;\n\
          @group(0) @binding(5) var<storage, read> TBL: array<u32>;\n",
     );
-    let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {sh_rows}>;");
-    let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {sh_rows}>;");
+    // Scalar workgroup storage for transposed tiles (As always, Bs for MODE 0/1) avoids WGSL multi-invocation
+    // vec4 component read-modify-write races while keeping the exact same swizzled layout and byte footprint.
+    let _ = writeln!(s, "var<workgroup> As: array<array<f32, {bm}>, {sh_rows}>;");
+    if mode == 2 {
+        let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {sh_rows}>;");
+    } else {
+        let _ = writeln!(s, "var<workgroup> Bs: array<array<f32, {bn}>, {sh_rows}>;");
+    }
     s.push_str("var<workgroup> prob: array<u32, 13>;\n");
     s.push_str(&find_matrix(if mode == 2 { 7 } else { 6 }));
     let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
@@ -414,11 +461,11 @@ fn gen_grouped(spec: &Spec) -> String {
         for u in 0..pa_count {
             let _ = writeln!(
                 st,
-                "    {{ let mm = pm0 + {}u; let col = (mm >> 2u) ^ {swz_expr}; let ln = mm & 3u;",
+                "    {{ let mm = pm0 + {}u; let idx = (((mm >> 2u) ^ {swz_expr}) << 2u) | (mm & 3u);",
                 u * pa_step
             );
             for c in 0..4 {
-                let _ = writeln!(st, "      As[{base}u + pk4 * 4u + {c}u][col][ln] = ra[{u}][{c}];");
+                let _ = writeln!(st, "      As[{base}u + pk4 * 4u + {c}u][idx] = ra[{u}][{c}];");
             }
             st.push_str("    }\n");
         }
@@ -431,11 +478,11 @@ fn gen_grouped(spec: &Spec) -> String {
             for u in 0..pa_count {
                 let _ = writeln!(
                     st,
-                    "      {{ let nn = pm0 + {}u; let col = (nn >> 2u) ^ {swz_expr}; let ln = nn & 3u;",
+                    "      {{ let nn = pm0 + {}u; let idx = (((nn >> 2u) ^ {swz_expr}) << 2u) | (nn & 3u);",
                     u * pa_step
                 );
                 for c in 0..4 {
-                    let _ = writeln!(st, "        Bs[{base}u + pk4 * 4u + {c}u][col][ln] = rb[{u}][{c}];");
+                    let _ = writeln!(st, "        Bs[{base}u + pk4 * 4u + {c}u][idx] = rb[{u}][{c}];");
                 }
                 st.push_str("      }\n");
             }
@@ -450,15 +497,30 @@ fn gen_grouped(spec: &Spec) -> String {
             let swz = (kk >> 2) << swz_shift;
             c.push_str("    {\n");
             for bi in 0..tm4 {
-                let _ = writeln!(c, "      let a{bi} = As[{row}u][({}u + ty) ^ {swz}u];", bi * wgy);
+                let _ = writeln!(
+                    c,
+                    "      let ab{bi} = (({}u + ty) ^ {swz}u) << 2u;\n\
+                     \x20     let a{bi} = vec4<f32>(As[{row}u][ab{bi}], As[{row}u][ab{bi} + 1u], As[{row}u][ab{bi} + 2u], As[{row}u][ab{bi} + 3u]);",
+                    bi * wgy
+                );
             }
             for bj in 0..tn4 {
                 if use_a_for_b {
-                    let _ = writeln!(c, "      let b{bj} = As[{row}u][({}u + tx) ^ {swz}u];", bj * wgx);
+                    let _ = writeln!(
+                        c,
+                        "      let bb{bj} = (({}u + tx) ^ {swz}u) << 2u;\n\
+                         \x20     let b{bj} = vec4<f32>(As[{row}u][bb{bj}], As[{row}u][bb{bj} + 1u], As[{row}u][bb{bj} + 2u], As[{row}u][bb{bj} + 3u]);",
+                        bj * wgx
+                    );
                 } else if mode == 2 {
                     let _ = writeln!(c, "      let b{bj} = Bs[{row}u][{}u + tx];", bj * wgx);
                 } else {
-                    let _ = writeln!(c, "      let b{bj} = Bs[{row}u][({}u + tx) ^ {swz}u];", bj * wgx);
+                    let _ = writeln!(
+                        c,
+                        "      let bb{bj} = (({}u + tx) ^ {swz}u) << 2u;\n\
+                         \x20     let b{bj} = vec4<f32>(Bs[{row}u][bb{bj}], Bs[{row}u][bb{bj} + 1u], Bs[{row}u][bb{bj} + 2u], Bs[{row}u][bb{bj} + 3u]);",
+                        bj * wgx
+                    );
                 }
             }
             for bi in 0..tm4 {

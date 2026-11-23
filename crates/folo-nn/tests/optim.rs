@@ -328,28 +328,35 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
     assert!(e_p5 < e_ns5 * 0.5, "Polar5 ({e_p5:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
 }
 
-/// Finite matrices whose squared Frobenius norm overflows `f32::MAX` (`norm = +∞`, `X₀ = 0`, `α = 0`) must produce
-/// a finite zero update under `Polar4` / `Polar5` (matching `Ns5`) rather than `0.0 * +∞ = NaN`, while `NaN`
-/// inputs still propagate `NaN`.
+/// Finite matrices whose unscaled squared Frobenius norm would overflow `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
+/// `4×4` `1e38`) are power-of-two downscaled before squaring so `Ns5`, `Polar4`, and `Polar5` all return the
+/// finite orthogonalised direction matching the `f64` reference without intermediate overflow, while `NaN` inputs
+/// still propagate `NaN`.
 #[test]
 fn polar_folo_handles_frobenius_overflow_and_nan() {
     let huge_1x1 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
     let huge_16x16 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let huge_4x4 = Tensor::from_vec(vec![1e38_f32; 4 * 4], [4, 4]).unwrap();
     let mut nan_data = vec![0.25_f32; 4 * 4];
     nan_data[5] = f32::NAN;
     let with_nan = Tensor::from_vec(nan_data, [4, 4]).unwrap();
-    let batch = [huge_1x1, huge_16x16, with_nan];
+    let batch = [huge_1x1, huge_16x16, huge_4x4, with_nan];
     for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
         let many = orthogonalize_many_with(&batch, ortho).unwrap();
         for (idx, t) in batch.iter().enumerate() {
             let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
             let got = many[idx].to_vec::<f32>().unwrap();
-            if idx < 2 {
+            if idx < 3 {
+                let d = t.dims();
+                let (rows, cols) = (d[0], t.numel() / d[0]);
+                let v: Vec<f64> = t.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect();
+                let want = ortho_f64(&v, rows, cols, ortho);
                 assert!(
-                    got.iter().all(|&v| v == 0.0),
-                    "{ortho:?} batch[{idx}] expected exact 0, got {got:?}"
+                    got.iter().all(|v| v.is_finite()) && got.iter().any(|&v| v != 0.0),
+                    "{ortho:?} [{idx}]"
                 );
-                assert!(one.iter().all(|&v| v == 0.0), "{ortho:?} one[{idx}] expected exact 0, got {one:?}");
+                close(&got, &want, 2e-4);
+                close(&one, &want, 2e-4);
             } else {
                 assert!(got.iter().all(|v| v.is_nan()), "{ortho:?} batch NaN must propagate");
                 assert!(one.iter().all(|v| v.is_nan()), "{ortho:?} one NaN must propagate");

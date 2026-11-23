@@ -230,7 +230,7 @@ fn partition(shapes: &[(usize, usize)], max_bytes: u64) -> Option<Vec<Range<usiz
         let r64 = r as u64;
         let n = r64.checked_mul(ld_c)?;
         let n_sq = r64.checked_mul(ld_r)?;
-        let need = [n, n_sq, n.div_ceil(256), STRIDE as u64 + 2];
+        let need = [n, n_sq, n.div_ceil(256).checked_mul(2)?, STRIDE as u64 + 2];
         if need.iter().any(|&v| v > cap) {
             return None;
         }
@@ -285,7 +285,7 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
         t_sq += tr_sq * (tr_sq + 1) / 2;
         t_up += tr_up * tc_up;
     }
-    for v in [off, off_sq, wg, t_sq, t_up] {
+    for v in [off, off_sq, wg * 2, t_sq, t_up] {
         u32::try_from(v).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?;
     }
     table.extend(items.iter().map(|it| it.scale.to_bits()));
@@ -295,8 +295,8 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     let xb = ctx.alloc(DType::F32.bytes(off as usize))?;
     let am = ctx.alloc(DType::F32.bytes(off_sq as usize))?;
     let bm = ctx.alloc(DType::F32.bytes(off_sq as usize))?;
-    let part = ctx.alloc(DType::F32.bytes(wg as usize))?;
-    let den = ctx.alloc(DType::F32.bytes(count))?;
+    let part = ctx.alloc(DType::F32.bytes(wg as usize * 2))?;
+    let den = ctx.alloc(DType::F32.bytes(count * 2))?;
     let (x0, x1) = (xa.raw(), xb.raw());
 
     // 1. u, oriented with zero-padded align4 rows, into `x0`, with its partial sums of squares.
@@ -422,7 +422,7 @@ mod tests {
             let (r, c) = (rows.min(cols), rows.max(cols));
             let n = (r * align4(c)) as u64;
             let n_sq = (r * align4(r)) as u64;
-            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256), STRIDE as u64 + 2]) {
+            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 2]) {
                 *s += v;
             }
         }

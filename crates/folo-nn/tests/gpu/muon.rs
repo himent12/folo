@@ -1,5 +1,5 @@
 //! MuSGD's fused Muon update (`Tensor::muon_step_many_`) against the tensor ops (the Nesterov mix as tensor ops,
-//! `orthogonalize_many_with`, then `p · 1 + O · (−lr)`, all on the CPU), for both default `NS5` and Polar-FOLO
+//! `orthogonalize_many_with`, then `p · 1 + O · (−lr)`, all on the CPU), for both legacy `Ns5` and Polar-FOLO
 //! (`Polar4`, `Polar5`) schedules, plus multi-group fused `MuSgd` (`decay` + `decay.cls`). `lr = 1`, so the
 //! parameters carry `O` at full size; values agree to `2e-4 + 2e-3·|ref|`, NaNs exactly where the reference has them.
 
@@ -75,7 +75,7 @@ fn reference(ps: &[Tensor], ms: &[Tensor], gs: &[Tensor], nesterov: bool, ortho:
 
 /// Wide and tall matrices (tall ones are transposed), several tiles along both sides, single rows and
 /// columns, a square one, scales other than 1, and more matrices than one multi-tensor dispatch takes — for
-/// default `Ns5` and Polar-FOLO (`Polar4`, `Polar5`).
+/// legacy `Ns5` and Polar-FOLO (`Polar4`, `Polar5`).
 #[test]
 fn fused_muon_matches_tensor_ops() {
     let dev = gpu!();
@@ -203,25 +203,32 @@ fn musgd_multi_group_gpu_matches_cpu() {
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
 
-/// Finite inputs whose Frobenius sum of squares overflows `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`) leave
-/// parameters unchanged (exact zero update, matching `Ns5`) on both CPU and GPU across `Ns5`, `Polar4`, and
-/// `Polar5`, while `NaN` inputs still propagate `NaN`.
+/// Finite inputs whose unscaled squared Frobenius norm would overflow `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
+/// and a multi-workgroup `16×64` mixing `> 2^48` and `<= 2^48` workgroups) use exact power-of-two downscaling on
+/// both CPU and GPU (zero non-finite intermediates under WGSL finite-math semantics), matching closely across
+/// `Ns5`, `Polar4`, and `Polar5`, while `NaN` inputs still propagate `NaN`.
 #[test]
 fn fused_muon_frobenius_overflow_and_nan() {
     let dev = gpu!();
     let rng = &mut Rng::seed(41);
     let p0 = Tensor::rand_uniform([1, 1], -1.0, 1.0, rng);
     let p1 = Tensor::rand_uniform([16, 16], -1.0, 1.0, rng);
-    let p2 = Tensor::rand_uniform([8, 8], -1.0, 1.0, rng);
+    let p2 = Tensor::rand_uniform([16, 64], -1.0, 1.0, rng);
+    let p3 = Tensor::rand_uniform([8, 8], -1.0, 1.0, rng);
     let m0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
     let g0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
     let m1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
     let g1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
-    let m2 = Tensor::rand_uniform([8, 8], -0.5, 0.5, rng);
-    let mut g2_v = vec![0.1_f32; 8 * 8];
-    g2_v[13] = f32::NAN;
-    let g2 = Tensor::from_vec(g2_v, [8, 8]).unwrap();
-    let (ps, ms, gs) = ([p0, p1, p2], [m0, m1, m2], [g0, g1, g2]);
+    let mut mixed = vec![1.0_f32; 16 * 64];
+    mixed[0] = 3e14; // > 2^48 in workgroup 0
+    mixed[500] = 1e14; // <= 2^48 in workgroup 1 (rescaled in muon_norm)
+    let m2 = Tensor::from_vec(mixed.clone(), [16, 64]).unwrap();
+    let g2 = Tensor::from_vec(mixed, [16, 64]).unwrap();
+    let m3 = Tensor::rand_uniform([8, 8], -0.5, 0.5, rng);
+    let mut g3_v = vec![0.1_f32; 8 * 8];
+    g3_v[13] = f32::NAN;
+    let g3 = Tensor::from_vec(g3_v, [8, 8]).unwrap();
+    let (ps, ms, gs) = ([p0, p1, p2, p3], [m0, m1, m2, m3], [g0, g1, g2, g3]);
     for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
         for nesterov in [false, true] {
             let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
@@ -229,17 +236,51 @@ fn fused_muon_frobenius_overflow_and_nan() {
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
                 close_or_nan(g, w, &format!("{ortho:?} nesterov {nesterov}: overflow[{i}]"));
             }
-            for (i, (before_t, after_t)) in ps[..2].iter().zip(&got[..2]).enumerate() {
+            for (i, (before_t, after_t)) in ps[..3].iter().zip(&got[..3]).enumerate() {
                 let before = before_t.to_vec::<f32>().unwrap();
                 let after = after_t.to_vec::<f32>().unwrap();
                 assert!(
-                    before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()),
-                    "{ortho:?} nesterov {nesterov}: overflow[{i}] must be exact zero update"
+                    after.iter().all(|v| v.is_finite())
+                        && before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-3),
+                    "{ortho:?} nesterov {nesterov}: overflow[{i}] must take a finite non-zero orthogonal step"
                 );
             }
-            let nans = got[2].to_vec::<f32>().unwrap().iter().filter(|x| x.is_nan()).count();
+            let nans = got[3].to_vec::<f32>().unwrap().iter().filter(|x| x.is_nan()).count();
             assert_eq!(nans, if nesterov { 64 } else { 0 }, "{ortho:?} nesterov {nesterov}: NaN propagation");
         }
+    }
+}
+
+/// When Polar-FOLO multi-group fusion would overflow `muon_scale * group_lr` in `f32` (e.g. `scale = sqrt(17/5)`
+/// and `lr = 2e38`), `MuSgd` skips folding and runs per-group so a zero update direction stays `0.0` (no
+/// `0.0 * inf = NaN`).
+#[test]
+fn polar_folded_scale_overflow_falls_back_cleanly() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(61);
+    let p0_init = Tensor::rand_uniform([17, 5], -1.0, 1.0, &mut rng);
+    let p1_init = Tensor::rand_uniform([17, 5], -1.0, 1.0, &mut rng);
+    let p0 = p0_init.to_device(dev).unwrap().requires_grad_();
+    let p1 = p1_init.to_device(dev).unwrap().requires_grad_();
+    let gs = vec![
+        ParamGroup::new("decay", vec![("w0".into(), p0.clone())]).lr(1.0).momentum(0.9).weight_decay(0.0),
+        ParamGroup::new("decay.cls", vec![("w1".into(), p1.clone())])
+            .lr(2.0e38)
+            .momentum(0.9)
+            .weight_decay(0.0),
+    ];
+    let mut opt = MuSgd::with_ortho(gs, MuSgdWeights { muon: 1.0, sgd: 0.0 }, MuonOrtho::Polar4).unwrap();
+    let mut grads = folo_core::Grads::default();
+    grads.insert(&p0, Tensor::zeros_with([17, 5], folo_core::DType::F32, dev).unwrap());
+    grads.insert(&p1, Tensor::zeros_with([17, 5], folo_core::DType::F32, dev).unwrap());
+    opt.step(&grads).unwrap();
+    for (name, got, init) in [("w0", &p0, &p0_init), ("w1", &p1, &p1_init)] {
+        let a = got.to_vec::<f32>().unwrap();
+        let b = init.to_vec::<f32>().unwrap();
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+            "{name} must stay finite and unchanged when folded scale * lr overflows"
+        );
     }
 }
 

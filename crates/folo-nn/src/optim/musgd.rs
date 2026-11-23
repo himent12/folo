@@ -204,9 +204,9 @@ impl MuSgd {
     }
 
     /// The Muon half of a step: momentum, orthogonalisation and `p −= muon · lr · O` for every Muon parameter
-    /// with a gradient. On non-CPU devices, Muon groups sharing `(momentum, nesterov)` (such as `decay` and
-    /// `decay.cls`) fuse into one `muon_step_many_` call when using Polar-FOLO (or when all groups share `lr`,
-    /// preserving bit-exact pre-Polar `(X * scale) * (-lr)` rounding for legacy `Ns5` across differing LRs).
+    /// with a gradient. For Polar-FOLO on non-CPU devices, Muon groups sharing `(momentum, nesterov)` (such as
+    /// `decay` and `decay.cls`) fuse into one `muon_step_many_` call when folded scales stay finite; legacy `Ns5`
+    /// keeps per-group calls for bit-exact pre-Polar rounding and aliasing semantics.
     fn muon_step(&self, grads: &dyn GradSource) -> Result<()> {
         let _g = folo_core::no_grad();
         // Collect active Muon groups (those with at least one parameter that received a gradient).
@@ -249,36 +249,48 @@ impl MuSgd {
         if active.is_empty() {
             return Ok(());
         }
-        // Fast path: when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device, fuse both momentum
-        // update and orthogonalisation into one multi-tensor device pass. For legacy `Ns5` with differing per-group
-        // LRs, keep separate per-group calls so non-unit `muon_scale` preserves exact `(X * scale) * (-lr)` rounding.
+        // Fast path (Polar-FOLO only): when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device,
+        // fuse both momentum update and orthogonalisation into one multi-tensor device pass. Legacy `Ns5` stays
+        // unconditionally on the per-group path so rounding order and fallback aliasing semantics remain identical
+        // to pre-Polar `MuSgd`. Skip fusion if folding a group's `lr` into `muon_scale` would overflow `f32`.
         let first_dev = active[0].ps[0].device();
         let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
-        let can_fuse_all = active.len() >= 2
+        let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
+        let can_fuse_all = self.ortho != MuonOrtho::Ns5
+            && active.len() >= 2
             && !first_dev.is_cpu()
-            && (self.ortho != MuonOrtho::Ns5 || same_lr)
             && active.iter().all(|a| {
                 a.mu.to_bits() == active[0].mu.to_bits()
                     && a.nesterov == active[0].nesterov
                     && a.ps.iter().all(|p| p.device() == first_dev)
             });
-        if can_fuse_all {
-            let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
+        let fused_scales: Option<Vec<f32>> = if can_fuse_all {
             let total: usize = active.iter().map(|a| a.ps.len()).sum();
-            let (mut ps, mut bs, mut gr, mut scales) = (
-                Vec::with_capacity(total),
-                Vec::with_capacity(total),
-                Vec::with_capacity(total),
-                Vec::with_capacity(total),
-            );
+            let mut scales = Vec::with_capacity(total);
+            let mut ok = true;
+            'outer: for a in &active {
+                for p in &a.ps {
+                    let sc = muon_scale(p.dims());
+                    let s = if fold_lr { sc * a.lr } else { sc };
+                    if fold_lr && !s.is_finite() {
+                        ok = false;
+                        break 'outer;
+                    }
+                    scales.push(s);
+                }
+            }
+            ok.then_some(scales)
+        } else {
+            None
+        };
+        if let Some(scales) = fused_scales {
+            let total = scales.len();
+            let (mut ps, mut bs, mut gr) =
+                (Vec::with_capacity(total), Vec::with_capacity(total), Vec::with_capacity(total));
             for a in &active {
                 ps.extend_from_slice(&a.ps);
                 bs.extend_from_slice(&a.bs);
                 gr.extend(a.gs.iter());
-                scales.extend(a.ps.iter().map(|p| {
-                    let sc = muon_scale(p.dims());
-                    if fold_lr { sc * a.lr } else { sc }
-                }));
             }
             let (mu, nesterov) = (active[0].mu, active[0].nesterov);
             axpby_many(&bs, &gr, mu, 1.0 - mu)?;
@@ -438,28 +450,39 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
             })
             .collect::<folo_core::Result<Vec<_>>>()?;
         let mut x = Tensor::stack(&padded, 0)?;
-        let norm = x.square()?.sum([1, 2], true)?.sqrt()?.add_scalar(NS_EPS)?;
-        x = x.div(&norm)?;
-        for (step, &(a, b, c)) in schedule.iter().enumerate() {
-            let xt = x.transpose(1, 2)?.contiguous()?;
-            let am = x.matmul(&xt)?;
-            if step == 0 && use_s4 {
-                // Zero-extra-GEMM step-0 Schatten-4 spectral rescaling:
-                // α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps) guarantees σ₁(X₀ / α) < 1 strictly.
-                // When ‖U‖_F² overflows to +∞ on huge finite inputs, X₀ = 0 and α = 0; map α == 0 → inv_a = 0
-                // (preserving NaN propagation since NaN == 0 is false) to match Ns5's zero update.
-                let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
-                let alpha = a_frob.sqrt()?.add(&norm.recip()?.mul_scalar(NS_EPS)?)?;
-                let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
-                let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
-                let inv_a2 = inv_a.square()?;
-                let inv_a4 = inv_a2.square()?;
-                let bm =
-                    am.mul(&inv_a2.mul_scalar(b)?)?.add(&am.matmul(&am)?.mul(&inv_a4.mul_scalar(c)?)?)?;
-                x = x.mul(&inv_a.mul_scalar(a)?)?.add(&bm.matmul(&x)?.mul(&inv_a)?)?;
-            } else {
-                let bm = am.mul_scalar(b)?.add(&am.matmul(&am)?.mul_scalar(c)?)?;
-                x = x.mul_scalar(a)?.add(&bm.matmul(&x)?)?;
+        if x.numel() > 0 {
+            // Exact power-of-two downscale (2^-80) when any element exceeds 2^48 (~2.81e14) so squaring never
+            // overflows f32::MAX (matching the GPU kernel's WGSL finite-math-safe Frobenius norm; exact no-op on
+            // normal gradients).
+            const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
+            const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
+            let max_abs = x.abs()?.max([1, 2], true)?;
+            let is_big = max_abs.gt_scalar(BIG_THRESH)?;
+            let one = max_abs.ones_like()?;
+            let scale = is_big.where_cond(&one.mul_scalar(DOWN_SCALE)?, &one)?;
+            let xs = x.mul(&scale)?;
+            let eps_s = scale.mul_scalar(NS_EPS)?;
+            let norm = xs.square()?.sum([1, 2], true)?.sqrt()?.add(&eps_s)?;
+            x = xs.div(&norm)?;
+            for (step, &(a, b, c)) in schedule.iter().enumerate() {
+                let xt = x.transpose(1, 2)?.contiguous()?;
+                let am = x.matmul(&xt)?;
+                if step == 0 && use_s4 {
+                    // Zero-extra-GEMM step-0 Schatten-4 spectral rescaling:
+                    // α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps) guarantees σ₁(X₀ / α) < 1 strictly.
+                    let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
+                    let alpha = a_frob.sqrt()?.add(&eps_s.div(&norm)?)?;
+                    let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
+                    let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
+                    let inv_a2 = inv_a.square()?;
+                    let inv_a4 = inv_a2.square()?;
+                    let bm =
+                        am.mul(&inv_a2.mul_scalar(b)?)?.add(&am.matmul(&am)?.mul(&inv_a4.mul_scalar(c)?)?)?;
+                    x = x.mul(&inv_a.mul_scalar(a)?)?.add(&bm.matmul(&x)?.mul(&inv_a)?)?;
+                } else {
+                    let bm = am.mul_scalar(b)?.add(&am.matmul(&am)?.mul_scalar(c)?)?;
+                    x = x.mul_scalar(a)?.add(&bm.matmul(&x)?)?;
+                }
             }
         }
         for (j, &k) in ks.iter().enumerate() {

@@ -756,8 +756,9 @@ checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's
 `lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the orthogonalisation in `f32` (the
 reference: `bfloat16`); on the CPU matrices are batched by column count with zero-padded rows, which changes no value
 (including `‖A₀‖_F`). On a GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels,
-and the rest of the Muon step fuses `decay` and `decay.cls` (when they share `(μ, nesterov)`) into one call for all
-matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, the normalisation, optional `muon_s4`, each
+and the rest of the Muon step fuses `decay` and `decay.cls` under Polar-FOLO (when they share `(μ, nesterov)` and
+folded scales stay finite; legacy `ns5` keeps per-group calls for exact pre-Polar semantics) into one call for all
+matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, overflow-safe normalisation, optional `muon_s4`, each
 polynomial step as three grouped symmetric/rectangular `vec4` GEMMs over every matrix at once, and `p −= lr · scale · O`);
 only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs`
 (two steps against an `f64` reference for `Polar4`, `Ns5`, and `Polar5`, orthogonality and `f64` checks), `tests/gpu/`
