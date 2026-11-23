@@ -59,13 +59,21 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let conv = mode != 0;
     // Input gradient of one stride phase (`crate::kernels::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
+    // Fused 2×2 sub-pixel stride-2 input gradient (`CONV_MODE` 1 with 2×2 pixel-shuffle epilogue).
+    let subpixel = mode == 1 && spec.get_bool("SUBPIXEL");
+    // Per-image weight gradient (`CONV_MODE` 3 with `b1 = n`, `K = OH·OW`: drops `/ OHOW` and `% OHOW`).
+    let per_img = mode == 3 && spec.get_bool("PER_IMG");
     let split = spec.get_bool("SPLIT");
-    // Forward conv windows (and stride-1 backward input windows) of at most 32 taps keep a per-column tap mask (`vm`).
+    // Forward, stride-1 dX, and stride-phase dX windows of at most 32 taps keep a per-column tap mask (`vm`).
     let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
     let (sh_n, sw_n) = (spec.get_u32("SH", 1), spec.get_u32("SW", 1));
     let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
-    let tap_mask = mode == 1 && kh_n * kw_n <= 32;
-    let dx_tap_mask = mode == 2 && !phase && sh_n == 1 && sw_n == 1 && kh_n * kw_n <= 32;
+    let (pth_n, ptw_n) = (spec.get_u32("PTH", 1), spec.get_u32("PTW", 1));
+    let taps = kh_n.saturating_mul(kw_n);
+    let ptaps = pth_n.saturating_mul(ptw_n);
+    let tap_mask = mode == 1 && taps > 0 && taps <= 32;
+    let dx_tap_mask = mode == 2 && !phase && sh_n == 1 && sw_n == 1 && taps > 0 && taps <= 32;
+    let phase_tap_mask = phase && ptaps > 0 && ptaps <= 32;
     // The forward conv at listed output pixels (`crate::kernels::conv::conv2d_sites`).
     let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
@@ -154,6 +162,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             (false, true) => lines(threads, bk, bn * bk),
         }
     };
+    let wb =
+        (mode == 3).then(|| crate::kernels::conv::wgrad_b_units(threads, bk, bn, spec.get_u32("WG_RUN", 8)));
     // One B column per invocation for the whole K loop, so its index math is done once.
     match mode {
         // Forward: column = output pixel; B[k = (ci, kh, kw)][j] = X[ci][oh·SH − PH + kh·DH][ow·SW − PW + kw·DW].
@@ -161,22 +171,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n");
             s.push_str(&crate::kernels::conv::forward_column(&pb.inner_expr(), sites));
             if tap_mask {
-                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
-                for kh in 0..kh_n {
-                    for kw in 0..kw_n {
-                        let _ = writeln!(
-                            s,
-                            "    if (u32(cih0 + {}) < IH && u32(ciw0 + {}) < IW) {{ vm |= {}u; }}",
-                            kh * dh_n,
-                            kw * dw_n,
-                            1u32 << (kh * kw_n + kw)
-                        );
-                    }
-                }
-                s.push_str(
-                    "  }\n  let wbase = offB + bitcast<u32>(cih0 * i32(IW) + ciw0);\n\
-                     \x20 let IHW = IH * IW; let DHIW = DH * IW;\n",
-                );
+                s.push_str(&crate::kernels::conv::fwd_tap_mask_setup(kh_n, kw_n, dh_n, dw_n, "wbase"));
             }
         }
         // Input gradient: column = input pixel; B[k = (co, kh, kw)][j] =
@@ -189,6 +184,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20 let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);",
                 pb.inner_expr()
             );
+            if phase_tap_mask {
+                s.push_str(&crate::kernels::conv::phase_tap_mask_setup(pth_n, ptw_n, "pbase"));
+            }
         }
         2 => {
             let _ = writeln!(
@@ -199,38 +197,22 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                 pb.inner_expr()
             );
             if dx_tap_mask {
-                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
-                for kh in 0..kh_n {
-                    for kw in 0..kw_n {
-                        let _ = writeln!(
-                            s,
-                            "    if (u32(cih - {}i) < OH && u32(ciw - {}i) < OW) {{ vm |= {}u; }}",
-                            kh * dh_n,
-                            kw * dw_n,
-                            1u32 << (kh * kw_n + kw)
-                        );
-                    }
-                }
-                s.push_str(
-                    "  }\n  let wbase = offB + bitcast<u32>(cih * i32(OW) + ciw);\n\
-                     \x20 let OHW = OH * OW; let DHOW = DH * OW;\n",
-                );
+                s.push_str(&crate::kernels::conv::dx_tap_mask_setup(kh_n, kw_n, dh_n, dw_n, "wbase"));
             }
         }
-        // Weight gradient: k = (n, oh, ow) runs over the whole batch, column = (ci, kh, kw).
+        // Weight gradient: k = (n, oh, ow) (or `(oh, ow)` per image when `PER_IMG`), column = (ci, kh, kw).
         3 => {
-            let _ = writeln!(
-                s,
-                "{}  let SAN = pu(32u); let SBN = pu(33u);\n\
-                 \x20 let wl = tid % {WR}u; let wq = tid / {WR}u;",
-                crate::kernels::conv::weight_grad_dims(spec),
-                WR = spec.get_u32("WG_RUN", 8),
-            );
+            s.push_str(&crate::kernels::conv::weight_grad_dims(spec));
+            if !per_img {
+                s.push_str("  let SAN = pu(32u); let SBN = pu(33u);\n");
+            }
+            let _ = writeln!(s, "  let wl = tid % {0}u; let wq = tid / {0}u;", spec.get_u32("WG_RUN", 8));
+            if let Some(wb) = &wb {
+                s.push_str(&crate::kernels::conv::wgrad_b_setup(wb, per_img));
+            }
         }
         _ => {}
     }
-    let wb =
-        (mode == 3).then(|| crate::kernels::conv::wgrad_b_units(threads, bk, bn, spec.get_u32("WG_RUN", 8)));
     let a_reg = if va { "vec4<f16>" } else { "f16" };
     let b_reg = if vb && !conv { "vec4<f16>" } else { "f16" };
     for u in 0..pa.count {
@@ -255,13 +237,13 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     for u in 0..pa.count {
         let (o, i) = (pa.outer(u), pa.inner_expr());
         let (idx, cond) = match (va, ta) {
-            (true, false) if mode == 3 => (
+            (true, false) if mode == 3 && !per_img => (
                 format!(
                     "(offA + ((k0 + {i} * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i} * 4u) % OHOW) / 4u"
                 ),
                 format!("m0 + {o} < M && k0 + {i} * 4u < K"),
             ),
-            (false, false) if mode == 3 => (
+            (false, false) if mode == 3 && !per_img => (
                 format!("offA + ((k0 + {i}) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i}) % OHOW"),
                 format!("m0 + {o} < M && k0 + {i} < K"),
             ),
@@ -288,18 +270,28 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         load.push_str(&pa.guarded(body));
     }
     if let Some(wb) = &wb {
-        load.push_str(&crate::kernels::conv::wgrad_b_load(wb, "MB", |u| format!("rb{u}"), "", "f16(0.0)"));
+        load.push_str(&crate::kernels::conv::wgrad_b_load(
+            wb,
+            "MB",
+            |u| format!("rb{u}"),
+            "",
+            "f16(0.0)",
+            per_img,
+            check,
+        ));
     }
     for u in (0..pb.count).filter(|_| mode != 3) {
         let (o, i) = (pb.outer(u), pb.inner_expr());
         let body = if mode == 1 && tap_mask {
             let _ = i;
-            let kcheck = if check { "k < K && " } else { "" };
-            format!(
-                "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k - ci * (KH * KW);\n\
-                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
-                 \x20       rb{u} = MB[wbase + ci * IHW + (r / KW) * DHIW + (r % KW) * DW];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            crate::kernels::conv::fwd_tap_mask_load(
+                "MB",
+                "wbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if mode == 1 {
             let _ = i;
@@ -309,6 +301,17 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
                  \x20       rb{u} = MB[offB + (ci * IH + u32(ih)) * IW + u32(iw)];\n\
                  \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            )
+        } else if phase_tap_mask {
+            let _ = i;
+            crate::kernels::conv::phase_tap_mask_load(
+                "MB",
+                "pbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if phase {
             format!(
@@ -322,12 +325,14 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             )
         } else if dx_tap_mask {
             let _ = i;
-            let kcheck = if check { "k < K && " } else { "" };
-            format!(
-                "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k - co * (KH * KW);\n\
-                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
-                 \x20       rb{u} = MB[wbase + co * OHW - (r / KW) * DHOW - (r % KW) * DW];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            crate::kernels::conv::dx_tap_mask_load(
+                "MB",
+                "wbase",
+                &format!("rb{u}"),
+                "",
+                "f16(0.0)",
+                &o,
+                check,
             )
         } else if mode == 2 {
             format!(
@@ -479,6 +484,11 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     s.push_str("  }\n\n");
 
     // --- epilogue: one fragment at a time through the subgroup's scratch slice ---------------------------------
+    if subpixel {
+        s.push_str(&crate::kernels::conv::subpixel_epilogue_coop(fm, fnn, vc));
+        s.push_str("}\n");
+        return s;
+    }
     s.push_str(
         "  let alpha = pf(7u); let act_alpha = pf(17u);\n\
          \x20 let er = (lane & 31u) >> 1u; let ec = (lane & 1u) * 8u;\n",

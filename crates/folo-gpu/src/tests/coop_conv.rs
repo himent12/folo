@@ -810,3 +810,157 @@ fn coop_conv_backward_tap_mask_and_c32x32() {
         );
     }
 }
+
+/// Formula 1 verification: fused 2×2 sub-pixel stride-2 3×3 input gradient across odd/even `H`/`W`, `W % 4 == 0`
+/// (vec4 epilogue, including `CHECK == false` with odd `H = 15` and `UW = 10` row-wrap) and odd `W` (scalar
+/// epilogue), paddings `0/1/2/3` and asymmetric padding, groups, and tiny `1×1`/`2×2`/`3×3` inputs.
+#[test]
+fn coop_conv_subpixel_stride2_input_grad() {
+    let (ctx, _g) = coop!();
+    let s2 = |ph, pw| Window2d { kernel: (3, 3), stride: (2, 2), padding: (ph, pw), dilation: (1, 1) };
+    let cases = [
+        // Standard YOLO shapes: vec4 epilogue, UW even (10 wraps every 2 cells, 16 aligned, 8 tile-aligned).
+        cdesc(2, 16, 16, 16, 32, 1, s2(1, 1)),
+        cdesc(2, 16, 20, 20, 32, 1, s2(1, 1)),
+        cdesc(2, 32, 16, 16, 64, 1, s2(1, 1)),
+        cdesc(1, 64, 20, 20, 64, 1, s2(1, 1)),
+        // Odd H=15 with W=16: UH=8, UW=8 -> N=64, M=64, K=128 (CHECK == false yet iy=15 must stay masked).
+        cdesc(2, 16, 15, 16, 32, 1, s2(1, 1)),
+        // Odd W / scalar epilogue and tiny spatial sizes.
+        cdesc(2, 8, 13, 17, 16, 1, s2(1, 1)),
+        cdesc(1, 16, 16, 17, 24, 1, s2(1, 1)),
+        cdesc(2, 4, 1, 1, 8, 1, s2(1, 1)),
+        cdesc(2, 4, 2, 2, 8, 1, s2(1, 1)),
+        cdesc(2, 4, 3, 3, 8, 1, s2(0, 0)),
+        // Paddings 0, 2, 3 and asymmetric (0, 1), (2, 1).
+        cdesc(2, 16, 16, 16, 16, 1, s2(0, 0)),
+        cdesc(2, 16, 15, 17, 16, 1, s2(0, 0)),
+        cdesc(2, 16, 16, 16, 16, 1, s2(2, 2)),
+        cdesc(2, 12, 13, 15, 16, 1, s2(2, 2)),
+        cdesc(1, 8, 12, 12, 12, 1, s2(3, 3)),
+        cdesc(2, 16, 15, 16, 24, 1, s2(0, 1)),
+        cdesc(2, 12, 16, 13, 20, 1, s2(2, 1)),
+        // Groups > 1, wide cin_g = 256, and C64X128 sub-pixel (N=1600 CHECK=true, N=2048 CHECK=false).
+        cdesc(2, 16, 16, 20, 32, 2, s2(1, 1)),
+        cdesc(2, 24, 15, 13, 36, 4, s2(0, 1)),
+        cdesc(1, 256, 8, 8, 256, 1, s2(1, 1)),
+        cdesc(1, 32, 80, 80, 64, 1, s2(1, 1)),
+        cdesc(1, 32, 64, 128, 64, 1, s2(1, 1)),
+    ];
+    for (i, d) in cases.iter().enumerate() {
+        run_conv_grads(&ctx, d, 400 + i as u64);
+    }
+    // Verify the fused path dispatches exactly 1 pack + 1 GEMM (no 4-phase loop, no pixel-shuffle pass).
+    ctx.set_tensor_cores(true);
+    let d = cdesc(2, 16, 20, 20, 32, 1, s2(1, 1));
+    let (oh, ow) = d.output().unwrap();
+    let gg = GpuTensor::zeros(&ctx, &[2 * 32 * oh * ow], DType::F16).unwrap();
+    let gw = GpuTensor::zeros(&ctx, &[32 * 16 * 9], DType::F16).unwrap();
+    let dx = GpuTensor::empty(&ctx, &[2 * 16 * 20 * 20], DType::F16).unwrap();
+    ctx.trace_begin();
+    conv::conv2d_backward_input(&ctx, &d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+    let names: Vec<_> = ctx.trace_end().into_iter().map(|op| op.name).collect();
+    assert_eq!(names, ["conv2d_subpixel_pack", "coop_gemm"], "expected fused 2-dispatch sub-pixel dX");
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}
+
+/// Formula 2 & 3 verification: division-free `vec4` per-image split-K 1×1 weight gradient (`CONV_MODE` 0,
+/// `TRANS_B`) and `conv2d_wgrad_reduce` across narrow/wide channels, single/multi-image, `sp == 1` and `sp > 1`,
+/// groups, odd `H·W`, odd `wn` (fallback to `reduce_cols`), plus exact integer split-K sums.
+#[test]
+fn coop_conv_pointwise_split_k_weight_grad() {
+    let (ctx, _g) = coop!();
+    let p1 = Window2d::square(1, 1, 0);
+    let cases = [
+        // Single image (direct write, zero reduction) and single image with spatial splits.
+        cdesc(1, 32, 16, 16, 32, 1, p1),
+        cdesc(1, 64, 40, 40, 64, 1, p1),
+        // Multi-image YOLO 1×1 shapes: C32X32, C64X64, C64X128, C128X64, C128X128, plus 3-mode WGRAD_REDUCE.
+        cdesc(4, 16, 20, 20, 32, 1, p1),
+        cdesc(4, 32, 20, 20, 32, 1, p1),
+        cdesc(4, 32, 20, 20, 64, 1, p1),
+        cdesc(4, 64, 20, 20, 32, 1, p1),
+        cdesc(4, 48, 40, 40, 64, 1, p1),
+        cdesc(4, 64, 16, 16, 128, 1, p1),
+        cdesc(4, 96, 16, 16, 128, 1, p1),
+        cdesc(4, 128, 20, 20, 128, 1, p1),
+        cdesc(2, 256, 8, 8, 256, 1, p1),
+        // folo-s stem (3→32 3×3 s2: C32X32 + PER_IMG) and grouped/odd 1×1 (reduce_cols fallback).
+        cdesc(4, 3, 32, 32, 32, 1, Window2d::square(3, 2, 1)),
+        cdesc(4, 32, 32, 32, 64, 2, p1),
+        cdesc(3, 24, 13, 11, 40, 4, p1),
+        cdesc(4, 5, 16, 16, 7, 1, p1),
+    ];
+    for (i, d) in cases.iter().enumerate() {
+        run_conv_grads(&ctx, d, 500 + i as u64);
+    }
+    // Check C64X64 / C64X128 on wide 1×1 dW (never C128X128) and C32X32 on folo-s 3→32 stem dW.
+    assert!(matches!(
+        conv_grads(&ctx, &cdesc(2, 96, 16, 16, 128, 1, p1), 540, false)[0],
+        Some((true, (64, 64), _))
+    ));
+    assert!(matches!(
+        conv_grads(&ctx, &cdesc(2, 128, 16, 16, 128, 1, p1), 541, false)[0],
+        Some((true, (64, 128), _))
+    ));
+    let stem_r = conv_grads(&ctx, &cdesc(4, 3, 64, 64, 32, 1, Window2d::square(3, 2, 1)), 542, true)[0];
+    assert!(
+        matches!(stem_r, Some((true, (32, 32), s)) if s >= 4),
+        "expected C32X32 PER_IMG stem, got {stem_r:?}"
+    );
+    // Exact integer split-K check on 48->64 @ 40x40 (N=4, many slabs -> any dropped slab fails immediately).
+    let d = cdesc(4, 48, 40, 40, 64, 1, p1);
+    let routes = conv_grads(&ctx, &d, 550, true);
+    for r in &routes[..2] {
+        assert!(
+            matches!(r, Some((true, (64, 64), s)) if *s >= 16),
+            "expected split-K coop 1x1 dW, got {r:?}"
+        );
+    }
+    for r in &routes[2..] {
+        assert!(matches!(r, Some((false, _, s)) if *s >= 16), "expected split-K regular 1x1 dW, got {r:?}");
+    }
+    // Verify 1x1 split-K dispatches coop_gemm + conv2d_wgrad_reduce (no reduce_cols when wn % 4 == 0).
+    ctx.set_tensor_cores(true);
+    let gx = GpuTensor::zeros(&ctx, &[4 * 48 * 1600], DType::F16).unwrap();
+    let gg = GpuTensor::zeros(&ctx, &[4 * 64 * 1600], DType::F16).unwrap();
+    let dw = GpuTensor::empty(&ctx, &[64 * 48], DType::F32).unwrap();
+    ctx.trace_begin();
+    conv::conv2d_backward_weight_as(&ctx, &d, gx.raw(), gg.raw(), dw.raw(), DType::F32).unwrap();
+    let names: Vec<_> = ctx.trace_end().into_iter().map(|op| op.name).collect();
+    assert_eq!(names, ["coop_gemm", "conv2d_wgrad_reduce"], "expected 1x1 coop_gemm + wgrad_reduce");
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}
+
+/// High-magnitude (AMP `loss_scale = 65536`) finiteness check on the new backward paths: `subpixel` `C64X128`
+/// `dX`, `1×1` per-image split-K `dW`, and `PER_IMG` `C32X32` stem `dW` stay finite and accurate.
+#[test]
+fn coop_conv_backward_large_scale_stays_finite() {
+    let (ctx, _g) = coop!();
+    ctx.set_tensor_cores(true);
+    let d_sp = cdesc(1, 32, 80, 80, 64, 1, Window2d::square(3, 2, 1));
+    let gg = upload(&ctx, &vec![60000f32; 64 * 40 * 40], DType::F16);
+    let gw = upload(&ctx, &vec![0.001f32; 64 * 32 * 9], DType::F16);
+    let dx = GpuTensor::empty(&ctx, &[32 * 80 * 80], DType::F16).unwrap();
+    assert_eq!(
+        traced_tile(&ctx, || conv::conv2d_backward_input(&ctx, &d_sp, gg.raw(), gw.raw(), dx.raw()).unwrap()),
+        (64, 128)
+    );
+    let got_dx = dx.to_vec().unwrap();
+    assert!(got_dx.iter().all(|v| v.is_finite()), "non-finite subpixel dX");
+    for (d, expect) in [
+        (cdesc(16, 64, 40, 40, 128, 1, Window2d::square(1, 1, 0)), 16.0 * 1600.0 * 3.6e9),
+        (cdesc(16, 3, 64, 64, 32, 1, Window2d::square(3, 2, 1)), 16.0 * 1024.0 * 3.6e9),
+    ] {
+        let (oh, ow) = d.output().unwrap();
+        let (kh, kw) = d.win.kernel;
+        let gx = upload(&ctx, &vec![60000f32; d.n * d.c_in * d.h * d.w], DType::F16);
+        let gg = upload(&ctx, &vec![60000f32; d.n * d.c_out * oh * ow], DType::F16);
+        let dw = GpuTensor::empty(&ctx, &[d.c_out * d.c_in * kh * kw], DType::F32).unwrap();
+        conv::conv2d_backward_weight_as(&ctx, &d, gx.raw(), gg.raw(), dw.raw(), DType::F32).unwrap();
+        let got = dw.to_vec().unwrap();
+        assert!(got.iter().all(|v| v.is_finite()), "non-finite dW for {d:?}");
+        let centre = got[kh * kw / 2] as f64;
+        assert!((centre / expect - 1.0).abs() < 1e-2, "{d:?}: got {centre}, expected {expect}");
+    }
+}

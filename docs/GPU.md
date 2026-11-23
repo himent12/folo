@@ -369,7 +369,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | softmax (any dim) | `kernels::reduce::softmax_dim` | f32, f16 | rows kernel for the last dim, a column kernel otherwise |
 | top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
 | pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices, its backward and the upsample backward also f16, summed in f32) | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
-| conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight, conv2d_backward_weight_as}` | f32, f16 (f32 accumulation; the weight gradient also f16 → f32) | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels. f16 runs on tensor cores when they are on (1×1 input gradients as a GEMM over the once-transposed weight), else on the regular generator with f16 storage; split-K partials are f32 either way |
+| conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight, conv2d_backward_weight_as}` | f32, f16 (f32 accumulation; the weight gradient also f16 → f32) | implicit GEMM (`CONV_MODE` 2 / 3) with tap masks, fused 2×2 sub-pixel stride-2 input gradients (`conv2d_subpixel_pack` + `SUBPIXEL` epilogue), division-free `vec4` per-image split-K `A·Bᵀ` GEMM for 1×1 weight gradients, `conv2d_wgrad_reduce` (`vec4` partial-slab reduction), a transposed-A GEMM for 1×1 input gradients, and direct depthwise kernels. f16 runs on tensor cores when they are on, else on the regular generator with f16 storage; split-K partials are f32 either way |
 | train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 or f16 data (`BnDesc::dtype`); parameters, statistics and sums f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
 | Muon (MuSGD) | `kernels::muon::muon_step_many` | f32 | MuSGD's Muon update of every matrix-shaped weight in `2 · ⌈n / 16⌉ + 3 · 5 + 2` dispatches per group of `n`: a multi-tensor gather (the Nesterov mix of momentum and gradient, each matrix oriented rows ≤ cols into one workspace, a partial sum of squares per 256 elements), the Frobenius norms from those partials (one workgroup per matrix) and the division over all elements, then per Newton–Schulz step three grouped GEMMs over all matrices (`A = X·Xᵀ`, `b·A + c·A·A`, `a·X + Bm·X`; each workgroup binary-searches its matrix and 64×64 tile in a table; `A` is symmetric bit for bit, so `A·A` reads `A` as its own transpose), and a multi-tensor `p = p · 1 + (X · scale) · (−lr)` back in each weight's layout. The workspaces (`X` twice, `A` and `Bm`, the partials, the table) of all matrices must fit one storage binding, so the matrices run in consecutive groups that each fit `min(max_buffer_size, max_storage_buffer_binding_size)` (and index in `u32`), the pipeline once per group; a device with fewer than 5 storage bindings per kernel (the gather of one matrix and the GEMMs take 5), or a matrix whose workspace alone is past the limit, declines the whole call before anything is written (`Error::NotSupported`), and MuSGD runs the tensor ops instead. Reached through `Backend::muon_step_many` |
 | optimizer updates | `kernels::optim::optimizer_step`, `optimizer_step_many` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs and gradient accumulation, in the op order of folo-nn's CPU loops. `_many` updates up to 16 tensors with one update per dispatch: each workgroup finds its tensor in a table of first workgroups (uniforms 16..31, element counts at 32..47) and runs that tensor's copy of the update (a generated `switch` over per-tensor bindings, so the per-element arithmetic is the single kernel's, bit for bit); devices that bind fewer than `16 · (2 + states)` storage buffers fall back to one dispatch per tensor |
@@ -432,23 +432,44 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   convs are not split; a strided 1×1 conv is implicit GEMM and is.
 - `CONV_MODE = 2` is the input gradient as a transposed conv: each thread owns one input pixel and, for
   `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
-  the divisions are exact and in range (a strided conv leaves the rest zero). `A` is the weight permuted once to
-  `[groups, C_in/g, C_out/g, KH·KW]`.
-- **Stride phases** (`CONV_MODE = 2` with `PHASE`): for a strided conv with dilation 1 (not depthwise), only the
-  taps `kh ≡ (ih + PH) mod SH` (and likewise for `kw`) reach input row `ih`, so the plain transposed conv
+  the divisions are exact and in range (a strided conv leaves the rest zero); stride-1 windows of at most 32 taps
+  use a per-column tap mask (`dx_tap_mask`, both generators) just like forward `CONV_MODE = 1`. `A` is the weight
+  permuted once to `[groups, C_in/g, C_out/g, KH·KW]`.
+- **Fused 2×2 sub-pixel stride-2 input gradient** (`CONV_MODE = 1` with `SUBPIXEL`, both generators): for 3×3
+  stride-2 dilation-1 non-depthwise convs, pairing input pixels `(2u + qy, 2v + qx)` over `⌈H/2⌉ × ⌈W/2⌉` cells
+  turns the transposed conv into a single 2×2 stride-1 conv (`C_out/g → 4·C_in/g`) over `dY` with shift
+  `bh = ⌊(PH − 1)/2⌋`, `bw = ⌊(PW − 1)/2⌋` and `off = P − 2b ∈ {1, 2}` (handling every odd/even `H`/`W`, padding,
+  and group count). `conv2d_subpixel_pack` packs the weight once into `[groups, 4·C_in/g, 4·C_out/g]` with row
+  order `ci·4 + qy·2 + qx`, and the GEMM epilogue performs the 2×2 pixel shuffle directly into `dX` (aligned
+  `vec4` stores when `W % 4 == 0`, scalar bounds-checked stores otherwise) with zero intermediate shuffle buffer —
+  2 dispatches instead of 5. Tensor cores always take this path (with `C64X128` for `M ≥ 128, N ≥ 1600`), while
+  the regular generator uses it for `C_in/g ≤ 32` and switches to tap-masked stride phases above that where
+  compute FLOPs (`1×` vs `16/9×`) dominate. Like WGSL shaders generally, this path assumes finite `dY` inputs:
+  out-of-phase taps in the packed 2×2 weight are `0.0`, so an `±inf` in an adjacent `dY` pixel can yield `NaN`
+  (`0 · inf`), whereas the CPU reference and stride-phase path skip out-of-phase taps.
+- **Stride phases** (`CONV_MODE = 2` with `PHASE`): for other strided convs with dilation 1 (not depthwise), only
+  the taps `kh ≡ (ih + PH) mod SH` (and likewise for `kw`) reach input row `ih`, so the plain transposed conv
   multiplies by zero for 3/4 of its `K` at 3×3 stride 2. The input pixels split into `SH·SW` phases by
   `((ih + PH) mod SH, (iw + PW) mod SW)`; each phase is a dense implicit GEMM with `K = C_out/g · th · tw` (1, 2, 2
-  or 4 taps of the 9 at 3×3 s2, constants `PTH` / `PTW`), its `B` gathered at output pixel `(bh + a − t, bw + b −
-  u)` for phase pixel `(a, b)` and tap `(t, u)` with no divisibility test, and its epilogue writing column `j` to
-  plane offset `(IH0 + SH·(j / WR))·W + IW0 + SW·(j mod WR)` (`ppix`). `conv2d_phase_pack` packs the weight per
-  phase once (`[phase][g][C_in/g][C_out/g][th·tw]`, the `A` of each phase), replacing the permute. One dispatch
-  per phase with taps: only the `min(SH, KH) · min(SW, KW)` such phases are packed and run, so scratch and host
-  work do not grow with the stride; when the kernel is smaller than the stride, the input gradient is cleared
-  first and the other phases' pixels stay zero. Both the regular and the tensor-core generator have it.
-- `CONV_MODE = 3` is the weight gradient: `K = N·OH·OW` folds the batch into the reduction, `A` rows are output-
-  gradient planes read across images, and `B` is the image gathered as a transposed im2col. The `B` tile is loaded in
+  or 4 taps of the 9 at 3×3 s2, constants `PTH` / `PTW`), using a per-column tap mask (`phase_tap_mask`) for up to
+  32 taps so its `B` gather drops per-tap bounds checks, and its epilogue writing column `j` to plane offset
+  `(IH0 + SH·(j / WR))·W + IW0 + SW·(j mod WR)` (`ppix`). `conv2d_phase_pack` packs the weight per phase once
+  (`[phase][g][C_in/g][C_out/g][th·tw]`, the `A` of each phase), replacing the permute. One dispatch per phase with
+  taps: only the `min(SH, KH) · min(SW, KW)` such phases are packed and run, so scratch and host work do not grow
+  with the stride; when the kernel is smaller than the stride, the input gradient is cleared first and the other
+  phases' pixels stay zero. Both the regular and the tensor-core generator have it.
+- **Pointwise 1×1 weight gradient** (`CONV_MODE = 0`, `TRANS_B = true`, both generators): for 1×1 stride-1
+  unpadded non-depthwise convs with `H·W ≥ BK`, each image's spatial plane is contiguous, so `dW = ∑_n dY_n · X_nᵀ`
+  runs as a division-free batched per-image split-K `A·Bᵀ` GEMM over `K = H·W` with `vec4` loads on both `dY` and
+  `X` when `H·W % 4 == 0` (using narrow `PW32`/`PW32X64`/`PW64X32` tiles on the regular generator and `C32X32` /
+  `C64X64` / `C64X128` on tensor cores). When `splits > 1`, `conv2d_wgrad_reduce` (`@workgroup_size(8, 32)`, `vec4`
+  coalesced columns) sums the f32 partial slabs into `gw` (falling back to `reduce_cols` when `wn % 4 != 0`).
+- `CONV_MODE = 3` is the windowed weight gradient: when the target split count already reaches `N` (`PER_IMG =
+  true`, both generators), `b1` indexes the image and `K = OH·OW`, eliminating `/ OHOW` and `% OHOW` from both `A`
+  and `B` loads while hoisting column `(ci, kh, kw)` decoding (`wgrad_b_setup`) before the K loop when a thread
+  owns at most 4 columns; otherwise `K = N·OH·OW` folds the batch into the reduction. The `B` tile is loaded in
   runs of pixels: neighbouring invocations take `min(bk, 16)` (so 8 on the `LARGE` tile, whose depth is 8; 8 on
-  tensor cores) neighbouring `k = (n, oh, ow)` of one `(c_in, kh, kw)` column, then the next columns
+  tensor cores) neighbouring `k` of one `(c_in, kh, kw)` column, then the next columns
   (`conv::wgrad_b_units`), so a warp's gather reads a few contiguous pieces of image rows instead of one element per
   image plane (neighbouring columns are a whole plane apart: each invocation owned one column before, and a 1×1
   layer's weight gradient ran at about 3 TFLOPS). The k-major workgroup tile is padded so these stores hit distinct
@@ -458,11 +479,12 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   `workgroup_bytes`); a run of a whole warp along `k` made the f16 stores conflict 4-way and the tensor-core weight
   gradients 3x slower. The stem shape (per group: `C_out/groups ≤ 16` and `N = C_in/groups·KH·KW ≤ 32` columns, e.g.
   3→16 with `N = 27`) takes a 16×32 regular tile with 32 invocations (`STEM`, f32 or f16 inputs, also when tensor
-  cores are on: their narrowest tile is 16×256), split-K into up to 1024 chunks.
+  cores are on: their narrowest 16-row tile is 16×256), split-K into up to 1024 chunks; wider narrow weights such
+  as `folo-s`'s 3→32 stem (`N = 27`) take `C32X32` on tensor cores.
   `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
-  partial weight slab that a column reduction sums: early layers have only a few output tiles but hundreds of
+  partial weight slab that `conv2d_wgrad_reduce` sums: early layers have only a few output tiles but hundreds of
   thousands of `K` steps. The spatial sizes (`IH`, `IW`, `OH`, `OW`) are specialisation constants here (in both
-  generators), because the gather divides every `k = (n, oh, ow)` by `OH·OW` and `OW`: a constant divisor is a
+  generators), because the gather divides `k` by `OW` (and `OH·OW` when not `PER_IMG`): a constant divisor is a
   multiply and a shift, a runtime one a dozen instructions. That made the tensor-core weight gradients of a folo-n
   step about 5 ms faster (the AMP step 366 → 449 img/s); the f32 kernels are bound elsewhere and did not change.
   A training run compiles one weight-gradient pipeline per layer shape (a few dozen).
@@ -512,19 +534,21 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   as its GEMM, other non-depthwise convs as its implicit-GEMM conv), and `conv::conv2d_backward_input` /
   `conv2d_backward_weight_as` send f16 gradients to its `CONV_MODE` 2 / 3 kernels (mixed-precision training,
   below). Depthwise convs and f32 keep the regular kernels; so do calls with an explicit `TileConfig`.
-- **Gradients (mixed-precision training).** `CONV_MODE` 2 is the input gradient as a transposed conv (each
-  invocation owns an input pixel; the `B` tile gathers the output-gradient pixels that read it, `A` is the weight
-  permuted once to `[groups, C_in/g, C_out/g, KH·KW]`; 1×1 convs are the plain tensor-core GEMM over that permuted
-  weight). `CONV_MODE` 3 is the weight gradient with `K = N·OH·OW` (the `A` rows are output-gradient planes read
-  across images, the `B` tile the image gathered as a transposed im2col in runs of 8 pixels, see above; the stem
-  shape goes to the regular kernels' `STEM` tile), tiles picked by `M = C_out/groups` and, past 32 rows, `N` (the
-  128-wide tiles need `N ≥ 128`), and `SPLIT` cutting `K` into chunks (one z-layer each; each chunk writes an f32
-  partial slab, a column reduction sums them) until about 512 workgroups run. The loop bounds derive from
-  `workgroup_id` and uniforms, so they stay uniform. The weight gradient is written as f32 (straight to the f32
-  master weight, no f16 rounding or overflow) or f16. `src/tests/coop.rs` checks both against an f64 CPU reference with the bound below, on every conv
-  shape folo-n / s use plus dilation, rectangular kernels, groups, depthwise and a split-K case, with tensor cores
-  and with the regular f16 kernels; two long reductions (the stem with dozens of chunks, a narrow 4→8 3×3 weight
-  with hundreds on tensor cores) run on small integers, whose sums are exact, so a dropped chunk fails.
+- **Gradients (mixed-precision training).** 3×3 stride-2 dilation-1 input gradients run as the fused 2×2 sub-pixel
+  conv (`CONV_MODE = 1` with `SUBPIXEL` over `conv2d_subpixel_pack`, picking `C64X128` for `M ≥ 128, N ≥ 1600`);
+  1×1 input gradients run as the plain tensor-core GEMM over the once-transposed weight; other input gradients use
+  `CONV_MODE = 2` (tap-masked for stride-1 and stride-phase windows up to 32 taps). For weight gradients, 1×1
+  stride-1 unpadded convs run as the division-free `vec4` per-image split-K `A·Bᵀ` GEMM (`CONV_MODE = 0`, `TRANS_B`
+  with `C32X32` / `C64X64` / `C64X128` tiles, falling back to `C128X128` only when 64-row tiles exceed the 65,535
+  grid limit), and windowed convs run `CONV_MODE = 3` (with
+  `PER_IMG` per-image split-K + hoisted column decoding when `want ≥ N`, `C32X32` for narrow weights like `folo-s`'s
+  3→32 stem, and the regular `STEM` tile for `M ≤ 16, N ≤ 32`), reducing f32 partial slabs through
+  `conv2d_wgrad_reduce`. The loop bounds derive from `workgroup_id` and uniforms, so they stay uniform. The weight
+  gradient is written as f32 (straight to the f32 master weight, no f16 rounding or overflow) or f16.
+  `src/tests/coop_conv.rs` checks both against an f64 CPU reference with the bound below, on every conv shape
+  folo-n / s use plus odd/ragged sub-pixel shapes, paddings, dilation, rectangular kernels, groups, depthwise and
+  split-K cases, with tensor cores and with the regular f16 kernels; long reductions run on small integers whose
+  sums are exact so a dropped chunk fails.
 - **Fallback.** Anything unexpected leaves the regular kernels in place: an adapter without the configuration, a
   device that refuses the feature (it is created again without it), a failed self-test (the experimental device is
   dropped and the context rebuilt on a plain one), or a tensor-core kernel
@@ -541,20 +565,22 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   experimental device safely: `ctx.device()` is `None` on such a context (the raw device is behind the `unsafe`
   `device_unchecked`, whose contract is the two conditions before), and `ctx.destroy_device()` covers what tests
   used the raw device for.
-- **Kernel.** 256 invocations = 8 subgroups per workgroup, each owning `FM × FN` 16×16 f32 accumulators of a
-  `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so they are uniform per subgroup). `K` is walked
-  32 at a time with the f32 generator's scheme: the next `A` / `B` tiles are loaded into registers (vec4 when
-  aligned, the conv's `B` gathered straight from the NCHW image) while the current ones, double-buffered f16 in
-  workgroup memory, row-major with 8 halves of padding per row, feed `coopLoadT` + `coopMultiplyAdd`; one barrier
-  per step. The K loop starts each half with a `break` check instead of wrapping it in an `if`, because naga
-  treats values derived from the loop counter as non-uniform. Epilogue: cooperative matrices have no per-element
-  access, so each subgroup stores one fragment at a time into its own 1 KiB f32 scratch slice, and its 32 lanes
-  apply `alpha`, bias and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2
-  fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32` and 16×256 for `M ≤ 16` (folo-n's 16- and 32-channel
-  early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv input gradients (the weight
-  gradients have their own `pick_config_weight_grad`). The forward
-  convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without a
-  config) pick through `coop::pick_config_conv` instead:
+- **Kernel.** 256 invocations = 8 subgroups per workgroup (or 128 invocations = 4 subgroups for `32×32`), each
+  owning `FM × FN` 16×16 f32 accumulators of a `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so
+  they are uniform per subgroup). `K` is walked 32 at a time with the f32 generator's scheme: the next `A` / `B`
+  tiles are loaded into registers (vec4 when aligned, the conv's `B` gathered straight from the NCHW image) while
+  the current ones, double-buffered f16 in workgroup memory, row-major with 8 halves of padding per row, feed
+  `coopLoadT` + `coopMultiplyAdd`; one barrier per step. The K loop starts each half with a `break` check instead
+  of wrapping it in an `if`, because naga treats values derived from the loop counter as non-uniform. Epilogue:
+  cooperative matrices have no per-element access, so each subgroup stores one fragment at a time into its own
+  1 KiB f32 scratch slice, and its 32 lanes apply `alpha`, bias and activation to 8 elements each and store them
+  with bounds checks. Configs: 128×128 (4×2 fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32`, 32×32
+  (1×1 fragment per subgroup, 128 threads, 14 KiB) for small batch-1 planes and narrow weights, and 16×256 for
+  `M ≤ 16` (folo-n's 16- and 32-channel early layers); `coop::pick_config` picks by `M` and occupancy for plain
+  GEMMs, `pick_config_conv` / `pick_config_stride2_dx` pick for conv input gradients (with `C64X128` for stride-2
+  `M ≥ 128, N ≥ 1600`), and weight gradients have `pick_config_weight_grad` / `pick_config_pointwise_wgrad`. The
+  forward convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without
+  a config) pick through `coop::pick_config_conv` (`pick_config_conv_batched` for batch-1 `32×32`) instead:
   the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels per group and 6400 pixels
   (80 px and up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64
   took 14–63% less time than it at 40 and 20 px and on the stride-2 convs; the switch raised folo-s's batch-16
@@ -601,6 +627,13 @@ build:
 | depthwise with 4 outputs per invocation (hill/gpu-infer; old kernel in the same alternated runs): f32 / f16 | 0.063–0.068 / **0.044–0.051** (0.070–0.080 / 0.127–0.130) | 1 865 / 2 700 at best |
 | tensor cores, under ~65% load (regular f16 in the same run: 0.584 / 0.177 / 0.101 ms): 3×3 s1 / 3×3 s2 / 1×1 | **0.288 / 0.118 / 0.044** | 26 191 / 15 937 / 19 239 |
 | tensor cores, folo-n's stem at batch 16 (same run, regular f16 0.831 / 0.780 / 0.309 ms): 3→16 at 640, 16→32 at 320, 32→64 at 160, all 3×3 s2 | **0.245 / 0.250 / 0.097** | 5 783 / 15 104 / 39 097 |
+
+| Training step (`b16`, `640×640`, SGD, alternated A/B vs previous backward kernels) | step ms | GPU backward ms | delta |
+|---|---|---|---|
+| `folo-n` AMP (tensor cores) | **23.11** (677–708 img/s; was 27.38) | **17.29** (was 18.92; `conv_bwd_in` −27.4%) | **−15.6%** wall / −8.6% GPU bwd |
+| `folo-s` AMP (tensor cores) | **51.16** (306–319 img/s; was 54.21) | **34.50** (was 38.48; `conv_bwd_in` −19.9%, `conv_bwd_w` −13.8%) | **−5.6%** wall / −10.3% GPU bwd |
+| `folo-n` f32 | **41.29** (was 43.37) | **30.36** (was 32.44) | **−4.8%** wall / −6.4% GPU bwd |
+| `folo-s` f32 | **97.04** (was 100.92) | **71.05** (was 74.34) | **−3.8%** wall / −4.4% GPU bwd |
 
 | Memory-bound, 64 Mi f32 | GB/s |
 |---|---|

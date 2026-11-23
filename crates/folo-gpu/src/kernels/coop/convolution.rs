@@ -11,7 +11,7 @@ use crate::UnaryOp;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
 use crate::kernels::conv::{Conv2dDesc, split};
-use crate::kernels::gemm::{GemmBias, GemmDesc, gemm_params};
+use crate::kernels::gemm::{BatchStrides, GemmBias, GemmDesc, gemm_params};
 use crate::pipeline::Spec;
 
 /// Tensor-core conv2d: `y = act(conv2d(x, weight) + bias)` with f16 `x` and `weight` (`d.dtype` must be
@@ -240,10 +240,22 @@ pub(crate) fn encode_conv_backward_input(
     Ok(true)
 }
 
+/// Tile pick for stride-2 `dX` (sub-pixel and phase): `C64X128` starting at `N >= 1600` (40×40) when `M >= 128`
+/// to halve weight traffic on wide layers (`128→128 @ 80`, `256→256 @ 80`), else [`pick_config_conv`].
+fn pick_config_stride2_dx(m: usize, n: usize) -> CoopConfig {
+    if m >= 128 && n >= 1600 { CoopConfig::C64X128 } else { pick_config_conv(m, n) }
+}
+
+/// `(BM, BN)` of the tile [`encode_conv_backward_input_subpixel`] will pick, for pre-dispatch grid checks.
+pub(crate) fn stride2_dx_tile(m: usize, n: usize) -> (usize, usize) {
+    let cfg = pick_config_stride2_dx(m, n);
+    (cfg.bm as usize, cfg.bn as usize)
+}
+
 /// One stride phase of the f16 conv `d`'s input gradient on tensor cores (`CONV_MODE` 2 with `PHASE`, see
 /// [`crate::kernels::conv`]'s stride-phase decomposition): `g` is the phase's GEMM view (`M = C_in/groups`, `N` its
-/// pixels, `K = C_out/groups · th · tw`), `packed` the phase-packed weight. Uses [`pick_config_conv`] (`C64X64` /
-/// `C64X128`). Returns `false` (nothing encoded) when the kernel failed to build.
+/// pixels, `K = C_out/groups · th · tw`), `packed` the phase-packed weight. Returns `false` (nothing encoded) when
+/// the kernel failed to build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_conv_backward_input_phase(
     ctx: &GpuContext,
@@ -256,7 +268,7 @@ pub(crate) fn encode_conv_backward_input_phase(
     gx: &wgpu::Buffer,
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
-    let Some(cfg) = resolve(ctx, None, || pick_config_conv(g.m, g.n))? else { return Ok(false) };
+    let Some(cfg) = resolve(ctx, None, || pick_config_stride2_dx(g.m, g.n))? else { return Ok(false) };
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
         || !g.k.is_multiple_of(cfg.bk as usize)
@@ -275,27 +287,94 @@ pub(crate) fn encode_conv_backward_input_phase(
     Ok(true)
 }
 
-/// Tile configuration for a weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns): capped at
-/// `C64X128`/`C64X64` (never `C128X128`, avoiding Ada shared-memory occupancy cliffs) since split-K supplies the
-/// occupancy.
+/// Fused 2×2 sub-pixel stride-2 input gradient on tensor cores (`CONV_MODE` 1 with `SUBPIXEL`): one 2×2
+/// stride-1 conv (`C_out → 4·C_in`) over `grad` whose epilogue shuffles directly into `gx`. Returns `false`
+/// (nothing encoded) when the kernel failed to build.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_conv_backward_input_subpixel(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    g: &GemmDesc,
+    (oh, ow, uh, uw, bh, bw): (usize, usize, usize, usize, i32, i32),
+    packed: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    gx: &wgpu::Buffer,
+) -> Result<bool> {
+    let Some(cfg) = resolve(ctx, None, || pick_config_stride2_dx(g.m, g.n))? else { return Ok(false) };
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(g, DType::F16, cfg)
+        .bool("VEC_A", true)
+        .bool("VEC_B", false)
+        .bool("VEC_C", d.w.is_multiple_of(4))
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 1)
+        .bool("SUBPIXEL", true)
+        .u32("KH", 2)
+        .u32("KW", 2)
+        .u32("SH", 1)
+        .u32("SW", 1)
+        .u32("DH", 1)
+        .u32("DW", 1)
+        .i32("PH", -bh)
+        .i32("PW", -bw);
+    let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+    let p = gemm_params(g)?.at(24).uz(oh)?.uz(ow)?.uz(uh)?.uz(uw)?.uz(d.h)?.uz(d.w)?;
+    ctx.dispatch(&kernel, &[packed, grad, ctx.dummy(), gx], &p, grid(g, cfg, d.n * d.groups)?)?;
+    Ok(true)
+}
+
+/// Maximum workgroups per grid dimension (WebGPU / Vulkan Y and Z guarantee).
+const MAX_WG: usize = 65_535;
+
+/// Tile configuration for a windowed weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns):
+/// `C32X32` for narrow weights (e.g. `folo-s`'s `3→32` stem with `N = 27`, when it fits `MAX_WG`), otherwise
+/// capped at `C64X128`/`C64X64` (falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
 fn pick_config_weight_grad(m: usize, n: usize) -> CoopConfig {
+    if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        return CoopConfig::C32X32;
+    }
+    if m.div_ceil(64) > MAX_WG {
+        return CoopConfig::C128X128;
+    }
     match m {
         0..=16 => CoopConfig::C16X256,
         17..=32 => CoopConfig::C32X128,
-        _ if n >= 128 => CoopConfig::C64X128,
+        _ if n >= 128 || n.div_ceil(64) > MAX_WG => CoopConfig::C64X128,
         _ => CoopConfig::C64X64,
+    }
+}
+
+/// Tile configuration for the 1×1 `A · Bᵀ` weight gradient: `C32X32` for narrow `N <= 32` (when it fits
+/// `MAX_WG`), `C64X128` for wide `N >= 128`, `C64X64` elsewhere (stays at 24–35 KiB shared memory so Ada keeps
+/// full occupancy, falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
+fn pick_config_pointwise_wgrad(m: usize, n: usize) -> CoopConfig {
+    if m.div_ceil(64) > MAX_WG {
+        return CoopConfig::C128X128;
+    }
+    if m <= 16 && n >= 128 {
+        CoopConfig::C16X256
+    } else if m <= 32 && n >= 96 {
+        CoopConfig::C32X128
+    } else if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        CoopConfig::C32X32
+    } else if n >= 128 || n.div_ceil(64) > MAX_WG {
+        CoopConfig::C64X128
+    } else {
+        CoopConfig::C64X64
     }
 }
 
 /// Upper bound for split-K partial slabs, in f32 elements (64 MiB), as for the regular kernels.
 const MAX_PARTIAL_ELEMS: usize = 16 << 20;
 
-/// The weight gradient of the f16 conv `d` on tensor cores (`CONV_MODE` 3): `K = N·OH·OW` folds the batch into
-/// the reduction, `A` rows are output-gradient planes read across images, `B` the image gathered as a transposed
-/// im2col. `g` is the GEMM view built by [`crate::kernels::conv::conv2d_backward_weight`]. `K` is split into chunks
-/// (one z-layer each, f32 partial slabs summed by a deterministic 2-pass column reduction) when the weight alone has
-/// too few tiles to fill the GPU. `gw` is written as `out` (f32 or f16; partial sums stay f32). Returns `false`
-/// (nothing encoded) when the kernel failed to build.
+/// The weight gradient of the f16 conv `d` on tensor cores: 1×1 stride-1 unpadded convs run as a division-free
+/// contiguous `vec4` per-image split-K `A · Bᵀ` GEMM (`CONV_MODE` 0), other convs as implicit GEMM (`CONV_MODE` 3,
+/// per-image when the split count already covers `N` so `/ OHOW` and `% OHOW` vanish). Partial sums stay f32 and
+/// are reduced into `gw` (`out`, f32 or f16). Returns `false` (nothing encoded) when the kernel failed to build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_conv_backward_weight(
     ctx: &GpuContext,
@@ -307,17 +386,131 @@ pub(crate) fn encode_conv_backward_weight(
     gw: &wgpu::Buffer,
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
-    let Some(cfg) = resolve(ctx, None, || pick_config_weight_grad(g.m, g.n))? else { return Ok(false) };
     let (ohow, np, wn) = (oh * ow, g.k, g.m * g.n * d.groups);
+    if let Some(pw_cfg) = resolve(ctx, None, || pick_config_pointwise_wgrad(g.m, g.n))?
+        && crate::kernels::conv::can_pointwise_wgrad(d, pw_cfg.bk as usize, wn)
+    {
+        let (cin_g, cout_g, hw) = (d.c_in / d.groups, d.c_out / d.groups, ohow);
+        let (sp, chunk_p) = crate::kernels::conv::plan_pointwise_wgrad(
+            d,
+            pw_cfg.bm as usize,
+            pw_cfg.bn as usize,
+            pw_cfg.bk as usize,
+            pw_cfg.threads() as usize,
+            wn,
+        );
+        let total_slabs = d.n * sp;
+        let mut gp = GemmDesc::new(cout_g, cin_g, hw, false, true, d.n);
+        gp.batch = (d.n, d.groups);
+        gp.lda = hw;
+        gp.ldb = hw;
+        gp.ldc = cin_g;
+        gp.a = BatchStrides { offset: 0, outer: d.c_out * hw, inner: cout_g * hw };
+        gp.b = BatchStrides { offset: 0, outer: d.c_in * hw, inner: cin_g * hw };
+        gp.c = BatchStrides { offset: 0, outer: wn, inner: cout_g * cin_g };
+        gp.dtype = DType::F16;
+        let tmp = if total_slabs > 1 {
+            Some(ctx.alloc(DType::F32.bytes(crate::kernels::prod(&[total_slabs, wn])?))?)
+        } else {
+            None
+        };
+        let target = tmp.as_ref().map_or(gw, |t| t.raw());
+        let out_dt = if total_slabs > 1 { DType::F32 } else { out };
+        let check = !cout_g.is_multiple_of(pw_cfg.bm as usize)
+            || !cin_g.is_multiple_of(pw_cfg.bn as usize)
+            || !hw.is_multiple_of(pw_cfg.bk as usize);
+        let spec = base_spec(&gp, out_dt, pw_cfg)
+            .bool("VEC_A", hw.is_multiple_of(4))
+            .bool("VEC_B", hw.is_multiple_of(4))
+            .bool("VEC_C", cin_g.is_multiple_of(4))
+            .bool("TRANS_A", false)
+            .bool("TRANS_B", true)
+            .bool("CHECK", check)
+            .u32("CONV_MODE", 0)
+            .bool("SPLIT", sp > 1);
+        let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+        #[cfg(test)]
+        crate::kernels::conv::LAST_ROUTE.set(Some((true, (pw_cfg.bm, pw_cfg.bn), total_slabs)));
+        let p = if sp > 1 {
+            gemm_params(&gp)?.at(28).uz(sp)?.uz(chunk_p)?.uz(d.n * wn)?
+        } else {
+            gemm_params(&gp)?
+        };
+        ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, grid(&gp, pw_cfg, d.n * d.groups * sp)?)?;
+        if let Some(t) = &tmp {
+            crate::kernels::conv::finish_wgrad(ctx, t.raw(), total_slabs, wn, gw, out)?;
+        }
+        return Ok(true);
+    }
+    let Some(cfg) = resolve(ctx, None, || pick_config_weight_grad(g.m, g.n))? else { return Ok(false) };
     let bk = cfg.bk as usize;
-    // Aim for ~512 workgroups, each at least 16 K tiles deep.
+    // Aim for ~512 workgroups (scaled for narrower 128-thread tiles), each at least 16 K tiles deep.
     let tiles = g.m.div_ceil(cfg.bm as usize) * g.n.div_ceil(cfg.bn as usize) * d.groups;
-    let want = 512usize
+    let want = (512 * 256 / cfg.threads() as usize)
+        .min(1024)
         .div_ceil(tiles)
         .min(np.div_ceil(16 * bk))
         .min(MAX_PARTIAL_ELEMS / wn.max(1))
         .min(65535 / d.groups)
         .max(1);
+    let per_img = ohow >= bk
+        && d.n.saturating_mul(d.groups) <= 65535
+        && d.n.saturating_mul(wn) <= MAX_PARTIAL_ELEMS
+        && want >= d.n;
+    if per_img {
+        let (cin_g, cout_g, ncols) = (d.c_in / d.groups, d.c_out / d.groups, g.n);
+        let (sp, chunk_p) =
+            crate::kernels::conv::plan_wgrad_per_img(d, ohow, tiles, bk, cfg.threads() as usize, wn, 16);
+        let total_slabs = d.n * sp;
+        let mut gp = GemmDesc::new(cout_g, ncols, ohow, false, false, d.n);
+        gp.batch = (d.n, d.groups);
+        gp.lda = ohow;
+        gp.ldb = ncols;
+        gp.ldc = ncols;
+        gp.a = BatchStrides { offset: 0, outer: d.c_out * ohow, inner: cout_g * ohow };
+        gp.b = BatchStrides { offset: 0, outer: d.c_in * d.h * d.w, inner: cin_g * d.h * d.w };
+        gp.c = BatchStrides { offset: 0, outer: wn, inner: cout_g * ncols };
+        gp.dtype = DType::F16;
+        let tmp = if total_slabs > 1 {
+            Some(ctx.alloc(DType::F32.bytes(crate::kernels::prod(&[total_slabs, wn])?))?)
+        } else {
+            None
+        };
+        let target = tmp.as_ref().map_or(gw, |t| t.raw());
+        let out_dt = if total_slabs > 1 { DType::F32 } else { out };
+        let check = !cout_g.is_multiple_of(cfg.bm as usize)
+            || !ncols.is_multiple_of(cfg.bn as usize)
+            || !ohow.is_multiple_of(bk);
+        let spec = base_spec(&gp, out_dt, cfg)
+            .bool("VEC_A", ohow.is_multiple_of(4))
+            .bool("VEC_B", false)
+            .bool("VEC_C", ncols.is_multiple_of(4))
+            .bool("TRANS_A", false)
+            .bool("TRANS_B", false)
+            .bool("CHECK", check)
+            .u32("CONV_MODE", 3)
+            .bool("PER_IMG", true)
+            .bool("SPLIT", sp > 1);
+        let spec = crate::kernels::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
+        let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+        #[cfg(test)]
+        crate::kernels::conv::LAST_ROUTE.set(Some((true, (cfg.bm, cfg.bn), total_slabs)));
+        let p = gemm_params(&gp)?
+            .at(24)
+            .uz(d.h)?
+            .uz(d.w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(sp)?
+            .uz(chunk_p)?
+            .uz(d.n * wn)?
+            .uz(ohow)?;
+        ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, grid(&gp, cfg, d.n * d.groups * sp)?)?;
+        if let Some(t) = &tmp {
+            crate::kernels::conv::finish_wgrad(ctx, t.raw(), total_slabs, wn, gw, out)?;
+        }
+        return Ok(true);
+    }
     let ks = np.div_ceil(want).next_multiple_of(bk);
     let splits = np.div_ceil(ks);
     let tmp = if splits > 1 || out != DType::F32 {
@@ -356,12 +549,24 @@ pub(crate) fn encode_conv_backward_weight(
         .uz(d.c_in * d.h * d.w)?;
     ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, grid(g, cfg, d.groups * splits)?)?;
     if let Some(t) = &tmp {
-        if splits > 1 {
-            let op = crate::kernels::reduce::ReduceOp::Sum;
-            crate::kernels::reduce::reduce_as(ctx, op, (t.raw(), DType::F32), (gw, out), 1, splits, wn)?;
-        } else {
-            crate::kernels::layout::cast(ctx, t.raw(), gw, wn, true)?;
-        }
+        crate::kernels::conv::finish_wgrad(ctx, t.raw(), splits, wn, gw, out)?;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Narrow `C32X32` falls back to a wider tile whenever `M` (or `N`) would exceed `MAX_WG` (65,535).
+    #[test]
+    fn weight_grad_tile_pick_respects_grid_limit() {
+        assert_eq!(pick_config_weight_grad(32, 27), CoopConfig::C32X32);
+        assert_eq!(pick_config_pointwise_wgrad(32, 32), CoopConfig::C32X32);
+        assert_eq!(pick_config_weight_grad(2_097_121, 9), CoopConfig::C64X64);
+        assert_eq!(pick_config_pointwise_wgrad(2_097_121, 16), CoopConfig::C64X64);
+        assert_eq!(pick_config_weight_grad(4_194_241, 9), CoopConfig::C128X128);
+        assert_eq!(pick_config_pointwise_wgrad(4_194_241, 16), CoopConfig::C128X128);
+        assert_eq!(pick_config_weight_grad(64, 4_194_241), CoopConfig::C64X128);
+    }
 }

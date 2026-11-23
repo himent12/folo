@@ -11,20 +11,19 @@
 //!   ever written. Weight `[C_out, C_in/groups, KH, KW]` is the row-major `A` matrix of each group as is.
 //!
 //! Gradients ([`conv2d_backward_input`], [`conv2d_backward_weight`]) reuse the same machinery:
-//! - **Input gradient**: a transposed convolution as implicit GEMM (`CONV_MODE` 2): `M = C_in/groups`,
-//!   `N = H·W`, `K = C_out/groups·KH·KW`; each thread owns one input pixel and gathers the output-gradient
-//!   pixels that read it (strided convs skip the positions the stride never touched). The weight is permuted
-//!   once to `[groups, C_in/groups, C_out/groups, KH·KW]`. 1×1 convs are a transposed-A GEMM; depthwise convs
-//!   have a direct kernel.
-//! - **Weight gradient**: implicit GEMM (`CONV_MODE` 3) with `K = N·OH·OW` folding the batch into the
-//!   reduction, `M = C_out/groups`, `N = C_in/groups·KH·KW`, split along `K` into partial slabs when the
-//!   output alone has too few tiles to fill the GPU, then summed. Depthwise convs have a direct kernel that
-//!   reduces each tap in workgroup memory.
+//! - **Input gradient**: fused 2×2 sub-pixel conv (`CONV_MODE` 1 with `SUBPIXEL` over `conv2d_subpixel_pack`) for
+//!   3×3 stride-2 dilation-1 convs (always on tensor cores, up to `C_in/groups <= 32` on regular kernels),
+//!   tap-masked stride phases (`CONV_MODE` 2 with `PHASE`) for other strided convs, tap-masked transposed conv
+//!   (`CONV_MODE` 2) for stride-1 convs, a transposed-A GEMM for 1×1 convs, and a direct depthwise kernel.
+//! - **Weight gradient**: division-free contiguous `vec4` per-image split-K `A·Bᵀ` GEMM (`CONV_MODE` 0, `TRANS_B`)
+//!   for 1×1 stride-1 unpadded convs, implicit GEMM (`CONV_MODE` 3, with `PER_IMG` per-image split-K and hoisted
+//!   column decoding when splits cover `N`) for windowed convs, `conv2d_wgrad_reduce` (`vec4` partial-slab sum),
+//!   and a direct depthwise kernel.
 //!
 //! Gradients take f32 or f16 operands (f32 accumulation either way; mixed-precision training). With tensor cores
-//! on, the f16 input and weight gradients run on [`coop`](crate::kernels::coop)'s `CONV_MODE` 2 / 3 kernels (1×1 input gradients as a
-//! GEMM over the transposed weight), and the weight gradient can be written as f32 directly
-//! ([`conv2d_backward_weight_as`]).
+//! on, f16 input and weight gradients run on [`coop`](crate::kernels::coop) (narrow `M <= 16, N <= 32` stems
+//! keep the regular `STEM` tile; wider narrow weights such as `3→32` take `C32X32`), and the weight gradient can
+//! be written as f32 directly ([`conv2d_backward_weight_as`]).
 //!
 //! Files: `forward.rs` the forward ([`conv2d`], [`conv2d_cat`]); `split.rs` its split-K; `sites.rs` the forward
 //! at listed output pixels ([`conv2d_sites`]); `input_grad.rs` and `weight_grad.rs` the gradients;
@@ -41,17 +40,31 @@ pub use forward::{
     ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_input, conv2d_with_config, conv2d_with_plan,
 };
 pub use input_grad::conv2d_backward_input;
-pub(crate) use input_grad::{PHASE_PIXEL, Phase};
+pub(crate) use input_grad::{
+    PHASE_PIXEL, Phase, dx_tap_mask_load, dx_tap_mask_setup, phase_tap_mask_load, phase_tap_mask_setup,
+    subpixel_epilogue_coop, subpixel_epilogue_gemm,
+};
 pub use sites::conv2d_sites;
-pub(crate) use sites::{SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column};
+pub(crate) use sites::{
+    SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column, fwd_tap_mask_load, fwd_tap_mask_setup,
+};
 #[cfg(test)]
 pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
+pub(crate) use weight_grad::{
+    can_pointwise_wgrad, finish_wgrad, plan_pointwise_wgrad, plan_wgrad_per_img, weight_grad_dims,
+    weight_grad_spec, wgrad_b_load, wgrad_b_setup, wgrad_b_units,
+};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
-pub(crate) use weight_grad::{weight_grad_dims, weight_grad_spec, wgrad_b_load, wgrad_b_units};
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&crate::pipeline::KernelDef] =
-    &[&depthwise::DEPTHWISE, &depthwise::DEPTHWISE_GRAD, &input_grad::PHASE_PACK, &split::SPLIT_FINISH];
+pub(crate) static DEFS: &[&crate::pipeline::KernelDef] = &[
+    &depthwise::DEPTHWISE,
+    &depthwise::DEPTHWISE_GRAD,
+    &input_grad::PHASE_PACK,
+    &input_grad::SUBPIXEL_PACK,
+    &split::SPLIT_FINISH,
+    &weight_grad::WGRAD_REDUCE,
+];
 
 /// Whether a kernel list may ask for the direct depthwise forward with `spec` (`kernels::bounds`).
 pub(crate) fn depthwise_fits(spec: &Spec) -> bool {
