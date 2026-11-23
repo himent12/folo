@@ -23,8 +23,8 @@
 
 use crate::boxes::Xyxy;
 use crate::fusion::{
-    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_consensus_scores, dfl_repulse_scores, elc_scores,
-    fuse_boxes,
+    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_cgr_scores, dfl_consensus_scores,
+    dfl_repulse_scores, elc_scores, fuse_boxes, fuse_boxes_sebf,
 };
 use crate::model::HeadMode;
 use rayon::prelude::*;
@@ -453,7 +453,7 @@ fn finish(
         cfg.iou,
         cfg.max_det,
         cfg.agnostic,
-        cfg.score.is_calibrated(),
+        cfg.score.is_calibrated() || cfg.fusion.wants_owner(),
     );
     let cands_slice = cands.as_slice();
     let fused = match cfg.fusion {
@@ -465,6 +465,21 @@ fn finish(
             let of = dfl.precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
             let of = of.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
+        }
+        BoxFusion::Sebf => {
+            let of = dfl.precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
+            let of = of.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
+            Some(fuse_boxes_sebf(
+                &kept,
+                &boxes,
+                &scores,
+                &classes,
+                cfg.agnostic,
+                cfg.fusion_iou,
+                owner.as_deref(),
+                cfg.iou,
+                of,
+            ))
         }
     };
     let mut dets: Vec<Detection> = kept
@@ -485,23 +500,14 @@ fn finish(
             let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
             Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou, bp))
         }
-        ScoreRule::DflRepulse => {
+        ScoreRule::DflRepulse | ScoreRule::DflCgr => {
             let repulse_boxes: Vec<Xyxy> = dets.iter().map(|d| d.bbox).collect();
             let ent = dfl.entropy.map(|e| move |k: usize| e[cands_slice[k].idx as usize]);
             let ent = ent.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
             let st = dfl.strides.map(|s| move |k: usize| s[cands_slice[k].idx as usize]);
             let st = st.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
-            Some(dfl_repulse_scores(
-                &kept,
-                &boxes,
-                &repulse_boxes,
-                &scores,
-                &classes,
-                owner.as_deref(),
-                cfg.iou,
-                ent,
-                st,
-            ))
+            let scorer = if cfg.score == ScoreRule::DflCgr { dfl_cgr_scores } else { dfl_repulse_scores };
+            Some(scorer(&kept, &boxes, &repulse_boxes, &scores, &classes, owner.as_deref(), cfg.iou, ent, st))
         }
     };
     if let Some(new_scores) = new_scores {

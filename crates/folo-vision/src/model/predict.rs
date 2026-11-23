@@ -13,7 +13,6 @@ use crate::decode::{
     bin_precision, decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation,
     softmax_moments, softmax_moments_and_entropy,
 };
-use crate::fusion::BoxFusion;
 use crate::nms::{
     Candidate, Detection, DflInputs, NmsConfig, nms_candidates_with_inputs, postprocess_with_inputs,
     topk_candidates,
@@ -379,7 +378,7 @@ impl HeadOutput {
             return DflWants::default();
         }
         DflWants {
-            side: nms.fusion == BoxFusion::Dfl,
+            side: nms.fusion.wants_side_precision(),
             bin: nms.score.wants_bin_precisions(),
             ent: nms.score.wants_dfl_entropy(),
         }

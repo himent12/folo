@@ -15,6 +15,32 @@ use super::{
 };
 use crate::{Error, Result};
 
+/// Geometric spectral conditioning mode of [`MuSgd`] (`Conv-GeoMuon`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MuonGeoMode {
+    /// Legacy `muon_scale` (`dims[n-2]/dims[n-1]`) and dense orthogonalisation on all rank-2/4 decay weights.
+    #[default]
+    Legacy,
+    /// True 2-D flattened aspect scale `sqrt(max(1, m/n))` + exact zero-GEMM per-channel Polar LMO for depthwise convs.
+    Geo,
+}
+
+impl MuonGeoMode {
+    /// True when this is legacy mode.
+    pub fn is_legacy(&self) -> bool {
+        *self == MuonGeoMode::Legacy
+    }
+
+    /// Canonical lowercase name (`"legacy"`, `"geo"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MuonGeoMode::Legacy => "legacy",
+            MuonGeoMode::Geo => "geo",
+        }
+    }
+}
+
 /// Weight of the Muon update: `p −= MUON_SCALE · lr · O`.
 pub const MUON_SCALE: f64 = 0.2;
 /// Newton–Schulz iterations of [`orthogonalize`].
@@ -115,6 +141,7 @@ pub struct MuSgd {
     muon: Vec<Vec<Option<Tensor>>>,
     weights: MuSgdWeights,
     ortho: MuonOrtho,
+    geo: MuonGeoMode,
 }
 
 /// The two factors of a [`MuSgd`] step on a Muon parameter: `p −= muon · lr · O`, then the SGD update at
@@ -161,9 +188,19 @@ impl MuSgd {
 
     /// [`MuSgd::with_weights`] with a chosen orthogonalisation schedule [`MuonOrtho`].
     pub fn with_ortho(groups: Vec<ParamGroup>, weights: MuSgdWeights, ortho: MuonOrtho) -> Result<Self> {
+        Self::with_ortho_and_geo(groups, weights, ortho, MuonGeoMode::Legacy)
+    }
+
+    /// [`MuSgd::with_ortho`] with a chosen geometric conditioning mode [`MuonGeoMode`].
+    pub fn with_ortho_and_geo(
+        groups: Vec<ParamGroup>,
+        weights: MuSgdWeights,
+        ortho: MuonOrtho,
+        geo: MuonGeoMode,
+    ) -> Result<Self> {
         weights.validate()?;
         let muon = groups.iter().map(|g| vec![None; g.params.len()]).collect();
-        let mut s = MuSgd { sgd: Sgd::new(groups)?, muon, weights, ortho };
+        let mut s = MuSgd { sgd: Sgd::new(groups)?, muon, weights, ortho, geo };
         s.ensure_buffers()?;
         Ok(s)
     }
@@ -183,15 +220,29 @@ impl MuSgd {
         self.ortho = ortho;
     }
 
+    /// The geometric conditioning mode (`Conv-GeoMuon`).
+    pub fn geo_mode(&self) -> MuonGeoMode {
+        self.geo
+    }
+
+    /// Set the geometric conditioning mode (`Conv-GeoMuon`).
+    pub fn set_geo_mode(&mut self, geo: MuonGeoMode) -> Result<()> {
+        self.geo = geo;
+        self.ensure_buffers()
+    }
+
     fn uses_muon(g: &ParamGroup, p: &Tensor) -> bool {
         is_muon_group(&g.name) && matches!(p.rank(), 2 | 4)
     }
 
     fn ensure_buffers(&mut self) -> Result<()> {
-        for (g, bufs) in self.sgd.groups().iter().zip(&mut self.muon) {
-            for ((_, p), b) in g.params.iter().zip(bufs.iter_mut()) {
-                if b.is_none() && Self::uses_muon(g, p) {
-                    *b = Some(Tensor::zeros_with(p.shape(), DType::F32, p.device())?);
+        for (gi, g) in self.sgd.groups().iter().enumerate() {
+            for (pi, (_, p)) in g.params.iter().enumerate() {
+                if !Self::uses_muon(g, p) {
+                    continue;
+                }
+                if self.muon[gi][pi].is_none() {
+                    self.muon[gi][pi] = Some(Tensor::zeros_with(p.shape(), DType::F32, p.device())?);
                 }
             }
         }
@@ -204,26 +255,24 @@ impl MuSgd {
     }
 
     /// The Muon half of a step: momentum, orthogonalisation and `p −= muon · lr · O` for every Muon parameter
-    /// with a gradient. For Polar-FOLO on non-CPU devices, Muon groups sharing `(momentum, nesterov)` (such as
-    /// `decay` and `decay.cls`) fuse into one `muon_step_many_` call when no storage aliases exist and folded
-    /// scales stay finite; legacy `Ns5` keeps per-group calls for per-group rounding and aliasing semantics.
+    /// with a gradient.
     fn muon_step(&self, grads: &dyn GradSource) -> Result<()> {
         let _g = folo_core::no_grad();
-        // Collect active Muon groups (those with at least one parameter that received a gradient).
         struct Active<'a> {
             mu: f32,
             nesterov: bool,
             lr: f32,
             ps: Vec<&'a Tensor>,
             bs: Vec<&'a Tensor>,
+            dws: Vec<bool>,
             gs: Vec<Tensor>,
         }
         let mut active: Vec<Active<'_>> = Vec::new();
-        for (g, bufs) in self.sgd.groups().iter().zip(&self.muon) {
+        for (gi, g) in self.sgd.groups().iter().enumerate() {
             let mu = g.momentum as f32;
-            let (mut ps, mut bs, mut gs) = (Vec::new(), Vec::new(), Vec::new());
-            for ((name, p), b) in g.params.iter().zip(bufs) {
-                let (Some(b), Some(gr)) = (b, grads.grad(p)) else { continue };
+            let (mut ps, mut bs, mut dws, mut gs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (pi, (name, p)) in g.params.iter().enumerate() {
+                let (Some(b), Some(gr)) = (&self.muon[gi][pi], grads.grad(p)) else { continue };
                 if gr.shape() != p.shape() {
                     return Err(Error::Invalid(format!(
                         "musgd: gradient of `{name}` is {:?}, parameter is {:?}",
@@ -231,8 +280,10 @@ impl MuSgd {
                         p.dims()
                     )));
                 }
+                let dw = self.geo != MuonGeoMode::Legacy && g.is_depthwise(pi);
                 ps.push(p);
                 bs.push(b);
+                dws.push(dw);
                 gs.push(gr.to_dtype(DType::F32)?);
             }
             if !ps.is_empty() {
@@ -242,6 +293,7 @@ impl MuSgd {
                     lr: (self.weights.muon * g.lr) as f32,
                     ps,
                     bs,
+                    dws,
                     gs,
                 });
             }
@@ -249,11 +301,15 @@ impl MuSgd {
         if active.is_empty() {
             return Ok(());
         }
-        // Fast path (Polar-FOLO only): when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device,
-        // fuse both momentum update and orthogonalisation into one multi-tensor device pass. Legacy `Ns5` stays
-        // unconditionally on the per-group path for per-group rounding and aliasing semantics. Skip fusion if any
-        // cross-group storage alias exists (before mutating momentum buffers) or if folding a group's `lr` into
-        // `muon_scale` would overflow `f32`.
+        let scale_of = |p: &Tensor, dw: bool| -> f32 {
+            if dw {
+                1.0
+            } else if self.geo == MuonGeoMode::Legacy {
+                muon_scale(p.dims())
+            } else {
+                muon_scale_geo(p.dims())
+            }
+        };
         let first_dev = active[0].ps[0].device();
         let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
         let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
@@ -295,8 +351,8 @@ impl MuSgd {
             let mut scales = Vec::with_capacity(total);
             let mut ok = true;
             'outer: for a in &active {
-                for p in &a.ps {
-                    let sc = muon_scale(p.dims());
+                for (p, &dw) in a.ps.iter().zip(&a.dws) {
+                    let sc = scale_of(p, dw);
                     let s = if fold_lr { sc * a.lr } else { sc };
                     if fold_lr && !s.is_finite() {
                         ok = false;
@@ -311,37 +367,72 @@ impl MuSgd {
         };
         if let Some(scales) = fused_scales {
             let total = scales.len();
-            let (mut ps, mut bs, mut gr) =
-                (Vec::with_capacity(total), Vec::with_capacity(total), Vec::with_capacity(total));
+            let (mut ps, mut bs, mut dws, mut gr) = (
+                Vec::with_capacity(total),
+                Vec::with_capacity(total),
+                Vec::with_capacity(total),
+                Vec::with_capacity(total),
+            );
             for a in &active {
                 ps.extend_from_slice(&a.ps);
                 bs.extend_from_slice(&a.bs);
+                dws.extend_from_slice(&a.dws);
                 gr.extend(a.gs.iter());
             }
             let (mu, nesterov) = (active[0].mu, active[0].nesterov);
             axpby_many(&bs, &gr, mu, 1.0 - mu)?;
-            if muon_fused_with_scales(&ps, &bs, &gr, &scales, mu, nesterov, step_lr, self.ortho)? {
+            if muon_fused_with_scales(&ps, &bs, &gr, &scales, &dws, mu, nesterov, step_lr, self.ortho)? {
                 return Ok(());
             }
-            // Fallback if backend declined: momentum buffers `bs` are already updated; run tensor ops per group.
             for a in &active {
-                muon_step_tensor_ops(&a.ps, &a.bs, &a.gs, a.mu, a.nesterov, a.lr, self.ortho)?;
+                muon_step_tensor_ops(
+                    &a.ps, &a.bs, &a.gs, &a.dws, a.mu, a.nesterov, a.lr, self.ortho, self.geo,
+                )?;
             }
             return Ok(());
         }
         for a in &active {
             let gr: Vec<&Tensor> = a.gs.iter().collect();
-            // m = μ · m + (1 − μ) · g
             axpby_many(&a.bs, &gr, a.mu, 1.0 - a.mu)?;
-            // The rest of the Muon step in a few kernels for all of them, where the backend has it.
-            let scales: Vec<f32> = a.ps.iter().map(|p| muon_scale(p.dims())).collect();
-            if muon_fused_with_scales(&a.ps, &a.bs, &gr, &scales, a.mu, a.nesterov, a.lr, self.ortho)? {
+            let scales: Vec<f32> = a.ps.iter().zip(&a.dws).map(|(p, &dw)| scale_of(p, dw)).collect();
+            if muon_fused_with_scales(&a.ps, &a.bs, &gr, &scales, &a.dws, a.mu, a.nesterov, a.lr, self.ortho)?
+            {
                 continue;
             }
-            muon_step_tensor_ops(&a.ps, &a.bs, &a.gs, a.mu, a.nesterov, a.lr, self.ortho)?;
+            muon_step_tensor_ops(&a.ps, &a.bs, &a.gs, &a.dws, a.mu, a.nesterov, a.lr, self.ortho, self.geo)?;
         }
         Ok(())
     }
+}
+
+/// Exact zero-GEMM per-channel block-diagonal Polar LMO for depthwise conv weights (CPU / tensor fallback).
+fn muon_dw_step_tensor(p: &Tensor, u: &Tensor, lr: f32) -> Result<()> {
+    let rows = p.dims()[0];
+    let cols = p.numel() / rows.max(1);
+    let dev = p.device();
+    let u_cpu = u.to_device(Device::Cpu)?.to_vec::<f32>()?;
+    let mut o_cpu = vec![0.0f32; u_cpu.len()];
+    const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
+    const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
+    for r in 0..rows {
+        let row = &u_cpu[r * cols..(r + 1) * cols];
+        let max_abs = row.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        let sc_big = if max_abs > BIG_THRESH { DOWN_SCALE } else { 1.0 };
+        let mut sq = 0.0f32;
+        for &v in row {
+            let vs = if sc_big != 1.0 { v * sc_big } else { v };
+            sq += vs * vs;
+        }
+        let denom = sq.sqrt() + NS_EPS * sc_big;
+        let out = &mut o_cpu[r * cols..(r + 1) * cols];
+        for (dst, &v) in out.iter_mut().zip(row) {
+            let vs = if sc_big != 1.0 { v * sc_big } else { v };
+            *dst = vs / denom;
+        }
+    }
+    let o = Tensor::from_vec(o_cpu, p.shape().clone())?.to_device(dev)?;
+    p.add_scaled_assign(&o, -lr)?;
+    Ok(())
 }
 
 /// Tensor-op fallback for the post-momentum half of [`MuSgd::muon_step`].
@@ -350,12 +441,13 @@ fn muon_step_tensor_ops(
     ps: &[&Tensor],
     bs: &[&Tensor],
     gs: &[Tensor],
+    dws: &[bool],
     mu: f32,
     nesterov: bool,
     lr: f32,
     ortho: MuonOrtho,
+    geo: MuonGeoMode,
 ) -> Result<()> {
-    // u = μ · m + (1 − μ) · g (Nesterov), else m.
     let us = if nesterov {
         let us = gs.iter().map(|x| x.mul_scalar(1.0 - mu)).collect::<folo_core::Result<Vec<_>>>()?;
         let ur: Vec<&Tensor> = us.iter().collect();
@@ -364,19 +456,33 @@ fn muon_step_tensor_ops(
     } else {
         bs.iter().map(|b| b.mul_scalar(1.0)).collect::<folo_core::Result<Vec<_>>>()?
     };
-    let os = orthogonalize_many_with(&us, ortho)?;
+    let mut mat_ps = Vec::new();
+    let mut mat_us = Vec::new();
+    for ((&p, u), &dw) in ps.iter().zip(us).zip(dws) {
+        if dw {
+            muon_dw_step_tensor(p, &u, lr)?;
+        } else {
+            mat_ps.push(p);
+            mat_us.push(u);
+        }
+    }
+    if mat_ps.is_empty() {
+        return Ok(());
+    }
+    let os = orthogonalize_many_geo(&mat_us, ortho, geo)?;
     let or: Vec<&Tensor> = os.iter().collect();
-    axpby_many(ps, &or, 1.0, -lr)
+    axpby_many(&mat_ps, &or, 1.0, -lr)
 }
 
 /// The rest of [`MuSgd::muon_step`] after the momentum update through the backend's fused kernels
-/// (`Tensor::muon_step_many_`); `false`, touching nothing, where the backend has none.
+/// (`Tensor::muon_step_many_geo_`); `false`, touching nothing, where the backend has none.
 #[allow(clippy::too_many_arguments)]
 fn muon_fused_with_scales(
     ps: &[&Tensor],
     bs: &[&Tensor],
     gs: &[&Tensor],
     scales: &[f32],
+    dws: &[bool],
     mu: f32,
     nesterov: bool,
     lr: f32,
@@ -386,7 +492,7 @@ fn muon_fused_with_scales(
         return Ok(false);
     }
     let settings = MuonSettings::from_schedule(mu, nesterov, ortho.schedule(), ortho.schatten4(), NS_EPS, lr);
-    Ok(Tensor::muon_step_many_(ps, bs, gs, scales, &settings)?)
+    Ok(Tensor::muon_step_many_geo_(ps, bs, gs, scales, dws, &settings)?)
 }
 
 /// `p = a · p + b · g` for every pair: one multi-tensor call on a device that has it, else tensor ops.
@@ -416,6 +522,20 @@ pub fn muon_scale(dims: &[usize]) -> f32 {
     (dims[n - 2] as f32 / dims[n - 1] as f32).max(1.0).sqrt()
 }
 
+/// True 2-D flattened aspect scale for `Conv-GeoMuon`: `sqrt(max(1, m / n))` where `m = dims[0]` and
+/// `n = prod(dims[1..])`.
+pub fn muon_scale_geo(dims: &[usize]) -> f32 {
+    if dims.len() < 2 {
+        return 1.0;
+    }
+    let rows = dims[0];
+    let cols = dims.iter().product::<usize>() / rows.max(1);
+    if cols == 0 {
+        return 1.0;
+    }
+    (rows as f32 / cols as f32).max(1.0).sqrt()
+}
+
 /// Newton–Schulz orthogonalisation of one matrix `g` (`[rows, cols]`): `X = g / (‖g‖_F + 1e-7)`, transposed so
 /// that `rows ≤ cols`, then [`NS_STEPS`] times `A = X·Xᵀ`, `X = a·X + (b·A + c·A·A)·X` with [`NS_COEFFS`], and
 /// transposed back. In `f32` (the reference computes in `bfloat16`).
@@ -438,6 +558,11 @@ pub fn orthogonalize_many(us: &[Tensor]) -> Result<Vec<Tensor>> {
 /// rows ≤ cols and batched by column count, zero-padding the rows (a zero row changes neither the Frobenius norm,
 /// nor the Schatten-4 norm `‖X·Xᵀ‖_F^(1/2)`, nor the other rows' result).
 pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Tensor>> {
+    orthogonalize_many_geo(us, ortho, MuonGeoMode::Legacy)
+}
+
+/// [`orthogonalize_many_with`] extended with [`MuonGeoMode`] (true 2-D aspect scaling).
+fn orthogonalize_many_geo(us: &[Tensor], ortho: MuonOrtho, geo: MuonGeoMode) -> Result<Vec<Tensor>> {
     let _g = folo_core::no_grad();
     // (index, oriented matrix, transposed)
     let mut mats = Vec::with_capacity(us.len());
@@ -478,9 +603,6 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
         let mut x = Tensor::stack(&padded, 0)?;
         if x.numel() > 0 {
             let (norm, eps_s) = if use_s4 {
-                // Exact power-of-two downscale (2^-80) when any element exceeds 2^48 (~2.81e14) so squaring never
-                // overflows f32::MAX (matching the GPU kernel's WGSL finite-math-safe Frobenius norm; exact no-op
-                // on normal gradients). Gated on Polar-FOLO so legacy `Ns5` stays bit-exact with pre-Polar runs.
                 const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
                 const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
                 let max_abs = x.abs()?.max([1, 2], true)?;
@@ -501,8 +623,6 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
                 let xt = x.transpose(1, 2)?.contiguous()?;
                 let am = x.matmul(&xt)?;
                 if step == 0 && use_s4 {
-                    // Zero-extra-GEMM step-0 Schatten-4 spectral rescaling:
-                    // α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps) guarantees σ₁(X₀ / α) < 1 strictly.
                     let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
                     let eps_s = eps_s.as_ref().expect("set when use_s4");
                     let alpha = a_frob.sqrt()?.add(&eps_s.div(&norm)?)?;
@@ -522,10 +642,11 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
         for (j, &k) in ks.iter().enumerate() {
             let (i, m, t) = &mats[k];
             let r = m.dims()[0];
-            let o = x.narrow(0, j, 1)?.narrow(1, 0, r)?.reshape([r, m.dims()[1]])?;
+            let c = m.dims()[1];
+            let o = x.narrow(0, j, 1)?.narrow(1, 0, r)?.reshape([r, c])?;
             let o = if *t { o.transpose(0, 1)? } else { o };
             let u = &us[*i];
-            let s = muon_scale(u.dims());
+            let s = if geo == MuonGeoMode::Legacy { muon_scale(u.dims()) } else { muon_scale_geo(u.dims()) };
             let o = o.contiguous()?.reshape(u.shape().clone())?;
             out[*i] = Some(if s != 1.0 { o.mul_scalar(s)? } else { o });
         }
@@ -572,26 +693,27 @@ impl Optimizer for MuSgd {
         // Omit `muon_ortho` only for legacy `Ns5` so pre-Polar `folo.optim` contracts stay byte-compatible and
         // older readers cleanly reject `Polar4` / `Polar5` checkpoints instead of silently resuming with `Ns5`.
         c.muon_ortho = (self.ortho != MuonOrtho::Ns5).then_some(self.ortho);
+        c.muon_geo = (!self.geo.is_legacy()).then_some(self.geo);
         c
     }
 
-    /// Also adopts the contract's step weights and orthogonalisation schedule. A contract without `musgd` keeps
-    /// the weights this optimizer was built with; one without `muon_ortho` (pre-Polar or explicit `Ns5`
-    /// checkpoint) restores [`MuonOrtho::Ns5`] (bit-exact with pre-Polar `Ns5` on CPU; see `docs/FORMAT.md`).
+    /// Also adopts the contract's step weights, orthogonalisation schedule and geometric conditioning mode.
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
         let weights = c.musgd.unwrap_or(self.weights);
         weights.validate().map_err(|e| Error::Load(format!("folo.optim: {e}")))?;
         apply_group_contract(self, c)?;
         self.weights = weights;
         self.ortho = c.muon_ortho.unwrap_or(MuonOrtho::Ns5);
+        self.geo = c.muon_geo.unwrap_or(MuonGeoMode::Legacy);
+        self.ensure_buffers()?;
         Ok(())
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
         let mut out = self.sgd.state_tensors()?;
-        for (g, bufs) in self.sgd.groups().iter().zip(&self.muon) {
-            for ((name, _), b) in g.params.iter().zip(bufs) {
-                if let Some(b) = b {
+        for (gi, g) in self.sgd.groups().iter().enumerate() {
+            for (pi, (name, _)) in g.params.iter().enumerate() {
+                if let Some(b) = &self.muon[gi][pi] {
                     out.push((format!("{name}.muon_buffer"), b.clone()));
                 }
             }

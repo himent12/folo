@@ -458,6 +458,7 @@ fn candidate_first_replays_are_bit_identical_with_and_without_dfl_precisions() {
                 (BoxFusion::Dfl, ScoreRule::None),
                 (BoxFusion::None, ScoreRule::DflRepulse),
                 (BoxFusion::Dfl, ScoreRule::DflRepulse),
+                (BoxFusion::Sebf, ScoreRule::DflCgr),
             ] {
                 let nms = NmsConfig { score, ..low_conf(0.3, fusion) };
                 let want = cand_bits(&r.predict_candidates(&x, &nms).unwrap());

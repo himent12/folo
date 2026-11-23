@@ -18,7 +18,6 @@ use super::FoloModel;
 use super::head::{HeadLevel, HeadMode};
 use super::predict::{CPU_DECODE_BLOCK, DflWants, Found, dfl_box, finish_candidates, single_label_block};
 use crate::decode::Anchors;
-use crate::fusion::BoxFusion;
 use crate::nms::{Candidate, Detection, DflInputs, NmsConfig, class_allowed};
 
 /// One image's candidates from [`FoloModel::predict_candidates`], in anchor order.
@@ -257,7 +256,7 @@ impl FoloModel {
             return DflWants::default();
         }
         DflWants {
-            side: nms.fusion == BoxFusion::Dfl,
+            side: nms.fusion.wants_side_precision(),
             bin: nms.score.wants_bin_precisions(),
             ent: nms.score.wants_dfl_entropy(),
         }

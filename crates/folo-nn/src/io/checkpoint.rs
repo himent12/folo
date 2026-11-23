@@ -163,6 +163,12 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
             optim.kind.as_str()
         )));
     }
+    if optim.muon_geo.is_some() && optim.kind != OptimKind::MuSgd {
+        return Err(Error::Metadata(format!(
+            "folo.optim: `muon_geo` on a `{}` contract",
+            optim.kind.as_str()
+        )));
+    }
 
     // Every model tensor is in exactly one group, and every group parameter is a model tensor.
     let model: BTreeSet<&str> = file.names(Namespace::Model).into_iter().collect();

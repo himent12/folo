@@ -7,7 +7,8 @@
 // first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
 // S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
 // Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
-// 5 = nwd_weight (0 = pure CIoU).
+// 5 = nwd_weight (0 = pure CIoU), 6 = box_loss_kind (0 = CIoU, 1 = R-PIoU), 7 = rpiou_beta, 8 = rpiou_kappa,
+// 9 = rpiou_delta, 10 = dfl_ot_weight.
 @group(0) @binding(1) var<storage, read> BOX: array<f32>;
 @group(0) @binding(2) var<storage, read> META: array<u32>;
 @group(0) @binding(3) var<storage, read> PICK: array<u32>;
@@ -47,6 +48,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let wt = t * 0.25;
     let hi = pf(4u);
     let ltrb = vec4<f32>(ax - tb.x, ay - tb.y, tb.z - ax, tb.w - ay);
+    let box_kind = pu(6u);
+    let rpiou_beta = pf(7u);
+    let rpiou_kappa = pf(8u);
+    let rpiou_delta = pf(9u);
+    let dfl_ot_w = pf(10u);
 
     // Softmax per side (p) and log-softmax (lp), kept for the backward.
     var p: array<f32, 4u * R>;
@@ -89,6 +95,26 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         wl[side] = l * wt;
         wr[side] = (1.0 - l) * wt;
         dfl = dfl + lp[side * R + ju] * wl[side] + lp[side * R + ju + 1u] * wr[side];
+        if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
+            var l_tail = 0.0;
+            if (ju > 0u) {
+                var acc_suf = lp[side * R + (R - 1u)];
+                for (var step = 0u; step + 1u < R; step++) {
+                    let k = (R - 2u) - step;
+                    if (step > 0u) { acc_suf = lse2(acc_suf, lp[side * R + k + 1u]); }
+                    if (k < ju) { l_tail = l_tail + max(-acc_suf, 0.0); }
+                }
+            }
+            if (ju + 2u < R) {
+                var acc_pre = lp[side * R];
+                for (var k = 1u; k + 1u < R; k++) {
+                    acc_pre = lse2(acc_pre, lp[side * R + k]);
+                    if (k > ju) { l_tail = l_tail + max(-acc_pre, 0.0); }
+                }
+            }
+            // Subtracted because det_combine.wgsl negates r.z (signed-negative DFL convention).
+            dfl = dfl - dfl_ot_w * wt * l_tail;
+        }
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
     let nwd_w = pf(5u);
@@ -96,58 +122,106 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let lam = nwd_lambda((tb.z - tb.x) / inv, (tb.w - tb.y) / inv, nwd_w);
     let c_s = 12.8 * inv;
     if (MODE == 0u) {
-        let l_ciou = 1.0 - ciou_eps(pd, tb);
-        let l_box = select(l_ciou, (1.0 - lam) * l_ciou + lam * (1.0 - nwd_box(pd, tb, c_s)), lam > 0.0);
+        let l_base = select(
+            1.0 - ciou_eps(pd, tb),
+            rpiou_loss_f(pd, tb, rpiou_beta, rpiou_kappa, rpiou_delta),
+            box_kind == 1u,
+        );
+        let l_box = select(l_base, (1.0 - lam) * l_base + lam * (1.0 - nwd_box(pd, tb, c_s)), lam > 0.0);
         OUT[2u * s] = l_box * t;
         OUT[2u * s + 1u] = dfl;
         return;
     }
 
-    // Backward: the CIoU of §7.2 differentiated by hand (α constant), then through the expectation.
-    let eps = 1e-7;
-    let w1 = pd.z - pd.x;
-    let h1 = pd.w - pd.y + eps;
-    let w2 = tb.z - tb.x;
-    let h2 = tb.w - tb.y + eps;
-    let ix = min(pd.z, tb.z) - max(pd.x, tb.x);
-    let iy = min(pd.w, tb.w) - max(pd.y, tb.y);
-    let iw = max(ix, 0.0);
-    let ih = max(iy, 0.0);
-    let inter = iw * ih;
-    let uni = w1 * h1 + w2 * h2 - inter + eps;
-    let iou = inter / uni;
-    let cw = max(pd.z, tb.z) - min(pd.x, tb.x);
-    let ch = max(pd.w, tb.w) - min(pd.y, tb.y);
-    let c2 = cw * cw + ch * ch + eps;
-    let dx = tb.x + tb.z - pd.x - pd.z;
-    let dy = tb.y + tb.w - pd.y - pd.w;
-    let rho2 = (dx * dx + dy * dy) * 0.25;
-    let r1 = w1 / h1;
-    let dd = atan_wh(w2, h2) - atan_wh(w1, h1);
-    let v = dd * dd * V_K;
-    let alpha = v / (v - iou + (1.0 + eps));
-
+    // Backward: R-PIoU or CIoU (§7.2, α constant), then through the expectation.
     let g = GRAD[0];
-    // dL/dCIoU for L = S_box · t · (1 − lam) · (1 − CIoU).
-    let gc = -t * STATS[8] * g * (1.0 - lam);
-    let g_rho2 = -gc / c2;
-    let g_c2 = gc * rho2 / (c2 * c2);
-    let g_v = -gc * alpha;
-    let g_inter = gc * (1.0 / uni + inter / (uni * uni));
-    let g_uni = -gc * inter / (uni * uni);
-    let g_r1 = -g_v * V_K * 2.0 * dd / (1.0 + r1 * r1);
-    let g_w1 = g_uni * h1 + g_r1 / h1;
-    let g_h1 = g_uni * w1 - g_r1 * r1 / h1;
-    let g_ix = select(0.0, g_inter * ih, ix > 0.0);
-    let g_iy = select(0.0, g_inter * iw, iy > 0.0);
-    let g_cw = g_c2 * 2.0 * cw;
-    let g_ch = g_c2 * 2.0 * ch;
-    let g_dx = g_rho2 * 0.5 * dx;
-    let g_dy = g_rho2 * 0.5 * dy;
-    var gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) - g_cw * w_min(pd.x, tb.x) - g_dx;
-    var gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) - g_ch * w_min(pd.y, tb.y) - g_dy;
-    var gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + g_cw * w_max(pd.z, tb.z) - g_dx;
-    var gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + g_ch * w_max(pd.w, tb.w) - g_dy;
+    let g_base = t * STATS[8] * g * (1.0 - lam);
+    var gx1 = 0.0;
+    var gy1 = 0.0;
+    var gx2 = 0.0;
+    var gy2 = 0.0;
+    if (box_kind == 1u) {
+        let eps = 1e-7;
+        let w1 = max(pd.z - pd.x, 0.0);
+        let h1 = max(pd.w - pd.y, 0.0);
+        let w2 = max(tb.z - tb.x, 0.0);
+        let h2 = max(tb.w - tb.y, 0.0);
+        let ix = min(pd.z, tb.z) - max(pd.x, tb.x);
+        let iy = min(pd.w, tb.w) - max(pd.y, tb.y);
+        let iw = max(ix, 0.0);
+        let ih = max(iy, 0.0);
+        let inter = iw * ih;
+        let uni = w1 * h1 + w2 * h2 - inter + eps;
+        let iou = inter / uni;
+        let g_u = -g_base * (1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
+        let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
+        let g_uni = -g_u * inter / (uni * uni);
+        let g_w1 = select(0.0, g_uni * h1, pd.z > pd.x);
+        let g_h1 = select(0.0, g_uni * w1, pd.w > pd.y);
+        let g_ix = select(0.0, g_inter * ih, ix > 0.0);
+        let g_iy = select(0.0, g_inter * iw, iy > 0.0);
+        let d2 = rpiou_delta * rpiou_delta;
+        let denom_x = w2 * w2 + d2;
+        let denom_y = h2 * h2 + d2;
+        let dx1 = pd.x - tb.x;
+        let dx2 = pd.z - tb.z;
+        let dy1 = pd.y - tb.y;
+        let dy2 = pd.w - tb.w;
+        let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
+        let ke2_raw = rpiou_kappa * e2;
+        let active_e = is_finite_f(ke2_raw) && ke2_raw < 1e16;
+        let inv1 = select(0.0, 1.0 / (1.0 + ke2_raw), active_e);
+        let g_e = g_base * 0.5 * rpiou_kappa * (inv1 * inv1);
+        let sx = g_e / denom_x;
+        let sy = g_e / denom_y;
+        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + sx * dx1;
+        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + sy * dy1;
+        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + sx * dx2;
+        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + sy * dy2;
+    } else {
+        let eps = 1e-7;
+        let w1 = pd.z - pd.x;
+        let h1 = pd.w - pd.y + eps;
+        let w2 = tb.z - tb.x;
+        let h2 = tb.w - tb.y + eps;
+        let ix = min(pd.z, tb.z) - max(pd.x, tb.x);
+        let iy = min(pd.w, tb.w) - max(pd.y, tb.y);
+        let iw = max(ix, 0.0);
+        let ih = max(iy, 0.0);
+        let inter = iw * ih;
+        let uni = w1 * h1 + w2 * h2 - inter + eps;
+        let iou = inter / uni;
+        let cw = max(pd.z, tb.z) - min(pd.x, tb.x);
+        let ch = max(pd.w, tb.w) - min(pd.y, tb.y);
+        let c2 = cw * cw + ch * ch + eps;
+        let dx = tb.x + tb.z - pd.x - pd.z;
+        let dy = tb.y + tb.w - pd.y - pd.w;
+        let rho2 = (dx * dx + dy * dy) * 0.25;
+        let r1 = w1 / h1;
+        let dd = atan_wh(w2, h2) - atan_wh(w1, h1);
+        let v = dd * dd * V_K;
+        let alpha = v / (v - iou + (1.0 + eps));
+
+        let gc = -g_base;
+        let g_rho2 = -gc / c2;
+        let g_c2 = gc * rho2 / (c2 * c2);
+        let g_v = -gc * alpha;
+        let g_inter = gc * (1.0 / uni + inter / (uni * uni));
+        let g_uni = -gc * inter / (uni * uni);
+        let g_r1 = -g_v * V_K * 2.0 * dd / (1.0 + r1 * r1);
+        let g_w1 = g_uni * h1 + g_r1 / h1;
+        let g_h1 = g_uni * w1 - g_r1 * r1 / h1;
+        let g_ix = select(0.0, g_inter * ih, ix > 0.0);
+        let g_iy = select(0.0, g_inter * iw, iy > 0.0);
+        let g_cw = g_c2 * 2.0 * cw;
+        let g_ch = g_c2 * 2.0 * ch;
+        let g_dx = g_rho2 * 0.5 * dx;
+        let g_dy = g_rho2 * 0.5 * dy;
+        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) - g_cw * w_min(pd.x, tb.x) - g_dx;
+        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) - g_ch * w_min(pd.y, tb.y) - g_dy;
+        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + g_cw * w_max(pd.z, tb.z) - g_dx;
+        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + g_ch * w_max(pd.w, tb.w) - g_dy;
+    }
     if (lam > 0.0) {
         let dcx = 0.5 * (pd.x + pd.z - tb.x - tb.z);
         let dcy = 0.5 * (pd.y + pd.w - tb.y - tb.w);
@@ -162,15 +236,54 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         gy2 = gy2 + gn * (dcy + 0.5 * dh);
     }
     let g_d = vec4<f32>(-gx1, -gy1, gx2, gy2);
-    // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}).
+    // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}) + S_dfl · OT_tail.
     let sd = STATS[10] * g;
+    let use_ot = dfl_ot_w > 0.0 && R > 2u;
+    let ot_scale = sd * dfl_ot_w * wt;
+    let r_m2 = f32(R - 2u);
     for (var side = 0u; side < 4u; side++) {
         let wsum = wl[side] + wr[side];
+        let ju = jl[side];
+        var m_suf: array<f32, R>;
+        var m_pre: array<f32, R>;
+        if (use_ot) {
+            if (ju > 0u) {
+                var acc_suf = lp[side * R + (R - 1u)];
+                for (var step = 0u; step + 1u < R; step++) {
+                    let k = (R - 2u) - step;
+                    if (step > 0u) { acc_suf = lse2(acc_suf, lp[side * R + k + 1u]); }
+                    if (k < ju) { m_suf[k] = -acc_suf; }
+                }
+                for (var r = 1u; r < ju; r++) {
+                    m_suf[r] = lse2(m_suf[r - 1u], m_suf[r]);
+                }
+            }
+            if (ju + 2u < R) {
+                var acc_pre = lp[side * R];
+                for (var k = 1u; k + 1u < R; k++) {
+                    acc_pre = lse2(acc_pre, lp[side * R + k]);
+                    if (k > ju) { m_pre[k] = -acc_pre; }
+                }
+                var r = R - 2u;
+                while (r > ju + 1u) {
+                    r = r - 1u;
+                    m_pre[r] = lse2(m_pre[r + 1u], m_pre[r]);
+                }
+            }
+        }
         for (var k = 0u; k < R; k++) {
             let q = p[side * R + k];
             var gk = g_d[side] * q * (f32(k) - d[side]) + sd * wsum * q;
-            if (k == jl[side]) { gk = gk - sd * wl[side]; }
-            if (k == jl[side] + 1u) { gk = gk - sd * wr[side]; }
+            if (k == ju) { gk = gk - sd * wl[side]; }
+            if (k == ju + 1u) { gk = gk - sd * wr[side]; }
+            if (use_ot) {
+                let lpk = lp[side * R + k];
+                var bm = 0.0;
+                if (k > 0u && ju > 0u) { bm = fexp(lpk + m_suf[min(k - 1u, ju - 1u)]); }
+                var am = 0.0;
+                if (k + 1u < R && ju + 2u < R) { am = fexp(lpk + m_pre[max(k, ju + 1u)]); }
+                gk = gk + ot_scale * (r_m2 * q - bm - am);
+            }
             OUT[base + (side * R + k) * na] = gk;
         }
     }

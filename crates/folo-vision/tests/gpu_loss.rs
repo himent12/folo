@@ -231,6 +231,11 @@ fn returned_stats_do_not_feed_the_backward() {
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         mal_gamma: cfg.mal_gamma,
         nwd_weight: cfg.nwd_weight,
+        box_loss: folo_gpu::detect::BoxLossKind::Ciou,
+        rpiou_beta: cfg.rpiou_beta,
+        rpiou_kappa: cfg.rpiou_kappa,
+        rpiou_delta: cfg.rpiou_delta,
+        dfl_ot_weight: cfg.dfl_ot_weight,
         tal: folo_gpu::detect::TalSettings {
             topk: cfg.tal.topk,
             topk2: cfg.tal.topk2,
@@ -272,4 +277,49 @@ fn unsupported_settings_fall_back_to_the_host() {
     let want = detection_loss_host(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
     assert!(got.is_finite() && got.num_fg > 0);
     assert_eq!(got.total_value, want.total_value);
+}
+
+/// CPU-vs-GPU parity for `R-PIoU`, `OT-DFL`, and `R-PIoU + OT-DFL`.
+#[test]
+fn new_math_formulas_match_host() {
+    let dev = gpu!();
+    use folo_vision::loss::BoxLossKind;
+    let rpiou = LossConfig { box_loss: BoxLossKind::Rpiou, ..LossConfig::default() };
+    let otdfl = LossConfig { dfl_ot_weight: 0.25, ..LossConfig::default() };
+    let box_combo = LossConfig { dfl_ot_weight: 0.25, ..rpiou };
+
+    for (name, seed, cfg) in [("rpiou", 61, rpiou), ("otdfl", 62, otdfl), ("rpiou+otdfl", 63, box_combo)] {
+        let (anchors, box_raw, cls_raw, targets) = case(seed, 128, 5);
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want_asg = assign_batch(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got_asg = assign_batch_device(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert_same_assignment(&got_asg, &want_asg);
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite(), "{name}: non-finite");
+        assert_eq!(got.num_fg, want.num_fg, "{name}: num_fg");
+        let rel = |g: f32, w: f32| (g - w).abs() <= 2e-4 * w.abs().max(1e-3);
+        let (gi, wi) = (got.items, want.items);
+        assert!(
+            rel(gi.box_, wi.box_) && rel(gi.cls, wi.cls) && rel(gi.dfl, wi.dfl),
+            "{name}: {gi:?} vs {wi:?}"
+        );
+        assert!(
+            rel(got.total_value, want.total_value),
+            "{name}: {} vs {}",
+            got.total_value,
+            want.total_value
+        );
+        let (gg, gw) = (got.total.backward().unwrap(), want.total.backward().unwrap());
+        for (tensor_name, d, h) in [("box_raw", &bd, &bh), ("cls_raw", &cd, &ch)] {
+            let g = gg.get(d).unwrap().to_vec::<f32>().unwrap();
+            let w = gw.get(h).unwrap().to_vec::<f32>().unwrap();
+            let scale = w.iter().fold(0f32, |m, v| m.max(v.abs()));
+            close_vec(&g, &w, 2e-4 * scale.max(1e-4), 2e-3, &format!("{name}/{tensor_name}"));
+        }
+    }
 }

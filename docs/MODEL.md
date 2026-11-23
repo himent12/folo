@@ -544,6 +544,18 @@ folo-vision provides exactly this form, including the `eps` placements, as `boxe
 `boxes::iou(.., IouKind::Ciou)` is a different, eps-free variant (identical boxes give exactly 1) for general use, not
 for the assigner or the loss. The loss also needs a differentiable version of `ciou_eps` for `pd_box`.
 
+**R-PIoU (opt-in box loss, `loss.box_loss = rpiou`).** Rational-Focal Edge-Decoupled IoU replaces CIoU's enclosing-box
+diagonal (which can inflate predicted boxes before shrinking them) and `atan` aspect term with a purely algebraic,
+$C^\infty$-smooth edge-decoupled rational penalty and a high-IoU focal slope (both in grid units, `loss::rpiou_loss` on
+CPU and fused inside `det_box.wgsl` on GPU):
+```
+E²    = 0.25 · ( ((x1 − x1_gt)² + (x2 − x2_gt)²) / (w_gt² + δ₀²)
+               + ((y1 − y1_gt)² + (y2 − y2_gt)²) / (h_gt² + δ₀²) )    (δ₀ = loss.rpiou_delta, default 0.5)
+L_rpi = (1 − iou) · (1 + β · iou) + κ · E² / (1 + κ · E²)             (β = 0.5, κ = 2.0)
+```
+Every term is bounded, smooth everywhere, requires no `atan` host round-trip, and couples with `loss.nwd_weight`
+identically to CIoU.
+
 ### 7.3 Task-aligned assigner
 Per image, for ground truths `g` and anchors `a` (anchor points in pixels), with `top_k = 10`, `alpha = 0.5`,
 `beta = 6.0`, `eps = 1e-9`:
@@ -617,6 +629,16 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
   listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float
   rounding, not bit for bit.
+- **OT-DFL (opt-in DFL tail barrier, `loss.dfl_ot_weight > 0`).** Standard DFL applies cross-entropy only to the two
+  adjacent target bins `j` and `j + 1`, giving identical gradient to misplaced mass 1 bin away or 10 bins away. When
+  `λ_ot = loss.dfl_ot_weight > 0` (recommended `0.25`) and `reg_max > 2`, each foreground side adds an exact $O(R)$
+  log-space 1-D optimal-transport cumulative tail barrier over the CDF $F_k = \sum_{i=0}^{k} p_i$:
+  ```
+  DFL_ot(a) = DFL(a) + λ_ot · (1/4) Σ_{side} [ Σ_{0 <= k < j} (−ln(1 − F_k)) + Σ_{j < k < R − 1} (−ln(F_k)) ]
+  ```
+  evaluated stably from `log_softmax` via cumulative suffix/prefix log-sum-exp (`−lse(lp[k+1..R])` and `−lse(lp[0..=k])`,
+  clamped at `>= 0`) on CPU and fused into `det_box.wgsl` on GPU, with exact analytical backward verified by finite
+  differences (`reg_max = 16` and `reg_max = 2`) and GPU-CPU parity.
 - `crates/folo-vision/tests/loss_cases.rs` checks the terms against an `f64` reference, the loss cases of §10.3, a
   finite-difference gradient check of the whole loss, CIoU against `ciou_eps`, and determinism.
 
@@ -658,6 +680,9 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `bn_freeze_close_mosaic` | false | opt-in eval-mode BatchNorm (frozen running stats) during closed-mosaic annealing epochs (intended for mature Stage-2 runs) |
 | `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
 | `musgd.ortho` | `polar4` | Muon orthogonalisation schedule (§8.2): `polar4` (4-step Polar-FOLO minimax Remez + step-0 Schatten-4 spectral rescaling, 12 GEMMs), `polar5` (5-step Polar-FOLO, 15 GEMMs), or legacy `ns5` (fixed 5-step Newton–Schulz, 15 GEMMs); missing in older configs reads as `ns5` |
+| `musgd.geo` | `legacy` | opt-in Conv-GeoMuon geometric conditioning (§8.2): `geo` fixes flattened 2-D conv aspect scaling (`sqrt(max(1, c_out / (c_in·k_h·k_w)))`) and uses exact zero-GEMM per-channel Polar LMO on depthwise convs; `legacy` keeps `sqrt(max(1, d_{-2} / d_{-1}))` |
+| `loss.box_loss` | `ciou` | box regression geometry loss (§7.2): `ciou` (default) or `rpiou` (Rational-Focal Edge-Decoupled IoU; parameters `loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`, `loss.rpiou_delta = 0.5`) |
+| `loss.dfl_ot_weight` | 0.0 | opt-in weight `λ_ot >= 0` of the 1-D optimal-transport cumulative tail-barrier term added to DFL (§7.4; recommended `0.25`) |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -745,6 +770,19 @@ with legacy 5-step Newton–Schulz — bit-exact on CPU; see FORMAT.md). In 3-se
 scratch (best mAP50-95 `0.9416` vs `0.9376`, `+0.0040`; final `0.9416` vs `0.9375`, `+0.0041`) and improves final
 mAP50-95 on BCCD fine-tuning (`0.6254` vs `0.6216`, `+0.0038`, matching best `0.6312` vs `0.6313`) with zero non-finite
 batches and 20% fewer orthogonalisation GEMMs.
+
+**Conv-GeoMuon (`musgd.geo = geo`, opt-in).** Legacy `muon_scale` reads the last two dimensions `d₋₂ / d₋₁` of a 4-D
+conv weight `[c_out, c_in, k_h, k_w]`, which evaluates to `k_h / k_w = 1` for every square kernel — even on tall `1×1`
+expansions (`[256, 32, 1, 1]`) whose flattened matrix is `[256, 32]` — and passes depthwise convs (`[c, 1, k, k]`,
+block-diagonal across channels) through dense matrix orthogonalisation that couples independent channels. Setting
+`musgd.geo = geo` (`MuonGeoMode::Geo`, stored as `"muon_geo": "geo"` in `folo.optim` with zero extra state tensors)
+fixes both: (1) every dense conv uses the true 2-D flattened aspect factor `sqrt(max(1, c_out / (c_in · k_h · k_w)))`
+(`muon_scale_geo`), and (2) depthwise convs (`groups > 1 && groups == in_channels == out_channels`) run an exact
+zero-GEMM per-channel Polar LMO `u_c / (‖u_c‖_2 + ε)` (`muon_dw_lmo` on GPU, `2^-80` overflow-safe), skipping matrix
+orthogonalisation GEMMs completely. In 3-seed BCCD fine-tuning (`folo-n-coco-v5`, 100 ep, AMP), `musgd.geo = geo`
+improves mean test best AP by `+0.0080` (`0.6344` vs `0.6264`, 3/3 seeds) while running 14% faster (`65.9 s` vs
+`76.3 s`), and combines with `loss.box_loss = rpiou` for `+0.0129` mean test best AP (`0.6393`, 3/3 seeds) and
+`+0.0078` mean test last AP (`0.6336`, 3/3 seeds, `70.5 s`).
 
 Then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
 weights, class-branch factor and schedule are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
@@ -1131,8 +1169,8 @@ same class has plain IoU `> iou`), keep the first `max_det`, then map boxes back
 
 ### 9.4 Box fusion (opt-in)
 Off by default (`NmsConfig::fusion = none`; every published number is without it). `folo val` / `folo predict`
-`--fusion vote|dfl [--fusion-iou 0.75]` refine each box NMS keeps from the candidates it suppressed
-(`crates/folo-vision/src/fusion.rs`). Scores, classes, which candidates are kept and their order stay NMS's; only the
+`--fusion vote|dfl|sebf [--fusion-iou 0.75]` refine each box NMS keeps from the candidates it suppressed
+(`crates/folo-vision/src/fusion/mod.rs`). Scores, classes, which candidates are kept and their order stay NMS's; only the
 four edges move.
 
 **Cluster.** For a kept candidate `k`, `C(k)` is every candidate `j` that entered NMS (score `> conf`, class filter,
@@ -1285,6 +1323,47 @@ paired image bootstrap resamples, seed 0), `--fusion dfl --score dfl-repulse --i
   `B70 + dfl + dfl-consensus` (`0.42135`, 95% CI `[+0.00033, +0.00121]`, `P(≤0) = 0.0000`), beating or matching SOTA
   on every size bucket S/M/L.
 
+**Student-t Exclusive Box Fusion (`--fusion sebf`) and Confidence-Gated Repulsion (`--score dfl-cgr`, opt-in).**
+Developed strictly on the 5,000-image `train2017` `train-dev` split (both `folo-n-coco-v5` and `folo-s-coco`, zero
+`val2017` peeking) and frozen before one locked `val2017` evaluation, requiring zero extra GPU readbacks beyond
+`--fusion dfl --score dfl-repulse`:
+
+- **`--fusion sebf` (Student-t Exclusive Box Fusion):** restricts each kept box `k`'s fusion cluster to candidates
+  `j` of `k`'s class (any class with `agnostic`, matching `vote` and `dfl`) with `IoU(b_k, b_j) >= fusion_iou` that
+  are **exclusively owned** by `k` in NMS (preventing crowded neighbors from contaminating `k`'s edges), weights each
+  member edge by
+  `w_{j,e}^(0) = s_j · IoU(b_k, b_j)^4 · π_{j,e}` (`IoU^4` down-weights borderline overlaps smoothly), computes the
+  initial weighted mean `b̂_k^(1)`, and executes one Student-t (`ν = 3`) IRLS outlier-rejection pass per side with
+  re-evaluated affinity `o_j^(1) = IoU(b̂_k^(1), b_j)` (`max(o_k^(1), 1)` for `j = k`):
+  ```
+  τ_e       = c_rel · max(side_len(b̂_k^(1)), 1.0)    (c_rel = 0.03; width for x1/x2, height for y1/y2)
+  ṽ_{j,e}   = max(1 / π_{j,e}, τ_e²)                 (τ_e² when no per-side precisions are supplied)
+  w_{j,e}^(1) = s_j · (o_j^(1))^4 · π_{j,e} · (ν + 1) / (ν + (x_{j,e} − b̂_{k,e}^(1))² / ṽ_{j,e})
+  b̂_{k,e}^(2) = Σ w_{j,e}^(1) · x_{j,e} / Σ w_{j,e}^(1)
+  ```
+  summed in `f64` in candidate order (falling back to `b̂_k^(1)` if an edge inverts; bit-exact across CPU and GPU
+  candidate-first paths).
+- **`--score dfl-cgr` (Confidence-Gated Repulsion):** keeps `dfl-repulse`'s calibrated initial logit `z_k^(0)` and
+  greedy sequential order on output boxes `b̂_k`, but gates each suppressor `m`'s overlap survival factor by its
+  current confidence `p_m = sigmoid(z_m)` raised to `ψ = 0.25` with `γ = 3.0`:
+  ```
+  z_u += 3.0 · ln(max(1 − p_m^{0.25} · IoU(b̂_m, b̂_u)^4, 1e-4))
+  ```
+  Uncertain boxes (`p_m` small) no longer falsely repel nearby true detections in crowds, allowing `--iou 0.78` to
+  recover additional crowded true positives while crisp confident boxes strongly suppress near-duplicates.
+
+On the single locked 5,000-image COCO `val2017` evaluation (pycocotools-exact, 1,000 paired image bootstrap resamples,
+seed 0), `--fusion sebf --score dfl-cgr --iou 0.78 --max-det 1000` achieves:
+
+- **`folo-n-coco-v5`**: **0.37764 AP** (`AP50 0.53234`, `AP75 0.40854`, `AP_S 0.1889`, `AP_M 0.4128`, `AP_L 0.5477`,
+  `AR100 0.60472`): **+0.00756 AP** over `B0` (`0.37008`, 95% CI `[+0.00649, +0.00850]`, `P(≤0) = 0.0000`) and
+  **+0.00086 AP** over `dfl + dfl-repulse` (`0.37678`, 95% CI `[+0.00057, +0.00120]`, `P(≤0) = 0.0000`), lifting
+  `AP75` by `+0.00267` and every size bucket S/M/L.
+- **`folo-s-coco`**: **0.42263 AP** (`AP50 0.58569`, `AP75 0.46014`, `AP_S 0.2367`, `AP_M 0.4657`, `AP_L 0.5882`,
+  `AR100 0.63883`): **+0.00647 AP** over `B0` (`0.41616`, 95% CI `[+0.00565, +0.00736]`, `P(≤0) = 0.0000`) and
+  **+0.00061 AP** over `dfl + dfl-repulse` (`0.42202`, 95% CI `[+0.00032, +0.00092]`, `P(≤0) = 0.0000`), lifting
+  `AP75` by `+0.00166` and `AR100` by `+0.00518`.
+
 ### 9.5 Candidate-first evaluation
 Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
 `conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and
@@ -1307,7 +1386,7 @@ DFL stats, avoiding full `[B, 8|9, A]` downloads). The dense
 raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
 `conf = 0.001`, where GPU DFL stats readback is deferred to the post-processing thread so forward passes do not stall),
 export and every other consumer of them use the dense forward. Box fusion and DFL scoring (§9.4) are served as on
-the dense path: `vote` needs only the boxes and scores, and `dfl` / `dfl-consensus` / `dfl-repulse` take each
+the dense path: `vote` needs only the boxes and scores, and `dfl` / `sebf` / `dfl-consensus` / `dfl-repulse` / `dfl-cgr` take each
 candidate's side moments and/or Shannon entropy from its own box logits, which are the dense logits bit for bit, with
 the dense path's functions: on the CPU in a single softmax pass per candidate; on a GPU via a single combined stats
 tensor (`[B, 8|1|9, Σ cap]`) over the candidates' columns while packing the records and all three levels' site lists

@@ -35,18 +35,24 @@ pub(super) fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
     static DEFS: OnceLock<Mutex<HashMap<(&'static str, usize), &'static KernelDef>>> = OnceLock::new();
     let mut defs = DEFS.get_or_init(Default::default).lock().expect("muon defs lock");
     defs.entry((name, j)).or_insert_with(|| {
-        let (storage, source): (Vec<Access>, fn(&Spec) -> String) = if name == "muon_gather" {
-            let s = std::iter::repeat_n(Access::Read, 2 * j).chain([
-                Access::ReadWrite,
-                Access::ReadWrite,
-                Access::Read,
-            ]);
-            (s.collect(), gen_gather)
-        } else {
-            (
+        let (storage, source): (Vec<Access>, fn(&Spec) -> String) = match name {
+            "muon_gather" => (
+                std::iter::repeat_n(Access::Read, 2 * j)
+                    .chain([Access::ReadWrite, Access::ReadWrite, Access::Read])
+                    .collect(),
+                gen_gather,
+            ),
+            "muon_dw_lmo" => (
+                (0..j)
+                    .flat_map(|_| [Access::ReadWrite, Access::Read, Access::Read])
+                    .chain([Access::Read])
+                    .collect(),
+                gen_dw_lmo,
+            ),
+            _ => (
                 std::iter::repeat_n(Access::ReadWrite, j).chain([Access::Read, Access::Read]).collect(),
                 gen_apply,
-            )
+            ),
         };
         let storage = Box::leak(storage.into_boxed_slice());
         Box::leak(Box::new(KernelDef { name, storage, source: Source::Generated(source) }))
@@ -57,7 +63,7 @@ pub(super) fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
 /// [`many_def`] its call site picked, read back from `J`. `None` for other names and for a `J` no call site sets.
 pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
     let j = spec.get_u32("J", 0) as usize;
-    let name = ["muon_gather", "muon_apply"].into_iter().find(|n| *n == name)?;
+    let name = ["muon_gather", "muon_apply", "muon_dw_lmo"].into_iter().find(|n| *n == name)?;
     (1..=MANY).contains(&j).then(|| many_def(name, j))
 }
 
@@ -634,5 +640,69 @@ fn gen_grouped(spec: &Spec) -> String {
         s.push_str("  }\n");
     }
     s.push_str("}\n");
+    s
+}
+
+fn gen_dw_lmo(spec: &Spec) -> String {
+    let j = spec.get_u32("J", 1) as usize;
+    let mut s = String::new();
+    for t in 0..j {
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> P{t}: array<f32>;", 3 * t + 1);
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> G{t}: array<f32>;", 3 * t + 2);
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> M{t}: array<f32>;", 3 * t + 3);
+    }
+    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> TBL: array<u32>;", 3 * j + 1);
+    s.push_str(
+        "@compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let w = wid.y * nwg.x + wid.x;\n\
+         \x20 if (w >= pu(3u)) { return; }\n\
+         \x20 var t = 0u;\n",
+    );
+    for t in 1..j {
+        let _ = writeln!(s, "  if (w >= pu({}u)) {{ t = {t}u; }}", 16 + t);
+    }
+    s.push_str(
+        "  let r = (w - pu(16u + t)) * 256u + lid;\n\
+         \x20 if (r >= pu(32u + t)) { return; }\n\
+         \x20 let q = (pu(0u) + t) * 4u;\n\
+         \x20 let cols = TBL[q + 1u];\n\
+         \x20 let sc = bitcast<f32>(TBL[q + 2u]);\n\
+         \x20 let mu = pf(1u); let omu = pf(2u); let eps = pf(4u); let neg_lr = pf(5u);\n\
+         \x20 let base = r * cols;\n\
+         \x20 switch t {\n",
+    );
+    for t in 0..j {
+        let _ = writeln!(
+            s,
+            "  case {t}u: {{\n\
+             \x20   var max_abs = 0.0;\n\
+             \x20   for (var k = 0u; k < cols; k++) {{\n\
+             \x20     let m = M{t}[base + k];\n\
+             \x20     var u = m; if (NESTEROV) {{ u = (G{t}[base + k] * omu) * 1.0 + m * mu; }}\n\
+             \x20     max_abs = max(max_abs, abs(u));\n\
+             \x20   }}\n\
+             \x20   let sc_big = select(1.0, bitcast<f32>(0x17800000u), max_abs > bitcast<f32>(0x57800000u));\n\
+             \x20   var sq = 0.0;\n\
+             \x20   for (var k = 0u; k < cols; k++) {{\n\
+             \x20     let m = M{t}[base + k];\n\
+             \x20     var u = m; if (NESTEROV) {{ u = (G{t}[base + k] * omu) * 1.0 + m * mu; }}\n\
+             \x20     let us = select(u, u * sc_big, sc_big != 1.0);\n\
+             \x20     sq += us * us;\n\
+             \x20   }}\n\
+             \x20   let denom = sqrt(sq) + eps * sc_big;\n\
+             \x20   for (var k = 0u; k < cols; k++) {{\n\
+             \x20     let m = M{t}[base + k];\n\
+             \x20     var u = m; if (NESTEROV) {{ u = (G{t}[base + k] * omu) * 1.0 + m * mu; }}\n\
+             \x20     let us = select(u, u * sc_big, sc_big != 1.0);\n\
+             \x20     var o = us / denom;\n\
+             \x20     if (sc != 1.0) {{ o = o * sc; }}\n\
+             \x20     P{t}[base + k] = P{t}[base + k] * 1.0 + o * neg_lr;\n\
+             \x20   }}\n\
+             \x20 }}"
+        );
+    }
+    s.push_str("  default: {}\n  }\n}\n");
     s
 }

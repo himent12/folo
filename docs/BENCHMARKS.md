@@ -1228,6 +1228,32 @@ that choice, on the same images. At validation's settings the rule adds a median
 (mean 0.08–0.17 ms, p99 up to 1.9 ms; shared PC, 20–26% busy). The gain was measured at validation's `conf` 0.001 only.
 The server, Studio, ONNX export and the wasm build do not offer it.
 
+**SEBF + DFL-CGR post-processing (opt-in, docs/MODEL.md §9.4):** `--fusion sebf --score dfl-cgr --iou 0.78 --max-det 1000`
+was developed strictly on 5,000 `train2017` images (`train-dev`) and evaluated once on locked COCO `val2017` (GPU f32,
+pycocotools-exact, 1,000 paired image bootstrap resamples, seed 0):
+
+| weights | default (`B0`) AP / AP75 | `dfl + dfl-repulse` (`--iou 0.75`) | **`sebf + dfl-cgr` (`--iou 0.78`)** | gain vs `B0` [95% CI] | gain vs `dfl-repulse` [95% CI] |
+|---|---|---|---:|---:|---:|
+| `folo-n-coco-v5` | 0.37008 / 0.39999 | 0.37678 / 0.40587 | **0.37764** / **0.40854** | +0.00756 [+0.00649, +0.00850] | +0.00086 [+0.00057, +0.00120] |
+| `folo-s-coco` | 0.41616 / 0.45193 | 0.42202 / 0.45848 | **0.42263** / **0.46014** | +0.00647 [+0.00565, +0.00736] | +0.00061 [+0.00032, +0.00092] |
+
+All four paired bootstrap intervals have `P(≤ 0) = 0.0000` (1,000 / 1,000 resamples).
+
+**R-PIoU, OT-DFL and Conv-GeoMuon training formulas (opt-in, docs/MODEL.md §7.2, §7.4, §8.2):** 3-seed fine-tuning
+ablation from `folo-n-coco-v5` on BCCD (100 epochs, 640 px, batch 16, AMP, RTX 4080 SUPER, seeds 0–2, test split AP):
+
+| arm (`--set ...`) | mean test best AP (seeds 0 / 1 / 2) | mean test last AP | Δ best AP | mean wall time |
+|---|---|---:|---:|---:|
+| baseline (`ciou`, `musgd.geo=legacy`) | 0.6264 (0.6338 / 0.6170 / 0.6285) | 0.6258 | — | 76.3 s |
+| `loss.dfl_ot_weight=0.25` (`OT-DFL`) | 0.6306 (0.6370 / 0.6213 / 0.6336) | 0.6261 | +0.0042 (3/3) | 58.9 s |
+| `musgd.geo=geo` (`Conv-GeoMuon`) | 0.6344 (0.6354 / 0.6317 / 0.6361) | 0.6259 | +0.0080 (3/3) | 65.9 s |
+| `loss.box_loss=rpiou` (`R-PIoU`) | 0.6385 (0.6417 / 0.6311 / 0.6427) | 0.6295 | +0.0121 (3/3) | 75.0 s |
+| **`loss.box_loss=rpiou` + `musgd.geo=geo`** | **0.6393** (0.6397 / 0.6333 / 0.6448) | **0.6336** | **+0.0129 (3/3)** | **70.5 s** |
+
+On a 5,000-image `train2017` from-scratch proxy (`folo-n`, 20 epochs, 320 px, AMP, seed 0), `Conv-GeoMuon` also raises
+val AP from `0.0530` to `0.0570` (`+0.0040`, batch 32) and `0.0513` to `0.0531` (`+0.0019`, batch 16), and `R-PIoU`
+raises it to `0.0552` (`+0.0022`).
+
 **Equal budget on a COCO proxy** (the hill-climb's learn agent, [notes/hill/learn.md](notes/hill/learn.md)): 20,000 train2017 /
 2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
 scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed for the last 5; COCO AP

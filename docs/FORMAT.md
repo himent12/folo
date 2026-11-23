@@ -105,7 +105,8 @@ separately.
                 "betas": [0.9, 0.999], "eps": 1e-8 } ],   // the fields that apply to `type`
   "step": 1234,                                            // number of optimizer.step() calls; equals optim.__step
   "musgd": { "muon": 0.5, "sgd": 0.5 },                    // MuSGD step weights; only when not the defaults
-  "muon_ortho": "polar4" | "polar5" }                      // MuSGD ortho schedule; omitted for legacy "ns5"
+  "muon_ortho": "polar4" | "polar5",                       // MuSGD ortho schedule; omitted for legacy "ns5"
+  "muon_geo": "geo" }                                      // MuSGD Conv-GeoMuon mode; omitted for legacy
 ```
 `musgd` holds MuSGD's step weights (docs/MODEL.md §8.2, `train.musgd.muon` / `train.musgd.sgd`): both finite and
 `>= 0`, and only on a `"musgd"` contract. It is written only when the weights differ from the defaults 0.2 / 1.0, so a
@@ -115,10 +116,13 @@ built with (the trainer builds it from `folo.train`'s `musgd`, so a file that re
 resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's orthogonalisation schedule (`"polar4"`, the default for new runs, or `"polar5"`; only on a
 `"musgd"` contract) and is omitted for legacy `"ns5"`, so the `folo.optim` contract of `"ns5"` runs stays byte-for-byte
 compatible with pre-Polar checkpoints (note that trainer checkpoints' informational `folo.train` adds `musgd.ortho`).
+`muon_geo` holds MuSGD's optional geometric conditioning mode (`"geo"` for Conv-GeoMuon, docs/MODEL.md §8.2; only on a
+`"musgd"` contract, omitted for legacy so existing checkpoints stay byte-for-byte identical and absent `muon_geo`
+resumes in legacy mode).
 When `muon_ortho` is absent, resuming restores legacy `"ns5"` (5-step Newton–Schulz: bit-exact with pre-Polar `"ns5"`
 on the CPU and deterministic save/resume within the same binary; GPU `"ns5"` runs through the current 4-aligned
 symmetric `muon_gemm` kernel rather than preserving pre-Polar GPU tile reduction order or binding-limit boundaries),
-while a reader that predates either key rejects a file that has it (unknown field) rather than continuing with different
+while a reader that predates any of these keys rejects a file that has it (unknown field) rather than continuing with different
 settings.
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
 Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.

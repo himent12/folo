@@ -632,6 +632,46 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
     optim["type"] = "sgd".into();
     map.insert("folo.optim".into(), optim.to_string());
     assert!(rewrite(&map, &tensors).err().unwrap().to_string().contains("muon_ortho"));
+
+    // `Conv-GeoMuon` (`muon_geo: "geo"`) round-trips bit-identically on CPU and is refused on non-MuSGD contracts.
+    let mut geo_run = new_run_with(OptimKind::MuSgd, 24, MuSgdWeights::default());
+    let sg = StandardGroups::from_module(&geo_run.model);
+    let last = sg.decay.last().unwrap().0.rsplit_once('.').unwrap().0.to_string() + ".";
+    let groups = sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0);
+    geo_run.opt = Box::new(
+        MuSgd::with_ortho_and_geo(
+            groups,
+            MuSgdWeights::default(),
+            MuonOrtho::Polar4,
+            folo_nn::optim::MuonGeoMode::Geo,
+        )
+        .unwrap(),
+    );
+    train_steps(&mut geo_run, 3);
+    let gpath = tmp("resume-musgd-geo.folo");
+    save(&geo_run, &gpath);
+    let (mut gmap, gtensors) =
+        with_parts(&geo_run, |p| checkpoint_contents(&meta(FileKind::Checkpoint, 3), p).unwrap());
+    assert_eq!(optim_json(&gpath)["muon_geo"], "geo");
+    assert!(optim_json(&path).get("muon_geo").is_none(), "legacy mode omits muon_geo");
+    train_steps(&mut geo_run, 3);
+    let want_geo = snapshot(&geo_run);
+
+    let mut bg = new_run(OptimKind::MuSgd, 91);
+    let fg = ModelFile::open(&gpath).unwrap();
+    let res = fg.resume(&bg.model, bg.opt.as_mut(), Some(&mut bg.ema), Some(classes(3))).unwrap();
+    assert_eq!(bg.opt.contract().muon_geo, Some(folo_nn::optim::MuonGeoMode::Geo));
+    bg.sched = res.schedule;
+    bg.rng = res.rng;
+    drop(fg);
+    train_steps(&mut bg, 3);
+    assert_eq!(snapshot(&bg), want_geo, "Conv-GeoMuon checkpoint resume must be bit-identical");
+
+    let mut gopt = optim_json(&gpath);
+    gopt["type"] = "sgd".into();
+    gopt.as_object_mut().unwrap().remove("muon_ortho");
+    gmap.insert("folo.optim".into(), gopt.to_string());
+    assert!(rewrite(&gmap, &gtensors).err().unwrap().to_string().contains("muon_geo"));
 }
 
 #[test]

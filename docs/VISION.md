@@ -12,10 +12,10 @@ code](../crates/folo-vision/README.md#from-modelmd-to-the-code).
 model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.folo through folo-nn),
                    predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head),
                    quant/ (int8 inference, §9.6), v2/ (FOLO v2-Iso clean-sheet model family)
-loss/              the detection loss: assignment.rs (host assigner), terms.rs (BCE/MAL, CIoU/NWD-IoU, DFL),
+loss/              the detection loss: assignment.rs (host assigner), terms.rs (BCE/MAL, CIoU/R-PIoU/NWD-IoU, DFL/OT-DFL),
                    device.rs (GPU), distill/ (dense/BCKD/GT-verified distillation, §8.9)
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
-boxes.rs, decode.rs, nms/{mod.rs, topk.rs}, fusion.rs   boxes and IoU, anchors and DFL decode, NMS / o2o top-k, cluster fusion & ELC/DFL-consensus/DFL-repulse
+boxes.rs, decode.rs, nms/{mod.rs, topk.rs}, fusion/{mod.rs, tests.rs}   boxes and IoU, anchors and DFL decode, NMS / o2o top-k, cluster fusion (vote/DFL/SEBF) & ELC/DFL-consensus/DFL-repulse/DFL-CGR
 metrics.rs, cocoeval.rs                  Evaluator (mAP, PR curves, confusion matrix), the full COCOeval
 train/             Trainer: config, setup (new / resume), run (epochs), epoch, feed (GPU staging), device,
                    teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/

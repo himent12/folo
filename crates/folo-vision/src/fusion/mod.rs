@@ -76,7 +76,22 @@ pub const DFL_REPULSE_STRIDE_W: f64 = 0.30;
 /// Log-survival soft-repulsion strength `γ` of [`ScoreRule::DflRepulse`].
 pub const DFL_REPULSE_GAMMA: f64 = 2.5;
 
-/// Overlap power `p` in `ln(max(1 − IoU^p, ε_r))` of [`ScoreRule::DflRepulse`].
+/// Log-survival soft-repulsion strength `γ` of [`ScoreRule::DflCgr`] (Confidence-Gated Repulsion).
+pub const DFL_CGR_GAMMA: f64 = 3.0;
+
+/// Suppressor confidence-gating exponent `ψ` of [`ScoreRule::DflCgr`] (`p_m^0.25`).
+pub const DFL_CGR_PSI: f64 = 0.25;
+
+/// IoU-affinity exponent `ρ` of [`BoxFusion::Sebf`] (`IoU^4`).
+pub const SEBF_RHO: f64 = 4.0;
+
+/// Student-t degrees of freedom `ν` of [`BoxFusion::Sebf`] 1-step IRLS.
+pub const SEBF_NU: f64 = 3.0;
+
+/// Relative box-span scale floor `c_rel` of [`BoxFusion::Sebf`] Student-t variance (`(0.03 · L)²`).
+pub const SEBF_C_REL: f64 = 0.03;
+
+/// Overlap power `p` in `ln(max(1 − IoU^p, ε_r))` of [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_POW: f64 = 4.0;
 
 /// Survival floor `ε_r` inside `ln(max(1 − IoU^4, ε_r))` of [`ScoreRule::DflRepulse`].
@@ -109,10 +124,15 @@ pub enum ScoreRule {
     /// Preserves the `[0, 1]` score scale and gracefully omits entropy/stride terms when unavailable.
     #[serde(rename = "dfl-repulse")]
     DflRepulse,
+    /// Confidence-Gated DFL Repulsion ([`dfl_cgr_scores`], docs/MODEL.md §9.4): [`ScoreRule::DflRepulse`] with
+    /// suppressor confidence gating `p_m^{0.25}` inside the log-survival kernel (`γ = 3.0`), preventing weak
+    /// detections from suppressing adjacent true objects. Best paired with [`BoxFusion::Sebf`] and `--iou 0.78`.
+    #[serde(rename = "dfl-cgr")]
+    DflCgr,
 }
 
 impl ScoreRule {
-    /// The name used by the CLI and in JSON (`none`, `consensus`, `elc`, `dfl-consensus`, `dfl-repulse`).
+    /// The name used by the CLI and in JSON (`none`, `consensus`, `elc`, `dfl-consensus`, `dfl-repulse`, `dfl-cgr`).
     pub fn as_str(self) -> &'static str {
         match self {
             ScoreRule::None => "none",
@@ -120,13 +140,14 @@ impl ScoreRule {
             ScoreRule::Elc => "elc",
             ScoreRule::DflConsensus => "dfl-consensus",
             ScoreRule::DflRepulse => "dfl-repulse",
+            ScoreRule::DflCgr => "dfl-cgr",
         }
     }
 
     /// Whether this rule uses exclusive NMS suppressor ownership and centered logit-space calibration.
     #[inline]
     pub fn is_calibrated(self) -> bool {
-        matches!(self, ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse)
+        matches!(self, ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse | ScoreRule::DflCgr)
     }
 
     /// Whether this rule uses per-anchor scale-free DFL bin precisions ([`crate::decode::bin_precision`]).
@@ -138,13 +159,13 @@ impl ScoreRule {
     /// Whether this rule uses per-anchor mean 4-side DFL Shannon entropy ([`crate::decode::dfl_entropy`]).
     #[inline]
     pub fn wants_dfl_entropy(self) -> bool {
-        self == ScoreRule::DflRepulse
+        matches!(self, ScoreRule::DflRepulse | ScoreRule::DflCgr)
     }
 
     /// Whether this rule uses per-anchor stride for cross-scale consensus.
     #[inline]
     pub fn wants_strides(self) -> bool {
-        self == ScoreRule::DflRepulse
+        matches!(self, ScoreRule::DflRepulse | ScoreRule::DflCgr)
     }
 }
 
@@ -418,6 +439,64 @@ pub fn dfl_repulse_scores(
     entropy: Option<&dyn Fn(usize) -> f32>,
     stride: Option<&dyn Fn(usize) -> f32>,
 ) -> Vec<f32> {
+    dfl_repulse_scores_impl(
+        kept,
+        boxes,
+        repulse_boxes,
+        scores,
+        classes,
+        owner,
+        nms_iou,
+        entropy,
+        stride,
+        DFL_REPULSE_GAMMA,
+        0.0,
+    )
+}
+
+/// Confidence-Gated DFL Repulsion (`ScoreRule::DflCgr`, docs/MODEL.md §9.4): [`dfl_repulse_scores`] with
+/// suppressor confidence gating `p_m^{0.25}` inside `γ · ln(max(1 − p_m^{0.25} · o⁴, 1e-4))` (`γ = 3.0`).
+#[allow(clippy::too_many_arguments)]
+pub fn dfl_cgr_scores(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    repulse_boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+    entropy: Option<&dyn Fn(usize) -> f32>,
+    stride: Option<&dyn Fn(usize) -> f32>,
+) -> Vec<f32> {
+    dfl_repulse_scores_impl(
+        kept,
+        boxes,
+        repulse_boxes,
+        scores,
+        classes,
+        owner,
+        nms_iou,
+        entropy,
+        stride,
+        DFL_CGR_GAMMA,
+        DFL_CGR_PSI,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dfl_repulse_scores_impl(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    repulse_boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+    entropy: Option<&dyn Fn(usize) -> f32>,
+    stride: Option<&dyn Fn(usize) -> f32>,
+    gamma: f64,
+    psi: f64,
+) -> Vec<f32> {
     assert_eq!(repulse_boxes.len(), kept.len(), "dfl_repulse_scores: repulse_boxes length mismatch");
     assert_eq!(scores.len(), boxes.len(), "dfl_repulse_scores: boxes/scores length mismatch");
     assert_eq!(classes.len(), boxes.len(), "dfl_repulse_scores: boxes/classes length mismatch");
@@ -529,6 +608,7 @@ pub fn dfl_repulse_scores(
                         break;
                     }
                     active[best_u] = false;
+                    let gate = if psi > 0.0 { branch_safe_sigmoid(best_z).powf(psi) } else { 1.0 };
                     let bb = repulse_boxes[grp[best_u]];
                     let ba = areas[best_u];
                     for u in 0..m {
@@ -543,7 +623,7 @@ pub fn dfl_repulse_scores(
                         if o > 0.0 {
                             let o2 = o * o;
                             let o4 = o2 * o2;
-                            z[grp[u]] += DFL_REPULSE_GAMMA * (1.0 - o4).max(DFL_REPULSE_FLOOR).ln();
+                            z[grp[u]] += gamma * (1.0 - gate * o4).max(DFL_REPULSE_FLOOR).ln();
                         }
                     }
                 }
@@ -569,17 +649,155 @@ pub enum BoxFusion {
     /// DFL evidence fusion: score times per-side precision. A caller without the DFL logits (boxes-only inputs)
     /// gives every side the same precision, which is [`BoxFusion::Vote`].
     Dfl,
+    /// Student-t Exclusive Box Fusion ([`fuse_boxes_sebf`], docs/MODEL.md §9.4): exclusive NMS suppressor
+    /// ownership + `IoU⁴` affinity + 1-step Student-t (`ν = 3`) IRLS outlier rejection per side, using the same
+    /// per-side DFL precisions as [`BoxFusion::Dfl`].
+    Sebf,
 }
 
 impl BoxFusion {
-    /// The name used by the CLI and in JSON (`none`, `vote`, `dfl`).
+    /// The name used by the CLI and in JSON (`none`, `vote`, `dfl`, `sebf`).
     pub fn as_str(self) -> &'static str {
         match self {
             BoxFusion::None => "none",
             BoxFusion::Vote => "vote",
             BoxFusion::Dfl => "dfl",
+            BoxFusion::Sebf => "sebf",
         }
     }
+
+    /// Whether this fusion rule uses per-side DFL precisions ([`crate::decode::side_precision`]).
+    #[inline]
+    pub fn wants_side_precision(self) -> bool {
+        matches!(self, BoxFusion::Dfl | BoxFusion::Sebf)
+    }
+
+    /// Whether this fusion rule uses exclusive NMS suppressor ownership.
+    #[inline]
+    pub fn wants_owner(self) -> bool {
+        self == BoxFusion::Sebf
+    }
+}
+
+/// Student-t Exclusive Box Fusion (`BoxFusion::Sebf`, docs/MODEL.md §9.4): each kept box `k` fuses only candidates
+/// exclusively owned by `k` in NMS (`owner[j] == kp`) with `IoU(b_k, b_j) >= iou` (`j == k` always included),
+/// weighting each side by `s_j · IoU⁴ · prec(j)[e]`, followed by one Student-t (`ν = 3`) IRLS refinement step
+/// with variance floor `max(1 / prec(j)[e], (0.03 · L_e)²)` to reject cross-object outliers.
+#[allow(clippy::too_many_arguments)]
+pub fn fuse_boxes_sebf(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    agnostic: bool,
+    iou: f32,
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+    precision: Option<&dyn Fn(usize) -> [f32; 4]>,
+) -> Vec<Xyxy> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let buckets = Buckets::new(boxes.len(), classes, agnostic);
+    let computed_owners;
+    let owners: &[u32] = match owner {
+        Some(o) => {
+            assert_eq!(o.len(), boxes.len(), "fuse_boxes_sebf: owner length mismatch");
+            o
+        }
+        None => {
+            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            &computed_owners
+        }
+    };
+    let mut members: Vec<(usize, f32, [f32; 4])> = Vec::new();
+    kept.iter()
+        .enumerate()
+        .map(|(kp, &k)| {
+            let b = boxes[k];
+            if !finite(&b) {
+                return b;
+            }
+            let ba = b.area();
+            let kp_u32 = kp as u32;
+            members.clear();
+            for &j in buckets.of(classes[k]) {
+                let j = j as usize;
+                let c = &boxes[j];
+                if j == k {
+                    if scores[j].is_finite() && scores[j] > 0.0 {
+                        members.push((j, 1.0, precision.map_or([1.0; 4], |f| f(j))));
+                    }
+                } else if owners[j] == kp_u32 && finite(c) && scores[j].is_finite() && scores[j] > 0.0 {
+                    let o = overlap(&b, ba, c);
+                    if !o.is_nan() && o >= iou {
+                        members.push((j, o, precision.map_or([1.0; 4], |f| f(j))));
+                    }
+                }
+            }
+            if members.len() <= 1 {
+                return b;
+            }
+            let old = b.to_array();
+            let (mut acc1, mut sum1) = ([0f64; 4], [0f64; 4]);
+            for &(j, o0, p) in &members {
+                let s = scores[j] as f64;
+                let o2 = (o0 as f64) * (o0 as f64);
+                let aff = o2 * o2;
+                let x = boxes[j].to_array();
+                for e in 0..4 {
+                    let pe = p[e] as f64;
+                    if pe.is_finite() && pe > 0.0 {
+                        let wt = s * aff * pe;
+                        acc1[e] += wt * x[e] as f64;
+                        sum1[e] += wt;
+                    }
+                }
+            }
+            let mut b1 = [0f64; 4];
+            for e in 0..4 {
+                b1[e] = if sum1[e] > 0.0 { acc1[e] / sum1[e] } else { old[e] as f64 };
+            }
+            let b1_xyxy = Xyxy::new(b1[0] as f32, b1[1] as f32, b1[2] as f32, b1[3] as f32);
+            let b1_area = b1_xyxy.area();
+            let bw = (b1[2] - b1[0]).max(1.0);
+            let bh = (b1[3] - b1[1]).max(1.0);
+            let c2 = [
+                (SEBF_C_REL * bw) * (SEBF_C_REL * bw),
+                (SEBF_C_REL * bh) * (SEBF_C_REL * bh),
+                (SEBF_C_REL * bw) * (SEBF_C_REL * bw),
+                (SEBF_C_REL * bh) * (SEBF_C_REL * bh),
+            ];
+            let (mut acc2, mut sum2) = ([0f64; 4], [0f64; 4]);
+            for &(j, _, p) in &members {
+                let s = scores[j] as f64;
+                let o1_raw = overlap(&b1_xyxy, b1_area, &boxes[j]) as f64;
+                let o1 = if j == k { o1_raw.max(1.0) } else { o1_raw };
+                let o1_2 = o1 * o1;
+                let aff2 = o1_2 * o1_2;
+                let x = boxes[j].to_array();
+                for e in 0..4 {
+                    let pe = p[e] as f64;
+                    if pe.is_finite() && pe > 0.0 {
+                        let v_raw = if precision.is_some() { 1.0 / pe } else { 0.0 };
+                        let v_tilde = v_raw.max(c2[e]);
+                        let diff = x[e] as f64 - b1[e];
+                        let lam_t = (SEBF_NU + 1.0) / (SEBF_NU + (diff * diff) / v_tilde);
+                        let wt = s * aff2 * pe * lam_t;
+                        acc2[e] += wt * x[e] as f64;
+                        sum2[e] += wt;
+                    }
+                }
+            }
+            let mut b2 = [0f64; 4];
+            for e in 0..4 {
+                b2[e] = if sum2[e] > 0.0 { acc2[e] / sum2[e] } else { b1[e] };
+            }
+            if b2[2] >= b2[0] && b2[3] >= b2[1] {
+                Xyxy::new(b2[0] as f32, b2[1] as f32, b2[2] as f32, b2[3] as f32)
+            } else {
+                b1_xyxy
+            }
+        })
+        .collect()
 }
 
 /// The fused boxes of the `kept` candidates (indices into `boxes` / `scores` / `classes`, the candidates that
@@ -630,198 +848,4 @@ pub fn fuse_boxes(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::decode::{side_precision, side_precisions, softmax_moments};
-
-    fn b(x1: f32, y1: f32, x2: f32, y2: f32) -> Xyxy {
-        Xyxy::new(x1, y1, x2, y2)
-    }
-
-    /// A lone candidate (nothing else of its class reaches the cluster IoU) keeps its box exactly, voting or not.
-    #[test]
-    fn lone_candidate_is_unchanged() {
-        let boxes = [b(10.0, 10.0, 50.0, 60.0), b(12.0, 10.0, 50.0, 60.0), b(200.0, 0.0, 240.0, 40.0)];
-        // Candidate 1 overlaps 0 well but is another class; candidate 2 is far away.
-        let classes = [0, 1, 0];
-        let scores = [0.9, 0.8, 0.7];
-        let prec = |j: usize| [1.0 + j as f32, 2.0, 3.0, 4.0];
-        for p in [None, Some(&prec as &dyn Fn(usize) -> [f32; 4])] {
-            assert_eq!(fuse_boxes(&[0, 2], &boxes, &scores, &classes, false, 0.75, p), [boxes[0], boxes[2]]);
-        }
-        // Agnostic: candidate 1 joins candidate 0's cluster (IoU 0.95).
-        let got = fuse_boxes(&[0], &boxes, &scores, &classes, true, 0.75, None);
-        assert!((got[0].x1 - (0.9 * 10.0 + 0.8 * 12.0) / 1.7).abs() < 1e-5, "{got:?}");
-    }
-
-    /// Two members, one sharp and one vague on each side: each side moves to its precision-and-score-weighted
-    /// mean, so the result follows the sharp member side by side; voting takes the score-weighted mean.
-    #[test]
-    fn two_members_weigh_their_certainty_per_side() {
-        let boxes = [b(10.0, 20.0, 110.0, 120.0), b(12.0, 22.0, 108.0, 118.0)];
-        let (scores, classes) = ([0.8f32, 0.4], [3u32, 3]);
-        // Member 0 is sharp on the left and top, member 1 on the right and bottom.
-        let prec = |j: usize| if j == 0 { [9.0, 9.0, 1.0, 1.0] } else { [1.0, 1.0, 9.0, 9.0] };
-        let got = fuse_boxes(&[0], &boxes, &scores, &classes, false, 0.75, Some(&prec))[0];
-        let mean = |a: f32, wa: f32, c: f32, wc: f32| (a * wa + c * wc) / (wa + wc);
-        let want = [
-            mean(10.0, 0.8 * 9.0, 12.0, 0.4),
-            mean(20.0, 0.8 * 9.0, 22.0, 0.4),
-            mean(110.0, 0.8, 108.0, 0.4 * 9.0),
-            mean(120.0, 0.8, 118.0, 0.4 * 9.0),
-        ];
-        for (g, w) in got.to_array().iter().zip(want) {
-            assert!((g - w).abs() < 1e-4, "{got:?} vs {want:?}");
-        }
-        let vote = fuse_boxes(&[0], &boxes, &scores, &classes, false, 0.75, None)[0];
-        assert!((vote.x2 - mean(110.0, 0.8, 108.0, 0.4)).abs() < 1e-4, "{vote:?}");
-    }
-
-    /// The cluster IoU is inclusive, members below it are left out, and a side with no weight (zero scores)
-    /// keeps the kept box's edge. The result does not depend on where other classes' candidates sit.
-    #[test]
-    fn cluster_rule_and_zero_weights() {
-        // IoU of [0, 0, 10, 10] and [0, 0, 10, 7.5] is 0.75 exactly.
-        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 7.5), b(0.0, 0.0, 10.0, 7.0)];
-        let classes = [0, 0, 0];
-        let got = fuse_boxes(&[0], &boxes, &[0.5, 0.5, 0.5], &classes, false, 0.75, None)[0];
-        assert_eq!(got.y2, 8.75, "member 1 (IoU 0.75) is in, member 2 (0.7) is out");
-        let got = fuse_boxes(&[0], &boxes, &[0.0, 0.0, 0.0], &classes, false, 0.75, None)[0];
-        assert_eq!(got, boxes[0]);
-        // Interleaving another class's candidates changes nothing.
-        let boxes2 = [boxes[0], b(0.0, 0.0, 10.0, 9.0), boxes[1], boxes[2]];
-        let got2 = fuse_boxes(&[0], &boxes2, &[0.5, 0.9, 0.5, 0.5], &[0, 1, 0, 0], false, 0.75, None)[0];
-        assert_eq!(got2.y2, 8.75);
-        // A NaN box overlaps everything (IoU 1 from f32 min / max) but must not poison the kept box.
-        let boxes3 = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 5.0, 10.0)];
-        let got3 = fuse_boxes(&[0], &boxes3, &[0.9, 0.8], &[0, 0], false, 0.75, None)[0];
-        assert_eq!(got3.x1, 0.0);
-        assert!(got3.to_array().iter().all(|v| v.is_finite()), "{got3:?}");
-    }
-
-    /// The side precision: a perfectly certain edge between two bins (DFL's {3: 0.7, 4: 0.3} for 3.3) has no
-    /// excess variance, like one on a bin; a spread side has less precision; at stride 32 a side with the same
-    /// distribution has 1/16 of its precision at stride 8 (a cluster spanning two levels trusts the finer one).
-    #[test]
-    fn side_precision_values() {
-        let ln = |p: f32| p.ln();
-        let mut row = vec![-30.0f32; 16];
-        (row[3], row[4]) = (ln(0.7), ln(0.3));
-        let (m, v) = softmax_moments(&row);
-        assert!((m - 3.3).abs() < 1e-5 && (v - 0.21).abs() < 1e-5, "{m} {v}");
-        let certain = 1.0 / (64.0 * DFL_FUSION_EPS);
-        assert!((side_precision(m, v, 8.0) / certain - 1.0).abs() < 1e-3);
-        assert!((side_precision(3.0, 0.0, 8.0) / certain - 1.0).abs() < 1e-6);
-        // Uniform over 16 bins: variance 21.25, mean 7.5 (f = 0.5): excess 21.0.
-        let (m, v) = softmax_moments(&[0.0; 16]);
-        assert!((m - 7.5).abs() < 1e-5 && (v - 21.25).abs() < 1e-4);
-        assert!((side_precision(m, v, 8.0) - 1.0 / (64.0 * (21.0 + DFL_FUSION_EPS))).abs() < 1e-9);
-        // Two levels, one distribution.
-        let mut four = row.clone();
-        four.extend(row.iter().chain(&row).chain(&row));
-        let (p8, p32) = (side_precisions(&four, 16, 8.0), side_precisions(&four, 16, 32.0));
-        for s in 0..4 {
-            assert!((p8[s] / p32[s] - 16.0).abs() < 1e-3);
-        }
-    }
-
-    /// A cluster spanning two levels: two members with the same distributions and scores, one at stride 8 and one at
-    /// stride 32, fuse 16 : 1 towards the stride-8 member on every side.
-    #[test]
-    fn cluster_spanning_two_levels() {
-        let mut row = vec![0f32; 64];
-        for (s, v) in row.iter_mut().enumerate() {
-            *v = -((s % 16) as f32 - 4.0).powi(2) / 2.0;
-        }
-        let (p8, p32) = (side_precisions(&row, 16, 8.0), side_precisions(&row, 16, 32.0));
-        let boxes = [b(100.0, 100.0, 200.0, 200.0), b(104.0, 96.0, 204.0, 196.0)];
-        let prec = |j: usize| if j == 0 { p8 } else { p32 };
-        let got = fuse_boxes(&[1], &boxes, &[0.5, 0.5], &[0, 0], false, 0.75, Some(&prec))[0];
-        let want = [(16.0 * 100.0 + 104.0) / 17.0, (16.0 * 100.0 + 96.0) / 17.0];
-        assert!((got.x1 - want[0]).abs() < 1e-3 && (got.y1 - want[1]).abs() < 1e-3, "{got:?}");
-        assert!((got.x2 - (16.0 * 200.0 + 204.0) / 17.0).abs() < 1e-3, "{got:?}");
-    }
-
-    /// A censored side (all of its mass on the last bin: the edge may lie beyond `reg_max − 1` bins) has variance 0
-    /// and so the highest precision, `1 / (s² · ε)`: no guard down-weights it. Lane `fusion` measured such a guard
-    /// and it changed nothing (it fires on fewer than 0.02% of candidate sides on COCO val2017), so none is applied.
-    #[test]
-    fn censored_side_is_trusted_like_a_certain_one() {
-        let mut censored = vec![-30.0f32; 16];
-        censored[15] = 10.0;
-        let (m, v) = softmax_moments(&censored);
-        assert!((m - 15.0).abs() < 1e-4 && v < 1e-4, "{m} {v}");
-        let p = side_precision(m, v, 8.0);
-        assert!((p * 64.0 * DFL_FUSION_EPS - 1.0).abs() < 1e-3, "{p}");
-    }
-
-    /// Hand-computed consensus scores: a lonely box (`M = s`, divided by `√10`), a cluster above the cap (the score
-    /// stays, bit for bit), a cluster between (`M/s = 2.5`), a member just below the IoU, another class's box on top.
-    #[test]
-    fn consensus_scores_by_hand() {
-        let boxes = [
-            // Lonely: nothing else of class 0 near it; candidate 1 is the same box in class 1.
-            b(0.0, 0.0, 10.0, 10.0),
-            b(0.0, 0.0, 10.0, 10.0),
-            // Between: kept 0.4 + a member at IoU 0.75 exactly (0.6); the third is at IoU 0.7, out.
-            b(100.0, 0.0, 110.0, 10.0),
-            b(100.0, 0.0, 110.0, 7.5),
-            b(100.0, 0.0, 110.0, 7.0),
-            // Above the cap: kept 0.1 with four members of 0.5 on the same box, M/s = 21.
-            b(200.0, 0.0, 210.0, 10.0),
-            b(200.0, 0.0, 210.0, 10.0),
-            b(200.0, 0.0, 210.0, 10.0),
-            b(200.0, 0.0, 210.0, 10.0),
-            b(200.0, 0.0, 210.0, 10.0),
-        ];
-        let scores = [0.8f32, 0.9, 0.4, 0.6, 0.9, 0.1, 0.5, 0.5, 0.5, 0.5];
-        let classes = [0u32, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-        let got = consensus_scores(&[0, 2, 5], &boxes, &scores, &classes);
-        assert_eq!(got[0], (0.8f32 as f64 / 10f64.sqrt()) as f32, "lonely: s / sqrt(10)");
-        let mass = 0.4f32 as f64 + 0.6f32 as f64;
-        let want = 0.4f32 as f64 * (mass / 0.4f32 as f64).sqrt() / 10f64.sqrt();
-        assert_eq!(got[1], want as f32, "between: M/s = 2.5");
-        assert!((got[1] - 0.2).abs() < 1e-6, "0.4 * sqrt(2.5 / 10) = 0.2, got {}", got[1]);
-        assert_eq!(got[2].to_bits(), 0.1f32.to_bits(), "at the cap the score stays");
-    }
-
-    /// A kept box is in its own cluster even when its IoU with itself is not defined (zero area); a member with a
-    /// NaN box or a score that is not positive adds nothing; a kept score that is not positive stays. A NaN box and
-    /// a valid one reach IoU 1 through f32 min / max, and neither lends the other its score, in either direction.
-    #[test]
-    fn consensus_edge_cases() {
-        let flat = [b(5.0, 5.0, 5.0, 9.0)];
-        let got = consensus_scores(&[0], &flat, &[0.5], &[0])[0];
-        assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32);
-        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 5.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
-        assert_eq!(overlap(&boxes[1], boxes[1].area(), &boxes[0]), 1.0, "the pair the guard is for");
-        assert_eq!(overlap(&boxes[0], boxes[0].area(), &boxes[1]), 1.0, "the pair the guard is for");
-        let got = consensus_scores(&[0], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0])[0];
-        assert_eq!(got, (0.5f64 / 10f64.sqrt()) as f32, "the NaN box and the zero score add nothing");
-        let got = consensus_scores(&[1], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0])[0];
-        assert_eq!(got, (0.9f32 as f64 / 10f64.sqrt()) as f32, "a kept NaN box has no members but itself");
-        assert_eq!(consensus_scores(&[2], &boxes, &[0.5, 0.9, 0.0], &[0, 0, 0]), [0.0]);
-    }
-
-    /// `fuse_boxes` reads a class only for a kept candidate under `agnostic`: a shorter `classes` still works.
-    #[test]
-    fn agnostic_fusion_reads_only_the_kept_class() {
-        let boxes = [b(0.0, 0.0, 10.0, 10.0), b(1.0, 0.0, 10.0, 10.0)];
-        let got = fuse_boxes(&[0], &boxes, &[0.5, 0.5], &[0], true, 0.75, None)[0];
-        assert_eq!(got.x1, 0.5, "both boxes vote");
-    }
-
-    /// The same inputs give the same boxes, bit for bit.
-    #[test]
-    fn deterministic() {
-        let boxes: Vec<Xyxy> =
-            (0..40).map(|i| b(i as f32 * 0.37, 5.0 - i as f32 * 0.11, 60.0 + i as f32 * 0.2, 70.0)).collect();
-        let scores: Vec<f32> = (0..40).map(|i| 0.9 - i as f32 * 0.01).collect();
-        let classes = vec![0u32; 40];
-        let prec = |j: usize| [1.0 / (1.0 + j as f32), 2.0, 0.5, 1.0 + (j % 3) as f32];
-        let kept = [0usize, 7, 21];
-        let a = fuse_boxes(&kept, &boxes, &scores, &classes, false, 0.75, Some(&prec));
-        assert_eq!(a, fuse_boxes(&kept, &boxes, &scores, &classes, false, 0.75, Some(&prec)));
-        assert_ne!(a[0], boxes[0], "the cluster moved the box");
-    }
-}
+mod tests;

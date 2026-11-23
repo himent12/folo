@@ -90,6 +90,16 @@ pub struct DetectDesc {
     pub mal_gamma: f32,
     /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
     pub box_nwd_weight: f32,
+    /// Box geometry loss kind (`0` = CIoU, `1` = R-PIoU).
+    pub box_loss_kind: u32,
+    /// High-IoU focusing slope `β` in `[0, 1]` for R-PIoU.
+    pub rpiou_beta: f32,
+    /// Rational edge-penalty sharpness `κ > 0` for R-PIoU.
+    pub rpiou_kappa: f32,
+    /// Grid-unit GT-size floor `δ₀ > 0` for R-PIoU.
+    pub rpiou_delta: f32,
+    /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
+    pub dfl_ot_weight: f32,
 }
 
 impl DetectDesc {
@@ -294,7 +304,18 @@ pub fn box_terms(
     let spec = Spec::new().u32("R", d.reg_max as u32).u32("K", d.k as u32).u32("MODE", backward as u32);
     let k = ctx.kernel(&BOX, spec)?;
     let hi = d.reg_max as f32 - 1.0 - 0.01;
-    let p = Params::new().uz(d.slots())?.uz(d.a)?.uz(d.g)?.uz(d.gt_box_offset())?.f(hi).f(d.box_nwd_weight);
+    let p = Params::new()
+        .uz(d.slots())?
+        .uz(d.a)?
+        .uz(d.g)?
+        .uz(d.gt_box_offset())?
+        .f(hi)
+        .f(d.box_nwd_weight)
+        .u(d.box_loss_kind)
+        .f(d.rpiou_beta)
+        .f(d.rpiou_kappa)
+        .f(d.rpiou_delta)
+        .f(d.dfl_ot_weight);
     ctx.dispatch(&k, &[box_raw, meta, pick, slot, out, stats, grad], &p, ctx.grid_1d(d.slots() as u64, 64)?)
 }
 
@@ -394,6 +415,11 @@ mod tests {
             tal_nwd_weight: 0.0,
             mal_gamma: 0.0,
             box_nwd_weight: 0.0,
+            box_loss_kind: 0,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            rpiou_delta: 0.5,
+            dfl_ot_weight: 0.0,
         }
     }
 

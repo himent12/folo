@@ -430,3 +430,63 @@ fn ns5_multi_group_matches_per_group_steps() {
         );
     }
 }
+
+/// `Conv-GeoMuon` (`Geo`, including depthwise convs + tall/wide convs + multi-group) on GPU matches the CPU
+/// reference over multiple steps, and all kernels are registered for precompile.
+#[test]
+fn conv_geomuon_gpu_matches_cpu() {
+    use folo_nn::optim::MuonGeoMode;
+    let dev = gpu!();
+    for geo in [MuonGeoMode::Geo] {
+        let mut rng = Rng::seed(77);
+        let mk = |rng: &mut Rng| {
+            let w0 = Tensor::rand_uniform([32, 16, 3, 3], -0.5, 0.5, rng).requires_grad_(); // wide 32x144
+            let w1 = Tensor::rand_uniform([128, 16, 1, 1], -0.5, 0.5, rng).requires_grad_(); // tall 128x16
+            let w2 = Tensor::rand_uniform([64, 64, 1, 1], -0.5, 0.5, rng).requires_grad_(); // square 64x64
+            let dw = Tensor::rand_uniform([64, 1, 3, 3], -0.5, 0.5, rng).requires_grad_(); // depthwise 64x9
+            let bn = Tensor::rand_uniform([32], 0.5, 1.5, rng).requires_grad_();
+            vec![w0, w1, w2, dw, bn]
+        };
+        let cpu_ps = mk(&mut rng);
+        let gpu_ps: Vec<Tensor> =
+            cpu_ps.iter().map(|t| t.detach().to_device(dev).unwrap().requires_grad_()).collect();
+        let make_opt = |ps: &[Tensor]| {
+            let gs = vec![
+                ParamGroup::new("decay", vec![("w0".into(), ps[0].clone()), ("w1".into(), ps[1].clone())])
+                    .with_depthwise(vec![false, false])
+                    .lr(0.02)
+                    .momentum(0.937)
+                    .weight_decay(5e-4),
+                ParamGroup::new(
+                    "decay.cls",
+                    vec![("w2".into(), ps[2].clone()), ("dw".into(), ps[3].clone())],
+                )
+                .with_depthwise(vec![false, true])
+                .lr(0.06)
+                .momentum(0.937)
+                .weight_decay(5e-4),
+                ParamGroup::new("bn", vec![("bn".into(), ps[4].clone())]).lr(0.02).momentum(0.937),
+            ];
+            MuSgd::with_ortho_and_geo(gs, MuSgdWeights { muon: 0.5, sgd: 0.5 }, MuonOrtho::Polar4, geo)
+                .unwrap()
+        };
+        let mut cpu_opt = make_opt(&cpu_ps);
+        let mut gpu_opt = make_opt(&gpu_ps);
+        for _ in 0..4 {
+            let mut g_cpu = folo_core::Grads::default();
+            let mut g_gpu = folo_core::Grads::default();
+            for (pc, pg) in cpu_ps.iter().zip(&gpu_ps) {
+                let g = Tensor::rand_uniform(pc.shape().clone(), -0.3, 0.3, &mut rng);
+                g_gpu.insert(pg, g.to_device(dev).unwrap());
+                g_cpu.insert(pc, g);
+            }
+            cpu_opt.step(&g_cpu).unwrap();
+            gpu_opt.step(&g_gpu).unwrap();
+        }
+        for (i, (pg, pc)) in gpu_ps.iter().zip(&cpu_ps).enumerate() {
+            close_or_nan(pg, pc, &format!("{geo:?} param {i} {:?}", pc.dims()));
+        }
+    }
+    let ctx = folo_gpu::GpuContext::shared().unwrap();
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}

@@ -57,6 +57,8 @@ pub struct MuonMatrix<'a> {
     pub cols: usize,
     /// Factor of the orthogonalised direction (`folo_nn::optim::muon_scale`).
     pub scale: f32,
+    /// Exact zero-GEMM per-channel Polar LMO (depthwise convs).
+    pub depthwise: bool,
 }
 
 /// The settings of [`muon_step_many`].
@@ -208,12 +210,63 @@ pub(crate) fn muon_step_within(
     if bindings < MIN_BINDINGS {
         return Ok(false);
     }
-    let shapes: Vec<(usize, usize)> = items.iter().map(|it| (it.rows, it.cols)).collect();
+    let (dw_items, mat_items): (Vec<&MuonMatrix<'_>>, Vec<&MuonMatrix<'_>>) =
+        items.into_iter().partition(|it| it.depthwise);
+    let shapes: Vec<(usize, usize)> = mat_items.iter().map(|it| (it.rows, it.cols)).collect();
     let Some(groups) = partition(&shapes, max_bytes) else { return Ok(false) };
+    if !dw_items.is_empty() {
+        run_dw_group(ctx, &dw_items, s, bindings)?;
+    }
     for g in groups {
-        run_group(ctx, &items[g], s, bindings)?;
+        run_group(ctx, &mat_items[g], s, bindings)?;
     }
     Ok(true)
+}
+
+/// Branch A: exact zero-GEMM per-channel block-diagonal Polar LMO for depthwise conv weights.
+fn run_dw_group(
+    ctx: &GpuContext,
+    items: &[&MuonMatrix<'_>],
+    s: &MuonSettings,
+    bindings: usize,
+) -> Result<()> {
+    let j_dw = MANY.min((bindings - 1) / 3).max(1);
+    let mut table: Vec<u32> = Vec::with_capacity(items.len() * 4);
+    for it in items {
+        for v in [it.rows as u64, it.cols as u64, u64::from(it.scale.to_bits()), 0u64] {
+            table.push(u32::try_from(v).map_err(|_| GpuError::Limit("muon: dw too large".into()))?);
+        }
+    }
+    let tbuf = ctx.upload(bytemuck::cast_slice(&table))?;
+    let (mu, omu) = (s.momentum, 1.0 - s.momentum);
+    for (ci, chunk) in items.chunks(j_dw).enumerate() {
+        let spec = Spec::new().u32("J", chunk.len() as u32).bool("NESTEROV", s.nesterov);
+        let k = ctx.kernel(shader::many_def("muon_dw_lmo", chunk.len()), spec)?;
+        let mut starts = Vec::with_capacity(chunk.len());
+        let mut start = 0u64;
+        for it in chunk {
+            starts.push(u32::try_from(start).map_err(|_| GpuError::Limit("muon: dw too large".into()))?);
+            start += (it.rows as u64).div_ceil(256);
+        }
+        let total = u32::try_from(start).map_err(|_| GpuError::Limit("muon: dw too large".into()))?;
+        let mut p = Params::new().uz(ci * j_dw)?.f(mu).f(omu).u(total).f(s.eps).f(-s.lr).at(16);
+        for st in starts {
+            p = p.u(st);
+        }
+        p = p.at(32);
+        for it in chunk {
+            p = p.uz(it.rows)?;
+        }
+        let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(3 * chunk.len() + 1);
+        for it in chunk {
+            bufs.push(it.p);
+            bufs.push(it.g);
+            bufs.push(it.m);
+        }
+        bufs.push(tbuf.raw());
+        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(start * 256, 256)?)?;
+    }
+    Ok(())
 }
 
 /// Splits the matrices (`rows × cols` each, none empty) into consecutive runs whose workspaces (`X` twice:
@@ -424,7 +477,7 @@ mod tests {
             let (r, c) = (rows.min(cols), rows.max(cols));
             let n = (r * align4(c)) as u64;
             let n_sq = (r * align4(r)) as u64;
-            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 2]) {
+            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 3]) {
                 *s += v;
             }
         }
