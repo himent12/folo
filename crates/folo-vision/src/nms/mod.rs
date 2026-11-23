@@ -33,8 +33,10 @@ use serde::{Deserialize, Serialize};
 mod topk;
 pub use topk::{topk_candidates, topk_detections};
 
-/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus`) when `conf` is higher:
-/// nearby supporting anchors down to `0.10` join the cluster before final scores are filtered by `score > conf`.
+/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse`) when
+/// `conf > 0.10`: nearby supporting anchors down to `0.10` join the cluster before final scores are filtered by
+/// `score > conf`. When `conf <= 0.10` (e.g. evaluation at `0.001`), pre-NMS extraction uses `conf` and calibrated
+/// scores below `conf` are kept without post-filtering.
 pub const CALIBRATED_PRE_CONF: f32 = 0.10;
 
 /// Remaining-box count above which one suppression pass is split across threads.
@@ -112,8 +114,9 @@ impl NmsConfig {
         Self { conf: 0.001, multi_label: true, ..Self::default() }
     }
 
-    /// Pre-NMS candidate threshold: `0.10` for single-label calibrated scoring (`Elc` / `DflConsensus`) when
-    /// `conf > 0.10`, else `self.conf` unchanged.
+    /// Pre-NMS candidate threshold: `0.10` for single-label calibrated scoring (`Elc` / `DflConsensus` /
+    /// `DflRepulse`) when `conf > 0.10`, else `self.conf` unchanged (for `conf <= 0.10`, post-calibration scores
+    /// below `conf` are kept in full).
     #[inline]
     pub fn candidate_conf(&self) -> f32 {
         if self.post_filter_calibrated() { CALIBRATED_PRE_CONF } else { self.conf }
@@ -126,7 +129,9 @@ impl NmsConfig {
         if mode == HeadMode::O2m { self.candidate_conf() } else { self.conf }
     }
 
-    /// Whether final detections are filtered by `score > self.conf` after calibrated re-scoring.
+    /// Whether final detections are filtered by `score > self.conf` after calibrated re-scoring (active for
+    /// single-label calibrated scoring with `self.conf > CALIBRATED_PRE_CONF`; when `self.conf <= 0.10` or
+    /// `multi_label` is set, all re-scored detections are retained).
     #[inline]
     pub(crate) fn post_filter_calibrated(&self) -> bool {
         !self.multi_label && self.score.is_calibrated() && self.conf > CALIBRATED_PRE_CONF

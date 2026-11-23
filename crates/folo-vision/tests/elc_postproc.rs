@@ -1,7 +1,9 @@
-//! Tests for `--score elc` (Exclusive Logit-Space Consensus) and `--score dfl-consensus` (Scale-Free Exclusive
-//! Logit-Consensus with fused DFL precision), docs/MODEL.md §9.4: exact hand-checked formulas, exclusive ghost-mass
-//! blocking, graceful fallback when DFL moments are absent, `agnostic` class-local ownership, NaN/extreme-score
-//! safety, determinism, zero regression on `None`/`Consensus`, and end-to-end CPU candidate-first / val parity.
+//! Tests for `--score elc` (Exclusive Logit-Space Consensus), `--score dfl-consensus` (Scale-Free Exclusive
+//! Logit-Consensus with fused DFL precision), and `--score dfl-repulse` (DFL entropy consensus with cross-stride
+//! agreement and greedy log-survival soft repulsion), docs/MODEL.md §9.4: exact hand-checked formulas, exclusive
+//! ghost-mass blocking, greedy sequential repulsion order, graceful fallback when DFL stats/strides are absent,
+//! `agnostic` class-local ownership/repulsion, NaN/extreme-score safety, determinism, zero regression on
+//! `None`/`Consensus`, and end-to-end CPU candidate-first / val parity.
 
 use std::sync::Arc;
 

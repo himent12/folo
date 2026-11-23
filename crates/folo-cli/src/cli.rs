@@ -552,8 +552,9 @@ pub struct PredictArgs {
     pub fusion_iou: f32,
     /// Score of each kept box (docs/MODEL.md §9.4): `elc`, `dfl-consensus` and `dfl-repulse` update log-odds
     /// from exclusive suppressor mass (plus DFL precision / entropy and soft repulsion) while preserving the
-    /// `[0, 1]` scale, gathering supporting anchors down to 0.10 before filtering final scores by --conf;
-    /// `consensus` scales probabilities by cluster mass (changes the score scale). Off by default.
+    /// `[0, 1]` scale; when `--conf > 0.10`, supporting anchors are gathered down to 0.10 before filtering final
+    /// scores by `--conf` (for `--conf <= 0.10`, calibrated scores below `--conf` are kept in full). `consensus`
+    /// scales probabilities by cluster mass (changes the score scale). Off by default.
     #[arg(long, value_enum, default_value_t = ScoreArg::None)]
     pub score: ScoreArg,
     /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`

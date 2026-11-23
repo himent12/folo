@@ -424,27 +424,43 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
         );
     }
     // Verify sparse-gather `candidates_on_device` with exactly 1 surviving candidate matches dense bit-for-bit.
-    let mut all_scores: Vec<f32> = (0..2 * an)
-        .map(|k| {
-            let (img, j) = (k / an, k % an);
-            (0..nc).map(|c| cls_low[(img * nc + c) * an + j]).fold(f32::NEG_INFINITY, f32::max)
-        })
+    // Run on the high-contrast random image `a` alone (image `b` is flat 0.5, so its interior anchors tie).
+    let x1 = a.to_device(dev).unwrap();
+    let dense1 = m_low.forward(&x1).unwrap();
+    let dense1_side = dense1.side_precisions().unwrap();
+    let cls1 = dense1.cls_raw.to_vec::<f32>().unwrap();
+    let mut all_scores: Vec<f32> = (0..an)
+        .map(|j| (0..nc).map(|c| cls1[c * an + j]).fold(f32::NEG_INFINITY, f32::max))
         .map(|l| 1.0 / (1.0 + (-l).exp()))
         .collect();
     all_scores.sort_by(|u, v| v.total_cmp(u));
     let conf_one = (all_scores[0] + all_scores[1]) * 0.5;
-    if all_scores[0] > conf_one && conf_one > all_scores[1] {
-        let nms_one =
-            NmsConfig { conf: conf_one, fusion: BoxFusion::Dfl, score: ScoreRule::DflRepulse, ..nms.clone() };
-        let got_one = m_low.predict_candidates(&x, &nms_one).unwrap();
-        let want_one = dense_low.detections(&nms_one).unwrap();
-        for img in 0..2 {
+    assert!(
+        all_scores[0] > conf_one && conf_one > all_scores[1],
+        "expected distinct top-2 scores for 1-candidate test, got {} and {}",
+        all_scores[0],
+        all_scores[1]
+    );
+    // `ScoreRule::None` keeps `candidate_conf == conf_one` regardless of `0.10`, deterministically exercising the
+    // `total_cands == 1` 2-column padding path in `candidates_on_device`; also check `DflRepulse` at `conf_one`.
+    for rule in [ScoreRule::None, ScoreRule::DflRepulse] {
+        let nms_one = NmsConfig { conf: conf_one, fusion: BoxFusion::Dfl, score: rule, ..nms.clone() };
+        let got_one = m_low.predict_candidates(&x1, &nms_one).unwrap();
+        let want_one = dense1.detections(&nms_one).unwrap();
+        if rule == ScoreRule::None || conf_one <= 0.10 {
             assert_eq!(
-                bits(&m_low.finish_candidates(&got_one[img], &nms_one)),
-                bits(&want_one[img]),
-                "DFL-repulse single-candidate sparse gather: image {img}"
+                got_one[0].cands.len(),
+                1,
+                "{rule:?} single-candidate sparse gather must have exactly 1 surviving candidate"
             );
+            assert_eq!(want_one[0].len(), 1);
+            check_precisions(&m_low, &got_one, &dense1_side, &nms_one, "single-candidate sparse gather");
         }
+        assert_eq!(
+            bits(&m_low.finish_candidates(&got_one[0], &nms_one)),
+            bits(&want_one[0]),
+            "{rule:?} single-candidate sparse gather"
+        );
     }
     // `o2o` ignores `--score` (DflConsensus and DflRepulse match None bit-for-bit).
     let m_o2o = model(3, "o2o", dev, DType::F32);

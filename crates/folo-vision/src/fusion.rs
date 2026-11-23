@@ -34,10 +34,10 @@ pub const CONSENSUS_IOU: f32 = 0.75;
 /// The cap `R` of [`ScoreRule::Consensus`]: a cluster carrying this many times the kept box's score keeps the score.
 pub const CONSENSUS_CAP: f64 = 10.0;
 
-/// The cluster IoU `τ` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+/// The cluster IoU `τ` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
 pub const ELC_IOU: f32 = 0.75;
 
-/// The cluster support cap `R` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+/// The cluster support cap `R` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
 pub const ELC_CAP: f64 = 10.0;
 
 /// The log-support slope `α` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
@@ -242,7 +242,7 @@ fn branch_safe_sigmoid(z: f64) -> f64 {
 /// Class-local suppressor ownership of every candidate `j` relative to `kept` (assumed in descending score order):
 /// each kept box owns itself, and every other candidate of class `c` is owned by the first kept box of class `c`
 /// whose IoU with it is `> nms_iou` (`u32::MAX` if none). Used when NMS ran `agnostic` or when a caller invokes
-/// [`elc_scores`] / [`dfl_consensus_scores`] without precomputed owners.
+/// [`elc_scores`] / [`dfl_consensus_scores`] / [`dfl_repulse_scores`] without precomputed owners.
 fn class_local_owners(
     kept: &[usize],
     boxes: &[Xyxy],
@@ -321,7 +321,7 @@ pub fn dfl_consensus_scores(
     let computed_owners;
     let owners: &[u32] = match owner {
         Some(o) => {
-            debug_assert_eq!(o.len(), boxes.len(), "dfl_consensus_scores: owner length mismatch");
+            assert_eq!(o.len(), boxes.len(), "dfl_consensus_scores: owner length mismatch");
             o
         }
         None => {
@@ -418,13 +418,15 @@ pub fn dfl_repulse_scores(
     entropy: Option<&dyn Fn(usize) -> f32>,
     stride: Option<&dyn Fn(usize) -> f32>,
 ) -> Vec<f32> {
-    debug_assert_eq!(repulse_boxes.len(), kept.len(), "dfl_repulse_scores: repulse_boxes length mismatch");
+    assert_eq!(repulse_boxes.len(), kept.len(), "dfl_repulse_scores: repulse_boxes length mismatch");
+    assert_eq!(scores.len(), boxes.len(), "dfl_repulse_scores: boxes/scores length mismatch");
+    assert_eq!(classes.len(), boxes.len(), "dfl_repulse_scores: boxes/classes length mismatch");
     let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
     let buckets = Buckets::new(boxes.len(), classes, false);
     let computed_owners;
     let owners: &[u32] = match owner {
         Some(o) => {
-            debug_assert_eq!(o.len(), boxes.len(), "dfl_repulse_scores: owner length mismatch");
+            assert_eq!(o.len(), boxes.len(), "dfl_repulse_scores: owner length mismatch");
             o
         }
         None => {

@@ -75,6 +75,15 @@ impl DflAuxOutputs {
                 let Some(t) = stats else {
                     return Ok(DflAux { strides: keep_strides.then_some(strides), ..DflAux::default() });
                 };
+                if a == 0 {
+                    let b = t.dims()[0];
+                    return Ok(DflAux {
+                        precision: wants.side.then(|| vec![Vec::new(); b]),
+                        bin_precision: wants.bin.then(|| vec![Vec::new(); b]),
+                        entropy: wants.ent.then(|| vec![Vec::new(); b]),
+                        strides: keep_strides.then_some(strides),
+                    });
+                }
                 let raw = t.to_vec::<f32>()?;
                 let ch = dfl_stats_channels(wants.moments(), wants.ent);
                 let precision = wants.side.then(|| {
@@ -404,6 +413,14 @@ impl HeadOutput {
                 "HeadOutput: box_raw {:?} does not match {a} anchors",
                 self.box_raw.dims()
             )));
+        }
+        if a == 0 {
+            return Ok(DflAuxOutputs::Host(DflAux {
+                precision: wants.side.then(|| vec![Vec::new(); b]),
+                bin_precision: wants.bin.then(|| vec![Vec::new(); b]),
+                entropy: wants.ent.then(|| vec![Vec::new(); b]),
+                strides: keep_strides.then(|| self.anchors.strides.clone()),
+            }));
         }
         if !self.box_raw.device().is_cpu() {
             let k = wants.moments().then(|| device_bins(self.box_raw.device(), rm)).transpose()?;

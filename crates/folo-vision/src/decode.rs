@@ -134,7 +134,8 @@ pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
 
 /// Mean, variance (in bins and bins²) and Shannon entropy (in nats, `>= 0`) of `softmax(logits)` over the bin
 /// indices, computed stably (max-subtracted) in a single pass. `(mean, var)` is bit-for-bit identical to
-/// [`softmax_moments`]; `(0, 0, 0)` for an empty slice, and `NaN` entropy on non-finite logits.
+/// [`softmax_moments`]; `(0, 0, 0)` for an empty slice. `-∞` acts as a zero-mass bin when at least one finite
+/// logit is present (and no logit is `+∞` or `NaN`); otherwise non-finite logits yield `NaN` entropy.
 #[inline]
 pub fn softmax_moments_and_entropy(logits: &[f32]) -> (f32, f32, f32) {
     if logits.is_empty() {

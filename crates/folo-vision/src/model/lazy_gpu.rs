@@ -9,10 +9,11 @@
 //! slots in some image is flagged, and those images take their candidates from the dense head (a second round
 //! trip on the same features).
 //!
-//! DFL box fusion needs each candidate's side precisions: the dense path's moment ops
-//! ([`HeadOutput::moments_on_device`]) run on the candidates' box-logit columns, which hold the dense logits bit
-//! for bit, so the precisions are the dense ones bit for bit (only then are the moments and the site lists read
-//! back too).
+//! DFL box fusion and DFL-based score rules (`dfl-consensus`, `dfl-repulse`) need per-candidate side moments
+//! and/or Shannon entropy: [`dfl_stats_with`] runs on the candidates' box-logit columns, which hold the dense
+//! logits bit for bit, so the stats are the dense ones bit for bit. When any DFL stats are requested, all three
+//! levels' site lists are concatenated with the records into one `u32` buffer so the host downloads at most two
+//! buffers (the packed `u32` buffer and the single `[B, ch, Σ cap]` `f32` stats buffer).
 //!
 //! Everything from the input to the records (and the DFL stats) is a pure function of the input with a fixed
 //! dispatch list, so with the model's forward plans on ([`FoloModel::set_forward_plans`], as in a `Predictor`) the
