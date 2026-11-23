@@ -41,17 +41,29 @@ pub use forward::{
     ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_input, conv2d_with_config, conv2d_with_plan,
 };
 pub use input_grad::conv2d_backward_input;
-pub(crate) use input_grad::{PHASE_PIXEL, Phase};
+pub(crate) use input_grad::{
+    PHASE_PIXEL, Phase, dx_tap_mask_setup, phase_tap_mask_setup, subpixel_epilogue_coop,
+    subpixel_epilogue_gemm,
+};
 pub use sites::conv2d_sites;
-pub(crate) use sites::{SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column};
+pub(crate) use sites::{SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column, fwd_tap_mask_setup};
 #[cfg(test)]
 pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
+pub(crate) use weight_grad::{
+    can_pointwise_wgrad, finish_wgrad, plan_pointwise_wgrad, plan_wgrad_per_img, weight_grad_dims,
+    weight_grad_spec, wgrad_b_load, wgrad_b_setup, wgrad_b_units,
+};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
-pub(crate) use weight_grad::{weight_grad_dims, weight_grad_spec, wgrad_b_load, wgrad_b_units};
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&crate::pipeline::KernelDef] =
-    &[&depthwise::DEPTHWISE, &depthwise::DEPTHWISE_GRAD, &input_grad::PHASE_PACK, &split::SPLIT_FINISH];
+pub(crate) static DEFS: &[&crate::pipeline::KernelDef] = &[
+    &depthwise::DEPTHWISE,
+    &depthwise::DEPTHWISE_GRAD,
+    &input_grad::PHASE_PACK,
+    &input_grad::SUBPIXEL_PACK,
+    &split::SPLIT_FINISH,
+    &weight_grad::WGRAD_REDUCE,
+];
 
 /// Whether a kernel list may ask for the direct depthwise forward with `spec` (`kernels::bounds`).
 pub(crate) fn depthwise_fits(spec: &Spec) -> bool {

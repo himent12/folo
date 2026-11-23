@@ -42,6 +42,30 @@ pub(crate) fn forward_column(inner: &str, sites: bool) -> String {
     pixel + "  let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n"
 }
 
+/// WGSL of the forward `CONV_MODE` 1 tap-mask setup (shared by `gemm` and `coop/shader`): builds `vm` (bit
+/// `kh·KW + kw` set when the tap lies inside `(IH, IW)`) and `base_var` (the top-left input pixel of the window).
+pub(crate) fn fwd_tap_mask_setup(kh_n: u32, kw_n: u32, dh_n: u32, dw_n: u32, base_var: &str) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from("  var vm = 0u;\n  if (cjok) {\n");
+    for kh in 0..kh_n {
+        for kw in 0..kw_n {
+            let _ = writeln!(
+                s,
+                "    if (u32(cih0 + {}) < IH && u32(ciw0 + {}) < IW) {{ vm |= {}u; }}",
+                kh * dh_n,
+                kw * dw_n,
+                1u32 << (kh * kw_n + kw)
+            );
+        }
+    }
+    let _ = writeln!(
+        s,
+        "  }}\n  let {base_var} = offB + bitcast<u32>(cih0 * i32(IW) + ciw0);\n\
+         \x20 let IHW = IH * IW; let DHIW = DH * IW;"
+    );
+    s
+}
+
 /// `y = act(conv2d(x, weight) + bias)` at listed output pixels. `sites` (u32 `[N, 1 + cap]`) holds per image a
 /// count, then up to `cap` output pixels `oy·OW + ox`; `y` is `[N, C_out, cap]`: column `j < min(count, cap)` of
 /// image `n` is the conv at the image's `j`-th pixel, bit for bit [`super::conv2d`]'s value there for the same

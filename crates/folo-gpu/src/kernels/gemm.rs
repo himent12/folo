@@ -276,11 +276,21 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let conv = mode != 0;
     // Input gradient of one stride phase (`super::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
+    // Fused 2×2 sub-pixel stride-2 input gradient (`CONV_MODE` 1 with 2×2 pixel-shuffle epilogue).
+    let subpixel = mode == 1 && spec.get_bool("SUBPIXEL");
+    // Per-image weight gradient (`CONV_MODE` 3 with `b1 = n`, `K = OH·OW`: drops `/ OHOW` and `% OHOW`).
+    let per_img = mode == 3 && spec.get_bool("PER_IMG");
     let split = spec.get_bool("SPLIT");
-    // Forward conv windows of at most 32 taps keep a per-column tap mask (`vm`) instead of four bounds checks.
+    // Forward, stride-1 dX, and stride-phase dX windows of at most 32 taps keep a per-column tap mask (`vm`).
     let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
+    let (sh_n, sw_n) = (spec.get_u32("SH", 1), spec.get_u32("SW", 1));
     let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
-    let tap_mask = mode == 1 && kh_n * kw_n <= 32;
+    let (pth_n, ptw_n) = (spec.get_u32("PTH", 1), spec.get_u32("PTW", 1));
+    let taps = kh_n.saturating_mul(kw_n);
+    let ptaps = pth_n.saturating_mul(ptw_n);
+    let tap_mask = mode == 1 && taps > 0 && taps <= 32;
+    let dx_tap_mask = mode == 2 && !phase && sh_n == 1 && sw_n == 1 && taps > 0 && taps <= 32;
+    let phase_tap_mask = phase && ptaps > 0 && ptaps <= 32;
     let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`super::gemm_cat`; plain GEMM, `B` not transposed).
@@ -380,11 +390,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 s.push_str("  let WR = pu(33u);\n");
             }
         }
-        // Weight gradient: k = (n, oh, ow) runs over the whole batch; A[m][k] = G[n][m][oh, ow] and
-        // B[k][j = (ci, kh, kw)] = X[n][ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
+        // Weight gradient: k = (n, oh, ow) (or `(oh, ow)` per image when `PER_IMG`); column = (ci, kh, kw).
         3 => {
             s.push_str(&super::conv::weight_grad_dims(spec));
-            s.push_str("  let SAN = pu(32u); let SBN = pu(33u);\n");
+            if !per_img {
+                s.push_str("  let SAN = pu(32u); let SBN = pu(33u);\n");
+            }
         }
         _ => {}
     }
@@ -396,34 +407,32 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         1 => {
             s.push_str(&super::conv::forward_column("bi", sites));
             if tap_mask {
-                // Which taps of this column's window lie inside the image (bit `kh·KW + kw`), and the window's
-                // top-left element (wrapping u32 arithmetic: only in-image taps are ever read).
-                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
-                for kh in 0..kh_n {
-                    for kw in 0..kw_n {
-                        let _ = writeln!(
-                            s,
-                            "    if (u32(cih0 + {}) < IH && u32(ciw0 + {}) < IW) {{ vm |= {}u; }}",
-                            kh * dh_n,
-                            kw * dw_n,
-                            1u32 << (kh * kw_n + kw)
-                        );
-                    }
-                }
-                s.push_str(
-                    "  }\n  let cbase = offB + bitcast<u32>(cih0 * i32(IW) + ciw0);\n\
-                     \x20 let IHW = IH * IW; let DHIW = DH * IW;\n",
-                );
+                s.push_str(&super::conv::fwd_tap_mask_setup(kh_n, kw_n, dh_n, dw_n, "cbase"));
             }
         }
-        2 if phase => s.push_str(
-            "  let cj = n0 + bi; let cjok = cj < N;\n\
-             let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);\n",
-        ),
-        2 => s.push_str(
-            "  let cj = n0 + bi; let cjok = cj < N;\n\
-             let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;\n",
-        ),
+        2 if phase => {
+            s.push_str(
+                "  let cj = n0 + bi; let cjok = cj < N;\n\
+                 let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);\n",
+            );
+            if phase_tap_mask {
+                s.push_str(&super::conv::phase_tap_mask_setup(pth_n, ptw_n, "pbase"));
+            }
+        }
+        2 => {
+            s.push_str(
+                "  let cj = n0 + bi; let cjok = cj < N;\n\
+                 let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;\n",
+            );
+            if dx_tap_mask {
+                s.push_str(&super::conv::dx_tap_mask_setup(kh_n, kw_n, dh_n, dw_n, "cbase"));
+            }
+        }
+        3 => {
+            if let Some(wb) = &wb {
+                s.push_str(&super::conv::wgrad_b_setup(wb, per_img));
+            }
+        }
         _ => {}
     }
     let _ =
@@ -447,14 +456,14 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             (format!("ra[{}]", u / 4), format!("[{}]", u % 4))
         };
         let (idx, cond) = match (pa.vec, ta) {
-            // Weight gradient: k = (n, pixel) folds the batch into K; the gradient rows are `OHOW` long.
-            (true, false) if mode == 3 => (
+            // Weight gradient: k = (n, pixel) folds the batch into K; `PER_IMG` takes the linear path below.
+            (true, false) if mode == 3 && !per_img => (
                 format!(
                     "(offA + ((k0 + ai * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + ai * 4u) % OHOW) / 4u"
                 ),
                 format!("m0 + {o} < M && k0 + ai * 4u < K"),
             ),
-            (false, false) if mode == 3 => (
+            (false, false) if mode == 3 && !per_img => (
                 format!("offA + ((k0 + ai) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + ai) % OHOW"),
                 format!("m0 + {o} < M && k0 + ai < K"),
             ),
@@ -484,7 +493,7 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     }
     if let Some(wb) = &wb {
         let reg = |u: usize| format!("rb[{}][{}]", u / 4, u % 4);
-        load.push_str(&super::conv::wgrad_b_load(wb, "B", reg, "f32", "0.0"));
+        load.push_str(&super::conv::wgrad_b_load(wb, "B", reg, "f32", "0.0", per_img, check));
     }
     for u in 0..pb.count {
         let o = format!("(bo + {}u)", u * pb.step);
@@ -518,6 +527,17 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 );
                 continue;
             }
+            2 if phase_tap_mask => {
+                let kcheck = if check { "k < K && " } else { "" };
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k - co * (PTH * PTW);\n\
+                     \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+                     \x20       {reg}{comp} = f32(B[pbase + co * OHW - (r / PTW) * OW - (r % PTW)]);\n\
+                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+                );
+                continue;
+            }
             2 if phase => {
                 // Unit (k = (co, th, tw), j = phase pixel (a, b)): output pixel (BH + a - th, BW + b - tw).
                 let _ = writeln!(
@@ -529,6 +549,17 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                      \x20       v = f32(B[offB + (co * OH + u32(oh)) * OW + u32(ow)]);\n\
                      \x20     }}\n\
                      \x20     {reg}{comp} = v; }}"
+                );
+                continue;
+            }
+            2 if dx_tap_mask => {
+                let kcheck = if check { "k < K && " } else { "" };
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k - co * (KH * KW);\n\
+                     \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+                     \x20       {reg}{comp} = f32(B[cbase + co * OHW - (r / KW) * DHOW - (r % KW) * DW]);\n\
+                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
                 );
                 continue;
             }
@@ -694,6 +725,11 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     s.push_str("  }\n\n");
 
     // --- epilogue --------------------------------------------------------------------------------------------
+    if subpixel {
+        s.push_str(&super::conv::subpixel_epilogue_gemm(tm, tn, wgx, wgy, vc, c_f16));
+        s.push_str("}\n");
+        return s;
+    }
     s.push_str("  let alpha = pf(7u); let act_alpha = pf(17u);\n");
     for i in 0..tm / 4 {
         for r in 0..4 {

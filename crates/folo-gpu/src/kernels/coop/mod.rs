@@ -34,8 +34,8 @@ use crate::error::{Result, shape_err};
 
 pub use self::convolution::conv2d;
 pub(crate) use self::convolution::{
-    encode_conv, encode_conv_backward_input, encode_conv_backward_input_phase, encode_conv_backward_weight,
-    encode_conv_sites,
+    encode_conv, encode_conv_backward_input, encode_conv_backward_input_phase,
+    encode_conv_backward_input_subpixel, encode_conv_backward_weight, encode_conv_sites,
 };
 pub use self::matmul::gemm;
 pub(crate) use self::matmul::{encode_gemm, encode_gemm_cat};

@@ -353,3 +353,90 @@ fn conv_rejects_bad_configs() {
     let d = desc(1, 1 << 20, 1 << 20, 1 << 20, 8, 1, Window2d::square(3, 1, 1));
     assert!(conv::conv2d(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw()).is_err());
 }
+
+fn cpu_conv_grads_f32(d: &Conv2dDesc, x: &[f32], w: &[f32], g: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let (oh, ow) = d.output().unwrap();
+    let (kh, kw) = d.win.kernel;
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    let (mut gx, mut gw) = (vec![0f64; x.len()], vec![0f64; w.len()]);
+    for n in 0..d.n {
+        for co in 0..d.c_out {
+            let grp = co / cout_g;
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let gv = g[((n * d.c_out + co) * oh + oy) * ow + ox] as f64;
+                    for ci in 0..cin_g {
+                        for ky in 0..kh {
+                            for kx in 0..kw {
+                                let iy = (oy * d.win.stride.0 + ky * d.win.dilation.0) as isize
+                                    - d.win.padding.0 as isize;
+                                let ix = (ox * d.win.stride.1 + kx * d.win.dilation.1) as isize
+                                    - d.win.padding.1 as isize;
+                                if iy < 0 || ix < 0 || iy >= d.h as isize || ix >= d.w as isize {
+                                    continue;
+                                }
+                                let xi =
+                                    ((n * d.c_in + grp * cin_g + ci) * d.h + iy as usize) * d.w + ix as usize;
+                                let wi = ((co * cin_g + ci) * kh + ky) * kw + kx;
+                                gx[xi] += gv * w[wi] as f64;
+                                gw[wi] += gv * x[xi] as f64;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (gx.into_iter().map(|v| v as f32).collect(), gw.into_iter().map(|v| v as f32).collect())
+}
+
+/// Regular f32 backward formulas: fused 2×2 sub-pixel stride-2 3×3 `dX`, stride-1 `dx_tap_mask` + `ROWS16`/`ROWS32`,
+/// division-free `vec4` per-image split-K 1×1 `dW`, and `conv2d_wgrad_reduce`.
+#[test]
+fn conv_f32_backward_formulas() {
+    let ctx = gpu!();
+    let s2 = |ph, pw| Window2d { kernel: (3, 3), stride: (2, 2), padding: (ph, pw), dilation: (1, 1) };
+    let k4x8 = Window2d { kernel: (4, 8), stride: (1, 1), padding: (1, 3), dilation: (1, 1) };
+    let cases = [
+        // Sub-pixel stride-2 3×3 (vec4 aligned, UW=10 wrap, odd H with CHECK=false, odd W scalar, paddings, groups).
+        desc(2, 16, 20, 20, 32, 1, s2(1, 1)),
+        desc(2, 16, 15, 16, 32, 1, s2(1, 1)),
+        desc(2, 12, 13, 17, 20, 1, s2(1, 1)),
+        desc(2, 8, 12, 12, 16, 1, s2(0, 0)),
+        desc(2, 8, 13, 15, 12, 1, s2(2, 1)),
+        desc(2, 16, 16, 20, 24, 2, s2(1, 1)),
+        // Stride-1 dx_tap_mask + ROWS16/ROWS32 (3x3, 5x5, 4x8 exact 32-tap limit).
+        desc(2, 16, 16, 16, 32, 1, Window2d::square(3, 1, 1)),
+        desc(2, 32, 13, 15, 32, 1, Window2d::square(3, 1, 1)),
+        desc(1, 8, 11, 12, 16, 1, Window2d::square(5, 1, 2)),
+        desc(1, 4, 10, 11, 12, 1, k4x8),
+        // Pointwise 1×1 division-free split-K dW (narrow PW32/PW32X64/PW64X32, wide, single-img, grouped, odd).
+        desc(1, 32, 16, 16, 32, 1, Window2d::square(1, 1, 0)),
+        desc(4, 32, 20, 20, 64, 1, Window2d::square(1, 1, 0)),
+        desc(4, 64, 20, 20, 32, 1, Window2d::square(1, 1, 0)),
+        desc(4, 48, 32, 32, 64, 1, Window2d::square(1, 1, 0)),
+        desc(4, 32, 24, 24, 64, 2, Window2d::square(1, 1, 0)),
+        desc(3, 5, 11, 13, 7, 1, Window2d::square(1, 1, 0)),
+    ];
+    for (i, d) in cases.iter().enumerate() {
+        let mut rng = Rng::new(700 + i as u64);
+        let (oh, ow) = d.output().unwrap();
+        let (kh, kw) = d.win.kernel;
+        let x = rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0);
+        let w = rng.vec(d.c_out * (d.c_in / d.groups) * kh * kw, -1.0, 1.0);
+        let g = rng.vec(d.n * d.c_out * oh * ow, -1.0, 1.0);
+        let (want_x, want_w) = cpu_conv_grads_f32(d, &x, &w, &g);
+        let gx = GpuTensor::from_slice(&ctx, &x, &[x.len()]).unwrap();
+        let gw = GpuTensor::from_slice(&ctx, &w, &[w.len()]).unwrap();
+        let gg = GpuTensor::from_slice(&ctx, &g, &[g.len()]).unwrap();
+        let dx = GpuTensor::empty(&ctx, &[x.len()], DType::F32).unwrap();
+        let dw = GpuTensor::empty(&ctx, &[w.len()], DType::F32).unwrap();
+        conv::conv2d_backward_input(&ctx, d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+        conv::conv2d_backward_weight(&ctx, d, gx.raw(), gg.raw(), dw.raw()).unwrap();
+        let kx = (d.c_out / d.groups * kh * kw) as f32;
+        let kw_ = (d.n * oh * ow) as f32;
+        assert_close(&dx.to_vec().unwrap(), &want_x, 2e-5 * kx.sqrt(), 1e-5, &format!("f32 dX {d:?}"));
+        assert_close(&dw.to_vec().unwrap(), &want_w, 2e-5 * kw_.sqrt(), 1e-5, &format!("f32 dW {d:?}"));
+    }
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}

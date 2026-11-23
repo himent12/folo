@@ -8,7 +8,139 @@ use crate::context::GpuContext;
 use crate::error::Result;
 use crate::kernels::gemm::{self, BatchStrides, GEMM, GemmDesc, TileConfig, base_spec, gemm_params};
 use crate::kernels::{check_buf, coop, prod};
-use crate::pipeline::{Params, Spec};
+use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+
+/// Sums `splits` f32 partial weight-gradient slabs (`[splits, wn / 4]` of `vec4<f32>`) into `GW` (`vec4<T>`,
+/// f32 or f16): `@workgroup_size(8, 32)` reduces 8 contiguous `vec4` columns (32 f32s = 128 B coalesced
+/// sector) per workgroup with 32 lanes streaming along `splits`. Params: 0 = `wn / 4`, 1 = `splits`.
+fn gen_wgrad_reduce(_: &Spec) -> String {
+    "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
+     @group(0) @binding(2) var<storage, read_write> GW: array<vec4<T>>;\n\
+     var<workgroup> smem: array<vec4<f32>, 256>;\n\
+     @compute @workgroup_size(8, 32)\n\
+     fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+     \x20       @builtin(local_invocation_id) lid: vec3<u32>) {\n\
+     \x20 let wn4 = pu(0u); let splits = pu(1u);\n\
+     \x20 let col = (wid.y * nwg.x + wid.x) * 8u + lid.x;\n\
+     \x20 var acc = vec4<f32>(0.0);\n\
+     \x20 if (col < wn4) {\n\
+     \x20   for (var s = lid.y; s < splits; s += 32u) { acc += PART[s * wn4 + col]; }\n\
+     \x20 }\n\
+     \x20 let slot = lid.y * 8u + lid.x;\n\
+     \x20 smem[slot] = acc;\n\
+     \x20 workgroupBarrier();\n\
+     \x20 if (lid.y < 16u) { smem[slot] += smem[slot + 128u]; }\n\
+     \x20 workgroupBarrier();\n\
+     \x20 if (lid.y < 8u) { smem[slot] += smem[slot + 64u]; }\n\
+     \x20 workgroupBarrier();\n\
+     \x20 if (lid.y < 4u) { smem[slot] += smem[slot + 32u]; }\n\
+     \x20 workgroupBarrier();\n\
+     \x20 if (lid.y < 2u) { smem[slot] += smem[slot + 16u]; }\n\
+     \x20 workgroupBarrier();\n\
+     \x20 if (lid.y == 0u && col < wn4) { GW[col] = vec4<T>(smem[lid.x] + smem[lid.x + 8u]); }\n}\n"
+        .into()
+}
+
+pub(super) static WGRAD_REDUCE: KernelDef = KernelDef {
+    name: "conv2d_wgrad_reduce",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_wgrad_reduce),
+};
+
+/// Sums `splits` f32 partial slabs (`[splits, wn]`) into `gw` stored as `out`, using the `vec4` weight-gradient
+/// reducer when `wn` is a multiple of 4 (falling back to `reduce::reduce_as` for odd `wn`, or a cast when
+/// `splits == 1`).
+pub(crate) fn finish_wgrad(
+    ctx: &GpuContext,
+    tmp: &wgpu::Buffer,
+    splits: usize,
+    wn: usize,
+    gw: &wgpu::Buffer,
+    out: DType,
+) -> Result<()> {
+    if splits > 1 {
+        if wn.is_multiple_of(4) {
+            let wn4 = wn / 4;
+            let k = ctx.kernel(&WGRAD_REDUCE, Spec::new().f16(out == DType::F16))?;
+            let p = Params::new().uz(wn4)?.uz(splits)?;
+            let groups = ctx.grid_1d(wn4.div_ceil(8) as u64 * 256, 256)?;
+            ctx.dispatch(&k, &[tmp, gw], &p, groups)
+        } else {
+            let op = crate::kernels::reduce::ReduceOp::Sum;
+            crate::kernels::reduce::reduce_as(ctx, op, (tmp, DType::F32), (gw, out), 1, splits, wn)
+        }
+    } else {
+        crate::kernels::layout::cast(ctx, tmp, gw, wn, true)
+    }
+}
+
+/// Whether a 1×1 stride-1 unpadded weight gradient can run as a division-free per-image split-K `A · Bᵀ` GEMM
+/// (`K = H·W`, contiguous `vec4` loads on both `dY` and `X`).
+pub(crate) fn can_pointwise_wgrad(d: &Conv2dDesc, bk: usize, wn: usize) -> bool {
+    let hw = d.h * d.w;
+    d.is_pointwise()
+        && !d.is_depthwise()
+        && hw >= bk
+        && d.n.saturating_mul(d.groups) <= 65535
+        && d.n.saturating_mul(wn) <= MAX_PARTIAL_ELEMS
+}
+
+/// `(sp, chunk_p)` for per-image spatial split-K weight gradients: `sp` chunks of `chunk_p` output pixels per
+/// image (`total_slabs = d.n * sp`).
+pub(crate) fn plan_wgrad_per_img(
+    d: &Conv2dDesc,
+    ohow: usize,
+    tiles: usize,
+    bk: usize,
+    threads: usize,
+    wn: usize,
+    min_chunk_tiles: usize,
+) -> (usize, usize) {
+    let target = (512 * 256 / threads).min(1024);
+    let base_groups = tiles.saturating_mul(d.n);
+    let max_sp = ohow
+        .div_ceil(min_chunk_tiles * bk)
+        .min((MAX_PARTIAL_ELEMS / d.n.saturating_mul(wn).max(1)).max(1))
+        .min(65535 / d.n.saturating_mul(d.groups).max(1))
+        .max(1);
+    let want = target.div_ceil(base_groups.max(1)).min(max_sp).max(1);
+    if want <= 1 {
+        return (1, ohow);
+    }
+    let chunk_p = ohow.div_ceil(want).next_multiple_of(bk);
+    (ohow.div_ceil(chunk_p), chunk_p)
+}
+
+/// `(sp, chunk_p)` for the pointwise per-image split-K weight gradient.
+pub(crate) fn plan_pointwise_wgrad(
+    d: &Conv2dDesc,
+    bm: usize,
+    bn: usize,
+    bk: usize,
+    threads: usize,
+    wn: usize,
+) -> (usize, usize) {
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    let tiles = cout_g.div_ceil(bm) * cin_g.div_ceil(bn) * d.groups;
+    plan_wgrad_per_img(d, d.h * d.w, tiles, bk, threads, wn, 8)
+}
+
+/// 32×32 tiles, depth 16, 4×4 per thread, 64 threads (8 KiB): narrow 1×1 weight gradients.
+const PW32: TileConfig = TileConfig { bm: 32, bn: 32, bk: 16, tm: 4, tn: 4 };
+/// 32×64 tiles, depth 16, 4×4 per thread, 128 threads (12 KiB).
+const PW32X64: TileConfig = TileConfig { bm: 32, bn: 64, bk: 16, tm: 4, tn: 4 };
+/// 64×32 tiles, depth 16, 4×4 per thread, 128 threads (12 KiB).
+const PW64X32: TileConfig = TileConfig { bm: 64, bn: 32, bk: 16, tm: 4, tn: 4 };
+
+fn pick_config_pointwise_wgrad(ctx: &GpuContext, m: usize, n: usize) -> TileConfig {
+    let cfg = match (m, n) {
+        (0..=32, 0..=32) => PW32,
+        (0..=32, 33..=64) => PW32X64,
+        (33..=64, 0..=32) => PW64X32,
+        _ => return pick_config_weight_grad(ctx, m, n),
+    };
+    if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
+}
 
 /// Tile configuration of a regular (not tensor-core) weight gradient with `m = C_out/groups` rows and
 /// `n = C_in/groups·KH·KW` columns, by the shape alone: split-K supplies the workgroups, so the tile is picked for
@@ -26,8 +158,8 @@ pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> T
     if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
 }
 
-/// 16×32 tiles, depth 32, 4×4 per thread, 32 threads: the stem (3→16, `N = 27`), whose 1.6 M-deep reduction
-/// split-K spreads over thousands of workgroups; a wider tile would be mostly padding.
+/// 16×32 tiles, depth 32, 4×4 per thread, 32 threads (13.3 KiB padded): the stem (3→16, `N = 27`), whose
+/// 1.6 M-deep reduction split-K spreads over a thousand workgroups.
 const STEM: TileConfig = TileConfig { bm: 16, bn: 32, bk: 32, tm: 4, tn: 4 };
 
 /// Whether the weight gradient of an `m × n` weight takes the regular kernels' [`STEM`] tile even on tensor
@@ -124,19 +256,57 @@ pub(crate) fn wgrad_b_units(threads: u32, bk: u32, bn: u32, run: u32) -> WgradPl
     WgradPlan { run, units }
 }
 
-/// The WGSL of a weight gradient's B-tile load (from `buf`, converted by `cast`): each distinct run of `units` gets its
-/// pixel `(wn, wr)` decoded once, then each unit gathers the image element that pixel read through tap
-/// `j = (ci, kh, kw)` into `reg(u)` (zero outside the image or past `K` / `N`).
+/// Distinct `w.jj` columns of `plan`, in order of appearance.
+fn wgrad_cols(plan: &WgradPlan) -> Vec<&str> {
+    let mut cols: Vec<&str> = Vec::new();
+    for w in &plan.units {
+        if !cols.iter().any(|c| *c == w.jj) {
+            cols.push(&w.jj);
+        }
+    }
+    cols
+}
+
+/// Loop-invariant column setup hoisted before the K loop of `CONV_MODE` 3 when a thread owns at most 4 distinct
+/// columns (`C64X128`, `C64X64`, `C32X128`, `C32X32`, `LARGE`, `SMALL`): decodes `j = (ci, kh, kw)` once instead
+/// of repeating `/ (KH * KW)` and `% (KH * KW)` on every K tile.
+pub(crate) fn wgrad_b_setup(plan: &WgradPlan, per_img: bool) -> String {
+    use std::fmt::Write as _;
+    let cols = wgrad_cols(plan);
+    if cols.len() > 4 {
+        return String::new();
+    }
+    let prefix = if per_img { "offB + " } else { "" };
+    let mut s = String::new();
+    for (c, jj) in cols.iter().enumerate() {
+        let _ = writeln!(
+            s,
+            "  let wj{c} = n0 + {jj}; let wjok{c} = wj{c} < N;\n\
+             \x20 let wci{c} = wj{c} / (KH * KW); let wtap{c} = wj{c} - wci{c} * (KH * KW);\n\
+             \x20 let wdh{c} = i32((wtap{c} / KW) * DH); let wdw{c} = i32((wtap{c} % KW) * DW);\n\
+             \x20 let wcb{c} = {prefix}wci{c} * (IH * IW);"
+        );
+    }
+    s
+}
+
+/// The WGSL of a weight gradient's B-tile load (from `buf`, converted by `cast`): each distinct run of `units` gets
+/// its output pixel decoded once (`per_img` drops `/ OHOW` and `% OHOW` since `offB` already targets image `b1`),
+/// then each unit gathers through tap `j = (ci, kh, kw)` into `reg(u)` with unsigned bounds checks.
 pub(crate) fn wgrad_b_load(
     plan: &WgradPlan,
     buf: &str,
     reg: impl Fn(usize) -> String,
     cast: &str,
     zero: &str,
+    per_img: bool,
+    check: bool,
 ) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     let mut runs: Vec<&str> = Vec::new();
+    let cols = wgrad_cols(plan);
+    let hoisted = cols.len() <= 4;
     let run = plan.run;
     for (u, w) in plan.units.iter().enumerate() {
         let q = match runs.iter().position(|k| *k == w.kq) {
@@ -144,27 +314,55 @@ pub(crate) fn wgrad_b_load(
             None => {
                 runs.push(&w.kq);
                 let q = runs.len() - 1;
-                let _ = writeln!(
-                    s,
-                    "    let wk{q} = k0 + {} * {run}u + wl; let wkok{q} = wk{q} < K; let wn{q} = wk{q} / OHOW;\n\
-                     \x20   let wr{q} = wk{q} % OHOW; let wb{q} = offB + wn{q} * SBN;\n\
-                     \x20   let wih{q} = i32((wr{q} / OW) * SH) - PH; let wiw{q} = i32((wr{q} % OW) * SW) - PW;",
-                    w.kq
-                );
+                let kok = if check { format!(" let wkok{q} = wk{q} < K;") } else { String::new() };
+                if per_img {
+                    let _ = writeln!(
+                        s,
+                        "    let wk{q} = k0 + {} * {run}u + wl;{kok}\n\
+                         \x20   let wih{q} = i32((wk{q} / OW) * SH) - PH; let wiw{q} = i32((wk{q} % OW) * SW) - PW;",
+                        w.kq
+                    );
+                } else {
+                    let _ = writeln!(
+                        s,
+                        "    let wk{q} = k0 + {} * {run}u + wl;{kok} let wn{q} = wk{q} / OHOW;\n\
+                         \x20   let wr{q} = wk{q} - wn{q} * OHOW; let wb{q} = offB + wn{q} * SBN;\n\
+                         \x20   let wih{q} = i32((wr{q} / OW) * SH) - PH; let wiw{q} = i32((wr{q} % OW) * SW) - PW;",
+                        w.kq
+                    );
+                }
                 q
             }
         };
-        let _ = writeln!(
-            s,
-            "    {{ let j = n0 + {}; let ci = j / (KH * KW); let r = j % (KH * KW);\n\
-             \x20     let ih = wih{q} + i32((r / KW) * DH); let iw = wiw{q} + i32((r % KW) * DW);\n\
-             \x20     if (wkok{q} && j < N && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
-             \x20       {} = {cast}({buf}[wb{q} + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
-             \x20     }} else {{ {} = {zero}; }} }}",
-            w.jj,
-            reg(u),
-            reg(u)
-        );
+        let k_cond = if check { format!("wkok{q} && ") } else { String::new() };
+        if hoisted {
+            let c = cols.iter().position(|jj| *jj == w.jj).unwrap();
+            let j_cond = if check { format!("wjok{c} && ") } else { String::new() };
+            let wb_pre = if per_img { String::new() } else { format!("wb{q} + ") };
+            let _ = writeln!(
+                s,
+                "    {{ let ih = wih{q} + wdh{c}; let iw = wiw{q} + wdw{c};\n\
+                 \x20     if ({k_cond}{j_cond}u32(ih) < IH && u32(iw) < IW) {{\n\
+                 \x20       {} = {cast}({buf}[{wb_pre}wcb{c} + u32(ih) * IW + u32(iw)]);\n\
+                 \x20     }} else {{ {} = {zero}; }} }}",
+                reg(u),
+                reg(u)
+            );
+        } else {
+            let j_cond = if check { "j < N && " } else { "" };
+            let wb_var = if per_img { "offB".to_string() } else { format!("wb{q}") };
+            let _ = writeln!(
+                s,
+                "    {{ let j = n0 + {}; let ci = j / (KH * KW); let r = j - ci * (KH * KW);\n\
+                 \x20     let ih = wih{q} + i32((r / KW) * DH); let iw = wiw{q} + i32((r % KW) * DW);\n\
+                 \x20     if ({k_cond}{j_cond}u32(ih) < IH && u32(iw) < IW) {{\n\
+                 \x20       {} = {cast}({buf}[{wb_var} + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
+                 \x20     }} else {{ {} = {zero}; }} }}",
+                w.jj,
+                reg(u),
+                reg(u)
+            );
+        }
     }
     s
 }
@@ -216,12 +414,7 @@ pub fn conv2d_backward_weight_as(
     }
     // f32 partials (several chunks, or an f16 result) end in a column reduction or a cast into `gw`.
     let finish = |tmp: &crate::GpuBuffer, parts: usize| -> Result<()> {
-        if parts > 1 {
-            let op = crate::kernels::reduce::ReduceOp::Sum;
-            crate::kernels::reduce::reduce_as(ctx, op, (tmp.raw(), DType::F32), (gw, out), 1, parts, wn)
-        } else {
-            crate::kernels::layout::cast(ctx, tmp.raw(), gw, wn, true)
-        }
+        finish_wgrad(ctx, tmp.raw(), parts, wn, gw, out)
     };
     if d.is_depthwise() && khkw <= MAX_DEPTHWISE_TAPS {
         // Enough workgroups to fill the GPU, at least 4096 pixels each.
@@ -260,6 +453,68 @@ pub fn conv2d_backward_weight_as(
     {
         return Ok(());
     }
+    // Formula 2: division-free contiguous `vec4` batched/split-K `A · Bᵀ` GEMM for 1×1 s1 p0 weight gradients.
+    let pw_cfg = pick_config_pointwise_wgrad(ctx, cout_g, cin_g);
+    if can_pointwise_wgrad(d, pw_cfg.bk as usize, wn) {
+        gemm::check_config(ctx, pw_cfg)?;
+        let hw = ohow;
+        let (sp, chunk_p) = plan_pointwise_wgrad(
+            d,
+            pw_cfg.bm as usize,
+            pw_cfg.bn as usize,
+            pw_cfg.bk as usize,
+            pw_cfg.threads() as usize,
+            wn,
+        );
+        let total_slabs = d.n * sp;
+        #[cfg(test)]
+        LAST_ROUTE.set(Some((false, (pw_cfg.bm, pw_cfg.bn), total_slabs)));
+        let mut gp = GemmDesc::new(cout_g, cin_g, hw, false, true, d.n);
+        gp.batch = (d.n, d.groups);
+        gp.lda = hw;
+        gp.ldb = hw;
+        gp.ldc = cin_g;
+        gp.a = BatchStrides { offset: 0, outer: d.c_out * hw, inner: cout_g * hw };
+        gp.b = BatchStrides { offset: 0, outer: d.c_in * hw, inner: cin_g * hw };
+        gp.c = BatchStrides { offset: 0, outer: wn, inner: cout_g * cin_g };
+        gp.dtype = dt;
+        let c_f32 = total_slabs > 1 || out == DType::F32;
+        let tmp = if total_slabs > 1 {
+            Some(ctx.alloc(DType::F32.bytes(prod(&[total_slabs, wn])?))?)
+        } else {
+            None
+        };
+        let target = tmp.as_ref().map_or(gw, |t| t.raw());
+        let check = !cout_g.is_multiple_of(pw_cfg.bm as usize)
+            || !cin_g.is_multiple_of(pw_cfg.bn as usize)
+            || !hw.is_multiple_of(pw_cfg.bk as usize);
+        let spec = base_spec(&gp, pw_cfg)
+            .bool("VEC_A", hw.is_multiple_of(4))
+            .bool("VEC_B", hw.is_multiple_of(4))
+            .bool("VEC_C", cin_g.is_multiple_of(4))
+            .bool("TRANS_A", false)
+            .bool("TRANS_B", true)
+            .bool("CHECK", check)
+            .u32("CONV_MODE", 0)
+            .bool("SPLIT", sp > 1)
+            .bool("OUT_F32", c_f32 && dt == DType::F16);
+        let kernel = ctx.kernel(&GEMM, spec)?;
+        let p = if sp > 1 {
+            gemm_params(&gp)?.at(28).uz(sp)?.uz(chunk_p)?.uz(d.n * wn)?
+        } else {
+            gemm_params(&gp)?
+        };
+        let groups = [
+            cin_g.div_ceil(pw_cfg.bn as usize) as u32,
+            cout_g.div_ceil(pw_cfg.bm as usize) as u32,
+            u32::try_from(d.n * d.groups * sp).unwrap_or(u32::MAX),
+        ];
+        ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, groups)?;
+        if let Some(t) = &tmp {
+            finish(t, total_slabs)?;
+        }
+        return Ok(());
+    }
     let cfg = pick_config_weight_grad(ctx, cout_g, ncols);
     gemm::check_config(ctx, cfg)?;
     let pad = wgrad_pad(cfg, ctx.caps().max_workgroup_storage);
@@ -273,6 +528,68 @@ pub fn conv2d_backward_weight_as(
         .min(np.div_ceil(16 * bk))
         .min(MAX_PARTIAL_ELEMS / wn)
         .min(65535 / d.groups);
+    let per_img = ohow >= bk
+        && d.n.saturating_mul(d.groups) <= 65535
+        && d.n.saturating_mul(wn) <= MAX_PARTIAL_ELEMS
+        && want >= d.n;
+    if per_img {
+        let (sp, chunk_p) = plan_wgrad_per_img(d, ohow, tiles, bk, cfg.threads() as usize, wn, 16);
+        let total_slabs = d.n * sp;
+        #[cfg(test)]
+        LAST_ROUTE.set(Some((false, (cfg.bm, cfg.bn), total_slabs)));
+        let mut gp = GemmDesc::new(cout_g, ncols, ohow, false, false, d.n);
+        gp.batch = (d.n, d.groups);
+        gp.lda = ohow;
+        gp.ldb = ncols;
+        gp.ldc = ncols;
+        gp.a = BatchStrides { offset: 0, outer: d.c_out * ohow, inner: cout_g * ohow };
+        gp.b = BatchStrides { offset: 0, outer: d.c_in * d.h * d.w, inner: cin_g * d.h * d.w };
+        gp.c = BatchStrides { offset: 0, outer: wn, inner: cout_g * ncols };
+        gp.dtype = dt;
+        let c_f32 = total_slabs > 1 || out == DType::F32;
+        let tmp = if total_slabs > 1 {
+            Some(ctx.alloc(DType::F32.bytes(prod(&[total_slabs, wn])?))?)
+        } else {
+            None
+        };
+        let target = tmp.as_ref().map_or(gw, |t| t.raw());
+        let check = !cout_g.is_multiple_of(cfg.bm as usize)
+            || !ncols.is_multiple_of(cfg.bn as usize)
+            || !ohow.is_multiple_of(bk);
+        let spec = base_spec(&gp, cfg)
+            .bool("VEC_A", ohow.is_multiple_of(4))
+            .bool("VEC_B", false)
+            .bool("VEC_C", ncols.is_multiple_of(4))
+            .bool("TRANS_A", false)
+            .bool("TRANS_B", false)
+            .bool("CHECK", check)
+            .u32("CONV_MODE", 3)
+            .bool("PER_IMG", true)
+            .bool("WG_PAD", pad)
+            .bool("SPLIT", sp > 1)
+            .bool("OUT_F32", c_f32 && dt == DType::F16);
+        let kernel = ctx.kernel(&GEMM, weight_grad_spec(conv_spec(spec, d), d, oh, ow))?;
+        let p = gemm_params(&gp)?
+            .at(24)
+            .uz(d.h)?
+            .uz(d.w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(sp)?
+            .uz(chunk_p)?
+            .uz(d.n * wn)?
+            .uz(ohow)?;
+        let groups = [
+            ncols.div_ceil(cfg.bn as usize) as u32,
+            cout_g.div_ceil(cfg.bm as usize) as u32,
+            u32::try_from(d.n * d.groups * sp).unwrap_or(u32::MAX),
+        ];
+        ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, groups)?;
+        if let Some(t) = &tmp {
+            finish(t, total_slabs)?;
+        }
+        return Ok(());
+    }
     let ks = np.div_ceil(want.max(1)).next_multiple_of(bk);
     let splits = np.div_ceil(ks);
     #[cfg(test)]
