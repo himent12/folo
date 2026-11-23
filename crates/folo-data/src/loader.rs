@@ -663,8 +663,9 @@ impl Iterator for EpochIter {
                             });
                         }
                         Err(e) => {
-                            err = Some(e);
-                            break;
+                            if err.is_none() {
+                                err = Some(e);
+                            }
                         }
                     }
                 }

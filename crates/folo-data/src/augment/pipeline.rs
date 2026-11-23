@@ -73,10 +73,7 @@ fn image_to_planar_fused(
     let (w, h) = (img.width as usize, img.height as usize);
     let stride = img.stride();
     for_planar_bands(dst, w, h, |dy0, band| {
-        let rows = match band {
-            PlanarDst::U8 { r, .. } => r.len() / w,
-            PlanarDst::F32Div255 { r, .. } => r.len() / w,
-        };
+        let rows = band.rows(w);
         for bi in 0..rows {
             let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi };
             let mut drow = band.row_slices(bi, w);
