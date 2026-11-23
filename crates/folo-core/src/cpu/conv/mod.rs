@@ -37,8 +37,8 @@ use small_c::{small_c_forward, uses_small_c};
 pub(crate) use winograd::calls as winograd_calls;
 pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward, winograd_forward_at};
 #[cfg(test)]
-pub(crate) use winograd4::calls4 as winograd4_calls;
-pub(crate) use winograd4::{transform_weights4, uses_winograd4, winograd4_forward, winograd4_forward_at};
+pub(crate) use winograd4::{calls4 as winograd4_calls, transform_weights4};
+pub(crate) use winograd4::{try_transform_weights4, uses_winograd4, winograd4_forward, winograd4_forward_at};
 
 pub(crate) use backward_input::{backward_input_overwrites, conv2d_backward_input};
 pub(crate) use backward_weight::conv2d_backward_weight;

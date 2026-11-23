@@ -59,6 +59,7 @@ fn inference_conv_takes_winograd() {
             if expect_f4 { [1, 1] } else { [0, 0] },
             "unexpected F(4x4) dispatch for ({c}@{hw})"
         );
+        assert!(direct.iter().all(|v| v.is_finite()) && wino.iter().all(|v| v.is_finite()));
         let max_err = direct.iter().zip(&wino).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(max_err < 1e-4, "Winograd and direct differ by {max_err} ({c}@{hw})");
         assert!(
@@ -185,7 +186,53 @@ fn winograd4_public_conv_edge_cases() {
         let (got, calls4) =
             counting4(|| x.conv2d_act(&w, Some(&b), &p, None).unwrap().to_vec::<f32>().unwrap());
         assert_eq!(calls4, [1, 1], "expected F(4x4) for padding {padding:?}");
+        assert!(direct.iter().all(|v| v.is_finite()) && got.iter().all(|v| v.is_finite()));
         let max_err = direct.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(max_err < 2e-4, "F(4x4) padding {padding:?} max_err {max_err}");
     }
+}
+
+/// Huge finite weights (e.g., `1e38` at tap `(0, 0)`, which `G4[0,0]^2 = 16` overflows past `f32::MAX`)
+/// fall back cleanly to the direct conv instead of producing `0 * inf = NaN` in Winograd F(4x4).
+#[test]
+fn winograd4_large_finite_weight_falls_back_without_nan() {
+    let _g = no_grad();
+    let mut w_data = vec![0.0f32; 64 * 64 * 9];
+    w_data[0] = 1e38_f32;
+    let w = Tensor::from_vec(w_data, [64, 64, 3, 3]).unwrap();
+
+    // Zero input: must return all exact zeros (zero NaNs), matching `conv2d_with`, and cache the fallback.
+    let x_zero = Tensor::zeros([1, 64, 40, 40]);
+    let direct_zero = x_zero.conv2d_with(&w, None, &P).unwrap().to_vec::<f32>().unwrap();
+    for pass in 0..2 {
+        let (got, calls4) =
+            counting4(|| x_zero.conv2d_act(&w, None, &P, None).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4, [0, 0], "pass {pass}: overflowed weights must not run F(4x4)");
+        assert!(got.iter().all(|&v| v.to_bits() == 0), "pass {pass}: expected all exact zeros");
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            direct_zero.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+    }
+    let at = Tensor::from_vec(vec![0u32, 41, 1599], [3]).unwrap();
+    let (got_at, calls4) =
+        counting4(|| x_zero.conv2d_act_at(&w, None, &P, None, &at).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(calls4, [0, 0]);
+    for &s in &[0usize, 41, 1599] {
+        for oc in 0..64 {
+            assert_eq!(got_at[oc * 1600 + s].to_bits(), 0);
+        }
+    }
+
+    // Small non-zero input (`1e-10 * 1e38 = 1e28`, finite): must match direct conv bit for bit.
+    let x_small = Tensor::from_vec(vec![1e-10_f32; 64 * 40 * 40], [1, 64, 40, 40]).unwrap();
+    let direct_small = x_small.conv2d_with(&w, None, &P).unwrap().to_vec::<f32>().unwrap();
+    let (got_small, calls4) =
+        counting4(|| x_small.conv2d_act(&w, None, &P, None).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(calls4, [0, 0]);
+    assert!(got_small.iter().all(|v| v.is_finite()));
+    assert_eq!(
+        got_small.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        direct_small.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+    );
 }

@@ -672,17 +672,18 @@ fn conv_forward(
         let input = conv::ConvInput { parts: &parts };
         if inference && conv::uses_winograd4(&g) {
             let key = derived_key("winograd f(4x4, 3x3)", w.layout);
-            let u = w.derived(key, || conv::transform_weights4(&wd, o, c));
-            match sites {
-                Some(at) => {
-                    let tiles = conv::winograd4_tiles_at(&g, at);
-                    conv::winograd4_forward_at(input, &u, &mut out, &g, fused.then_some(epi), &tiles);
+            let u = w.derived(key, || conv::try_transform_weights4(&wd, o, c));
+            if let Some(u) = u.as_deref() {
+                match sites {
+                    Some(at) => {
+                        let tiles = conv::winograd4_tiles_at(&g, at);
+                        conv::winograd4_forward_at(input, u, &mut out, &g, fused.then_some(epi), &tiles);
+                    }
+                    None => conv::winograd4_forward(input, u, &mut out, &g, fused.then_some(epi)),
                 }
-                None => conv::winograd4_forward(input, &u, &mut out, &g, fused.then_some(epi)),
+                return Ok(f32_storage(out));
             }
-            return Ok(f32_storage(out));
-        }
-        if inference && conv::uses_winograd(&g) {
+        } else if inference && conv::uses_winograd(&g) {
             // Transformed once per weight tensor, and kept with it until it is written.
             let key = derived_key("winograd f(2x2, 3x3)", w.layout);
             let u = w.derived(key, || conv::transform_weights(&wd, o, c));

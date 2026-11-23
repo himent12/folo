@@ -126,11 +126,13 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   share its block) and a pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites'
   columns gathered into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv
   runs densely, as does a backend without the kernel.
-- Patch isolation: in Winograd F(2x2, 3x3) each output of a tile reads only its own 3x3 window of the 4x4 patch
+- Patch isolation: in Winograd F(2x2, 3x3) each output of a tile depends only on its own 3x3 window of the 4x4 patch
   (tested with NaN everywhere else). In Winograd F(4x4, 3x3) the transform combines inputs across the 4x4 tile's 6x6
   input patch (`4·ty − pad_h .. 4·ty − pad_h + 6` by `4·tx − pad_w .. 4·tx − pad_w + 6`), so inputs must be valid
   across every requested tile's 6x6 patch (candidate-first prediction populates that patch in `conv0` whenever `conv1`
-  may take F(4x4); anything outside those patches is never read, tested with NaN).
+  may take F(4x4)). For image-contiguous inputs, the sparse kernels never read outside those patches (tested with NaN);
+  non-contiguous views are materialized before dispatch, though elements outside those patches still cannot affect the
+  requested sites.
 - On the GPU, `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the
   pixels): folo-gpu's implicit GEMM with `SITES` (`kernels/conv/sites.rs`; regular and tensor-core generators) maps
   column `j` to the image's `j`-th listed pixel, runs the dense conv's tile config and split-K chunks (planned for the

@@ -572,6 +572,9 @@ fn conv_size_refuses_buffers_that_overflow() {
 fn qconv_rejects_zero_channels_and_handles_empty_batch() {
     assert!(!QConv::supports((0, 4, 3), 1, 1), "zero output channels");
     assert!(!QConv::supports((4, 0, 3), 1, 1), "zero input channels");
+    assert!(!QConv::supports((usize::MAX & !3, 4, 1), 1, 0), "weight count overflow");
+    assert!(!QConv::supports(((usize::MAX / 4) & !3, 4, 1), 1, 0), "weight byte overflow");
+    assert!(!QConv::supports((((isize::MAX as usize) / 4) & !3, 4, 1), 1, 0), "weight exceeds isize::MAX");
     let g = Grid { scale: 0.05, zero: 10 };
     let cv = QConv::new(&[0.1; 4 * 4 * 9], &[0.0; 4], (4, 4, 3), 1, 1, true, &[g; 4]);
     let x = vec![0u32; SLACK];

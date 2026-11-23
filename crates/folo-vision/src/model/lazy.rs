@@ -3,11 +3,11 @@
 //!
 //! The box branch (`conv0`, `conv1`: 3×3, `out`: 1×1) and the class branch are independent functions of the same
 //! level feature, so the class scores, and with them the candidate set, are the dense forward's. A candidate's
-//! box needs `out` at its own pixel, `conv1` at that pixel and `conv0` on that pixel's receptive field. The convs
-//! run through [`Tensor::conv2d_act_at`], which on the CPU computes only the Winograd tiles (and 1×1 columns)
-//! that hold a site with the dense conv's own arithmetic, and whose site values read only their receptive
-//! field: every value a candidate reads is then the dense forward's, and every box is the dense path's bit for
-//! bit.
+//! box needs `out` at its own pixel, `conv1` at that pixel and `conv0` on the input patch `conv1` reads (that
+//! pixel's 3×3 receptive field, or the full 6×6 patch of its 4×4 tile when `conv1` may take Winograd F(4×4)). The
+//! convs run through [`Tensor::conv2d_act_at`], which on the CPU computes only the Winograd 2×2 or 4×4 tiles (and
+//! 1×1 columns) that hold a site with the dense conv's own arithmetic, and whose site values depend only on that
+//! patch: every value a candidate reads is then the dense forward's, and every box is the dense path's bit for bit.
 
 use folo_core::{DType, Device, Tensor, no_grad, with_no_grad};
 use folo_nn::{ConvBnAct, Forward, Module, Result};

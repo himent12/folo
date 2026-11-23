@@ -1,8 +1,8 @@
 //! Forward convs evaluated only at some output sites (`Backend::conv2d_act_at`): the inference forward's own
 //! arithmetic on fewer outputs, so every site gets the value the dense conv computes there, bit for bit.
 //!
-//! - A Winograd conv ([`super::uses_winograd`]) runs the block code over the list of 2x2 output tiles that hold a
-//!   site ([`super::winograd_forward_at`]).
+//! - A Winograd conv ([`super::uses_winograd`] / [`super::uses_winograd4`]) runs the block code over the list of
+//!   2x2 or 4x4 output tiles that hold a site ([`super::winograd_forward_at`] / [`super::winograd4_forward_at`]).
 //! - A pointwise conv runs the dense path's GEMM ([`gemm_ex`] with the weights read in place and `B` packed from
 //!   planes) over the sites' columns gathered into planes of their own: every element of C is the same K sum in
 //!   the same `KC` blocks, through the same micro-kernel and epilogue, wherever its column is.

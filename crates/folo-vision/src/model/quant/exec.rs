@@ -18,11 +18,38 @@ use crate::model::FoloModel;
 /// Shared per-channel grids and zero points for an activation boundary.
 type GridPair = (Arc<[Grid]>, Arc<[u8]>);
 
-/// Invoke `f` with the optional bias tensor's contiguous `f32` slice without copying.
-fn with_opt_bias<R>(bias: Option<&Tensor>, f: impl FnOnce(Option<&[f32]>) -> Result<R>) -> Result<R> {
-    match bias {
-        Some(b) => b.with_f32_slice(|s| f(Some(s)))?,
-        None => f(None),
+/// Snapshot of an optional bias tensor (`<= 512` channels on the stack, zero heap allocations; heap fallback
+/// above) so the bias storage read guard is released before any weight storage lock is acquired (preventing
+/// self-deadlock when weight and bias alias the same storage).
+#[allow(clippy::large_enum_variant)]
+enum BiasBuf {
+    None,
+    Stack([f32; 512], usize),
+    Heap(Vec<f32>),
+}
+
+impl BiasBuf {
+    fn load(bias: Option<&Tensor>) -> Result<Self> {
+        let Some(b) = bias else {
+            return Ok(Self::None);
+        };
+        Ok(b.with_f32_slice(|s| {
+            if s.len() <= 512 {
+                let mut arr = [0.0f32; 512];
+                arr[..s.len()].copy_from_slice(s);
+                Self::Stack(arr, s.len())
+            } else {
+                Self::Heap(s.to_vec())
+            }
+        })?)
+    }
+
+    fn as_deref(&self) -> Option<&[f32]> {
+        match self {
+            Self::None => None,
+            Self::Stack(arr, len) => Some(&arr[..*len]),
+            Self::Heap(v) => Some(v.as_slice()),
+        }
     }
 }
 
@@ -131,7 +158,7 @@ impl QAct {
             offset: self.offset,
             img_stride: self.img_stride,
             c: self.dims[1],
-            zero: self.zeros()[0],
+            zero: self.zeros().first().copied().unwrap_or(0),
         }
     }
 
@@ -296,89 +323,88 @@ impl Int8<'_> {
         let decouple = self.plan.cal.version >= VERSION_V2 && q8::should_decouple_parts(part_grids);
         let l = conv.conv.weight.layout();
         let (dims, offset, strides) = (l.shape().dims(), l.offset(), l.strides());
-        with_opt_bias(conv.conv.bias.as_ref(), |bias_slice| {
-            let mut h = std::hash::DefaultHasher::new();
-            "folo-vision int8 QConv v3".hash(&mut h);
-            dims.hash(&mut h);
-            offset.hash(&mut h);
-            strides.hash(&mut h);
-            geometry.hash(&mut h);
-            silu.hash(&mut h);
-            decouple.hash(&mut h);
-            parts.len().hash(&mut h);
-            for a in parts {
-                a.dims[1].hash(&mut h);
+        let bias_buf = BiasBuf::load(conv.conv.bias.as_ref())?;
+        let bias_slice = bias_buf.as_deref();
+        let mut h = std::hash::DefaultHasher::new();
+        "folo-vision int8 QConv v3".hash(&mut h);
+        dims.hash(&mut h);
+        offset.hash(&mut h);
+        strides.hash(&mut h);
+        geometry.hash(&mut h);
+        silu.hash(&mut h);
+        decouple.hash(&mut h);
+        parts.len().hash(&mut h);
+        for a in parts {
+            a.dims[1].hash(&mut h);
+        }
+        for &gs in part_grids {
+            for g in gs {
+                g.scale.to_bits().hash(&mut h);
+                g.zero.hash(&mut h);
             }
-            for &gs in part_grids {
-                for g in gs {
-                    g.scale.to_bits().hash(&mut h);
-                    g.zero.hash(&mut h);
+        }
+        match bias_slice {
+            Some(b) => {
+                b.len().hash(&mut h);
+                for &v in b {
+                    v.to_bits().hash(&mut h);
                 }
             }
+            None => {
+                cfg.out_channels.hash(&mut h);
+                for _ in 0..cfg.out_channels {
+                    0u32.hash(&mut h);
+                }
+            }
+        }
+        let make_key = || Key {
+            layout: (dims.to_vec(), offset, strides.to_vec()),
+            geometry,
+            silu,
+            decouple,
+            part_lens: parts.iter().map(|a| a.dims[1]).collect(),
+            in_grids: part_grids
+                .iter()
+                .flat_map(|gs| gs.iter().map(|g| (g.scale.to_bits(), g.zero)))
+                .collect(),
+            bias_bits: match bias_slice {
+                Some(b) => b.iter().map(|v| v.to_bits()).collect(),
+                None => vec![0u32; cfg.out_channels],
+            },
+        };
+        let pack = |w: &[f32]| {
+            let shape = (cfg.out_channels, cfg.in_channels, cfg.kernel);
             match bias_slice {
-                Some(b) => {
-                    b.len().hash(&mut h);
-                    for &v in b {
-                        v.to_bits().hash(&mut h);
-                    }
-                }
+                Some(b) => Arc::new(QConv::new_parts(
+                    w,
+                    b,
+                    shape,
+                    cfg.stride,
+                    cfg.padding,
+                    silu,
+                    part_grids,
+                    decouple,
+                )),
                 None => {
-                    cfg.out_channels.hash(&mut h);
-                    for _ in 0..cfg.out_channels {
-                        0u32.hash(&mut h);
-                    }
-                }
-            }
-            let make_key = || Key {
-                layout: (dims.to_vec(), offset, strides.to_vec()),
-                geometry,
-                silu,
-                decouple,
-                part_lens: parts.iter().map(|a| a.dims[1]).collect(),
-                in_grids: part_grids
-                    .iter()
-                    .flat_map(|gs| gs.iter().map(|g| (g.scale.to_bits(), g.zero)))
-                    .collect(),
-                bias_bits: match bias_slice {
-                    Some(b) => b.iter().map(|v| v.to_bits()).collect(),
-                    None => vec![0u32; cfg.out_channels],
-                },
-            };
-            let pack = |w: &[f32]| {
-                let shape = (cfg.out_channels, cfg.in_channels, cfg.kernel);
-                match bias_slice {
-                    Some(b) => Arc::new(QConv::new_parts(
+                    let zeros = vec![0.0; cfg.out_channels];
+                    Arc::new(QConv::new_parts(
                         w,
-                        b,
+                        &zeros,
                         shape,
                         cfg.stride,
                         cfg.padding,
                         silu,
                         part_grids,
                         decouple,
-                    )),
-                    None => {
-                        let zeros = vec![0.0; cfg.out_channels];
-                        Arc::new(QConv::new_parts(
-                            w,
-                            &zeros,
-                            shape,
-                            cfg.stride,
-                            cfg.padding,
-                            silu,
-                            part_grids,
-                            decouple,
-                        ))
-                    }
+                    ))
                 }
-            };
-            let kept =
-                conv.conv.weight.derived_f32(h.finish(), |w| Packed { key: make_key(), conv: pack(w) })?;
-            if kept.key.matches(dims, offset, strides, geometry, silu, decouple, parts, bias_slice) {
-                return Ok(kept.conv.clone());
             }
-            Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
-        })
+        };
+        let kept = conv.conv.weight.derived_f32(h.finish(), |w| Packed { key: make_key(), conv: pack(w) })?;
+        if kept.key.matches(dims, offset, strides, geometry, silu, decouple, parts, bias_slice) {
+            return Ok(kept.conv.clone());
+        }
+        Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
     }
 
     /// The stem's packed `u8` weights, cached on the weight tensor (zero heap allocations on cache hit).
@@ -389,62 +415,53 @@ impl Int8<'_> {
         let silu = conv.act == Activation::Silu;
         let l = conv.conv.weight.layout();
         let (dims, offset, strides) = (l.shape().dims(), l.offset(), l.strides());
-        with_opt_bias(conv.conv.bias.as_ref(), |bias_slice| {
-            let mut h = std::hash::DefaultHasher::new();
-            "folo-vision int8 QStem v3".hash(&mut h);
-            dims.hash(&mut h);
-            offset.hash(&mut h);
-            strides.hash(&mut h);
-            geometry.hash(&mut h);
-            silu.hash(&mut h);
-            match bias_slice {
-                Some(b) => {
-                    b.len().hash(&mut h);
-                    for &v in b {
-                        v.to_bits().hash(&mut h);
-                    }
-                }
-                None => {
-                    cfg.out_channels.hash(&mut h);
-                    for _ in 0..cfg.out_channels {
-                        0u32.hash(&mut h);
-                    }
+        let bias_buf = BiasBuf::load(conv.conv.bias.as_ref())?;
+        let bias_slice = bias_buf.as_deref();
+        let mut h = std::hash::DefaultHasher::new();
+        "folo-vision int8 QStem v3".hash(&mut h);
+        dims.hash(&mut h);
+        offset.hash(&mut h);
+        strides.hash(&mut h);
+        geometry.hash(&mut h);
+        silu.hash(&mut h);
+        match bias_slice {
+            Some(b) => {
+                b.len().hash(&mut h);
+                for &v in b {
+                    v.to_bits().hash(&mut h);
                 }
             }
-            let make_key = || StemKey {
-                layout: (dims.to_vec(), offset, strides.to_vec()),
-                geometry,
-                silu,
-                bias_bits: match bias_slice {
-                    Some(b) => b.iter().map(|v| v.to_bits()).collect(),
-                    None => vec![0u32; cfg.out_channels],
-                },
-            };
-            let pack = |w: &[f32]| match bias_slice {
-                Some(b) => {
-                    Arc::new(QStem::new(w, b, (cfg.out_channels, cfg.kernel), cfg.stride, cfg.padding, silu))
+            None => {
+                cfg.out_channels.hash(&mut h);
+                for _ in 0..cfg.out_channels {
+                    0u32.hash(&mut h);
                 }
-                None => {
-                    let zeros = vec![0.0; cfg.out_channels];
-                    Arc::new(QStem::new(
-                        w,
-                        &zeros,
-                        (cfg.out_channels, cfg.kernel),
-                        cfg.stride,
-                        cfg.padding,
-                        silu,
-                    ))
-                }
-            };
-            let kept = conv
-                .conv
-                .weight
-                .derived_f32(h.finish(), |w| PackedStem { key: make_key(), stem: pack(w) })?;
-            if kept.key.matches(dims, offset, strides, geometry, silu, bias_slice) {
-                return Ok(kept.stem.clone());
             }
-            Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
-        })
+        }
+        let make_key = || StemKey {
+            layout: (dims.to_vec(), offset, strides.to_vec()),
+            geometry,
+            silu,
+            bias_bits: match bias_slice {
+                Some(b) => b.iter().map(|v| v.to_bits()).collect(),
+                None => vec![0u32; cfg.out_channels],
+            },
+        };
+        let pack = |w: &[f32]| match bias_slice {
+            Some(b) => {
+                Arc::new(QStem::new(w, b, (cfg.out_channels, cfg.kernel), cfg.stride, cfg.padding, silu))
+            }
+            None => {
+                let zeros = vec![0.0; cfg.out_channels];
+                Arc::new(QStem::new(w, &zeros, (cfg.out_channels, cfg.kernel), cfg.stride, cfg.padding, silu))
+            }
+        };
+        let kept =
+            conv.conv.weight.derived_f32(h.finish(), |w| PackedStem { key: make_key(), stem: pack(w) })?;
+        if kept.key.matches(dims, offset, strides, geometry, silu, bias_slice) {
+            return Ok(kept.stem.clone());
+        }
+        Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
     }
 
     /// The int8 conv into `out`.
@@ -632,4 +649,51 @@ pub fn features_rgb0_u8(
 ) -> Result<[Tensor; 3]> {
     let dummy = Tensor::zeros([0]);
     walk::features(model, &mut Int8 { plan, rgb0_input: Some((rgb0, [n, h, w])) }, &dummy)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::model::blocks::Init;
+    use crate::model::quant::Method;
+    use folo_core::rng::Rng;
+
+    /// Weight and bias views sharing the same underlying storage `RwLock` must never deadlock during `qconv` or
+    /// `qstem` packing (cache miss) or lookup (cache hit).
+    #[test]
+    fn aliased_weight_and_bias_storage_does_not_deadlock() {
+        let mut rng = Rng::seed(99);
+        let cal = Calibration {
+            version: VERSION_V2,
+            method: Method::MinMax,
+            images: 1,
+            ranges: BTreeMap::new(),
+            channel_ranges: BTreeMap::new(),
+            u8_stem: true,
+            f32_convs: Vec::new(),
+            weights: None,
+        };
+        let plan = Int8Plan::new(cal);
+        let exec = Int8 { plan: &plan, rgb0_input: None };
+
+        // Aliased conv (`bias` is a view into `weight`'s own storage).
+        let mut conv = Init::new(&mut rng).conv(8, 8, 3, 1);
+        conv.fuse_().unwrap();
+        conv.conv.bias = Some(conv.conv.weight.reshape([8 * 8 * 9]).unwrap().narrow(0, 0, 8).unwrap());
+        let g = Grid::from_range(-1.0, 1.0);
+        let act = QAct::new(q8::alloc(1, 8, 16), [1, 8, 4, 4], vec![g; 8].into(), vec![g.zero; 8].into());
+        let first = exec.qconv(&conv, &[&act]).unwrap();
+        let second = exec.qconv(&conv, &[&act]).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "second qconv call must hit cache");
+
+        // Aliased stem (`bias` is a view into `weight`'s own storage).
+        let mut stem = Init::new(&mut rng).conv(3, 16, 3, 2);
+        stem.fuse_().unwrap();
+        stem.conv.bias = Some(stem.conv.weight.reshape([16 * 3 * 9]).unwrap().narrow(0, 0, 16).unwrap());
+        let s1 = exec.qstem(&stem).unwrap();
+        let s2 = exec.qstem(&stem).unwrap();
+        assert!(Arc::ptr_eq(&s1, &s2), "second qstem call must hit cache");
+    }
 }

@@ -242,12 +242,15 @@ fn deinterleave_even_odd_scalar(src: &[u32], even: &mut [u32], odd: &mut [u32], 
     }
 }
 
+/// # Safety
+/// Caller must ensure AVX2 and FMA are available and `odd.len() >= even.len()`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn deinterleave_even_odd_avx2(src: &[u32], even: &mut [u32], odd: &mut [u32], pad: u32) {
     use std::arch::x86_64::*;
     let w = src.len();
     let pairs = even.len();
+    debug_assert_eq!(odd.len(), pairs);
     let full = (w / 16).min(pairs / 8);
     let mut j = 0;
     // SAFETY: `2 * (j + 8) <= w` and `j + 8 <= pairs`.

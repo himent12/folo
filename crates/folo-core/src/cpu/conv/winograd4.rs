@@ -75,13 +75,10 @@ fn count4(i: usize) {
 }
 
 /// `U = G g Gᵀ` of every `(o, c)` 3x3 kernel of the OIHW weights `wt`, laid out `[36][o][c]`, computed in `f64`
-/// and rounded once to `f32`.
-pub(crate) fn transform_weights4(wt: &[f32], o: usize, c: usize) -> Vec<f32> {
-    #[cfg(test)]
-    {
-        super::winograd::count_transform();
-        count4(0);
-    }
+/// and rounded once to `f32`. Returns `None` if any transformed weight overflows `f32` or is non-finite (e.g.,
+/// huge finite weights like `1e38` scaled by `G[0,0]² = 16`), signalling the caller to fall back to the direct
+/// conv rather than introducing `0 * inf = NaN`.
+pub(crate) fn try_transform_weights4(wt: &[f32], o: usize, c: usize) -> Option<Vec<f32>> {
     let oc = o.checked_mul(c).expect("winograd4: o * c overflow");
     let wt_len = oc.checked_mul(9).expect("winograd4: weight length overflow");
     let u_len = oc.checked_mul(36).expect("winograd4: transformed weight length overflow");
@@ -100,11 +97,26 @@ pub(crate) fn transform_weights4(wt: &[f32], o: usize, c: usize) -> Vec<f32> {
             let [r0, r1, r2] = t[i];
             for j in 0..6 {
                 let [b0, b1, b2] = G4[j];
-                u[(i * 6 + j) * oc + k] = (b0 * r0 + b1 * r1 + b2 * r2) as f32;
+                let val = (b0 * r0 + b1 * r1 + b2 * r2) as f32;
+                if !val.is_finite() {
+                    return None;
+                }
+                u[(i * 6 + j) * oc + k] = val;
             }
         }
     }
-    u
+    #[cfg(test)]
+    {
+        super::winograd::count_transform();
+        count4(0);
+    }
+    Some(u)
+}
+
+/// Unchecked wrapper around [`try_transform_weights4`] for unit tests with finite normal weights.
+#[cfg(test)]
+pub(crate) fn transform_weights4(wt: &[f32], o: usize, c: usize) -> Vec<f32> {
+    try_transform_weights4(wt, o, c).expect("winograd4: transformed weights overflowed f32")
 }
 
 /// Tiles per block (multiple of `NR`), balancing L2 residency of `V` and `M` with parallelism.

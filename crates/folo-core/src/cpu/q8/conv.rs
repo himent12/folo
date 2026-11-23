@@ -225,7 +225,8 @@ impl QConv {
     }
 
     /// Whether [`QConv::new`] takes this geometry: positive `o` and `c` multiples of 4, `k ≥ 1`, `c · k²` at most
-    /// [`MAX_REDUCTION`], stride in `1..=`[`MAX_STRIDE`] and padding at most [`MAX_PAD`].
+    /// [`MAX_REDUCTION`], stride in `1..=`[`MAX_STRIDE`], padding at most [`MAX_PAD`], and the weight buffer size
+    /// `o · c · k² · 4` fits within `isize::MAX` bytes without overflow.
     pub fn supports((o, c, k): (usize, usize, usize), stride: usize, pad: usize) -> bool {
         o > 0
             && c > 0
@@ -234,7 +235,12 @@ impl QConv {
             && k >= 1
             && (1..=MAX_STRIDE).contains(&stride)
             && pad <= MAX_PAD
-            && k.checked_mul(k).and_then(|t| t.checked_mul(c)).is_some_and(|r| r <= MAX_REDUCTION)
+            && k.checked_mul(k)
+                .and_then(|t| t.checked_mul(c))
+                .filter(|&r| r <= MAX_REDUCTION)
+                .and_then(|r| r.checked_mul(o))
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+                .is_some_and(|bytes| bytes <= isize::MAX as usize)
     }
 
     /// Output channels.

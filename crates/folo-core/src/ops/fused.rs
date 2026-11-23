@@ -155,18 +155,22 @@ impl Tensor {
     /// there on this backend, and **every other element is unspecified** (a backend may compute neighbours of
     /// the sites, leave garbage, or compute everything).
     ///
-    /// A site's value depends only on `self` within its kernel's input patch, so `self` needs its true values
+    /// A site's output depends only on `self` within its kernel's input patch, so `self` needs its true values
     /// there and nowhere else (the box branch of candidate-first prediction evaluates a conv on such a partly
     /// computed tensor). On the CPU ([`crate::backend::Backend::conv2d_act_at`]):
-    /// - Pointwise convs read only the sites' own columns.
-    /// - Winograd F(2×2, 3×3) computes only the 2×2 output tiles holding a site, and each output reads only its
-    ///   own 3×3 receptive field of the tile's 4×4 patch (garbage, even NaN, elsewhere in the patch reaches only
-    ///   the tile's other outputs).
+    /// - Pointwise convs depend only on the sites' own columns.
+    /// - Winograd F(2×2, 3×3) computes only the 2×2 output tiles holding a site, and each output depends only on
+    ///   its own 3×3 receptive field of the tile's 4×4 patch (garbage, even NaN, elsewhere in the patch reaches
+    ///   only the tile's other outputs).
     /// - Winograd F(4×4, 3×3) (dense 3×3 stride-1 with `OH, OW >= 24`, `C >= 16`, `O >= 8`, `C + O <= 2048`, and
     ///   `tiles >= 56 && C · O >= 2048` or `tiles >= 200`) computes only the 4×4 output tiles holding a site, and
     ///   its transforms combine inputs across the tile's full 6×6 patch (`4·ty − pad_h .. 4·ty − pad_h + 6` by
     ///   `4·tx − pad_w .. 4·tx − pad_w + 6`), so `self` must hold valid values across every requested tile's 6×6
-    ///   patch (everything outside those patches is never read).
+    ///   patch.
+    ///
+    /// For image-contiguous CPU inputs (the common case, including channel slices), the sparse kernels do not read
+    /// elements outside those patches at all; a non-contiguous view is copied to a contiguous buffer before kernel
+    /// dispatch, though elements outside the documented patches still never affect the requested sites.
     ///
     /// All paths match the dense [`Tensor::conv2d_act`] bit for bit at every site of `at`. A backend without the
     /// kernel computes the dense [`Tensor::conv2d_act`] (the same values everywhere). Never recorded: call it
