@@ -127,11 +127,11 @@ impl MuonTile {
         (self.bm / self.tm) * (self.bn / self.tn)
     }
 
-    /// Workgroup storage bytes (`As`, `Bs`, `prob`).
+    /// Workgroup storage bytes (`As`, `Bs`, and 16-byte-aligned `prob`).
     #[inline]
     pub(crate) const fn workgroup_bytes(self, dbuf: bool) -> u32 {
         let mult = if dbuf { 2 } else { 1 };
-        mult * self.depth * (self.bm + self.bn) * 4 + 13 * 4
+        mult * self.depth * (self.bm + self.bn) * 4 + (13 * 4_u32).next_multiple_of(16)
     }
 
     /// Whether a kernel list may precompile this tile configuration for `mode`.
@@ -304,7 +304,8 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     for (ci, chunk) in items.chunks(j_gather).enumerate() {
         let spec = Spec::new().u32("J", chunk.len() as u32).bool("NESTEROV", s.nesterov);
         let k = ctx.kernel(shader::many_def("muon_gather", chunk.len()), spec)?;
-        let (p, groups) = chunk_params(Params::new().uz(ci * j_gather)?.f(mu).f(omu), chunk, true)?;
+        let (p, groups) =
+            chunk_params(Params::new().uz(ci * j_gather)?.f(mu).f(omu), chunk, true, u32::from(s.schatten4))?;
         let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(2 * chunk.len() + 3);
         for it in chunk {
             bufs.push(it.g);
@@ -374,7 +375,7 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     for (ci, chunk) in items.chunks(j_apply).enumerate() {
         let k = ctx
             .kernel(shader::many_def("muon_apply", chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
-        let (p, groups) = chunk_params(Params::new().uz(ci * j_apply)?.f(-s.lr).uz(count)?, chunk, false)?;
+        let (p, groups) = chunk_params(Params::new().uz(ci * j_apply)?.f(-s.lr).uz(count)?, chunk, false, 0)?;
         let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|it| it.p).collect();
         bufs.extend([cur, tbuf.raw()]);
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
@@ -383,10 +384,11 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
 }
 
 /// A multi-tensor dispatch's params: `base` (words 0..3), total logical workgroups at word `3` (for 2D-folded
-/// `grid_1d` early exit), then the first workgroup of matrix `t` of the chunk at `16 + t` and its logical element
-/// count `r · c` at `32 + t`. When `padded` is true (gather), workgroups cover the 4-aligned padded row width
-/// `r · align4(c)`.
-fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool) -> Result<(Params, u64)> {
+/// `grid_1d` early exit), `flag` at word `4` (`muon_gather`: `1` enables `2^-80` overflow-safe norm rescaling
+/// for Polar-FOLO, `0` keeps legacy `Ns5`), then the first workgroup of matrix `t` of the chunk at `16 + t` and
+/// its logical element count `r · c` at `32 + t`. When `padded` is true (gather), workgroups cover the 4-aligned
+/// padded row width `r · align4(c)`.
+fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool, flag: u32) -> Result<(Params, u64)> {
     let mut starts = Vec::with_capacity(chunk.len());
     let mut start = 0u64;
     for it in chunk {
@@ -400,7 +402,7 @@ fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool) -> Result
         start += elems.div_ceil(256);
     }
     let total = u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?;
-    let mut p = base.at(3).u(total).at(16);
+    let mut p = base.at(3).u(total).u(flag).at(16);
     for s in starts {
         p = p.u(s);
     }

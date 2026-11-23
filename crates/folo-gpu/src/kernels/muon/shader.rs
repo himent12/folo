@@ -113,7 +113,7 @@ fn gen_gather(spec: &Spec) -> String {
          \x20 if (NESTEROV) { u = (g * pf(2u)) * 1.0 + m * pf(1u); }\n\
          \x20 if (ok) {\n\
          \x20   X[TBL[q + 3u] + oriented_pad(e, r, c, ld_c, TBL[q + 2u] != 0u)] = u;\n\
-         \x20   if (abs(u) > bitcast<f32>(0x57800000u)) { atomicStore(&big_flag, 1u); }\n\
+         \x20   if (pu(4u) != 0u && abs(u) > bitcast<f32>(0x57800000u)) { atomicStore(&big_flag, 1u); }\n\
          \x20 } else if (e < r * ld_c) {\n\
          \x20   let pe = e - n; let pad = ld_c - c;\n\
          \x20   X[TBL[q + 3u] + (pe / pad) * ld_c + c + pe % pad] = 0.0;\n\

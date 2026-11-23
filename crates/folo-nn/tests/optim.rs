@@ -328,10 +328,10 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
     assert!(e_p5 < e_ns5 * 0.5, "Polar5 ({e_p5:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
 }
 
-/// Finite matrices whose unscaled squared Frobenius norm would overflow `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
-/// `4×4` `1e38`) are power-of-two downscaled before squaring so `Ns5`, `Polar4`, and `Polar5` all return the
-/// finite orthogonalised direction matching the `f64` reference without intermediate overflow, while `NaN` inputs
-/// still propagate `NaN`.
+/// Finite matrices whose unscaled squared Frobenius norm overflows `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
+/// `4×4` `1e38`): Polar-FOLO (`Polar4`, `Polar5`) uses power-of-two downscaling and returns the finite
+/// orthogonalised direction matching the `f64` reference, legacy `Ns5` preserves its exact pre-Polar zero
+/// direction, and all three propagate `NaN`.
 #[test]
 fn polar_folo_handles_frobenius_overflow_and_nan() {
     let huge_1x1 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
@@ -346,7 +346,16 @@ fn polar_folo_handles_frobenius_overflow_and_nan() {
         for (idx, t) in batch.iter().enumerate() {
             let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
             let got = many[idx].to_vec::<f32>().unwrap();
-            if idx < 3 {
+            if idx == 3 {
+                assert!(got.iter().all(|v| v.is_nan()), "{ortho:?} batch NaN must propagate");
+                assert!(one.iter().all(|v| v.is_nan()), "{ortho:?} one NaN must propagate");
+            } else if ortho == MuonOrtho::Ns5 {
+                assert!(got.iter().all(|&v| v == 0.0), "legacy Ns5 [{idx}] must keep exact 0, got {got:?}");
+                assert!(
+                    one.iter().all(|&v| v == 0.0),
+                    "legacy Ns5 one[{idx}] must keep exact 0, got {one:?}"
+                );
+            } else {
                 let d = t.dims();
                 let (rows, cols) = (d[0], t.numel() / d[0]);
                 let v: Vec<f64> = t.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect();
@@ -357,9 +366,6 @@ fn polar_folo_handles_frobenius_overflow_and_nan() {
                 );
                 close(&got, &want, 2e-4);
                 close(&one, &want, 2e-4);
-            } else {
-                assert!(got.iter().all(|v| v.is_nan()), "{ortho:?} batch NaN must propagate");
-                assert!(one.iter().all(|v| v.is_nan()), "{ortho:?} one NaN must propagate");
             }
         }
     }

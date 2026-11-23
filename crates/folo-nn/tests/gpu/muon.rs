@@ -203,40 +203,39 @@ fn musgd_multi_group_gpu_matches_cpu() {
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
 
-/// Finite inputs whose unscaled squared Frobenius norm would overflow `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
-/// and a multi-workgroup `16×64` mixing `> 2^48` and `<= 2^48` workgroups) use exact power-of-two downscaling on
-/// both CPU and GPU (zero non-finite intermediates under WGSL finite-math semantics), matching closely across
-/// `Ns5`, `Polar4`, and `Polar5`, while `NaN` inputs still propagate `NaN`.
+/// Finite Polar-FOLO inputs whose unscaled squared Frobenius norm would overflow `f32::MAX` (`1×1` `2e19`,
+/// `16×16` `1e19`, `4×4` `1e38`, and a multi-workgroup `16×64` mixing `> 2^48` and `<= 2^48` workgroups) use
+/// exact power-of-two downscaling on both CPU and GPU (zero non-finite intermediates under WGSL finite-math
+/// semantics), matching closely across `Polar4` and `Polar5`. (`NaN` propagation and legacy `Ns5` overflow are
+/// verified on CPU in `tests/optim.rs` because WGSL assumes finite-math.)
 #[test]
-fn fused_muon_frobenius_overflow_and_nan() {
+fn fused_muon_frobenius_overflow_finite() {
     let dev = gpu!();
     let rng = &mut Rng::seed(41);
     let p0 = Tensor::rand_uniform([1, 1], -1.0, 1.0, rng);
     let p1 = Tensor::rand_uniform([16, 16], -1.0, 1.0, rng);
-    let p2 = Tensor::rand_uniform([16, 64], -1.0, 1.0, rng);
-    let p3 = Tensor::rand_uniform([8, 8], -1.0, 1.0, rng);
+    let p2 = Tensor::rand_uniform([4, 4], -1.0, 1.0, rng);
+    let p3 = Tensor::rand_uniform([16, 64], -1.0, 1.0, rng);
     let m0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
     let g0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
     let m1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
     let g1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let m2 = Tensor::from_vec(vec![1e38_f32; 4 * 4], [4, 4]).unwrap();
+    let g2 = Tensor::from_vec(vec![1e38_f32; 4 * 4], [4, 4]).unwrap();
     let mut mixed = vec![1.0_f32; 16 * 64];
     mixed[0] = 3e14; // > 2^48 in workgroup 0
     mixed[500] = 1e14; // <= 2^48 in workgroup 1 (rescaled in muon_norm)
-    let m2 = Tensor::from_vec(mixed.clone(), [16, 64]).unwrap();
-    let g2 = Tensor::from_vec(mixed, [16, 64]).unwrap();
-    let m3 = Tensor::rand_uniform([8, 8], -0.5, 0.5, rng);
-    let mut g3_v = vec![0.1_f32; 8 * 8];
-    g3_v[13] = f32::NAN;
-    let g3 = Tensor::from_vec(g3_v, [8, 8]).unwrap();
+    let m3 = Tensor::from_vec(mixed.clone(), [16, 64]).unwrap();
+    let g3 = Tensor::from_vec(mixed, [16, 64]).unwrap();
     let (ps, ms, gs) = ([p0, p1, p2, p3], [m0, m1, m2, m3], [g0, g1, g2, g3]);
-    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5] {
         for nesterov in [false, true] {
             let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
             let want = reference(&ps, &ms, &gs, nesterov, ortho);
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
                 close_or_nan(g, w, &format!("{ortho:?} nesterov {nesterov}: overflow[{i}]"));
             }
-            for (i, (before_t, after_t)) in ps[..3].iter().zip(&got[..3]).enumerate() {
+            for (i, (before_t, after_t)) in ps.iter().zip(&got).enumerate() {
                 let before = before_t.to_vec::<f32>().unwrap();
                 let after = after_t.to_vec::<f32>().unwrap();
                 assert!(
@@ -245,10 +244,57 @@ fn fused_muon_frobenius_overflow_and_nan() {
                     "{ortho:?} nesterov {nesterov}: overflow[{i}] must take a finite non-zero orthogonal step"
                 );
             }
-            let nans = got[3].to_vec::<f32>().unwrap().iter().filter(|x| x.is_nan()).count();
-            assert_eq!(nans, if nesterov { 64 } else { 0 }, "{ortho:?} nesterov {nesterov}: NaN propagation");
         }
     }
+}
+
+/// When Polar-FOLO multi-group fusion sees a cross-group storage alias (group B's gradient sharing storage with
+/// group A's parameter), `MuSgd` detects the alias BEFORE updating momentum buffers and runs per-group so GPU
+/// matches CPU's exact sequential per-group semantics.
+#[test]
+fn polar_cross_group_grad_alias_matches_cpu() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(71);
+    let init0 = Tensor::rand_uniform([8, 12], -0.5, 0.5, &mut rng);
+    let init1 = Tensor::rand_uniform([8, 12], -0.5, 0.5, &mut rng);
+    let g0_cpu = Tensor::rand_uniform([8, 12], -0.3, 0.3, &mut rng);
+
+    let p0_cpu = init0.detach().requires_grad_();
+    let p1_cpu = init1.detach().requires_grad_();
+    let p0_gpu = init0.to_device(dev).unwrap().requires_grad_();
+    let p1_gpu = init1.to_device(dev).unwrap().requires_grad_();
+    let g0_gpu = g0_cpu.to_device(dev).unwrap();
+
+    let make_opt = |p0: &Tensor, p1: &Tensor| {
+        let gs = vec![
+            ParamGroup::new("decay", vec![("w0".into(), p0.clone())])
+                .lr(0.05)
+                .momentum(0.9)
+                .weight_decay(0.0),
+            ParamGroup::new("decay.cls", vec![("w1".into(), p1.clone())])
+                .lr(0.15)
+                .momentum(0.9)
+                .weight_decay(0.0),
+        ];
+        MuSgd::with_ortho(gs, MuSgdWeights { muon: 0.5, sgd: 0.0 }, MuonOrtho::Polar4).unwrap()
+    };
+    let mut cpu_opt = make_opt(&p0_cpu, &p1_cpu);
+    let mut gpu_opt = make_opt(&p0_gpu, &p1_gpu);
+
+    for _ in 0..2 {
+        let mut g_cpu = folo_core::Grads::default();
+        g_cpu.insert(&p0_cpu, g0_cpu.clone());
+        g_cpu.insert(&p1_cpu, p0_cpu.detach()); // shares storage with p0_cpu!
+        let mut g_gpu = folo_core::Grads::default();
+        g_gpu.insert(&p0_gpu, g0_gpu.clone());
+        g_gpu.insert(&p1_gpu, p0_gpu.detach()); // shares storage with p0_gpu!
+        assert!(p0_cpu.same_storage(g_cpu.get(&p1_cpu).unwrap()));
+        assert!(p0_gpu.same_storage(g_gpu.get(&p1_gpu).unwrap()));
+        cpu_opt.step(&g_cpu).unwrap();
+        gpu_opt.step(&g_gpu).unwrap();
+    }
+    close_or_nan(&p0_gpu, &p0_cpu, "cross-group alias w0");
+    close_or_nan(&p1_gpu, &p1_cpu, "cross-group alias w1");
 }
 
 /// When Polar-FOLO multi-group fusion would overflow `muon_scale * group_lr` in `f32` (e.g. `scale = sqrt(17/5)`

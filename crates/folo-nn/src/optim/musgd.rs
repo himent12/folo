@@ -252,10 +252,35 @@ impl MuSgd {
         // Fast path (Polar-FOLO only): when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device,
         // fuse both momentum update and orthogonalisation into one multi-tensor device pass. Legacy `Ns5` stays
         // unconditionally on the per-group path so rounding order and fallback aliasing semantics remain identical
-        // to pre-Polar `MuSgd`. Skip fusion if folding a group's `lr` into `muon_scale` would overflow `f32`.
+        // to pre-Polar `MuSgd`. Skip fusion if any cross-group storage alias exists (before mutating momentum
+        // buffers) or if folding a group's `lr` into `muon_scale` would overflow `f32`.
         let first_dev = active[0].ps[0].device();
         let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
         let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
+        let no_alias = |active: &[Active<'_>]| -> bool {
+            let mut ps: Vec<&Tensor> = Vec::new();
+            let mut bs: Vec<&Tensor> = Vec::new();
+            let mut gs: Vec<&Tensor> = Vec::new();
+            for a in active {
+                ps.extend(a.ps.iter().copied());
+                bs.extend(a.bs.iter().copied());
+                gs.extend(a.gs.iter());
+            }
+            for (i, p) in ps.iter().enumerate() {
+                if ps[i + 1..].iter().any(|q| p.same_storage(q))
+                    || bs.iter().any(|b| p.same_storage(b))
+                    || gs.iter().any(|g| p.same_storage(g))
+                {
+                    return false;
+                }
+            }
+            for (i, b) in bs.iter().enumerate() {
+                if bs[i + 1..].iter().any(|q| b.same_storage(q)) || gs.iter().any(|g| b.same_storage(g)) {
+                    return false;
+                }
+            }
+            true
+        };
         let can_fuse_all = self.ortho != MuonOrtho::Ns5
             && active.len() >= 2
             && !first_dev.is_cpu()
@@ -263,7 +288,8 @@ impl MuSgd {
                 a.mu.to_bits() == active[0].mu.to_bits()
                     && a.nesterov == active[0].nesterov
                     && a.ps.iter().all(|p| p.device() == first_dev)
-            });
+            })
+            && no_alias(&active);
         let fused_scales: Option<Vec<f32>> = if can_fuse_all {
             let total: usize = active.iter().map(|a| a.ps.len()).sum();
             let mut scales = Vec::with_capacity(total);
@@ -451,19 +477,26 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
             .collect::<folo_core::Result<Vec<_>>>()?;
         let mut x = Tensor::stack(&padded, 0)?;
         if x.numel() > 0 {
-            // Exact power-of-two downscale (2^-80) when any element exceeds 2^48 (~2.81e14) so squaring never
-            // overflows f32::MAX (matching the GPU kernel's WGSL finite-math-safe Frobenius norm; exact no-op on
-            // normal gradients).
-            const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
-            const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
-            let max_abs = x.abs()?.max([1, 2], true)?;
-            let is_big = max_abs.gt_scalar(BIG_THRESH)?;
-            let one = max_abs.ones_like()?;
-            let scale = is_big.where_cond(&one.mul_scalar(DOWN_SCALE)?, &one)?;
-            let xs = x.mul(&scale)?;
-            let eps_s = scale.mul_scalar(NS_EPS)?;
-            let norm = xs.square()?.sum([1, 2], true)?.sqrt()?.add(&eps_s)?;
-            x = xs.div(&norm)?;
+            let (norm, eps_s) = if use_s4 {
+                // Exact power-of-two downscale (2^-80) when any element exceeds 2^48 (~2.81e14) so squaring never
+                // overflows f32::MAX (matching the GPU kernel's WGSL finite-math-safe Frobenius norm; exact no-op
+                // on normal gradients). Gated on Polar-FOLO so legacy `Ns5` stays bit-exact with pre-Polar runs.
+                const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
+                const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
+                let max_abs = x.abs()?.max([1, 2], true)?;
+                let is_big = max_abs.gt_scalar(BIG_THRESH)?;
+                let one = max_abs.ones_like()?;
+                let scale = is_big.where_cond(&one.mul_scalar(DOWN_SCALE)?, &one)?;
+                let xs = x.mul(&scale)?;
+                let eps_s = scale.mul_scalar(NS_EPS)?;
+                let norm = xs.square()?.sum([1, 2], true)?.sqrt()?.add(&eps_s)?;
+                x = xs.div(&norm)?;
+                (norm, Some(eps_s))
+            } else {
+                let norm = x.square()?.sum([1, 2], true)?.sqrt()?.add_scalar(NS_EPS)?;
+                x = x.div(&norm)?;
+                (norm, None)
+            };
             for (step, &(a, b, c)) in schedule.iter().enumerate() {
                 let xt = x.transpose(1, 2)?.contiguous()?;
                 let am = x.matmul(&xt)?;
@@ -471,6 +504,7 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
                     // Zero-extra-GEMM step-0 Schatten-4 spectral rescaling:
                     // α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps) guarantees σ₁(X₀ / α) < 1 strictly.
                     let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
+                    let eps_s = eps_s.as_ref().expect("set when use_s4");
                     let alpha = a_frob.sqrt()?.add(&eps_s.div(&norm)?)?;
                     let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
                     let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
