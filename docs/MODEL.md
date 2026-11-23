@@ -1226,6 +1226,48 @@ cutting `predict` (`conf = 0.25`) 10-bin ECE from `0.209 / 0.171` (B0) to `0.145
 `F1@75`. (`elc` requires no DFL moments and improves every size bucket S/M/L; `dfl-consensus` trades ~0.002 `AP_S` for
 higher `AP_L`, F1 and calibration.)
 
+**DFL Entropy Consensus with Greedy Log-Survival Soft Repulsion (`--score dfl-repulse`, opt-in).**
+A scale-preserving successor to `--score dfl-consensus` developed strictly on 5,000 `train2017` images (`train-dev`,
+both `folo-n-coco-v5` and `folo-s-coco`) and frozen before a single locked `val2017` run. It upgrades three parts of
+the calibrated scoring formula while keeping the exact same `[0, 1]` probability scale, class-local exclusive NMS
+ownership `C_excl(k)`, and `CALIBRATED_PRE_CONF = 0.10` single-label extraction:
+
+    M_{q,k}  = Σ_{j ∈ C_excl(k)} s_j^{1.5}                                          (q = 1.5, j = k included)
+    H̄_k      = (Σ_{j ∈ C_excl(k)} s_j · H_j) / (Σ s_j),  H_j = (1/4) Σ_{e=0..4} H(p_{j,e})
+    f_cross  = (Σ_{j ∈ C_excl(k), stride_j ≠ stride_k} s_j) / (Σ s_j)
+    z_k^(0)  = logit(clamp(s_k, 1e-6, 1 − 1e-6))
+               + 0.70 · ln(min(M_{q,k} / s_k^{1.5}, 10) / 3.0)
+               − 0.55 · (H̄_k − 1.5)
+               + 0.30 · f_cross
+
+1. **Power-weighted exclusive support (`q = 1.5`)** sharpens the contrast between crisp high-confidence clusters and
+   diffuse low-confidence tails.
+2. **DFL Shannon entropy (`H̄_k`, in nats)** replaces excess-variance `bin_precision` with the 4-side mean entropy of the
+   DFL bin softmax (a single pass on CPU and a single extra channel packed with the moments on GPU, `[B, 9, A]`),
+   measuring localization sharpness without the small-box variance skew.
+3. **Cross-stride agreement (`f_cross`)** rewards clusters whose supporting anchors span more than one FPN pyramid
+   level (P3/P4/P5) — a strong indicator of a true object rather than single-scale background clutter.
+4. **Greedy sequential log-survival soft repulsion on output boxes (`b̂_k`):** within each class `c` (also class-local
+   under `agnostic` NMS), repeatedly freeze the active box `m` with the highest current logit `z_m` (ties to earlier
+   NMS position) and dampen every remaining active box `u` of class `c` with `o = IoU(b̂_m, b̂_u) > 0` by
+   `z_u += 2.5 · ln(max(1 − o^4, 1e-4))`, then return `sigmoid(z)` sorted descending. Because repulsion runs on the
+   **fused** boxes in **greedy sequential** order, a dampened duplicate's logit drops below nearby true crowd objects
+   before it can falsely repel them — allowing a higher NMS threshold (`--iou 0.75` instead of `0.70`) to recover
+   crowded true positives while cleanly demoting near-duplicates.
+
+Callers without DFL logits or anchor strides (`nms_detections`, `folo-wasm`) gracefully omit the entropy and/or stride
+terms. `o2o` ignores `--score`. On a locked 5,000-image held-out COCO `val2017` evaluation (pycocotools-exact, 1,000
+paired image bootstrap resamples, seed 0), `--fusion dfl --score dfl-repulse --iou 0.75 --max-det 1000` achieves:
+
+- **`folo-n-coco-v5`**: **0.37678 AP** (`AP50 0.53487`, `AP_S 0.18726`, `AP_M 0.41123`, `AP_L 0.54690`, `AR100 0.59950`):
+  **+0.00671 AP** over `B0` (`0.37008`, 95% CI `[+0.00559, +0.00774]`, `P(≤0) = 0.0000`) and **+0.00087 AP** over
+  `B70 + dfl + dfl-consensus` (`0.37591`, 95% CI `[+0.00034, +0.00141]`, `P(≤0) = 0.0010`), lifting every size bucket
+  S/M/L (matching the `train-dev` gain of `+0.00086` AP within `0.00001`).
+- **`folo-s-coco`**: **0.42202 AP** (`AP50 0.58759`, `AP_S 0.23517`, `AP_M 0.46475`, `AP_L 0.58841`, `AR100 0.63365`):
+  **+0.00586 AP** over `B0` (`0.41616`, 95% CI `[+0.00499, +0.00676]`, `P(≤0) = 0.0000`) and **+0.00067 AP** over
+  `B70 + dfl + dfl-consensus` (`0.42135`, 95% CI `[+0.00033, +0.00121]`, `P(≤0) = 0.0000`), beating or matching SOTA
+  on every size bucket S/M/L.
+
 ### 9.5 Candidate-first evaluation
 Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
 `conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and
@@ -1242,14 +1284,20 @@ does so bit for bit too: a class pass lists each image's candidates and the pixe
 fixed-capacity lists on the device, the 3×3 box convs run the dense implicit GEMM (regular or tensor-core) with
 one column per listed pixel and the dense conv's split-K chunks, `out` runs the dense GEMM over the candidates'
 columns, and one decode appends the boxes to one record list per image, read back once; an image with more
-candidates on a level than the list holds (1024, 512, 512 for P3, P4, P5) takes the dense head instead. The dense
+candidates on a level than the list holds (1024, 512, 512 for P3, P4, P5) takes the dense head instead (where
+`candidates_on_device` gathers only the surviving candidate columns when `total_cands <= B · A / 4` before computing
+DFL stats, avoiding full `[B, 8|9, A]` downloads). The dense
 raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
-`conf = 0.001`), export and every other consumer of them use the dense forward. Box fusion (§9.4) is served as on
-the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its
-own box logits, which are the dense logits bit for bit, with the dense path's functions: on the CPU the same
-softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput::moments_on_device`) over the
-candidates' columns, which compute each column on its own, so the same bits. With forward plans on (§9.1), the
-GPU path from the input to the records and moments is one recorded plan; the readbacks follow the replay.
+`conf = 0.001`, where GPU DFL stats readback is deferred to the post-processing thread so forward passes do not stall),
+export and every other consumer of them use the dense forward. Box fusion and DFL scoring (§9.4) are served as on
+the dense path: `vote` needs only the boxes and scores, and `dfl` / `dfl-consensus` / `dfl-repulse` take each
+candidate's side moments and/or Shannon entropy from its own box logits, which are the dense logits bit for bit, with
+the dense path's functions: on the CPU in a single softmax pass per candidate; on a GPU via a single combined stats
+tensor (`[B, 8|1|9, Σ cap]`) over the candidates' columns while packing the records and all three levels' site lists
+into one `u32` buffer (cutting GPU readbacks from 5 to at most 2, and skipping the stats readback when no fitting image
+has candidates). With forward plans on (§9.1), the GPU path from the input to the packed `u32` buffer and DFL stats is
+one recorded plan; the readbacks follow the replay (cutting warm `folo predict --half --tensor-cores` `folo-n`
+inference latency with DFL fusion + scoring by 16–23%, to `1.56 ms` inference / `0.026 ms` postprocess).
 
 ### 9.6 int8 inference (opt-in, CPU)
 Post-training quantisation of the backbone and neck (layers 0–22); the head (§6) stays `f32`. Opt-in:

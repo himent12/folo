@@ -390,7 +390,7 @@ impl Backend for CpuBackend {
     }
 
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
-        conv_forward(&[x], w, bias, p, None, false, None)
+        conv_forward(&[x], w, bias, p, None, false, None, false)
     }
 
     fn conv2d_act(
@@ -401,7 +401,7 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        conv_forward(&[x], w, bias, p, act, true, None)
+        conv_forward(&[x], w, bias, p, act, true, None, true)
     }
 
     fn conv2d_act_at(
@@ -418,7 +418,25 @@ impl Backend for CpuBackend {
         let [oh, ow] =
             p.output_hw(h, wi, kh, kw).expect("conv2d_act_at: output size validated by the caller");
         let at = indices(&at, "conv2d_act_at", n * oh * ow)?;
-        conv_forward(&[x], w, bias, p, act, true, Some(&at))
+        // Never use Winograd F(4x4) here: `conv2d_act_at` preserves strict per-site receptive-field isolation.
+        conv_forward(&[x], w, bias, p, act, true, Some(&at), false)
+    }
+
+    fn conv2d_act_at_tiles(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: View<'_>,
+    ) -> Result<Storage> {
+        let (n, _, h, wi) = nchw(x.shape());
+        let (_, _, kh, kw) = nchw(w.shape());
+        let [oh, ow] =
+            p.output_hw(h, wi, kh, kw).expect("conv2d_act_at_tiles: output size validated by the caller");
+        let at = indices(&at, "conv2d_act_at_tiles", n * oh * ow)?;
+        conv_forward(&[x], w, bias, p, act, true, Some(&at), true)
     }
 
     fn conv2d_act_cat(
@@ -429,7 +447,7 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        conv_forward(xs, w, bias, p, act, true, None)
+        conv_forward(xs, w, bias, p, act, true, None, true)
     }
     fn conv2d_backward_input(
         &self,
@@ -625,12 +643,15 @@ impl Backend for CpuBackend {
 }
 
 /// conv2d forward over the channel concatenation of `xs` with bias and activation, for every conv entry point.
-/// `inference` (the fused entry points, which never record a gradient) may take Winograd F(2x2, 3x3), which is
-/// not bit for bit the direct conv; the autograd forward keeps the direct conv that its backward matches.
+/// `inference` (the fused entry points, which never record a gradient) may take Winograd F(4x4, 3x3) or
+/// F(2x2, 3x3), which are not bit for bit the direct conv; the autograd forward keeps the direct conv that its
+/// backward matches.
 ///
-/// With `sites` (flat output indices, `conv2d_act_at`), only those outputs need their values: a Winograd conv
-/// computes the 2x2 tiles that hold them and a pointwise conv their columns (`conv::sites`), each bit for bit
-/// what the dense call gives; the other elements of the output are unspecified. Any other conv runs densely.
+/// With `sites` (flat output indices, `conv2d_act_at` / `conv2d_act_at_tiles`), only those outputs need their
+/// values: `allow_wino4` enables 4x4 Winograd F(4x4) tiles (for callers populating full 6x6 tile patches, bit for
+/// bit the dense call); when `false`, `conv2d_act_at` skips F(4x4) to preserve strict 3x3 receptive-field
+/// isolation. Any other conv runs densely.
+#[allow(clippy::too_many_arguments)]
 fn conv_forward(
     xs: &[View<'_>],
     w: View<'_>,
@@ -639,6 +660,7 @@ fn conv_forward(
     act: Option<UnaryOp>,
     inference: bool,
     sites: Option<&[usize]>,
+    allow_wino4: bool,
 ) -> Result<Storage> {
     // Parts whose images are each contiguous (a channel slice, for example) are read in place.
     let owned = xs
@@ -669,7 +691,20 @@ fn conv_forward(
         let epi = gemm::BiasAct { bias: bd.as_deref(), act };
         let fused = bd.is_some() || act.is_some();
         let input = conv::ConvInput { parts: &parts };
-        if inference && conv::uses_winograd(&g) {
+        if inference && allow_wino4 && conv::uses_winograd4(&g) {
+            let key = derived_key("winograd f(4x4, 3x3)", w.layout);
+            let u = w.derived(key, || conv::try_transform_weights4(&wd, o, c));
+            if let Some(u) = u.as_deref() {
+                match sites {
+                    Some(at) => {
+                        let tiles = conv::winograd4_tiles_at(&g, at);
+                        conv::winograd4_forward_at(input, &wd, u, &mut out, &g, fused.then_some(epi), &tiles);
+                    }
+                    None => conv::winograd4_forward(input, &wd, u, &mut out, &g, fused.then_some(epi)),
+                }
+                return Ok(f32_storage(out));
+            }
+        } else if inference && conv::uses_winograd(&g) {
             // Transformed once per weight tensor, and kept with it until it is written.
             let key = derived_key("winograd f(2x2, 3x3)", w.layout);
             let u = w.derived(key, || conv::transform_weights(&wd, o, c));

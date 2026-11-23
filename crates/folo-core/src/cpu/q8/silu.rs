@@ -1,15 +1,17 @@
 //! Bit-exact division-free minimax fast SiLU (`silu_q8`) for the CPU int8 epilogue.
 //!
 //! Computes `x / (1 + exp(-x))` using:
-//! 1. Base-2 range reduction `u = t · log2(e)`, `n = round_ties_even(u)`, `f = u - n` (`f ∈ [-0.5, 0.5]`),
-//!    with `t = clamp(-x, -86, 86)` so `2^n` and the reciprocal seed stay strictly normal floats.
-//! 2. Economised degree-5 minimax polynomial for `2^f` on `[-0.5, 0.5]` (relative error `< 1e-7`, exact `2^0 = 1`).
-//! 3. Deterministic IEEE-754 bit-hack reciprocal seed `0x7EF3_11C3 - bits(1 + e)` followed by 3 exact FMA
-//!    Newton-Raphson steps (`r ← r · (2 - d · r)`), achieving `< 2e-7` hybrid error (`|err| / max(1, |ref|)`,
-//!    max true relative error `~2.4e-6` near `-79`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
+//! 1. Fused base-2 range reduction `u = clamp(x · (-log2(e)), -124, 124)`, `z = u + (1.5·2^23 + 127)` so
+//!    `n = z - magic` rounds to nearest-even and `bits(z) << 23` yields `2^n` in a single shift (zero `vroundps`,
+//!    zero `vcvtps2dq`, zero `vpaddd`).
+//! 2. Economised degree-5 minimax polynomial for `2^f` on `f ∈ [-0.5, 0.5]` (relative error `< 1e-7`, `2^0 = 1`).
+//! 3. Deterministic IEEE-754 bit-hack reciprocal seed `0x7EF3_11C3 - bits(1 + e)` followed by a 4-FMA factored
+//!    Householder-6 step `r = r0 · (1 + e0) · (1 + e0^2 + e0^4)` (`e0 = 1 - d·r0`, truncation error `e0^6 <= 1.66e-8`,
+//!    exact `r(1.0) == 1.0` and `r(2.0) == 0.5`, 33% lower latency than 3 Newton-Raphson steps), achieving
+//!    `< 2e-7` hybrid error (`|err| / max(1, |ref|)`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
 //!
-//! Scalar and AVX2 paths execute the exact same IEEE-754 FMA/mul/add/sub/integer-sub operations in the same
-//! order, so they produce bit-identical results across CPUs.
+//! Scalar and AVX2 paths execute the exact same IEEE-754 FMA/mul/add/sub/integer operations in the same order,
+//! producing bit-identical results across CPUs.
 
 /// `max(a, b)` as `vmaxps` computes it (`b` when either is NaN).
 #[inline(always)]
@@ -31,18 +33,21 @@ const C2: f32 = 2.402_210_9e-1;
 const C1: f32 = 6.931_472e-1;
 const C0: f32 = 1.0;
 
-/// Bit-hack reciprocal seed constant (`~2 * 127 << 23` tuned for minimax relative error `< 0.0385` on normal `d`).
+const NEG_LOG2_E: f32 = -std::f32::consts::LOG2_E;
+/// `1.5 * 2^23 + 127` (`0x4B40_007F`): adding `u ∈ [-124, 124]` puts `n + 127 ∈ [3, 251]` in bits 0..8, so
+/// `bits(z) << 23` is IEEE-754 `2^n` directly.
+const MAGIC_EXP: f32 = 12_583_039.0;
+/// Bit-hack reciprocal seed constant (`max |1 - d·r0| ≈ 0.05051`, exact `r(1.0) == 1.0` & `r(2.0) == 0.5`).
 const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
 /// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 (`|err| / max(1, |ref|) < 2e-7`
-/// on `[-86, 86]`, max true relative error `~2.4e-6` in the far negative tail, finite at extremes, `silu_q8(0.0) == 0.0`, NaN stays NaN).
+/// on `[-86, 86]`, finite at extremes, `silu_q8(0.0) == 0.0`, `silu_q8(-0.0) == -0.0`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {
     let x = maxps(-88.0, x);
-    let neg = f32::from_bits(x.to_bits() ^ 0x8000_0000);
-    let t = maxps(minps(neg, 86.0), -86.0);
-    let u = t * std::f32::consts::LOG2_E;
-    let n = u.round_ties_even();
+    let u = minps(maxps(x * NEG_LOG2_E, -124.0), 124.0);
+    let z = u + MAGIC_EXP;
+    let n = z - MAGIC_EXP;
     let f = u - n;
     let mut p = C5;
     p = p.mul_add(f, C4);
@@ -50,12 +55,14 @@ pub fn silu_q8(x: f32) -> f32 {
     p = p.mul_add(f, C2);
     p = p.mul_add(f, C1);
     p = p.mul_add(f, C0);
-    let e = p * f32::from_bits(((n as i32).wrapping_add(127) as u32) << 23);
+    let e = p * f32::from_bits(z.to_bits() << 23);
     let d = 1.0 + e;
-    let mut r = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
-    r = r.mul_add((-d).mul_add(r, 1.0), r);
-    r = r.mul_add((-d).mul_add(r, 1.0), r);
-    r = r.mul_add((-d).mul_add(r, 1.0), r);
+    let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
+    let e0 = (-d).mul_add(r0, 1.0);
+    let u2 = r0.mul_add(e0, r0);
+    let e2 = e0 * e0;
+    let t2 = e2.mul_add(e2, e2);
+    let r = u2.mul_add(t2, u2);
     x * r
 }
 
@@ -66,10 +73,13 @@ pub fn silu_q8(x: f32) -> f32 {
 pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let x = _mm256_max_ps(_mm256_set1_ps(-88.0), x);
-    let neg = _mm256_xor_ps(x, _mm256_set1_ps(-0.0));
-    let t = _mm256_max_ps(_mm256_min_ps(neg, _mm256_set1_ps(86.0)), _mm256_set1_ps(-86.0));
-    let u = _mm256_mul_ps(t, _mm256_set1_ps(std::f32::consts::LOG2_E));
-    let n = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(u);
+    let u = _mm256_min_ps(
+        _mm256_max_ps(_mm256_mul_ps(x, _mm256_set1_ps(NEG_LOG2_E)), _mm256_set1_ps(-124.0)),
+        _mm256_set1_ps(124.0),
+    );
+    let magic = _mm256_set1_ps(MAGIC_EXP);
+    let z = _mm256_add_ps(u, magic);
+    let n = _mm256_sub_ps(z, magic);
     let f = _mm256_sub_ps(u, n);
     let mut p = _mm256_set1_ps(C5);
     p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(C4));
@@ -77,14 +87,16 @@ pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::_
     p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(C2));
     p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(C1));
     p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(C0));
-    let s = _mm256_slli_epi32::<23>(_mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)));
+    let s = _mm256_slli_epi32::<23>(_mm256_castps_si256(z));
     let e = _mm256_mul_ps(p, _mm256_castsi256_ps(s));
     let one = _mm256_set1_ps(1.0);
     let d = _mm256_add_ps(one, e);
-    let mut r =
+    let r0 =
         _mm256_castsi256_ps(_mm256_sub_epi32(_mm256_set1_epi32(RECIP_MAGIC as i32), _mm256_castps_si256(d)));
-    r = _mm256_fmadd_ps(r, _mm256_fnmadd_ps(d, r, one), r);
-    r = _mm256_fmadd_ps(r, _mm256_fnmadd_ps(d, r, one), r);
-    r = _mm256_fmadd_ps(r, _mm256_fnmadd_ps(d, r, one), r);
+    let e0 = _mm256_fnmadd_ps(d, r0, one);
+    let u2 = _mm256_fmadd_ps(r0, e0, r0);
+    let e2 = _mm256_mul_ps(e0, e0);
+    let t2 = _mm256_fmadd_ps(e2, e2, e2);
+    let r = _mm256_fmadd_ps(u2, t2, u2);
     _mm256_mul_ps(x, r)
 }

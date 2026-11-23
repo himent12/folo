@@ -98,9 +98,11 @@ fn f32_to_pixel_u8(x: f32) -> u8 {
 /// Pack `[n, 3, h, w]` `f32` inputs in `[0, 1]` into `[n, h, w]` `u32` words `[R, G, B, 0]`, bit-exact between
 /// scalar and AVX2.
 pub fn pack_f32_to_rgb0_u8(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u32]) {
-    let hw = h * w;
-    assert!(x.len() >= n * 3 * hw && out.len() >= n * hw, "pack_f32_to_rgb0_u8: buffer too short");
-    if n * hw == 0 {
+    let hw = h.checked_mul(w).expect("pack_f32_to_rgb0_u8: h * w overflow");
+    let n_hw = n.checked_mul(hw).expect("pack_f32_to_rgb0_u8: n * h * w overflow");
+    let x_need = n_hw.checked_mul(3).expect("pack_f32_to_rgb0_u8: n * 3 * h * w overflow");
+    assert!(x.len() >= x_need && out.len() >= n_hw, "pack_f32_to_rgb0_u8: buffer too short");
+    if n_hw == 0 {
         return;
     }
     const BLOCK: usize = 4096;
@@ -116,9 +118,11 @@ pub fn pack_f32_to_rgb0_u8(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u
 }
 
 fn pack_rgb0_slice(r: &[f32], g: &[f32], b: &[f32], out: &mut [u32]) {
+    let len = out.len();
+    assert!(r.len() >= len && g.len() >= len && b.len() >= len, "pack_rgb0_slice: input too short");
     #[cfg(target_arch = "x86_64")]
     if super::kernel::uses_avx2() {
-        // SAFETY: AVX2 and FMA were detected; slices have identical lengths.
+        // SAFETY: AVX2 and FMA were detected; slice lengths asserted above.
         return unsafe { pack_rgb0_slice_avx2(r, g, b, out) };
     }
     for i in 0..out.len() {
@@ -233,16 +237,128 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
     };
     let threads = rayon::current_num_threads();
     let total_rows = n.checked_mul(oh).expect("q8::stem_u8: n * oh overflow");
-    let band = (total_rows / (3 * threads).max(1)).max(1);
+    let band = (total_rows / (2 * threads).max(1)).max(4);
     let bands = total_rows.div_ceil(band);
-    (0..bands).into_par_iter().for_each(|bi| {
+    let fast_k3s2p1 = k == 3 && s == 2 && p == 1;
+    let run_band = |bi: usize| {
         let r0 = bi * band;
         let r1 = (r0 + band).min(total_rows);
-        let mut strips = vec![0u32; strip_len];
-        let mut row_ptrs = vec![std::ptr::null::<u32>(); ks];
         let mut acc: Tile = [[0; NR]; MR];
         let mut qw = [0u32; NR];
         let mut fv = [[0f32; NR]; MR];
+        if fast_k3s2p1 {
+            // 3 rotating row slots: each slot holds `even` (`strip_w`, for kx=1) and `odd` (`strip_w + 1`,
+            // with `odd[0] = 0` so `odd[0..]` is kx=0 and `odd[1..]` is kx=2). Row `2*oy + 1` (ky=2) becomes
+            // next row's `ky = 0`, cutting strip packing by 4.5× and eliminating inner-loop branches.
+            // Stack-backed for `strip_w <= STACK_W` (covers up to 1024px inputs with zero heap allocs).
+            const STACK_W: usize = 512;
+            let mut ev_stack = [[0u32; STACK_W]; 3];
+            let mut od_stack = [[0u32; STACK_W + 1]; 3];
+            let mut ev_heap;
+            let mut od_heap;
+            let (evens, odds): ([&mut [u32]; 3], [&mut [u32]; 3]) = if strip_w <= STACK_W {
+                let [e0, e1, e2] = &mut ev_stack;
+                let [o0, o1, o2] = &mut od_stack;
+                (
+                    [&mut e0[..strip_w], &mut e1[..strip_w], &mut e2[..strip_w]],
+                    [&mut o0[..strip_w + 1], &mut o1[..strip_w + 1], &mut o2[..strip_w + 1]],
+                )
+            } else {
+                ev_heap = [vec![0u32; strip_w], vec![0u32; strip_w], vec![0u32; strip_w]];
+                od_heap = [vec![0u32; strip_w + 1], vec![0u32; strip_w + 1], vec![0u32; strip_w + 1]];
+                let [e0, e1, e2] = &mut ev_heap;
+                let [o0, o1, o2] = &mut od_heap;
+                (
+                    [e0.as_mut_slice(), e1.as_mut_slice(), e2.as_mut_slice()],
+                    [o0.as_mut_slice(), o1.as_mut_slice(), o2.as_mut_slice()],
+                )
+            };
+            let fill_slot = |ev: &mut [u32], od: &mut [u32], img: usize, iy: isize| {
+                od[0] = 0;
+                if iy < 0 || iy >= h as isize {
+                    ev[..ow].fill(0);
+                    od[1..ow + 1].fill(0);
+                } else {
+                    let srow = &x_rgb0[img * hw + iy as usize * w..][..w];
+                    super::deinterleave_even_odd(srow, &mut ev[..ow], &mut od[1..ow + 1], 0);
+                }
+            };
+            let mut row_ptrs = [std::ptr::null::<u32>(); 9];
+            let mut prev_img = usize::MAX;
+            let mut prev_oy = usize::MAX;
+            let mut ord = [0usize, 1, 2];
+            for row_idx in r0..r1 {
+                let (img, oy) = (row_idx / oh, row_idx % oh);
+                if img == prev_img && oy == prev_oy + 1 {
+                    ord.rotate_left(2);
+                    fill_slot(evens[ord[1]], odds[ord[1]], img, (2 * oy) as isize);
+                    fill_slot(evens[ord[2]], odds[ord[2]], img, (2 * oy + 1) as isize);
+                } else {
+                    ord = [0, 1, 2];
+                    fill_slot(evens[0], odds[0], img, (2 * oy) as isize - 1);
+                    fill_slot(evens[1], odds[1], img, (2 * oy) as isize);
+                    fill_slot(evens[2], odds[2], img, (2 * oy + 1) as isize);
+                }
+                prev_img = img;
+                prev_oy = oy;
+                for (ky, &sl) in ord.iter().enumerate() {
+                    let od_ptr = odds[sl].as_ptr();
+                    let ev_ptr = evens[sl].as_ptr();
+                    // SAFETY: `odds[sl]` has `strip_w + 1` words (`od_ptr.add(1)` has `strip_w`); `evens[sl]` has `strip_w`.
+                    row_ptrs[3 * ky] = od_ptr;
+                    row_ptrs[3 * ky + 1] = ev_ptr;
+                    row_ptrs[3 * ky + 2] = unsafe { od_ptr.add(1) };
+                }
+                for chunk in 0..chunks {
+                    let col = chunk * NR;
+                    let cols = NR.min(ow - col);
+                    for g in 0..og {
+                        let out_kind = if out_grids.is_some() {
+                            let (inv, zero) = &group_out[g];
+                            Out::U8 { inv, zero }
+                        } else {
+                            Out::F32
+                        };
+                        let e = Epi {
+                            corr: &zero_corr,
+                            scale: stem.scale[4 * g..4 * g + 4].try_into().unwrap(),
+                            bias: stem.bias[4 * g..4 * g + 4].try_into().unwrap(),
+                            silu: stem.silu,
+                            res: None,
+                            out: out_kind,
+                        };
+                        let panel = stem.a[g * ks * MR..].as_ptr();
+                        // SAFETY: `panel` has `ks * MR` words; each strip has `strip_w >= col + NR` words.
+                        unsafe { kern(ks, panel, row_ptrs.as_ptr(), col, &mut acc) };
+                        if out_grids.is_some() {
+                            let at = (img * og + g) * ohw + oy * ow + col;
+                            if cols == NR {
+                                // SAFETY: disjoint `NR`-word output slice owned by this task.
+                                unsafe { e.apply_full_u8_direct(&acc, std::ptr::null(), qptr.at(at)) };
+                            } else {
+                                e.apply(&acc, cols, &resw, &mut qw, &mut fv);
+                                // SAFETY: disjoint `cols`-word output slice owned by this task.
+                                unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), qptr.at(at), cols) };
+                            }
+                        } else {
+                            if cols == NR {
+                                e.apply_full(&acc, &resw, &mut qw, &mut fv);
+                            } else {
+                                e.apply(&acc, cols, &resw, &mut qw, &mut fv);
+                            }
+                            for (rr, row) in fv.iter().enumerate() {
+                                let at = (img * stem.o + 4 * g + rr) * ohw + oy * ow + col;
+                                // SAFETY: disjoint output row owned by this task.
+                                unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), fptr.at(at), cols) };
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let mut strips = vec![0u32; strip_len];
+        let mut row_ptrs = vec![std::ptr::null::<u32>(); ks];
         for row_idx in r0..r1 {
             let (img, oy) = (row_idx / oh, row_idx % oh);
             let src = &x_rgb0[img * hw..(img + 1) * hw];
@@ -265,44 +381,48 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                     }
                 }
             }
-            // Refresh shared raw strip pointers AFTER every `&mut strips` borrow has ended so Stacked/Tree Borrows
-            // stay strictly valid across the entire kernel pass below.
             let base = strips.as_ptr();
             for (t, ptr) in row_ptrs.iter_mut().enumerate().take(ks) {
                 // SAFETY: `t * strip_w` is inside `strips` and every strip has `strip_w >= chunks * NR` words.
                 *ptr = unsafe { base.add(t * strip_w) };
             }
-            for g in 0..og {
-                let out_kind = if out_grids.is_some() {
-                    let (inv, zero) = &group_out[g];
-                    Out::U8 { inv, zero }
-                } else {
-                    Out::F32
-                };
-                let e = Epi {
-                    corr: &zero_corr,
-                    scale: stem.scale[4 * g..4 * g + 4].try_into().unwrap(),
-                    bias: stem.bias[4 * g..4 * g + 4].try_into().unwrap(),
-                    silu: stem.silu,
-                    res: None,
-                    out: out_kind,
-                };
-                let panel = stem.a[g * ks * MR..].as_ptr();
-                for chunk in 0..chunks {
-                    let col = chunk * NR;
-                    let cols = NR.min(ow - col);
+            for chunk in 0..chunks {
+                let col = chunk * NR;
+                let cols = NR.min(ow - col);
+                for g in 0..og {
+                    let out_kind = if out_grids.is_some() {
+                        let (inv, zero) = &group_out[g];
+                        Out::U8 { inv, zero }
+                    } else {
+                        Out::F32
+                    };
+                    let e = Epi {
+                        corr: &zero_corr,
+                        scale: stem.scale[4 * g..4 * g + 4].try_into().unwrap(),
+                        bias: stem.bias[4 * g..4 * g + 4].try_into().unwrap(),
+                        silu: stem.silu,
+                        res: None,
+                        out: out_kind,
+                    };
+                    let panel = stem.a[g * ks * MR..].as_ptr();
                     // SAFETY: `panel` has `ks * MR` words; each strip has `strip_w >= col + NR` words.
                     unsafe { kern(ks, panel, row_ptrs.as_ptr(), col, &mut acc) };
-                    if cols == NR {
-                        e.apply_full(&acc, &resw, &mut qw, &mut fv);
-                    } else {
-                        e.apply(&acc, cols, &resw, &mut qw, &mut fv);
-                    }
                     if out_grids.is_some() {
                         let at = (img * og + g) * ohw + oy * ow + col;
-                        // SAFETY: disjoint output row owned by this task.
-                        unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), qptr.at(at), cols) };
+                        if cols == NR {
+                            // SAFETY: disjoint output row owned by this task.
+                            unsafe { e.apply_full_u8_direct(&acc, std::ptr::null(), qptr.at(at)) };
+                        } else {
+                            e.apply(&acc, cols, &resw, &mut qw, &mut fv);
+                            // SAFETY: disjoint output row owned by this task.
+                            unsafe { std::ptr::copy_nonoverlapping(qw.as_ptr(), qptr.at(at), cols) };
+                        }
                     } else {
+                        if cols == NR {
+                            e.apply_full(&acc, &resw, &mut qw, &mut fv);
+                        } else {
+                            e.apply(&acc, cols, &resw, &mut qw, &mut fv);
+                        }
                         for (rr, row) in fv.iter().enumerate() {
                             let at = (img * stem.o + 4 * g + rr) * ohw + oy * ow + col;
                             // SAFETY: disjoint output row owned by this task.
@@ -312,5 +432,10 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                 }
             }
         }
-    });
+    };
+    if bands <= 1 || threads <= 1 {
+        (0..bands).for_each(run_band);
+    } else {
+        crate::cpu::par_for(bands, &run_band);
+    }
 }

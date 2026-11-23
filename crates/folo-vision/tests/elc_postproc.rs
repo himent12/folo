@@ -1,7 +1,9 @@
-//! Tests for `--score elc` (Exclusive Logit-Space Consensus) and `--score dfl-consensus` (Scale-Free Exclusive
-//! Logit-Consensus with fused DFL precision), docs/MODEL.md §9.4: exact hand-checked formulas, exclusive ghost-mass
-//! blocking, graceful fallback when DFL moments are absent, `agnostic` class-local ownership, NaN/extreme-score
-//! safety, determinism, zero regression on `None`/`Consensus`, and end-to-end CPU candidate-first / val parity.
+//! Tests for `--score elc` (Exclusive Logit-Space Consensus), `--score dfl-consensus` (Scale-Free Exclusive
+//! Logit-Consensus with fused DFL precision), and `--score dfl-repulse` (DFL entropy consensus with cross-stride
+//! agreement and greedy log-survival soft repulsion), docs/MODEL.md §9.4: exact hand-checked formulas, exclusive
+//! ghost-mass blocking, greedy sequential repulsion order, graceful fallback when DFL stats/strides are absent,
+//! `agnostic` class-local ownership/repulsion, NaN/extreme-score safety, determinism, zero regression on
+//! `None`/`Consensus`, and end-to-end CPU candidate-first / val parity.
 
 use std::sync::Arc;
 
@@ -11,15 +13,16 @@ use folo_data::Split;
 use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_nn::Module;
 use folo_vision::boxes::Xyxy;
-use folo_vision::decode::{bin_precision, side_precision, softmax_moments};
+use folo_vision::decode::{bin_precision, dfl_entropy, side_precision, softmax_moments};
 use folo_vision::fusion::{
-    BoxFusion, DFL_CONSENSUS_BETA, DFL_CONSENSUS_SIG_REF, ELC_ALPHA, ELC_CAP, ELC_R_REF, ScoreRule,
-    consensus_scores, dfl_consensus_scores, elc_scores,
+    BoxFusion, DFL_CONSENSUS_BETA, DFL_CONSENSUS_SIG_REF, DFL_REPULSE_ALPHA, DFL_REPULSE_BETA,
+    DFL_REPULSE_ENT_REF, DFL_REPULSE_GAMMA, DFL_REPULSE_R_REF, DFL_REPULSE_STRIDE_W, ELC_ALPHA, ELC_CAP,
+    ELC_R_REF, ScoreRule, consensus_scores, dfl_consensus_scores, dfl_repulse_scores, elc_scores,
 };
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::nms::{
-    CALIBRATED_PRE_CONF, Detection, NmsConfig, nms_detections, non_max_suppression,
-    non_max_suppression_with_dfl,
+    CALIBRATED_PRE_CONF, Detection, DflInputs, NmsConfig, nms_detections, non_max_suppression,
+    non_max_suppression_with_dfl, non_max_suppression_with_inputs,
 };
 use folo_vision::val::{ValConfig, validate};
 
@@ -206,7 +209,7 @@ fn edge_cases_nan_safety_and_serde() {
         let cfg = NmsConfig { conf: 0.25, score: rule, ..NmsConfig::default() };
         assert_eq!(cfg.candidate_conf(), 0.25);
     }
-    for rule in [ScoreRule::Elc, ScoreRule::DflConsensus] {
+    for rule in [ScoreRule::Elc, ScoreRule::DflConsensus, ScoreRule::DflRepulse] {
         let pred = NmsConfig { conf: 0.25, score: rule, ..NmsConfig::default() };
         assert_eq!(pred.candidate_conf(), CALIBRATED_PRE_CONF);
         let val = NmsConfig { score: rule, ..NmsConfig::val() };
@@ -219,6 +222,7 @@ fn edge_cases_nan_safety_and_serde() {
         (ScoreRule::Consensus, "consensus"),
         (ScoreRule::Elc, "elc"),
         (ScoreRule::DflConsensus, "dfl-consensus"),
+        (ScoreRule::DflRepulse, "dfl-repulse"),
     ] {
         assert_eq!(rule.as_str(), s);
         let json = serde_json::to_string(&rule).unwrap();
@@ -271,7 +275,13 @@ fn cpu_candidate_first_and_val_match_dense_bit_for_bit() {
     };
 
     for fusion in [BoxFusion::None, BoxFusion::Dfl] {
-        for score in [ScoreRule::None, ScoreRule::Consensus, ScoreRule::Elc, ScoreRule::DflConsensus] {
+        for score in [
+            ScoreRule::None,
+            ScoreRule::Consensus,
+            ScoreRule::Elc,
+            ScoreRule::DflConsensus,
+            ScoreRule::DflRepulse,
+        ] {
             for conf in [0.05f32, 0.25] {
                 let nms = NmsConfig { conf, iou: 0.70, max_det: 300, fusion, score, ..NmsConfig::default() };
                 let raw = m.predict_raw(&x, &nms).unwrap();
@@ -431,4 +441,167 @@ fn elc_and_dfl_consensus_edge_case_regressions() {
         None,
     );
     assert!(!inf_out[0].is_nan());
+}
+
+/// Hand-checked `ScoreRule::DflRepulse` (`dfl_repulse_scores`): q=1.5 power consensus, DFL Shannon entropy term,
+/// cross-stride bonus, greedy sequential log-survival soft repulsion on output boxes, graceful fallback without
+/// entropy/strides, class-local agnostic safety, and NaN/Inf/zero-area edge cases.
+#[test]
+fn hand_checked_dfl_repulse_and_greedy_order() {
+    // 1. Hand-checked single cluster with two strides (8 and 16) + two entropies (0.8 and 1.2), plus a second
+    //    kept box of the same class overlapping at IoU = 0.50 (survives NMS at 0.75, repelled by the winner).
+    // Winner k0: [0, 0, 100, 100] (s=0.8, H=0.8, stride=8)
+    // Member j1: [0, 0, 100, 80] (IoU=0.80 >= 0.75, s=0.4, H=1.2, stride=16, suppressed by k0)
+    // Crowd/dup k2: [33.333332, 0, 133.33333, 100] -> IoU(k0, k2) = 66.66667 / 133.33333 = 0.50
+    let boxes =
+        [b(0.0, 0.0, 100.0, 100.0), b(0.0, 0.0, 100.0, 80.0), b(100.0 / 3.0, 0.0, 400.0 / 3.0, 100.0)];
+    let scores = [0.8f32, 0.4, 0.6];
+    let classes = [0u32; 3];
+    let ents = [0.8f32, 1.2, 1.5];
+    let strides = [8.0f32, 16.0, 8.0];
+    let ent_fn = |j: usize| ents[j];
+    let st_fn = |j: usize| strides[j];
+    let kept = [0usize, 2];
+    let repulse_boxes = [boxes[0], boxes[2]];
+    let got = dfl_repulse_scores(
+        &kept,
+        &boxes,
+        &repulse_boxes,
+        &scores,
+        &classes,
+        None,
+        0.75,
+        Some(&ent_fn),
+        Some(&st_fn),
+    );
+    // Exact hand computation for k0:
+    let (s0, s1, s2) = (0.8f32 as f64, 0.4f32 as f64, 0.6f32 as f64);
+    let sq0 = s0 * s0.sqrt();
+    let mass_q0 = sq0 + s1 * s1.sqrt();
+    let hbar0 = (s0 * (0.8f32 as f64) + s1 * (1.2f32 as f64)) / (s0 + s1);
+    let f_cross0 = s1 / (s0 + s1);
+    let z0 = (s0 / (1.0 - s0)).ln()
+        + DFL_REPULSE_ALPHA * ((mass_q0 / sq0).clamp(1.0, ELC_CAP) / DFL_REPULSE_R_REF).ln()
+        - DFL_REPULSE_BETA * (hbar0 - DFL_REPULSE_ENT_REF)
+        + DFL_REPULSE_STRIDE_W * f_cross0;
+    // Exact hand computation for k2 (lonely, H=1.5, f_cross=0, then repelled by k0 with IoU=0.5):
+    let z2_init = (s2 / (1.0 - s2)).ln() + DFL_REPULSE_ALPHA * (1.0 / DFL_REPULSE_R_REF).ln();
+    assert!(z0 > z2_init);
+    let w_ov = (boxes[0].x2.min(boxes[2].x2) - boxes[0].x1.max(boxes[2].x1)).max(0.0);
+    let inter = w_ov * 100.0;
+    let o = (inter / (10000.0 + 10000.0 - inter)) as f64;
+    let z2 = z2_init + DFL_REPULSE_GAMMA * (1.0 - o.powi(4)).max(1e-4).ln();
+    assert!((got[0] - ref_sigmoid(z0) as f32).abs() < 1e-6, "{} vs {}", got[0], ref_sigmoid(z0));
+    assert!((got[1] - ref_sigmoid(z2) as f32).abs() < 1e-6, "{} vs {}", got[1], ref_sigmoid(z2));
+
+    // 2. Greedy sequential order: A (z highest) overlaps B strongly (IoU=0.67), B overlaps C strongly (IoU=0.67),
+    //    A and C barely overlap (IoU=0.40). Under greedy repulsion: A freezes first and severely dampens B, so B's
+    //    current z drops BELOW C's z! Thus C freezes second BEFORE B and receives NO penalty from the dampened
+    //    duplicate B! Under static order, B would have repelled C too.
+    let chain = [b(0.0, 0.0, 100.0, 100.0), b(20.0, 0.0, 120.0, 100.0), b(40.0, 0.0, 140.0, 100.0)];
+    let chain_s = [0.90f32, 0.80, 0.78]; // initial z: A > B > C, but after A dampens B: C > B!
+    let chain_c = [0u32; 3];
+    let chain_out =
+        dfl_repulse_scores(&[0, 1, 2], &chain, &chain, &chain_s, &chain_c, None, 0.75, None, None);
+    // Compare C's score with and without B present: since C freezes before B, C's score must be identical!
+    let ac_out = dfl_repulse_scores(
+        &[0, 1],
+        &[chain[0], chain[2]],
+        &[chain[0], chain[2]],
+        &[0.90, 0.78],
+        &[0, 0],
+        None,
+        0.75,
+        None,
+        None,
+    );
+    assert_eq!(
+        chain_out[2].to_bits(),
+        ac_out[1].to_bits(),
+        "greedy sequential order must freeze clean C before dampened duplicate B"
+    );
+    assert!(
+        chain_out[2] > chain_out[1],
+        "clean C ({}) must outrank dampened duplicate B ({})",
+        chain_out[2],
+        chain_out[1]
+    );
+
+    // 3. Different class boxes do not repel each other, even under `agnostic = true`.
+    let cfg_ag = NmsConfig {
+        conf: 0.001,
+        iou: 0.75,
+        agnostic: true,
+        multi_label: true,
+        score: ScoreRule::DflRepulse,
+        ..NmsConfig::default()
+    };
+    let pair = [b(0.0, 0.0, 100.0, 100.0), b(30.0, 0.0, 130.0, 100.0)]; // IoU = 70/130 = 0.538 <= 0.75
+    let same_cls = non_max_suppression(&pair, &[0.8, 0.7], 1, &cfg_ag);
+    let diff_cls = non_max_suppression(&pair, &[0.8, 0.0, 0.0, 0.7], 2, &cfg_ag);
+    assert_eq!(same_cls.len(), 2);
+    assert_eq!(diff_cls.len(), 2);
+    assert!(
+        diff_cls[1].score > same_cls[1].score + 0.01,
+        "different-class box ({}) must not be repelled like same-class ({})",
+        diff_cls[1].score,
+        same_cls[1].score
+    );
+
+    // 4. `non_max_suppression_with_inputs` uses entropy & strides and falls back cleanly when omitted.
+    let cfg_rep = NmsConfig {
+        conf: 0.001,
+        iou: 0.75,
+        multi_label: true,
+        score: ScoreRule::DflRepulse,
+        ..NmsConfig::default()
+    };
+    let low_ent = [0.2f32, 0.2, 0.2];
+    let high_ent = [2.7f32, 2.7, 2.7];
+    let d_sharp = non_max_suppression_with_inputs(
+        &boxes,
+        &scores,
+        DflInputs { entropy: Some(&low_ent), strides: Some(&strides), ..Default::default() },
+        1,
+        &cfg_rep,
+    );
+    let d_blur = non_max_suppression_with_inputs(
+        &boxes,
+        &scores,
+        DflInputs { entropy: Some(&high_ent), strides: Some(&strides), ..Default::default() },
+        1,
+        &cfg_rep,
+    );
+    assert!(d_sharp[0].score > d_blur[0].score, "low DFL entropy must outscore high entropy");
+
+    // 5. NaN / +Inf / zero-area / NaN entropy & invalid stride edge cases never produce NaN.
+    let bad_boxes = [
+        b(0.0, 0.0, 10.0, 10.0),
+        b(f32::NAN, 0.0, 5.0, 10.0),
+        b(5.0, 5.0, 5.0, 9.0),
+        b(50.0, 50.0, 60.0, 60.0),
+    ];
+    let bad_scores = [1.0f32, 0.8, 1e-8, 0.0];
+    let bad_ent = |_j: usize| f32::NAN;
+    let bad_st = |_j: usize| -1.0f32;
+    let safe = dfl_repulse_scores(
+        &[0, 1, 2, 3],
+        &bad_boxes,
+        &bad_boxes,
+        &bad_scores,
+        &[0; 4],
+        None,
+        0.75,
+        Some(&bad_ent),
+        Some(&bad_st),
+    );
+    assert!(safe[0].is_finite() && safe[0] > 0.99 && safe[0] <= 1.0);
+    assert!(safe[1].is_finite() && safe[1] > 0.0 && safe[1] < 1.0);
+    assert!(safe[2].is_finite() && safe[2] > 0.0);
+    assert_eq!(safe[3], 0.0);
+    let mut row = vec![-100.0f32; 64];
+    for s in 0..4 {
+        row[s * 16 + 3] = 50.0;
+    }
+    assert!(dfl_entropy(&row, 16) < 1e-5);
 }

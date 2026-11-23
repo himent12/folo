@@ -343,10 +343,63 @@ fn sign(x: f32) -> f32 {
     }
 }
 
+/// `max(a, b)` with x86 `vmaxps` NaN semantics (`b` when either is NaN), for bit-exact scalar == AVX2.
+#[inline(always)]
+fn maxps(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+// Degree-5 minimax coefficients for `(exp(r) - 1) / r` on `r ∈ [-ln(2)/2, ln(2)/2]` (max rel err `9.54e-8`).
+const EXP5_C5: f32 = 8.290_312e-3;
+const EXP5_C4: f32 = 4.189_795_3e-2;
+const EXP5_C3: f32 = 1.666_763_6e-1;
+const EXP5_C2: f32 = 4.999_915e-1;
+const EXP5_C1: f32 = 9.999_997e-1;
+
+/// `1.5 * 2^23` (`0x4B40_0000`): adding `u ∈ [-150, 0]` rounds to nearest-even integer in the low mantissa bits.
+const EXP_MAGIC_0: f32 = 12_582_912.0;
+const EXP_MAGIC_0_BITS: i32 = 0x4B40_0000;
+/// Minimax IEEE-754 reciprocal seed magic (`max |1 - d * r0| ≈ 0.05051`, exact `r(1.0) == 1.0`, `r(2.0) == 0.5`).
+const RECIP_MAGIC: u32 = 0x7EF3_11C3;
+
+/// Division-free, bit-exact scalar twin of `silu8`: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
+/// minimax polynomial, `1 / (1 + e)` via bit-hack seed + 4-FMA Householder-6 `(1 + e0)(1 + e0^2 + e0^4)`
+/// (error `e0^6 <= 1.66e-8`), `sigmoid = r` for `x >= 0` else `e * r`.
+#[inline]
+pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
+    let t_abs = f32::from_bits(x.to_bits() & 0x7FFF_FFFF);
+    let t = maxps(0.0 - t_abs, -104.0);
+    let z = t.mul_add(LOG2E, EXP_MAGIC_0);
+    let n = z - EXP_MAGIC_0;
+    let r = (-0.693_359_4f32).mul_add(n, t);
+    let r = (2.121_944_4e-4f32).mul_add(n, r);
+    let mut p = EXP5_C5;
+    p = p.mul_add(r, EXP5_C4);
+    p = p.mul_add(r, EXP5_C3);
+    p = p.mul_add(r, EXP5_C2);
+    p = p.mul_add(r, EXP5_C1);
+    let y = p.mul_add(r, 1.0);
+    let ni = (z.to_bits() as i32).wrapping_sub(EXP_MAGIC_0_BITS);
+    let n1 = ni >> 1;
+    let n2 = ni - n1;
+    let s1 = f32::from_bits(((n1 + 127) as u32) << 23);
+    let s2 = f32::from_bits(((n2 + 127) as u32) << 23);
+    let e = (y * s1) * s2;
+    let d = 1.0 + e;
+    let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
+    let e0 = (-d).mul_add(r0, 1.0);
+    let u = r0.mul_add(e0, r0);
+    let e2 = e0 * e0;
+    let t2 = e2.mul_add(e2, e2);
+    let rec = u.mul_add(t2, u);
+    let sig = if x >= 0.0 { rec } else { e * rec };
+    x * sig
+}
+
 /// `v[i] = silu(v[i] + bias)` in place: the fused-epilogue SiLU. With AVX2 + FMA (detected at runtime) eight
-/// lanes at a time through [`silu8`] (a ragged tail too, padded), whose error against the exact SiLU is
-/// bounded by [`SILU_MAX_REL_ERR`] (tested); otherwise the scalar `x * sigmoid(x)`. Either way every element's
-/// result depends only on its value, never on its position in `v`.
+/// lanes at a time through `silu8` (a ragged tail too, padded), whose error against the exact SiLU is
+/// bounded by [`SILU_MAX_REL_ERR`] (tested); otherwise the bit-exact scalar twin [`silu_epilogue_scalar`]. Either
+/// way every element's result depends only on its value, never on its position in `v` or the CPU's ISA.
 pub(crate) fn silu_bias_inplace(v: &mut [f32], bias: f32) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -356,8 +409,7 @@ pub(crate) fn silu_bias_inplace(v: &mut [f32], bias: f32) {
         }
     }
     for x in v.iter_mut() {
-        let t = *x + bias;
-        *x = t * sigmoid(t);
+        *x = silu_epilogue_scalar(*x + bias);
     }
 }
 
@@ -370,7 +422,19 @@ pub const SILU_MAX_REL_ERR: f64 = 5e-7;
 fn silu_bias_avx2(v: &mut [f32], bias: f32) {
     use std::arch::x86_64::*;
     let b = _mm256_set1_ps(bias);
-    let (chunks, tail) = v.as_chunks_mut::<8>();
+    let (pairs, rem) = v.as_chunks_mut::<16>();
+    for c in pairs {
+        // SAFETY: `c` is 16 floats; unaligned loads and stores. Processing two 8-wide vectors per
+        // iteration hides `silu8`'s FMA chain latency across independent lanes.
+        unsafe {
+            let p = c.as_mut_ptr();
+            let x0 = _mm256_add_ps(_mm256_loadu_ps(p), b);
+            let x1 = _mm256_add_ps(_mm256_loadu_ps(p.add(8)), b);
+            _mm256_storeu_ps(p, silu8(x0));
+            _mm256_storeu_ps(p.add(8), silu8(x1));
+        }
+    }
+    let (chunks, tail) = rem.as_chunks_mut::<8>();
     for c in chunks {
         // SAFETY: `c` is 8 floats; unaligned loads and stores.
         unsafe {
@@ -393,9 +457,10 @@ fn silu_bias_avx2(v: &mut [f32], bias: f32) {
     }
 }
 
-/// `x * sigmoid(x)` on eight lanes: `e = exp(-|x|)` by Cody-Waite reduction and the degree-6 polynomial of
-/// [`fast_exp`] (FMA), `sigmoid = 1 / (1 + e)` for `x >= 0` and `e / (1 + e)` below, so neither tail overflows.
-/// NaN stays NaN.
+/// `x * sigmoid(x)` on eight lanes, division-free and bit-identical to [`silu_epilogue_scalar`]: `e = exp(-|x|)`
+/// by Cody-Waite reduction and degree-5 minimax polynomial (FMA), `1 / (1 + e)` by bit-hack seed plus 4-FMA
+/// Householder-6 refinement `(1 + e0)(1 + e0^2 + e0^4)` (zero `vdivps`, zero `vroundps`, zero `vcvtps2dq`),
+/// `sigmoid = r` for `x >= 0` and `e * r` below. NaN stays NaN.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -403,32 +468,37 @@ pub(crate) fn silu8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let one = _mm256_set1_ps(1.0);
     let zero = _mm256_setzero_ps();
+    let magic0 = _mm256_set1_ps(EXP_MAGIC_0);
     // t = -|x| clamped to the bottom of the exp range (a NaN lane becomes -104; x * sig is NaN again below).
-    let t = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
-    let t = _mm256_max_ps(_mm256_sub_ps(zero, t), _mm256_set1_ps(-104.0));
-    let n = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(_mm256_mul_ps(
-        t,
-        _mm256_set1_ps(LOG2E),
-    ));
+    let t_abs = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
+    let t = _mm256_max_ps(_mm256_sub_ps(zero, t_abs), _mm256_set1_ps(-104.0));
+    let z = _mm256_fmadd_ps(t, _mm256_set1_ps(LOG2E), magic0);
+    let n = _mm256_sub_ps(z, magic0);
     let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693_359_4), t);
     let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.121_944_4e-4), r);
-    let mut p = _mm256_set1_ps(1.987_569_1e-4);
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.398_199_9e-3));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.333_452e-3));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.166_579_6e-2));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.666_666_5e-1));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
-    let y = _mm256_add_ps(_mm256_fmadd_ps(_mm256_mul_ps(p, r), r, r), one);
+    let mut p = _mm256_set1_ps(EXP5_C5);
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C4));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C3));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C2));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C1));
+    let y = _mm256_fmadd_ps(p, r, one);
     // 2^n as two normal powers of two (n is in -150..=0), so tiny results underflow gradually.
-    let ni = _mm256_cvtps_epi32(n);
+    let ni = _mm256_sub_epi32(_mm256_castps_si256(z), _mm256_set1_epi32(EXP_MAGIC_0_BITS));
     let n1 = _mm256_srai_epi32::<1>(ni);
     let n2 = _mm256_sub_epi32(ni, n1);
     let bias127 = _mm256_set1_epi32(127);
     let s1 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n1, bias127)));
     let s2 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n2, bias127)));
     let e = _mm256_mul_ps(_mm256_mul_ps(y, s1), s2);
-    let r = _mm256_div_ps(one, _mm256_add_ps(one, e));
-    let sig = _mm256_blendv_ps(_mm256_mul_ps(e, r), r, _mm256_cmp_ps::<_CMP_GE_OQ>(x, zero));
+    let d = _mm256_add_ps(one, e);
+    let r0 =
+        _mm256_castsi256_ps(_mm256_sub_epi32(_mm256_set1_epi32(RECIP_MAGIC as i32), _mm256_castps_si256(d)));
+    let e0 = _mm256_fnmadd_ps(d, r0, one);
+    let u = _mm256_fmadd_ps(r0, e0, r0);
+    let e2 = _mm256_mul_ps(e0, e0);
+    let t2 = _mm256_fmadd_ps(e2, e2, e2);
+    let rec = _mm256_fmadd_ps(u, t2, u);
+    let sig = _mm256_blendv_ps(_mm256_mul_ps(e, rec), rec, _mm256_cmp_ps::<_CMP_GE_OQ>(x, zero));
     _mm256_mul_ps(x, sig)
 }
 
@@ -717,6 +787,37 @@ mod tests {
         for y in b {
             assert!(((y as f64) - silu(-1.0)).abs() < 1e-6);
         }
+        // Scalar twin matches AVX2 bit for bit on normal, subnormal, tail and special values.
+        let mut scalar_check = tails;
+        scalar_check.extend([0.0f32, -0.0, f32::INFINITY, -110.0, f32::MIN, 3.0, -3.0, 1.0, -1.0, 0.25]);
+        let mut avx_out = scalar_check.clone();
+        silu_bias_inplace(&mut avx_out, 0.0);
+        for (&x, &y) in scalar_check.iter().zip(&avx_out) {
+            let sc = silu_epilogue_scalar(x + 0.0);
+            assert_eq!(sc.to_bits(), y.to_bits(), "silu_bias scalar vs AVX2 mismatch at {x}: {sc} vs {y}");
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            for ch in scalar_check.chunks(8) {
+                let mut v = [0f32; 8];
+                v[..ch.len()].copy_from_slice(ch);
+                // SAFETY: AVX2 and FMA were detected.
+                let got: [f32; 8] = unsafe {
+                    use std::arch::x86_64::*;
+                    let mut o = [0f32; 8];
+                    _mm256_storeu_ps(o.as_mut_ptr(), silu8(_mm256_loadu_ps(v.as_ptr())));
+                    o
+                };
+                for (&x, &y) in v.iter().zip(&got) {
+                    assert_eq!(
+                        silu_epilogue_scalar(x).to_bits(),
+                        y.to_bits(),
+                        "silu8 direct scalar vs AVX2 mismatch at {x}"
+                    );
+                }
+            }
+        }
+        assert!(silu_epilogue_scalar(f32::NAN).is_nan());
     }
 
     #[test]

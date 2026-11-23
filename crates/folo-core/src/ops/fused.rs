@@ -151,19 +151,25 @@ impl Tensor {
 
     /// [`Tensor::conv2d_act`] where only the output sites `at` are needed: `at` is a `U32` vector on the same
     /// device of flat output indices `n · OH·OW + oy · OW + ox` (any order, repeats allowed). The result has the
-    /// full output shape `[N, O, OH, OW]`; every site of `at` holds the value [`Tensor::conv2d_act`] computes
-    /// there on this backend, and **every other element is unspecified** (a backend may compute neighbours of
-    /// the sites, leave garbage, or compute everything).
+    /// full output shape `[N, O, OH, OW]`, and **every other element is unspecified** (a backend may compute
+    /// neighbours of the sites, leave garbage, or compute everything).
     ///
-    /// A site's value depends only on `self` within the site's receptive field, so `self` needs its true values
-    /// there and nowhere else (the box branch of candidate-first prediction evaluates a conv on such a partly
-    /// computed tensor). On the CPU ([`crate::backend::Backend::conv2d_act_at`]) a Winograd conv computes only
-    /// the 2×2 output tiles that hold a site, and a pointwise conv only the sites' columns, both bit for bit the
-    /// dense values; in Winograd F(2×2, 3×3) each output of a tile reads only its own 3×3 window of the tile's
-    /// 4×4 input patch (its transforms never combine the other row or column into it), so garbage, even NaN,
-    /// elsewhere in the patch reaches only the tile's other outputs. A backend without the kernel computes the
-    /// dense [`Tensor::conv2d_act`] (the same values everywhere). Never recorded: call it under `no_grad` or on
-    /// tensors that do not require grad.
+    /// A site's output depends **only** on `self` within its kernel's own receptive field (e.g., 3×3 window for
+    /// a 3×3 conv, 1×1 column for a 1×1 conv), so `self` needs its true values there and nowhere else — garbage
+    /// (even `NaN` or huge values) outside a site's receptive field never affects that site's output. On the CPU
+    /// ([`crate::backend::Backend::conv2d_act_at`]):
+    /// - Pointwise convs depend only on the sites' own columns.
+    /// - Dense 3×3 stride-1 convs use Winograd F(2×2, 3×3) (never F(4×4)), where each output depends only on its
+    ///   own 3×3 receptive field of the tile's 4×4 patch. On shapes where dense [`Tensor::conv2d_act`] uses
+    ///   Winograd F(4×4), `conv2d_act_at` stays on F(2×2) to preserve strict 3×3 receptive-field isolation (use
+    ///   [`Tensor::conv2d_act_at_tiles`] when full 6×6 tile patches are populated and bit-for-bit parity with
+    ///   dense F(4×4) is needed); on all other shapes it matches dense [`Tensor::conv2d_act`] bit for bit.
+    ///
+    /// For image-contiguous CPU inputs (the common case, including channel slices), the sparse kernels do not read
+    /// elements outside each site's tile/column at all; a non-contiguous view is copied to a contiguous buffer
+    /// before kernel dispatch, though elements outside each site's receptive field still never affect that site.
+    /// A backend without the kernel computes the dense [`Tensor::conv2d_act`]. Never recorded: call it under
+    /// `no_grad` or on tensors that do not require grad.
     pub fn conv2d_act_at(
         &self,
         weight: &Tensor,
@@ -172,28 +178,67 @@ impl Tensor {
         act: Option<UnaryOp>,
         at: &Tensor,
     ) -> Result<Tensor> {
-        const OP: &str = "conv2d_act_at";
+        self.conv2d_act_at_impl(weight, bias, p, act, at, false)
+    }
+
+    /// Tile-patched variant of [`Tensor::conv2d_act_at`] that permits Winograd F(4×4, 3×3) on the CPU
+    /// ([`crate::backend::Backend::conv2d_act_at_tiles`]), matching dense [`Tensor::conv2d_act`] bit for bit at
+    /// every site of `at` across all shapes.
+    ///
+    /// When CPU Winograd F(4×4, 3×3) applies (dense 3×3 stride-1 with `OH, OW >= 24`, `C >= 16`, `O >= 8`,
+    /// `C + O <= 2048`, and `tiles >= 56 && C · O >= 2048` or `tiles >= 200`), its transforms combine inputs
+    /// across each requested 4×4 tile's full 6×6 patch (`4·ty − pad_h .. 4·ty − pad_h + 6` by
+    /// `4·tx − pad_w .. 4·tx − pad_w + 6`), so callers (such as candidate-first detection heads) must populate
+    /// valid values across that 6×6 patch; elements outside those patches still never affect the requested sites.
+    /// Never recorded: call it under `no_grad` or on tensors that do not require grad.
+    pub fn conv2d_act_at_tiles(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: &Tensor,
+    ) -> Result<Tensor> {
+        self.conv2d_act_at_impl(weight, bias, p, act, at, true)
+    }
+
+    fn conv2d_act_at_impl(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: &Tensor,
+        tiled: bool,
+    ) -> Result<Tensor> {
+        let op = if tiled { "conv2d_act_at_tiles" } else { "conv2d_act_at" };
         if is_grad_enabled()
             && (self.requires_grad() || weight.requires_grad() || bias.is_some_and(Tensor::requires_grad))
         {
-            return Err(Error::invalid_arg(OP, "not differentiable: call it under no_grad"));
+            return Err(Error::invalid_arg(op, "not differentiable: call it under no_grad"));
         }
         if at.rank() != 1 || at.dtype() != DType::U32 {
-            return Err(Error::invalid_shape(OP, at.shape(), "sites must be a U32 vector"));
+            return Err(Error::invalid_shape(op, at.shape(), "sites must be a U32 vector"));
         }
-        self.check_same_device(at, OP)?;
+        self.check_same_device(at, op)?;
         let (dev, dt) = (self.device(), self.dtype());
         let uniform = weight.device() == dev
             && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
             && weight.dtype() == dt
-            && self.check_float(OP).is_ok();
+            && self.check_float(op).is_ok();
         if uniform && let Some(shape) = conv_out_shape(self, weight, bias, p) {
             let b = self.backend()?;
             let mut ts = vec![self, weight, at];
             ts.extend(bias);
-            let r = with_views_dyn(&ts, |v| b.conv2d_act_at(v[0], v[1], v.get(3).copied(), p, act, v[2]));
+            let r = with_views_dyn(&ts, |v| {
+                if tiled {
+                    b.conv2d_act_at_tiles(v[0], v[1], v.get(3).copied(), p, act, v[2])
+                } else {
+                    b.conv2d_act_at(v[0], v[1], v.get(3).copied(), p, act, v[2])
+                }
+            });
             match r {
-                Ok(s) => return Tensor::wrap(s, shape, OP),
+                Ok(s) => return Tensor::wrap(s, shape, op),
                 Err(e) if unsupported(&e) => {}
                 Err(e) => return Err(e),
             }

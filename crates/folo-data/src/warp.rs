@@ -13,6 +13,11 @@
 
 use crate::image::Image;
 use crate::par::{for_bands, for_rows};
+use crate::simd::bilinear::{
+    vblend_rgb_to_rgba32, vshift_rgb_to_rgba32, warp_general_interior_to_rgb, warp_hinterp_interior_to_rgb,
+};
+use crate::simd::hsv_fused::{HsvTables, rgb_row_to_planar_fused, warp_interior_to_planar_fused};
+use crate::simd::{PlanarDst, PlanarRow, assert_image_data, for_planar_bands};
 
 /// A 2x3 affine matrix `[a, b, c, d, e, f]` mapping `(x, y)` to `(a x + b y + c, d x + e y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,10 +132,32 @@ impl<'a> Plane<'a> {
     }
 
     /// Writes plane row `y`, columns `x0 .. x0 + out.len() / 3`, into `out` (interleaved RGB).
-    fn row(&self, y: i64, x0: i64, out: &mut [u8]) {
-        for px in out.as_chunks_mut::<3>().0.iter_mut() {
-            *px = self.fill;
+    pub(crate) fn row(&self, y: i64, x0: i64, out: &mut [u8]) {
+        fill_rgb(out, self.fill);
+        self.overlay_tiles(y, x0, out);
+    }
+
+    /// Borrows a contiguous slice straight from a single tile when one covers all of `[x0, x0 + len / 3)` at row `y`.
+    #[inline]
+    pub(crate) fn row_ref_direct(&self, y: i64, x0: i64, len: usize) -> Option<&'a [u8]> {
+        if len == 0 {
+            return Some(&[]);
         }
+        let x1 = x0 + (len / 3) as i64;
+        for t in &self.tiles {
+            let [tx0, ty0, tx1, ty1] = t.dst;
+            if y >= ty0 && y < ty1 && tx0 <= x0 && tx1 >= x1 {
+                let img = t.img;
+                let (sx, sy) = ((x0 - tx0 + t.src[0]) as usize, (y - ty0 + t.src[1]) as usize);
+                return Some(&img.data[sy * img.stride() + sx * 3..][..len]);
+            }
+        }
+        None
+    }
+
+    /// Copies the portions of all tiles intersecting row `y`, columns `x0 .. x0 + out.len() / 3`, into `out`.
+    #[inline]
+    fn overlay_tiles(&self, y: i64, x0: i64, out: &mut [u8]) {
         let x1 = x0 + (out.len() / 3) as i64;
         for t in &self.tiles {
             let [tx0, ty0, tx1, ty1] = t.dst;
@@ -155,18 +182,53 @@ impl<'a> Plane<'a> {
         if img.data.is_empty() {
             return img;
         }
-        for px in img.data.as_chunks_mut::<3>().0.iter_mut() {
-            *px = self.fill;
-        }
+        fill_rgb(&mut img.data, self.fill);
         let stride = img.stride();
         for (y, row) in img.data.chunks_exact_mut(stride).enumerate() {
             let y = y as i64;
             if self.tiles.iter().any(|t| (t.dst[1]..t.dst[3]).contains(&y)) {
-                self.row(y, 0, row);
+                self.overlay_tiles(y, 0, row);
             }
         }
         img
     }
+}
+
+/// Fills an interleaved RGB buffer with one colour (`memset` when all three channels match).
+#[inline]
+fn fill_rgb(out: &mut [u8], fill: [u8; 3]) {
+    if fill[0] == fill[1] && fill[1] == fill[2] {
+        out.fill(fill[0]);
+    } else {
+        for px in out.as_chunks_mut::<3>().0.iter_mut() {
+            *px = fill;
+        }
+    }
+}
+
+/// Contiguous sub-range `[x0, x1) ⊆ [0, width)` where `lo <= f0 + x * df < hi_excl`.
+#[inline]
+fn linear_range(f0: i128, df: i128, lo: i128, hi_excl: i128, width: usize) -> (usize, usize) {
+    if lo >= hi_excl || width == 0 {
+        return (0, 0);
+    }
+    if df == 0 {
+        return if f0 >= lo && f0 < hi_excl { (0, width) } else { (0, 0) };
+    }
+    let w = width as i128;
+    let (x0, x1) = if df > 0 {
+        let start = if f0 >= lo { 0 } else { (lo - f0 + df - 1) / df };
+        let end = if f0 >= hi_excl { 0 } else { (hi_excl - f0 + df - 1) / df };
+        (start, end)
+    } else {
+        let ad = -df;
+        let start = if f0 < hi_excl { 0 } else { (f0 - hi_excl) / ad + 1 };
+        let end = if f0 < lo { 0 } else { (f0 - lo) / ad + 1 };
+        (start, end)
+    };
+    let a = x0.clamp(0, w) as usize;
+    let b = x1.clamp(a as i128, w) as usize;
+    (a, b)
 }
 
 /// Warps `src` by `m` (source → destination) into a `width x height` image; uncovered pixels get `border`.
@@ -178,6 +240,9 @@ pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8
 /// plane's fill as the border, without rendering the plane when the source row does not change along a destination
 /// row.
 pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> Image {
+    for t in &plane.tiles {
+        assert_image_data(t.img);
+    }
     if width == 0 || height == 0 {
         return Image { width, height, data: Vec::new() };
     }
@@ -213,59 +278,313 @@ pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> 
     Image { width, height, data: out }
 }
 
+/// Warps `plane` by `m`, applies optional HSV jitter and flips, and writes straight into planar `dst` (`u8` or
+/// `f32 / 255.0`) in a single L1-resident pass without allocating an intermediate HWC image. Bit for bit identical to
+/// `warp_plane` followed by `apply_hsv`, `flip_ud`, `flip_lr`, and planar conversion.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn warp_plane_fused(
+    plane: &Plane,
+    m: &Affine,
+    width: u32,
+    height: u32,
+    hsv: Option<&HsvTables>,
+    flip_ud: bool,
+    flip_lr: bool,
+    dst: &mut PlanarDst<'_>,
+) {
+    for t in &plane.tiles {
+        assert_image_data(t.img);
+    }
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let fill_post = hsv.map_or(plane.fill, |t| t.apply_pixel(plane.fill));
+    if m.is_identity() && (plane.width, plane.height) == (width, height) {
+        for_planar_bands(dst, w, h, |dy0, band| {
+            let mut scratch = Vec::new();
+            let rows = band.rows(w);
+            for bi in 0..rows {
+                let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi } as i64;
+                let mut drow = band.row_slices(bi, w);
+                if let Some(direct) = plane.row_ref_direct(src_y, 0, w * 3) {
+                    rgb_row_to_planar_fused(direct, hsv, flip_lr, &mut drow);
+                } else {
+                    if scratch.len() < w * 3 {
+                        scratch.resize(w * 3, 0);
+                    }
+                    plane.row(src_y, 0, &mut scratch[..w * 3]);
+                    rgb_row_to_planar_fused(&scratch[..w * 3], hsv, flip_lr, &mut drow);
+                }
+            }
+        });
+        return;
+    }
+    let Some(inv) = m.inverse() else {
+        for dy in 0..h {
+            dst.row_slices(dy, w).fill_range(0, w, fill_post);
+        }
+        return;
+    };
+    if (inv.0[3] * (1i64 << FRAC) as f64).round() as i64 == 0 && rows_fit(&inv, w, h) {
+        warp_rows_fused(plane, &inv, w, h, fill_post, hsv, flip_ud, flip_lr, dst);
+    } else {
+        match plane.tiles.as_slice() {
+            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64]
+                && t.src == [0, 0]
+                && (t.img.width, t.img.height) == (plane.width, plane.height) =>
+            {
+                warp_general_fused(t.img, &inv, w, h, plane.fill, hsv, flip_ud, flip_lr, dst);
+            }
+            _ => {
+                let rendered = plane.render();
+                warp_general_fused(&rendered, &inv, w, h, plane.fill, hsv, flip_ud, flip_lr, dst);
+                crate::buffers::recycle(rendered.data);
+            }
+        }
+    }
+}
+
+/// Scalar `warp_general` pixel loop on `row[..count * 3]` starting at `(fu, fv)`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn warp_general_scalar_span(
+    sdata: &[u8],
+    sw: i64,
+    sh: i64,
+    sstride: usize,
+    mut fu: i64,
+    mut fv: i64,
+    du: i64,
+    dv: i64,
+    border: [u8; 3],
+    row: &mut [u8],
+) {
+    for px in row.as_chunks_mut::<3>().0.iter_mut() {
+        let ix = fu >> FRAC;
+        let iy = fv >> FRAC;
+        let wx = ((fu >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
+        let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
+        fu += du;
+        fv += dv;
+        if ix >= 0 && iy >= 0 && ix + 1 < sw && iy + 1 < sh {
+            let o = iy as usize * sstride + ix as usize * 3;
+            let (r0, r1) = (&sdata[o..o + 6], &sdata[o + sstride..o + sstride + 6]);
+            let (iwx, iwy) = (WONE - wx, WONE - wy);
+            for ch in 0..3 {
+                let t = r0[ch] as u32 * iwx + r0[ch + 3] as u32 * wx;
+                let u = r1[ch] as u32 * iwx + r1[ch + 3] as u32 * wx;
+                px[ch] = ((t * iwy + u * wy + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
+            }
+        } else if ix < -1 || iy < -1 || ix >= sw || iy >= sh {
+            px.copy_from_slice(&border);
+        } else {
+            let fetch = |x: i64, y: i64, ch: usize| -> u32 {
+                if x >= 0 && y >= 0 && x < sw && y < sh {
+                    sdata[y as usize * sstride + x as usize * 3 + ch] as u32
+                } else {
+                    border[ch] as u32
+                }
+            };
+            let (iwx, iwy) = (WONE - wx, WONE - wy);
+            for (ch, out) in px.iter_mut().enumerate() {
+                let t = fetch(ix, iy, ch) * iwx + fetch(ix + 1, iy, ch) * wx;
+                let u = fetch(ix, iy + 1, ch) * iwx + fetch(ix + 1, iy + 1, ch) * wx;
+                *out = ((t * iwy + u * wy + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
+            }
+        }
+    }
+}
+
+/// Advances a 16.16 fixed-point position `f0` by `x * df` using widened `i128` arithmetic so intermediate products
+/// `x * df` cannot overflow `i64` when the final position `f0 + x * df` fits in `i64`.
+#[inline]
+pub(crate) fn step_fp(f0: i64, x: usize, df: i64) -> i64 {
+    (f0 as i128 + x as i128 * df as i128) as i64
+}
+
+/// Computes one destination row `y` of `warp_general`, taking the AVX2 interior span when safe.
+#[allow(clippy::too_many_arguments)]
+fn warp_general_row(
+    sdata: &[u8],
+    sw: i64,
+    sh: i64,
+    sstride: usize,
+    inv: &Affine,
+    y: usize,
+    width: usize,
+    border: [u8; 3],
+    row: &mut [u8],
+) {
+    let [a, b, c, d, e, f] = inv.0;
+    let fone = (1i64 << FRAC) as f64;
+    let yc = y as f64 + 0.5;
+    let fu0 = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64;
+    let fv0 = ((d * 0.5 + e * yc + f - 0.5) * fone).round() as i64;
+    let du = (a * fone).round() as i64;
+    let dv = (d * fone).round() as i64;
+
+    if sw >= 2
+        && sh >= 3
+        && width >= 6
+        && i64::try_from(fu0 as i128 + du as i128 * (width - 1) as i128).is_ok()
+        && i64::try_from(fv0 as i128 + dv as i128 * (width - 1) as i128).is_ok()
+    {
+        let (ux0, ux1) = linear_range(fu0 as i128, du as i128, 0, (sw as i128 - 1) << FRAC, width);
+        let (vy0, vy1) = linear_range(fv0 as i128, dv as i128, 0, (sh as i128 - 2) << FRAC, width);
+        let x0 = ux0.max(vy0);
+        let x1 = ux1.min(vy1);
+        if x1 >= x0 + 6 {
+            if x0 > 0 {
+                warp_general_scalar_span(
+                    sdata,
+                    sw,
+                    sh,
+                    sstride,
+                    fu0,
+                    fv0,
+                    du,
+                    dv,
+                    border,
+                    &mut row[..x0 * 3],
+                );
+            }
+            let fu_x0 = step_fp(fu0, x0, du);
+            let fv_x0 = step_fp(fv0, x0, dv);
+            warp_general_interior_to_rgb(
+                sdata,
+                sw as usize,
+                sh as usize,
+                sstride,
+                fu_x0,
+                fv_x0,
+                du,
+                dv,
+                &mut row[x0 * 3..x1 * 3],
+            );
+            if x1 < width {
+                let fu_x1 = step_fp(fu0, x1, du);
+                let fv_x1 = step_fp(fv0, x1, dv);
+                warp_general_scalar_span(
+                    sdata,
+                    sw,
+                    sh,
+                    sstride,
+                    fu_x1,
+                    fv_x1,
+                    du,
+                    dv,
+                    border,
+                    &mut row[x1 * 3..],
+                );
+            }
+            return;
+        }
+    }
+    warp_general_scalar_span(sdata, sw, sh, sstride, fu0, fv0, du, dv, border, row);
+}
+
 /// The warp of `src` by the inverse matrix `inv` into `out` (rows of `width` pixels), any matrix: each pixel steps
 /// its own source position.
 fn warp_general(src: &Image, inv: &Affine, width: usize, border: [u8; 3], out: &mut [u8]) {
-    let [a, b, c, d, e, f] = inv.0;
+    assert_image_data(src);
     let (sw, sh) = (src.width as i64, src.height as i64);
     let sstride = src.stride();
     let sdata = &src.data;
-    let fone = (1i64 << FRAC) as f64;
     for_rows(out, width * 3, |y, row| {
-        // Source position (in pixel-index space, centres at integers) of destination pixel centre (0.5, y + 0.5).
-        let yc = y as f64 + 0.5;
-        let u0 = a * 0.5 + b * yc + c - 0.5;
-        let v0 = d * 0.5 + e * yc + f - 0.5;
-        let mut fu = (u0 * fone).round() as i64;
-        let mut fv = (v0 * fone).round() as i64;
-        let du = (a * fone).round() as i64;
-        let dv = (d * fone).round() as i64;
-        for px in row.as_chunks_mut::<3>().0.iter_mut() {
-            let ix = fu >> FRAC;
-            let iy = fv >> FRAC;
-            let wx = ((fu >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
-            let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
-            fu += du;
-            fv += dv;
-            if ix >= 0 && iy >= 0 && ix + 1 < sw && iy + 1 < sh {
-                let o = iy as usize * sstride + ix as usize * 3;
-                let (r0, r1) = (&sdata[o..o + 6], &sdata[o + sstride..o + sstride + 6]);
-                let (iwx, iwy) = (WONE - wx, WONE - wy);
-                for ch in 0..3 {
-                    let t = r0[ch] as u32 * iwx + r0[ch + 3] as u32 * wx;
-                    let u = r1[ch] as u32 * iwx + r1[ch + 3] as u32 * wx;
-                    px[ch] = ((t * iwy + u * wy + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
-                }
-            } else if ix < -1 || iy < -1 || ix >= sw || iy >= sh {
-                px.copy_from_slice(&border);
-            } else {
-                // Straddles the edge: missing neighbours take the border colour.
-                let fetch = |x: i64, y: i64, ch: usize| -> u32 {
-                    if x >= 0 && y >= 0 && x < sw && y < sh {
-                        sdata[y as usize * sstride + x as usize * 3 + ch] as u32
-                    } else {
-                        border[ch] as u32
-                    }
-                };
-                let (iwx, iwy) = (WONE - wx, WONE - wy);
-                for (ch, out) in px.iter_mut().enumerate() {
-                    let t = fetch(ix, iy, ch) * iwx + fetch(ix + 1, iy, ch) * wx;
-                    let u = fetch(ix, iy + 1, ch) * iwx + fetch(ix + 1, iy + 1, ch) * wx;
-                    *out = ((t * iwy + u * wy + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
-                }
-            }
+        warp_general_row(sdata, sw, sh, sstride, inv, y, width, border, row);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn warp_general_fused(
+    src: &Image,
+    inv: &Affine,
+    width: usize,
+    height: usize,
+    border: [u8; 3],
+    hsv: Option<&HsvTables>,
+    flip_ud: bool,
+    flip_lr: bool,
+    dst: &mut PlanarDst<'_>,
+) {
+    assert_image_data(src);
+    let (sw, sh) = (src.width as i64, src.height as i64);
+    let sstride = src.stride();
+    let sdata = &src.data;
+    for_planar_bands(dst, width, height, |dy0, band| {
+        let mut row_rgb = vec![0u8; width * 3];
+        let rows = band.rows(width);
+        for bi in 0..rows {
+            let src_y = if flip_ud { height - 1 - (dy0 + bi) } else { dy0 + bi };
+            warp_general_row(sdata, sw, sh, sstride, inv, src_y, width, border, &mut row_rgb);
+            let mut drow = band.row_slices(bi, width);
+            rgb_row_to_planar_fused(&row_rgb, hsv, flip_lr, &mut drow);
         }
     });
+}
+
+/// Reusable per-band scratch for [`warp_rows`] and [`warp_rows_fused`]: caches copied multi-tile rows and the
+/// vertically blended `[R, G, B, 0]` `u32` buffer across consecutive destination rows.
+#[derive(Default)]
+struct PlaneRowCache {
+    top: Vec<u8>,
+    bot: Vec<u8>,
+    v: Vec<u32>,
+    top_key: Option<(i64, i64, usize)>,
+    bot_key: Option<(i64, i64, usize)>,
+    v_key: Option<(i64, u32, i64, usize)>,
+}
+
+impl PlaneRowCache {
+    #[inline]
+    fn prepare(&mut self, plane: &Plane, iy: i64, wy: u32, lo: i64, cols: usize) -> &[u32] {
+        let key = (iy, wy, lo, cols);
+        if self.v_key == Some(key) {
+            return &self.v[..cols * 4];
+        }
+        let n = cols * 3;
+        if self.v.len() < cols * 4 {
+            self.v.resize(cols * 4, 0);
+        }
+        let top_direct = plane.row_ref_direct(iy, lo, n);
+        if top_direct.is_none() && self.top_key != Some((iy, lo, n)) {
+            if self.bot_key == Some((iy, lo, n)) {
+                std::mem::swap(&mut self.top, &mut self.bot);
+                std::mem::swap(&mut self.top_key, &mut self.bot_key);
+            } else {
+                if self.top.len() < n {
+                    self.top.resize(n, 0);
+                }
+                plane.row(iy, lo, &mut self.top[..n]);
+                self.top_key = Some((iy, lo, n));
+            }
+        }
+        if wy == 0 {
+            let top = top_direct.unwrap_or_else(|| &self.top[..n]);
+            vshift_rgb_to_rgba32(top, &mut self.v[..cols * 4]);
+            self.v_key = Some(key);
+            return &self.v[..cols * 4];
+        }
+        let bot_direct = plane.row_ref_direct(iy + 1, lo, n);
+        if bot_direct.is_none() && self.bot_key != Some((iy + 1, lo, n)) {
+            if top_direct.is_some() && self.top_key == Some((iy + 1, lo, n)) {
+                std::mem::swap(&mut self.top, &mut self.bot);
+                std::mem::swap(&mut self.top_key, &mut self.bot_key);
+            } else {
+                if self.bot.len() < n {
+                    self.bot.resize(n, 0);
+                }
+                plane.row(iy + 1, lo, &mut self.bot[..n]);
+                self.bot_key = Some((iy + 1, lo, n));
+            }
+        }
+        let top = top_direct.unwrap_or_else(|| &self.top[..n]);
+        let bot = bot_direct.unwrap_or_else(|| &self.bot[..n]);
+        vblend_rgb_to_rgba32(top, bot, wy, &mut self.v[..cols * 4]);
+        self.v_key = Some(key);
+        &self.v[..cols * 4]
+    }
 }
 
 /// Whether [`warp_rows`] may run (both paths give the same bytes; this picks where the rows are the faster and safe
@@ -290,9 +609,9 @@ fn rows_fit(inv: &Affine, width: usize, height: usize) -> bool {
 /// The warp of `plane` by the inverse matrix `inv` into `out` (rows of `width` pixels) when the source row does not
 /// change along a destination row (`inv`'s vertical step per pixel rounds to zero). Per destination row, the two
 /// source rows `iy`, `iy + 1` over the columns the row reaches are blended into `v = top·(1 − wy) + bottom·wy`
-/// (`u32`), then each pixel is `(v[ix]·(1 − wx) + v[ix + 1]·wx + 2^21) >> 22`: the four products and the one
-/// rounding of the general path's `(t·(1 − wy) + u·wy + 2^21) >> 22`, so the same bytes. A pixel whose taps are
-/// all off the plane's source rectangle gets the fill colour, as the general path gives it the border.
+/// (`u32`, padded `[R, G, B, 0]` for AVX2), then each interior pixel is
+/// `(v[ix]·(1 − wx) + v[ix + 1]·wx + 2^21) >> 22`: the four products and the one rounding of the general path's
+/// `(t·(1 − wy) + u·wy + 2^21) >> 22`, so the same bytes.
 fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
     let [a, b, c, d, e, f] = inv.0;
     let fone = (1i64 << FRAC) as f64;
@@ -300,58 +619,93 @@ fn warp_rows(plane: &Plane, inv: &Affine, width: usize, out: &mut [u8]) {
     let (pw, ph) = (plane.width as i64, plane.height as i64);
     let fill = plane.fill;
     for_bands(out, width * 3, |y0, band| {
-        // Scratch for the columns a row reaches, grown as rows need it.
-        let (mut top, mut bottom, mut v) = (Vec::new(), Vec::new(), Vec::<u32>::new());
+        let mut cache = PlaneRowCache::default();
         for (i, row) in band.chunks_exact_mut(width * 3).enumerate() {
             let yc = (y0 + i) as f64 + 0.5;
-            let u0 = a * 0.5 + b * yc + c - 0.5;
-            let v0 = d * 0.5 + e * yc + f - 0.5;
-            let fu0 = (u0 * fone).round() as i64;
-            let fv = (v0 * fone).round() as i64;
+            let fu0 = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64;
+            let fv = ((d * 0.5 + e * yc + f - 0.5) * fone).round() as i64;
             let iy = fv >> FRAC;
             let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
-            // Left taps run from `ix_a` to `ix_b`; off columns `-1 ..= pw - 1` both taps are `fill`. The last
-            // position fits in `i64` ([`rows_fit`]), but the product `du · (width - 1)` alone may not: `i128`.
             let last_fu = fu0 as i128 + du as i128 * (width as i128 - 1);
             let (ix_a, ix_b) = (fu0 >> FRAC, (last_fu >> FRAC) as i64);
             let lo = ix_a.min(ix_b).max(-1);
             let hi = (ix_a.max(ix_b) + 1).min(pw);
             if iy < -1 || iy >= ph || hi <= lo {
-                for px in row.as_chunks_mut::<3>().0.iter_mut() {
-                    *px = fill;
-                }
+                fill_rgb(row, fill);
                 continue;
             }
-            let n = (hi - lo + 1) as usize * 3;
-            if top.len() < n {
-                top.resize(n, 0);
-                bottom.resize(n, 0);
-                v.resize(n, 0);
+            let (x_start, x_end) =
+                linear_range(fu0 as i128, du as i128, (lo as i128) << FRAC, (hi as i128) << FRAC, width);
+            if x_start >= x_end {
+                fill_rgb(row, fill);
+                continue;
             }
-            plane.row(iy, lo, &mut top[..n]);
-            plane.row(iy + 1, lo, &mut bottom[..n]);
-            let iwy = WONE - wy;
-            for ((v, &t), &u) in v[..n].iter_mut().zip(&top[..n]).zip(&bottom[..n]) {
-                *v = t as u32 * iwy + u as u32 * wy;
+            let cols = (hi - lo + 1) as usize;
+            let v = cache.prepare(plane, iy, wy, lo, cols);
+            if x_start > 0 {
+                fill_rgb(&mut row[..x_start * 3], fill);
             }
-            // A pixel whose left tap is column `lo + k` reads `v[k]` and `v[k + 1]`, so needs `k < last`.
-            let last = (n / 3 - 1) as u64;
-            let mut fu = fu0;
-            for px in row.as_chunks_mut::<3>().0.iter_mut() {
-                let k = ((fu >> FRAC) - lo) as u64;
-                let wx = ((fu >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
-                fu += du;
-                if k < last {
-                    let t = &v[k as usize * 3..][..6];
-                    let iwx = WONE - wx;
-                    for ch in 0..3 {
-                        px[ch] =
-                            ((t[ch] * iwx + t[ch + 3] * wx + (1 << (2 * WBITS - 1))) >> (2 * WBITS)) as u8;
-                    }
-                } else {
-                    *px = fill;
-                }
+            let rel_fu0 = (fu0 as i128 + du as i128 * x_start as i128 - ((lo as i128) << FRAC)) as i64;
+            warp_hinterp_interior_to_rgb(v, rel_fu0, du, &mut row[x_start * 3..x_end * 3]);
+            if x_end < width {
+                fill_rgb(&mut row[x_end * 3..], fill);
             }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn warp_rows_fused(
+    plane: &Plane,
+    inv: &Affine,
+    width: usize,
+    height: usize,
+    fill_post: [u8; 3],
+    hsv: Option<&HsvTables>,
+    flip_ud: bool,
+    flip_lr: bool,
+    dst: &mut PlanarDst<'_>,
+) {
+    let [a, b, c, d, e, f] = inv.0;
+    let fone = (1i64 << FRAC) as f64;
+    let du = (a * fone).round() as i64;
+    let (pw, ph) = (plane.width as i64, plane.height as i64);
+    for_planar_bands(dst, width, height, |dy0, band| {
+        let mut cache = PlaneRowCache::default();
+        let rows = band.rows(width);
+        for bi in 0..rows {
+            let src_y = if flip_ud { height - 1 - (dy0 + bi) } else { dy0 + bi };
+            let yc = src_y as f64 + 0.5;
+            let fu0 = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64;
+            let fv = ((d * 0.5 + e * yc + f - 0.5) * fone).round() as i64;
+            let iy = fv >> FRAC;
+            let wy = ((fv >> (FRAC - WBITS)) & (WONE as i64 - 1)) as u32;
+            let last_fu = fu0 as i128 + du as i128 * (width as i128 - 1);
+            let (ix_a, ix_b) = (fu0 >> FRAC, (last_fu >> FRAC) as i64);
+            let lo = ix_a.min(ix_b).max(-1);
+            let hi = (ix_a.max(ix_b) + 1).min(pw);
+            let mut drow: PlanarRow<'_> = band.row_slices(bi, width);
+            if iy < -1 || iy >= ph || hi <= lo {
+                drow.fill_range(0, width, fill_post);
+                continue;
+            }
+            let (x_start, x_end) =
+                linear_range(fu0 as i128, du as i128, (lo as i128) << FRAC, (hi as i128) << FRAC, width);
+            if x_start >= x_end {
+                drow.fill_range(0, width, fill_post);
+                continue;
+            }
+            let cols = (hi - lo + 1) as usize;
+            let v = cache.prepare(plane, iy, wy, lo, cols);
+            if flip_lr {
+                drow.fill_range(0, width - x_end, fill_post);
+                drow.fill_range(width - x_start, width, fill_post);
+            } else {
+                drow.fill_range(0, x_start, fill_post);
+                drow.fill_range(x_end, width, fill_post);
+            }
+            let rel_fu0 = (fu0 as i128 + du as i128 * x_start as i128 - ((lo as i128) << FRAC)) as i64;
+            warp_interior_to_planar_fused(v, rel_fu0, du, width, x_start, x_end, hsv, flip_lr, &mut drow);
         }
     });
 }

@@ -9,15 +9,17 @@
 //! slots in some image is flagged, and those images take their candidates from the dense head (a second round
 //! trip on the same features).
 //!
-//! DFL box fusion needs each candidate's side precisions: the dense path's moment ops
-//! ([`HeadOutput::moments_on_device`]) run on the candidates' box-logit columns, which hold the dense logits bit
-//! for bit, so the precisions are the dense ones bit for bit (only then are the moments and the site lists read
-//! back too).
+//! DFL box fusion and DFL-based score rules (`dfl-consensus`, `dfl-repulse`) need per-candidate side moments
+//! and/or Shannon entropy: [`dfl_stats_with`] runs on the candidates' box-logit columns, which hold the dense
+//! logits bit for bit, so the stats are the dense ones bit for bit. When any DFL stats are requested, all three
+//! levels' site lists are concatenated with the records into one `u32` buffer so the host downloads at most two
+//! buffers (the packed `u32` buffer and the single `[B, ch, Σ cap]` `f32` stats buffer).
 //!
-//! Everything from the input to the records (and the moments) is a pure function of the input with a fixed
+//! Everything from the input to the records (and the DFL stats) is a pure function of the input with a fixed
 //! dispatch list, so with the model's forward plans on ([`FoloModel::set_forward_plans`], as in a `Predictor`) the
 //! whole device side is one recorded plan ([`folo_gpu::ForwardPlans`]): a replayed prediction is one flat list of
-//! dispatches, then the readbacks (the records; with DFL fusion also the moments and the three site lists).
+//! dispatches, then at most two readbacks (the records packed with the site lists in one `u32` buffer; with DFL
+//! fusion/scoring also the single `[B, ch, Σ cap]` `f32` stats buffer).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,7 +30,8 @@ use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::head::{HeadLevel, HeadMode};
 use super::predict::{
-    bin_precision_from_moments, candidates_of_records, dfl_moments_with, moment_bins, precision_from_moments,
+    DflWants, bin_precision_from_moments, candidates_of_records, dfl_stats_channels, dfl_stats_with,
+    entropy_from_stats, moment_bins, precision_from_moments,
 };
 use super::{FoloModel, HeadOutput, ImageCandidates, each_tensor};
 use crate::nms::NmsConfig;
@@ -57,7 +60,7 @@ fn conv_sites(c: &ConvBnAct, x: &Tensor, sites: &Tensor, to_map: bool) -> Result
 /// it (listed with the model's tensors) instead of uploading it. Keyed by the context serving `dev`, not by the
 /// ordinal: a context registered again at the same device ([`folo_gpu::register`]) gets bins of its own, and the
 /// replaced context's are dropped. Without a registered context the bins are uploaded for the call.
-fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
+pub(super) fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
     static BINS: Mutex<Vec<(Device, GpuContext, usize, Tensor)>> = Mutex::new(Vec::new());
     let Some(ctx) = folo_gpu::context_for(dev) else { return Ok(moment_bins(rm)?.to_device(dev)?) };
     let mut bins = BINS.lock().unwrap_or_else(|p| p.into_inner());
@@ -70,6 +73,16 @@ fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
     Ok(k)
 }
 
+/// Stride of global `anchor` from per-level `(cap, stride, start)` layout.
+fn stride_of(layout: &[(usize, f32, usize)], anchor: usize) -> f32 {
+    for w in layout.windows(2) {
+        if anchor < w[1].2 {
+            return w[0].1;
+        }
+    }
+    layout.last().map_or(0.0, |l| l.1)
+}
+
 impl FoloModel {
     /// [`FoloModel::predict_candidates`] on a GPU: the candidates at the sites, with the dense head serving the
     /// images whose candidates did not fit (and every image on a device without the site kernels).
@@ -78,25 +91,25 @@ impl FoloModel {
         let (h, w) = self.check_input(x)?;
         let levels = self.site_levels();
         let o2o = self.head_mode == HeadMode::O2o && self.head.o2o.is_some();
-        let want_side = self.wants_precisions(nms);
-        let want_bin = self.wants_bin_precisions(nms);
+        let wants = self.dfl_wants(nms);
+        let want_strides = self.wants_strides(nms);
         let cand_conf = nms.candidate_conf_for(self.head_mode);
-        let bins = (want_side || want_bin).then(|| device_bins(x.device(), self.head.reg_max)).transpose()?;
+        let bins = wants.moments().then(|| device_bins(x.device(), self.head.reg_max)).transpose()?;
         let tensors = |f: &mut dyn FnMut(&Tensor)| {
             each_tensor(self, f);
             bins.iter().for_each(&mut *f);
         };
         // What reaches a kernel besides the input and the tensors: the branch, the class pass's threshold (a
-        // parameter block), the slots, and whether the moments and site lists are results. The rest of `nms` is
-        // the host's post-process.
+        // parameter block), the slots, and which DFL stats (moments / entropy) are computed and returned.
         let [s3, s4, s5] = GPU_SITE_SLOTS.map(|s| s as u64);
-        let key = [SITES_PLAN, o2o as u64, bins.is_some() as u64, cand_conf.to_bits() as u64, s3, s4, s5];
+        let stats_bits = (wants.moments() as u64) | ((wants.ent as u64) << 1);
+        let key = [SITES_PLAN, o2o as u64, stats_bits, cand_conf.to_bits() as u64, s3, s4, s5];
         // The features of a call that found no site kernel, for the dense head. Such a call returns no results, so
         // it is never a plan, and every call of it runs (and fills this).
         let mut unsited = None;
         let out = self.plans.run(&key, x, &tensors, |x| {
             let feats = self.features(x, None)?;
-            let out = self.sites_on_device(levels, &feats, cand_conf, bins.as_ref())?;
+            let out = self.sites_on_device(levels, &feats, cand_conf, wants, bins.as_ref())?;
             if out.is_none() {
                 unsited = Some(feats);
             }
@@ -106,7 +119,7 @@ impl FoloModel {
             // No site kernel on this device: the dense head on the same features.
             return self.dense_candidates(x, unsited, nms, h, w);
         }
-        let (cands, fits) = self.read_sites(&out, levels, h, w, want_side, want_bin)?;
+        let (cands, fits) = self.read_sites(&out, levels, h, w, wants, want_strides)?;
         if fits.iter().all(|&f| f) {
             return Ok(cands);
         }
@@ -160,13 +173,15 @@ impl FoloModel {
     }
 
     /// The device side of candidate-first prediction on `feats`, nothing read back: the records tensor of
-    /// [`Tensor::detect_decode_sites`], and with the moment bins `bins` (DFL fusion) the moments of the levels'
-    /// box-logit columns side by side and every level's site list. `None` when the device lacks a site kernel.
+    /// [`Tensor::detect_decode_sites`], or when `wants.any_stats()` two tensors: the records concatenated along
+    /// dim 1 with all three levels' `u32` site lists (one `u32` readback instead of four) and the combined
+    /// `[B, ch, Σ cap]` DFL stats tensor. `None` when the device lacks a site kernel.
     fn sites_on_device(
         &self,
         levels: &[HeadLevel],
         feats: &[Tensor; 3],
         conf: f32,
+        wants: DflWants,
         bins: Option<&Tensor>,
     ) -> Result<Option<Vec<Tensor>>> {
         let (b, rm) = (feats[0].dims()[0], self.head.reg_max);
@@ -191,94 +206,121 @@ impl FoloModel {
         }
         let refs: Vec<_> = parts.iter().map(|(r, s, c, w, st, a)| (r, s, c, *w, *st, *a)).collect();
         let Some(out) = Tensor::detect_decode_sites(&refs, rm)? else { return Ok(None) };
-        let mut results = vec![out];
-        if let Some(k) = bins {
-            // `Σ cap ≥ 3` columns, so the column kernels the dense `A` takes.
-            let raws: Vec<&Tensor> = parts.iter().map(|p| &p.0).collect();
-            results.push(dfl_moments_with(&Tensor::cat(&raws, 2)?, rm, k)?);
-            results.extend(parts.into_iter().map(|p| p.1));
+        if !wants.any_stats() {
+            return Ok(Some(vec![out]));
         }
-        Ok(Some(results))
+        // `Σ cap ≥ 3` columns, so the column kernels the dense `A` takes.
+        let raws: Vec<&Tensor> = parts.iter().map(|p| &p.0).collect();
+        let stats = dfl_stats_with(&Tensor::cat(&raws, 2)?, rm, bins, wants.moments(), wants.ent)?;
+        let mut u32_parts: Vec<&Tensor> = Vec::with_capacity(1 + parts.len());
+        u32_parts.push(&out);
+        u32_parts.extend(parts.iter().map(|p| &p.1));
+        let packed = Tensor::cat(&u32_parts, 1)?;
+        Ok(Some(vec![packed, stats]))
     }
 
-    /// Every image's candidates in anchor order from [`FoloModel::sites_on_device`]'s results (with the moments,
-    /// also their side precisions), and whether they fit the slots (`false`: some level had more; that image's
-    /// candidates are partial and carry no precisions). `h × w` is the input.
+    /// Every image's candidates in anchor order from [`FoloModel::sites_on_device`]'s results (with DFL stats
+    /// when requested), and whether they fit the slots (`false`: some level had more; that image's candidates are
+    /// partial and carry no stats). `h × w` is the input.
     fn read_sites(
         &self,
         out: &[Tensor],
         levels: &[HeadLevel],
         h: usize,
         w: usize,
-        want_side: bool,
-        want_bin: bool,
+        wants: DflWants,
+        want_strides: bool,
     ) -> Result<(Vec<ImageCandidates>, Vec<bool>)> {
-        let words = out[0].dims()[1];
+        let mut start = 0usize;
+        let layout: Vec<(usize, f32, usize)> = levels
+            .iter()
+            .enumerate()
+            .map(|(l, lv)| {
+                let at = start;
+                let stride = lv.stride as usize;
+                let hw = (h / stride) * (w / stride);
+                start += hw;
+                (GPU_SITE_SLOTS[l].min(hw), lv.stride as f32, at)
+            })
+            .collect();
+        let total_words = out[0].dims()[1];
+        let has_stats = out.len() == 2;
+        let site_words: usize = if has_stats { layout.iter().map(|l| 1 + l.0).sum() } else { 0 };
+        let rec_words = total_words - site_words;
         let v = out[0].to_vec::<u32>()?;
         let mut cands = Vec::with_capacity(out[0].dims()[0]);
         let mut fits = Vec::with_capacity(cands.capacity());
-        for row in v.chunks_exact(words) {
-            let n = (row[0] as usize).min((words - 2) / 7);
+        for row in v.chunks_exact(total_words) {
+            let rec = &row[..rec_words];
+            let n = (rec[0] as usize).min((rec_words - 2) / 7);
+            let fit = rec[1] == 0;
+            let list = candidates_of_records(&rec[2..2 + 7 * n]);
+            let strides = (want_strides && fit)
+                .then(|| list.iter().map(|c| stride_of(&layout, c.anchor as usize)).collect());
             cands.push(ImageCandidates {
-                cands: candidates_of_records(&row[2..2 + 7 * n]),
+                cands: list,
                 precisions: None,
                 bin_precisions: None,
+                entropies: None,
+                strides,
             });
-            fits.push(row[1] == 0);
+            fits.push(fit);
         }
-        if let [_, moments, sites @ ..] = out {
-            // Each level's (cap, stride, first anchor): its map is the input over its stride.
-            let mut start = 0;
-            let layout: Vec<(usize, f32, usize)> = levels
-                .iter()
-                .zip(sites)
-                .map(|(lv, s)| {
-                    let at = start;
-                    let stride = lv.stride as usize;
-                    start += (h / stride) * (w / stride);
-                    (s.dims()[1] - 1, lv.stride as f32, at)
-                })
-                .collect();
-            self.site_precisions(moments, sites, &layout, &mut cands, &fits, want_side, want_bin)?;
+        if has_stats && wants.any_stats() {
+            self.unpack_site_stats(&out[1], &v, total_words, rec_words, &layout, &mut cands, &fits, wants)?;
         }
         Ok((cands, fits))
     }
 
-    /// DFL fusion / DFL consensus precisions of the fitting images' candidates from the site columns' `moments`.
+    /// DFL precisions and/or entropies of the fitting images' candidates from the packed `u32` buffer's site lists
+    /// and the single `stats` (`[B, ch, Σ cap]`) tensor. Skips the `stats` readback when no fitting image has any
+    /// candidate.
     #[allow(clippy::too_many_arguments)]
-    fn site_precisions(
+    fn unpack_site_stats(
         &self,
-        moments: &Tensor,
-        site_lists: &[Tensor],
+        stats: &Tensor,
+        packed_u32: &[u32],
+        total_words: usize,
+        rec_words: usize,
         layout: &[(usize, f32, usize)],
         cands: &mut [ImageCandidates],
         fits: &[bool],
-        want_side: bool,
-        want_bin: bool,
+        wants: DflWants,
     ) -> Result<()> {
-        let cols: usize = layout.iter().map(|l| l.0).sum();
-        let m = moments.to_vec::<f32>()?;
-        let mut sites = Vec::with_capacity(site_lists.len());
-        for s in site_lists {
-            sites.push(s.to_vec::<u32>()?);
+        let any_needed = fits.iter().zip(cands.iter()).any(|(&fit, c)| fit && !c.cands.is_empty());
+        if !any_needed {
+            for (c, &fit) in cands.iter_mut().zip(fits) {
+                if fit {
+                    c.precisions = wants.side.then(Vec::new);
+                    c.bin_precisions = wants.bin.then(Vec::new);
+                    c.entropies = wants.ent.then(Vec::new);
+                }
+            }
+            return Ok(());
         }
+        let cols: usize = layout.iter().map(|l| l.0).sum();
+        let ch = dfl_stats_channels(wants.moments(), wants.ent);
+        let m = stats.to_vec::<f32>()?;
         for (i, (c, &fit)) in cands.iter_mut().zip(fits).enumerate() {
             if !fit {
                 continue;
             }
-            // Global anchor -> (column, stride) of every slotted candidate.
-            let mut at = HashMap::new();
+            // Global anchor -> (column, stride) of every slotted candidate, read straight from packed_u32.
+            let mut at = HashMap::with_capacity(c.cands.len());
             let mut col0 = 0;
-            for (&(cap, stride, start), s) in layout.iter().zip(&sites) {
-                let row = &s[i * (1 + cap)..(i + 1) * (1 + cap)];
+            let mut off = i * total_words + rec_words;
+            for &(cap, stride, start) in layout {
+                let row = &packed_u32[off..off + 1 + cap];
                 for (k, &px) in row[1..].iter().take((row[0] as usize).min(cap)).enumerate() {
                     at.insert(start as u32 + px, (col0 + k, stride));
                 }
                 col0 += cap;
+                off += 1 + cap;
             }
-            let img = &m[i * 8 * cols..(i + 1) * 8 * cols];
-            let mut prec = want_side.then(|| Vec::with_capacity(c.cands.len()));
-            let mut bprec = want_bin.then(|| Vec::with_capacity(c.cands.len()));
+            let img = &m[i * ch * cols..(i + 1) * ch * cols];
+            let mut prec = wants.side.then(|| Vec::with_capacity(c.cands.len()));
+            let mut bprec = wants.bin.then(|| Vec::with_capacity(c.cands.len()));
+            let mut ent = wants.ent.then(|| Vec::with_capacity(c.cands.len()));
             for cand in &c.cands {
                 let &(j, stride) = at.get(&cand.anchor).ok_or_else(|| {
                     folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", cand.anchor))
@@ -289,9 +331,13 @@ impl FoloModel {
                 if let Some(bp) = bprec.as_mut() {
                     bp.push(bin_precision_from_moments(img, cols, j));
                 }
+                if let Some(ev) = ent.as_mut() {
+                    ev.push(entropy_from_stats(img, cols, j, wants.moments()));
+                }
             }
             c.precisions = prec;
             c.bin_precisions = bprec;
+            c.entropies = ent;
         }
         Ok(())
     }

@@ -132,6 +132,35 @@ pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
     (mean, (e2 / z - mean * mean).max(0.0))
 }
 
+/// Mean, variance (in bins and bins²) and Shannon entropy (in nats, `>= 0`) of `softmax(logits)` over the bin
+/// indices, computed stably (max-subtracted) in a single pass. `(mean, var)` is bit-for-bit identical to
+/// [`softmax_moments`]; `(0, 0, 0)` for an empty slice. `-∞` acts as a zero-mass bin when at least one finite
+/// logit is present (and no logit is `+∞` or `NaN`); otherwise non-finite logits yield `NaN` entropy.
+#[inline]
+pub fn softmax_moments_and_entropy(logits: &[f32]) -> (f32, f32, f32) {
+    if logits.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (mut z, mut e, mut e2, mut su) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for (i, &l) in logits.iter().enumerate() {
+        let u = l - m;
+        let p = u.exp();
+        let k = i as f32;
+        z += p;
+        e += p * k;
+        e2 += p * k * k;
+        if p > 0.0 {
+            su += p * u;
+        }
+    }
+    let mean = e / z;
+    let var = (e2 / z - mean * mean).max(0.0);
+    let raw_ent = z.ln() - su / z;
+    let ent = if raw_ent.is_finite() { raw_ent.max(0.0) } else { f32::NAN };
+    (mean, var, ent)
+}
+
 /// The side precision of DFL evidence fusion (docs/MODEL.md §9.4) for a side whose distribution has `mean` and
 /// `var` (bins, bins²) at an anchor of stride `stride`: `1 / (stride² · (max(var − f·(1 − f), 0) + ε))` with
 /// `f = mean − floor(mean)` and `ε =` [`crate::fusion::DFL_FUSION_EPS`]. `f·(1 − f)` is the variance DFL trains a
@@ -175,6 +204,19 @@ pub fn bin_precisions(row: &[f32], reg_max: usize) -> [f32; 4] {
         let (mean, var) = softmax_moments(&row[side * reg_max..(side + 1) * reg_max]);
         bin_precision(mean, var)
     })
+}
+
+/// Mean 4-side Shannon entropy (in nats) of one anchor from its `4 * reg_max` DFL logits (one row of
+/// [`dfl_decode_into`]'s `reg`), used by [`crate::fusion::ScoreRule::DflRepulse`] (docs/MODEL.md §9.4).
+pub fn dfl_entropy(row: &[f32], reg_max: usize) -> f32 {
+    if reg_max == 0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f32;
+    for side in 0..4 {
+        sum += softmax_moments_and_entropy(&row[side * reg_max..(side + 1) * reg_max]).2;
+    }
+    0.25 * sum
 }
 
 /// DFL decode: `reg` `[A, 4 * reg_max]` → `out` `[A, 4]` `ltrb` distances in stride units.
@@ -298,6 +340,36 @@ mod tests {
         // Two equal peaks at bins 1 and 3 → 2. Large logits stay finite.
         assert!((softmax_expectation(&[0.0, 1e4, 0.0, 1e4]) - 2.0).abs() < 1e-6);
         assert_eq!(softmax_expectation(&[]), 0.0);
+    }
+
+    #[test]
+    fn softmax_moments_and_entropy_values() {
+        assert_eq!(softmax_moments_and_entropy(&[]), (0.0, 0.0, 0.0));
+        // Uniform over 16 bins: H = ln(16).
+        let u = [0.0f32; 16];
+        let (m, v, h) = softmax_moments_and_entropy(&u);
+        assert_eq!((m.to_bits(), v.to_bits()), {
+            let (m0, v0) = softmax_moments(&u);
+            (m0.to_bits(), v0.to_bits())
+        });
+        assert!((h - 16f32.ln()).abs() < 1e-5, "{h}");
+        // Peaked at one bin: H = 0, even with -Inf elsewhere.
+        let peaked = [f32::NEG_INFINITY, 10.0, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        assert_eq!(softmax_moments_and_entropy(&peaked), (1.0, 0.0, 0.0));
+        // Two equal peaks: H = ln(2).
+        let (m2, v2, h2) = softmax_moments_and_entropy(&[0.0, 1e4, 0.0, 1e4]);
+        assert!((m2 - 2.0).abs() < 1e-6 && (v2 - 1.0).abs() < 1e-5 && (h2 - 2f32.ln()).abs() < 1e-5);
+        // Non-finite logits yield NaN entropy (never mistaken for zero entropy).
+        assert!(softmax_moments_and_entropy(&[f32::NAN; 4]).2.is_nan());
+        assert!(softmax_moments_and_entropy(&[f32::INFINITY, 0.0, 0.0, 0.0]).2.is_nan());
+        assert!(softmax_moments_and_entropy(&[f32::NEG_INFINITY; 4]).2.is_nan());
+        // `dfl_entropy` averages the four sides.
+        let mut row = vec![-100.0f32; 16];
+        row[0..4].fill(0.0); // side 0 uniform (ln 4), sides 1..4 peaked at bin 0 (0)
+        row[4] = 100.0;
+        row[8] = 100.0;
+        row[12] = 100.0;
+        assert!((dfl_entropy(&row, 4) - 0.25 * 4f32.ln()).abs() < 1e-5);
     }
 
     #[test]

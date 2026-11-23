@@ -1,8 +1,10 @@
-//! Forward convs evaluated only at some output sites (`Backend::conv2d_act_at`): the inference forward's own
-//! arithmetic on fewer outputs, so every site gets the value the dense conv computes there, bit for bit.
+//! Forward convs evaluated only at some output sites (`Backend::conv2d_act_at` and
+//! `Backend::conv2d_act_at_tiles`): the inference forward's own arithmetic on fewer outputs, so every site gets
+//! the dense value bit for bit (`conv2d_act_at` restricts Winograd to F(2x2) to preserve strict 3x3 receptive-field
+//! isolation; `conv2d_act_at_tiles` also enables F(4x4) for callers that populate full 6x6 tile patches).
 //!
-//! - A Winograd conv ([`super::uses_winograd`]) runs the block code over the list of 2x2 output tiles that hold a
-//!   site ([`super::winograd_forward_at`]).
+//! - A Winograd conv ([`super::uses_winograd`] / [`super::uses_winograd4`]) runs the block code over the list of
+//!   2x2 or 4x4 output tiles that hold a site ([`super::winograd_forward_at`] / [`super::winograd4_forward_at`]).
 //! - A pointwise conv runs the dense path's GEMM ([`gemm_ex`] with the weights read in place and `B` packed from
 //!   planes) over the sites' columns gathered into planes of their own: every element of C is the same K sum in
 //!   the same `KC` blocks, through the same micro-kernel and epilogue, wherever its column is.
@@ -11,21 +13,31 @@ use super::im2col::PlaneRows;
 use super::{ChannelEpilogue, ConvGeom, ConvInput};
 use crate::cpu::gemm::{KC, Strided, gemm_ex};
 
-/// Per image, the ascending distinct 2x2 output tiles (`ty · ⌈OW/2⌉ + tx`) holding one of the sites `at` (flat
-/// `img · OH·OW + oy · OW + ox`, each `< N · OH · OW`).
-pub(crate) fn winograd_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
-    let (ohw, tw) = (g.ohw(), g.ow.div_ceil(2));
+/// Per image, the ascending distinct `tile x tile` output tiles (`ty · ⌈OW/tile⌉ + tx`) holding one of the sites
+/// `at` (flat `img · OH·OW + oy · OW + ox`, each `< N · OH · OW`).
+fn tiles_at(g: &ConvGeom, at: &[usize], tile: usize) -> Vec<Vec<u32>> {
+    let (ohw, tw) = (g.ohw(), g.ow.div_ceil(tile));
     let mut lists = vec![Vec::new(); g.n];
     for &s in at {
         let (img, pix) = (s / ohw, s % ohw);
         let (oy, ox) = (pix / g.ow, pix % g.ow);
-        lists[img].push(((oy / 2) * tw + ox / 2) as u32);
+        lists[img].push(((oy / tile) * tw + ox / tile) as u32);
     }
     for l in &mut lists {
         l.sort_unstable();
         l.dedup();
     }
     lists
+}
+
+/// Per image, the ascending distinct 2x2 output tiles (`ty · ⌈OW/2⌉ + tx`) holding one of the sites `at`.
+pub(crate) fn winograd_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
+    tiles_at(g, at, 2)
+}
+
+/// Per image, the ascending distinct 4x4 output tiles (`ty · ⌈OW/4⌉ + tx`) holding one of the sites `at`.
+pub(crate) fn winograd4_tiles_at(g: &ConvGeom, at: &[usize]) -> Vec<Vec<u32>> {
+    tiles_at(g, at, 4)
 }
 
 /// A pointwise conv (`g` 1x1, stride 1, no padding, one group) at the output sites `at` (as in

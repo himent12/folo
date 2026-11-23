@@ -137,14 +137,8 @@ pub(crate) fn random_affine_plane(
 /// Mirrors a sample left to right in place.
 pub fn flip_lr(s: &mut Sample) {
     let stride = s.image.stride();
-    let w = s.image.width as usize;
     for row in s.image.data.chunks_exact_mut(stride) {
-        for x in 0..w / 2 {
-            let (a, b) = (x * 3, (w - 1 - x) * 3);
-            for c in 0..3 {
-                row.swap(a + c, b + c);
-            }
-        }
+        crate::simd::planar::flip_lr_row(row);
     }
     for b in &mut s.boxes {
         b.cx = 1.0 - b.cx;
