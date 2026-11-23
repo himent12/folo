@@ -318,7 +318,12 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     let p = Params::new().uz(count)?.f(s.eps);
     ctx.dispatch(&k, &[part.raw(), den.raw(), tbuf.raw()], &p, ctx.grid_1d(count as u64 * 256, 256)?)?;
     let k = ctx.kernel(&shader::DIVIDE, Spec::new())?;
-    ctx.dispatch(&k, &[x0, den.raw(), tbuf.raw()], &Params::new().uz(count)?, ctx.grid_1d(wg * 256, 256)?)?;
+    ctx.dispatch(
+        &k,
+        &[x0, den.raw(), tbuf.raw()],
+        &Params::new().uz(count)?.u(wg as u32),
+        ctx.grid_1d(wg * 256, 256)?,
+    )?;
     // 3. The odd-quintic polynomial steps, ping-ponging between `x0` and `x1`.
     let spec_of = |mode: u32, t: MuonTile, dbuf: bool, s4: bool| {
         Spec::new()
@@ -341,8 +346,9 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     let (mut cur, mut next) = (x0, x1);
     for step in 0..s.steps {
         let (a, b, c) = s.step_coeffs[step];
-        let p = Params::new().uz(count)?.f(a).f(b).f(c);
-        ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p, sq_grid)?;
+        let p_sq = Params::new().uz(count)?.f(a).f(b).f(c).u(t_sq as u32);
+        let p_up = Params::new().uz(count)?.f(a).f(b).f(c).u(t_up as u32);
+        ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p_sq, sq_grid)?;
         if step == 0 && s.schatten4 {
             let s4_k = ctx.kernel(&shader::S4_NORM, Spec::new())?;
             let ps4 = Params::new().uz(count)?.f(s.eps);
@@ -355,12 +361,12 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
             let poly_s4 = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, true))?;
             let update_s4 = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, true))?;
             let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
-            ctx.dispatch(&poly_s4, &sq, &p, sq_grid)?;
-            ctx.dispatch(&update_s4, &[bm.raw(), cur, cur, next, tbuf.raw()], &p, up_grid)?;
+            ctx.dispatch(&poly_s4, &sq, &p_sq, sq_grid)?;
+            ctx.dispatch(&update_s4, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
         } else {
             let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
-            ctx.dispatch(&poly, &sq, &p, sq_grid)?;
-            ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p, up_grid)?;
+            ctx.dispatch(&poly, &sq, &p_sq, sq_grid)?;
+            ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
         }
         std::mem::swap(&mut cur, &mut next);
     }
@@ -376,14 +382,15 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     Ok(())
 }
 
-/// A multi-tensor dispatch's params: `base` (its words from 0), then the first workgroup of matrix `t` of the
-/// chunk at `16 + t` and its logical element count `r · c` at `32 + t`. When `padded` is true (gather), workgroups
-/// cover the 4-aligned padded row width `r · align4(c)`.
+/// A multi-tensor dispatch's params: `base` (words 0..3), total logical workgroups at word `3` (for 2D-folded
+/// `grid_1d` early exit), then the first workgroup of matrix `t` of the chunk at `16 + t` and its logical element
+/// count `r · c` at `32 + t`. When `padded` is true (gather), workgroups cover the 4-aligned padded row width
+/// `r · align4(c)`.
 fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool) -> Result<(Params, u64)> {
-    let mut p = base.at(16);
+    let mut starts = Vec::with_capacity(chunk.len());
     let mut start = 0u64;
     for it in chunk {
-        p = p.u(u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?);
+        starts.push(u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?);
         let elems = if padded {
             let (r, c) = (it.rows.min(it.cols), it.rows.max(it.cols));
             (r * align4(c)) as u64
@@ -391,6 +398,11 @@ fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool) -> Result
             (it.rows * it.cols) as u64
         };
         start += elems.div_ceil(256);
+    }
+    let total = u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?;
+    let mut p = base.at(3).u(total).at(16);
+    for s in starts {
+        p = p.u(s);
     }
     p = p.at(32);
     for it in chunk {

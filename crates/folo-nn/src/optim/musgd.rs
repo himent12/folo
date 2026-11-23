@@ -205,8 +205,8 @@ impl MuSgd {
 
     /// The Muon half of a step: momentum, orthogonalisation and `p −= muon · lr · O` for every Muon parameter
     /// with a gradient. On non-CPU devices, Muon groups sharing `(momentum, nesterov)` (such as `decay` and
-    /// `decay.cls`) fuse into one `muon_step_many_` call so small `.cls` groups do not pay a second wave of
-    /// grouped GEMM dispatches.
+    /// `decay.cls`) fuse into one `muon_step_many_` call when using Polar-FOLO (or when all groups share `lr`,
+    /// preserving bit-exact pre-Polar `(X * scale) * (-lr)` rounding for legacy `Ns5` across differing LRs).
     fn muon_step(&self, grads: &dyn GradSource) -> Result<()> {
         let _g = folo_core::no_grad();
         // Collect active Muon groups (those with at least one parameter that received a gradient).
@@ -249,18 +249,21 @@ impl MuSgd {
         if active.is_empty() {
             return Ok(());
         }
-        // Fast path: when >= 2 Muon groups share (mu, nesterov) off the CPU, fuse both momentum update and
-        // orthogonalisation into a single multi-tensor device pass (carrying per-group lr in each matrix's scale,
-        // with settings.lr = 1.0 whose negation is an exact IEEE-754 sign flip).
+        // Fast path: when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device, fuse both momentum
+        // update and orthogonalisation into one multi-tensor device pass. For legacy `Ns5` with differing per-group
+        // LRs, keep separate per-group calls so non-unit `muon_scale` preserves exact `(X * scale) * (-lr)` rounding.
         let first_dev = active[0].ps[0].device();
+        let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
         let can_fuse_all = active.len() >= 2
             && !first_dev.is_cpu()
+            && (self.ortho != MuonOrtho::Ns5 || same_lr)
             && active.iter().all(|a| {
                 a.mu.to_bits() == active[0].mu.to_bits()
                     && a.nesterov == active[0].nesterov
                     && a.ps.iter().all(|p| p.device() == first_dev)
             });
         if can_fuse_all {
+            let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
             let total: usize = active.iter().map(|a| a.ps.len()).sum();
             let (mut ps, mut bs, mut gr, mut scales) = (
                 Vec::with_capacity(total),
@@ -272,11 +275,14 @@ impl MuSgd {
                 ps.extend_from_slice(&a.ps);
                 bs.extend_from_slice(&a.bs);
                 gr.extend(a.gs.iter());
-                scales.extend(a.ps.iter().map(|p| muon_scale(p.dims()) * a.lr));
+                scales.extend(a.ps.iter().map(|p| {
+                    let sc = muon_scale(p.dims());
+                    if fold_lr { sc * a.lr } else { sc }
+                }));
             }
             let (mu, nesterov) = (active[0].mu, active[0].nesterov);
             axpby_many(&bs, &gr, mu, 1.0 - mu)?;
-            if muon_fused_with_scales(&ps, &bs, &gr, &scales, mu, nesterov, 1.0, self.ortho)? {
+            if muon_fused_with_scales(&ps, &bs, &gr, &scales, mu, nesterov, step_lr, self.ortho)? {
                 return Ok(());
             }
             // Fallback if backend declined: momentum buffers `bs` are already updated; run tensor ops per group.
@@ -384,7 +390,7 @@ pub fn orthogonalize_with(g: &Tensor, ortho: MuonOrtho) -> Result<Tensor> {
     Ok(orthogonalize_many_with(std::slice::from_ref(g), ortho)?.remove(0))
 }
 
-/// [`MuSgd`]'s update directions for `us` (any shapes of rank ≥ 2) using the default [`MuonOrtho::Ns5`] schedule.
+/// [`MuSgd`]'s update directions for `us` (any shapes of rank ≥ 2) using the legacy [`MuonOrtho::Ns5`] schedule.
 pub fn orthogonalize_many(us: &[Tensor]) -> Result<Vec<Tensor>> {
     orthogonalize_many_with(us, MuonOrtho::Ns5)
 }
@@ -440,9 +446,12 @@ pub fn orthogonalize_many_with(us: &[Tensor], ortho: MuonOrtho) -> Result<Vec<Te
             if step == 0 && use_s4 {
                 // Zero-extra-GEMM step-0 Schatten-4 spectral rescaling:
                 // α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps) guarantees σ₁(X₀ / α) < 1 strictly.
+                // When ‖U‖_F² overflows to +∞ on huge finite inputs, X₀ = 0 and α = 0; map α == 0 → inv_a = 0
+                // (preserving NaN propagation since NaN == 0 is false) to match Ns5's zero update.
                 let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
                 let alpha = a_frob.sqrt()?.add(&norm.recip()?.mul_scalar(NS_EPS)?)?;
-                let inv_a = alpha.recip()?;
+                let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
+                let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
                 let inv_a2 = inv_a.square()?;
                 let inv_a4 = inv_a2.square()?;
                 let bm =

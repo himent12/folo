@@ -68,7 +68,8 @@ fn many_prologue(s: &mut String, j: usize) {
         "@compute @workgroup_size(256)\n\
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+         \x20 let w = wid.y * nwg.x + wid.x;\n\
+         \x20 if (w >= pu(3u)) { return; }\n\
          \x20 var t = 0u;\n",
     );
     for t in 1..j {
@@ -118,7 +119,7 @@ fn gen_gather(spec: &Spec) -> String {
          \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
          \x20   workgroupBarrier();\n\
          \x20 }\n\
-         \x20 if (lid == 0u) { PART[TBL[q + 5u] + lw] = red[0]; }\n}\n",
+         \x20 if (lid == 0u && e < r * ld_c) { PART[TBL[q + 5u] + lw] = red[0]; }\n}\n",
     );
     s
 }
@@ -161,7 +162,7 @@ pub(super) static NORM: KernelDef = KernelDef {
          @compute @workgroup_size(256)\n\
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let i = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+         \x20 let i = wid.y * nwg.x + wid.x;\n\
          \x20 let ok = i < pu(0u);\n\
          \x20 let q = min(i, pu(0u) - 1u) * 8u;\n\
          \x20 let first = TBL[q + 5u];\n\
@@ -198,7 +199,8 @@ fn gen_divide(_: &Spec) -> String {
         "@compute @workgroup_size(256)\n\
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {{\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+         \x20 let w = wid.y * nwg.x + wid.x;\n\
+         \x20 if (w >= pu(1u)) {{ return; }}\n\
          \x20 let i = find_matrix(w);\n\
          \x20 let q = i * {STRIDE}u;\n\
          \x20 let ld_c = (TBL[q + 1u] + 3u) & 0xfffffffcu;\n\
@@ -222,7 +224,7 @@ pub(super) static S4_NORM: KernelDef = KernelDef {
          @compute @workgroup_size(256)\n\
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let i = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+         \x20 let i = wid.y * nwg.x + wid.x;\n\
          \x20 let count = pu(0u);\n\
          \x20 let ok = i < count;\n\
          \x20 let q = min(i, count - 1u) * 8u;\n\
@@ -243,7 +245,8 @@ pub(super) static S4_NORM: KernelDef = KernelDef {
          \x20 }\n\
          \x20 if (ok && lid == 0u) {\n\
          \x20   let alpha = sqrt(sqrt(red[0])) + pf(1u) / D[i];\n\
-         \x20   TBL[count * 9u + i] = bitcast<u32>(1.0 / alpha);\n\
+         \x20   let inv_a = select(1.0 / alpha, 0.0, alpha == 0.0);\n\
+         \x20   TBL[count * 9u + i] = bitcast<u32>(inv_a);\n\
          \x20 }\n}\n",
     ),
 };
@@ -303,9 +306,10 @@ fn gen_grouped(spec: &Spec) -> String {
         s,
         "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) tid: u32, @builtin(local_invocation_id) lid3: vec3<u32>) {{\n\
+         \x20 let w = wid.y * nwg.x + wid.x;\n\
+         \x20 if (w >= pu(4u)) {{ return; }}\n\
          \x20 if (tid == 0u) {{\n\
          \x20   let count = pu(0u);\n\
-         \x20   let w = linear_id(wid, nwg, 0u, {threads}u) / {threads}u;\n\
          \x20   let i = find_matrix(w);\n\
          \x20   let q = i * {STRIDE}u;\n\
          \x20   let r = TBL[q]; let c = TBL[q + 1u]; let ox = TBL[q + 3u]; let oa = TBL[q + 4u];\n\

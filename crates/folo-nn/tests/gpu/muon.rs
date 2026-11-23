@@ -202,3 +202,124 @@ fn musgd_multi_group_gpu_matches_cpu() {
     let ctx = folo_gpu::GpuContext::shared().unwrap();
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
+
+/// Finite inputs whose Frobenius sum of squares overflows `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`) leave
+/// parameters unchanged (exact zero update, matching `Ns5`) on both CPU and GPU across `Ns5`, `Polar4`, and
+/// `Polar5`, while `NaN` inputs still propagate `NaN`.
+#[test]
+fn fused_muon_frobenius_overflow_and_nan() {
+    let dev = gpu!();
+    let rng = &mut Rng::seed(41);
+    let p0 = Tensor::rand_uniform([1, 1], -1.0, 1.0, rng);
+    let p1 = Tensor::rand_uniform([16, 16], -1.0, 1.0, rng);
+    let p2 = Tensor::rand_uniform([8, 8], -1.0, 1.0, rng);
+    let m0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
+    let g0 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
+    let m1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let g1 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let m2 = Tensor::rand_uniform([8, 8], -0.5, 0.5, rng);
+    let mut g2_v = vec![0.1_f32; 8 * 8];
+    g2_v[13] = f32::NAN;
+    let g2 = Tensor::from_vec(g2_v, [8, 8]).unwrap();
+    let (ps, ms, gs) = ([p0, p1, p2], [m0, m1, m2], [g0, g1, g2]);
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+        for nesterov in [false, true] {
+            let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
+            let want = reference(&ps, &ms, &gs, nesterov, ortho);
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                close_or_nan(g, w, &format!("{ortho:?} nesterov {nesterov}: overflow[{i}]"));
+            }
+            for (i, (before_t, after_t)) in ps[..2].iter().zip(&got[..2]).enumerate() {
+                let before = before_t.to_vec::<f32>().unwrap();
+                let after = after_t.to_vec::<f32>().unwrap();
+                assert!(
+                    before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{ortho:?} nesterov {nesterov}: overflow[{i}] must be exact zero update"
+                );
+            }
+            let nans = got[2].to_vec::<f32>().unwrap().iter().filter(|x| x.is_nan()).count();
+            assert_eq!(nans, if nesterov { 64 } else { 0 }, "{ortho:?} nesterov {nesterov}: NaN propagation");
+        }
+    }
+}
+
+/// Legacy `Ns5` with multiple Muon groups at differing LRs (`decay` + `decay.cls`) and non-unit `muon_scale`
+/// preserves the exact pre-Polar `(X * scale) * (-lr)` GPU rounding order bit for bit.
+#[test]
+fn ns5_multi_group_preserves_exact_pre_pr_rounding() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(53);
+    let shapes: [&[usize]; 3] = [&[13, 7, 3, 1], &[17, 5], &[9, 4, 2, 1]];
+    let init: Vec<Tensor> = shapes.iter().map(|s| Tensor::rand_uniform(*s, -1.0, 1.0, &mut rng)).collect();
+    let ps_opt: Vec<Tensor> = init.iter().map(|t| t.to_device(dev).unwrap().requires_grad_()).collect();
+    let ps_ref: Vec<Tensor> = init.iter().map(|t| t.to_device(dev).unwrap().requires_grad_()).collect();
+    let ms_ref: Vec<Tensor> =
+        shapes.iter().map(|s| Tensor::zeros_with(*s, folo_core::DType::F32, dev).unwrap()).collect();
+
+    let weights = MuSgdWeights { muon: 0.2, sgd: 1.0 };
+    let (lr0, lr1, mu, wd) = (0.02_f64, 0.06_f64, 0.937_f64, 5e-4_f64);
+    let make_groups = |ps: &[Tensor]| {
+        vec![
+            ParamGroup::new("decay", vec![("w0".into(), ps[0].clone()), ("w1".into(), ps[1].clone())])
+                .lr(lr0)
+                .momentum(mu)
+                .weight_decay(wd),
+            ParamGroup::new("decay.cls", vec![("w2".into(), ps[2].clone())])
+                .lr(lr1)
+                .momentum(mu)
+                .weight_decay(wd),
+        ]
+    };
+    let mut opt = MuSgd::with_ortho(make_groups(&ps_opt), weights, MuonOrtho::Ns5).unwrap();
+    let mut sgd_ref = Sgd::new(make_groups(&ps_ref)).unwrap();
+
+    for _ in 0..2 {
+        let gs: Vec<Tensor> = shapes
+            .iter()
+            .map(|s| Tensor::rand_uniform(*s, -0.3, 0.3, &mut rng).to_device(dev).unwrap())
+            .collect();
+        let (mut g_opt, mut g_ref) = (folo_core::Grads::default(), folo_core::Grads::default());
+        for ((p_opt, p_ref), g) in ps_opt.iter().zip(&ps_ref).zip(&gs) {
+            g_opt.insert(p_opt, g.clone());
+            g_ref.insert(p_ref, g.clone());
+        }
+        opt.step(&g_opt).unwrap();
+
+        // Exact pre-PR per-group GPU sequence: un-folded `scales[i] = muon_scale`, `settings.lr = muon * group_lr`.
+        {
+            let _ng = no_grad();
+            let mu32 = mu as f32;
+            let step_axpby = folo_core::backend::OptimStep::Axpby { a: mu32, b: 1.0 - mu32 };
+            for (idxs, lr) in [
+                (&[0usize, 1][..], (weights.muon * lr0) as f32),
+                (&[2usize][..], (weights.muon * lr1) as f32),
+            ] {
+                let p_sl: Vec<&Tensor> = idxs.iter().map(|&i| &ps_ref[i]).collect();
+                let m_sl: Vec<&Tensor> = idxs.iter().map(|&i| &ms_ref[i]).collect();
+                let g_sl: Vec<&Tensor> = idxs.iter().map(|&i| &gs[i]).collect();
+                let none: Vec<Vec<&Tensor>> = vec![Vec::new(); idxs.len()];
+                assert!(Tensor::optimizer_step_many_(&m_sl, &g_sl, &none, &step_axpby).unwrap());
+                let scales: Vec<f32> = p_sl.iter().map(|p| muon_scale(p.dims())).collect();
+                assert!(scales.iter().all(|&s| s > 1.0));
+                let settings = folo_core::backend::MuonSettings::from_schedule(
+                    mu32,
+                    true,
+                    MuonOrtho::Ns5.schedule(),
+                    false,
+                    NS_EPS,
+                    lr,
+                );
+                assert!(Tensor::muon_step_many_(&p_sl, &m_sl, &g_sl, &scales, &settings).unwrap());
+            }
+        }
+        sgd_ref.step(&g_ref).unwrap();
+    }
+    for (i, ((p_opt, p_ref), shape)) in ps_opt.iter().zip(&ps_ref).zip(&shapes).enumerate() {
+        let got = p_opt.to_vec::<f32>().unwrap();
+        let want = p_ref.to_vec::<f32>().unwrap();
+        assert!(
+            got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "Ns5 param {i} {shape:?} must match pre-PR per-group rounding bit for bit",
+        );
+    }
+}

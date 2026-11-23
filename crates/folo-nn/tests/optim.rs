@@ -267,7 +267,7 @@ fn ortho_f64(m: &[f64], rows: usize, cols: usize, ortho: MuonOrtho) -> Vec<f64> 
         if step == 0 && ortho.schatten4() {
             let a_frob = am.iter().map(|v| v * v).sum::<f64>().sqrt();
             let alpha = a_frob.sqrt() + 1e-7 / norm;
-            let inv_a = 1.0 / alpha;
+            let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
             let inv_a2 = inv_a * inv_a;
             let inv_a4 = inv_a2 * inv_a2;
             let bm: Vec<f64> =
@@ -326,6 +326,36 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
     let e_p5 = ortho_err(MuonOrtho::Polar5);
     assert!(e_p4 < e_ns5 * 0.5, "Polar4 ({e_p4:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
     assert!(e_p5 < e_ns5 * 0.5, "Polar5 ({e_p5:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
+}
+
+/// Finite matrices whose squared Frobenius norm overflows `f32::MAX` (`norm = +∞`, `X₀ = 0`, `α = 0`) must produce
+/// a finite zero update under `Polar4` / `Polar5` (matching `Ns5`) rather than `0.0 * +∞ = NaN`, while `NaN`
+/// inputs still propagate `NaN`.
+#[test]
+fn polar_folo_handles_frobenius_overflow_and_nan() {
+    let huge_1x1 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
+    let huge_16x16 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let mut nan_data = vec![0.25_f32; 4 * 4];
+    nan_data[5] = f32::NAN;
+    let with_nan = Tensor::from_vec(nan_data, [4, 4]).unwrap();
+    let batch = [huge_1x1, huge_16x16, with_nan];
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+        let many = orthogonalize_many_with(&batch, ortho).unwrap();
+        for (idx, t) in batch.iter().enumerate() {
+            let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
+            let got = many[idx].to_vec::<f32>().unwrap();
+            if idx < 2 {
+                assert!(
+                    got.iter().all(|&v| v == 0.0),
+                    "{ortho:?} batch[{idx}] expected exact 0, got {got:?}"
+                );
+                assert!(one.iter().all(|&v| v == 0.0), "{ortho:?} one[{idx}] expected exact 0, got {one:?}");
+            } else {
+                assert!(got.iter().all(|v| v.is_nan()), "{ortho:?} batch NaN must propagate");
+                assert!(one.iter().all(|v| v.is_nan()), "{ortho:?} one NaN must propagate");
+            }
+        }
+    }
 }
 
 #[test]
