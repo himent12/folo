@@ -17,7 +17,8 @@ the determinism rules.
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
-| `src/resize.rs`, `src/warp.rs` | Bilinear resize and affine warp of 8-bit RGB images (the warp reads a `Plane`: images placed on one colour, so a mosaic needs no canvas) |
+| `src/resize.rs`, `src/warp.rs` | Bilinear resize and affine warp of 8-bit RGB images (the warp reads a `Plane`: images placed on one colour, so a mosaic needs no canvas; also fuses warp, HSV, flips and planar conversion in one pass) |
+| `src/simd/` | Bit-exact AVX2 SIMD kernels and scalar fallbacks: `planar.rs` (RGB → planar `u8`/`f32`/`RGB0`, row flip), `bilinear.rs` (vertical blend and horizontal fixed-point interpolation for resize and warp), `hsv_fused.rs` (explicit AVX2 hexcone HSV and L1-fused warp/RGB → HSV → flip → planar passes) |
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |

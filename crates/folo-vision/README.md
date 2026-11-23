@@ -19,8 +19,8 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
 | `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, MAL, CIoU, NWD-IoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs` |
-| `src/nms/` | `mod.rs` (class-aware batched NMS, ELC / consensus / DFL-consensus post-processing, and the top-k of the `o2o` head), `tests.rs` |
-| `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) and the consensus / ELC score modes (opt-in through `NmsConfig::score`) |
+| `src/nms/` | `mod.rs` (class-aware batched NMS and ELC / consensus / DFL-consensus / DFL-repulse post-processing), `topk.rs` (the NMS-free top-k of the `o2o` head), `tests.rs` |
+| `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) and the consensus / ELC / DFL-repulse score modes (opt-in through `NmsConfig::score`) |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
 | `src/train/` | `mod.rs` (`Trainer`), `config.rs` (`TrainConfig`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |

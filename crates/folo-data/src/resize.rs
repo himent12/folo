@@ -5,7 +5,16 @@
 //! or more an integer box filter runs first so large downscales do not alias.
 
 use crate::image::Image;
-use crate::par::for_rows;
+use crate::par::{for_bands, for_rows};
+use crate::simd::assert_image_data;
+use crate::simd::bilinear::{
+    add_u8_to_u32, hinterp_taps_to_planar_f32_div255, hinterp_taps_to_planar_f32_scale,
+    hinterp_taps_to_planar_u8, hinterp_taps_to_rgb, hinterp_taps_to_rgb0_u32, vblend_rgb_to_rgba32,
+    vshift_rgb_to_rgba32,
+};
+use crate::simd::planar::{
+    rgb_to_planar_f32_div255, rgb_to_planar_f32_scale, rgb_to_planar_u8, rgb_to_rgb0_u32,
+};
 
 /// Fixed-point bits of the bilinear weights (`1 << RESIZE_WEIGHT_BITS` is a weight of 1).
 pub const RESIZE_WEIGHT_BITS: u32 = 11;
@@ -97,16 +106,26 @@ pub fn resize(src: &Image, width: u32, height: u32) -> Image {
 /// `dst[y * dst_stride + x_offset * 3]`. `dst` must hold at least `height` rows of `dst_stride` bytes.
 pub fn resize_into(src: &Image, dst: &mut [u8], dst_stride: usize, x_offset: usize, width: u32, height: u32) {
     assert!(width > 0 && height > 0 && src.width > 0 && src.height > 0, "resize to or from an empty image");
-    assert!(x_offset * 3 + width as usize * 3 <= dst_stride, "resize window exceeds the row stride");
-    let dst = &mut dst[..dst_stride * height as usize];
+    let x_end = x_offset
+        .checked_add(width as usize)
+        .and_then(|n| n.checked_mul(3))
+        .expect("resize window overflows usize");
+    assert!(x_end <= dst_stride, "resize window exceeds the row stride");
+    let total = dst_stride.checked_mul(height as usize).expect("resize destination size overflow");
+    let dst = &mut dst[..total];
     let rows = RowResizer::new(src, width, height);
-    let row = width as usize * 3;
-    for_rows(dst, dst_stride, |y, out| rows.row(y, &mut out[x_offset * 3..x_offset * 3 + row]));
+    let row_bytes = width as usize * 3;
+    for_bands(dst, dst_stride, |y0, band| {
+        let mut scratch = rows.band_scratch();
+        for (i, out) in band.chunks_exact_mut(dst_stride).enumerate() {
+            rows.row_with_scratch(y0 + i, &mut out[x_offset * 3..x_offset * 3 + row_bytes], &mut scratch);
+        }
+    });
 }
 
-/// One `width x height` resize of an image, produced a row at a time ([`RowResizer::row`]), so callers can
-/// write each row wherever (and in whatever format) they need without an intermediate image. The box
-/// prefilter, when the plan needs one, runs once in [`RowResizer::new`].
+/// One `width x height` resize of an image, produced a row at a time, so callers can write each row wherever (and in
+/// whatever format) they need without an intermediate image. The box prefilter, when the plan needs one, runs once in
+/// [`RowResizer::new`].
 pub(crate) struct RowResizer<'a> {
     src: &'a Image,
     /// The box-prefiltered source (`None`: no prefilter).
@@ -116,12 +135,20 @@ pub(crate) struct RowResizer<'a> {
     width: usize,
 }
 
+/// Per-band scratch holding the vertically blended `[R, G, B, 0]` `u32` row (plus one duplicated trailing column so
+/// clamped `x1 == src_w - 1` reads `v[x0 + 1]`).
+pub(crate) struct RowScratch {
+    v: Vec<u32>,
+    cached: Option<(u32, u32, u32)>,
+}
+
 impl<'a> RowResizer<'a> {
     pub(crate) fn new(src: &'a Image, width: u32, height: u32) -> Self {
         assert!(
             width > 0 && height > 0 && src.width > 0 && src.height > 0,
             "resize to or from an empty image"
         );
+        assert_image_data(src);
         if src.width == width && src.height == height {
             return RowResizer { src, filtered: None, plan: None, width: width as usize };
         }
@@ -129,41 +156,144 @@ impl<'a> RowResizer<'a> {
         let [fx, fy] = plan.prefilter;
         // Integer box prefilter for large reductions.
         let filtered = (fx >= 2 || fy >= 2).then(|| box_downsample(src, fx, fy));
+        let sw = filtered.as_ref().unwrap_or(src).width as usize;
+        assert!(plan.x0.iter().all(|&k| (k as usize) < sw), "resize tap out of source bounds");
         RowResizer { src, filtered, plan: Some(plan), width: width as usize }
+    }
+
+    /// Allocates reusable vertical-blend scratch for a band of rows.
+    pub(crate) fn band_scratch(&self) -> RowScratch {
+        let len = match &self.plan {
+            None => 0,
+            Some(_) => (self.filtered.as_ref().unwrap_or(self.src).width as usize + 1) * 4,
+        };
+        RowScratch { v: vec![0u32; len], cached: None }
+    }
+
+    /// Populates `scratch.v` with the vertically blended source row for destination row `y`.
+    #[inline]
+    fn fill_v<'b>(&self, y: usize, plan: &ResizePlan, scratch: &'b mut RowScratch) -> &'b [u32] {
+        let (y0, y1, wy) = (plan.y0[y], plan.y1[y], plan.wy[y]);
+        let key = (y0, y1, wy);
+        let s = self.filtered.as_ref().unwrap_or(self.src);
+        let sw = s.width as usize;
+        let need = (sw + 1) * 4;
+        if scratch.v.len() < need {
+            scratch.v.resize(need, 0);
+            scratch.cached = None;
+        }
+        if scratch.cached != Some(key) {
+            let sstride = s.stride();
+            let top = &s.data[y0 as usize * sstride..][..sstride];
+            if y0 == y1 || wy == 0 {
+                vshift_rgb_to_rgba32(top, &mut scratch.v[..sw * 4]);
+            } else {
+                let bot = &s.data[y1 as usize * sstride..][..sstride];
+                vblend_rgb_to_rgba32(top, bot, wy, &mut scratch.v[..sw * 4]);
+            }
+            // Duplicate the last column so `v[x0 + 1]` equals `v[x1]` even when `x0 == sw - 1`.
+            let last = (sw - 1) * 4;
+            scratch.v.copy_within(last..last + 4, sw * 4);
+            scratch.cached = Some(key);
+        }
+        &scratch.v[..need]
     }
 
     /// Writes destination row `y` (`width` interleaved RGB pixels) into `out[..width * 3]`.
     #[inline]
-    pub(crate) fn row(&self, y: usize, out: &mut [u8]) {
+    pub(crate) fn row_with_scratch(&self, y: usize, out: &mut [u8], scratch: &mut RowScratch) {
         let out = &mut out[..self.width * 3];
         let Some(plan) = &self.plan else {
             out.copy_from_slice(&self.src.data[y * out.len()..(y + 1) * out.len()]);
             return;
         };
-        let s = self.filtered.as_ref().unwrap_or(self.src);
-        let sstride = s.stride();
-        let top = &s.data[plan.y0[y] as usize * sstride..][..sstride];
-        let bot = &s.data[plan.y1[y] as usize * sstride..][..sstride];
-        let wy = plan.wy[y];
-        let iwy = ONE - wy;
-        for (x, px) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            let (a, b, wx) = (plan.x0[x] as usize * 3, plan.x1[x] as usize * 3, plan.wx[x]);
-            let iwx = ONE - wx;
-            for c in 0..3 {
-                let t = top[a + c] as u32 * iwx + top[b + c] as u32 * wx;
-                let u = bot[a + c] as u32 * iwx + bot[b + c] as u32 * wx;
-                px[c] = ((t * iwy + u * wy + (1 << (2 * BITS - 1))) >> (2 * BITS)) as u8;
-            }
-        }
+        let v = self.fill_v(y, plan, scratch);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb(v, &plan.x0, &plan.wx, out) };
+    }
+
+    /// Writes destination row `y` straight into planar `u8` (`r`, `g`, `b` of length `width`).
+    #[inline]
+    pub(crate) fn row_planar_u8(
+        &self,
+        y: usize,
+        r: &mut [u8],
+        g: &mut [u8],
+        b: &mut [u8],
+        scratch: &mut RowScratch,
+    ) {
+        let Some(plan) = &self.plan else {
+            let stride = self.width * 3;
+            rgb_to_planar_u8(&self.src.data[y * stride..(y + 1) * stride], r, g, b, false);
+            return;
+        };
+        let v = self.fill_v(y, plan, scratch);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_u8(v, &plan.x0, &plan.wx, r, g, b) };
+    }
+
+    /// Writes destination row `y` straight into planar `f32` (`v as f32 * scale`).
+    #[inline]
+    pub(crate) fn row_planar_f32_scale(
+        &self,
+        y: usize,
+        scale: f32,
+        r: &mut [f32],
+        g: &mut [f32],
+        b: &mut [f32],
+        scratch: &mut RowScratch,
+    ) {
+        let Some(plan) = &self.plan else {
+            let stride = self.width * 3;
+            rgb_to_planar_f32_scale(&self.src.data[y * stride..(y + 1) * stride], r, g, b, scale);
+            return;
+        };
+        let v = self.fill_v(y, plan, scratch);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_scale(v, &plan.x0, &plan.wx, scale, r, g, b) };
+    }
+
+    /// Writes destination row `y` straight into planar `f32` (`v as f32 / 255.0`).
+    #[inline]
+    pub(crate) fn row_planar_f32_div255(
+        &self,
+        y: usize,
+        r: &mut [f32],
+        g: &mut [f32],
+        b: &mut [f32],
+        scratch: &mut RowScratch,
+    ) {
+        let Some(plan) = &self.plan else {
+            let stride = self.width * 3;
+            rgb_to_planar_f32_div255(&self.src.data[y * stride..(y + 1) * stride], r, g, b, false);
+            return;
+        };
+        let v = self.fill_v(y, plan, scratch);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_div255(v, &plan.x0, &plan.wx, r, g, b) };
+    }
+
+    /// Writes destination row `y` straight into packed `[R, G, B, 0]` `u32` words.
+    #[inline]
+    pub(crate) fn row_rgb0_u32(&self, y: usize, dst: &mut [u32], scratch: &mut RowScratch) {
+        let Some(plan) = &self.plan else {
+            let stride = self.width * 3;
+            rgb_to_rgb0_u32(&self.src.data[y * stride..(y + 1) * stride], dst);
+            return;
+        };
+        let v = self.fill_v(y, plan, scratch);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb0_u32(v, &plan.x0, &plan.wx, dst) };
     }
 }
 
 /// Averages `fx x fy` blocks. The last block in each direction may be partial; it averages what is there.
 ///
-/// Each output row sums its `fy` source rows into one `u32` row (a contiguous loop the compiler vectorises),
-/// then each pixel adds up its `fx` columns and divides with rounding, `(sum + n / 2) / n`, by a
-/// multiply-shift ([`RoundDiv`]). Blocks too large for `u32` sums take the `u64` path.
+/// Each output band reuses one `u32` row accumulator (summed with AVX2), then each pixel adds up its `fx` columns
+/// and divides with rounding, `(sum + n / 2) / n`, by a multiply-shift ([`RoundDiv`]). Blocks too large for `u32`
+/// sums take the `u64` path.
 fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
+    assert_image_data(src);
     if 255 * fx as u64 * fy as u64 > u32::MAX as u64 / 2 {
         return box_downsample_wide(src, fx, fy);
     }
@@ -175,37 +305,63 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
     let stride = w * 3;
     // Columns in the last (maybe partial) block.
     let last_w = w - (ow - 1) * fx;
-    for_rows(&mut out, ow * 3, |oy, row| {
-        let y0 = oy * fy;
-        let y1 = (y0 + fy).min(h);
+    for_bands(&mut out, ow * 3, |oy0, band| {
         let mut col = vec![0u32; stride];
-        for y in y0..y1 {
-            for (a, &v) in col.iter_mut().zip(&src.data[y * stride..(y + 1) * stride]) {
-                *a += v as u32;
+        for (bi, row) in band.chunks_exact_mut(ow * 3).enumerate() {
+            let oy = oy0 + bi;
+            let y0 = oy * fy;
+            let y1 = (y0 + fy).min(h);
+            col.fill(0);
+            for y in y0..y1 {
+                add_u8_to_u32(&mut col, &src.data[y * stride..(y + 1) * stride]);
             }
-        }
-        let ny = y1 - y0;
-        let (full, last) = (RoundDiv::new((fx * ny) as u32), RoundDiv::new((last_w * ny) as u32));
-        let (body, tail) = col.split_at((ow - 1) * fx * 3);
-        let sum = |block: &[u32]| {
-            let mut s = [0u32; 3];
-            for p in block.as_chunks::<3>().0 {
-                for c in 0..3 {
-                    s[c] += p[c];
+            let ny = y1 - y0;
+            let full_n = (fx * ny) as u32;
+            let (full, last) = (RoundDiv::new(full_n), RoundDiv::new((last_w * ny) as u32));
+            let (body, tail) = col.split_at((ow - 1) * fx * 3);
+            let (row_body, row_tail) = row.split_at_mut((ow - 1) * 3);
+            if fx == 2 && full_n.is_power_of_two() {
+                let shift = full_n.trailing_zeros();
+                let half = full_n >> 1;
+                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0) {
+                    px[0] = ((block[0] + block[3] + half) >> shift) as u8;
+                    px[1] = ((block[1] + block[4] + half) >> shift) as u8;
+                    px[2] = ((block[2] + block[5] + half) >> shift) as u8;
+                }
+            } else if fx == 2 {
+                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0) {
+                    px[0] = full.div(block[0] + block[3]) as u8;
+                    px[1] = full.div(block[1] + block[4]) as u8;
+                    px[2] = full.div(block[2] + block[5]) as u8;
+                }
+            } else if fx == 3 {
+                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<9>().0) {
+                    px[0] = full.div(block[0] + block[3] + block[6]) as u8;
+                    px[1] = full.div(block[1] + block[4] + block[7]) as u8;
+                    px[2] = full.div(block[2] + block[5] + block[8]) as u8;
+                }
+            } else {
+                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.chunks_exact(fx * 3)) {
+                    let mut s = [0u32; 3];
+                    for p in block.as_chunks::<3>().0 {
+                        s[0] += p[0];
+                        s[1] += p[1];
+                        s[2] += p[2];
+                    }
+                    px[0] = full.div(s[0]) as u8;
+                    px[1] = full.div(s[1]) as u8;
+                    px[2] = full.div(s[2]) as u8;
                 }
             }
-            s
-        };
-        let (row_body, row_tail) = row.split_at_mut((ow - 1) * 3);
-        for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.chunks_exact(fx * 3)) {
-            let s = sum(block);
-            for c in 0..3 {
-                px[c] = full.div(s[c]) as u8;
+            let mut s = [0u32; 3];
+            for p in tail.as_chunks::<3>().0 {
+                s[0] += p[0];
+                s[1] += p[1];
+                s[2] += p[2];
             }
-        }
-        let s = sum(tail);
-        for c in 0..3 {
-            row_tail[c] = last.div(s[c]) as u8;
+            for c in 0..3 {
+                row_tail[c] = last.div(s[c]) as u8;
+            }
         }
     });
     Image { width: ow as u32, height: oh as u32, data: out }
@@ -238,6 +394,7 @@ impl RoundDiv {
 
 /// [`box_downsample`] with `u64` sums, for blocks whose sums could overflow `u32`.
 fn box_downsample_wide(src: &Image, fx: u32, fy: u32) -> Image {
+    assert_image_data(src);
     let (w, h) = (src.width as usize, src.height as usize);
     let (fx, fy) = (fx as usize, fy as usize);
     let ow = w.div_ceil(fx);

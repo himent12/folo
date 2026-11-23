@@ -34,10 +34,10 @@ pub const CONSENSUS_IOU: f32 = 0.75;
 /// The cap `R` of [`ScoreRule::Consensus`]: a cluster carrying this many times the kept box's score keeps the score.
 pub const CONSENSUS_CAP: f64 = 10.0;
 
-/// The cluster IoU `τ` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+/// The cluster IoU `τ` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
 pub const ELC_IOU: f32 = 0.75;
 
-/// The cluster support cap `R` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
+/// The cluster support cap `R` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
 pub const ELC_CAP: f64 = 10.0;
 
 /// The log-support slope `α` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
@@ -55,7 +55,34 @@ pub const DFL_CONSENSUS_SIG_REF: f64 = 0.50;
 /// Lower clamp on the 4-side mean fused DFL excess std (bins) in [`ScoreRule::DflConsensus`].
 const DFL_CONSENSUS_SIG_MIN: f64 = 0.1;
 
-/// Probability clamp before taking log-odds in [`elc_scores`] and [`dfl_consensus_scores`].
+/// Power exponent `q` on cluster scores in [`ScoreRule::DflRepulse`] (`s^1.5 = s · √s`).
+pub const DFL_REPULSE_Q: f64 = 1.5;
+
+/// Log-support slope `α` of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_ALPHA: f64 = 0.70;
+
+/// Scale-preserving power-weighted support reference `R_ref` of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_R_REF: f64 = 3.0;
+
+/// DFL Shannon-entropy slope `β` (nats⁻¹) of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_BETA: f64 = 0.55;
+
+/// Scale-preserving mean 4-side DFL entropy reference `H_ref` (nats) of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_ENT_REF: f64 = 1.5;
+
+/// Cross-stride support weight `λ` of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_STRIDE_W: f64 = 0.30;
+
+/// Log-survival soft-repulsion strength `γ` of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_GAMMA: f64 = 2.5;
+
+/// Overlap power `p` in `ln(max(1 − IoU^p, ε_r))` of [`ScoreRule::DflRepulse`].
+pub const DFL_REPULSE_POW: f64 = 4.0;
+
+/// Survival floor `ε_r` inside `ln(max(1 − IoU^4, ε_r))` of [`ScoreRule::DflRepulse`].
+const DFL_REPULSE_FLOOR: f64 = 1e-4;
+
+/// Probability clamp before taking log-odds in [`elc_scores`], [`dfl_consensus_scores`] and [`dfl_repulse_scores`].
 const ELC_PROB_EPS: f64 = 1e-6;
 
 /// How the boxes NMS keeps are scored.
@@ -77,29 +104,47 @@ pub enum ScoreRule {
     /// Falls back to [`ScoreRule::Elc`] when DFL bin precisions are unavailable.
     #[serde(rename = "dfl-consensus")]
     DflConsensus,
+    /// Power-weighted exclusive logit consensus with DFL Shannon entropy, cross-stride agreement, and greedy
+    /// sequential log-survival soft repulsion on output boxes ([`dfl_repulse_scores`], docs/MODEL.md §9.4).
+    /// Preserves the `[0, 1]` score scale and gracefully omits entropy/stride terms when unavailable.
+    #[serde(rename = "dfl-repulse")]
+    DflRepulse,
 }
 
 impl ScoreRule {
-    /// The name used by the CLI and in JSON (`none`, `consensus`, `elc`, `dfl-consensus`).
+    /// The name used by the CLI and in JSON (`none`, `consensus`, `elc`, `dfl-consensus`, `dfl-repulse`).
     pub fn as_str(self) -> &'static str {
         match self {
             ScoreRule::None => "none",
             ScoreRule::Consensus => "consensus",
             ScoreRule::Elc => "elc",
             ScoreRule::DflConsensus => "dfl-consensus",
+            ScoreRule::DflRepulse => "dfl-repulse",
         }
     }
 
     /// Whether this rule uses exclusive NMS suppressor ownership and centered logit-space calibration.
     #[inline]
     pub fn is_calibrated(self) -> bool {
-        matches!(self, ScoreRule::Elc | ScoreRule::DflConsensus)
+        matches!(self, ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse)
     }
 
     /// Whether this rule uses per-anchor scale-free DFL bin precisions ([`crate::decode::bin_precision`]).
     #[inline]
     pub fn wants_bin_precisions(self) -> bool {
         self == ScoreRule::DflConsensus
+    }
+
+    /// Whether this rule uses per-anchor mean 4-side DFL Shannon entropy ([`crate::decode::dfl_entropy`]).
+    #[inline]
+    pub fn wants_dfl_entropy(self) -> bool {
+        self == ScoreRule::DflRepulse
+    }
+
+    /// Whether this rule uses per-anchor stride for cross-scale consensus.
+    #[inline]
+    pub fn wants_strides(self) -> bool {
+        self == ScoreRule::DflRepulse
     }
 }
 
@@ -197,7 +242,7 @@ fn branch_safe_sigmoid(z: f64) -> f64 {
 /// Class-local suppressor ownership of every candidate `j` relative to `kept` (assumed in descending score order):
 /// each kept box owns itself, and every other candidate of class `c` is owned by the first kept box of class `c`
 /// whose IoU with it is `> nms_iou` (`u32::MAX` if none). Used when NMS ran `agnostic` or when a caller invokes
-/// [`elc_scores`] / [`dfl_consensus_scores`] without precomputed owners.
+/// [`elc_scores`] / [`dfl_consensus_scores`] / [`dfl_repulse_scores`] without precomputed owners.
 fn class_local_owners(
     kept: &[usize],
     boxes: &[Xyxy],
@@ -276,7 +321,7 @@ pub fn dfl_consensus_scores(
     let computed_owners;
     let owners: &[u32] = match owner {
         Some(o) => {
-            debug_assert_eq!(o.len(), boxes.len(), "dfl_consensus_scores: owner length mismatch");
+            assert_eq!(o.len(), boxes.len(), "dfl_consensus_scores: owner length mismatch");
             o
         }
         None => {
@@ -338,6 +383,177 @@ pub fn dfl_consensus_scores(
             }
             branch_safe_sigmoid(z) as f32
         })
+        .collect()
+}
+
+/// Power-weighted Exclusive Logit-Consensus with DFL Shannon entropy, cross-stride agreement and greedy
+/// sequential log-survival soft repulsion (docs/MODEL.md §9.4), in `kept`'s order:
+///
+/// ```text
+/// M_{q,k}  = Σ_{j ∈ C_excl(k)} s_j^{1.5}                                          (j = k included)
+/// H̄_k      = (Σ_{j ∈ C_excl(k)} s_j · H_j) / (Σ s_j)                              (omitted if entropy is None)
+/// f_cross  = (Σ_{j ∈ C_excl(k), stride_j ≠ stride_k} s_j) / (Σ s_j)               (omitted if stride is None)
+/// z_k^(0)  = logit(s_k) + 0.70 · ln(min(M_{q,k} / s_k^{1.5}, 10) / 3.0)
+///            − 0.55 · (H̄_k − 1.5) + 0.30 · f_cross
+/// ```
+///
+/// Then, within each class `c`, greedy sequential log-survival soft repulsion runs on `repulse_boxes` (the output
+/// boxes corresponding to `kept`, i.e. fused boxes when box fusion is enabled): repeatedly freeze the active box
+/// `m` with the largest current logit (ties to earlier `kept` position) and update every remaining active box `u`
+/// of class `c` with `o = IoU(b̂_m, b̂_u) > 0` by `z_u += 2.5 · ln(max(1 − o^4, 1e-4))`, before returning
+/// `sigmoid(z)` in `f32`.
+///
+/// Sums run in `f64` in candidate order; cluster ownership and repulsion stay class-local even under `agnostic`
+/// NMS. Non-finite/non-positive kept scores stay unchanged, and non-finite `repulse_boxes` do not participate in
+/// repulsion.
+#[allow(clippy::too_many_arguments)]
+pub fn dfl_repulse_scores(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    repulse_boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    owner: Option<&[u32]>,
+    nms_iou: f32,
+    entropy: Option<&dyn Fn(usize) -> f32>,
+    stride: Option<&dyn Fn(usize) -> f32>,
+) -> Vec<f32> {
+    assert_eq!(repulse_boxes.len(), kept.len(), "dfl_repulse_scores: repulse_boxes length mismatch");
+    assert_eq!(scores.len(), boxes.len(), "dfl_repulse_scores: boxes/scores length mismatch");
+    assert_eq!(classes.len(), boxes.len(), "dfl_repulse_scores: boxes/classes length mismatch");
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let buckets = Buckets::new(boxes.len(), classes, false);
+    let computed_owners;
+    let owners: &[u32] = match owner {
+        Some(o) => {
+            assert_eq!(o.len(), boxes.len(), "dfl_repulse_scores: owner length mismatch");
+            o
+        }
+        None => {
+            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            &computed_owners
+        }
+    };
+    let n_kept = kept.len();
+    let mut z = vec![0.0f64; n_kept];
+    let mut valid = vec![false; n_kept];
+    for (kp, &k) in kept.iter().enumerate() {
+        if !scores[k].is_finite() || scores[k] <= 0.0 {
+            continue;
+        }
+        valid[kp] = true;
+        let b = boxes[k];
+        let ba = b.area();
+        let s = scores[k] as f64;
+        let sq = s * s.sqrt();
+        let kp_u32 = kp as u32;
+        let st_k = stride.map_or(0.0, |f| f(k));
+        let st_k_valid = st_k.is_finite() && st_k > 0.0;
+        let mut mass_q = 0f64;
+        let mut ent_sum = 0f64;
+        let mut ent_mass = 0f64;
+        let mut cross_mass = 0f64;
+        let mut stride_mass = 0f64;
+        let mut add_member = |j: usize, sj: f64| {
+            mass_q += sj * sj.sqrt();
+            if let Some(ent_fn) = entropy {
+                let h = ent_fn(j) as f64;
+                if h.is_finite() && h >= 0.0 {
+                    ent_sum += sj * h;
+                    ent_mass += sj;
+                }
+            }
+            if let Some(st_fn) = stride {
+                let st_j = st_fn(j);
+                if st_j.is_finite() && st_j > 0.0 {
+                    if st_k_valid && st_j != st_k {
+                        cross_mass += sj;
+                    }
+                    stride_mass += sj;
+                }
+            }
+        };
+        if finite(&b) {
+            for &j in buckets.of(classes[k]) {
+                let j = j as usize;
+                let c = &boxes[j];
+                let member = j == k || (owners[j] == kp_u32 && finite(c) && overlap(&b, ba, c) >= ELC_IOU);
+                if member && scores[j].is_finite() && scores[j] > 0.0 {
+                    add_member(j, scores[j] as f64);
+                }
+            }
+        } else {
+            add_member(k, s);
+        }
+        let sc = s.clamp(ELC_PROB_EPS, 1.0 - ELC_PROB_EPS);
+        let mut zk = (sc / (1.0 - sc)).ln();
+        let ratio = if sq > 0.0 { (mass_q / sq).clamp(1.0, ELC_CAP) } else { 1.0 };
+        zk += DFL_REPULSE_ALPHA * (ratio / DFL_REPULSE_R_REF).ln();
+        if ent_mass > 0.0 {
+            zk -= DFL_REPULSE_BETA * (ent_sum / ent_mass - DFL_REPULSE_ENT_REF);
+        }
+        if st_k_valid && stride_mass > 0.0 {
+            zk += DFL_REPULSE_STRIDE_W * (cross_mass / stride_mass);
+        }
+        z[kp] = zk;
+    }
+
+    // Greedy sequential class-local log-survival soft repulsion on `repulse_boxes`.
+    if n_kept > 1 {
+        let mut order: Vec<usize> =
+            (0..n_kept).filter(|&kp| valid[kp] && finite(&repulse_boxes[kp])).collect();
+        // Stable sort preserves ascending `kp` within each class for deterministic tie-breaking.
+        order.sort_by_key(|&kp| classes[kept[kp]]);
+        let mut lo = 0;
+        while lo < order.len() {
+            let cls = classes[kept[order[lo]]];
+            let mut hi = lo + 1;
+            while hi < order.len() && classes[kept[order[hi]]] == cls {
+                hi += 1;
+            }
+            let grp = &order[lo..hi];
+            let m = grp.len();
+            if m > 1 {
+                let areas: Vec<f32> = grp.iter().map(|&kp| repulse_boxes[kp].area()).collect();
+                let mut active = vec![true; m];
+                for _ in 0..m - 1 {
+                    let mut best_u = usize::MAX;
+                    let mut best_z = f64::NEG_INFINITY;
+                    for u in 0..m {
+                        if active[u] && (best_u == usize::MAX || z[grp[u]] > best_z) {
+                            best_u = u;
+                            best_z = z[grp[u]];
+                        }
+                    }
+                    if best_u == usize::MAX {
+                        break;
+                    }
+                    active[best_u] = false;
+                    let bb = repulse_boxes[grp[best_u]];
+                    let ba = areas[best_u];
+                    for u in 0..m {
+                        if !active[u] {
+                            continue;
+                        }
+                        let cb = &repulse_boxes[grp[u]];
+                        if bb.x2 <= cb.x1 || cb.x2 <= bb.x1 || bb.y2 <= cb.y1 || cb.y2 <= bb.y1 {
+                            continue;
+                        }
+                        let o = overlap(&bb, ba, cb) as f64;
+                        if o > 0.0 {
+                            let o2 = o * o;
+                            let o4 = o2 * o2;
+                            z[grp[u]] += DFL_REPULSE_GAMMA * (1.0 - o4).max(DFL_REPULSE_FLOOR).ln();
+                        }
+                    }
+                }
+            }
+            lo = hi;
+        }
+    }
+
+    (0..n_kept)
+        .map(|kp| if valid[kp] { branch_safe_sigmoid(z[kp]) as f32 } else { scores[kept[kp]] })
         .collect()
 }
 

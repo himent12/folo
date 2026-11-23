@@ -536,10 +536,9 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "conv2d_act_cat")
     }
     /// [`Backend::conv2d_act`] where only the output sites `at` are needed (`U32 [S]`, flat output indices
-    /// `n · OH·OW + oy · OW + ox`, each `< N·OH·OW`, any order, repeats allowed): the result is the full
-    /// `[N, O, OH, OW]` output in which every site holds the value [`Backend::conv2d_act`] computes there, and
-    /// every other element is unspecified. Reached through `Tensor::conv2d_act_at`, which falls back to the dense
-    /// [`Backend::conv2d_act`].
+    /// `n · OH·OW + oy · OW + ox`, each `< N·OH·OW`, any order, repeats allowed): each site depends only on its
+    /// kernel's own receptive field in `x`, and every other element of the `[N, O, OH, OW]` output is unspecified.
+    /// Reached through `Tensor::conv2d_act_at`, which falls back to the dense [`Backend::conv2d_act`].
     fn conv2d_act_at(
         &self,
         x: View<'_>,
@@ -550,6 +549,20 @@ pub trait Backend: Send + Sync + 'static {
         at: View<'_>,
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_act_at")
+    }
+    /// Like [`Backend::conv2d_act_at`], but permits tiled algorithms (such as CPU Winograd F(4×4, 3×3)) that
+    /// combine inputs across each requested 4×4 tile's full 6×6 patch to match dense [`Backend::conv2d_act`] bit
+    /// for bit at every site of `at`. Defaults to [`Backend::conv2d_act_at`].
+    fn conv2d_act_at_tiles(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: View<'_>,
+    ) -> Result<Storage> {
+        self.conv2d_act_at(x, w, bias, p, act, at)
     }
     /// [`Backend::conv2d_act`] at listed output pixels: `sites` `U32 [N, 1 + cap]` holds per image a count, then
     /// up to `cap` pixels `oy·OW + ox` (as [`Backend::detect_class_sites`] lists them). Returns `[N, O, cap]`:

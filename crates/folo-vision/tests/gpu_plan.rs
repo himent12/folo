@@ -11,7 +11,7 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_gpu::GpuContext;
 use folo_nn::Module;
-use folo_vision::fusion::BoxFusion;
+use folo_vision::fusion::{BoxFusion, ScoreRule};
 use folo_vision::model::{FoloModel, HeadMode, ImageCandidates, ModelConfig};
 use folo_vision::nms::NmsConfig;
 use folo_vision::predict::{PredictConfig, Predictor, f16_unavailable};
@@ -390,6 +390,18 @@ fn cand_bits(c: &[ImageCandidates]) -> Vec<Vec<u32>> {
                 v.extend(p.map(f32::to_bits));
             }
             v.push(ic.precisions.is_some() as u32);
+            for p in ic.bin_precisions.iter().flatten() {
+                v.extend(p.map(f32::to_bits));
+            }
+            v.push(ic.bin_precisions.is_some() as u32);
+            for e in ic.entropies.iter().flatten() {
+                v.push(e.to_bits());
+            }
+            v.push(ic.entropies.is_some() as u32);
+            for s in ic.strides.iter().flatten() {
+                v.push(s.to_bits());
+            }
+            v.push(ic.strides.is_some() as u32);
             v
         })
         .collect()
@@ -441,10 +453,18 @@ fn candidate_first_replays_are_bit_identical_with_and_without_dfl_precisions() {
         r.to_dtype(dtype).unwrap();
         for dims in [[1, 3, 64, 96], [2, 3, 96, 64]] {
             let x = input(dev, dims, dtype, 12);
-            for fusion in [BoxFusion::None, BoxFusion::Dfl] {
-                let nms = low_conf(0.3, fusion);
+            for (fusion, score) in [
+                (BoxFusion::None, ScoreRule::None),
+                (BoxFusion::Dfl, ScoreRule::None),
+                (BoxFusion::None, ScoreRule::DflRepulse),
+                (BoxFusion::Dfl, ScoreRule::DflRepulse),
+            ] {
+                let nms = NmsConfig { score, ..low_conf(0.3, fusion) };
                 let want = cand_bits(&r.predict_candidates(&x, &nms).unwrap());
-                assert!(want.iter().all(|v| v.len() > 2), "{dtype:?} {dims:?}: no candidates to compare");
+                assert!(
+                    want.iter().all(|v| v.len() > 5),
+                    "{dtype:?} {dims:?} {fusion:?} {score:?}: no candidates to compare"
+                );
                 cands_until_replayed(&m, &x, &nms, &want);
             }
         }
@@ -514,7 +534,7 @@ fn dfl_bins_follow_a_context_registered_again_at_the_same_device() {
         let m = scored(model(dev, 4, 0));
         let x = input(dev, [1, 3, 64, 96], DType::F32, 12);
         let got = cand_bits(&m.predict_candidates(&x, &nms).unwrap());
-        assert!(got[0].len() > 2, "round {round}: no candidates to compare");
+        assert!(got[0].len() > 5, "round {round}: no candidates to compare");
         match &first {
             None => first = Some(got),
             Some(want) => assert_eq!(&got, want, "the second context's candidates"),

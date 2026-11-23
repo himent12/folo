@@ -169,6 +169,16 @@ fn unreadable_samples_are_substituted_deterministically() {
     let all_bad: Arc<dyn Dataset> = Arc::new(Flaky { inner: rect_dataset(3), bad: vec![0, 1, 2] });
     let l = DataLoader::new(all_bad, LoaderConfig { augment: None, ..cfg(2) }).unwrap();
     assert!(l.epoch(0).next().unwrap().is_err());
+    // Sync path (`workers: 0`) must process every position in a failing batch so `failures()` records the same
+    // unreadable images as the threaded path (here pos 0 exhausts 0..64, while pos 1..3 hit 64, 65, 66).
+    let long_bad: Arc<dyn Dataset> = Arc::new(Flaky { inner: rect_dataset(68), bad: (0..67).collect() });
+    let sync_l =
+        DataLoader::new(long_bad.clone(), LoaderConfig { augment: None, shuffle: false, ..cfg(0) }).unwrap();
+    let par_l = DataLoader::new(long_bad, LoaderConfig { augment: None, shuffle: false, ..cfg(2) }).unwrap();
+    assert!(sync_l.epoch(0).next().unwrap().is_err());
+    assert!(par_l.epoch(0).next().unwrap().is_err());
+    assert_eq!(sync_l.failures().len(), 67);
+    assert_eq!(sync_l.failures(), par_l.failures());
 }
 
 #[test]
@@ -191,6 +201,8 @@ fn invalid_configs_are_rejected() {
     let ds = rect_dataset(2);
     assert!(DataLoader::new(ds.clone(), LoaderConfig { batch_size: 0, ..cfg(1) }).is_err());
     assert!(DataLoader::new(ds.clone(), LoaderConfig { imgsz: 0, ..cfg(1) }).is_err());
+    assert!(DataLoader::new(ds.clone(), LoaderConfig { batch_size: usize::MAX, ..cfg(1) }).is_err());
+    assert!(DataLoader::new(ds.clone(), LoaderConfig { imgsz: u32::MAX, batch_size: 4, ..cfg(1) }).is_err());
     let bad = AugmentConfig { fliplr: 1.5, ..AugmentConfig::default() };
     assert!(DataLoader::new(ds, LoaderConfig { augment: Some(bad), ..cfg(1) }).is_err());
     let empty: Arc<dyn Dataset> =
