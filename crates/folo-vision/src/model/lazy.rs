@@ -15,10 +15,10 @@ use rayon::prelude::*;
 
 use super::FoloModel;
 use super::head::{HeadLevel, HeadMode};
-use super::predict::{CPU_DECODE_BLOCK, Found, dfl_box, finish_candidates, single_label_block};
+use super::predict::{CPU_DECODE_BLOCK, DflWants, Found, dfl_box, finish_candidates, single_label_block};
 use crate::decode::Anchors;
 use crate::fusion::BoxFusion;
-use crate::nms::{Candidate, Detection, NmsConfig, class_allowed};
+use crate::nms::{Candidate, Detection, DflInputs, NmsConfig, class_allowed};
 
 /// One image's candidates from [`FoloModel::predict_candidates`], in anchor order.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -31,6 +31,12 @@ pub struct ImageCandidates {
     /// With DFL consensus scoring (`NmsConfig::score == ScoreRule::DflConsensus`, an `o2m` head): each candidate's
     /// scale-free bin precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
     pub bin_precisions: Option<Vec<[f32; 4]>>,
+    /// With DFL entropy repulsion scoring (`NmsConfig::score == ScoreRule::DflRepulse`, an `o2m` head): each
+    /// candidate's mean 4-side DFL Shannon entropy in nats, parallel to `cands`. `None` otherwise.
+    pub entropies: Option<Vec<f32>>,
+    /// With a score rule that uses anchor strides (`ScoreRule::DflRepulse`, an `o2m` head): each candidate's
+    /// anchor stride in input pixels, parallel to `cands`. `None` otherwise.
+    pub strides: Option<Vec<f32>>,
 }
 
 /// `c` (a fused `Conv` block) at the output sites `at` ([`Tensor::conv2d_act_at`]).
@@ -179,8 +185,8 @@ impl FoloModel {
         nms: &NmsConfig,
     ) -> Result<Vec<ImageCandidates>> {
         let mode = self.head_mode;
-        let want_side = self.wants_precisions(nms);
-        let want_bin = self.wants_bin_precisions(nms);
+        let wants = self.dfl_wants(nms);
+        let want_strides = self.wants_strides(nms);
         let cand_conf = nms.candidate_conf_for(mode);
         let levels = match (mode, &self.head.o2o) {
             (HeadMode::O2o, Some(o2o)) => o2o,
@@ -208,19 +214,24 @@ impl FoloModel {
             .into_par_iter()
             .map(|l| {
                 with_no_grad(|| {
-                    self.boxes_at(&levels[l], &feats[l], &need[l], &anchors, offsets[l], want_side, want_bin)
+                    self.boxes_at(&levels[l], &feats[l], &need[l], &anchors, offsets[l], wants, want_strides)
                 })
             })
             .collect::<Result<_>>()?;
         Ok((0..b)
             .map(|i| ImageCandidates {
                 cands: boxed.iter().flat_map(|lv| lv[i].cands.iter().copied()).collect(),
-                precisions: want_side.then(|| {
+                precisions: wants.side.then(|| {
                     boxed.iter().flat_map(|lv| lv[i].precisions.iter().flatten().copied()).collect()
                 }),
-                bin_precisions: want_bin.then(|| {
+                bin_precisions: wants.bin.then(|| {
                     boxed.iter().flat_map(|lv| lv[i].bin_precisions.iter().flatten().copied()).collect()
                 }),
+                entropies: wants
+                    .ent
+                    .then(|| boxed.iter().flat_map(|lv| lv[i].entropies.iter().flatten().copied()).collect()),
+                strides: want_strides
+                    .then(|| boxed.iter().flat_map(|lv| lv[i].strides.iter().flatten().copied()).collect()),
             })
             .collect())
     }
@@ -230,18 +241,30 @@ impl FoloModel {
     /// `o2m`, §6.6's top-k for `o2o`. Highest score first, in network-input pixels. `c` must come from
     /// [`FoloModel::predict_candidates`] with the same `nms` (DFL fusion needs its precisions).
     pub fn finish_candidates(&self, c: &ImageCandidates, nms: &NmsConfig) -> Vec<Detection> {
-        finish_candidates(self.head_mode, &c.cands, c.precisions.as_deref(), c.bin_precisions.as_deref(), nms)
+        let dfl = DflInputs {
+            precision: c.precisions.as_deref(),
+            bin_precision: c.bin_precisions.as_deref(),
+            entropy: c.entropies.as_deref(),
+            strides: c.strides.as_deref(),
+        };
+        finish_candidates(self.head_mode, &c.cands, dfl, nms)
     }
 
-    /// Whether the post-process of `nms` needs each candidate's side precisions (DFL evidence fusion, an `o2m`
-    /// head): the dense path's `HeadOutput::wants_precisions`.
-    pub(super) fn wants_precisions(&self, nms: &NmsConfig) -> bool {
-        nms.fusion == BoxFusion::Dfl && self.head_mode == HeadMode::O2m
+    /// Which DFL side statistics `nms` needs on this model's branch (`o2m` only).
+    pub(super) fn dfl_wants(&self, nms: &NmsConfig) -> DflWants {
+        if self.head_mode != HeadMode::O2m {
+            return DflWants::default();
+        }
+        DflWants {
+            side: nms.fusion == BoxFusion::Dfl,
+            bin: nms.score.wants_bin_precisions(),
+            ent: nms.score.wants_dfl_entropy(),
+        }
     }
 
-    /// Whether the post-process of `nms` needs each candidate's scale-free DFL bin precisions (`o2m` head).
-    pub(super) fn wants_bin_precisions(&self, nms: &NmsConfig) -> bool {
-        nms.score.wants_bin_precisions() && self.head_mode == HeadMode::O2m
+    /// Whether the post-process of `nms` needs each candidate's anchor stride (`o2m` head).
+    pub(super) fn wants_strides(&self, nms: &NmsConfig) -> bool {
+        nms.score.wants_strides() && self.head_mode == HeadMode::O2m
     }
 
     /// One level's class branch on `x` (`[B, C, h, w]`) and each image's candidates in it (local anchors).
@@ -261,7 +284,7 @@ impl FoloModel {
     }
 
     /// One level's box branch at the anchors `need[img]` (local, ascending) of `x` (`[B, C, h, w]`), decoded into
-    /// per-image candidate records (global anchors from `offset`), with `dfl` also their side precisions.
+    /// per-image candidate records (global anchors from `offset`), plus any requested DFL statistics and strides.
     #[allow(clippy::too_many_arguments)]
     fn boxes_at(
         &self,
@@ -270,16 +293,18 @@ impl FoloModel {
         need: &[Vec<Found>],
         anchors: &Anchors,
         offset: usize,
-        want_side: bool,
-        want_bin: bool,
+        wants: DflWants,
+        want_strides: bool,
     ) -> Result<Vec<ImageCandidates>> {
         let (b, _, h, w) = x.dims4()?;
         let (hw, rm) = (h * w, self.head.reg_max);
         if need.iter().all(Vec::is_empty) {
             let empty = ImageCandidates {
                 cands: Vec::new(),
-                precisions: want_side.then(Vec::new),
-                bin_precisions: want_bin.then(Vec::new),
+                precisions: wants.side.then(Vec::new),
+                bin_precisions: wants.bin.then(Vec::new),
+                entropies: wants.ent.then(Vec::new),
+                strides: want_strides.then(Vec::new),
             };
             return Ok(vec![empty; b]);
         }
@@ -314,17 +339,22 @@ impl FoloModel {
                     let mut bins = vec![0f32; rm];
                     let mut out = ImageCandidates {
                         cands: Vec::with_capacity(v.len()),
-                        precisions: want_side.then(|| Vec::with_capacity(v.len())),
-                        bin_precisions: want_bin.then(|| Vec::with_capacity(v.len())),
+                        precisions: wants.side.then(|| Vec::with_capacity(v.len())),
+                        bin_precisions: wants.bin.then(|| Vec::with_capacity(v.len())),
+                        entropies: wants.ent.then(|| Vec::with_capacity(v.len())),
+                        strides: want_strides.then(|| Vec::with_capacity(v.len())),
                     };
                     for &(j, class, score) in v {
                         let (j, k) = (j as usize, offset + j as usize);
                         let (point, st) = (anchors.points[k], anchors.strides[k]);
-                        let (bbox, p, bp) =
-                            dfl_box(&mut bins, |r| rg[r * hw + j], point, st, want_side, want_bin);
+                        let (bbox, p, bp, ent) = dfl_box(&mut bins, |r| rg[r * hw + j], point, st, wants);
                         out.cands.push(Candidate { anchor: k as u32, class, score, bbox });
                         out.precisions.iter_mut().zip(p).for_each(|(v, p)| v.push(p));
                         out.bin_precisions.iter_mut().zip(bp).for_each(|(v, p)| v.push(p));
+                        out.entropies.iter_mut().zip(ent).for_each(|(v, e)| v.push(e));
+                        if let Some(sv) = out.strides.as_mut() {
+                            sv.push(st);
+                        }
                     }
                     out
                 })
@@ -370,11 +400,21 @@ mod tests {
                 })
                 .collect();
             let got = m
-                .boxes_at(&m.head.levels[l], &feats[l], &need, &out.anchors, lv.start, false, false)
+                .boxes_at(
+                    &m.head.levels[l],
+                    &feats[l],
+                    &need,
+                    &out.anchors,
+                    lv.start,
+                    DflWants::default(),
+                    false,
+                )
                 .unwrap();
             for (i, (g, n)) in got.iter().zip(&need).enumerate() {
                 assert_eq!(g.cands.len(), n.len());
                 assert_eq!(g.precisions, None);
+                assert_eq!(g.entropies, None);
+                assert_eq!(g.strides, None);
                 for c in &g.cands {
                     let want = dense[i][c.anchor as usize];
                     let bits = |b: &crate::boxes::Xyxy| [b.x1, b.y1, b.x2, b.y2].map(f32::to_bits);

@@ -23,11 +23,15 @@
 
 use crate::boxes::Xyxy;
 use crate::fusion::{
-    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_consensus_scores, elc_scores, fuse_boxes,
+    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_consensus_scores, dfl_repulse_scores, elc_scores,
+    fuse_boxes,
 };
 use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+mod topk;
+pub use topk::{topk_candidates, topk_detections};
 
 /// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus`) when `conf` is higher:
 /// nearby supporting anchors down to `0.10` join the cluster before final scores are filtered by `score > conf`.
@@ -369,16 +373,29 @@ struct Cand {
 /// or input position): what [`BoxFusion::Dfl`] weighs a cluster member's sides by. `None`: equal precisions.
 pub type Precisions<'a> = Option<&'a [[f32; 4]]>;
 
+/// Optional per-source DFL and anchor metadata passed to post-processing ([`BoxFusion::Dfl`],
+/// [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`]), indexed by source position (anchor or candidate).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DflInputs<'a> {
+    /// Per-side DFL precisions ([`crate::decode::side_precision`]) for [`BoxFusion::Dfl`].
+    pub precision: Precisions<'a>,
+    /// Scale-free per-side DFL bin precisions ([`crate::decode::bin_precision`]) for [`ScoreRule::DflConsensus`].
+    pub bin_precision: Precisions<'a>,
+    /// Mean 4-side DFL Shannon entropy in nats ([`crate::decode::dfl_entropy`]) for [`ScoreRule::DflRepulse`].
+    pub entropy: Option<&'a [f32]>,
+    /// Anchor stride in input pixels for [`ScoreRule::DflRepulse`]'s cross-scale consensus term.
+    pub strides: Option<&'a [f32]>,
+}
+
 /// Cap the candidates (given in `(idx, class)` order) at the `cap` best by score, ties to the earlier candidate,
-/// then run batched NMS, fuse the kept boxes when [`NmsConfig::fusion`] asks for it (with `precision`, indexed by
-/// source index, for [`BoxFusion::Dfl`]), re-score them when [`NmsConfig::score`] does (from the unfused boxes, then
-/// sorted by the new score, ties in NMS's order), and build the detections. Every NMS path of every device ends here.
+/// then run batched NMS, fuse the kept boxes when [`NmsConfig::fusion`] asks for it (with `dfl.precision`, indexed
+/// by source index, for [`BoxFusion::Dfl`]), re-score them when [`NmsConfig::score`] does (sorted by the new score,
+/// ties in NMS's order), and build the detections. Every NMS path of every device ends here.
 fn finish(
     mut cands: Vec<Cand>,
     cfg: &NmsConfig,
     bbox_of: impl Fn(u32) -> Xyxy,
-    precision: Precisions,
-    bin_precision: Precisions,
+    dfl: DflInputs<'_>,
 ) -> Vec<Detection> {
     let (cands, boxes): (Vec<Cand>, Vec<Xyxy>) = if cfg.score.is_calibrated() {
         // Filter non-finite scores (+Inf / NaN) and non-finite boxes before `max_candidates` truncation so
@@ -440,7 +457,7 @@ fn finish(
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, None))
         }
         BoxFusion::Dfl => {
-            let of = precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
+            let of = dfl.precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
             let of = of.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
             Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
         }
@@ -459,9 +476,27 @@ fn finish(
         ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes)),
         ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou)),
         ScoreRule::DflConsensus => {
-            let bp = bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
+            let bp = dfl.bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
             let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
             Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou, bp))
+        }
+        ScoreRule::DflRepulse => {
+            let repulse_boxes: Vec<Xyxy> = dets.iter().map(|d| d.bbox).collect();
+            let ent = dfl.entropy.map(|e| move |k: usize| e[cands_slice[k].idx as usize]);
+            let ent = ent.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
+            let st = dfl.strides.map(|s| move |k: usize| s[cands_slice[k].idx as usize]);
+            let st = st.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
+            Some(dfl_repulse_scores(
+                &kept,
+                &boxes,
+                &repulse_boxes,
+                &scores,
+                &classes,
+                owner.as_deref(),
+                cfg.iou,
+                ent,
+                st,
+            ))
         }
     };
     if let Some(new_scores) = new_scores {
@@ -494,7 +529,7 @@ pub fn nms_detections(dets: &[Detection], cfg: &NmsConfig) -> Vec<Detection> {
         .filter(|(_, d)| d.score > conf && class_allowed(cfg, d.class))
         .map(|(i, d)| Cand { score: d.score, idx: i as u32, class: d.class })
         .collect();
-    finish(cands, cfg, |i| dets[i as usize].bbox, None, None)
+    finish(cands, cfg, |i| dets[i as usize].bbox, DflInputs::default())
 }
 
 /// The detector post-process for one image.
@@ -514,7 +549,7 @@ pub fn non_max_suppression(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    non_max_suppression_with(boxes, scores, None, num_classes, cfg)
+    non_max_suppression_with_inputs(boxes, scores, DflInputs::default(), num_classes, cfg)
 }
 
 /// [`non_max_suppression`] with the anchors' side precisions (`[A]`, [`crate::decode::side_precisions`]) for
@@ -529,7 +564,13 @@ pub fn non_max_suppression_with(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    non_max_suppression_with_dfl(boxes, scores, precision, None, num_classes, cfg)
+    non_max_suppression_with_inputs(
+        boxes,
+        scores,
+        DflInputs { precision, ..Default::default() },
+        num_classes,
+        cfg,
+    )
 }
 
 /// [`non_max_suppression_with`] also accepting scale-free per-anchor DFL bin precisions (`[A]`,
@@ -542,22 +583,30 @@ pub fn non_max_suppression_with_dfl(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    assert!(precision.is_none_or(|p| p.len() == boxes.len()), "non_max_suppression: precision must be [A]");
-    assert!(
-        bin_precision.is_none_or(|p| p.len() == boxes.len()),
-        "non_max_suppression: bin_precision must be [A]"
-    );
-    assert_eq!(
-        scores.len(),
-        boxes.len() * num_classes,
-        "non_max_suppression: scores must be [A, num_classes]"
-    );
-    assert!(boxes.len() <= u32::MAX as usize, "non_max_suppression: too many anchors");
-    if num_classes == 0 || boxes.is_empty() {
+    let dfl = DflInputs { precision, bin_precision, ..Default::default() };
+    non_max_suppression_with_inputs(boxes, scores, dfl, num_classes, cfg)
+}
+
+/// [`non_max_suppression`] accepting all optional per-anchor [`DflInputs`] (`[A]`).
+pub fn non_max_suppression_with_inputs(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    dfl: DflInputs<'_>,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    let a = boxes.len();
+    assert!(dfl.precision.is_none_or(|p| p.len() == a), "non_max_suppression: precision must be [A]");
+    assert!(dfl.bin_precision.is_none_or(|p| p.len() == a), "non_max_suppression: bin_precision must be [A]");
+    assert!(dfl.entropy.is_none_or(|e| e.len() == a), "non_max_suppression: entropy must be [A]");
+    assert!(dfl.strides.is_none_or(|s| s.len() == a), "non_max_suppression: strides must be [A]");
+    assert_eq!(scores.len(), a * num_classes, "non_max_suppression: scores must be [A, num_classes]");
+    assert!(a <= u32::MAX as usize, "non_max_suppression: too many anchors");
+    if num_classes == 0 || a == 0 {
         return Vec::new();
     }
-    let cands = extract_candidates(scores, boxes.len(), num_classes, num_classes, 0, cfg);
-    finish(cands, cfg, |i| boxes[i as usize], precision, bin_precision)
+    let cands = extract_candidates(scores, a, num_classes, num_classes, 0, cfg);
+    finish(cands, cfg, |i| boxes[i as usize], dfl)
 }
 
 /// [`non_max_suppression`] of one image's decoded outputs as rows `[A, 4 + num_classes]` (`x1, y1, x2, y2`, then
@@ -566,7 +615,7 @@ pub fn non_max_suppression_with_dfl(
 /// # Panics
 /// If `rows.len()` is not a multiple of `4 + num_classes`, or there are more than `u32::MAX` anchors.
 pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfig) -> Vec<Detection> {
-    non_max_suppression_rows_with(rows, None, num_classes, cfg)
+    non_max_suppression_rows_with_inputs(rows, DflInputs::default(), num_classes, cfg)
 }
 
 /// [`non_max_suppression_rows`] with the anchors' side precisions (`[A]`) for [`BoxFusion::Dfl`].
@@ -579,7 +628,12 @@ pub fn non_max_suppression_rows_with(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    non_max_suppression_rows_with_dfl(rows, precision, None, num_classes, cfg)
+    non_max_suppression_rows_with_inputs(
+        rows,
+        DflInputs { precision, ..Default::default() },
+        num_classes,
+        cfg,
+    )
 }
 
 /// [`non_max_suppression_rows_with`] also accepting scale-free DFL bin precisions (`[A]`) for
@@ -591,6 +645,17 @@ pub fn non_max_suppression_rows_with_dfl(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
+    let dfl = DflInputs { precision, bin_precision, ..Default::default() };
+    non_max_suppression_rows_with_inputs(rows, dfl, num_classes, cfg)
+}
+
+/// [`non_max_suppression_rows`] accepting all optional per-anchor [`DflInputs`] (`[A]`).
+pub fn non_max_suppression_rows_with_inputs(
+    rows: &[f32],
+    dfl: DflInputs<'_>,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     let w = 4 + num_classes;
     assert!(rows.len().is_multiple_of(w), "non_max_suppression_rows: rows must be [A, 4 + num_classes]");
     let a = rows.len() / w;
@@ -598,17 +663,19 @@ pub fn non_max_suppression_rows_with_dfl(
     if num_classes == 0 || a == 0 {
         return Vec::new();
     }
-    assert!(precision.is_none_or(|p| p.len() == a), "non_max_suppression_rows: precision must be [A]");
+    assert!(dfl.precision.is_none_or(|p| p.len() == a), "non_max_suppression_rows: precision must be [A]");
     assert!(
-        bin_precision.is_none_or(|p| p.len() == a),
+        dfl.bin_precision.is_none_or(|p| p.len() == a),
         "non_max_suppression_rows: bin_precision must be [A]"
     );
+    assert!(dfl.entropy.is_none_or(|e| e.len() == a), "non_max_suppression_rows: entropy must be [A]");
+    assert!(dfl.strides.is_none_or(|s| s.len() == a), "non_max_suppression_rows: strides must be [A]");
     let cands = extract_candidates(rows, a, num_classes, w, 4, cfg);
     let bbox_of = |i: u32| {
         let r = &rows[i as usize * w..];
         Xyxy::new(r[0], r[1], r[2], r[3])
     };
-    finish(cands, cfg, bbox_of, precision, bin_precision)
+    finish(cands, cfg, bbox_of, dfl)
 }
 
 /// Multi-label [`non_max_suppression_rows`] from the `(anchor, class, score)` pairs whose score is `> conf`, in any
@@ -620,7 +687,7 @@ pub fn non_max_suppression_pairs(
     bbox_of: impl Fn(u32) -> Xyxy,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    non_max_suppression_pairs_with(pairs, bbox_of, None, cfg)
+    non_max_suppression_pairs_with_inputs(pairs, bbox_of, DflInputs::default(), cfg)
 }
 
 /// [`non_max_suppression_pairs`] with the anchors' side precisions (indexed by anchor) for [`BoxFusion::Dfl`].
@@ -630,16 +697,27 @@ pub fn non_max_suppression_pairs_with(
     precision: Precisions,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    non_max_suppression_pairs_with_dfl(pairs, bbox_of, precision, None, cfg)
+    non_max_suppression_pairs_with_inputs(pairs, bbox_of, DflInputs { precision, ..Default::default() }, cfg)
 }
 
 /// [`non_max_suppression_pairs_with`] also accepting scale-free DFL bin precisions (indexed by anchor) for
 /// [`ScoreRule::DflConsensus`].
 pub fn non_max_suppression_pairs_with_dfl(
-    mut pairs: Vec<(u32, u32, f32)>,
+    pairs: Vec<(u32, u32, f32)>,
     bbox_of: impl Fn(u32) -> Xyxy,
     precision: Precisions,
     bin_precision: Precisions,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    let dfl = DflInputs { precision, bin_precision, ..Default::default() };
+    non_max_suppression_pairs_with_inputs(pairs, bbox_of, dfl, cfg)
+}
+
+/// [`non_max_suppression_pairs`] accepting all optional per-anchor [`DflInputs`] (indexed by anchor).
+pub fn non_max_suppression_pairs_with_inputs(
+    mut pairs: Vec<(u32, u32, f32)>,
+    bbox_of: impl Fn(u32) -> Xyxy,
+    dfl: DflInputs<'_>,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
     debug_assert!(cfg.multi_label, "non_max_suppression_pairs is the multi-label path");
@@ -650,7 +728,7 @@ pub fn non_max_suppression_pairs_with_dfl(
         .filter(|&(_, c, s)| s > conf && class_allowed(cfg, c))
         .map(|(idx, class, score)| Cand { score, idx, class })
         .collect();
-    finish(cands, cfg, bbox_of, precision, bin_precision)
+    finish(cands, cfg, bbox_of, dfl)
 }
 
 /// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
@@ -748,12 +826,22 @@ pub fn nms_candidates_with_dfl(
     bin_precision: Precisions,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
-    assert!(cands.len() <= u32::MAX as usize, "nms_candidates: too many candidates");
-    assert!(precision.is_none_or(|p| p.len() == cands.len()), "nms_candidates: precision must match cands");
-    assert!(
-        bin_precision.is_none_or(|p| p.len() == cands.len()),
-        "nms_candidates: bin_precision must match cands"
-    );
+    let dfl = DflInputs { precision, bin_precision, ..Default::default() };
+    nms_candidates_with_inputs(cands, dfl, cfg)
+}
+
+/// [`nms_candidates`] accepting all optional per-candidate [`DflInputs`] (parallel to `cands`).
+pub fn nms_candidates_with_inputs(
+    cands: &[Candidate],
+    dfl: DflInputs<'_>,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    let n = cands.len();
+    assert!(n <= u32::MAX as usize, "nms_candidates: too many candidates");
+    assert!(dfl.precision.is_none_or(|p| p.len() == n), "nms_candidates: precision must match cands");
+    assert!(dfl.bin_precision.is_none_or(|p| p.len() == n), "nms_candidates: bin_precision must match cands");
+    assert!(dfl.entropy.is_none_or(|e| e.len() == n), "nms_candidates: entropy must match cands");
+    assert!(dfl.strides.is_none_or(|s| s.len() == n), "nms_candidates: strides must match cands");
     debug_assert!(cands.windows(2).all(|w| w[0].anchor < w[1].anchor), "nms_candidates: unsorted");
     let conf = cfg.candidate_conf();
     // Positions in anchor order tie-break exactly as anchor indices do.
@@ -763,110 +851,7 @@ pub fn nms_candidates_with_dfl(
         .filter(|(_, c)| c.score > conf && class_allowed(cfg, c.class))
         .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
         .collect();
-    finish(list, cfg, |i| cands[i as usize].bbox, precision, bin_precision)
-}
-
-/// Ranks `(score, key)` pairs by descending score, ties by ascending key (NaN never reaches here: it fails every
-/// `> conf` test).
-fn by_score<K: Ord>(a: &(f32, K), b: &(f32, K)) -> std::cmp::Ordering {
-    b.0.total_cmp(&a.0).then(a.1.cmp(&b.1))
-}
-
-/// The `k` best of `v` by [`by_score`], in that order.
-fn top_sorted<K: Ord + Copy>(v: &mut Vec<(f32, K)>, k: usize) {
-    if v.len() > k {
-        if k == 0 {
-            v.clear();
-            return;
-        }
-        v.select_nth_unstable_by(k - 1, by_score);
-        v.truncate(k);
-    }
-    v.sort_unstable_by(by_score);
-}
-
-/// The post-process of the one-to-one (NMS-free) head for one image (docs/MODEL.md §6.6): with `k =
-/// min(max_det, A)`, the `k` anchors with the highest max-class score (ties: lower anchor), then
-///
-/// - `multi_label` (validation): the `k` best (anchor, class) pairs among those anchors (ties: the anchor's rank,
-///   then the class), each kept if its score is `> conf`;
-/// - single-label (prediction): each anchor once, with its best class (first maximum), kept if `> conf`.
-///
-/// Then the class filter. No NMS and no candidate cap (`iou`, `max_candidates` and `agnostic` are unused).
-/// Returns at most `max_det` detections sorted by descending score. Anchors whose best score is not `> conf` can
-/// contribute no pair above it, so they are dropped before ranking: the result is the spec's.
-///
-/// # Panics
-/// If `scores.len() != boxes.len() * num_classes`, or there are more than `u32::MAX` anchors.
-pub fn topk_detections(
-    boxes: &[Xyxy],
-    scores: &[f32],
-    num_classes: usize,
-    cfg: &NmsConfig,
-) -> Vec<Detection> {
-    assert_eq!(scores.len(), boxes.len() * num_classes, "topk_detections: scores must be [A, num_classes]");
-    assert!(boxes.len() <= u32::MAX as usize, "topk_detections: too many anchors");
-    if num_classes == 0 || boxes.is_empty() {
-        return Vec::new();
-    }
-    let k = cfg.max_det.min(boxes.len());
-    // (best score, (anchor, best class)): the class is a function of the anchor, so ties rank by anchor.
-    let mut anchors: Vec<(f32, (u32, u32))> = Vec::new();
-    for (a, row) in scores.chunks_exact(num_classes).enumerate() {
-        let (mut bc, mut bs) = (0usize, row[0]);
-        for (c, &s) in row.iter().enumerate().skip(1) {
-            if s > bs {
-                (bc, bs) = (c, s);
-            }
-        }
-        if bs > cfg.conf {
-            anchors.push((bs, (a as u32, bc as u32)));
-        }
-    }
-    top_sorted(&mut anchors, k);
-    let dets: Vec<Detection> = if cfg.multi_label {
-        let mut pairs: Vec<(f32, (u32, u32))> = Vec::new();
-        for (rank, &(_, (a, _))) in anchors.iter().enumerate() {
-            let row = &scores[a as usize * num_classes..(a as usize + 1) * num_classes];
-            for (c, &s) in row.iter().enumerate() {
-                if s > cfg.conf {
-                    pairs.push((s, (rank as u32, c as u32)));
-                }
-            }
-        }
-        top_sorted(&mut pairs, k);
-        pairs
-            .into_iter()
-            .map(|(s, (r, c))| Detection {
-                bbox: boxes[anchors[r as usize].1.0 as usize],
-                score: s,
-                class: c,
-            })
-            .collect()
-    } else {
-        anchors.iter().map(|&(s, (a, c))| Detection { bbox: boxes[a as usize], score: s, class: c }).collect()
-    };
-    dets.into_iter().filter(|d| class_allowed(cfg, d.class)).collect()
-}
-
-/// [`topk_detections`] single-label from the candidates already extracted (one per anchor whose best class scores
-/// `> conf`, any order; folo-core's `Tensor::detect_candidates`): the same detections.
-pub fn topk_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
-    assert!(cands.len() <= u32::MAX as usize, "topk_candidates: too many candidates");
-    // (score, (anchor, position)): ties rank by anchor, as the full selection does.
-    let mut ranked: Vec<(f32, (u32, u32))> = cands
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.score > cfg.conf)
-        .map(|(i, c)| (c.score, (c.anchor, i as u32)))
-        .collect();
-    top_sorted(&mut ranked, cfg.max_det);
-    ranked
-        .into_iter()
-        .map(|(_, (_, i))| cands[i as usize])
-        .map(|c| Detection { bbox: c.bbox, score: c.score, class: c.class })
-        .filter(|d| class_allowed(cfg, d.class))
-        .collect()
+    finish(list, cfg, |i| cands[i as usize].bbox, dfl)
 }
 
 /// The post-process of one image's decoded outputs for the branch that produced them: [`non_max_suppression`]
@@ -878,7 +863,7 @@ pub fn postprocess(
     cfg: &NmsConfig,
     mode: HeadMode,
 ) -> Vec<Detection> {
-    postprocess_with(boxes, scores, None, num_classes, cfg, mode)
+    postprocess_with_inputs(boxes, scores, DflInputs::default(), num_classes, cfg, mode)
 }
 
 /// [`postprocess`] with the anchors' side precisions (`[A]`) for [`BoxFusion::Dfl`] (unused by `o2o`).
@@ -890,7 +875,14 @@ pub fn postprocess_with(
     cfg: &NmsConfig,
     mode: HeadMode,
 ) -> Vec<Detection> {
-    postprocess_with_dfl(boxes, scores, precision, None, num_classes, cfg, mode)
+    postprocess_with_inputs(
+        boxes,
+        scores,
+        DflInputs { precision, ..Default::default() },
+        num_classes,
+        cfg,
+        mode,
+    )
 }
 
 /// [`postprocess_with`] also accepting scale-free DFL bin precisions (`[A]`) for [`ScoreRule::DflConsensus`].
@@ -903,10 +895,21 @@ pub fn postprocess_with_dfl(
     cfg: &NmsConfig,
     mode: HeadMode,
 ) -> Vec<Detection> {
+    let dfl = DflInputs { precision, bin_precision, ..Default::default() };
+    postprocess_with_inputs(boxes, scores, dfl, num_classes, cfg, mode)
+}
+
+/// [`postprocess`] accepting all optional per-anchor [`DflInputs`] (`[A]`, unused by `o2o`).
+pub fn postprocess_with_inputs(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    dfl: DflInputs<'_>,
+    num_classes: usize,
+    cfg: &NmsConfig,
+    mode: HeadMode,
+) -> Vec<Detection> {
     match mode {
-        HeadMode::O2m => {
-            non_max_suppression_with_dfl(boxes, scores, precision, bin_precision, num_classes, cfg)
-        }
+        HeadMode::O2m => non_max_suppression_with_inputs(boxes, scores, dfl, num_classes, cfg),
         HeadMode::O2o => topk_detections(boxes, scores, num_classes, cfg),
     }
 }

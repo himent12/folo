@@ -15,7 +15,7 @@ model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.f
 loss/              the detection loss: assignment.rs (host assigner), terms.rs (BCE/MAL, CIoU/NWD-IoU, DFL),
                    device.rs (GPU), distill/ (dense/BCKD/GT-verified distillation, §8.9)
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
-boxes.rs, decode.rs, nms/mod.rs, fusion.rs   boxes and IoU, anchors and DFL decode, NMS, cluster fusion & ELC/DFL-consensus
+boxes.rs, decode.rs, nms/{mod.rs, topk.rs}, fusion.rs   boxes and IoU, anchors and DFL decode, NMS / o2o top-k, cluster fusion & ELC/DFL-consensus/DFL-repulse
 metrics.rs, cocoeval.rs                  Evaluator (mAP, PR curves, confusion matrix), the full COCOeval
 train/             Trainer: config, setup (new / resume), run (epochs), epoch, feed (GPU staging), device,
                    teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/
@@ -96,8 +96,9 @@ preprocess / inference / postprocess timing split.
   fixed-capacity site lists, `conv0` on the listed windows (scattered back into a map), `conv1` and `out` at the
   candidates, then one decode of every level and one readback of the records. The dispatches do not depend on the
   candidates, and an image whose candidates overflow a list takes the dense head on the same features.
-- With DFL box fusion the dense path's moment ops also run on the candidates' box-logit columns (the moments and the
-  site lists are read back too).
+- With DFL box fusion / DFL scoring the dense path's DFL moment/entropy ops also run on the candidates' box-logit
+  columns (all site lists are packed with the records into one `u32` buffer, so the whole readback is at most two
+  transfers: one `u32` buffer and one combined `f32` stats buffer).
 
 ### On the CPU
 - The whole prediction runs inside the rayon pool (`cpu::in_pool`).

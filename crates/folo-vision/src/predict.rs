@@ -63,9 +63,9 @@ pub struct PredictConfig {
     pub fusion: BoxFusion,
     /// The cluster IoU of [`PredictConfig::fusion`] ([`NmsConfig::fusion_iou`]).
     pub fusion_iou: f32,
-    /// How the kept boxes are scored ([`NmsConfig::score`]; off by default). `elc` and `dfl-consensus` preserve
-    /// the `[0, 1]` score scale (pulling supporting anchors down to `0.10` before filtering final scores by
-    /// `conf`); `consensus` rescales scores by up to `1 / √10`.
+    /// How the kept boxes are scored ([`NmsConfig::score`]; off by default). `elc`, `dfl-consensus` and
+    /// `dfl-repulse` preserve the `[0, 1]` score scale (pulling supporting anchors down to `0.10` before filtering
+    /// final scores by `conf`); `consensus` rescales scores by up to `1 / √10`.
     pub score: ScoreRule,
 }
 
@@ -555,8 +555,9 @@ impl Predictor {
     /// the model predicts with its `o2o` head, [`FoloModel::head_mode`]) on each image's decoded
     /// `(boxes, scores)` (from [`HeadOutput::decode_images`] or [`HeadOutput::split_decoded`]), then the boxes
     /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count. Decoded boxes
-    /// carry no DFL logits, so [`BoxFusion::Dfl`] fuses as [`BoxFusion::Vote`] and [`ScoreRule::DflConsensus`]
-    /// scores as [`ScoreRule::Elc`] here.
+    /// carry no DFL logits or anchor strides, so [`BoxFusion::Dfl`] fuses as [`BoxFusion::Vote`],
+    /// [`ScoreRule::DflConsensus`] scores as [`ScoreRule::Elc`], and [`ScoreRule::DflRepulse`] omits its entropy
+    /// and cross-stride terms here.
     pub fn finish(
         &self,
         batch: &PreparedBatch,

@@ -187,7 +187,7 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
                 let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
                 changed += got.iter().zip(&off).map(|(on, off)| lowered_by_consensus(on, off)).sum::<usize>();
             }
-            ScoreRule::Elc | ScoreRule::DflConsensus => {
+            ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse => {
                 let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
                 changed += got.iter().zip(&off).filter(|(on, off)| bits(on) != bits(off)).count();
             }
@@ -251,13 +251,24 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
                 let what = format!("{fusion:?} {dtype:?} tensor cores {on} {dims:?}");
                 let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::None);
                 assert!(n > 0, "{what}: nothing compared");
-                // The consensus / ELC / DFL-consensus rules run on the host after NMS, on the same candidates.
-                for rule in [ScoreRule::Consensus, ScoreRule::Elc, ScoreRule::DflConsensus] {
+                // The consensus / ELC / DFL-consensus / DFL-repulse rules run on the host after NMS.
+                for rule in
+                    [ScoreRule::Consensus, ScoreRule::Elc, ScoreRule::DflConsensus, ScoreRule::DflRepulse]
+                {
                     let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, rule);
                     assert!(n > 0, "{what}, {rule:?}: nothing compared");
                 }
             }
         }
+        // Also test `ScoreRule::DflRepulse` without box fusion (entropy-only `[B, 1, Σ cap]` GPU stats path).
+        let n = check(
+            &m,
+            &input([1, 3, 384, 640], 5, dev, dtype),
+            "None+DflRepulse",
+            BoxFusion::None,
+            ScoreRule::DflRepulse,
+        );
+        assert!(n > 0, "None+DflRepulse: nothing compared");
         // The fusion moves boxes, so the comparison above sees the precisions.
         let x = input([1, 3, 384, 640], 5, dev, dtype);
         let _g = no_grad();
@@ -266,13 +277,16 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
         let (dfl, vote) =
             (out.detections(&nms(BoxFusion::Dfl)).unwrap(), out.detections(&nms(BoxFusion::Vote)).unwrap());
         assert_ne!(bits(&dfl[0]), bits(&vote[0]), "{dtype:?}: DFL fusion moved no box past voting");
-        // Exercise calibrated rules with real NMS suppression (default iou = 0.7) on GPU candidates-first.
-        for rule in [ScoreRule::Elc, ScoreRule::DflConsensus] {
-            let cfg = NmsConfig { conf: 0.3, fusion: BoxFusion::Dfl, score: rule, ..NmsConfig::default() };
+        // Exercise calibrated rules with real NMS suppression on GPU candidates-first.
+        for (rule, iou) in
+            [(ScoreRule::Elc, 0.70), (ScoreRule::DflConsensus, 0.70), (ScoreRule::DflRepulse, 0.75)]
+        {
+            let cfg =
+                NmsConfig { conf: 0.3, iou, fusion: BoxFusion::Dfl, score: rule, ..NmsConfig::default() };
             let want = out.detections(&cfg).unwrap();
             let cands = m.predict_candidates(&x, &cfg).unwrap();
             let got: Vec<Vec<Detection>> = cands.iter().map(|c| m.finish_candidates(c, &cfg)).collect();
-            assert_eq!(bits(&got[0]), bits(&want[0]), "{dtype:?} tensor cores {on}: {rule:?} at iou=0.7");
+            assert_eq!(bits(&got[0]), bits(&want[0]), "{dtype:?} tensor cores {on}: {rule:?} at iou={iou}");
         }
         assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
     }
@@ -395,18 +409,57 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
             "DFL-consensus: image {img}"
         );
     }
-    // `o2o` ignores `--score` (DflConsensus matches None bit-for-bit).
+    // Also check mixed fit/overflow batch with `DflRepulse` (entropies + strides + precisions bit-exact vs dense).
+    let nms_rep =
+        NmsConfig { conf: conf_low, fusion: BoxFusion::Dfl, score: ScoreRule::DflRepulse, ..nms.clone() };
+    let got_rep = m_low.predict_candidates(&x, &nms_rep).unwrap();
+    let want_rep = dense_low.detections(&nms_rep).unwrap();
+    for img in 0..2 {
+        assert_eq!(got_rep[img].entropies.as_ref().unwrap().len(), got_rep[img].cands.len());
+        assert_eq!(got_rep[img].strides.as_ref().unwrap().len(), got_rep[img].cands.len());
+        assert_eq!(
+            bits(&m_low.finish_candidates(&got_rep[img], &nms_rep)),
+            bits(&want_rep[img]),
+            "DFL-repulse mixed fit/overflow: image {img}"
+        );
+    }
+    // Verify sparse-gather `candidates_on_device` with exactly 1 surviving candidate matches dense bit-for-bit.
+    let mut all_scores: Vec<f32> = (0..2 * an)
+        .map(|k| {
+            let (img, j) = (k / an, k % an);
+            (0..nc).map(|c| cls_low[(img * nc + c) * an + j]).fold(f32::NEG_INFINITY, f32::max)
+        })
+        .map(|l| 1.0 / (1.0 + (-l).exp()))
+        .collect();
+    all_scores.sort_by(|u, v| v.total_cmp(u));
+    let conf_one = (all_scores[0] + all_scores[1]) * 0.5;
+    if all_scores[0] > conf_one && conf_one > all_scores[1] {
+        let nms_one =
+            NmsConfig { conf: conf_one, fusion: BoxFusion::Dfl, score: ScoreRule::DflRepulse, ..nms.clone() };
+        let got_one = m_low.predict_candidates(&x, &nms_one).unwrap();
+        let want_one = dense_low.detections(&nms_one).unwrap();
+        for img in 0..2 {
+            assert_eq!(
+                bits(&m_low.finish_candidates(&got_one[img], &nms_one)),
+                bits(&want_one[img]),
+                "DFL-repulse single-candidate sparse gather: image {img}"
+            );
+        }
+    }
+    // `o2o` ignores `--score` (DflConsensus and DflRepulse match None bit-for-bit).
     let m_o2o = model(3, "o2o", dev, DType::F32);
     let o2o_none = NmsConfig { conf: 0.25, score: ScoreRule::None, ..NmsConfig::default() };
-    let o2o_dfl = NmsConfig { conf: 0.25, score: ScoreRule::DflConsensus, ..NmsConfig::default() };
     let d_none = m_o2o.predict_raw(&x, &o2o_none).unwrap();
-    let d_dfl = m_o2o.predict_raw(&x, &o2o_dfl).unwrap();
-    for img in 0..2 {
-        assert_eq!(
-            bits(&d_none.images[img].detections),
-            bits(&d_dfl.images[img].detections),
-            "o2o img={img}"
-        );
+    for rule in [ScoreRule::DflConsensus, ScoreRule::DflRepulse] {
+        let o2o_sc = NmsConfig { conf: 0.25, score: rule, ..NmsConfig::default() };
+        let d_sc = m_o2o.predict_raw(&x, &o2o_sc).unwrap();
+        for img in 0..2 {
+            assert_eq!(
+                bits(&d_none.images[img].detections),
+                bits(&d_sc.images[img].detections),
+                "o2o {rule:?} img={img}"
+            );
+        }
     }
     ctx.set_tensor_cores(true);
 }
