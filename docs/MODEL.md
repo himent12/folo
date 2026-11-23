@@ -657,6 +657,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `gauge_norm` | false | opt-in exact function-preserving Floor Conv+BN Gauge Normalization applied on `--weights` transfer load (raises small-norm filters to the target norm floor while rescaling BN `running_mean` by `α` and `running_var + ε` by `α²`, leaving BN `γ`/`β` fixed) |
 | `bn_freeze_close_mosaic` | false | opt-in eval-mode BatchNorm (frozen running stats) during closed-mosaic annealing epochs (intended for mature Stage-2 runs) |
 | `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
+| `musgd.ortho` | `polar4` | Muon orthogonalisation schedule (§8.2): `polar4` (4-step Polar-FOLO minimax Remez + step-0 Schatten-4 spectral rescaling, 12 GEMMs), `polar5` (5-step Polar-FOLO, 15 GEMMs), or legacy `ns5` (fixed 5-step Newton–Schulz, 15 GEMMs); missing in older configs reads as `ns5` |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -729,24 +730,39 @@ rank 2 or 4 in a `decay` group (every conv weight) also takes a Muon step with t
 m = μ · m + (1 − μ) · g                      (muon_buffer, starts at zero)
 u = μ · m + (1 − μ) · g                      (Nesterov)
 X = u as [d0, d1·d2·d3] / (‖u‖_F + 1e-7), transposed if it has more rows than columns
-5 times:  A = X·Xᵀ;  X = 3.4445·X + (−4.7750·A + 2.0315·A·A)·X      (then transposed back)
+k = 0 .. S-1:  A = X·Xᵀ;  X = a_k·X + (b_k·A + c_k·A·A)·X      (then transposed back)
 p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor is 1 for square kernels)
 ```
-then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
-weights and the class-branch factor are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
-parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's (`auto` rule 5 uses 0.5 / 0.5 for a run from
-scratch, above); other step weights are saved in the
+By default (`musgd.ortho = polar4`, **Polar-FOLO**), `S = 4` (12 GEMMs, 20% fewer than legacy 5-step Newton–Schulz)
+using per-step minimax Remez odd-quintic coefficients `(a_k, b_k, c_k)` derived with a `1.005` f32 safety cushion
+(`folo_nn::optim::POLAR4_COEFFS`), paired with zero-extra-GEMM step-0 Schatten-4 spectral rescaling: after `A₀ = X₀·X₀ᵀ`,
+`α = ‖A₀‖_F^(1/2) + 1e-7 / (‖u‖_F + 1e-7)` satisfies `σ₁(X₀ / α) < 1` while compressing high-rank spectra up to `r^(1/4)`,
+and `1 / α` is folded directly into step 0's `(a₀, b₀, c₀)` (`a₀/α`, `b₀/α²`, `c₀/α⁴`, plus `1/α` on `Bm·X₀`) with no
+extra GEMM. `musgd.ortho = polar5` runs the 5-step Polar-FOLO schedule (`POLAR5_COEFFS`, 15 GEMMs) for tighter
+high-condition-number orthogonalisation; `musgd.ortho = ns5` keeps the legacy fixed 5-step Newton–Schulz coefficients
+`(3.4445, -4.7750, 2.0315)` (configs and checkpoints written before `musgd.ortho` default to `ns5` so they resume
+bit-exactly). In 3-seed equal-budget AMP training A/Bs on `folo-n`, `polar4` beats `ns5` on synthetic shapes from
+scratch (best mAP50-95 `0.9416` vs `0.9376`, `+0.0040`; final `0.9416` vs `0.9375`, `+0.0041`) and improves final
+mAP50-95 on BCCD fine-tuning (`0.6254` vs `0.6216`, `+0.0038`, matching best `0.6312` vs `0.6313`) with zero non-finite
+batches and 20% fewer orthogonalisation GEMMs.
+
+Then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
+weights, class-branch factor and schedule are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
+parameter runs at `sgd · lr`; `cls_lr = 3.0`; `ortho = polar4`), with `auto` rule 5 using 0.5 / 0.5 for a run from
+scratch (above); non-default step weights and non-`ns5` orthogonalisation schedules are saved in the
 checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's published COCO run used 0.528 /
 0.674 / 2.737 (the `muon_w`, `sgd_w`, `cls_w` of `yolo26n.pt`'s `train_args`), which fine-tuned BCCD worse here
 (docs/notes/hill/r2-learn.md). Same
-`lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
-reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
-GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, and the rest of the
-Muon step is one fused call for all matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, the
-normalisation, each Newton–Schulz step as three grouped GEMMs over every matrix at once with no zero padding, and
-`p −= 0.2 · lr · O`); only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
-Newton–Schulz against `f64`), `tests/gpu/` (GPU against CPU; the fused kernels against the tensor ops on wide,
-tall, multi-tile and single-row matrices, zero, near-zero, NaN and empty ones), `tests/folo_io.rs` (bit-exact resume).
+`lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the orthogonalisation in `f32` (the
+reference: `bfloat16`); on the CPU matrices are batched by column count with zero-padded rows, which changes no value
+(including `‖A₀‖_F`). On a GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels,
+and the rest of the Muon step fuses `decay` and `decay.cls` (when they share `(μ, nesterov)`) into one call for all
+matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, the normalisation, optional `muon_s4`, each
+polynomial step as three grouped symmetric/rectangular `vec4` GEMMs over every matrix at once, and `p −= lr · scale · O`);
+only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs`
+(two steps against an `f64` reference for `Polar4`, `Ns5`, and `Polar5`, orthogonality and `f64` checks), `tests/gpu/`
+(GPU against CPU; the fused kernels against the tensor ops on wide, tall, multi-tile, `r > 256` and single-row
+matrices, zero, near-zero, NaN and empty ones), `tests/folo_io.rs` (bit-exact resume across all schedules).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation

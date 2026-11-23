@@ -57,7 +57,7 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         _ if name.starts_with("tal_") || name.starts_with("det_") => {
             u("K", 0) <= MAX_TOPK && u("K2", 0) <= MAX_TOPK && u("R", 0) <= MAX_REG_MAX
         }
-        "muon_gemm" => u("MODE", 0) <= 2,
+        "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
     }
@@ -101,7 +101,49 @@ mod tests {
             ("move", Spec::new().u32("EB", 2).u32("MODE", 1).u32("RANK", 0)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
-            ("muon_gemm", Spec::new().u32("MODE", 2)),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 2)
+                    .u32("BM", 64)
+                    .u32("BN", 128)
+                    .u32("TM", 4)
+                    .u32("TN", 8)
+                    .u32("DEPTH", 16),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 2)
+                    .u32("BM", 64)
+                    .u32("BN", 64)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 16)
+                    .bool("S4", true),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("DBUF", true),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("S4", true),
+            ),
             ("unary", Spec::new().u32("OP", 40)),
         ];
         for (name, spec) in &ok {
@@ -138,6 +180,18 @@ mod tests {
             ("tal_targets", Spec::new().u32("K", 10).u32("K2", 65536)),
             ("det_box", Spec::new().u32("R", 33)),
             ("muon_gemm", Spec::new().u32("MODE", 3)),
+            ("muon_gemm", Spec::new().u32("MODE", 0).u32("BM", 64).u32("BN", 128).u32("TM", 4).u32("TN", 8)),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .u32("BM", 64)
+                    .u32("BN", 64)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 16),
+            ),
+            ("muon_gemm", Spec::new().u32("MODE", 2).u32("BM", 32).u32("BN", 32).u32("TM", 8).u32("TN", 8)),
         ];
         for (name, spec) in &bad {
             assert!(!precompilable(name, spec), "{name} {}", spec.describe());

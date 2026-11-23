@@ -661,14 +661,11 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "scale_many")
     }
 
-    /// MuSGD's Muon update of many matrices in one call (folo-nn's `MuSgd`): for each item, the matrix
-    /// `u = nesterov ? (g · (1 − μ)) · 1 + m · μ : m` (`rows × cols`, from its momentum buffer and gradient),
-    /// orthogonalised as `folo_nn::optim::orthogonalize` does it (divided by its Frobenius norm plus `eps`,
-    /// transposed so that rows ≤ cols, `steps` quintic Newton–Schulz steps with `coeffs`, transposed back), times
-    /// its `scale` (when not 1), then `param = param · 1 + O · (−lr)` in place. The parameters hold their
-    /// `rows · cols` elements contiguously from element 0 and are no other item's storage. Reached through
-    /// `Tensor::muon_step_many_`. `Error::NotSupported`, with no parameter written, declines the call (also where
-    /// a backend cannot take these matrices on this device), and the caller uses tensor ops.
+    /// MuSGD's Muon update of many matrices in one call (folo-nn's `MuSgd`): for each item,
+    /// `u = nesterov ? (g · (1 − μ)) · 1 + m · μ : m` (`rows × cols`), orthogonalised by `settings` (`steps`
+    /// odd-quintic steps with `step_coeffs` and optional step-0 Schatten-4 rescaling), scaled by `scale` (when
+    /// not 1), then `param = param · 1 + O · (−lr)` in place. Parameters hold `rows · cols` elements from 0 and
+    /// do not alias. `Error::NotSupported`, writing nothing, declines the call so the caller falls back.
     fn muon_step_many(&self, items: &mut [MuonItem<'_>], settings: &MuonSettings) -> Result<()> {
         unsupported!(self, "muon_step_many")
     }
@@ -886,6 +883,9 @@ pub struct MuonItem<'a> {
     pub scale: f32,
 }
 
+/// Maximum odd-quintic orthogonalisation steps a single [`MuonSettings`] holds.
+pub const MAX_MUON_STEPS: usize = 8;
+
 /// The settings of [`Backend::muon_step_many`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MuonSettings {
@@ -893,14 +893,33 @@ pub struct MuonSettings {
     pub momentum: f32,
     /// Nesterov: `u = (g · (1 − μ)) · 1 + m · μ`; else `u = m`.
     pub nesterov: bool,
-    /// The Newton–Schulz coefficients `(a, b, c)`: `X ← a·X + (b·A + c·A·A)·X`, `A = X·Xᵀ`.
-    pub coeffs: (f32, f32, f32),
-    /// Newton–Schulz steps.
+    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`: `X ← a_k·X + (b_k·A + c_k·A²)·X`.
+    pub step_coeffs: [(f32, f32, f32); MAX_MUON_STEPS],
+    /// Number of polynomial steps (`<= MAX_MUON_STEPS`).
     pub steps: usize,
+    /// Step-0 Schatten-4 spectral rescaling (`α = ‖X₀·X₀ᵀ‖_F^(1/2) + eps / (‖U‖_F + eps)`).
+    pub schatten4: bool,
     /// Added to the Frobenius norm before the division.
     pub eps: f32,
     /// The learning rate of the update (MuSGD's `0.2 · lr`).
     pub lr: f32,
+}
+
+impl MuonSettings {
+    /// Per-step schedule `schedule` (`len <= MAX_MUON_STEPS`) with optional step-0 Schatten-4 rescaling.
+    pub fn from_schedule(
+        mu: f32,
+        nesterov: bool,
+        schedule: &[(f32, f32, f32)],
+        schatten4: bool,
+        eps: f32,
+        lr: f32,
+    ) -> Self {
+        let mut step_coeffs = [(0.0, 0.0, 0.0); MAX_MUON_STEPS];
+        let n = schedule.len().min(MAX_MUON_STEPS);
+        step_coeffs[..n].copy_from_slice(&schedule[..n]);
+        MuonSettings { momentum: mu, nesterov, step_coeffs, steps: schedule.len(), schatten4, eps, lr }
+    }
 }
 
 /// The running statistics [`Backend::batch_norm_act`] updates in place.
