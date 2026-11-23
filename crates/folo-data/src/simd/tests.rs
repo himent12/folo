@@ -405,10 +405,19 @@ fn letterbox_planar_dst_matches_apply_and_resize() {
     }
 }
 
-/// Huge-step nonzero-rotation/shear warp where `x0 * du` alone would overflow `i64` even though every running
-/// `fu0 + x * du` fits in `i64`: must match scalar pixel-for-pixel without overflowing.
+/// Verifies the widened `i128` step helper (`step_fp`) handles products `x * df` that overflow `i64` while
+/// `f0 + x * df` fits in `i64`, and verifies `warp_general` matches scalar on both huge-step rotation and
+/// interior-span rotation+shear.
 #[test]
 fn warp_general_huge_step_with_rotation_does_not_overflow() {
+    // Direct test of the widened `i128` offset arithmetic: `256 * (1 << 55) == 2^63` overflows `i64`, while
+    // `f0 + 256 * df == 1 << 54` fits cleanly in `i64`.
+    let f0 = i64::MIN + (1i64 << 54);
+    let df = 1i64 << 55;
+    assert!((256i64).checked_mul(df).is_none());
+    assert_eq!(crate::warp::step_fp(f0, 256, df), 1i64 << 54);
+    assert_eq!(crate::warp::step_fp(i64::MAX - (1i64 << 54), 256, -df), -(1i64 << 54) - 1);
+
     let src = noisy_image(99, 64, 64);
     let border = [114, 7, 23];
     let m_huge =

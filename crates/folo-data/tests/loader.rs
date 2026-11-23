@@ -191,6 +191,8 @@ fn invalid_configs_are_rejected() {
     let ds = rect_dataset(2);
     assert!(DataLoader::new(ds.clone(), LoaderConfig { batch_size: 0, ..cfg(1) }).is_err());
     assert!(DataLoader::new(ds.clone(), LoaderConfig { imgsz: 0, ..cfg(1) }).is_err());
+    assert!(DataLoader::new(ds.clone(), LoaderConfig { batch_size: usize::MAX, ..cfg(1) }).is_err());
+    assert!(DataLoader::new(ds.clone(), LoaderConfig { imgsz: u32::MAX, batch_size: 4, ..cfg(1) }).is_err());
     let bad = AugmentConfig { fliplr: 1.5, ..AugmentConfig::default() };
     assert!(DataLoader::new(ds, LoaderConfig { augment: Some(bad), ..cfg(1) }).is_err());
     let empty: Arc<dyn Dataset> =

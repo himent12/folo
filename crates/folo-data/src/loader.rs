@@ -229,6 +229,19 @@ impl DataLoader {
         if ds.is_empty() {
             return Err(DataError::Config("dataset is empty".into()));
         }
+        let elem_bytes = if cfg.u8_images { size_of::<u8>() } else { size_of::<f32>() };
+        let batch_bytes = (cfg.imgsz as usize)
+            .checked_mul(cfg.imgsz as usize)
+            .and_then(|p| p.checked_mul(3))
+            .and_then(|slot| slot.checked_mul(cfg.batch_size))
+            .and_then(|elems| elems.checked_mul(elem_bytes))
+            .filter(|&b| b <= isize::MAX as usize);
+        if batch_bytes.is_none() {
+            return Err(DataError::Config(format!(
+                "batch_size {} at imgsz {} overflows batch buffer size",
+                cfg.batch_size, cfg.imgsz
+            )));
+        }
         let ram = match cfg.cache {
             CacheMode::Ram => Some(RamCache::new(&*ds, cfg.imgsz)?),
             CacheMode::None => None,
@@ -363,17 +376,19 @@ struct Slot {
 
 impl Slot {
     fn planar_dst(&mut self) -> PlanarDst<'_> {
-        let start = self.slot_idx * self.alloc.slot_elems;
+        let start = self.slot_idx.checked_mul(self.alloc.slot_elems).expect("slot offset overflow");
         let len = self.alloc.slot_elems;
+        let end = start.checked_add(len).expect("slot end overflow");
         let plane = self.alloc.plane;
         match self.alloc.buf {
             RawBatchBuf::U8 { ptr, len: total, .. } => {
-                debug_assert!(start + len <= total);
-                // SAFETY: `start..start+len` is exclusively owned by this `Slot` (`&mut self` prevents self-aliasing).
+                assert!(end <= total, "batch u8 slot {start}..{end} exceeds {total}");
+                // SAFETY: `start..end` is bounds-checked and exclusively owned by this `Slot` (`&mut self` prevents
+                // self-aliasing).
                 PlanarDst::from_u8(unsafe { std::slice::from_raw_parts_mut(ptr.add(start), len) }, plane)
             }
             RawBatchBuf::F32 { ptr, len: total, .. } => {
-                debug_assert!(start + len <= total);
+                assert!(end <= total, "batch f32 slot {start}..{end} exceeds {total}");
                 // SAFETY: as above.
                 PlanarDst::from_f32_div255(
                     unsafe { std::slice::from_raw_parts_mut(ptr.add(start), len) },
@@ -392,9 +407,15 @@ struct BatchEntry {
 
 impl BatchEntry {
     fn new(len: usize, imgsz: usize, u8_images: bool) -> Self {
-        let plane = imgsz * imgsz;
-        let slot_elems = 3 * plane;
-        let buf = RawBatchBuf::new(len * slot_elems, u8_images);
+        let plane = imgsz.checked_mul(imgsz).expect("imgsz overflow");
+        let slot_elems = plane.checked_mul(3).expect("slot size overflow");
+        let total_elems = len.checked_mul(slot_elems).expect("batch size overflow");
+        let elem_bytes = if u8_images { size_of::<u8>() } else { size_of::<f32>() };
+        assert!(
+            total_elems.checked_mul(elem_bytes).is_some_and(|b| b <= isize::MAX as usize),
+            "batch buffer exceeds isize::MAX bytes"
+        );
+        let buf = RawBatchBuf::new(total_elems, u8_images);
         BatchEntry { alloc: Arc::new(BatchAlloc { buf, slot_elems, plane }), next_slot: 0, len }
     }
 

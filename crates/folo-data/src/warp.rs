@@ -396,6 +396,13 @@ fn warp_general_scalar_span(
     }
 }
 
+/// Advances a 16.16 fixed-point position `f0` by `x * df` using widened `i128` arithmetic so intermediate products
+/// `x * df` cannot overflow `i64` when the final position `f0 + x * df` fits in `i64`.
+#[inline]
+pub(crate) fn step_fp(f0: i64, x: usize, df: i64) -> i64 {
+    (f0 as i128 + x as i128 * df as i128) as i64
+}
+
 /// Computes one destination row `y` of `warp_general`, taking the AVX2 interior span when safe.
 #[allow(clippy::too_many_arguments)]
 fn warp_general_row(
@@ -442,8 +449,8 @@ fn warp_general_row(
                     &mut row[..x0 * 3],
                 );
             }
-            let fu_x0 = (fu0 as i128 + x0 as i128 * du as i128) as i64;
-            let fv_x0 = (fv0 as i128 + x0 as i128 * dv as i128) as i64;
+            let fu_x0 = step_fp(fu0, x0, du);
+            let fv_x0 = step_fp(fv0, x0, dv);
             warp_general_interior_to_rgb(
                 sdata,
                 sw as usize,
@@ -456,8 +463,8 @@ fn warp_general_row(
                 &mut row[x0 * 3..x1 * 3],
             );
             if x1 < width {
-                let fu_x1 = (fu0 as i128 + x1 as i128 * du as i128) as i64;
-                let fv_x1 = (fv0 as i128 + x1 as i128 * dv as i128) as i64;
+                let fu_x1 = step_fp(fu0, x1, du);
+                let fv_x1 = step_fp(fv0, x1, dv);
                 warp_general_scalar_span(
                     sdata,
                     sw,

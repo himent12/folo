@@ -224,8 +224,9 @@ canvas is painted and warped as before). HSV uses explicit 256-bit AVX2 kernels 
 lookups and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar per-pixel kernel on all
 2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch slots, fusing warp (or
 letterbox), HSV, flips and planar `u8`/`f32` conversion in a single L1-resident row pass without allocating an
-intermediate `imgsz x imgsz` HWC image or a separate collator copy pass (staying bit for bit identical, pinned by
-`tests/golden.rs`). With `augment: None` (validation) it only letterboxes straight into the planar slot and records
+intermediate `imgsz x imgsz` HWC image or a separate collator copy pass (when mixup triggers, it blends two
+materialised `imgsz x imgsz` interleaved images before running the fused HSV, flips and planar pass; every path stays
+bit for bit identical, pinned by `tests/golden.rs`). With `augment: None` (validation) it only letterboxes straight into the planar slot and records
 the geometry.
 
 ## DataLoader and determinism
