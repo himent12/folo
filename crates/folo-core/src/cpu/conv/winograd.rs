@@ -90,6 +90,16 @@ fn count(i: usize) {
     });
 }
 
+#[cfg(test)]
+pub(super) fn count_transform() {
+    count(0);
+}
+
+#[cfg(test)]
+pub(super) fn count_forward() {
+    count(1);
+}
+
 /// `U = G g Gᵀ` of every `(o, c)` 3x3 kernel of the OIHW weights `wt`, laid out `[16][o][c]` (element `xi` of
 /// the transform domain is the row-major `O x C` matrix `xi`), computed in f64 and rounded once.
 pub(crate) fn transform_weights(wt: &[f32], o: usize, c: usize) -> Vec<f32> {

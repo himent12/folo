@@ -6,6 +6,7 @@
 //! - `small_c.rs`: the direct forward for few input channels (the 3-channel stem).
 //! - `depthwise.rs`: depthwise convs (groups = channels), forward and gradients.
 //! - `winograd.rs`: Winograd F(2x2, 3x3) for dense 3x3 stride-1 inference convs.
+//! - `winograd4.rs`: well-conditioned Winograd F(4x4, 3x3) (points `0, ±1/2, ±1, ∞`) with AVX2/FMA transforms.
 //! - `sites.rs`: inference convs evaluated only at some output sites (`Backend::conv2d_act_at`).
 //! - `backward_input.rs`, `backward_weight.rs`: the input and weight gradients.
 //! - `kernel_tests.rs`: unit tests of these paths against an `f64` reference.
@@ -20,6 +21,7 @@ mod shifted;
 mod sites;
 mod small_c;
 mod winograd;
+mod winograd4;
 
 use rayon::prelude::*;
 
@@ -29,11 +31,14 @@ use crate::cpu::par_chunks;
 use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};
 use shifted::{ShiftedRows, shifted_scratch};
-pub(crate) use sites::{pointwise_forward_at, winograd_tiles_at};
+pub(crate) use sites::{pointwise_forward_at, winograd_tiles_at, winograd4_tiles_at};
 use small_c::{small_c_forward, uses_small_c};
 #[cfg(test)]
 pub(crate) use winograd::calls as winograd_calls;
 pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward, winograd_forward_at};
+#[cfg(test)]
+pub(crate) use winograd4::{calls4 as winograd4_calls, transform_weights4, transform4_attempts};
+pub(crate) use winograd4::{try_transform_weights4, uses_winograd4, winograd4_forward, winograd4_forward_at};
 
 pub(crate) use backward_input::{backward_input_overwrites, conv2d_backward_input};
 pub(crate) use backward_weight::conv2d_backward_weight;
