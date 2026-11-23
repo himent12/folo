@@ -469,7 +469,9 @@ mod tests {
             m.head.levels[0].box_branch.conv0 = conv0;
             let feat = Tensor::rand_uniform([1, c_in, h, w], -1.0, 1.0, &mut rng);
             let dense_raw = m.head.levels[0].box_branch.forward(&feat).unwrap();
-            let got = m.boxes_at(&m.head.levels[0], &feat, &need, &anchors, lv.start, false, false).unwrap();
+            let got = m
+                .boxes_at(&m.head.levels[0], &feat, &need, &anchors, lv.start, DflWants::default(), false)
+                .unwrap();
             assert_eq!(got[0].cands.len(), pts.len());
             dense_raw
                 .with_f32_slice(|rg| {
@@ -477,13 +479,12 @@ mod tests {
                     for c in &got[0].cands {
                         let k = c.anchor as usize;
                         let j = k - lv.start;
-                        let (want, _, _) = dfl_box(
+                        let (want, _, _, _) = dfl_box(
                             &mut bins,
                             |r| rg[r * hw + j],
                             anchors.points[k],
                             anchors.strides[k],
-                            false,
-                            false,
+                            DflWants::default(),
                         );
                         let bits = |b: &crate::boxes::Xyxy| [b.x1, b.y1, b.x2, b.y2].map(f32::to_bits);
                         assert_eq!(bits(&c.bbox), bits(&want), "c_in={c_in} -> F(4x4) anchor {k}");
