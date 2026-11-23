@@ -17,7 +17,7 @@ use crate::simd::bilinear::{
     vblend_rgb_to_rgba32, vshift_rgb_to_rgba32, warp_general_interior_to_rgb, warp_hinterp_interior_to_rgb,
 };
 use crate::simd::hsv_fused::{HsvTables, rgb_row_to_planar_fused, warp_interior_to_planar_fused};
-use crate::simd::{PlanarDst, PlanarRow};
+use crate::simd::{PlanarDst, PlanarRow, assert_image_data, for_planar_bands};
 
 /// A 2x3 affine matrix `[a, b, c, d, e, f]` mapping `(x, y)` to `(a x + b y + c, d x + e y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -240,6 +240,9 @@ pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8
 /// plane's fill as the border, without rendering the plane when the source row does not change along a destination
 /// row.
 pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> Image {
+    for t in &plane.tiles {
+        assert_image_data(t.img);
+    }
     if width == 0 || height == 0 {
         return Image { width, height, data: Vec::new() };
     }
@@ -289,6 +292,9 @@ pub(crate) fn warp_plane_fused(
     flip_lr: bool,
     dst: &mut PlanarDst<'_>,
 ) {
+    for t in &plane.tiles {
+        assert_image_data(t.img);
+    }
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 {
         return;
@@ -297,7 +303,7 @@ pub(crate) fn warp_plane_fused(
     if m.is_identity() && (plane.width, plane.height) == (width, height) {
         for_planar_bands(dst, w, h, |dy0, band| {
             let mut scratch = Vec::new();
-            let rows = band_rows(band, w);
+            let rows = band.rows(w);
             for bi in 0..rows {
                 let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi } as i64;
                 let mut drow = band.row_slices(bi, w);
@@ -335,49 +341,6 @@ pub(crate) fn warp_plane_fused(
                 warp_general_fused(&rendered, &inv, w, h, plane.fill, hsv, flip_ud, flip_lr, dst);
                 crate::buffers::recycle(rendered.data);
             }
-        }
-    }
-}
-
-#[inline]
-fn band_rows(band: &PlanarDst<'_>, width: usize) -> usize {
-    match band {
-        PlanarDst::U8 { r, .. } => r.len() / width,
-        PlanarDst::F32Div255 { r, .. } => r.len() / width,
-    }
-}
-
-/// Splits a [`PlanarDst`] into row bands (parallel with rayon when worthwhile and not in `par::serial`).
-pub(crate) fn for_planar_bands<F>(dst: &mut PlanarDst<'_>, width: usize, height: usize, f: F)
-where
-    F: Fn(usize, &mut PlanarDst<'_>) + Sync,
-{
-    if width == 0 || height == 0 {
-        return;
-    }
-    if crate::par::is_serial() || width * height * 3 < 64 * 1024 {
-        f(0, dst);
-        return;
-    }
-    use rayon::prelude::*;
-    match dst {
-        PlanarDst::U8 { r, g, b } => {
-            let rows_per_band = (64 * 1024 / (3 * width)).max(1);
-            let n = rows_per_band * width;
-            r.par_chunks_mut(n)
-                .zip(g.par_chunks_mut(n))
-                .zip(b.par_chunks_mut(n))
-                .enumerate()
-                .for_each(|(t, ((r, g), b))| f(t * rows_per_band, &mut PlanarDst::U8 { r, g, b }));
-        }
-        PlanarDst::F32Div255 { r, g, b } => {
-            let rows_per_band = (64 * 1024 / (12 * width)).max(1);
-            let n = rows_per_band * width;
-            r.par_chunks_mut(n)
-                .zip(g.par_chunks_mut(n))
-                .zip(b.par_chunks_mut(n))
-                .enumerate()
-                .for_each(|(t, ((r, g), b))| f(t * rows_per_band, &mut PlanarDst::F32Div255 { r, g, b }));
         }
     }
 }
@@ -479,23 +442,29 @@ fn warp_general_row(
                     &mut row[..x0 * 3],
                 );
             }
+            let fu_x0 = (fu0 as i128 + x0 as i128 * du as i128) as i64;
+            let fv_x0 = (fv0 as i128 + x0 as i128 * dv as i128) as i64;
             warp_general_interior_to_rgb(
                 sdata,
+                sw as usize,
+                sh as usize,
                 sstride,
-                fu0 + x0 as i64 * du,
-                fv0 + x0 as i64 * dv,
+                fu_x0,
+                fv_x0,
                 du,
                 dv,
                 &mut row[x0 * 3..x1 * 3],
             );
             if x1 < width {
+                let fu_x1 = (fu0 as i128 + x1 as i128 * du as i128) as i64;
+                let fv_x1 = (fv0 as i128 + x1 as i128 * dv as i128) as i64;
                 warp_general_scalar_span(
                     sdata,
                     sw,
                     sh,
                     sstride,
-                    fu0 + x1 as i64 * du,
-                    fv0 + x1 as i64 * dv,
+                    fu_x1,
+                    fv_x1,
                     du,
                     dv,
                     border,
@@ -511,6 +480,7 @@ fn warp_general_row(
 /// The warp of `src` by the inverse matrix `inv` into `out` (rows of `width` pixels), any matrix: each pixel steps
 /// its own source position.
 fn warp_general(src: &Image, inv: &Affine, width: usize, border: [u8; 3], out: &mut [u8]) {
+    assert_image_data(src);
     let (sw, sh) = (src.width as i64, src.height as i64);
     let sstride = src.stride();
     let sdata = &src.data;
@@ -531,12 +501,13 @@ fn warp_general_fused(
     flip_lr: bool,
     dst: &mut PlanarDst<'_>,
 ) {
+    assert_image_data(src);
     let (sw, sh) = (src.width as i64, src.height as i64);
     let sstride = src.stride();
     let sdata = &src.data;
     for_planar_bands(dst, width, height, |dy0, band| {
         let mut row_rgb = vec![0u8; width * 3];
-        let rows = band_rows(band, width);
+        let rows = band.rows(width);
         for bi in 0..rows {
             let src_y = if flip_ud { height - 1 - (dy0 + bi) } else { dy0 + bi };
             warp_general_row(sdata, sw, sh, sstride, inv, src_y, width, border, &mut row_rgb);
@@ -694,7 +665,7 @@ fn warp_rows_fused(
     let (pw, ph) = (plane.width as i64, plane.height as i64);
     for_planar_bands(dst, width, height, |dy0, band| {
         let mut cache = PlaneRowCache::default();
-        let rows = band_rows(band, width);
+        let rows = band.rows(width);
         for bi in 0..rows {
             let src_y = if flip_ud { height - 1 - (dy0 + bi) } else { dy0 + bi };
             let yc = src_y as f64 + 0.5;

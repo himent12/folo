@@ -6,6 +6,7 @@
 
 use crate::image::Image;
 use crate::par::{for_bands, for_rows};
+use crate::simd::assert_image_data;
 use crate::simd::bilinear::{
     add_u8_to_u32, hinterp_taps_to_planar_f32_div255, hinterp_taps_to_planar_f32_scale,
     hinterp_taps_to_planar_u8, hinterp_taps_to_rgb, hinterp_taps_to_rgb0_u32, vblend_rgb_to_rgba32,
@@ -105,8 +106,13 @@ pub fn resize(src: &Image, width: u32, height: u32) -> Image {
 /// `dst[y * dst_stride + x_offset * 3]`. `dst` must hold at least `height` rows of `dst_stride` bytes.
 pub fn resize_into(src: &Image, dst: &mut [u8], dst_stride: usize, x_offset: usize, width: u32, height: u32) {
     assert!(width > 0 && height > 0 && src.width > 0 && src.height > 0, "resize to or from an empty image");
-    assert!(x_offset * 3 + width as usize * 3 <= dst_stride, "resize window exceeds the row stride");
-    let dst = &mut dst[..dst_stride * height as usize];
+    let x_end = x_offset
+        .checked_add(width as usize)
+        .and_then(|n| n.checked_mul(3))
+        .expect("resize window overflows usize");
+    assert!(x_end <= dst_stride, "resize window exceeds the row stride");
+    let total = dst_stride.checked_mul(height as usize).expect("resize destination size overflow");
+    let dst = &mut dst[..total];
     let rows = RowResizer::new(src, width, height);
     let row_bytes = width as usize * 3;
     for_bands(dst, dst_stride, |y0, band| {
@@ -142,6 +148,7 @@ impl<'a> RowResizer<'a> {
             width > 0 && height > 0 && src.width > 0 && src.height > 0,
             "resize to or from an empty image"
         );
+        assert_image_data(src);
         if src.width == width && src.height == height {
             return RowResizer { src, filtered: None, plan: None, width: width as usize };
         }
@@ -149,6 +156,8 @@ impl<'a> RowResizer<'a> {
         let [fx, fy] = plan.prefilter;
         // Integer box prefilter for large reductions.
         let filtered = (fx >= 2 || fy >= 2).then(|| box_downsample(src, fx, fy));
+        let sw = filtered.as_ref().unwrap_or(src).width as usize;
+        assert!(plan.x0.iter().all(|&k| (k as usize) < sw), "resize tap out of source bounds");
         RowResizer { src, filtered, plan: Some(plan), width: width as usize }
     }
 
@@ -166,9 +175,14 @@ impl<'a> RowResizer<'a> {
     fn fill_v<'b>(&self, y: usize, plan: &ResizePlan, scratch: &'b mut RowScratch) -> &'b [u32] {
         let (y0, y1, wy) = (plan.y0[y], plan.y1[y], plan.wy[y]);
         let key = (y0, y1, wy);
+        let s = self.filtered.as_ref().unwrap_or(self.src);
+        let sw = s.width as usize;
+        let need = (sw + 1) * 4;
+        if scratch.v.len() < need {
+            scratch.v.resize(need, 0);
+            scratch.cached = None;
+        }
         if scratch.cached != Some(key) {
-            let s = self.filtered.as_ref().unwrap_or(self.src);
-            let sw = s.width as usize;
             let sstride = s.stride();
             let top = &s.data[y0 as usize * sstride..][..sstride];
             if y0 == y1 || wy == 0 {
@@ -182,7 +196,7 @@ impl<'a> RowResizer<'a> {
             scratch.v.copy_within(last..last + 4, sw * 4);
             scratch.cached = Some(key);
         }
-        &scratch.v
+        &scratch.v[..need]
     }
 
     /// Writes destination row `y` (`width` interleaved RGB pixels) into `out[..width * 3]`.
@@ -194,7 +208,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        hinterp_taps_to_rgb(v, &plan.x0, &plan.wx, out);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb(v, &plan.x0, &plan.wx, out) };
     }
 
     /// Writes destination row `y` straight into planar `u8` (`r`, `g`, `b` of length `width`).
@@ -213,7 +228,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        hinterp_taps_to_planar_u8(v, &plan.x0, &plan.wx, r, g, b);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_u8(v, &plan.x0, &plan.wx, r, g, b) };
     }
 
     /// Writes destination row `y` straight into planar `f32` (`v as f32 * scale`).
@@ -233,7 +249,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        hinterp_taps_to_planar_f32_scale(v, &plan.x0, &plan.wx, scale, r, g, b);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_scale(v, &plan.x0, &plan.wx, scale, r, g, b) };
     }
 
     /// Writes destination row `y` straight into planar `f32` (`v as f32 / 255.0`).
@@ -252,7 +269,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        hinterp_taps_to_planar_f32_div255(v, &plan.x0, &plan.wx, r, g, b);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_div255(v, &plan.x0, &plan.wx, r, g, b) };
     }
 
     /// Writes destination row `y` straight into packed `[R, G, B, 0]` `u32` words.
@@ -264,7 +282,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        hinterp_taps_to_rgb0_u32(v, &plan.x0, &plan.wx, dst);
+        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb0_u32(v, &plan.x0, &plan.wx, dst) };
     }
 }
 
@@ -274,6 +293,7 @@ impl<'a> RowResizer<'a> {
 /// and divides with rounding, `(sum + n / 2) / n`, by a multiply-shift ([`RoundDiv`]). Blocks too large for `u32`
 /// sums take the `u64` path.
 fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
+    assert_image_data(src);
     if 255 * fx as u64 * fy as u64 > u32::MAX as u64 / 2 {
         return box_downsample_wide(src, fx, fy);
     }
@@ -374,6 +394,7 @@ impl RoundDiv {
 
 /// [`box_downsample`] with `u64` sums, for blocks whose sums could overflow `u32`.
 fn box_downsample_wide(src: &Image, fx: u32, fy: u32) -> Image {
+    assert_image_data(src);
     let (w, h) = (src.width as usize, src.height as usize);
     let (fx, fy) = (fx as usize, fy as usize);
     let ow = w.div_ceil(fx);

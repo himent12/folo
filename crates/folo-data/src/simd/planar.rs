@@ -8,12 +8,10 @@ use super::has_avx2;
 #[inline]
 pub(crate) fn rgb_to_planar_u8(src: &[u8], r: &mut [u8], g: &mut [u8], b: &mut [u8], flip_lr: bool) {
     let w = r.len();
-    debug_assert_eq!(src.len(), w * 3);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(src.len() == w * 3 && g.len() == w && b.len() == w);
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 16 {
-        // SAFETY: CPU supports AVX2 and slice lengths match `w`.
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to match `w`.
         unsafe { rgb_to_planar_u8_avx2(src, r, g, b, flip_lr) };
         return;
     }
@@ -43,12 +41,10 @@ pub(crate) fn rgb_to_planar_u8_scalar(src: &[u8], r: &mut [u8], g: &mut [u8], b:
 #[inline]
 pub(crate) fn rgb_to_planar_f32_scale(src: &[u8], r: &mut [f32], g: &mut [f32], b: &mut [f32], scale: f32) {
     let w = r.len();
-    debug_assert_eq!(src.len(), w * 3);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(src.len() == w * 3 && g.len() == w && b.len() == w);
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 16 {
-        // SAFETY: CPU supports AVX2 and slice lengths match `w`.
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to match `w`.
         unsafe { rgb_to_planar_f32_scale_avx2(src, r, g, b, scale) };
         return;
     }
@@ -81,12 +77,10 @@ pub(crate) fn rgb_to_planar_f32_div255(
     flip_lr: bool,
 ) {
     let w = r.len();
-    debug_assert_eq!(src.len(), w * 3);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(src.len() == w * 3 && g.len() == w && b.len() == w);
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 16 {
-        // SAFETY: CPU supports AVX2 and slice lengths match `w`.
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to match `w`.
         unsafe { rgb_to_planar_f32_div255_avx2(src, r, g, b, flip_lr) };
         return;
     }
@@ -122,10 +116,10 @@ pub(crate) fn rgb_to_planar_f32_div255_scalar(
 #[inline]
 pub(crate) fn rgb_to_rgb0_u32(src: &[u8], dst: &mut [u32]) {
     let w = dst.len();
-    debug_assert_eq!(src.len(), w * 3);
+    assert_eq!(src.len(), w * 3);
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() && w >= 8 {
-        // SAFETY: CPU supports AVX2 and slice lengths match `w`.
+    if has_avx2() && w >= 6 {
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to match `w`.
         unsafe { rgb_to_rgb0_u32_avx2(src, dst) };
         return;
     }

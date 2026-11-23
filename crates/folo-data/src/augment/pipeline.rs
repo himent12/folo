@@ -13,9 +13,9 @@ use crate::error::Result;
 use crate::image::{Image, Sample};
 use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox_sample};
 use crate::rng::Rng;
-use crate::simd::PlanarDst;
 use crate::simd::hsv_fused::rgb_row_to_planar_fused;
-use crate::warp::{Plane, Tile, for_planar_bands, warp_plane, warp_plane_fused};
+use crate::simd::{PlanarDst, for_planar_bands};
+use crate::warp::{Plane, Tile, warp_plane, warp_plane_fused};
 
 /// A sample as the transform's `fetch` delivers it.
 #[derive(Clone, Debug)]

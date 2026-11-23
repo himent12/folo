@@ -23,8 +23,10 @@ pub(crate) struct HsvTables {
     pub vlut: [u8; 256],
     pub recip: [u32; 256],
     /// `slut[i] as u32` for direct AVX2 gather without per-row stack rebuilds.
+    #[cfg(target_arch = "x86_64")]
     pub slut_u32: [u32; 256],
     /// `(vlut[i] as u32) | (recip[i] << 8)`: one gather delivers both `v` and `recip[max]`.
+    #[cfg(target_arch = "x86_64")]
     pub max_lut: [u32; 256],
 }
 
@@ -47,9 +49,20 @@ impl HsvTables {
         for (d, r) in recip.iter_mut().enumerate().skip(1) {
             *r = ((1u32 << 16) + d as u32 / 2) / d as u32;
         }
+        #[cfg(target_arch = "x86_64")]
         let slut_u32 = std::array::from_fn(|i| slut[i] as u32);
+        #[cfg(target_arch = "x86_64")]
         let max_lut = std::array::from_fn(|i| (vlut[i] as u32) | (recip[i] << 8));
-        Some(HsvTables { shift, slut, vlut, recip, slut_u32, max_lut })
+        Some(HsvTables {
+            shift,
+            slut,
+            vlut,
+            recip,
+            #[cfg(target_arch = "x86_64")]
+            slut_u32,
+            #[cfg(target_arch = "x86_64")]
+            max_lut,
+        })
     }
 
     /// Applies this HSV transform to one pixel (scalar reference).
@@ -118,16 +131,21 @@ pub(crate) fn rgb_row_to_planar_fused(
     flip_lr: bool,
     dst: &mut PlanarRow<'_>,
 ) {
+    let w = src.len() / 3;
+    assert_eq!(src.len(), w * 3);
+    match dst {
+        PlanarRow::U8 { r, g, b } => assert!(r.len() == w && g.len() == w && b.len() == w),
+        PlanarRow::F32Div255 { r, g, b } => assert!(r.len() == w && g.len() == w && b.len() == w),
+    }
     match hsv {
         None => match dst {
             PlanarRow::U8 { r, g, b } => rgb_to_planar_u8(src, r, g, b, flip_lr),
             PlanarRow::F32Div255 { r, g, b } => rgb_to_planar_f32_div255(src, r, g, b, flip_lr),
         },
         Some(t) => {
-            let w = src.len() / 3;
             #[cfg(target_arch = "x86_64")]
             if has_avx2() && w >= 16 {
-                // SAFETY: CPU supports AVX2 and row lengths match `w`.
+                // SAFETY: CPU supports AVX2 and row lengths are asserted to match `w`.
                 unsafe { rgb_row_hsv_to_planar_avx2(src, t, flip_lr, dst) };
                 return;
             }
@@ -184,39 +202,44 @@ pub(crate) fn warp_interior_to_planar_fused(
     flip_lr: bool,
     dst: &mut PlanarRow<'_>,
 ) {
-    let count = x_end - x_start;
-    if count == 0 {
-        return;
-    }
     assert!(x_start <= x_end && x_end <= width);
     match dst {
         PlanarRow::U8 { r, g, b } => assert!(r.len() == width && g.len() == width && b.len() == width),
         PlanarRow::F32Div255 { r, g, b } => assert!(r.len() == width && g.len() == width && b.len() == width),
     }
-    let cols = v.len() / 4;
-    #[cfg(target_arch = "x86_64")]
-    if has_avx2()
-        && count >= 8
-        && (2..=32000).contains(&cols)
-        && du.abs() <= 4 << 16
-        && rel_fu0 >= 0
-        && rel_fu0 < ((cols as i64 - 1) << 16)
-    {
-        // SAFETY: CPU supports AVX2, `x_end <= width`, `cols <= 32000`, `|du| <= 4<<16`, and every `k < cols - 1`.
-        unsafe {
-            warp_interior_to_planar_fused_avx2(
-                v,
-                rel_fu0 as i32,
-                du as i32,
-                width,
-                x_start,
-                x_end,
-                hsv,
-                flip_lr,
-                dst,
-            )
-        };
+    let count = x_end - x_start;
+    if count == 0 {
         return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let cols = v.len() / 4;
+        let hi_excl = (cols as i128 - 1) << 16;
+        let last_rel = rel_fu0 as i128 + (count as i128 - 1) * du as i128;
+        if has_avx2()
+            && count >= 8
+            && (2..=32000).contains(&cols)
+            && du.abs() <= 4 << 16
+            && (0..hi_excl).contains(&(rel_fu0 as i128))
+            && (0..hi_excl).contains(&last_rel)
+        {
+            // SAFETY: CPU supports AVX2; `dst` lengths match `width`, `x_end <= width`, and by linearity both
+            // endpoints of `rel_fu` lie in `0..((cols-1)<<16)` with `cols <= 32000` and `|du| <= 4<<16`.
+            unsafe {
+                warp_interior_to_planar_fused_avx2(
+                    v,
+                    rel_fu0 as i32,
+                    du as i32,
+                    width,
+                    x_start,
+                    x_end,
+                    hsv,
+                    flip_lr,
+                    dst,
+                )
+            };
+            return;
+        }
     }
     warp_interior_to_planar_fused_scalar(v, rel_fu0, du, width, x_start, x_end, hsv, flip_lr, dst);
 }

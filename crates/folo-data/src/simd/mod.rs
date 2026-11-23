@@ -20,6 +20,7 @@ impl<'a> PlanarDst<'a> {
     /// Splits a contiguous `[3 * plane]` `u8` buffer into three plane slices.
     #[inline]
     pub(crate) fn from_u8(buf: &'a mut [u8], plane: usize) -> Self {
+        assert_eq!(buf.len(), plane.checked_mul(3).expect("plane size overflow"));
         let (r, rest) = buf.split_at_mut(plane);
         let (g, b) = rest.split_at_mut(plane);
         PlanarDst::U8 { r, g, b }
@@ -28,6 +29,7 @@ impl<'a> PlanarDst<'a> {
     /// Splits a contiguous `[3 * plane]` `f32` buffer into three plane slices (`v as f32 / 255.0`).
     #[inline]
     pub(crate) fn from_f32_div255(buf: &'a mut [f32], plane: usize) -> Self {
+        assert_eq!(buf.len(), plane.checked_mul(3).expect("plane size overflow"));
         let (r, rest) = buf.split_at_mut(plane);
         let (g, b) = rest.split_at_mut(plane);
         PlanarDst::F32Div255 { r, g, b }
@@ -76,6 +78,69 @@ impl PlanarRow<'_> {
                 g[lo..hi].fill(rgb[1] as f32 / 255.0);
                 b[lo..hi].fill(rgb[2] as f32 / 255.0);
             }
+        }
+    }
+}
+
+/// Verifies `img.data` holds at least `img.width * img.height * 3` bytes (guards raw-pointer kernels against
+/// malformed public [`crate::image::Image`] structs).
+#[inline]
+pub(crate) fn assert_image_data(img: &crate::image::Image) {
+    let need = (img.width as usize)
+        .checked_mul(img.height as usize)
+        .and_then(|n| n.checked_mul(3))
+        .expect("image dimensions overflow");
+    assert!(
+        img.data.len() >= need,
+        "image buffer has {} bytes, expected at least {}x{}x3 ({need})",
+        img.data.len(),
+        img.width,
+        img.height
+    );
+}
+
+impl PlanarDst<'_> {
+    /// Number of rows held by this planar band for a row width of `width` pixels.
+    #[inline]
+    pub(crate) fn rows(&self, width: usize) -> usize {
+        match self {
+            PlanarDst::U8 { r, .. } => r.len() / width,
+            PlanarDst::F32Div255 { r, .. } => r.len() / width,
+        }
+    }
+}
+
+/// Splits a [`PlanarDst`] into row bands (parallel with rayon when worthwhile and not in `par::serial`).
+pub(crate) fn for_planar_bands<F>(dst: &mut PlanarDst<'_>, width: usize, height: usize, f: F)
+where
+    F: Fn(usize, &mut PlanarDst<'_>) + Sync,
+{
+    if width == 0 || height == 0 {
+        return;
+    }
+    if crate::par::is_serial() || width * height * 3 < 64 * 1024 {
+        f(0, dst);
+        return;
+    }
+    use rayon::prelude::*;
+    match dst {
+        PlanarDst::U8 { r, g, b } => {
+            let rows_per_band = (64 * 1024 / (3 * width)).max(1);
+            let n = rows_per_band * width;
+            r.par_chunks_mut(n)
+                .zip(g.par_chunks_mut(n))
+                .zip(b.par_chunks_mut(n))
+                .enumerate()
+                .for_each(|(t, ((r, g), b))| f(t * rows_per_band, &mut PlanarDst::U8 { r, g, b }));
+        }
+        PlanarDst::F32Div255 { r, g, b } => {
+            let rows_per_band = (64 * 1024 / (12 * width)).max(1);
+            let n = rows_per_band * width;
+            r.par_chunks_mut(n)
+                .zip(g.par_chunks_mut(n))
+                .zip(b.par_chunks_mut(n))
+                .enumerate()
+                .for_each(|(t, ((r, g), b))| f(t * rows_per_band, &mut PlanarDst::F32Div255 { r, g, b }));
         }
     }
 }

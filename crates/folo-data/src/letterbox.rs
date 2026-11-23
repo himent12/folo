@@ -83,23 +83,33 @@ impl Letterbox {
         }
     }
 
+    /// Validates public [`Letterbox`] geometry fields and returns `(left, top, rw, rh)` inside `(ow, oh)`.
+    fn checked_window(&self) -> (usize, usize, usize, usize) {
+        let [ow, oh] = self.out.map(|v| v as usize);
+        let [rw, rh] = self.resized.map(|v| v as usize);
+        assert!(
+            self.pad[0].is_finite() && self.pad[1].is_finite() && self.pad[0] >= 0.0 && self.pad[1] >= 0.0,
+            "invalid letterbox pad {:?}",
+            self.pad
+        );
+        let [left, top] = self.pad.map(|v| v as usize);
+        assert!(
+            left.checked_add(rw).is_some_and(|e| e <= ow) && top.checked_add(rh).is_some_and(|e| e <= oh),
+            "letterbox window ({left}+{rw}, {top}+{rh}) exceeds output {ow}x{oh}"
+        );
+        (left, top, rw, rh)
+    }
+
     /// Resizes and pads `img` according to this geometry.
     pub fn apply(&self, img: &Image, pad_value: u8) -> Image {
         assert_eq!([img.width, img.height], self.orig, "letterbox geometry computed for another size");
+        let (left, top, _, _) = self.checked_window();
         let [ow, oh] = self.out;
         let mut out =
             Image { width: ow, height: oh, data: crate::buffers::scratch(ow as usize * oh as usize * 3) };
         out.data.fill(pad_value);
         let stride = out.stride();
-        let top = self.pad[1] as usize;
-        resize_into(
-            img,
-            &mut out.data[top * stride..],
-            stride,
-            self.pad[0] as usize,
-            self.resized[0],
-            self.resized[1],
-        );
+        resize_into(img, &mut out.data[top * stride..], stride, left, self.resized[0], self.resized[1]);
         out
     }
 
@@ -124,8 +134,7 @@ impl Letterbox {
         if plane == 0 {
             return;
         }
-        let [rw, rh] = self.resized.map(|v| v as usize);
-        let [left, top] = self.pad.map(|v| v as usize);
+        let (left, top, rw, rh) = self.checked_window();
         let pad = pad_value as f32 * scale;
         let rows = RowResizer::new(img, rw as u32, rh as u32);
         let (r, rest) = dst.split_at_mut(plane);
@@ -179,8 +188,7 @@ impl Letterbox {
         if plane == 0 {
             return;
         }
-        let [rw, rh] = self.resized.map(|v| v as usize);
-        let [left, top] = self.pad.map(|v| v as usize);
+        let (left, top, rw, rh) = self.checked_window();
         let rows = RowResizer::new(img, rw as u32, rh as u32);
         match dst {
             PlanarDst::U8 { r, g, b } => {
@@ -287,8 +295,7 @@ impl Letterbox {
         if plane == 0 {
             return;
         }
-        let [rw, rh] = self.resized.map(|v| v as usize);
-        let [left, top] = self.pad.map(|v| v as usize);
+        let (left, top, rw, rh) = self.checked_window();
         let pad_word = u32::from_le_bytes([pad_value, pad_value, pad_value, 0]);
         let rows = RowResizer::new(img, rw as u32, rh as u32);
         let band = |y0: usize, out: &mut [u32]| {

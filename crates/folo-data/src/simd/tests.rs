@@ -97,27 +97,32 @@ fn vblend_and_hinterp_match_scalar_bit_exact() {
                 let w = dst_w as usize;
                 let (mut o0, mut o1) = (vec![0u8; w * 3], vec![0u8; w * 3]);
                 hinterp_taps_to_rgb_scalar(&v0, &plan.x0, &plan.wx, &mut o0);
-                hinterp_taps_to_rgb(&v1, &plan.x0, &plan.wx, &mut o1);
+                // SAFETY: `v1` holds `(cols + 1) * 4` elements and every `plan.x0[x] < cols`.
+                unsafe { hinterp_taps_to_rgb(&v1, &plan.x0, &plan.wx, &mut o1) };
                 assert_eq!(o1, o0, "hinterp_rgb cols={cols} dst={dst_w}");
 
                 let (mut r0, mut g0, mut b0) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
                 rgb_to_planar_u8_scalar(&o0, &mut r0, &mut g0, &mut b0, false);
                 let (mut r1, mut g1, mut b1) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
-                hinterp_taps_to_planar_u8(&v1, &plan.x0, &plan.wx, &mut r1, &mut g1, &mut b1);
+                // SAFETY: as above.
+                unsafe { hinterp_taps_to_planar_u8(&v1, &plan.x0, &plan.wx, &mut r1, &mut g1, &mut b1) };
                 assert_eq!((&r1, &g1, &b1), (&r0, &g0, &b0), "hinterp_planar_u8 cols={cols} dst={dst_w}");
 
                 let (mut fr0, mut fg0, mut fb0) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
                 let (mut fr1, mut fg1, mut fb1) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
                 rgb_to_planar_f32_scale_scalar(&o0, &mut fr0, &mut fg0, &mut fb0, 1.0 / 255.0);
-                hinterp_taps_to_planar_f32_scale(
-                    &v1,
-                    &plan.x0,
-                    &plan.wx,
-                    1.0 / 255.0,
-                    &mut fr1,
-                    &mut fg1,
-                    &mut fb1,
-                );
+                // SAFETY: as above.
+                unsafe {
+                    hinterp_taps_to_planar_f32_scale(
+                        &v1,
+                        &plan.x0,
+                        &plan.wx,
+                        1.0 / 255.0,
+                        &mut fr1,
+                        &mut fg1,
+                        &mut fb1,
+                    );
+                }
                 assert!(
                     fr1.iter().zip(&fr0).all(|(a, b)| a.to_bits() == b.to_bits())
                         && fg1.iter().zip(&fg0).all(|(a, b)| a.to_bits() == b.to_bits())
@@ -126,7 +131,10 @@ fn vblend_and_hinterp_match_scalar_bit_exact() {
                 );
 
                 rgb_to_planar_f32_div255_scalar(&o0, &mut fr0, &mut fg0, &mut fb0, false);
-                hinterp_taps_to_planar_f32_div255(&v1, &plan.x0, &plan.wx, &mut fr1, &mut fg1, &mut fb1);
+                // SAFETY: as above.
+                unsafe {
+                    hinterp_taps_to_planar_f32_div255(&v1, &plan.x0, &plan.wx, &mut fr1, &mut fg1, &mut fb1);
+                }
                 assert!(
                     fr1.iter().zip(&fr0).all(|(a, b)| a.to_bits() == b.to_bits())
                         && fg1.iter().zip(&fg0).all(|(a, b)| a.to_bits() == b.to_bits())
@@ -136,7 +144,8 @@ fn vblend_and_hinterp_match_scalar_bit_exact() {
 
                 let (mut w0, mut w1) = (vec![0u32; w], vec![0u32; w]);
                 rgb_to_rgb0_u32_scalar(&o0, &mut w0);
-                hinterp_taps_to_rgb0_u32(&v1, &plan.x0, &plan.wx, &mut w1);
+                // SAFETY: as above.
+                unsafe { hinterp_taps_to_rgb0_u32(&v1, &plan.x0, &plan.wx, &mut w1) };
                 assert_eq!(w1, w0, "hinterp_rgb0 cols={cols} dst={dst_w}");
             }
         }
@@ -394,4 +403,102 @@ fn letterbox_planar_dst_matches_apply_and_resize() {
         random_hsv(&mut r, [0.015, 0.7, 0.4], &mut Rng::new(7));
         assert_eq!((r.width, r.height), (lb.resized[0], lb.resized[1]));
     }
+}
+
+/// Huge-step nonzero-rotation/shear warp where `x0 * du` alone would overflow `i64` even though every running
+/// `fu0 + x * du` fits in `i64`: must match scalar pixel-for-pixel without overflowing.
+#[test]
+fn warp_general_huge_step_with_rotation_does_not_overflow() {
+    let src = noisy_image(99, 64, 64);
+    let border = [114, 7, 23];
+    let m_huge =
+        Affine::rotate(1.0).then(&Affine::scale(2f64.powi(-39), 1.0)).then(&Affine::translate(128.5, 10.5));
+    let m_rot = Affine::translate(-32.0, -32.0)
+        .then(&Affine::rotate(17.0))
+        .then(&Affine::shear(4.0, -3.0))
+        .then(&Affine::scale(0.8, 1.3))
+        .then(&Affine::translate(40.0, 20.0));
+    for (m, ow, oh) in [(m_huge, 257u32, 4u32), (m_rot, 97, 63)] {
+        let out = crate::warp::warp_affine(&src, &m, ow, oh, border);
+        let inv = m.inverse().unwrap();
+        let [a, b, c, d, e, f] = inv.0;
+        let fone = (1i64 << 16) as f64;
+        let (sw, sh) = (src.width as i64, src.height as i64);
+        let sstride = src.stride();
+        let mut want = vec![0u8; ow as usize * oh as usize * 3];
+        for y in 0..oh as usize {
+            let yc = y as f64 + 0.5;
+            let mut fu = ((a * 0.5 + b * yc + c - 0.5) * fone).round() as i64;
+            let mut fv = ((d * 0.5 + e * yc + f - 0.5) * fone).round() as i64;
+            let du = (a * fone).round() as i64;
+            let dv = (d * fone).round() as i64;
+            for x in 0..ow as usize {
+                let ix = fu >> 16;
+                let iy = fv >> 16;
+                let wx = ((fu >> 5) & 2047) as u32;
+                let wy = ((fv >> 5) & 2047) as u32;
+                fu = fu.wrapping_add(du);
+                fv = fv.wrapping_add(dv);
+                let dst = &mut want[(y * ow as usize + x) * 3..][..3];
+                if ix < -1 || iy < -1 || ix >= sw || iy >= sh {
+                    dst.copy_from_slice(&border);
+                } else {
+                    let fetch = |px: i64, py: i64, ch: usize| -> u32 {
+                        if px >= 0 && py >= 0 && px < sw && py < sh {
+                            src.data[py as usize * sstride + px as usize * 3 + ch] as u32
+                        } else {
+                            border[ch] as u32
+                        }
+                    };
+                    let (iwx, iwy) = (2048 - wx, 2048 - wy);
+                    for (ch, out) in dst.iter_mut().enumerate() {
+                        let t = fetch(ix, iy, ch) * iwx + fetch(ix + 1, iy, ch) * wx;
+                        let u = fetch(ix, iy + 1, ch) * iwx + fetch(ix + 1, iy + 1, ch) * wx;
+                        *out = ((t * iwy + u * wy + (1 << 21)) >> 22) as u8;
+                    }
+                }
+            }
+        }
+        assert_eq!(out.data, want, "warp_general mismatch for {m:?}");
+    }
+}
+
+#[test]
+fn malformed_short_image_panics_safely_in_public_apis() {
+    let bad = Image { width: 64, height: 64, data: Vec::new() };
+    assert!(
+        std::panic::catch_unwind(|| crate::warp::warp_affine(&bad, &Affine::rotate(15.0), 64, 64, [0; 3]))
+            .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| crate::warp::warp_affine(&bad, &Affine::scale(1.1, 1.1), 64, 64, [0; 3]))
+            .is_err()
+    );
+    assert!(std::panic::catch_unwind(|| resize(&bad, 32, 32)).is_err());
+    assert!(std::panic::catch_unwind(|| resize(&bad, 48, 48)).is_err());
+    let lb = Letterbox::compute(64, 64, 64, 64, &LetterboxOptions::default());
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut dst = vec![0f32; 3 * 64 * 64];
+            lb.apply_planar_f32(&bad, PAD_VALUE, 1.0 / 255.0, &mut dst);
+        })
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut dst = vec![0u32; 64 * 64];
+            lb.apply_rgb0_u8(&bad, PAD_VALUE, &mut dst);
+        })
+        .is_err()
+    );
+    let bad_lb =
+        Letterbox { orig: [16, 16], resized: [16, 16], out: [16, 16], ratio: [1.0, 1.0], pad: [-2.0, 0.0] };
+    let ok = noisy_image(1, 16, 16);
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut dst = vec![0f32; 3 * 16 * 16];
+            bad_lb.apply_planar_f32(&ok, PAD_VALUE, 1.0 / 255.0, &mut dst);
+        })
+        .is_err()
+    );
 }

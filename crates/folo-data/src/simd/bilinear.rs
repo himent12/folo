@@ -22,9 +22,7 @@ pub(crate) const SHIFT: u32 = 2 * WBITS;
 #[inline]
 pub(crate) fn vblend_rgb_to_rgba32(top: &[u8], bot: &[u8], wy: u32, dst: &mut [u32]) {
     let cols = top.len() / 3;
-    debug_assert_eq!(top.len(), cols * 3);
-    debug_assert_eq!(bot.len(), cols * 3);
-    debug_assert!(dst.len() >= cols * 4);
+    assert!(top.len() == cols * 3 && bot.len() == cols * 3 && dst.len() >= cols * 4 && wy <= WONE);
     if wy == 0 {
         vshift_rgb_to_rgba32(top, dst);
         return;
@@ -35,7 +33,7 @@ pub(crate) fn vblend_rgb_to_rgba32(top: &[u8], bot: &[u8], wy: u32, dst: &mut [u
     }
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && cols >= 6 {
-        // SAFETY: CPU supports AVX2 and slice lengths satisfy `cols`.
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to satisfy `cols`.
         unsafe { vblend_rgb_to_rgba32_avx2(top, bot, wy, dst, cols) };
         return;
     }
@@ -47,11 +45,10 @@ pub(crate) fn vblend_rgb_to_rgba32(top: &[u8], bot: &[u8], wy: u32, dst: &mut [u
 #[inline]
 pub(crate) fn vshift_rgb_to_rgba32(src: &[u8], dst: &mut [u32]) {
     let cols = src.len() / 3;
-    debug_assert_eq!(src.len(), cols * 3);
-    debug_assert!(dst.len() >= cols * 4);
+    assert!(src.len() == cols * 3 && dst.len() >= cols * 4);
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && cols >= 6 {
-        // SAFETY: CPU supports AVX2 and slice lengths satisfy `cols`.
+        // SAFETY: CPU supports AVX2 and slice lengths are asserted to satisfy `cols`.
         unsafe { vshift_rgb_to_rgba32_avx2(src, dst, cols) };
         return;
     }
@@ -85,14 +82,17 @@ pub(crate) fn vshift_rgb_to_rgba32_scalar(src: &[u8], dst: &mut [u32], cols: usi
 
 /// Horizontal interpolation from `v` (`(max_x0 + 2) * 4` `u32`s, where column `src_w` duplicates `src_w - 1` when
 /// clamped) using precomputed taps `x0`, `wx` (`len == out_rgb.len() / 3`), writing interleaved RGB `u8`.
+///
+/// # Safety
+/// Every `k` in `x0` must satisfy `(k as usize + 2) * 4 <= v.len()`.
 #[inline]
-pub(crate) fn hinterp_taps_to_rgb(v: &[u32], x0: &[u32], wx: &[u32], out_rgb: &mut [u8]) {
+pub(crate) unsafe fn hinterp_taps_to_rgb(v: &[u32], x0: &[u32], wx: &[u32], out_rgb: &mut [u8]) {
     let w = x0.len();
-    debug_assert_eq!(wx.len(), w);
-    debug_assert_eq!(out_rgb.len(), w * 3);
+    assert!(wx.len() == w && out_rgb.len() == w * 3);
+    debug_assert!(x0.iter().all(|&k| (k as usize + 2) * 4 <= v.len()));
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 6 {
-        // SAFETY: CPU supports AVX2; `v` has at least `(x0[x] + 2) * 4` elements for every `x < w`.
+        // SAFETY: CPU supports AVX2; caller guarantees `(x0[x] + 2) * 4 <= v.len()` and lengths are asserted.
         unsafe { hinterp_taps_to_rgb_avx2(v, x0, wx, out_rgb) };
         return;
     }
@@ -112,8 +112,11 @@ pub(crate) fn hinterp_taps_to_rgb_scalar(v: &[u32], x0: &[u32], wx: &[u32], out_
 }
 
 /// Horizontal interpolation from `v` using taps `x0`, `wx` directly into planar `u8` (`r`, `g`, `b`).
+///
+/// # Safety
+/// Every `k` in `x0` must satisfy `(k as usize + 2) * 4 <= v.len()`.
 #[inline]
-pub(crate) fn hinterp_taps_to_planar_u8(
+pub(crate) unsafe fn hinterp_taps_to_planar_u8(
     v: &[u32],
     x0: &[u32],
     wx: &[u32],
@@ -122,13 +125,11 @@ pub(crate) fn hinterp_taps_to_planar_u8(
     b: &mut [u8],
 ) {
     let w = x0.len();
-    debug_assert_eq!(wx.len(), w);
-    debug_assert_eq!(r.len(), w);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(wx.len() == w && r.len() == w && g.len() == w && b.len() == w);
+    debug_assert!(x0.iter().all(|&k| (k as usize + 2) * 4 <= v.len()));
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 8 {
-        // SAFETY: CPU supports AVX2; caller guarantees `v` covers `x0[x] + 1`.
+        // SAFETY: CPU supports AVX2; caller guarantees `(x0[x] + 2) * 4 <= v.len()` and lengths are asserted.
         unsafe { hinterp_taps_to_planar_u8_avx2(v, x0, wx, r, g, b) };
         return;
     }
@@ -144,8 +145,11 @@ pub(crate) fn hinterp_taps_to_planar_u8(
 
 /// Horizontal interpolation from `v` using taps `x0`, `wx` directly into planar `f32` (`val as f32 * scale`,
 /// matching `Letterbox::apply_planar_f32` bit for bit).
+///
+/// # Safety
+/// Every `k` in `x0` must satisfy `(k as usize + 2) * 4 <= v.len()`.
 #[inline]
-pub(crate) fn hinterp_taps_to_planar_f32_scale(
+pub(crate) unsafe fn hinterp_taps_to_planar_f32_scale(
     v: &[u32],
     x0: &[u32],
     wx: &[u32],
@@ -155,13 +159,11 @@ pub(crate) fn hinterp_taps_to_planar_f32_scale(
     b: &mut [f32],
 ) {
     let w = x0.len();
-    debug_assert_eq!(wx.len(), w);
-    debug_assert_eq!(r.len(), w);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(wx.len() == w && r.len() == w && g.len() == w && b.len() == w);
+    debug_assert!(x0.iter().all(|&k| (k as usize + 2) * 4 <= v.len()));
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 8 {
-        // SAFETY: CPU supports AVX2; caller guarantees `v` covers `x0[x] + 1`.
+        // SAFETY: CPU supports AVX2; caller guarantees `(x0[x] + 2) * 4 <= v.len()` and lengths are asserted.
         unsafe { hinterp_taps_to_planar_f32_avx2(v, x0, wx, Some(scale), r, g, b) };
         return;
     }
@@ -177,8 +179,11 @@ pub(crate) fn hinterp_taps_to_planar_f32_scale(
 
 /// Horizontal interpolation from `v` using taps `x0`, `wx` directly into planar `f32` (`val as f32 / 255.0`,
 /// matching `DataLoader` bit for bit).
+///
+/// # Safety
+/// Every `k` in `x0` must satisfy `(k as usize + 2) * 4 <= v.len()`.
 #[inline]
-pub(crate) fn hinterp_taps_to_planar_f32_div255(
+pub(crate) unsafe fn hinterp_taps_to_planar_f32_div255(
     v: &[u32],
     x0: &[u32],
     wx: &[u32],
@@ -187,13 +192,11 @@ pub(crate) fn hinterp_taps_to_planar_f32_div255(
     b: &mut [f32],
 ) {
     let w = x0.len();
-    debug_assert_eq!(wx.len(), w);
-    debug_assert_eq!(r.len(), w);
-    debug_assert_eq!(g.len(), w);
-    debug_assert_eq!(b.len(), w);
+    assert!(wx.len() == w && r.len() == w && g.len() == w && b.len() == w);
+    debug_assert!(x0.iter().all(|&k| (k as usize + 2) * 4 <= v.len()));
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 8 {
-        // SAFETY: CPU supports AVX2; caller guarantees `v` covers `x0[x] + 1`.
+        // SAFETY: CPU supports AVX2; caller guarantees `(x0[x] + 2) * 4 <= v.len()` and lengths are asserted.
         unsafe { hinterp_taps_to_planar_f32_avx2(v, x0, wx, None, r, g, b) };
         return;
     }
@@ -208,14 +211,17 @@ pub(crate) fn hinterp_taps_to_planar_f32_div255(
 }
 
 /// Horizontal interpolation from `v` using taps `x0`, `wx` directly into packed `[R, G, B, 0]` `u32` words.
+///
+/// # Safety
+/// Every `k` in `x0` must satisfy `(k as usize + 2) * 4 <= v.len()`.
 #[inline]
-pub(crate) fn hinterp_taps_to_rgb0_u32(v: &[u32], x0: &[u32], wx: &[u32], dst: &mut [u32]) {
+pub(crate) unsafe fn hinterp_taps_to_rgb0_u32(v: &[u32], x0: &[u32], wx: &[u32], dst: &mut [u32]) {
     let w = x0.len();
-    debug_assert_eq!(wx.len(), w);
-    debug_assert_eq!(dst.len(), w);
+    assert!(wx.len() == w && dst.len() == w);
+    debug_assert!(x0.iter().all(|&k| (k as usize + 2) * 4 <= v.len()));
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 4 {
-        // SAFETY: CPU supports AVX2; caller guarantees `v` covers `x0[x] + 1`.
+        // SAFETY: CPU supports AVX2; caller guarantees `(x0[x] + 2) * 4 <= v.len()` and lengths are asserted.
         unsafe { hinterp_taps_to_rgb0_u32_avx2(v, x0, wx, dst) };
         return;
     }
@@ -235,19 +241,24 @@ pub(crate) fn hinterp_taps_to_rgb0_u32(v: &[u32], x0: &[u32], wx: &[u32], dst: &
 #[inline]
 pub(crate) fn warp_hinterp_interior_to_rgb(v: &[u32], rel_fu0: i64, du: i64, out_rgb: &mut [u8]) {
     let count = out_rgb.len() / 3;
-    debug_assert_eq!(out_rgb.len(), count * 3);
-    let cols = v.len() / 4;
+    assert_eq!(out_rgb.len(), count * 3);
     #[cfg(target_arch = "x86_64")]
-    if has_avx2()
-        && count >= 6
-        && (2..=32000).contains(&cols)
-        && du.abs() <= 4 << 16
-        && rel_fu0 >= 0
-        && rel_fu0 < ((cols as i64 - 1) << 16)
     {
-        // SAFETY: CPU supports AVX2; `cols <= 32000`, `|du| <= 4<<16`, and every `k < cols - 1`, so `rel_fu` fits `i32`.
-        unsafe { warp_hinterp_interior_to_rgb_avx2(v, rel_fu0 as i32, du as i32, out_rgb) };
-        return;
+        let cols = v.len() / 4;
+        let hi_excl = (cols as i128 - 1) << 16;
+        let last_rel = rel_fu0 as i128 + (count as i128 - 1) * du as i128;
+        if has_avx2()
+            && count >= 6
+            && (2..=32000).contains(&cols)
+            && du.abs() <= 4 << 16
+            && (0..hi_excl).contains(&(rel_fu0 as i128))
+            && (0..hi_excl).contains(&last_rel)
+        {
+            // SAFETY: CPU supports AVX2; both endpoints of linear `rel_fu` lie in `0..((cols-1)<<16)` with
+            // `cols <= 32000` and `|du| <= 4<<16`, so every tap `k < cols - 1` fits in `v` and `rel_fu` fits `i32`.
+            unsafe { warp_hinterp_interior_to_rgb_avx2(v, rel_fu0 as i32, du as i32, out_rgb) };
+            return;
+        }
     }
     warp_hinterp_interior_to_rgb_scalar(v, rel_fu0, du, out_rgb);
 }
@@ -266,11 +277,14 @@ pub(crate) fn warp_hinterp_interior_to_rgb_scalar(v: &[u32], rel_fu0: i64, du: i
     }
 }
 
-/// Interior span of `warp_general` (every pixel guaranteed to have `0 <= ix < sw - 1`, `0 <= iy < sh - 1`, and
-/// `iy * sstride + ix * 3 + sstride + 8 <= sdata.len()`), writing interleaved RGB into `out_rgb`.
+/// Interior span of `warp_general` for a `sw x sh` image (`sstride == sw * 3`), writing interleaved RGB into
+/// `out_rgb`. Verifies `sdata` length and both endpoints of `(fu, fv)` in O(1) before entering AVX2.
+#[allow(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn warp_general_interior_to_rgb(
     sdata: &[u8],
+    sw: usize,
+    sh: usize,
     sstride: usize,
     fu0: i64,
     fv0: i64,
@@ -279,12 +293,26 @@ pub(crate) fn warp_general_interior_to_rgb(
     out_rgb: &mut [u8],
 ) {
     let count = out_rgb.len() / 3;
-    debug_assert_eq!(out_rgb.len(), count * 3);
+    assert_eq!(out_rgb.len(), count * 3);
+    assert!(sstride == sw.checked_mul(3).expect("stride overflow"));
+    assert!(sh.checked_mul(sstride).is_some_and(|need| sdata.len() >= need));
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() && count >= 4 {
-        // SAFETY: CPU supports AVX2; caller guarantees every interior tap + 8 bytes is within `sdata`.
-        unsafe { warp_general_interior_to_rgb_avx2(sdata, sstride, fu0, fv0, du, dv, out_rgb) };
-        return;
+    if has_avx2() && count >= 6 && sw >= 2 && sh >= 3 {
+        let fu_last = fu0 as i128 + (count as i128 - 1) * du as i128;
+        let fv_last = fv0 as i128 + (count as i128 - 1) * dv as i128;
+        let u_hi = (sw as i128 - 1) << 16;
+        let v_hi = (sh as i128 - 2) << 16;
+        if (0..u_hi).contains(&(fu0 as i128))
+            && (0..u_hi).contains(&fu_last)
+            && (0..v_hi).contains(&(fv0 as i128))
+            && (0..v_hi).contains(&fv_last)
+        {
+            // SAFETY: CPU supports AVX2; `sdata.len() >= sh * sstride` is asserted above, and by linearity both
+            // endpoints prove every tap has `0 <= ix <= sw - 2` and `0 <= iy <= sh - 3`, so
+            // `(iy + 1) * sstride + ix * 3 + 8 <= sh * sstride <= sdata.len()`.
+            unsafe { warp_general_interior_to_rgb_avx2(sdata, sstride, fu0, fv0, du, dv, out_rgb) };
+            return;
+        }
     }
     let (mut fu, mut fv) = (fu0, fv0);
     for px in out_rgb.as_chunks_mut::<3>().0.iter_mut() {
@@ -308,10 +336,10 @@ pub(crate) fn warp_general_interior_to_rgb(
 /// Adds `src` bytes into `acc` (`u32`s) — used by `box_downsample` in `resize.rs`.
 #[inline]
 pub(crate) fn add_u8_to_u32(acc: &mut [u32], src: &[u8]) {
-    debug_assert_eq!(acc.len(), src.len());
+    assert_eq!(acc.len(), src.len());
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && src.len() >= 16 {
-        // SAFETY: CPU supports AVX2 and lengths match.
+        // SAFETY: CPU supports AVX2 and lengths are asserted equal.
         unsafe { add_u8_to_u32_avx2(acc, src) };
         return;
     }
