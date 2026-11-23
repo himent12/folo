@@ -800,8 +800,9 @@ impl Backend for GpuBackend {
         let settings = muon::MuonSettings {
             momentum: s.momentum,
             nesterov: s.nesterov,
-            coeffs: s.coeffs,
+            step_coeffs: s.step_coeffs,
             steps: s.steps,
+            schatten4: s.schatten4,
             eps: s.eps,
             lr: s.lr,
         };

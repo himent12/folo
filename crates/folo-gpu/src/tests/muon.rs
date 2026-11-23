@@ -6,13 +6,25 @@ use super::{Rng, gpu};
 use crate::kernels::muon::{MuonMatrix, MuonSettings, muon_step_within};
 use crate::{GpuContext, GpuTensor};
 
-/// `rows × cols`: (130, 40) is transposed; (70, 300) is the largest, 21,000 elements (84,000 bytes).
-const SHAPES: [(usize, usize); 6] = [(16, 27), (130, 40), (1, 5), (70, 300), (96, 96), (5, 1)];
-const LARGEST: u64 = 70 * 300 * 4;
+/// `rows × cols`: (130, 40) is transposed; (260, 290) triggers `UP64X128_D16` (`r > 256`) in the one-group run
+/// while the split groups below run `SQ64_D16`, verifying bit-exact agreement across tile sizes.
+/// Padded workspace of `(260, 290)`: `260 * align4(290) * 4 = 303,680` bytes.
+const SHAPES: [(usize, usize); 7] = [(16, 27), (130, 40), (1, 5), (260, 290), (70, 300), (96, 96), (5, 1)];
+const LARGEST: u64 = 260 * 292 * 4;
 
 /// The step on fresh copies of the same parameters, momenta and gradients: whether it ran, and the parameters
 /// before and after.
 fn run(ctx: &GpuContext, max_bytes: u64, bindings: usize) -> (bool, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let s = MuonSettings::uniform(0.9, true, (3.4445, -4.775, 2.0315), 5, 1e-7, 0.5);
+    run_with(ctx, max_bytes, bindings, &s)
+}
+
+fn run_with(
+    ctx: &GpuContext,
+    max_bytes: u64,
+    bindings: usize,
+    s: &MuonSettings,
+) -> (bool, Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let rng = &mut Rng::new(29);
     let mut ts = Vec::new();
     for &(r, c) in &SHAPES {
@@ -32,17 +44,38 @@ fn run(ctx: &GpuContext, max_bytes: u64, bindings: usize) -> (bool, Vec<Vec<f32>
             scale: (*r as f32 / *c as f32).max(1.0).sqrt(),
         })
         .collect();
+    let ran = muon_step_within(ctx, &items, s, max_bytes, bindings).unwrap();
+    let after = ts.iter().map(|t| t.0.to_vec().unwrap()).collect();
+    (ran, before, after)
+}
+
+#[test]
+fn muon_polar_groups_match_one_group() {
+    let ctx = gpu!();
+    let mut step_coeffs = [(0.0, 0.0, 0.0); crate::kernels::muon::MAX_STEPS];
+    step_coeffs[0] = (4.216_272_4, -12.289_586, 9.009_986);
+    step_coeffs[1] = (4.152_54, -11.770_327, 8.558_353);
+    step_coeffs[2] = (3.887_979, -9.771_957, 6.839_154_7);
+    step_coeffs[3] = (3.287_126, -5.261_409, 3.046_717_4);
     let s = MuonSettings {
         momentum: 0.9,
         nesterov: true,
-        coeffs: (3.4445, -4.775, 2.0315),
-        steps: 5,
+        step_coeffs,
+        steps: 4,
+        schatten4: true,
         eps: 1e-7,
         lr: 0.5,
     };
-    let ran = muon_step_within(ctx, &items, &s, max_bytes, bindings).unwrap();
-    let after = ts.iter().map(|t| t.0.to_vec().unwrap()).collect();
-    (ran, before, after)
+    let (ran, before, whole) = run_with(&ctx, 1 << 30, ctx.caps().max_storage_buffers as usize, &s);
+    assert!(ran);
+    for (i, (b, w)) in before.iter().zip(&whole).enumerate() {
+        assert_ne!(b, w, "matrix {i} updated");
+    }
+    let (ran, _, grouped) = run_with(&ctx, LARGEST, 5, &s);
+    assert!(ran);
+    for (i, (g, w)) in grouped.iter().zip(&whole).enumerate() {
+        assert!(g.iter().zip(w).all(|(a, b)| a.to_bits() == b.to_bits()), "matrix {i} {:?}", SHAPES[i]);
+    }
 }
 
 #[test]
@@ -53,7 +86,8 @@ fn muon_groups_match_one_group() {
     for (i, (b, w)) in before.iter().zip(&whole).enumerate() {
         assert_ne!(b, w, "matrix {i} updated");
     }
-    // Three groups ([16×27, 130×40, 1×5], [70×300], [96×96, 5×1]), one matrix per gather, three per update.
+    // Three groups ([16×27, 130×40, 1×5], [260×290], [70×300, 96×96, 5×1]): group 1 uses UP64X128_D16 while
+    // groups 0 and 2 use SQ64_D16, one matrix per gather, three per update.
     let (ran, _, grouped) = run(&ctx, LARGEST, 5);
     assert!(ran);
     for (i, (g, w)) in grouped.iter().zip(&whole).enumerate() {

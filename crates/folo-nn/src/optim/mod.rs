@@ -44,8 +44,9 @@ use serde::{Deserialize, Serialize};
 pub use adamw::AdamW;
 pub use grads::{GradAccumulator, global_grad_norm};
 pub use musgd::{
-    MUON_SCALE, MuSgd, MuSgdWeights, NS_COEFFS, NS_EPS, NS_STEPS, is_muon_group, muon_scale, orthogonalize,
-    orthogonalize_many,
+    MUON_SCALE, MuSgd, MuSgdWeights, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR4_COEFFS,
+    POLAR5_COEFFS, is_muon_group, muon_scale, orthogonalize, orthogonalize_many, orthogonalize_many_with,
+    orthogonalize_with,
 };
 pub use sgd::Sgd;
 
@@ -276,6 +277,7 @@ fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
         groups: o.groups().iter().map(|g| GroupContract::from_group(g, kind)).collect(),
         step: o.step_count(),
         musgd: None,
+        muon_ortho: None,
     }
 }
 
@@ -292,6 +294,12 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
     }
     if c.musgd.is_some() && kind != OptimKind::MuSgd {
         return Err(Error::Load(format!("folo.optim: a `{}` contract cannot have `musgd`", kind.as_str())));
+    }
+    if c.muon_ortho.is_some() && kind != OptimKind::MuSgd {
+        return Err(Error::Load(format!(
+            "folo.optim: a `{}` contract cannot have `muon_ortho`",
+            kind.as_str()
+        )));
     }
     check_param_sets(o.groups(), &c.groups)?;
     for (g, gc) in o.groups_mut().iter_mut().zip(&c.groups) {
@@ -315,6 +323,12 @@ pub struct OptimContract {
     /// default weights reads as before; absent, `apply_contract` keeps the weights the optimizer was built with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub musgd: Option<MuSgdWeights>,
+    /// MuSGD's orthogonalisation schedule when not legacy [`MuonOrtho::Ns5`] (`"polar4"` or `"polar5"`). Omitted
+    /// for `Ns5` so `folo.optim` stays byte-identical to pre-Polar contracts and absent `muon_ortho` resumes as
+    /// `Ns5`, while readers predating the key reject Polar-FOLO checkpoints cleanly instead of silently switching
+    /// schedules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muon_ortho: Option<MuonOrtho>,
 }
 
 /// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.

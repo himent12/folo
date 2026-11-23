@@ -1,34 +1,46 @@
-//! MuSGD's Muon half on the GPU ([`muon_step_many`]): the Nesterov mix, the Frobenius normalisation, the quintic
-//! Newton–Schulz iteration of every matrix-shaped weight and its update `p −= lr · scale · O`, in a fixed handful
-//! of dispatches per step for all of them (the tensor-op formulation took about fifteen per weight).
+//! MuSGD's Muon half on the GPU ([`muon_step_many`]): the Nesterov mix, the Frobenius normalisation, the
+//! odd-quintic Newton–Schulz / Polar-FOLO orthogonalisation of every matrix-shaped weight (with optional
+//! zero-extra-GEMM step-0 Schatten-4 spectral rescaling) and its update `p −= lr · scale · O`, in a fixed handful
+//! of dispatches per step for all of them.
 //!
-//! Every matrix `U` (`rows × cols`) is oriented so that it has no more rows than columns (transposed when
-//! `rows > cols`) and laid out back to back in one workspace `X` (one per group of matrices when all of them
-//! would not fit one storage binding). Each Newton–Schulz step is three grouped GEMMs over all matrices of the
-//! group at once, each workgroup finding its matrix and tile in a small table:
-//! `A = X·Xᵀ`, `Bm = b·A + c·(A·A)` (`A` is symmetric, bit for bit, so `A·A = A·Aᵀ`), `X' = a·X + Bm·X`. The
-//! arithmetic is the tensor ops' (`folo_nn::optim::orthogonalize_many`, then `p · 1 + O · (−lr)`), op for op,
-//! except for the summation order of the products and of the norm; zero padding of the reference's row buckets
-//! changes nothing and is not needed here, as every matrix is its own problem.
+//! Every matrix `U` (`rows × cols`) is oriented so that it has no more rows than columns (`r ≤ c`, transposed when
+//! `rows > cols`) and laid out back to back in one workspace `X` with 4-aligned row strides (`ld_c = align4(c)`,
+//! zero-padded in `c..ld_c`; `A` and `Bm` similarly with `ld_r = align4(r)`), sorted longest-`c` first (LPT) so
+//! high-`K` matrices start at workgroup 0. Each polynomial step runs three grouped `vec4` GEMMs over all matrices
+//! of the group at once (`muon/shader.rs`):
+//! - `MODE 0`: `A = X·Xᵀ` (symmetric: upper-triangle tiles only; diagonal tiles load `X` once; off-diagonal tiles
+//!   write both `(m, n)` and register-transposed `(n, m)` as `vec4<f32>`, preserving bit-exact symmetry),
+//! - `MODE 1`: `Bm = b_k·A + c_k·(A·A)` (same upper-triangle symmetry and diagonal reuse, since `A` is symmetric),
+//! - `MODE 2`: `X' = a_k·X + Bm·X` (rectangular `BM × BN` tiles matching wide `r ≤ c` weights).
+//!
+//! When `schatten4` is set, a single lightweight reduction (`muon_s4`, one workgroup per matrix over `A₀`)
+//! computes `1 / (‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps))` into the table's scratch tail, and step 0's `MODE 1` /
+//! `MODE 2` fold that factor into `(a₀, b₀, c₀)` with zero extra GEMMs or extra storage bindings.
 
-use std::collections::HashMap;
-use std::fmt::Write as _;
+mod shader;
+
 use std::ops::Range;
-use std::sync::{Mutex, OnceLock};
 
 use super::check_buf;
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+use crate::pipeline::{Params, Spec};
+
+pub(crate) use shader::{DEFS, many_def_for};
 
 /// Matrices one multi-tensor dispatch (the gather, the update) takes.
-const MANY: usize = super::optim::MANY;
+pub(super) const MANY: usize = super::optim::MANY;
 /// `u32` words per matrix in the table.
-const STRIDE: usize = 8;
-/// Output tile of the grouped GEMM (square) and its depth; 4×4 outputs per invocation.
-const TILE: usize = 64;
-const DEPTH: u32 = 16;
+pub(super) const STRIDE: usize = 8;
+/// Maximum polynomial steps a single [`MuonSettings`] holds (mirrors `folo_core::backend::MAX_MUON_STEPS`).
+pub const MAX_STEPS: usize = 8;
+
+/// Smallest multiple of 4 at least `n`.
+#[inline]
+const fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
 
 /// One matrix of [`muon_step_many`].
 #[derive(Clone, Copy, Debug)]
@@ -54,21 +66,110 @@ pub struct MuonSettings {
     pub momentum: f32,
     /// `u = (g · (1 − μ)) · 1 + m · μ` when set, else `u = m`.
     pub nesterov: bool,
-    /// Newton–Schulz coefficients `(a, b, c)`.
-    pub coeffs: (f32, f32, f32),
-    /// Newton–Schulz steps.
+    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`.
+    pub step_coeffs: [(f32, f32, f32); MAX_STEPS],
+    /// Polynomial steps (`<= MAX_STEPS`).
     pub steps: usize,
+    /// Zero-extra-GEMM step-0 Schatten-4 spectral rescaling (`α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps)`).
+    pub schatten4: bool,
     /// Added to the Frobenius norm before the division.
     pub eps: f32,
     /// The update's learning rate: `p = p · 1 + O · (−lr)`.
     pub lr: f32,
 }
 
+impl MuonSettings {
+    /// Uniform coefficients `(a, b, c)` repeated for `steps` steps (no Schatten-4 rescaling).
+    pub fn uniform(
+        momentum: f32,
+        nesterov: bool,
+        coeffs: (f32, f32, f32),
+        steps: usize,
+        eps: f32,
+        lr: f32,
+    ) -> Self {
+        MuonSettings {
+            momentum,
+            nesterov,
+            step_coeffs: [coeffs; MAX_STEPS],
+            steps,
+            schatten4: false,
+            eps,
+            lr,
+        }
+    }
+}
+
+/// Tile configuration of `muon_gemm` (`BM × BN` output tile, `TM × TN` per thread, K-tile depth `DEPTH`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MuonTile {
+    pub bm: u32,
+    pub bn: u32,
+    pub tm: u32,
+    pub tn: u32,
+    pub depth: u32,
+}
+
+impl MuonTile {
+    /// 32×32 square tile, 4×4 per thread (64 threads), K-depth 32 (128-byte cache-line loads, 16 KiB dbuf / 8 KiB
+    /// single-buf): used for symmetric `MODE 0` (`A = X·Xᵀ`) and `MODE 1` (`Bm = b·A + c·A·A`).
+    const SQ32_D32: Self = Self { bm: 32, bn: 32, tm: 4, tn: 4, depth: 32 };
+    /// 64×64 update tile, 4×4 per thread (256 threads), K-depth 16 (16 KiB dbuf / 8 KiB single-buf): used for
+    /// `MODE 2` (`X' = a·X + Bm·X`) on smaller models (`max_r <= 256`, e.g. `folo-n`).
+    const SQ64_D16: Self = Self { bm: 64, bn: 64, tm: 4, tn: 4, depth: 16 };
+    /// 64×128 update tile, 4×8 per thread (256 threads), K-depth 16 (24 KiB dbuf / 12 KiB single-buf, 2× `Bm`
+    /// reuse): used for `MODE 2` on larger models (`max_r > 256`, e.g. `folo-s` and above).
+    const UP64X128_D16: Self = Self { bm: 64, bn: 128, tm: 4, tn: 8, depth: 16 };
+
+    /// Workgroup threads.
+    #[inline]
+    pub(crate) const fn threads(self) -> u32 {
+        (self.bm / self.tm) * (self.bn / self.tn)
+    }
+
+    /// Workgroup storage bytes (`As`, `Bs`, and 16-byte-aligned `prob`).
+    #[inline]
+    pub(crate) const fn workgroup_bytes(self, dbuf: bool) -> u32 {
+        let mult = if dbuf { 2 } else { 1 };
+        mult * self.depth * (self.bm + self.bn) * 4 + (13 * 4_u32).next_multiple_of(16)
+    }
+
+    /// Whether a kernel list may precompile this tile configuration for `mode`.
+    pub(crate) fn valid(self, mode: u32) -> bool {
+        match mode {
+            0 | 1 => self == Self::SQ32_D32,
+            2 => matches!(self, Self::SQ64_D16 | Self::UP64X128_D16),
+            _ => false,
+        }
+    }
+}
+
+/// Validates `muon_gemm` specialisation constants for precompile (`bounds.rs`).
+pub(crate) fn gemm_fits(spec: &Spec) -> bool {
+    let mode = spec.get_u32("MODE", 0);
+    let tile = MuonTile {
+        bm: spec.get_u32("BM", 64),
+        bn: spec.get_u32("BN", 64),
+        tm: spec.get_u32("TM", 4),
+        tn: spec.get_u32("TN", 4),
+        depth: spec.get_u32("DEPTH", 16),
+    };
+    tile.valid(mode)
+}
+
+/// Picks `(square_tile, update_tile)` for one group of matrices.
+fn pick_tiles(items: &[&MuonMatrix<'_>]) -> (MuonTile, MuonTile) {
+    let max_r = items.iter().map(|it| it.rows.min(it.cols)).max().unwrap_or(0);
+    let up = if max_r <= 256 { MuonTile::SQ64_D16 } else { MuonTile::UP64X128_D16 };
+    (MuonTile::SQ32_D32, up)
+}
+
 /// For every matrix: `U = nesterov ? (g · (1 − μ)) · 1 + m · μ : m`, `X = U / (‖U‖_F + eps)` (transposed so
-/// that rows ≤ cols), `steps` times `A = X·Xᵀ; X = a·X + (b·A + c·A·A)·X`, transposed back, `O = X · scale`
-/// (when `scale ≠ 1`) and `p = p · 1 + O · (−lr)` in place. The matrices go in groups whose workspaces each fit
-/// one storage binding ([`partition`]), about `2 · ⌈n / 16⌉ + 3 · steps + 2` dispatches per group of `n`. The
-/// parameters must not alias the momenta or gradients.
+/// that rows ≤ cols), `steps` times `A = X·Xᵀ; X = a_k·X + (b_k·A + c_k·A·A)·X` (with optional step-0 Schatten-4
+/// spectral rescaling), transposed back, `O = X · scale` (when `scale ≠ 1`) and `p = p · 1 + O · (−lr)` in place.
+/// The matrices go in groups whose workspaces each fit one storage binding ([`partition`]), about
+/// `2 · ⌈n / 16⌉ + 3 · steps + 2` (+ 1 for `schatten4`) dispatches per group of `n`. The parameters must not
+/// alias the momenta or gradients.
 ///
 /// Returns `Ok(false)`, having written nothing, when the device cannot run it: fewer than 5 storage bindings
 /// per kernel, or a matrix whose workspace alone is past the largest storage binding. The caller then uses
@@ -92,6 +193,9 @@ pub(crate) fn muon_step_within(
     max_bytes: u64,
     bindings: usize,
 ) -> Result<bool> {
+    if s.steps > MAX_STEPS {
+        return Err(GpuError::Shape(format!("muon: steps {} exceeds maximum {MAX_STEPS}", s.steps)));
+    }
     for it in items {
         for (b, what) in [(it.p, "muon param"), (it.m, "muon momentum"), (it.g, "muon gradient")] {
             check_buf(b, it.rows * it.cols, DType::F32, what)?;
@@ -113,16 +217,20 @@ pub(crate) fn muon_step_within(
 }
 
 /// Splits the matrices (`rows × cols` each, none empty) into consecutive runs whose workspaces (`X` twice:
-/// `Σ rows · cols` f32; `A` and `Bm`: `Σ r²`, `r` the smaller side; one partial per 256 elements; the table)
+/// `Σ r · align4(c)` f32; `A` and `Bm`: `Σ r · align4(r)`; one partial per 256 padded elements; the table)
 /// each fit in `max_bytes` and index in `u32`. `None` when one matrix's alone does not.
 fn partition(shapes: &[(usize, usize)], max_bytes: u64) -> Option<Vec<Range<usize>>> {
     let cap = (max_bytes / 4).min(u64::from(u32::MAX));
     let mut groups = Vec::new();
     let (mut start, mut sum) = (0, [0u64; 4]);
     for (i, &(rows, cols)) in shapes.iter().enumerate() {
-        let (r, c) = (rows.min(cols) as u64, rows.max(cols) as u64);
-        let n = r.checked_mul(c)?;
-        let need = [n, r * r, n.div_ceil(256), STRIDE as u64 + 1];
+        let (r, c) = (rows.min(cols), rows.max(cols));
+        let ld_r = align4(r) as u64;
+        let ld_c = align4(c) as u64;
+        let r64 = r as u64;
+        let n = r64.checked_mul(ld_c)?;
+        let n_sq = r64.checked_mul(ld_r)?;
+        let need = [n, n_sq, n.div_ceil(256).checked_mul(2)?, STRIDE as u64 + 2];
         if need.iter().any(|&v| v > cap) {
             return None;
         }
@@ -143,45 +251,61 @@ fn partition(shapes: &[(usize, usize)], max_bytes: u64) -> Option<Vec<Range<usiz
 /// The whole update of one group of [`partition`], all in its own workspace.
 fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bindings: usize) -> Result<()> {
     let (j_gather, j_apply) = (MANY.min((bindings - 3) / 2), MANY.min(bindings - 2));
-    // The table: per matrix (oriented rows r, cols c, transposed, element offset, offset in the r×r scratch,
-    // first workgroup of the elementwise passes, first tile of the r×r products, first tile of the update),
-    // then each matrix's scale.
-    let mut table: Vec<u32> = Vec::with_capacity(items.len() * (STRIDE + 1));
+    // Longest-K-first (LPT) ordering so high-K matrices start at workgroup 0 instead of running as tail stragglers.
+    let mut ordered: Vec<&MuonMatrix<'_>> = items.to_vec();
+    ordered.sort_by(|a, b| {
+        let (ra, ca) = (a.rows.min(a.cols), a.rows.max(a.cols));
+        let (rb, cb) = (b.rows.min(b.cols), b.rows.max(b.cols));
+        cb.cmp(&ca).then_with(|| rb.cmp(&ra))
+    });
+    let items = ordered.as_slice();
+    let (tile_sq, tile_up) = pick_tiles(items);
+    let max_wg_bytes = ctx.caps().max_workgroup_storage;
+    let dbuf_sq = tile_sq.workgroup_bytes(true) <= max_wg_bytes;
+    let dbuf_up = tile_up.workgroup_bytes(true) <= max_wg_bytes;
+
+    // The table: per matrix (r, c, trans, off_x, off_sq, first_wg, first_t_sq, first_t_up), then each matrix's
+    // scale bits (`count` words), then `count` scratch words for step-0 Schatten-4 `1 / alpha`.
+    let count = items.len();
+    let mut table: Vec<u32> = Vec::with_capacity(count * (STRIDE + 2));
     let (mut off, mut off_sq, mut wg, mut t_sq, mut t_up) = (0u64, 0u64, 0u64, 0u64, 0u64);
     for it in items {
         let (r, c) = (it.rows.min(it.cols), it.rows.max(it.cols));
-        let (tr, tc) = (r.div_ceil(TILE) as u64, c.div_ceil(TILE) as u64);
+        let (ld_r, ld_c) = (align4(r) as u64, align4(c) as u64);
+        let tr_sq = r.div_ceil(tile_sq.bm as usize) as u64;
+        let tr_up = r.div_ceil(tile_up.bm as usize) as u64;
+        let tc_up = c.div_ceil(tile_up.bn as usize) as u64;
         for v in [r as u64, c as u64, u64::from(it.rows > it.cols), off, off_sq, wg, t_sq, t_up] {
             table.push(u32::try_from(v).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?);
         }
-        let n = (r * c) as u64;
-        off += n;
-        off_sq += (r * r) as u64;
-        wg += n.div_ceil(256);
-        t_sq += tr * tr;
-        t_up += tr * tc;
+        let n_pad = r as u64 * ld_c;
+        off += n_pad;
+        off_sq += r as u64 * ld_r;
+        wg += n_pad.div_ceil(256);
+        t_sq += tr_sq * (tr_sq + 1) / 2;
+        t_up += tr_up * tc_up;
     }
-    let count = items.len();
-    for v in [off, off_sq, wg, t_sq, t_up] {
+    for v in [off, off_sq, wg * 2, t_sq, t_up] {
         u32::try_from(v).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?;
     }
     table.extend(items.iter().map(|it| it.scale.to_bits()));
+    table.resize(count * (STRIDE + 2), 1.0f32.to_bits());
     let tbuf = ctx.upload(bytemuck::cast_slice(&table))?;
     let xa = ctx.alloc(DType::F32.bytes(off as usize))?;
     let xb = ctx.alloc(DType::F32.bytes(off as usize))?;
     let am = ctx.alloc(DType::F32.bytes(off_sq as usize))?;
     let bm = ctx.alloc(DType::F32.bytes(off_sq as usize))?;
-    // One partial sum of squares per 256 elements, then one denominator per matrix.
-    let part = ctx.alloc(DType::F32.bytes(wg as usize))?;
-    let den = ctx.alloc(DType::F32.bytes(count))?;
+    let part = ctx.alloc(DType::F32.bytes(wg as usize * 2))?;
+    let den = ctx.alloc(DType::F32.bytes(count * 2))?;
     let (x0, x1) = (xa.raw(), xb.raw());
 
-    // 1. u, oriented, into `x0`, with its partial sums of squares.
+    // 1. u, oriented with zero-padded align4 rows, into `x0`, with its partial sums of squares.
     let (mu, omu) = (s.momentum, 1.0 - s.momentum);
     for (ci, chunk) in items.chunks(j_gather).enumerate() {
         let spec = Spec::new().u32("J", chunk.len() as u32).bool("NESTEROV", s.nesterov);
-        let k = ctx.kernel(many_def("muon_gather", chunk.len()), spec)?;
-        let (p, groups) = chunk_params(Params::new().uz(ci * j_gather)?.f(mu).f(omu), chunk)?;
+        let k = ctx.kernel(shader::many_def("muon_gather", chunk.len()), spec)?;
+        let (p, groups) =
+            chunk_params(Params::new().uz(ci * j_gather)?.f(mu).f(omu), chunk, true, u32::from(s.schatten4))?;
         let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(2 * chunk.len() + 3);
         for it in chunk {
             bufs.push(it.g);
@@ -191,29 +315,67 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     // 2. Each matrix's `‖U‖_F + eps` from its partials, then `X /= ‖U‖_F + eps` over all of them.
-    let k = ctx.kernel(&NORM, Spec::new())?;
+    let k = ctx.kernel(&shader::NORM, Spec::new())?;
     let p = Params::new().uz(count)?.f(s.eps);
     ctx.dispatch(&k, &[part.raw(), den.raw(), tbuf.raw()], &p, ctx.grid_1d(count as u64 * 256, 256)?)?;
-    let k = ctx.kernel(&DIVIDE, Spec::new())?;
-    ctx.dispatch(&k, &[x0, den.raw(), tbuf.raw()], &Params::new().uz(count)?, ctx.grid_1d(wg * 256, 256)?)?;
-    // 3. The Newton–Schulz steps, ping-ponging between `x0` and `x1`.
-    let (a, b, c) = s.coeffs;
-    let p = Params::new().uz(count)?.f(a).f(b).f(c);
-    let gram = ctx.kernel(&GROUPED, Spec::new().u32("MODE", 0))?;
-    let poly = ctx.kernel(&GROUPED, Spec::new().u32("MODE", 1))?;
-    let update = ctx.kernel(&GROUPED, Spec::new().u32("MODE", 2))?;
+    let k = ctx.kernel(&shader::DIVIDE, Spec::new())?;
+    ctx.dispatch(
+        &k,
+        &[x0, den.raw(), tbuf.raw()],
+        &Params::new().uz(count)?.u(wg as u32),
+        ctx.grid_1d(wg * 256, 256)?,
+    )?;
+    // 3. The odd-quintic polynomial steps, ping-ponging between `x0` and `x1`.
+    let spec_of = |mode: u32, t: MuonTile, dbuf: bool, s4: bool| {
+        Spec::new()
+            .u32("MODE", mode)
+            .u32("BM", t.bm)
+            .u32("BN", t.bn)
+            .u32("TM", t.tm)
+            .u32("TN", t.tn)
+            .u32("DEPTH", t.depth)
+            .bool("DBUF", dbuf)
+            .bool("S4", s4)
+    };
+    let gram = ctx.kernel(&shader::GROUPED, spec_of(0, tile_sq, dbuf_sq, false))?;
+    let poly = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false))?;
+    let update = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, false))?;
+    let sq_threads = tile_sq.threads();
+    let up_threads = tile_up.threads();
+    let sq_grid = ctx.grid_1d(t_sq * u64::from(sq_threads), sq_threads)?;
+    let up_grid = ctx.grid_1d(t_up * u64::from(up_threads), up_threads)?;
     let (mut cur, mut next) = (x0, x1);
-    for _ in 0..s.steps {
-        ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p, ctx.grid_1d(t_sq * 256, 256)?)?;
-        let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
-        ctx.dispatch(&poly, &sq, &p, ctx.grid_1d(t_sq * 256, 256)?)?;
-        ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p, ctx.grid_1d(t_up * 256, 256)?)?;
+    for step in 0..s.steps {
+        let (a, b, c) = s.step_coeffs[step];
+        let p_sq = Params::new().uz(count)?.f(a).f(b).f(c).u(t_sq as u32);
+        let p_up = Params::new().uz(count)?.f(a).f(b).f(c).u(t_up as u32);
+        ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p_sq, sq_grid)?;
+        if step == 0 && s.schatten4 {
+            let s4_k = ctx.kernel(&shader::S4_NORM, Spec::new())?;
+            let ps4 = Params::new().uz(count)?.f(s.eps);
+            ctx.dispatch(
+                &s4_k,
+                &[am.raw(), den.raw(), tbuf.raw()],
+                &ps4,
+                ctx.grid_1d(count as u64 * 256, 256)?,
+            )?;
+            let poly_s4 = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, true))?;
+            let update_s4 = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, true))?;
+            let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
+            ctx.dispatch(&poly_s4, &sq, &p_sq, sq_grid)?;
+            ctx.dispatch(&update_s4, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+        } else {
+            let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
+            ctx.dispatch(&poly, &sq, &p_sq, sq_grid)?;
+            ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+        }
         std::mem::swap(&mut cur, &mut next);
     }
     // 4. `p = p · 1 + (X · scale) · (−lr)`, read back in each parameter's own layout.
     for (ci, chunk) in items.chunks(j_apply).enumerate() {
-        let k = ctx.kernel(many_def("muon_apply", chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
-        let (p, groups) = chunk_params(Params::new().uz(ci * j_apply)?.f(-s.lr).uz(count)?, chunk)?;
+        let k = ctx
+            .kernel(shader::many_def("muon_apply", chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
+        let (p, groups) = chunk_params(Params::new().uz(ci * j_apply)?.f(-s.lr).uz(count)?, chunk, false, 0)?;
         let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|it| it.p).collect();
         bufs.extend([cur, tbuf.raw()]);
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
@@ -221,14 +383,28 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     Ok(())
 }
 
-/// A multi-tensor dispatch's params: `base` (its words from 0), then the first workgroup of matrix `t` of the
-/// chunk at `16 + t` and its element count at `32 + t`. Returns them and the dispatch's workgroups.
-fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>]) -> Result<(Params, u64)> {
-    let mut p = base.at(16);
+/// A multi-tensor dispatch's params: `base` (words 0..3), total logical workgroups at word `3` (for 2D-folded
+/// `grid_1d` early exit), `flag` at word `4` (`muon_gather`: `1` enables `2^-80` overflow-safe norm rescaling
+/// for Polar-FOLO, `0` keeps legacy `Ns5`), then the first workgroup of matrix `t` of the chunk at `16 + t` and
+/// its logical element count `r · c` at `32 + t`. When `padded` is true (gather), workgroups cover the 4-aligned
+/// padded row width `r · align4(c)`.
+fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>], padded: bool, flag: u32) -> Result<(Params, u64)> {
+    let mut starts = Vec::with_capacity(chunk.len());
     let mut start = 0u64;
     for it in chunk {
-        p = p.u(u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?);
-        start += ((it.rows * it.cols) as u64).div_ceil(256);
+        starts.push(u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?);
+        let elems = if padded {
+            let (r, c) = (it.rows.min(it.cols), it.rows.max(it.cols));
+            (r * align4(c)) as u64
+        } else {
+            (it.rows * it.cols) as u64
+        };
+        start += elems.div_ceil(256);
+    }
+    let total = u32::try_from(start).map_err(|_| GpuError::Limit("muon: matrices too large".into()))?;
+    let mut p = base.at(3).u(total).u(flag).at(16);
+    for s in starts {
+        p = p.u(s);
     }
     p = p.at(32);
     for it in chunk {
@@ -237,336 +413,18 @@ fn chunk_params(base: Params, chunk: &[&MuonMatrix<'_>]) -> Result<(Params, u64)
     Ok((p, start))
 }
 
-/// The WGSL that finds this invocation's matrix: the last whose `field` (a running start) is at or before `w`.
-fn find_matrix(field: usize) -> String {
-    format!(
-        "fn find_matrix(w: u32) -> u32 {{\n\
-         \x20 var lo = 0u; var hi = pu(0u);\n\
-         \x20 loop {{\n\
-         \x20   if (lo + 1u >= hi) {{ break; }}\n\
-         \x20   let mid = (lo + hi) / 2u;\n\
-         \x20   if (TBL[mid * {STRIDE}u + {field}u] <= w) {{ lo = mid; }} else {{ hi = mid; }}\n\
-         \x20 }}\n\
-         \x20 return lo;\n}}\n"
-    )
-}
-
-/// The index in the oriented matrix of element `e` of the `rows × cols` original (`trans`: `rows > cols`, the
-/// oriented one is `[cols, rows] = [r, c]`).
-const ORIENT: &str = "fn oriented(e: u32, r: u32, c: u32, trans: bool) -> u32 {\n\
-     \x20 if (trans) { return (e % r) * c + e / r; }\n\
-     \x20 return e;\n}\n";
-
-/// The multi-tensor kernels' binding layouts, by name and matrix count, kept for the process: `muon_gather`
-/// (`G`, `M` per matrix, then `X`, `PART`, `TBL`), `muon_apply` (`P` per matrix, then `X`, `TBL`).
-fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
-    static DEFS: OnceLock<Mutex<HashMap<(&'static str, usize), &'static KernelDef>>> = OnceLock::new();
-    let mut defs = DEFS.get_or_init(Default::default).lock().expect("muon defs lock");
-    defs.entry((name, j)).or_insert_with(|| {
-        let (storage, source): (Vec<Access>, fn(&Spec) -> String) = if name == "muon_gather" {
-            let s = std::iter::repeat_n(Access::Read, 2 * j).chain([
-                Access::ReadWrite,
-                Access::ReadWrite,
-                Access::Read,
-            ]);
-            (s.collect(), gen_gather)
-        } else {
-            (
-                std::iter::repeat_n(Access::ReadWrite, j).chain([Access::Read, Access::Read]).collect(),
-                gen_apply,
-            )
-        };
-        let storage = Box::leak(storage.into_boxed_slice());
-        Box::leak(Box::new(KernelDef { name, storage, source: Source::Generated(source) }))
-    })
-}
-
-/// The per-layout kernel recorded as `name` with `spec` (the precompile registry, `kernels::find_def`): the
-/// [`many_def`] its call site picked, read back from `J`. `None` for other names and for a `J` no call site sets.
-pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
-    let j = spec.get_u32("J", 0) as usize;
-    let name = ["muon_gather", "muon_apply"].into_iter().find(|n| *n == name)?;
-    (1..=MANY).contains(&j).then(|| many_def(name, j))
-}
-
-/// The multi-tensor prologue: chunk-local matrix `t` of this workgroup, its element `e` and the table offset `q`
-/// of its matrix (`pu(0)` is the chunk's first matrix).
-fn many_prologue(s: &mut String, j: usize) {
-    s.push_str(
-        "@compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20 var t = 0u;\n",
-    );
-    for t in 1..j {
-        let _ = writeln!(s, "  if (w >= pu({}u)) {{ t = {t}u; }}", 16 + t);
-    }
-    let _ = writeln!(
-        s,
-        "  let lw = w - pu(16u + t); let e = lw * 256u + lid; let ok = e < pu(32u + t);\n\
-         \x20 let q = (pu(0u) + t) * {STRIDE}u;"
-    );
-}
-
-fn gen_gather(spec: &Spec) -> String {
-    let j = spec.get_u32("J", 1) as usize;
-    let mut s = String::new();
-    for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> G{t}: array<f32>;", 2 * t + 1);
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> M{t}: array<f32>;", 2 * t + 2);
-    }
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X: array<f32>;", 2 * j + 1);
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> PART: array<f32>;", 2 * j + 2);
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> TBL: array<u32>;", 2 * j + 3);
-    s.push_str("var<workgroup> red: array<f32, 256>;\n");
-    s.push_str(ORIENT);
-    many_prologue(&mut s, j);
-    s.push_str("  var g = 0.0; var m = 0.0;\n  if (ok) {\n  switch t {\n");
-    for t in 0..j {
-        let _ = writeln!(s, "  case {t}u: {{ g = G{t}[e]; m = M{t}[e]; }}");
-    }
-    // `u = (g · (1 − μ)) · 1 + m · μ`: the tensor ops' `g.mul_scalar(1 − μ)`, then the axpby `p · 1 + m · μ`.
-    // Out-of-range invocations add a zero to the partial (no early return: the reduction has barriers).
-    s.push_str(
-        "  default: {}\n  }\n  }\n\
-         \x20 var u = m;\n\
-         \x20 if (NESTEROV) { u = (g * pf(2u)) * 1.0 + m * pf(1u); }\n\
-         \x20 if (ok) { X[TBL[q + 3u] + oriented(e, TBL[q], TBL[q + 1u], TBL[q + 2u] != 0u)] = u; }\n\
-         \x20 red[lid] = select(0.0, u * u, ok);\n\
-         \x20 workgroupBarrier();\n\
-         \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
-         \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
-         \x20   workgroupBarrier();\n\
-         \x20 }\n\
-         \x20 if (lid == 0u) { PART[TBL[q + 5u] + lw] = red[0]; }\n}\n",
-    );
-    s
-}
-
-fn gen_apply(spec: &Spec) -> String {
-    let j = spec.get_u32("J", 1) as usize;
-    let mut s = String::new();
-    for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> P{t}: array<f32>;", t + 1);
-    }
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X: array<f32>;", j + 1);
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> TBL: array<u32>;", j + 2);
-    s.push_str(ORIENT);
-    many_prologue(&mut s, j);
-    // `O = X · scale` (the tensor ops multiply only when the scale is not 1), then the axpby `p · 1 + O · (−lr)`.
-    let _ = writeln!(
-        s,
-        "  if (!ok) {{ return; }}\n\
-         \x20 let sc = bitcast<f32>(TBL[pu(2u) * {STRIDE}u + pu(0u) + t]);\n\
-         \x20 var o = X[TBL[q + 3u] + oriented(e, TBL[q], TBL[q + 1u], TBL[q + 2u] != 0u)];\n\
-         \x20 if (sc != 1.0) {{ o = o * sc; }}\n\
-         \x20 switch t {{"
-    );
-    for t in 0..j {
-        let _ = writeln!(s, "  case {t}u: {{ P{t}[e] = P{t}[e] * 1.0 + o * pf(1u); }}");
-    }
-    s.push_str("  default: {}\n  }\n}\n");
-    s
-}
-
-/// One workgroup per matrix: `D[i] = sqrt(Σ partials) + eps` over the matrix's partials in a fixed order.
-static NORM: KernelDef = KernelDef {
-    name: "muon_norm",
-    storage: &[Access::Read, Access::ReadWrite, Access::Read],
-    source: Source::Static(
-        "@group(0) @binding(1) var<storage, read> PART: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read_write> D: array<f32>;\n\
-         @group(0) @binding(3) var<storage, read> TBL: array<u32>;\n\
-         var<workgroup> red: array<f32, 256>;\n\
-         @compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let i = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20 let ok = i < pu(0u);\n\
-         \x20 let q = min(i, pu(0u) - 1u) * 8u;\n\
-         \x20 let first = TBL[q + 5u];\n\
-         \x20 let n = select(0u, (TBL[q] * TBL[q + 1u] + 255u) / 256u, ok);\n\
-         \x20 var acc = 0.0;\n\
-         \x20 for (var e = lid; e < n; e += 256u) { acc += PART[first + e]; }\n\
-         \x20 red[lid] = acc;\n\
-         \x20 workgroupBarrier();\n\
-         \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
-         \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
-         \x20   workgroupBarrier();\n\
-         \x20 }\n\
-         \x20 if (ok && lid == 0u) { D[i] = sqrt(red[0]) + pf(1u); }\n}\n",
-    ),
-};
-
-static DIVIDE: KernelDef = KernelDef {
-    name: "muon_divide",
-    storage: &[Access::ReadWrite, Access::Read, Access::Read],
-    source: Source::Generated(gen_divide),
-};
-
-/// `X /= D[i]` over every matrix's elements (256 per workgroup, as the gather's partials).
-fn gen_divide(_: &Spec) -> String {
-    let mut s = String::from(
-        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read> D: array<f32>;\n\
-         @group(0) @binding(3) var<storage, read> TBL: array<u32>;\n",
-    );
-    s.push_str(&find_matrix(5));
-    let _ = writeln!(
-        s,
-        "@compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {{\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20 let i = find_matrix(w);\n\
-         \x20 let q = i * {STRIDE}u;\n\
-         \x20 let e = (w - TBL[q + 5u]) * 256u + lid;\n\
-         \x20 if (e >= TBL[q] * TBL[q + 1u]) {{ return; }}\n\
-         \x20 let at = TBL[q + 3u] + e;\n\
-         \x20 X[at] = X[at] / D[i];\n}}"
-    );
-    s
-}
-
-static GROUPED: KernelDef = KernelDef {
-    name: "muon_gemm",
-    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
-    source: Source::Generated(gen_grouped),
-};
-
-/// This module's fixed kernels, for the precompile registry (`kernels::find_def`; the gather and the update are
-/// built per layout, [`many_def_for`]).
-pub(crate) static DEFS: &[&KernelDef] = &[&NORM, &DIVIDE, &GROUPED];
-
-/// The grouped GEMM of one Newton–Schulz stage (`MODE` 0: `A = X·Xᵀ`, 1: `Bm = b·A + c·(A·A)`, 2:
-/// `X' = a·X + Bm·X`): bindings `P`, `Q`, `R` (the epilogue's addend), `C`, `TBL`. A workgroup computes one 64×64
-/// tile of one matrix's product, 4×4 outputs per invocation, `K` walked 16 deep through k-major vec4 tiles in
-/// workgroup memory (the k loop unrolled here: naga's loop guards keep the driver from unrolling it).
-fn gen_grouped(spec: &Spec) -> String {
-    let mode = spec.get_u32("MODE", 0);
-    let t4 = TILE / 4;
-    let mut s = String::from(
-        "@group(0) @binding(1) var<storage, read> SP: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read> SQ: array<f32>;\n\
-         @group(0) @binding(3) var<storage, read> SR: array<f32>;\n\
-         @group(0) @binding(4) var<storage, read_write> SC: array<f32>;\n\
-         @group(0) @binding(5) var<storage, read> TBL: array<u32>;\n",
-    );
-    let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {t4}>, {DEPTH}>;");
-    let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {t4}>, {DEPTH}>;");
-    // The problem of this workgroup, made workgroup-uniform for the barriers: M, N, K, the P / Q / C offsets and
-    // leading dimensions, the tile row and column.
-    s.push_str("var<workgroup> prob: array<u32, 12>;\n");
-    s.push_str(&find_matrix(if mode == 2 { 7 } else { 6 }));
-    s.push_str(
-        "@compute @workgroup_size(16, 16, 1)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) tid: u32, @builtin(local_invocation_id) lid3: vec3<u32>) {\n\
-         \x20 if (tid == 0u) {\n\
-         \x20   let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20   let i = find_matrix(w);\n\
-         \x20   let q = i * 8u;\n\
-         \x20   let r = TBL[q]; let c = TBL[q + 1u]; let ox = TBL[q + 3u]; let oa = TBL[q + 4u];\n",
-    );
-    let _ = writeln!(s, "    let tr = (r + {0}u) / {TILE}u; let tc = (c + {0}u) / {TILE}u;", TILE - 1);
-    // M, N, K, offP, ldP, offQ, ldQ, offR / C, ldC, tile row, tile column.
-    match mode {
-        0 => s.push_str(
-            "    let t = w - TBL[q + 6u];\n\
-             \x20   prob = array<u32, 12>(r, r, c, ox, c, ox, c, oa, r, t / tr, t % tr, 0u);\n",
-        ),
-        1 => s.push_str(
-            "    let t = w - TBL[q + 6u];\n\
-             \x20   prob = array<u32, 12>(r, r, r, oa, r, oa, r, oa, r, t / tr, t % tr, 0u);\n",
-        ),
-        _ => s.push_str(
-            "    let t = w - TBL[q + 7u];\n\
-             \x20   prob = array<u32, 12>(r, c, r, oa, r, ox, c, ox, c, t / tc, t % tc, 0u);\n",
-        ),
-    }
-    s.push_str(
-        "  }\n\
-         \x20 let pr = workgroupUniformLoad(&prob);\n\
-         \x20 let M = pr[0]; let N = pr[1]; let K = pr[2];\n\
-         \x20 let offP = pr[3]; let ldP = pr[4]; let offQ = pr[5]; let ldQ = pr[6]; let offC = pr[7]; let ldC = pr[8];\n",
-    );
-    let _ = writeln!(s, "  let m0 = pr[9] * {TILE}u; let n0 = pr[10] * {TILE}u;");
-    s.push_str("  let tx = lid3.x; let ty = lid3.y;\n");
-    for i in 0..4 {
-        let _ = writeln!(s, "  var acc{i} = vec4<f32>(0.0);");
-    }
-    let _ = writeln!(s, "  for (var k0 = 0u; k0 < K; k0 += {DEPTH}u) {{");
-    // P[m][k] = SP[offP + m·ldP + k] (contiguous along k): invocations along k, then rows.
-    for u in 0..4 {
-        let _ = writeln!(
-            s,
-            "    {{ let kk = tid % {DEPTH}u; let mm = tid / {DEPTH}u + {}u; let m = m0 + mm; let k = k0 + kk;\n\
-             \x20     var v = 0.0; if (m < M && k < K) {{ v = SP[offP + m * ldP + k]; }} As[kk][mm / 4u][mm % 4u] = v; }}",
-            u * (256 / DEPTH as usize)
-        );
-    }
-    for u in 0..4 {
-        if mode == 2 {
-            // Q[k][n] = SQ[offQ + k·ldQ + n] (along n).
-            let _ = writeln!(
-                s,
-                "    {{ let nn = tid % {TILE}u; let kk = tid / {TILE}u + {}u; let n = n0 + nn; let k = k0 + kk;\n\
-                 \x20     var v = 0.0; if (n < N && k < K) {{ v = SQ[offQ + k * ldQ + n]; }} Bs[kk][nn / 4u][nn % 4u] = v; }}",
-                u * (256 / TILE)
-            );
-        } else {
-            // Q[k][n] = SQ[offQ + n·ldQ + k] (Xᵀ, or A itself as A is symmetric; along k).
-            let _ = writeln!(
-                s,
-                "    {{ let kk = tid % {DEPTH}u; let nn = tid / {DEPTH}u + {}u; let n = n0 + nn; let k = k0 + kk;\n\
-                 \x20     var v = 0.0; if (n < N && k < K) {{ v = SQ[offQ + n * ldQ + k]; }} Bs[kk][nn / 4u][nn % 4u] = v; }}",
-                u * (256 / DEPTH as usize)
-            );
-        }
-    }
-    s.push_str("    workgroupBarrier();\n");
-    for kk in 0..DEPTH {
-        let _ = writeln!(s, "    {{ let a = As[{kk}u][ty]; let b = Bs[{kk}u][tx];");
-        for i in 0..4 {
-            let _ = writeln!(s, "      acc{i} = fma(vec4<f32>(a[{i}]), b, acc{i});");
-        }
-        s.push_str("    }\n");
-    }
-    s.push_str("    workgroupBarrier();\n  }\n");
-    s.push_str("  let a = pf(1u); let bb = pf(2u); let cc = pf(3u);\n");
-    for i in 0..4 {
-        let _ = writeln!(s, "  {{ let m = m0 + ty * 4u + {i}u; if (m < M) {{");
-        for jn in 0..4 {
-            let _ = writeln!(
-                s,
-                "    {{ let n = n0 + tx * 4u + {jn}u; if (n < N) {{ let at = offC + m * ldC + n;"
-            );
-            let v = match mode {
-                0 => format!("acc{i}[{jn}]"),
-                // `am.mul_scalar(b).add(&am.matmul(&am)?.mul_scalar(c))`.
-                1 => format!("SR[at] * bb + acc{i}[{jn}] * cc"),
-                // `x.mul_scalar(a).add(&bm.matmul(&x))`.
-                _ => format!("SR[at] * a + acc{i}[{jn}]"),
-            };
-            let _ = writeln!(s, "      SC[at] = {v}; }} }}");
-        }
-        s.push_str("  } }\n");
-    }
-    s.push_str("}\n");
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Workspace words of a run of matrices: `X`, `A`, the partials, the table.
+    /// Workspace words of a run of matrices: `X` (padded), `A` (padded), the partials, the table.
     fn words(shapes: &[(usize, usize)]) -> [u64; 4] {
         let mut sum = [0u64; 4];
         for &(rows, cols) in shapes {
-            let (r, c) = (rows.min(cols) as u64, rows.max(cols) as u64);
-            for (s, v) in sum.iter_mut().zip([r * c, r * r, (r * c).div_ceil(256), STRIDE as u64 + 1]) {
+            let (r, c) = (rows.min(cols), rows.max(cols));
+            let n = (r * align4(c)) as u64;
+            let n_sq = (r * align4(r)) as u64;
+            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 2]) {
                 *s += v;
             }
         }
@@ -577,9 +435,10 @@ mod tests {
     /// does not fit declines the call.
     #[test]
     fn partition_fits_the_limit() {
-        // The largest, (200, 63), takes 12,600 words of `X` (50,400 bytes); 32,781 in all (131,124 bytes).
+        // The largest, (200, 63), takes 12,600 words of `X` (50,400 bytes); 32,812 padded words (131,248 bytes).
         let shapes = [(16, 27), (130, 40), (200, 63), (1, 5), (5, 1), (96, 96), (3, 9), (40, 30), (64, 64)];
-        for max_bytes in [50_400, 50_403, 65_536, 100_000, 131_120, 131_124, 1 << 30] {
+        let total_bytes = words(&shapes)[0] * 4;
+        for max_bytes in [50_400, 50_403, 65_536, 100_000, total_bytes - 4, total_bytes, 1 << 30] {
             let groups = partition(&shapes, max_bytes).unwrap();
             let mut next = 0;
             for g in &groups {

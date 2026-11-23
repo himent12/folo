@@ -531,6 +531,110 @@ fn musgd_weights_resume_through_the_checkpoint() {
 }
 
 #[test]
+fn musgd_polar_ortho_resumes_through_the_checkpoint() {
+    let new_ortho = |seed: u64, ortho: MuonOrtho| -> Run {
+        let mut r = new_run_with(OptimKind::MuSgd, seed, MuSgdWeights::default());
+        let sg = StandardGroups::from_module(&r.model);
+        let last = sg.decay.last().unwrap().0.rsplit_once('.').unwrap().0.to_string() + ".";
+        let groups = sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0);
+        r.opt = Box::new(MuSgd::with_ortho(groups, MuSgdWeights::default(), ortho).unwrap());
+        r
+    };
+    let optim_json = |path: &std::path::Path| -> Value {
+        let p = parse_independently(&std::fs::read(path).unwrap());
+        serde_json::from_str(p.header["__metadata__"]["folo.optim"].as_str().unwrap()).unwrap()
+    };
+
+    // Default MuSGD (`Polar4`) writes `"muon_ortho": "polar4"` and resumes bit-identically even into an `Ns5` run.
+    let mut a = new_run(OptimKind::MuSgd, 21);
+    train_steps(&mut a, 3);
+    let path = tmp("resume-musgd-polar4.folo");
+    save(&a, &path);
+    let (mut map, tensors) =
+        with_parts(&a, |p| checkpoint_contents(&meta(FileKind::Checkpoint, 3), p).unwrap());
+    train_steps(&mut a, 3);
+    let want = snapshot(&a);
+    assert_eq!(optim_json(&path)["muon_ortho"], "polar4");
+
+    let mut b = new_ortho(88, MuonOrtho::Ns5);
+    let f = ModelFile::open(&path).unwrap();
+    let res = f.resume(&b.model, b.opt.as_mut(), Some(&mut b.ema), Some(classes(3))).unwrap();
+    assert_eq!(b.opt.contract().muon_ortho, Some(MuonOrtho::Polar4));
+    b.sched = res.schedule;
+    b.rng = res.rng;
+    drop(f);
+    train_steps(&mut b, 3);
+    assert_eq!(snapshot(&b), want, "Polar4 checkpoint resume must be bit-identical");
+
+    // Legacy `Ns5` omits `muon_ortho` in `folo.optim` (byte-identical to pre-Polar `folo.optim`) and resumes
+    // bit-identically on CPU as `Ns5` even when loaded into a default-`Polar4` `MuSgd::new`. Also verify a
+    // synthetic pre-Polar checkpoint whose `folo.optim` has no `muon_ortho` and whose `folo.train` has a
+    // pre-Polar `musgd` block without `ortho` (or no `musgd` key at all) loads and resumes cleanly as `Ns5`.
+    let mut leg = new_ortho(22, MuonOrtho::Ns5);
+    train_steps(&mut leg, 3);
+    let dpath = tmp("resume-musgd-ns5.folo");
+    save(&leg, &dpath);
+    let (leg_map, leg_tensors) =
+        with_parts(&leg, |p| checkpoint_contents(&meta(FileKind::Checkpoint, 3), p).unwrap());
+    assert!(optim_json(&dpath).get("muon_ortho").is_none());
+    let pre_polar_files: Vec<(&str, ModelFile)> = [
+        (
+            "pre-polar train with musgd without ortho",
+            serde_json::json!({ "epochs": 2, "batch": 2, "musgd": { "muon": 0.2, "sgd": 1.0, "cls_lr": 3.0 } }),
+        ),
+        ("pre-polar train without musgd", serde_json::json!({ "epochs": 2, "batch": 2 })),
+    ]
+    .into_iter()
+    .map(|(label, tj)| {
+        let mut m = leg_map.clone();
+        m.insert("folo.train".into(), tj.to_string());
+        (label, rewrite(&m, &leg_tensors).unwrap())
+    })
+    .collect();
+    train_steps(&mut leg, 3);
+    let want_ns5 = snapshot(&leg);
+
+    let mut cases: Vec<(&str, ModelFile)> = vec![("saved ns5", ModelFile::open(&dpath).unwrap())];
+    cases.extend(pre_polar_files);
+    for (label, f) in cases {
+        let mut b_leg = new_run(OptimKind::MuSgd, 89);
+        assert_eq!(f.checkpoint().unwrap().optim.muon_ortho, None, "{label}");
+        let res = f.resume(&b_leg.model, b_leg.opt.as_mut(), Some(&mut b_leg.ema), Some(classes(3))).unwrap();
+        assert_eq!(b_leg.opt.contract().muon_ortho, None, "{label}: restores Ns5");
+        b_leg.sched = res.schedule;
+        b_leg.rng = res.rng;
+        drop(f);
+        train_steps(&mut b_leg, 3);
+        assert_eq!(snapshot(&b_leg), want_ns5, "{label}: CPU Ns5 resume must be bit-identical");
+    }
+
+    // `Polar5` also writes `"muon_ortho": "polar5"` and resumes bit-identically.
+    let mut p5 = new_ortho(23, MuonOrtho::Polar5);
+    train_steps(&mut p5, 3);
+    let p5path = tmp("resume-musgd-polar5.folo");
+    save(&p5, &p5path);
+    assert_eq!(optim_json(&p5path)["muon_ortho"], "polar5");
+    train_steps(&mut p5, 3);
+    let want_p5 = snapshot(&p5);
+
+    let mut b5 = new_run(OptimKind::MuSgd, 90);
+    let f = ModelFile::open(&p5path).unwrap();
+    let res = f.resume(&b5.model, b5.opt.as_mut(), Some(&mut b5.ema), Some(classes(3))).unwrap();
+    assert_eq!(b5.opt.contract().muon_ortho, Some(MuonOrtho::Polar5));
+    b5.sched = res.schedule;
+    b5.rng = res.rng;
+    drop(f);
+    train_steps(&mut b5, 3);
+    assert_eq!(snapshot(&b5), want_p5, "Polar5 checkpoint resume must be bit-identical");
+
+    // `muon_ortho` is refused on non-MuSGD contracts.
+    let mut optim = optim_json(&path);
+    optim["type"] = "sgd".into();
+    map.insert("folo.optim".into(), optim.to_string());
+    assert!(rewrite(&map, &tensors).err().unwrap().to_string().contains("muon_ortho"));
+}
+
+#[test]
 fn checkpoint_layout_and_contracts() {
     let mut r = new_run(OptimKind::Sgd, 1);
     train_steps(&mut r, 2);

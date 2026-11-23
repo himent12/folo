@@ -76,8 +76,12 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step
-  weights (MODEL.md §8.2; default 0.2 / 1.0); weights other than the defaults are part of its contract (`musgd`),
-  and `apply_contract` adopts the file's (when it has none, the optimizer keeps the weights it was built with).
+  weights (MODEL.md §8.2; default 0.2 / 1.0) and `MuSgd::with_ortho(groups, weights, ortho)` sets its
+  orthogonalisation schedule (`MuonOrtho::Polar4` default, `Polar5`, or legacy `Ns5`; `orthogonalize_with` /
+  `orthogonalize_many_with` expose the schedules directly). Weights other than the defaults (`musgd`) and schedules
+  other than legacy `Ns5` (`muon_ortho`) are part of its contract; `apply_contract` adopts the file's weights when
+  present (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent `muon_ortho` to `Ns5` so
+  pre-Polar checkpoints resume with legacy 5-step Newton–Schulz).
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially

@@ -243,14 +243,13 @@ fn accumulator_with_duplicate_handles() {
     assert!(acc.grad(&q).is_none());
 }
 
-/// Newton–Schulz in `f64` on a row-major `rows x cols` matrix: the reference of `orthogonalize`.
-fn ns5_f64(m: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+/// Newton–Schulz / Polar-FOLO in `f64` on a row-major `rows x cols` matrix: the reference of `orthogonalize_with`.
+fn ortho_f64(m: &[f64], rows: usize, cols: usize, ortho: MuonOrtho) -> Vec<f64> {
     let t = rows > cols;
     let (r, c) = if t { (cols, rows) } else { (rows, cols) };
     let at = |i: usize, j: usize| if t { m[j * cols + i] } else { m[i * cols + j] };
     let norm = m.iter().map(|v| v * v).sum::<f64>().sqrt() + 1e-7;
     let mut x: Vec<f64> = (0..r * c).map(|k| at(k / c, k % c) / norm).collect();
-    let (a, b, cc) = (3.4445, -4.7750, 2.0315);
     let mul = |p: &[f64], q: &[f64], n: usize, k: usize, m: usize| {
         let mut o = vec![0.0; n * m];
         for i in 0..n {
@@ -260,15 +259,116 @@ fn ns5_f64(m: &[f64], rows: usize, cols: usize) -> Vec<f64> {
         }
         o
     };
-    for _ in 0..5 {
+    for (step, &(a, b, cc)) in ortho.schedule().iter().enumerate() {
+        let (a, b, cc) = (a as f64, b as f64, cc as f64);
         let xt: Vec<f64> = (0..c * r).map(|k| x[(k % r) * c + k / r]).collect();
         let am = mul(&x, &xt, r, c, r);
         let aa = mul(&am, &am, r, r, r);
-        let bm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| b * p + cc * q).collect();
-        let bx = mul(&bm, &x, r, r, c);
-        x = x.iter().zip(&bx).map(|(p, q)| a * p + q).collect();
+        if step == 0 && ortho.schatten4() {
+            let a_frob = am.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let alpha = a_frob.sqrt() + 1e-7 / norm;
+            let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
+            let inv_a2 = inv_a * inv_a;
+            let inv_a4 = inv_a2 * inv_a2;
+            let bm: Vec<f64> =
+                am.iter().zip(&aa).map(|(p, q)| (b * inv_a2) * p + (cc * inv_a4) * q).collect();
+            let bx = mul(&bm, &x, r, r, c);
+            x = x.iter().zip(&bx).map(|(p, q)| (a * inv_a) * p + q * inv_a).collect();
+        } else {
+            let bm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| b * p + cc * q).collect();
+            let bx = mul(&bm, &x, r, r, c);
+            x = x.iter().zip(&bx).map(|(p, q)| a * p + q).collect();
+        }
     }
     if t { (0..rows * cols).map(|k| x[(k % cols) * rows + k / cols]).collect() } else { x }
+}
+
+fn ns5_f64(m: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    ortho_f64(m, rows, cols, MuonOrtho::Ns5)
+}
+
+#[test]
+fn polar_folo_matches_f64_and_improves_orthogonality() {
+    let mut rng = Rng::seed(17);
+    let shapes: [&[usize]; 4] = [&[3, 5], &[6, 2], &[4, 2, 1, 3], &[1, 6]];
+    let ts: Vec<Tensor> = shapes.iter().map(|s| Tensor::randn(s.to_vec(), 0.0, 1.0, &mut rng)).collect();
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5] {
+        let many = orthogonalize_many_with(&ts, ortho).unwrap();
+        for (t, o) in ts.iter().zip(&many) {
+            let d = t.dims().to_vec();
+            let (rows, cols) = (d[0], t.numel() / d[0]);
+            let v: Vec<f64> = t.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect();
+            let scale = muon_scale(&d) as f64;
+            let want: Vec<f64> = ortho_f64(&v, rows, cols, ortho).iter().map(|x| x * scale).collect();
+            close(&o.to_vec::<f32>().unwrap(), &want, 2e-4);
+            // Alone, without bucket padding: Schatten-4 norm is invariant to zero-padded rows.
+            let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
+            close(&one, &o.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect::<Vec<_>>(), 1e-5);
+        }
+    }
+    // Check orthogonality error ||O O^T - I||_F / sqrt(r) on a well- and moderately-conditioned 16x64 matrix:
+    // both Polar4 (12 GEMMs) and Polar5 (15 GEMMs) strictly beat NS5 (15 GEMMs).
+    let g = Tensor::randn([16, 64], 0.0, 1.0, &mut rng);
+    let ortho_err = |ortho: MuonOrtho| -> f64 {
+        let o = orthogonalize_with(&g, ortho).unwrap();
+        let oot = o.matmul(&o.t().unwrap().contiguous().unwrap()).unwrap().to_vec::<f32>().unwrap();
+        let mut s = 0.0f64;
+        for i in 0..16 {
+            for j in 0..16 {
+                let d = oot[i * 16 + j] as f64 - if i == j { 1.0 } else { 0.0 };
+                s += d * d;
+            }
+        }
+        (s / 16.0).sqrt()
+    };
+    let e_ns5 = ortho_err(MuonOrtho::Ns5);
+    let e_p4 = ortho_err(MuonOrtho::Polar4);
+    let e_p5 = ortho_err(MuonOrtho::Polar5);
+    assert!(e_p4 < e_ns5 * 0.5, "Polar4 ({e_p4:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
+    assert!(e_p5 < e_ns5 * 0.5, "Polar5 ({e_p5:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
+}
+
+/// Finite matrices whose unscaled squared Frobenius norm overflows `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
+/// `4×4` `1e38`): Polar-FOLO (`Polar4`, `Polar5`) uses power-of-two downscaling and returns the finite
+/// orthogonalised direction matching the `f64` reference, legacy `Ns5` preserves its exact pre-Polar zero
+/// direction, and all three propagate `NaN`.
+#[test]
+fn polar_folo_handles_frobenius_overflow_and_nan() {
+    let huge_1x1 = Tensor::from_slice(&[2e19_f32], [1, 1]).unwrap();
+    let huge_16x16 = Tensor::from_vec(vec![1e19_f32; 16 * 16], [16, 16]).unwrap();
+    let huge_4x4 = Tensor::from_vec(vec![1e38_f32; 4 * 4], [4, 4]).unwrap();
+    let mut nan_data = vec![0.25_f32; 4 * 4];
+    nan_data[5] = f32::NAN;
+    let with_nan = Tensor::from_vec(nan_data, [4, 4]).unwrap();
+    let batch = [huge_1x1, huge_16x16, huge_4x4, with_nan];
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+        let many = orthogonalize_many_with(&batch, ortho).unwrap();
+        for (idx, t) in batch.iter().enumerate() {
+            let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
+            let got = many[idx].to_vec::<f32>().unwrap();
+            if idx == 3 {
+                assert!(got.iter().all(|v| v.is_nan()), "{ortho:?} batch NaN must propagate");
+                assert!(one.iter().all(|v| v.is_nan()), "{ortho:?} one NaN must propagate");
+            } else if ortho == MuonOrtho::Ns5 {
+                assert!(got.iter().all(|&v| v == 0.0), "legacy Ns5 [{idx}] must keep exact 0, got {got:?}");
+                assert!(
+                    one.iter().all(|&v| v == 0.0),
+                    "legacy Ns5 one[{idx}] must keep exact 0, got {one:?}"
+                );
+            } else {
+                let d = t.dims();
+                let (rows, cols) = (d[0], t.numel() / d[0]);
+                let v: Vec<f64> = t.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect();
+                let want = ortho_f64(&v, rows, cols, ortho);
+                assert!(
+                    got.iter().all(|v| v.is_finite()) && got.iter().any(|&v| v != 0.0),
+                    "{ortho:?} [{idx}]"
+                );
+                close(&got, &want, 2e-4);
+                close(&one, &want, 2e-4);
+            }
+        }
+    }
 }
 
 #[test]
@@ -306,25 +406,29 @@ fn sgd_ref(p: &mut [f64], s: &mut [f64], g: &[f64], lr: f64, wd: f64) {
     }
 }
 
-/// Two MuSGD steps against an `f64` re-implementation of Ultralytics 8.4's `MuSGD` (muon 0.2, sgd 1.0, Nesterov):
-/// a Muon conv weight, a boosted `.cls` weight at 3x the LR, and a BatchNorm weight that only takes SGD.
+/// Two MuSGD steps against an `f64` reference (muon 0.2, sgd 1.0, Nesterov) across all three orthogonalisation
+/// schedules (`Polar4` default, legacy `Ns5` matching Ultralytics 8.4, and `Polar5`): a Muon conv weight, a
+/// boosted `.cls` weight at 3x the LR, and a BatchNorm weight that only takes SGD.
 #[test]
 fn musgd_matches_reference_steps() {
-    musgd_reference_steps(MuSgdWeights::default());
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Ns5, MuonOrtho::Polar5] {
+        musgd_reference_steps(MuSgdWeights::default(), ortho);
+    }
 }
 
 /// The same with other step weights (the reference's `MuSGD(muon=0.5, sgd=0.5)`): the SGD factor scales only the
 /// Muon groups' SGD step, and the groups' LRs are left as the schedule set them.
 #[test]
 fn musgd_weights_match_reference_steps() {
-    musgd_reference_steps(MuSgdWeights { muon: 0.5, sgd: 0.5 });
+    musgd_reference_steps(MuSgdWeights { muon: 0.5, sgd: 0.5 }, MuonOrtho::Polar4);
+    musgd_reference_steps(MuSgdWeights { muon: 0.5, sgd: 0.5 }, MuonOrtho::Ns5);
     let bad = MuSgdWeights { muon: f64::NAN, sgd: 1.0 };
     assert!(
         MuSgd::with_weights(vec![ParamGroup::new("decay", vec![("w".into(), param(&[1.0]))])], bad).is_err()
     );
 }
 
-fn musgd_reference_steps(weights: MuSgdWeights) {
+fn musgd_reference_steps(weights: MuSgdWeights, ortho: MuonOrtho) {
     let w = Tensor::from_slice(&[0.3f32, -0.2, 0.5, 0.1, 0.4, -0.6], [2, 3, 1, 1]).unwrap().requires_grad_();
     let h = Tensor::from_slice(&[0.2f32, -0.1, 0.3, 0.7], [2, 2, 1, 1]).unwrap().requires_grad_();
     let bn = param(&[1.0, 0.9]);
@@ -337,8 +441,12 @@ fn musgd_reference_steps(weights: MuSgdWeights) {
             .weight_decay(wd),
         ParamGroup::new("bn", vec![("bn".into(), bn.clone())]).lr(lr).momentum(mu),
     ];
-    let mut opt = MuSgd::with_weights(groups, weights).unwrap();
-    assert_eq!((opt.kind(), opt.weights()), (OptimKind::MuSgd, weights));
+    let mut opt = if ortho == MuonOrtho::default() {
+        MuSgd::with_weights(groups, weights).unwrap()
+    } else {
+        MuSgd::with_ortho(groups, weights, ortho).unwrap()
+    };
+    assert_eq!((opt.kind(), opt.weights(), opt.ortho()), (OptimKind::MuSgd, weights, ortho));
     let gw = [[0.1f32, -0.3, 0.2, 0.05, 0.4, -0.1], [-0.2, 0.1, 0.3, 0.2, -0.05, 0.15]];
     let gh = [[0.3f32, 0.1, -0.2, 0.4], [0.1, -0.1, 0.2, 0.05]];
     let gb = [G1, G2];
@@ -353,7 +461,7 @@ fn musgd_reference_steps(weights: MuSgdWeights) {
             *m = mu * *m + (1.0 - mu) * g;
         }
         let u: Vec<f64> = m.iter().zip(g).map(|(m, g)| mu * m + (1.0 - mu) * g).collect();
-        let o = ns5_f64(&u, 2, u.len() / 2);
+        let o = ortho_f64(&u, 2, u.len() / 2, ortho);
         for (p, o) in p.iter_mut().zip(&o) {
             *p -= weights.muon * lr * o;
         }

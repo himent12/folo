@@ -120,9 +120,11 @@ pub struct TrainConfig {
     /// Loss gains and assigner settings (docs/MODEL.md §7; `reg_max` is the model's, whatever is given here).
     /// Missing in configs from before it: the §7 defaults.
     pub loss: LossConfig,
-    /// MuSGD's step weights and class-branch LR factor (docs/MODEL.md §8.2); used only when the run resolves to
-    /// MuSGD (under `auto` rule 5 the step weights are `auto`'s, see [`TrainConfig::resolve_optimizer`]). Missing in
-    /// configs from before it: the §8.2 defaults.
+    /// MuSGD's step weights, class-branch LR factor and orthogonalisation schedule (docs/MODEL.md §8.2); used only
+    /// when the run resolves to MuSGD (under `auto` rule 5 the step weights are `auto`'s, see
+    /// [`TrainConfig::resolve_optimizer`]). Missing in configs from before it: the §8.2 defaults with legacy `ns5`
+    /// orthogonalisation so older runs resume with legacy `ns5`.
+    #[serde(default = "legacy_musgd_config")]
     pub musgd: MuSgdConfig,
     /// Whether the run started from pretrained weights (transfer learning). Set by [`super::Trainer::new`] from
     /// [`super::TrainOptions::weights`], whatever is given here, and stored with the run, so a resume resolves `auto`
@@ -150,8 +152,10 @@ pub struct TrainConfig {
     pub cls_lr_close_scale: f64,
 }
 
-/// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, and the
-/// head's class branches at `cls_lr · lr0`. The defaults are the reference trainer's (Ultralytics 8.4).
+/// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, the
+/// head's class branches at `cls_lr · lr0`, and the orthogonalisation schedule `ortho` (`polar4` default for new
+/// runs, `polar5`, or legacy `ns5`). Missing `ortho` in configs written before the key reads as `ns5` so older
+/// runs resume with legacy `ns5`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MuSgdConfig {
@@ -161,12 +165,20 @@ pub struct MuSgdConfig {
     pub sgd: f64,
     /// LR factor of the head's class branches.
     pub cls_lr: f64,
+    /// Muon orthogonalisation schedule (`polar4` default for new runs; missing in older configs reads as `ns5`).
+    #[serde(default = "legacy_muon_ortho")]
+    pub ortho: folo_nn::optim::MuonOrtho,
 }
 
 impl Default for MuSgdConfig {
     fn default() -> Self {
         let w = folo_nn::optim::MuSgdWeights::default();
-        MuSgdConfig { muon: w.muon, sgd: w.sgd, cls_lr: super::MUSGD_CLS_LR_FACTOR }
+        MuSgdConfig {
+            muon: w.muon,
+            sgd: w.sgd,
+            cls_lr: super::MUSGD_CLS_LR_FACTOR,
+            ortho: folo_nn::optim::MuonOrtho::default(),
+        }
     }
 }
 
@@ -242,6 +254,16 @@ fn legacy_o2o_keeps_tal() -> bool {
 /// The `auto_rule` of settings written before the key existed.
 fn legacy_auto_rule() -> u32 {
     1
+}
+
+/// The `musgd.ortho` of settings written before Polar-FOLO existed: legacy 5-step Newton–Schulz (`ns5`).
+fn legacy_muon_ortho() -> folo_nn::optim::MuonOrtho {
+    folo_nn::optim::MuonOrtho::Ns5
+}
+
+/// The `musgd` block of settings written before `musgd` existed: default weights with legacy `ns5`.
+fn legacy_musgd_config() -> MuSgdConfig {
+    MuSgdConfig { ortho: legacy_muon_ortho(), ..MuSgdConfig::default() }
 }
 
 /// `min(available cores, 16)`: decoding and mosaic of large images (four decodes per sample) need more than 8
@@ -756,6 +778,32 @@ mod tests {
         // A new run through the API, whose config has no such key.
         let api: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"d"}"#).unwrap();
         assert!(TrainConfig::from_api(&api).unwrap().o2o_keeps_tal);
+    }
+
+    /// `musgd.ortho`: `polar4` for new runs (`default`, `from_api`); configs from before the key (missing
+    /// `musgd.ortho`, or missing `musgd` altogether) read as legacy `ns5` so older runs resume with legacy `ns5`.
+    #[test]
+    fn muon_ortho_versions() {
+        use folo_nn::optim::MuonOrtho;
+        let cfg = TrainConfig::default();
+        assert_eq!(cfg.musgd.ortho, MuonOrtho::Polar4);
+        let api: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"d"}"#).unwrap();
+        assert_eq!(TrainConfig::from_api(&api).unwrap().musgd.ortho, MuonOrtho::Polar4);
+        // Legacy config with `musgd` block but no `ortho` field.
+        let mut old = serde_json::to_value(&cfg).unwrap();
+        old["musgd"].as_object_mut().unwrap().remove("ortho");
+        assert_eq!(serde_json::from_value::<TrainConfig>(old).unwrap().musgd.ortho, MuonOrtho::Ns5);
+        // Older config with no `musgd` key at all.
+        let mut older = serde_json::to_value(&cfg).unwrap();
+        older.as_object_mut().unwrap().remove("musgd");
+        assert_eq!(serde_json::from_value::<TrainConfig>(older).unwrap().musgd.ortho, MuonOrtho::Ns5);
+        // Explicit `polar5` and `ns5` round-trip.
+        for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Ns5] {
+            let mut c = cfg.clone();
+            c.musgd.ortho = ortho;
+            let v = serde_json::to_value(&c).unwrap();
+            assert_eq!(serde_json::from_value::<TrainConfig>(v).unwrap().musgd.ortho, ortho);
+        }
     }
 
     /// `ema_run_fraction`: 0.25 by default, so a fine-tune of 400 optimizer steps averages over 100 (decay 0.99,

@@ -11,8 +11,9 @@ impl Tensor {
     /// MuSGD's Muon update of many matrix-shaped parameters in one backend call
     /// ([`crate::backend::Backend::muon_step_many`]): for each parameter `params[i]`, its Muon momentum buffer
     /// `momenta[i]` (already updated this step) and gradient `grads[i]` (same shape, rank ≥ 2, viewed as
-    /// `[d₀, rest]`), the Nesterov mix (or the buffer itself), Newton–Schulz orthogonalised as
-    /// `folo_nn::optim::orthogonalize`, times `scales[i]`, then `p = p · 1 + O · (−lr)` in place. Returns
+    /// `[d₀, rest]`), the Nesterov mix (or the buffer itself), orthogonalised by `settings` (`steps` odd-quintic
+    /// steps with `step_coeffs` and optional step-0 Schatten-4 spectral rescaling, matching
+    /// `folo_nn::optim::orthogonalize_with`), times `scales[i]`, then `p = p · 1 + O · (−lr)` in place. Returns
     /// `Ok(false)`, touching nothing, when the backend has no such kernel or a tensor does not fit (all `F32` on
     /// one device, parameters and momenta dense from the start of their own storages, no parameter storage used
     /// twice or shared with a momentum or gradient); the caller then uses tensor ops. The products are summed in
