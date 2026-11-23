@@ -56,6 +56,7 @@ pub use head::HeadMode;
 
 pub use folo_nn::io::ModelConfig;
 pub use lazy::ImageCandidates;
+pub(crate) use predict::{DflAux, DflAuxOutputs};
 pub use predict::{ImagePrediction, RawPrediction};
 
 /// The layer prefixes of MODEL.md §4, indexed by layer number (`""` for the parameter-free Upsample and Concat
