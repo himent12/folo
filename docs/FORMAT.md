@@ -112,10 +112,13 @@ separately.
 checkpoint with the default weights is byte-for-byte what it was before the key existed. Resuming adopts the file's
 weights when it has them, like the group hyperparameters; without the key the optimizer keeps the weights it was
 built with (the trainer builds it from `folo.train`'s `musgd`, so a file that recorded custom weights only there
-resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's orthogonalisation schedule
-(`"polar4"`, the default for new runs, or `"polar5"`; only on a `"musgd"` contract) and is omitted for legacy `"ns5"`,
-so pre-Polar checkpoints stay byte-for-byte compatible and resume bit-exactly as `"ns5"` when the key is absent, while
-a reader that predates either key rejects a file that has it (unknown field) rather than continuing with different
+resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's orthogonalisation schedule (`"polar4"`, the default for new runs, or `"polar5"`; only on a
+`"musgd"` contract) and is omitted for legacy `"ns5"`, so the `folo.optim` contract of `"ns5"` runs stays byte-for-byte
+compatible with pre-Polar checkpoints (note that trainer checkpoints' informational `folo.train` adds `musgd.ortho`).
+When `muon_ortho` is absent, resuming restores legacy `"ns5"` (5-step Newton–Schulz: bit-exact with pre-Polar `"ns5"`
+on the CPU and deterministic save/resume within the same binary; GPU `"ns5"` runs through the current 4-aligned
+symmetric `muon_gemm` kernel rather than preserving pre-Polar GPU tile reduction order or binding-limit boundaries),
+while a reader that predates either key rejects a file that has it (unknown field) rather than continuing with different
 settings.
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
 Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.

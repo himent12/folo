@@ -566,25 +566,47 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
     train_steps(&mut b, 3);
     assert_eq!(snapshot(&b), want, "Polar4 checkpoint resume must be bit-identical");
 
-    // Legacy `Ns5` omits `muon_ortho` completely (byte-identical to pre-Polar files) and resumes bit-identically
-    // as `Ns5` even when loaded into a default `Polar4` `MuSgd::new`.
+    // Legacy `Ns5` omits `muon_ortho` in `folo.optim` (byte-identical to pre-Polar `folo.optim`) and resumes
+    // bit-identically on CPU as `Ns5` even when loaded into a default-`Polar4` `MuSgd::new`. Also verify a
+    // synthetic pre-Polar checkpoint whose `folo.optim` has no `muon_ortho` and whose `folo.train` has a
+    // pre-Polar `musgd` block without `ortho` (or no `musgd` key at all) loads and resumes cleanly as `Ns5`.
     let mut leg = new_ortho(22, MuonOrtho::Ns5);
     train_steps(&mut leg, 3);
     let dpath = tmp("resume-musgd-ns5.folo");
     save(&leg, &dpath);
+    let (leg_map, leg_tensors) =
+        with_parts(&leg, |p| checkpoint_contents(&meta(FileKind::Checkpoint, 3), p).unwrap());
     assert!(optim_json(&dpath).get("muon_ortho").is_none());
+    let pre_polar_files: Vec<(&str, ModelFile)> = [
+        (
+            "pre-polar train with musgd without ortho",
+            serde_json::json!({ "epochs": 2, "batch": 2, "musgd": { "muon": 0.2, "sgd": 1.0, "cls_lr": 3.0 } }),
+        ),
+        ("pre-polar train without musgd", serde_json::json!({ "epochs": 2, "batch": 2 })),
+    ]
+    .into_iter()
+    .map(|(label, tj)| {
+        let mut m = leg_map.clone();
+        m.insert("folo.train".into(), tj.to_string());
+        (label, rewrite(&m, &leg_tensors).unwrap())
+    })
+    .collect();
     train_steps(&mut leg, 3);
     let want_ns5 = snapshot(&leg);
 
-    let mut b_leg = new_run(OptimKind::MuSgd, 89);
-    let f = ModelFile::open(&dpath).unwrap();
-    let res = f.resume(&b_leg.model, b_leg.opt.as_mut(), Some(&mut b_leg.ema), Some(classes(3))).unwrap();
-    assert_eq!(b_leg.opt.contract().muon_ortho, None, "legacy Ns5 contract restores Ns5");
-    b_leg.sched = res.schedule;
-    b_leg.rng = res.rng;
-    drop(f);
-    train_steps(&mut b_leg, 3);
-    assert_eq!(snapshot(&b_leg), want_ns5, "legacy Ns5 checkpoint resume must be bit-identical");
+    let mut cases: Vec<(&str, ModelFile)> = vec![("saved ns5", ModelFile::open(&dpath).unwrap())];
+    cases.extend(pre_polar_files);
+    for (label, f) in cases {
+        let mut b_leg = new_run(OptimKind::MuSgd, 89);
+        assert_eq!(f.checkpoint().unwrap().optim.muon_ortho, None, "{label}");
+        let res = f.resume(&b_leg.model, b_leg.opt.as_mut(), Some(&mut b_leg.ema), Some(classes(3))).unwrap();
+        assert_eq!(b_leg.opt.contract().muon_ortho, None, "{label}: restores Ns5");
+        b_leg.sched = res.schedule;
+        b_leg.rng = res.rng;
+        drop(f);
+        train_steps(&mut b_leg, 3);
+        assert_eq!(snapshot(&b_leg), want_ns5, "{label}: CPU Ns5 resume must be bit-identical");
+    }
 
     // `Polar5` also writes `"muon_ortho": "polar5"` and resumes bit-identically.
     let mut p5 = new_ortho(23, MuonOrtho::Polar5);

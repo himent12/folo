@@ -123,7 +123,7 @@ pub struct TrainConfig {
     /// MuSGD's step weights, class-branch LR factor and orthogonalisation schedule (docs/MODEL.md §8.2); used only
     /// when the run resolves to MuSGD (under `auto` rule 5 the step weights are `auto`'s, see
     /// [`TrainConfig::resolve_optimizer`]). Missing in configs from before it: the §8.2 defaults with legacy `ns5`
-    /// orthogonalisation so older runs resume bit-exactly.
+    /// orthogonalisation so older runs resume with legacy `ns5`.
     #[serde(default = "legacy_musgd_config")]
     pub musgd: MuSgdConfig,
     /// Whether the run started from pretrained weights (transfer learning). Set by [`super::Trainer::new`] from
@@ -155,7 +155,7 @@ pub struct TrainConfig {
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, the
 /// head's class branches at `cls_lr · lr0`, and the orthogonalisation schedule `ortho` (`polar4` default for new
 /// runs, `polar5`, or legacy `ns5`). Missing `ortho` in configs written before the key reads as `ns5` so older
-/// runs resume bit-exactly.
+/// runs resume with legacy `ns5`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MuSgdConfig {
@@ -781,7 +781,7 @@ mod tests {
     }
 
     /// `musgd.ortho`: `polar4` for new runs (`default`, `from_api`); configs from before the key (missing
-    /// `musgd.ortho`, or missing `musgd` altogether) read as legacy `ns5` so older runs resume bit-exactly.
+    /// `musgd.ortho`, or missing `musgd` altogether) read as legacy `ns5` so older runs resume with legacy `ns5`.
     #[test]
     fn muon_ortho_versions() {
         use folo_nn::optim::MuonOrtho;

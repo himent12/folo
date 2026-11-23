@@ -324,8 +324,9 @@ pub struct OptimContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub musgd: Option<MuSgdWeights>,
     /// MuSGD's orthogonalisation schedule when not legacy [`MuonOrtho::Ns5`] (`"polar4"` or `"polar5"`). Omitted
-    /// for `Ns5` so legacy checkpoints stay byte-identical and resume as `Ns5`, while readers predating the key
-    /// reject Polar-FOLO checkpoints cleanly instead of silently switching schedules.
+    /// for `Ns5` so `folo.optim` stays byte-identical to pre-Polar contracts and absent `muon_ortho` resumes as
+    /// `Ns5`, while readers predating the key reject Polar-FOLO checkpoints cleanly instead of silently switching
+    /// schedules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muon_ortho: Option<MuonOrtho>,
 }

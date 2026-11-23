@@ -331,14 +331,16 @@ fn polar_folded_scale_overflow_falls_back_cleanly() {
 }
 
 /// Legacy `Ns5` with multiple Muon groups at differing LRs (`decay` + `decay.cls`) and non-unit `muon_scale`
-/// preserves the exact pre-Polar `(X * scale) * (-lr)` GPU rounding order bit for bit.
+/// stays on the per-group path and matches separate per-group GPU calls bit for bit, and a pre-Polar `folo.optim`
+/// contract omitting `muon_ortho` transitions a default-`Polar4` GPU `MuSgd` to `Ns5` deterministically.
 #[test]
-fn ns5_multi_group_preserves_exact_pre_pr_rounding() {
+fn ns5_multi_group_matches_per_group_steps() {
     let dev = gpu!();
     let mut rng = Rng::seed(53);
     let shapes: [&[usize]; 3] = [&[13, 7, 3, 1], &[17, 5], &[9, 4, 2, 1]];
     let init: Vec<Tensor> = shapes.iter().map(|s| Tensor::rand_uniform(*s, -1.0, 1.0, &mut rng)).collect();
     let ps_opt: Vec<Tensor> = init.iter().map(|t| t.to_device(dev).unwrap().requires_grad_()).collect();
+    let ps_res: Vec<Tensor> = init.iter().map(|t| t.to_device(dev).unwrap().requires_grad_()).collect();
     let ps_ref: Vec<Tensor> = init.iter().map(|t| t.to_device(dev).unwrap().requires_grad_()).collect();
     let ms_ref: Vec<Tensor> =
         shapes.iter().map(|s| Tensor::zeros_with(*s, folo_core::DType::F32, dev).unwrap()).collect();
@@ -358,6 +360,14 @@ fn ns5_multi_group_preserves_exact_pre_pr_rounding() {
         ]
     };
     let mut opt = MuSgd::with_ortho(make_groups(&ps_opt), weights, MuonOrtho::Ns5).unwrap();
+    // Simulate resuming a pre-Polar `folo.optim` contract (no `muon_ortho`) into a default-`Polar4` GPU `MuSgd`.
+    let legacy_contract = opt.contract();
+    assert_eq!(legacy_contract.muon_ortho, None);
+    let mut resumed = MuSgd::with_weights(make_groups(&ps_res), weights).unwrap();
+    assert_eq!(resumed.ortho(), MuonOrtho::Polar4);
+    resumed.apply_contract(&legacy_contract).unwrap();
+    assert_eq!(resumed.ortho(), MuonOrtho::Ns5);
+
     let mut sgd_ref = Sgd::new(make_groups(&ps_ref)).unwrap();
 
     for _ in 0..2 {
@@ -365,14 +375,17 @@ fn ns5_multi_group_preserves_exact_pre_pr_rounding() {
             .iter()
             .map(|s| Tensor::rand_uniform(*s, -0.3, 0.3, &mut rng).to_device(dev).unwrap())
             .collect();
-        let (mut g_opt, mut g_ref) = (folo_core::Grads::default(), folo_core::Grads::default());
-        for ((p_opt, p_ref), g) in ps_opt.iter().zip(&ps_ref).zip(&gs) {
+        let (mut g_opt, mut g_res, mut g_ref) =
+            (folo_core::Grads::default(), folo_core::Grads::default(), folo_core::Grads::default());
+        for (((p_opt, p_res), p_ref), g) in ps_opt.iter().zip(&ps_res).zip(&ps_ref).zip(&gs) {
             g_opt.insert(p_opt, g.clone());
+            g_res.insert(p_res, g.clone());
             g_ref.insert(p_ref, g.clone());
         }
         opt.step(&g_opt).unwrap();
+        resumed.step(&g_res).unwrap();
 
-        // Exact pre-PR per-group GPU sequence: un-folded `scales[i] = muon_scale`, `settings.lr = muon * group_lr`.
+        // Separate per-group GPU calls: un-folded `scales[i] = muon_scale`, `settings.lr = muon * group_lr`.
         {
             let _ng = no_grad();
             let mu32 = mu as f32;
@@ -401,12 +414,19 @@ fn ns5_multi_group_preserves_exact_pre_pr_rounding() {
         }
         sgd_ref.step(&g_ref).unwrap();
     }
-    for (i, ((p_opt, p_ref), shape)) in ps_opt.iter().zip(&ps_ref).zip(&shapes).enumerate() {
+    for (i, (((p_opt, p_res), p_ref), shape)) in
+        ps_opt.iter().zip(&ps_res).zip(&ps_ref).zip(&shapes).enumerate()
+    {
         let got = p_opt.to_vec::<f32>().unwrap();
+        let res_v = p_res.to_vec::<f32>().unwrap();
         let want = p_ref.to_vec::<f32>().unwrap();
         assert!(
             got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
-            "Ns5 param {i} {shape:?} must match pre-PR per-group rounding bit for bit",
+            "Ns5 param {i} {shape:?} must match separate per-group GPU steps bit for bit",
+        );
+        assert!(
+            res_v.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "pre-Polar contract GPU resume param {i} {shape:?} must match Ns5 bit for bit",
         );
     }
 }

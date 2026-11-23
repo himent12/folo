@@ -205,8 +205,8 @@ impl MuSgd {
 
     /// The Muon half of a step: momentum, orthogonalisation and `p −= muon · lr · O` for every Muon parameter
     /// with a gradient. For Polar-FOLO on non-CPU devices, Muon groups sharing `(momentum, nesterov)` (such as
-    /// `decay` and `decay.cls`) fuse into one `muon_step_many_` call when folded scales stay finite; legacy `Ns5`
-    /// keeps per-group calls for bit-exact pre-Polar rounding and aliasing semantics.
+    /// `decay` and `decay.cls`) fuse into one `muon_step_many_` call when no storage aliases exist and folded
+    /// scales stay finite; legacy `Ns5` keeps per-group calls for per-group rounding and aliasing semantics.
     fn muon_step(&self, grads: &dyn GradSource) -> Result<()> {
         let _g = folo_core::no_grad();
         // Collect active Muon groups (those with at least one parameter that received a gradient).
@@ -251,9 +251,9 @@ impl MuSgd {
         }
         // Fast path (Polar-FOLO only): when >= 2 Muon groups share (mu, nesterov) on the same non-CPU device,
         // fuse both momentum update and orthogonalisation into one multi-tensor device pass. Legacy `Ns5` stays
-        // unconditionally on the per-group path so rounding order and fallback aliasing semantics remain identical
-        // to pre-Polar `MuSgd`. Skip fusion if any cross-group storage alias exists (before mutating momentum
-        // buffers) or if folding a group's `lr` into `muon_scale` would overflow `f32`.
+        // unconditionally on the per-group path for per-group rounding and aliasing semantics. Skip fusion if any
+        // cross-group storage alias exists (before mutating momentum buffers) or if folding a group's `lr` into
+        // `muon_scale` would overflow `f32`.
         let first_dev = active[0].ps[0].device();
         let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
         let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
@@ -569,15 +569,15 @@ impl Optimizer for MuSgd {
     fn contract(&self) -> OptimContract {
         let mut c = group_contract(self);
         c.musgd = (self.weights != MuSgdWeights::default()).then_some(self.weights);
-        // Omit `muon_ortho` only for legacy `Ns5` so pre-Polar checkpoints match byte-for-byte and older readers
-        // cleanly reject `Polar4` / `Polar5` checkpoints instead of silently resuming them with `Ns5`.
+        // Omit `muon_ortho` only for legacy `Ns5` so pre-Polar `folo.optim` contracts stay byte-compatible and
+        // older readers cleanly reject `Polar4` / `Polar5` checkpoints instead of silently resuming with `Ns5`.
         c.muon_ortho = (self.ortho != MuonOrtho::Ns5).then_some(self.ortho);
         c
     }
 
     /// Also adopts the contract's step weights and orthogonalisation schedule. A contract without `musgd` keeps
-    /// the weights this optimizer was built with; one without `muon_ortho` (legacy pre-Polar or explicit `Ns5`
-    /// checkpoint) resumes with [`MuonOrtho::Ns5`] for bit-exact backward compatibility.
+    /// the weights this optimizer was built with; one without `muon_ortho` (pre-Polar or explicit `Ns5`
+    /// checkpoint) restores [`MuonOrtho::Ns5`] (bit-exact with pre-Polar `Ns5` on CPU; see `docs/FORMAT.md`).
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
         let weights = c.musgd.unwrap_or(self.weights);
         weights.validate().map_err(|e| Error::Load(format!("folo.optim: {e}")))?;

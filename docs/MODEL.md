@@ -741,7 +741,7 @@ and `1 / α` is folded directly into step 0's `(a₀, b₀, c₀)` (`a₀/α`, `
 extra GEMM. `musgd.ortho = polar5` runs the 5-step Polar-FOLO schedule (`POLAR5_COEFFS`, 15 GEMMs) for tighter
 high-condition-number orthogonalisation; `musgd.ortho = ns5` keeps the legacy fixed 5-step Newton–Schulz coefficients
 `(3.4445, -4.7750, 2.0315)` (configs and checkpoints written before `musgd.ortho` default to `ns5` so they resume
-bit-exactly). In 3-seed equal-budget AMP training A/Bs on `folo-n`, `polar4` beats `ns5` on synthetic shapes from
+with legacy 5-step Newton–Schulz — bit-exact on CPU; see FORMAT.md). In 3-seed equal-budget AMP training A/Bs on `folo-n`, `polar4` beats `ns5` on synthetic shapes from
 scratch (best mAP50-95 `0.9416` vs `0.9376`, `+0.0040`; final `0.9416` vs `0.9375`, `+0.0041`) and improves final
 mAP50-95 on BCCD fine-tuning (`0.6254` vs `0.6216`, `+0.0038`, matching best `0.6312` vs `0.6313`) with zero non-finite
 batches and 20% fewer orthogonalisation GEMMs.
@@ -757,13 +757,13 @@ checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's
 reference: `bfloat16`); on the CPU matrices are batched by column count with zero-padded rows, which changes no value
 (including `‖A₀‖_F`). On a GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels,
 and the rest of the Muon step fuses `decay` and `decay.cls` under Polar-FOLO (when they share `(μ, nesterov)` and
-folded scales stay finite; legacy `ns5` keeps per-group calls for exact pre-Polar semantics) into one call for all
-matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, overflow-safe normalisation, optional `muon_s4`, each
+folded scales stay finite; legacy `ns5` keeps per-group calls for per-group rounding and aliasing semantics) into one call for all
+matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, `2^-80` overflow-safe normalisation under Polar-FOLO and unscaled normalisation for legacy `ns5`, optional `muon_s4`, each
 polynomial step as three grouped symmetric/rectangular `vec4` GEMMs over every matrix at once, and `p −= lr · scale · O`);
 only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs`
 (two steps against an `f64` reference for `Polar4`, `Ns5`, and `Polar5`, orthogonality and `f64` checks), `tests/gpu/`
 (GPU against CPU; the fused kernels against the tensor ops on wide, tall, multi-tile, `r > 256` and single-row
-matrices, zero, near-zero, NaN and empty ones), `tests/folo_io.rs` (bit-exact resume across all schedules).
+matrices, zero, near-zero, huge-norm and empty ones), `tests/folo_io.rs` (bit-exact CPU resume across all schedules).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation
