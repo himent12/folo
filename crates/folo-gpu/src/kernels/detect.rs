@@ -10,7 +10,7 @@
 //!   `own [2, B, A]`: the step-4 owner (max `u` bits, then the complemented gt index). `slot [B, G, K, 2]`:
 //!   `(t or 0, positive)`. `dense [2, B, A]`: `(label + 1 or 0, t)` per anchor. `misc [4]`: bit 0 of word 0 is
 //!   set when a head value is not finite.
-//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 2]`, `stats [12]` f32 and `total [1]` (see
+//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 3]`, `stats [12]` f32 and `total [1]` (see
 //!   `shaders/det_combine.wgsl`).
 
 use crate::context::GpuContext;
@@ -333,8 +333,14 @@ pub fn combine(
     total: &wgpu::Buffer,
 ) -> Result<()> {
     let k = ctx.kernel(&COMBINE, Spec::new())?;
-    let p =
-        Params::new().uz(d.bce_partials())?.uz(d.slots())?.f(d.b as f32).f(gains[0]).f(gains[1]).f(gains[2]);
+    let p = Params::new()
+        .uz(d.bce_partials())?
+        .uz(d.slots())?
+        .f(d.b as f32)
+        .f(gains[0])
+        .f(gains[1])
+        .f(gains[2])
+        .f(d.dfl_ot_weight);
     ctx.dispatch(&k, &[part, terms, slot, misc, stats, total], &p, [1, 1, 1])
 }
 

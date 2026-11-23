@@ -7,7 +7,7 @@
 //! - [`BoxFusion::Dfl`]: DFL evidence fusion, the score times the member's **per-side precision**, read from its
 //!   DFL distribution ([`crate::decode::side_precision`]): an anchor near an object's left edge knows that edge
 //!   sharply and the far edge vaguely, so its left edge counts more than its right;
-//! - [`BoxFusion::Sebf`]: two-pass IRLS Spatial-Evidence Bayesian Box Fusion over each kept box's NMS-owned
+//! - [`BoxFusion::Sebf`]: 1-step Student-t IRLS (Student-t Exclusive Box Fusion) over each kept box's NMS-owned
 //!   cluster, weighting members by `score · IoU^4 · side_precision`.
 //!
 //! Scores, classes, the kept set and its order are NMS's; only the boxes move. The cluster of a kept candidate is

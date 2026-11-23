@@ -2,8 +2,9 @@
 // pd = anchor ∓ Σ_i i · softmax(box logits) (grid units), L_box = t · (1 − CIoU(pd, gt / stride)) and the DFL
 // cross-entropy at the two bins around each side's clamped target distance, weighted t / 4. Slots that are not
 // positive, or have t = 0, contribute nothing.
-// MODE 0 writes OUT[2s] = box term, OUT[2s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL term
-// before its sign). MODE 1 writes the gradient of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
+// MODE 0 writes OUT[3s] = box term, OUT[3s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL CE
+// term before its sign), and OUT[3s + 2] = Σ_sides wt · L_ot (unscaled by dfl_ot_weight so det_combine normalises
+// by tss before multiplying). MODE 1 writes the gradient of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
 // first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
 // S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
 // Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
@@ -31,8 +32,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let t = bitcast<f32>(SLOT[2u * s]);
     let pos = SLOT[2u * s + 1u] == 1u;
     if (MODE == 0u) {
-        OUT[2u * s] = 0.0;
-        OUT[2u * s + 1u] = 0.0;
+        OUT[3u * s] = 0.0;
+        OUT[3u * s + 1u] = 0.0;
+        OUT[3u * s + 2u] = 0.0;
     }
     if (!pos || t == 0.0) { return; }
     let na = pu(1u);
@@ -61,6 +63,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var lp: array<f32, 4u * R>;
     var d: vec4<f32>;
     var dfl = 0.0;
+    var ot_sum = 0.0;
     var jl: array<u32, 4>;
     var wl: vec4<f32>;
     var wr: vec4<f32>;
@@ -130,8 +133,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                     if (k > ju) { l_tail = l_tail + max((m - mf) + (lz - log_ge1(f_acc)), 0.0); }
                 }
             }
-            // Subtracted because det_combine.wgsl negates r.z (signed-negative DFL convention).
-            dfl = dfl - (wt * l_tail) * dfl_ot_w;
+            ot_sum = ot_sum + wt * l_tail;
         }
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
@@ -150,8 +152,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         if (lam > 0.0) {
             l_box = (1.0 - lam) * l_base + lam * (1.0 - nwd_box(pd, tb, c_s));
         }
-        OUT[2u * s] = l_box * t;
-        OUT[2u * s + 1u] = dfl;
+        OUT[3u * s] = l_box * t;
+        OUT[3u * s + 1u] = dfl;
+        OUT[3u * s + 2u] = ot_sum;
         return;
     }
 
@@ -182,34 +185,45 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let g_h1 = select(0.0, g_uni * w1, pd.w > pd.y);
         let g_ix = select(0.0, g_inter * ih, ix > 0.0);
         let g_iy = select(0.0, g_inter * iw, iy > 0.0);
-        let d2 = rpiou_delta * rpiou_delta;
-        let denom_x = w2 * w2 + d2;
-        let denom_y = h2 * h2 + d2;
+        let rk = sqrt(rpiou_kappa);
+        let sx = max(w2, rpiou_delta);
+        let sy = max(h2, rpiou_delta);
+        let wx = w2 / sx;
+        let dx_f = rpiou_delta / sx;
+        let denom_x = wx * wx + dx_f * dx_f;
+        let hy = h2 / sy;
+        let dy_f = rpiou_delta / sy;
+        let denom_y = hy * hy + dy_f * dy_f;
+        let qx = rk / sx;
+        let qy = rk / sy;
         let dx1 = pd.x - tb.x;
         let dx2 = pd.z - tb.z;
         let dy1 = pd.y - tb.y;
         let dy2 = pd.w - tb.w;
-        let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-        let ke2_raw = rpiou_kappa * e2;
+        let ux1 = select(0.0, dx1 * qx, dx1 != 0.0);
+        let ux2 = select(0.0, dx2 * qx, dx2 != 0.0);
+        let uy1 = select(0.0, dy1 * qy, dy1 != 0.0);
+        let uy2 = select(0.0, dy2 * qy, dy2 != 0.0);
+        let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
         var ex1 = 0.0;
         var ey1 = 0.0;
         var ex2 = 0.0;
         var ey2 = 0.0;
         if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
             let inv1 = 1.0 / (1.0 + ke2_raw);
-            let k_inv1 = rpiou_kappa * inv1;
             let g_half = g_base * 0.5;
+            let qx_i = qx * inv1;
+            let qy_i = qy * inv1;
             if (abs(g_half) <= 1.0) {
-                let kg = k_inv1 * g_half;
-                ex1 = ((dx1 / denom_x) * kg) * inv1;
-                ey1 = ((dy1 / denom_y) * kg) * inv1;
-                ex2 = ((dx2 / denom_x) * kg) * inv1;
-                ey2 = ((dy2 / denom_y) * kg) * inv1;
+                if (dx1 != 0.0) { ex1 = (((ux1 / denom_x) * g_half) * inv1) * qx_i; }
+                if (dy1 != 0.0) { ey1 = (((uy1 / denom_y) * g_half) * inv1) * qy_i; }
+                if (dx2 != 0.0) { ex2 = (((ux2 / denom_x) * g_half) * inv1) * qx_i; }
+                if (dy2 != 0.0) { ey2 = (((uy2 / denom_y) * g_half) * inv1) * qy_i; }
             } else {
-                ex1 = (((dx1 / denom_x) * k_inv1) * inv1) * g_half;
-                ey1 = (((dy1 / denom_y) * k_inv1) * inv1) * g_half;
-                ex2 = (((dx2 / denom_x) * k_inv1) * inv1) * g_half;
-                ey2 = (((dy2 / denom_y) * k_inv1) * inv1) * g_half;
+                if (dx1 != 0.0) { ex1 = (((ux1 / denom_x) * inv1) * qx_i) * g_half; }
+                if (dy1 != 0.0) { ey1 = (((uy1 / denom_y) * inv1) * qy_i) * g_half; }
+                if (dx2 != 0.0) { ex2 = (((ux2 / denom_x) * inv1) * qx_i) * g_half; }
+                if (dy2 != 0.0) { ey2 = (((uy2 / denom_y) * inv1) * qy_i) * g_half; }
             }
         }
         gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + ex1;

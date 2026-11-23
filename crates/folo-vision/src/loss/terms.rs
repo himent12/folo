@@ -239,8 +239,8 @@ fn gather_flat_cpu(x: &Tensor, idx: Vec<usize>) -> Result<Tensor> {
 ///
 /// where `u = IoU(b1, b2)` and
 /// `E^2 = 0.25 * (((ax1 - bx1)^2 + (ax2 - bx2)^2) / (w_g^2 + delta0^2) + ((ay1 - by1)^2 + (ay2 - by2)^2) / (h_g^2 + delta0^2))`.
-/// Purely algebraic (no `atan`, `exp`, `sqrt` or host round-trip), with zero enclosing-box expansion and a global
-/// gradient bound.
+/// Purely algebraic (no `atan` or `exp`), with zero enclosing-box expansion and a global gradient bound; `b2` is
+/// treated as constant ground truth for the edge penalty (GPU training uses the fused `det_box.wgsl` kernel).
 pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
     const EPS: f32 = 1e-7;
     let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
@@ -258,10 +258,11 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     focal_iou.add(&edge_pen)
 }
 
-/// Overflow-safe rational edge penalty `ke2 / (1 + ke2)` with `ke2 = min(kappa * E^2, 1e16)` for `b1, b2: [N, 4]`.
+/// Overflow- and underflow-safe rational edge penalty `ke2 / (1 + ke2)` with `ke2 = min(kappa * E^2, 1e16)` for
+/// `b1, b2: [N, 4]`.
 ///
-/// Computed via a custom op so backward multiplies each edge residual `d / denom` by `kappa * inv1` before
-/// `0.5 * g_out`, avoiding `Inf * 0 = NaN` at exact matches when `kappa` is near `f32::MAX`.
+/// Scales each axis by `q = sqrt(kappa) / max(w, delta0)` so extreme `delta0` / `kappa` never overflow or underflow
+/// `delta0^2`, and guards `dx == 0` so exact matches never produce `Inf * 0 = NaN`.
 fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Result<Tensor> {
     const KE2_MAX: f32 = 1e16;
     let (n, c) = b1.dims2()?;
@@ -269,19 +270,34 @@ fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Resu
     let dev = b1.device();
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
-    let d2 = delta0 * delta0;
+    let rk = kappa.sqrt();
     let mut out = vec![0.0f32; n];
     for i in 0..n {
         let (ax1, ay1, ax2, ay2) = (a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
         let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
         let w2 = (bx2 - bx1).max(0.0);
         let h2 = (by2 - by1).max(0.0);
-        let denom_x = w2 * w2 + d2;
-        let denom_y = h2 * h2 + d2;
+        let sx = w2.max(delta0);
+        let sy = h2.max(delta0);
+        let (wx, dx_f) = (w2 / sx, delta0 / sx);
+        let (hy, dy_f) = (h2 / sy, delta0 / sy);
+        let denom_x = wx * wx + dx_f * dx_f;
+        let denom_y = hy * hy + dy_f * dy_f;
+        let (qx, qy) = (rk / sx, rk / sy);
         let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-        let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-        let ke2 = (kappa * e2).min(KE2_MAX);
-        out[i] = ke2 / (1.0 + ke2);
+        let ux1 = if dx1 != 0.0 { dx1 * qx } else { 0.0 };
+        let ux2 = if dx2 != 0.0 { dx2 * qx } else { 0.0 };
+        let uy1 = if dy1 != 0.0 { dy1 * qy } else { 0.0 };
+        let uy2 = if dy2 != 0.0 { dy2 * qy } else { 0.0 };
+        let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
+        out[i] = if ke2_raw.is_finite() {
+            let ke2 = ke2_raw.min(KE2_MAX);
+            ke2 / (1.0 + ke2)
+        } else if ke2_raw.is_infinite() {
+            1.0
+        } else {
+            ke2_raw
+        };
     }
     let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
     Tensor::custom_op("rpiou_edge_penalty", &[b1], out_t, move |g| {
@@ -292,27 +308,36 @@ fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Resu
             let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
             let w2 = (bx2 - bx1).max(0.0);
             let h2 = (by2 - by1).max(0.0);
-            let denom_x = w2 * w2 + d2;
-            let denom_y = h2 * h2 + d2;
+            let sx = w2.max(delta0);
+            let sy = h2.max(delta0);
+            let (wx, dx_f) = (w2 / sx, delta0 / sx);
+            let (hy, dy_f) = (h2 / sy, delta0 / sy);
+            let denom_x = wx * wx + dx_f * dx_f;
+            let denom_y = hy * hy + dy_f * dy_f;
+            let (qx, qy) = (rk / sx, rk / sy);
             let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-            let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-            let ke2_raw = kappa * e2;
+            let ux1 = if dx1 != 0.0 { dx1 * qx } else { 0.0 };
+            let ux2 = if dx2 != 0.0 { dx2 * qx } else { 0.0 };
+            let uy1 = if dy1 != 0.0 { dy1 * qy } else { 0.0 };
+            let uy2 = if dy2 != 0.0 { dy2 * qy } else { 0.0 };
+            let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
             if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
                 let inv1 = 1.0 / (1.0 + ke2_raw);
-                let k_inv1 = kappa * inv1;
                 let g_half = 0.5 * gv[i];
-                if g_half.abs() <= 1.0 {
-                    let kg = k_inv1 * g_half;
-                    grad[4 * i] = ((dx1 / denom_x) * kg) * inv1;
-                    grad[4 * i + 1] = ((dy1 / denom_y) * kg) * inv1;
-                    grad[4 * i + 2] = ((dx2 / denom_x) * kg) * inv1;
-                    grad[4 * i + 3] = ((dy2 / denom_y) * kg) * inv1;
-                } else {
-                    grad[4 * i] = (((dx1 / denom_x) * k_inv1) * inv1) * g_half;
-                    grad[4 * i + 1] = (((dy1 / denom_y) * k_inv1) * inv1) * g_half;
-                    grad[4 * i + 2] = (((dx2 / denom_x) * k_inv1) * inv1) * g_half;
-                    grad[4 * i + 3] = (((dy2 / denom_y) * k_inv1) * inv1) * g_half;
-                }
+                let (qx_i, qy_i) = (qx * inv1, qy * inv1);
+                let edge_g = |dx: f32, u: f32, denom: f32, q_i: f32| -> f32 {
+                    if dx == 0.0 {
+                        0.0
+                    } else if g_half.abs() <= 1.0 {
+                        (((u / denom) * g_half) * inv1) * q_i
+                    } else {
+                        (((u / denom) * inv1) * q_i) * g_half
+                    }
+                };
+                grad[4 * i] = edge_g(dx1, ux1, denom_x, qx_i);
+                grad[4 * i + 1] = edge_g(dy1, uy1, denom_y, qy_i);
+                grad[4 * i + 2] = edge_g(dx2, ux2, denom_x, qx_i);
+                grad[4 * i + 3] = edge_g(dy2, uy2, denom_y, qy_i);
             }
         }
         Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
@@ -326,10 +351,19 @@ fn safe_exp_neg(d: f32) -> f32 {
 }
 
 /// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:
-/// `ot_weight * Σ_{n, side} side_wt * (Σ_{k < j} max(-log S_k, 0) + Σ_{k > j} max(-log F_k, 0))`
+/// `(dfl_gain * ot_weight / tss) * Σ_{n, side} side_wt * (Σ_{k < j} max(-log S_k, 0) + Σ_{k > j} max(-log F_k, 0))`
 /// for `logits: [N, 4, R]`, keeping running maxima and mantissas separate so even extreme logits (e.g.
-/// `[-1e8, -1e8, -1e8, 0]`) preserve exact relative ratios (`1/2`, `1/3`) and the zero-sum gradient invariant.
-fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight: f32) -> Result<Tensor> {
+/// `[-1e8, -1e8, -1e8, 0]`) preserve exact relative ratios (`1/2`, `1/3`) and the zero-sum gradient invariant,
+/// and normalizing by `tss` in `f64` before scaling by `ot_weight * dfl_gain` so multi-positive sums never overflow
+/// prematurely in `f32`.
+fn ot_dfl_tail(
+    logits: &Tensor,
+    left_bins: &[usize],
+    side_wt: &[f32],
+    ot_weight: f32,
+    tss: f32,
+    dfl_gain: f32,
+) -> Result<Tensor> {
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
     let dev = logits.device();
@@ -418,7 +452,7 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
                 ap_mant[t] = ap_mant[t + 1] * safe_exp_neg(mf_arr[t] - mf_arr[t + 1]) + 1.0 / f_arr[t];
             }
         }
-        total += ((wt * l_tail) * ot_weight) as f64;
+        total += (wt as f64) * (l_tail as f64);
         let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
         for (k, out_k) in out_row.iter_mut().enumerate() {
             let xk = row[k];
@@ -437,14 +471,16 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
             *out_k = wt * (r_m2 * p[k] - bm - am);
         }
     }
-    let out = Tensor::scalar(total as f32).to_device(dev)?;
+    let out_val = ((total / tss as f64) * ot_weight as f64 * dfl_gain as f64) as f32;
+    let out = Tensor::scalar(out_val).to_device(dev)?;
     let shape = [n, 4, r];
     Tensor::custom_op("ot_dfl_tail", &[logits], out, move |g| {
         let gv = g.item::<f32>()?;
-        let scaled: Vec<f32> = if gv.abs() <= 1.0 {
-            grad_unit.iter().map(|&u| (u * gv) * ot_weight).collect()
+        let sd = gv * (dfl_gain / tss);
+        let scaled: Vec<f32> = if sd.abs() <= 1.0 {
+            grad_unit.iter().map(|&u| (u * sd) * ot_weight).collect()
         } else {
-            grad_unit.iter().map(|&u| (u * ot_weight) * gv).collect()
+            grad_unit.iter().map(|&u| (u * ot_weight) * sd).collect()
         };
         Ok(vec![Some(Tensor::from_vec(scaled, shape)?.to_device(dev)?)])
     })
@@ -658,18 +694,24 @@ pub(super) fn loss_impl(
         let bins = on_dev(Tensor::from_vec(bins, [n, 4, 2])?)?;
         let bin_w = on_dev(Tensor::from_vec(bin_w, [n, 4, 2])?)?;
         let picked = logits.log_softmax(2)?.gather(2, &bins)?;
-        let l_dfl_ce = sum_fixed_order(&picked.mul(&bin_w)?)?.neg()?;
-        let l_dfl = if cfg.dfl_ot_weight > 0.0 && r > 2 {
-            l_dfl_ce.add(&ot_dfl_tail(&logits, &left_bins, &side_wt, cfg.dfl_ot_weight)?)?.div_scalar(tss)?
+        let l_dfl_ce = sum_fixed_order(&picked.mul(&bin_w)?)?.neg()?.div_scalar(tss)?;
+        let wd = if cfg.dfl_ot_weight > 0.0 && r > 2 {
+            l_dfl_ce.mul_scalar(cfg.dfl_gain)?.add(&ot_dfl_tail(
+                &logits,
+                &left_bins,
+                &side_wt,
+                cfg.dfl_ot_weight,
+                tss,
+                cfg.dfl_gain,
+            )?)?
         } else {
-            l_dfl_ce.div_scalar(tss)?
+            l_dfl_ce.mul_scalar(cfg.dfl_gain)?
         };
-        (l_box, l_dfl)
+        (l_box, wd)
     };
     let l_cls = cls_sum.div_scalar(tss)?;
 
-    let (wb, wc, wd) =
-        (l_box.mul_scalar(cfg.box_gain)?, l_cls.mul_scalar(cfg.cls_gain)?, l_dfl.mul_scalar(cfg.dfl_gain)?);
+    let (wb, wc, wd) = (l_box.mul_scalar(cfg.box_gain)?, l_cls.mul_scalar(cfg.cls_gain)?, l_dfl);
     let items = LossItems { box_: wb.item::<f32>()?, cls: wc.item::<f32>()?, dfl: wd.item::<f32>()? };
     let total = wb.add(&wc)?.add(&wd)?.mul_scalar(b as f32)?;
     let total_value = total.item::<f32>()?;

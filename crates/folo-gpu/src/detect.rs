@@ -435,7 +435,7 @@ pub fn detection_loss_with_assignment(
         (raw(&asg.dense)?, raw(&asg.misc)?, raw(&asg.slots)?, raw(&asg.picks)?, raw(&asg.meta)?);
     let (_part, part) = bufs.alloc(DType::F32, &[d.bce_partials()], false)?;
     k::bce_forward(ctx, &d, &cls_buf, &dense_b, &part, &misc_b).map_err(gpu)?;
-    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 2], false)?;
+    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 3], false)?;
     let dummy = ctx.dummy().clone();
     k::box_terms(ctx, &d, false, &box_buf, &meta_b, &pick_b, &slot_b, &terms, &dummy, &dummy).map_err(gpu)?;
     let (stats, stats_b) = bufs.alloc(DType::F32, &[12], false)?;

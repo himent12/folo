@@ -466,7 +466,7 @@ fn finish(
         cfg.iou,
         cfg.max_det,
         cfg.agnostic,
-        cfg.score.is_calibrated() || cfg.fusion.wants_owner(),
+        cfg.fusion.wants_owner() || (!cfg.agnostic && cfg.score.is_calibrated()),
     );
     let cands_slice = cands.as_slice();
     let fused = match cfg.fusion {

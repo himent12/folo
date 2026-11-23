@@ -147,6 +147,8 @@ fn nwd_lambda(gt_w_px: f32, gt_h_px: f32, weight: f32) -> f32 {
 }
 
 // Rational-Focal Edge-Decoupled IoU loss (R-PIoU) between predicted xyxy `a` and GT xyxy `b` (grid units).
+// Uses scaled coordinates `q = sqrt(kappa) / max(w, delta0)` so extreme `delta0` / `kappa` never overflow or
+// underflow `delta0^2`.
 fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) -> f32 {
     let eps = 1e-7;
     let w1 = max(a.z - a.x, 0.0);
@@ -157,16 +159,28 @@ fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) 
     let uni = w1 * h1 + w2 * h2 - inter + eps;
     let iou = inter / uni;
     let focal_iou = (1.0 - iou) * (1.0 + beta * iou);
-    let d2 = delta0 * delta0;
-    let denom_x = w2 * w2 + d2;
-    let denom_y = h2 * h2 + d2;
+    let rk = sqrt(kappa);
+    let sx = max(w2, delta0);
+    let sy = max(h2, delta0);
+    let wx = w2 / sx;
+    let dx_f = delta0 / sx;
+    let denom_x = wx * wx + dx_f * dx_f;
+    let hy = h2 / sy;
+    let dy_f = delta0 / sy;
+    let denom_y = hy * hy + dy_f * dy_f;
+    let qx = rk / sx;
+    let qy = rk / sy;
     let dx1 = a.x - b.x;
     let dx2 = a.z - b.z;
     let dy1 = a.y - b.y;
     let dy2 = a.w - b.w;
-    let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-    let ke2 = min(kappa * e2, 1e16);
+    let ux1 = select(0.0, dx1 * qx, dx1 != 0.0);
+    let ux2 = select(0.0, dx2 * qx, dx2 != 0.0);
+    let uy1 = select(0.0, dy1 * qy, dy1 != 0.0);
+    let uy2 = select(0.0, dy2 * qy, dy2 != 0.0);
+    let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
+    let ke2 = select(1e16, min(ke2_raw, 1e16), is_finite_f(ke2_raw));
     let inv1 = 1.0 / (1.0 + ke2);
-    let edge_pen = select(1.0, ke2 * inv1, is_finite_f(ke2));
+    let edge_pen = select(1.0, ke2 * inv1, is_finite_f(ke2_raw));
     return focal_iou + edge_pen;
 }

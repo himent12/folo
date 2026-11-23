@@ -533,4 +533,131 @@ fn new_math_extreme_edge_cases_match_host() {
         let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
         close_vec(&g_gpu, &g_cpu, 2e-4 * scale.max(1.0), 2e-3, "huge_weight_otdfl/box_raw");
     }
+
+    // 5. Multi-positive extreme `OT-DFL` (`reg_max = 3`, uniform logits, 3 exact-match positives with `t = 1`,
+    //    `dfl_ot_weight = 3e38`, `dfl_gain = 1.5`): raw per-positive sum would overflow `f32`, so both CPU and GPU
+    //    must normalize by `tss` before multiplying by `dfl_ot_weight * dfl_gain`, matching an `f64` reference.
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let box_raw = Tensor::zeros([1, 12, a]);
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        // Three well-separated 16x16 boxes centered on anchors (1,1), (5,1), (1,5): each has ltrb = 1.0 grid cells
+        // (matching uniform R=3 decoded d = 1.0 exactly, IoU = 1, t = 1, j = 1, l_tail = ln(3/2)).
+        let targets = vec![ImageTargets {
+            boxes: vec![
+                Xyxy::new(4.0, 4.0, 20.0, 20.0),
+                Xyxy::new(36.0, 4.0, 52.0, 20.0),
+                Xyxy::new(4.0, 36.0, 20.0, 52.0),
+            ],
+            labels: vec![0, 0, 0],
+        }];
+        let cfg = LossConfig {
+            reg_max: 3,
+            box_gain: 0.0,
+            cls_gain: 0.0,
+            dfl_gain: 1.5,
+            dfl_ot_weight: 3e38,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        let ref_loss = (1.5f64 * 3e38f64 * 1.5f64.ln()) as f32;
+        assert!(got.is_finite() && want.is_finite(), "3-pos extreme OT-DFL must be finite");
+        assert_eq!((got.num_fg, want.num_fg), (3, 3));
+        assert!(
+            (want.total_value - ref_loss).abs() <= 1e-4 * ref_loss,
+            "CPU 3-pos OT-DFL {} vs f64 ref {ref_loss}",
+            want.total_value
+        );
+        assert!(
+            (got.total_value - ref_loss).abs() <= 1e-4 * ref_loss,
+            "GPU 3-pos OT-DFL {} vs f64 ref {ref_loss}",
+            got.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()) && g_gpu.iter().all(|v| v.is_finite()));
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(scale > 1e35, "expected large finite OT-DFL gradient, got {scale}");
+        close_vec(&g_gpu, &g_cpu, 2e-4 * scale, 2e-3, "three_pos_otdfl/box_raw");
+    }
+
+    // 6. Extreme `R-PIoU` floor (`rpiou_delta = 1e20`, `rpiou_kappa = 3e38`, unit-size GT `[3,3,4,4]` and
+    //    predicted `[2.5,2.5,4.5,4.5]` in grid units -> `|dx| = 0.5` on all 4 edges): naive `delta^2` overflows
+    //    `f32` and drops the penalty to 0; scaled coordinates match the independent `f64` reference (`0.00744417`).
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let box_raw = Tensor::zeros([1, 12, a]);
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        // Anchor (3, 3) sits at (28, 28) px = (3.5, 3.5) grid units; uniform R=3 decodes d = 1.0 -> [2.5,2.5,4.5,4.5].
+        // GT [24,24,32,32] px = [3,3,4,4] grid units (w=h=1); all 4 edge residuals have magnitude 0.5 grid units.
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(24.0, 24.0, 32.0, 32.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 3,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 3e38,
+            rpiou_delta: 1e20,
+            box_gain: 1.0,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        let ke2_ref = 3e38f64 * 0.25f64 * (4.0 * 0.25f64 / (1.0f64 + 1e40f64));
+        let edge_ref = ke2_ref / (1.0 + ke2_ref); // 0.007444168734491315
+        let focal_ref = (1.0 - 0.25f64) * (1.0 + 0.5 * 0.25f64); // 0.84375
+        let t_w = want.target_score_sum as f64; // u_max = CIoU = 0.25, tss = max(0.25, 1.0) = 1.0
+        let ref_loss = (t_w * (focal_ref + edge_ref)) as f32;
+        assert_eq!((got.num_fg, want.num_fg), (1, 1));
+        assert!((t_w - 0.25).abs() < 1e-5, "expected target_score_sum 0.25, got {t_w}");
+        assert!(
+            (want.total_value - ref_loss).abs() <= 1e-5,
+            "CPU scaled R-PIoU {} vs f64 ref {ref_loss}",
+            want.total_value
+        );
+        assert!(
+            (got.total_value - ref_loss).abs() <= 1e-5,
+            "GPU scaled R-PIoU {} vs f64 ref {ref_loss}",
+            got.total_value
+        );
+        // Also check gradient against a pure-focal baseline (kappa -> 0) to confirm non-zero edge gradient.
+        let cfg_no_edge = LossConfig { rpiou_kappa: 1e-30, ..cfg };
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        let bh0 = Tensor::zeros([1, 12, a]).requires_grad_();
+        let ch0 = Tensor::zeros([1, 1, a]).requires_grad_();
+        let g_no_edge = detection_loss_host(&bh0, &ch0, &anchors, &targets, &cfg_no_edge)
+            .unwrap()
+            .total
+            .backward()
+            .unwrap()
+            .get(&bh0)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let fg = 3 * 8 + 3;
+        // Analytical d(t * edge_pen)/d(d_side) = t * 0.5 * 3e38 * 0.5 / ((1 + 1e40) * 1.0075^2),
+        // and d(d_side)/d(logit_2) = (1/3) * (2 - 1) = +1/3.
+        let edge_d = (t_w * 0.5f64 * 3e38 * 0.5 / ((1.0 + 1e40) * (1.0 + ke2_ref).powi(2)) / 3.0) as f32;
+        let got_edge_d = g_gpu[2 * a + fg] - g_no_edge[2 * a + fg];
+        assert!(
+            (got_edge_d - edge_d).abs() <= 1e-5,
+            "GPU scaled R-PIoU edge grad delta {got_edge_d} vs analytical {edge_d}"
+        );
+        close_vec(&g_gpu, &g_cpu, 1e-5, 1e-4, "scaled_rpiou_delta1e20/box_raw");
+    }
 }
