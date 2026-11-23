@@ -70,6 +70,7 @@ pub mod paths;
 mod ram_cache;
 pub mod resize;
 mod rng;
+mod simd;
 mod stats;
 pub mod synthetic;
 pub mod unfinished;

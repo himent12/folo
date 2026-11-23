@@ -6,15 +6,17 @@
 //! identical for any number of workers. In-flight work is bounded by a window of positions plus a bounded batch
 //! channel; dropping the epoch iterator stops and joins all threads.
 
-use crate::augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
+use crate::augment::{AugmentConfig, Fetched, ProducedMeta, TrainTransform};
 use crate::buffers;
 use crate::dataset::{Dataset, Issue, IssueKind};
 use crate::error::{DataError, Result};
 use crate::par;
 use crate::ram_cache::{CacheMode, RamCache};
 use crate::rng::Rng;
+use crate::simd::PlanarDst;
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use std::collections::{BTreeMap, HashMap};
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -185,17 +187,18 @@ impl Shared {
         Err(last.unwrap_or(DataError::OutOfRange { index: i, len: n }))
     }
 
-    /// Transforms the sample at epoch position `pos`. A panic (a bug in a dataset or transform) becomes an error
-    /// for that batch instead of silently ending the epoch.
-    fn produce(
+    /// Transforms the sample at epoch position `pos` straight into `dst`. A panic (a bug in a dataset or transform)
+    /// becomes an error for that batch instead of silently ending the epoch.
+    fn produce_into(
         &self,
         transform: &TrainTransform,
         epoch: u32,
         pos: usize,
         index: usize,
-    ) -> Result<Transformed> {
+        dst: &mut PlanarDst<'_>,
+    ) -> Result<ProducedMeta> {
         let mut rng = Rng::derive(&[self.cfg.seed, epoch as u64, pos as u64]);
-        let run = || transform.apply(index, self.ds.len(), &|i| self.fetch(i), &mut rng);
+        let run = || transform.apply_into_planar(index, self.ds.len(), &|i| self.fetch(i), &mut rng, dst);
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|p| {
             let msg = p
                 .downcast_ref::<&str>()
@@ -301,28 +304,147 @@ impl DataLoader {
     }
 }
 
-/// Window gate: workers may claim position `p` only while `p < done + window`.
+/// Owning raw allocation for a batch's planar image buffer (`Vec<u8>` or `Vec<f32>`), split by raw pointer
+/// provenance so worker threads can write strictly disjoint image slots with zero overlapping `&mut Vec` references
+/// and zero collator copy.
+enum RawBatchBuf {
+    U8 { ptr: *mut u8, len: usize, cap: usize },
+    F32 { ptr: *mut f32, len: usize, cap: usize },
+}
+
+impl RawBatchBuf {
+    fn new(total_elems: usize, u8_images: bool) -> Self {
+        if u8_images {
+            let mut v = ManuallyDrop::new(vec![0u8; total_elems]);
+            RawBatchBuf::U8 { ptr: v.as_mut_ptr(), len: v.len(), cap: v.capacity() }
+        } else {
+            let mut v = ManuallyDrop::new(vec![0.0f32; total_elems]);
+            RawBatchBuf::F32 { ptr: v.as_mut_ptr(), len: v.len(), cap: v.capacity() }
+        }
+    }
+
+    fn into_vecs(self) -> (Vec<f32>, Vec<u8>) {
+        let this = ManuallyDrop::new(self);
+        match *this {
+            // SAFETY: `(ptr, len, cap)` came from a live `Vec` of the matching type and `this` will not run `Drop`.
+            RawBatchBuf::U8 { ptr, len, cap } => (Vec::new(), unsafe { Vec::from_raw_parts(ptr, len, cap) }),
+            RawBatchBuf::F32 { ptr, len, cap } => (unsafe { Vec::from_raw_parts(ptr, len, cap) }, Vec::new()),
+        }
+    }
+}
+
+impl Drop for RawBatchBuf {
+    fn drop(&mut self) {
+        match *self {
+            // SAFETY: reconstructs the exact `Vec` disassembled in `RawBatchBuf::new` once no `Slot` remains.
+            RawBatchBuf::U8 { ptr, len, cap } => drop(unsafe { Vec::from_raw_parts(ptr, len, cap) }),
+            RawBatchBuf::F32 { ptr, len, cap } => drop(unsafe { Vec::from_raw_parts(ptr, len, cap) }),
+        }
+    }
+}
+
+struct BatchAlloc {
+    buf: RawBatchBuf,
+    slot_elems: usize,
+    plane: usize,
+}
+
+// SAFETY: `BatchAlloc` never reallocates; every `Slot` receives a unique `slot_idx` from `BatchEntry::take_slot`
+// and creates `&mut [T]` strictly over `[slot_idx * slot_elems .. (slot_idx + 1) * slot_elems)`. `into_vecs` and
+// `Drop` run only when the `Arc<BatchAlloc>` refcount drops to 1 / 0 (zero remaining `Slot`s).
+unsafe impl Send for BatchAlloc {}
+unsafe impl Sync for BatchAlloc {}
+
+/// Exclusive write handle to one image's planar `[3, s, s]` slice inside a shared [`BatchAlloc`].
+struct Slot {
+    alloc: Arc<BatchAlloc>,
+    slot_idx: usize,
+}
+
+impl Slot {
+    fn planar_dst(&mut self) -> PlanarDst<'_> {
+        let start = self.slot_idx * self.alloc.slot_elems;
+        let len = self.alloc.slot_elems;
+        let plane = self.alloc.plane;
+        match self.alloc.buf {
+            RawBatchBuf::U8 { ptr, len: total, .. } => {
+                debug_assert!(start + len <= total);
+                // SAFETY: `start..start+len` is exclusively owned by this `Slot` (`&mut self` prevents self-aliasing).
+                PlanarDst::from_u8(unsafe { std::slice::from_raw_parts_mut(ptr.add(start), len) }, plane)
+            }
+            RawBatchBuf::F32 { ptr, len: total, .. } => {
+                debug_assert!(start + len <= total);
+                // SAFETY: as above.
+                PlanarDst::from_f32_div255(
+                    unsafe { std::slice::from_raw_parts_mut(ptr.add(start), len) },
+                    plane,
+                )
+            }
+        }
+    }
+}
+
+struct BatchEntry {
+    alloc: Arc<BatchAlloc>,
+    next_slot: usize,
+    len: usize,
+}
+
+impl BatchEntry {
+    fn new(len: usize, imgsz: usize, u8_images: bool) -> Self {
+        let plane = imgsz * imgsz;
+        let slot_elems = 3 * plane;
+        let buf = RawBatchBuf::new(len * slot_elems, u8_images);
+        BatchEntry { alloc: Arc::new(BatchAlloc { buf, slot_elems, plane }), next_slot: 0, len }
+    }
+
+    fn take_slot(&mut self) -> (Slot, bool) {
+        let idx = self.next_slot;
+        assert!(idx < self.len, "batch slot issued past batch length");
+        self.next_slot += 1;
+        (Slot { alloc: self.alloc.clone(), slot_idx: idx }, self.next_slot == self.len)
+    }
+}
+
+/// Window gate: workers may claim position `p` only while `p < done + window`, receiving that position's exclusive
+/// write [`Slot`] in its batch buffer.
 struct Gate {
     state: Mutex<GateState>,
     cv: Condvar,
     stop: AtomicBool,
+    batch_size: usize,
+    imgsz: usize,
+    u8_images: bool,
 }
 
 struct GateState {
     next: usize,
     done: usize,
+    batches: HashMap<usize, BatchEntry>,
 }
 
 impl Gate {
-    fn claim(&self, total: usize, window: usize) -> Option<usize> {
+    fn claim(&self, total: usize, window: usize) -> Option<(usize, Slot)> {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             if self.stop.load(Ordering::Acquire) || st.next >= total {
                 return None;
             }
             if st.next < st.done + window {
+                let pos = st.next;
                 st.next += 1;
-                return Some(st.next - 1);
+                let b = pos / self.batch_size;
+                let lo = b * self.batch_size;
+                let batch_len = (lo + self.batch_size).min(total) - lo;
+                let entry = st
+                    .batches
+                    .entry(b)
+                    .or_insert_with(|| BatchEntry::new(batch_len, self.imgsz, self.u8_images));
+                let (slot, last) = entry.take_slot();
+                if last {
+                    st.batches.remove(&b);
+                }
+                return Some((pos, slot));
             }
             st = self.cv.wait(st).unwrap_or_else(|p| p.into_inner());
         }
@@ -335,9 +457,15 @@ impl Gate {
 
     fn shutdown(&self) {
         self.stop.store(true, Ordering::Release);
-        let _guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.batches.clear();
         self.cv.notify_all();
     }
+}
+
+struct DoneSample {
+    meta: ProducedMeta,
+    slot: Slot,
 }
 
 enum Inner {
@@ -356,11 +484,14 @@ fn spawn(
     let total = order.len();
     let window = cfg.batch_size * (cfg.prefetch_batches + 1) + cfg.workers;
     let gate = Arc::new(Gate {
-        state: Mutex::new(GateState { next: 0, done: 0 }),
+        state: Mutex::new(GateState { next: 0, done: 0, batches: HashMap::new() }),
         cv: Condvar::new(),
         stop: false.into(),
+        batch_size: cfg.batch_size,
+        imgsz: cfg.imgsz as usize,
+        u8_images: cfg.u8_images,
     });
-    let (sample_tx, sample_rx) = unbounded::<(usize, Result<Transformed>)>();
+    let (sample_tx, sample_rx) = unbounded::<(usize, Result<DoneSample>)>();
     let (batch_tx, batch_rx) = bounded::<Result<Batch>>(cfg.prefetch_batches.max(1));
     let mut threads = Vec::with_capacity(cfg.workers + 1);
     for w in 0..cfg.workers {
@@ -370,8 +501,10 @@ fn spawn(
             .spawn(move || {
                 buffers::pooled(|| {
                     par::serial(|| {
-                        while let Some(pos) = gate.claim(total, window) {
-                            let out = shared.produce(&transform, epoch, pos, order[pos]);
+                        while let Some((pos, mut slot)) = gate.claim(total, window) {
+                            let out = shared
+                                .produce_into(&transform, epoch, pos, order[pos], &mut slot.planar_dst())
+                                .map(|meta| DoneSample { meta, slot });
                             if tx.send((pos, out)).is_err() {
                                 break;
                             }
@@ -390,8 +523,8 @@ fn spawn(
             .spawn(move || {
                 buffers::pooled(|| {
                     let bs = shared.cfg.batch_size;
-                    let collate_serial = shared.cfg.workers <= 1;
-                    let mut pending: HashMap<usize, Result<Transformed>> = HashMap::new();
+                    let s = shared.cfg.imgsz as usize;
+                    let mut pending: HashMap<usize, Result<DoneSample>> = HashMap::new();
                     for b in 0..num_batches {
                         let (lo, hi) = (b * bs, ((b + 1) * bs).min(total));
                         while (lo..hi).any(|p| !pending.contains_key(&p)) {
@@ -402,13 +535,9 @@ fn spawn(
                                 Err(_) => return, // workers stopped
                             }
                         }
-                        let items: Vec<Result<Transformed>> =
+                        let items: Vec<Result<DoneSample>> =
                             (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
-                        let batch = if collate_serial {
-                            par::serial(|| collate(items, &shared.cfg))
-                        } else {
-                            collate(items, &shared.cfg)
-                        };
+                        let batch = finish_batch(items, s);
                         gate.advance(hi);
                         if batch_tx.send(batch).is_err() {
                             return;
@@ -422,63 +551,29 @@ fn spawn(
     Inner::Threads { rx: Some(batch_rx), gate, threads }
 }
 
-/// Converts transformed samples into a [`Batch`].
-fn collate(items: Vec<Result<Transformed>>, cfg: &LoaderConfig) -> Result<Batch> {
-    let items: Vec<Transformed> = items.into_iter().collect::<Result<_>>()?;
-    let s = cfg.imgsz as usize;
-    let plane = s * s;
+/// Assembles a [`Batch`] from completed [`DoneSample`]s without copying pixel data.
+fn finish_batch(items: Vec<Result<DoneSample>>, s: usize) -> Result<Batch> {
+    let items: Vec<DoneSample> = items.into_iter().collect::<Result<_>>()?;
     let n = items.len();
-    // Interleaved RGB → planar, through `conv` (the f32 LUT or the identity).
-    fn planar<T: Copy + Send + Sync + Default>(
-        items: &[Transformed],
-        s: usize,
-        conv: impl Fn(u8) -> T + Sync,
-    ) -> Vec<T> {
-        let plane = s * s;
-        let mut out = vec![T::default(); items.len() * 3 * plane];
-        let fill = |(k, out): (usize, &mut [T])| {
-            let img = &items[k].sample.image;
-            debug_assert_eq!((img.width as usize, img.height as usize), (s, s));
-            let (r, rest) = out.split_at_mut(plane);
-            let (g, b) = rest.split_at_mut(plane);
-            for (i, px) in img.data.as_chunks::<3>().0.iter().enumerate() {
-                r[i] = conv(px[0]);
-                g[i] = conv(px[1]);
-                b[i] = conv(px[2]);
-            }
-        };
-        if par::is_serial() || items.len() == 1 {
-            out.chunks_mut(3 * plane).enumerate().for_each(fill);
-        } else {
-            use rayon::prelude::*;
-            out.par_chunks_mut(3 * plane).enumerate().for_each(fill);
-        }
-        out
-    }
-    let (images, images_u8) = if cfg.u8_images {
-        (Vec::new(), planar(&items, s, |v| v))
-    } else {
-        let lut: [f32; 256] = std::array::from_fn(|i| i as f32 / 255.0);
-        (planar(&items, s, |v| lut[v as usize]), Vec::new())
-    };
-    debug_assert_eq!(images.len().max(images_u8.len()), n * 3 * plane);
-    let mut items = items;
-    for t in &mut items {
-        buffers::recycle(std::mem::take(&mut t.sample.image.data));
-    }
     let mut targets = Vec::new();
     let mut meta = Vec::with_capacity(n);
-    for (k, t) in items.iter().enumerate() {
-        for b in &t.sample.boxes {
+    let mut last_alloc: Option<Arc<BatchAlloc>> = None;
+    for (k, item) in items.into_iter().enumerate() {
+        for b in &item.meta.boxes {
             targets.push([k as f32, b.class as f32, b.cx, b.cy, b.w, b.h]);
         }
         meta.push(ImageMeta {
-            index: t.index,
-            orig_size: t.orig_size,
-            ratio: t.letterbox.ratio,
-            pad: t.letterbox.pad,
+            index: item.meta.index,
+            orig_size: item.meta.orig_size,
+            ratio: item.meta.letterbox.ratio,
+            pad: item.meta.letterbox.pad,
         });
+        last_alloc = Some(item.slot.alloc);
     }
+    let alloc = Arc::into_inner(last_alloc.expect("non-empty batch"))
+        .expect("all batch slots finished before finish_batch");
+    let (images, images_u8) = alloc.buf.into_vecs();
+    debug_assert_eq!(images.len().max(images_u8.len()), n * 3 * s * s);
     Ok(Batch { images, images_u8, shape: [n, 3, s, s], targets, meta })
 }
 
@@ -519,9 +614,43 @@ impl Iterator for EpochIter {
         let batch = match &mut self.inner {
             Inner::Sync { shared, transform, order, epoch } => {
                 let bs = shared.cfg.batch_size;
+                let s = shared.cfg.imgsz as usize;
+                let plane = s * s;
                 let (lo, hi) = (self.batches * bs, ((self.batches + 1) * bs).min(order.len()));
-                let items = (lo..hi).map(|p| shared.produce(transform, *epoch, p, order[p])).collect();
-                collate(items, &shared.cfg)
+                let n = hi - lo;
+                let mut images = if shared.cfg.u8_images { Vec::new() } else { vec![0.0f32; n * 3 * plane] };
+                let mut images_u8 = if shared.cfg.u8_images { vec![0u8; n * 3 * plane] } else { Vec::new() };
+                let mut targets = Vec::new();
+                let mut meta = Vec::with_capacity(n);
+                let mut err = None;
+                for (k, p) in (lo..hi).enumerate() {
+                    let mut dst = if shared.cfg.u8_images {
+                        PlanarDst::from_u8(&mut images_u8[k * 3 * plane..(k + 1) * 3 * plane], plane)
+                    } else {
+                        PlanarDst::from_f32_div255(&mut images[k * 3 * plane..(k + 1) * 3 * plane], plane)
+                    };
+                    match shared.produce_into(transform, *epoch, p, order[p], &mut dst) {
+                        Ok(m) => {
+                            for b in &m.boxes {
+                                targets.push([k as f32, b.class as f32, b.cx, b.cy, b.w, b.h]);
+                            }
+                            meta.push(ImageMeta {
+                                index: m.index,
+                                orig_size: m.orig_size,
+                                ratio: m.letterbox.ratio,
+                                pad: m.letterbox.pad,
+                            });
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(Batch { images, images_u8, shape: [n, 3, s, s], targets, meta }),
+                }
             }
             Inner::Threads { rx, .. } => match rx.as_ref()?.recv() {
                 Ok(b) => b,

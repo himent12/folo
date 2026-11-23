@@ -1,14 +1,21 @@
 //! The training transform: mosaic → affine → mixup → HSV → flips, ending at `imgsz x imgsz`.
 
+use super::geometry::{random_affine_matrix, transform_boxes};
+use super::hsv::{HsvTables, random_hsv_tables};
+use super::mosaic::mosaic_plane;
 use super::{
     AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_affine, random_hsv, resize_long_side,
 };
+use crate::bbox::BBox;
 use crate::buffers;
 use crate::dataset::Dataset;
 use crate::error::Result;
-use crate::image::Sample;
-use crate::letterbox::{Letterbox, LetterboxOptions, letterbox_sample};
+use crate::image::{Image, Sample};
+use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox_sample};
 use crate::rng::Rng;
+use crate::simd::PlanarDst;
+use crate::simd::hsv_fused::rgb_row_to_planar_fused;
+use crate::warp::{Plane, Tile, for_planar_bands, warp_plane, warp_plane_fused};
 
 /// A sample as the transform's `fetch` delivers it.
 #[derive(Clone, Debug)]
@@ -44,6 +51,51 @@ fn letterbox_fetched(f: &Fetched, s: u32) -> (Sample, Letterbox) {
     debug_assert_eq!((orig.resized, orig.out, orig.pad), (lb.resized, lb.out, lb.pad));
     sample.boxes = f.sample.boxes.iter().map(|b| orig.map_box(b)).collect();
     (sample, orig)
+}
+
+/// Metadata and transformed boxes of a sample written straight into a planar batch buffer by
+/// [`TrainTransform::apply_into_planar`].
+pub(crate) struct ProducedMeta {
+    pub index: usize,
+    pub orig_size: [u32; 2],
+    pub letterbox: Letterbox,
+    pub boxes: Vec<BBox>,
+}
+
+/// Fuses `HSV + flip_ud + flip_lr + interleaved RGB → planar` over an existing HWC image (the mixup tail path).
+fn image_to_planar_fused(
+    img: &Image,
+    hsv: Option<&HsvTables>,
+    flip_ud: bool,
+    flip_lr: bool,
+    dst: &mut PlanarDst<'_>,
+) {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let stride = img.stride();
+    for_planar_bands(dst, w, h, |dy0, band| {
+        let rows = match band {
+            PlanarDst::U8 { r, .. } => r.len() / w,
+            PlanarDst::F32Div255 { r, .. } => r.len() / w,
+        };
+        for bi in 0..rows {
+            let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi };
+            let mut drow = band.row_slices(bi, w);
+            rgb_row_to_planar_fused(&img.data[src_y * stride..(src_y + 1) * stride], hsv, flip_lr, &mut drow);
+        }
+    });
+}
+
+fn flip_boxes(boxes: &mut [BBox], do_ud: bool, do_lr: bool) {
+    if do_ud {
+        for b in boxes.iter_mut() {
+            b.cy = 1.0 - b.cy;
+        }
+    }
+    if do_lr {
+        for b in boxes.iter_mut() {
+            b.cx = 1.0 - b.cx;
+        }
+    }
 }
 
 /// A transformed sample plus the letterbox geometry of its primary image.
@@ -116,6 +168,161 @@ impl TrainTransform {
             flip_lr(&mut out.sample);
         }
         Ok(out)
+    }
+
+    /// Produces the transformed sample straight into planar `dst` (`u8` or `f32 / 255.0`), fusing warp (or letterbox),
+    /// HSV, flips and planar conversion in L1 cache without allocating an intermediate `imgsz x imgsz` HWC image.
+    /// Bit for bit identical to [`TrainTransform::apply`] followed by planar conversion.
+    pub(crate) fn apply_into_planar<F>(
+        &self,
+        index: usize,
+        len: usize,
+        fetch: &F,
+        rng: &mut Rng,
+        dst: &mut PlanarDst<'_>,
+    ) -> Result<ProducedMeta>
+    where
+        F: Fn(usize) -> Result<Fetched>,
+    {
+        let s = self.imgsz;
+        let Some(cfg) = &self.augment else {
+            let f = fetch(index)?;
+            let opts = LetterboxOptions::default();
+            let lb_img = Letterbox::compute(f.sample.image.width, f.sample.image.height, s, s, &opts);
+            lb_img.apply_planar_dst(&f.sample.image, PAD_VALUE, dst);
+            let (boxes, letterbox) = if [f.sample.image.width, f.sample.image.height] == f.orig_size {
+                (f.sample.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
+            } else {
+                let orig = Letterbox::compute(f.orig_size[0], f.orig_size[1], s, s, &opts);
+                debug_assert_eq!(
+                    (orig.resized, orig.out, orig.pad),
+                    (lb_img.resized, lb_img.out, lb_img.pad)
+                );
+                (f.sample.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
+            };
+            buffers::recycle(f.sample.image.data);
+            return Ok(ProducedMeta { index: f.index, orig_size: f.orig_size, letterbox, boxes });
+        };
+
+        if self.mosaic && rng.chance(cfg.mosaic) {
+            let ids = [index, rng.below(len), rng.below(len), rng.below(len)];
+            let mut parts = Vec::with_capacity(4);
+            let (mut primary, mut orig_size) = (index, [0, 0]);
+            for (k, &i) in ids.iter().enumerate() {
+                let f = fetch(i)?;
+                if k == 0 {
+                    (primary, orig_size) = (f.index, f.orig_size);
+                }
+                parts.push(resize_long_side(f.sample, s));
+            }
+            let (plane, raw_boxes) = mosaic_plane([&parts[0], &parts[1], &parts[2], &parts[3]], s, rng);
+            let m = random_affine_matrix(plane.width, plane.height, s, s, cfg, rng);
+            let mut boxes = if m.is_identity() && (plane.width, plane.height) == (s, s) {
+                raw_boxes
+            } else {
+                transform_boxes(&raw_boxes, plane.width, plane.height, &m, s, s, &cfg.box_filter())
+            };
+            let letterbox = Letterbox::identity(s, s);
+            if self.mosaic && rng.chance(cfg.mixup) {
+                let img = if m.is_identity() && (plane.width, plane.height) == (s, s) {
+                    plane.render()
+                } else {
+                    warp_plane(&plane, &m, s, s)
+                };
+                drop(plane);
+                for p in parts {
+                    buffers::recycle(p.image.data);
+                }
+                let mut sample = Sample { image: img, boxes };
+                let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
+                mixup(&mut sample, &other.sample, rng);
+                buffers::recycle(other.sample.image.data);
+                let hsv = random_hsv_tables(cfg.hsv, rng);
+                let do_ud = rng.chance(cfg.flipud);
+                let do_lr = rng.chance(cfg.fliplr);
+                flip_boxes(&mut sample.boxes, do_ud, do_lr);
+                image_to_planar_fused(&sample.image, hsv.as_ref(), do_ud, do_lr, dst);
+                buffers::recycle(sample.image.data);
+                return Ok(ProducedMeta { index: primary, orig_size, letterbox, boxes: sample.boxes });
+            }
+            let hsv = random_hsv_tables(cfg.hsv, rng);
+            let do_ud = rng.chance(cfg.flipud);
+            let do_lr = rng.chance(cfg.fliplr);
+            flip_boxes(&mut boxes, do_ud, do_lr);
+            warp_plane_fused(&plane, &m, s, s, hsv.as_ref(), do_ud, do_lr, dst);
+            drop(plane);
+            for p in parts {
+                buffers::recycle(p.image.data);
+            }
+            Ok(ProducedMeta { index: primary, orig_size, letterbox, boxes })
+        } else {
+            let f = fetch(index)?;
+            let opts = LetterboxOptions::default();
+            let lb_img = Letterbox::compute(f.sample.image.width, f.sample.image.height, s, s, &opts);
+            let (lb_boxes, letterbox): (Vec<BBox>, _) =
+                if [f.sample.image.width, f.sample.image.height] == f.orig_size {
+                    (f.sample.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
+                } else {
+                    let orig = Letterbox::compute(f.orig_size[0], f.orig_size[1], s, s, &opts);
+                    debug_assert_eq!(
+                        (orig.resized, orig.out, orig.pad),
+                        (lb_img.resized, lb_img.out, lb_img.pad)
+                    );
+                    (f.sample.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
+                };
+            let [rw, rh] = lb_img.resized;
+            let [left, top] = lb_img.pad.map(|v| v as i64);
+            let resized_opt = if (f.sample.image.width, f.sample.image.height) == (rw, rh) {
+                None
+            } else {
+                Some(crate::resize::resize(&f.sample.image, rw, rh))
+            };
+            let tile_img = resized_opt.as_ref().unwrap_or(&f.sample.image);
+            let tile =
+                Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
+            let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: vec![tile] };
+            let m = random_affine_matrix(s, s, s, s, cfg, rng);
+            let mut boxes = if m.is_identity() {
+                lb_boxes
+            } else {
+                transform_boxes(&lb_boxes, s, s, &m, s, s, &cfg.box_filter())
+            };
+            if self.mosaic && rng.chance(cfg.mixup) {
+                let img = if m.is_identity() { plane.render() } else { warp_plane(&plane, &m, s, s) };
+                drop(plane);
+                if let Some(r) = resized_opt {
+                    buffers::recycle(r.data);
+                }
+                buffers::recycle(f.sample.image.data);
+                let mut sample = Sample { image: img, boxes };
+                let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
+                mixup(&mut sample, &other.sample, rng);
+                buffers::recycle(other.sample.image.data);
+                let hsv = random_hsv_tables(cfg.hsv, rng);
+                let do_ud = rng.chance(cfg.flipud);
+                let do_lr = rng.chance(cfg.fliplr);
+                flip_boxes(&mut sample.boxes, do_ud, do_lr);
+                image_to_planar_fused(&sample.image, hsv.as_ref(), do_ud, do_lr, dst);
+                buffers::recycle(sample.image.data);
+                return Ok(ProducedMeta {
+                    index: f.index,
+                    orig_size: f.orig_size,
+                    letterbox,
+                    boxes: sample.boxes,
+                });
+            }
+            let hsv = random_hsv_tables(cfg.hsv, rng);
+            let do_ud = rng.chance(cfg.flipud);
+            let do_lr = rng.chance(cfg.fliplr);
+            flip_boxes(&mut boxes, do_ud, do_lr);
+            warp_plane_fused(&plane, &m, s, s, hsv.as_ref(), do_ud, do_lr, dst);
+            drop(plane);
+            if let Some(r) = resized_opt {
+                buffers::recycle(r.data);
+            }
+            buffers::recycle(f.sample.image.data);
+            Ok(ProducedMeta { index: f.index, orig_size: f.orig_size, letterbox, boxes })
+        }
     }
 
     fn one<F>(

@@ -197,7 +197,9 @@ keeps one, as the YOLO reader drops duplicate label lines.
   weights; boxes go through the same matrix by their four corners. When the source row does not change along an
   output row (no rotation or shear, as in the default augmentation), each output row blends its two source rows once
   into `u32` sums and interpolates along them, with the same products and the one rounding of the general path, so
-  the same bytes.
+  the same bytes. On x86_64 CPUs with AVX2, bilinear resize, planar/RGB0 letterbox, the warp's row path and general
+  affine interior, and horizontal row flips run bit-exact 256-bit SIMD kernels (`src/simd/`, scalar fallback
+  elsewhere).
 
 ## Augmentation
 `AugmentConfig` deserialises from `TrainConfig.augment` (missing fields take the defaults):
@@ -218,9 +220,13 @@ keeps one, as the YOLO reader drops duplicate label lines.
 (centre, rotate + scale, shear, translate) to `s x s` → mixup → HSV (integer hexcone HSV with LUTs) → flips. The
 mosaic and its affine run as one step (`mosaic_affine`, bit for bit `random_affine` of `mosaic4`): the warp reads the
 four tiles where they lie on the `2s x 2s` canvas instead of painting the canvas first (with rotation or shear the
-canvas is painted and warped as before). HSV runs on blocks of 64 pixels without branches on CPUs with AVX2, the
-same integer arithmetic as the per-pixel kernel used elsewhere (both checked on all 2^24 colours). With
-`augment: None` (validation) it only letterboxes and records the geometry.
+canvas is painted and warped as before). HSV uses explicit 256-bit AVX2 kernels on CPUs with AVX2 (packed `max`
+lookups and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar per-pixel kernel on all
+2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch slots, fusing warp (or
+letterbox), HSV, flips and planar `u8`/`f32` conversion in a single L1-resident row pass without allocating an
+intermediate `imgsz x imgsz` HWC image or a separate collator copy pass (staying bit for bit identical, pinned by
+`tests/golden.rs`). With `augment: None` (validation) it only letterboxes straight into the planar slot and records
+the geometry.
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
