@@ -545,15 +545,16 @@ folo-vision provides exactly this form, including the `eps` placements, as `boxe
 for the assigner or the loss. The loss also needs a differentiable version of `ciou_eps` for `pd_box`.
 
 **R-PIoU (opt-in box loss, `loss.box_loss = rpiou`).** Rational-Focal Edge-Decoupled IoU replaces CIoU's enclosing-box
-diagonal (which can inflate predicted boxes before shrinking them) and `atan` aspect term with a purely algebraic,
-$C^\infty$-smooth edge-decoupled rational penalty and a high-IoU focal slope (both in grid units, `loss::rpiou_loss` on
-CPU and fused inside `det_box.wgsl` on GPU):
+diagonal (which can inflate predicted boxes before shrinking them) and `atan` aspect term with a purely algebraic
+edge-decoupled rational penalty (bounded in `[0, 1)` and $C^\infty$-smooth in the uncapped regime `κ · E² < 1e16`) and
+a high-IoU focal slope (both in grid units, `loss::rpiou_loss` on CPU and fused inside `det_box.wgsl` on GPU):
 ```
 E²    = 0.25 · ( ((x1 − x1_gt)² + (x2 − x2_gt)²) / (w_gt² + δ₀²)
                + ((y1 − y1_gt)² + (y2 − y2_gt)²) / (h_gt² + δ₀²) )    (δ₀ = loss.rpiou_delta, default 0.5)
 L_rpi = (1 − iou) · (1 + β · iou) + κ · E² / (1 + κ · E²)             (β = 0.5, κ = 2.0)
 ```
-Every term is bounded, smooth everywhere, requires no `atan` host round-trip, and couples with `loss.nwd_weight`
+The uncapped rational edge penalty is bounded and smooth everywhere; the full loss inherits IoU's standard piecewise
+corners where boxes touch or edges coincide, requires no `atan` host round-trip, and couples with `loss.nwd_weight`
 identically to CIoU.
 
 ### 7.3 Task-aligned assigner

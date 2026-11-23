@@ -243,7 +243,6 @@ fn gather_flat_cpu(x: &Tensor, idx: Vec<usize>) -> Result<Tensor> {
 /// gradient bound.
 pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
     const EPS: f32 = 1e-7;
-    const KE2_MAX: f32 = 1e16;
     let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
     let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
     let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
@@ -255,19 +254,69 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.add_scalar(EPS)?;
     let iou = inter.div(&union)?;
     let focal_iou = iou.rsub_scalar(1.0)?.mul(&iou.mul_scalar(beta)?.add_scalar(1.0)?)?;
-    // GT denominators are constants w.r.t. the prediction so predicted sizes never enter the denominator.
-    let (denom_x, denom_y) = {
-        let _g = no_grad();
-        let d2 = delta0 * delta0;
-        (w2.square()?.add_scalar(d2)?, h2.square()?.add_scalar(d2)?)
-    };
-    let ex = ax1.sub(&bx1)?.square()?.add(&ax2.sub(&bx2)?.square()?)?.div(&denom_x)?;
-    let ey = ay1.sub(&by1)?.square()?.add(&ay2.sub(&by2)?.square()?)?.div(&denom_y)?;
-    let ke2_raw = ex.add(&ey)?.mul_scalar(0.25 * kappa)?;
-    let cap = Tensor::full_with(ke2_raw.shape(), KE2_MAX as f64, DType::F32, ke2_raw.device())?;
-    let ke2 = ke2_raw.minimum(&cap)?;
-    let edge_pen = ke2.div(&ke2.add_scalar(1.0)?)?;
+    let edge_pen = rpiou_edge_penalty(b1, b2, kappa, delta0)?;
     focal_iou.add(&edge_pen)
+}
+
+/// Overflow-safe rational edge penalty `ke2 / (1 + ke2)` with `ke2 = min(kappa * E^2, 1e16)` for `b1, b2: [N, 4]`.
+///
+/// Computed via a custom op so backward multiplies each edge residual `d / denom` by `kappa * inv1` before
+/// `0.5 * g_out`, avoiding `Inf * 0 = NaN` at exact matches when `kappa` is near `f32::MAX`.
+fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Result<Tensor> {
+    const KE2_MAX: f32 = 1e16;
+    let (n, c) = b1.dims2()?;
+    debug_assert_eq!(c, 4);
+    let dev = b1.device();
+    let a = b1.to_vec::<f32>()?;
+    let b = b2.to_vec::<f32>()?;
+    let d2 = delta0 * delta0;
+    let mut out = vec![0.0f32; n];
+    for i in 0..n {
+        let (ax1, ay1, ax2, ay2) = (a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
+        let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
+        let w2 = (bx2 - bx1).max(0.0);
+        let h2 = (by2 - by1).max(0.0);
+        let denom_x = w2 * w2 + d2;
+        let denom_y = h2 * h2 + d2;
+        let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
+        let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
+        let ke2 = (kappa * e2).min(KE2_MAX);
+        out[i] = ke2 / (1.0 + ke2);
+    }
+    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    Tensor::custom_op("rpiou_edge_penalty", &[b1], out_t, move |g| {
+        let gv = g.to_vec::<f32>()?;
+        let mut grad = vec![0.0f32; 4 * n];
+        for i in 0..n {
+            let (ax1, ay1, ax2, ay2) = (a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
+            let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
+            let w2 = (bx2 - bx1).max(0.0);
+            let h2 = (by2 - by1).max(0.0);
+            let denom_x = w2 * w2 + d2;
+            let denom_y = h2 * h2 + d2;
+            let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
+            let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
+            let ke2_raw = kappa * e2;
+            if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
+                let inv1 = 1.0 / (1.0 + ke2_raw);
+                let k_inv1 = kappa * inv1;
+                let g_half = 0.5 * gv[i];
+                if g_half.abs() <= 1.0 {
+                    let kg = k_inv1 * g_half;
+                    grad[4 * i] = ((dx1 / denom_x) * kg) * inv1;
+                    grad[4 * i + 1] = ((dy1 / denom_y) * kg) * inv1;
+                    grad[4 * i + 2] = ((dx2 / denom_x) * kg) * inv1;
+                    grad[4 * i + 3] = ((dy2 / denom_y) * kg) * inv1;
+                } else {
+                    grad[4 * i] = (((dx1 / denom_x) * k_inv1) * inv1) * g_half;
+                    grad[4 * i + 1] = (((dy1 / denom_y) * k_inv1) * inv1) * g_half;
+                    grad[4 * i + 2] = (((dx2 / denom_x) * k_inv1) * inv1) * g_half;
+                    grad[4 * i + 3] = (((dy2 / denom_y) * k_inv1) * inv1) * g_half;
+                }
+            }
+        }
+        Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
+    })
 }
 
 /// Overflow/underflow-safe `exp(d)` for `d <= 0` (`d = -inf` maps to `0.0`).
@@ -369,8 +418,7 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
                 ap_mant[t] = ap_mant[t + 1] * safe_exp_neg(mf_arr[t] - mf_arr[t + 1]) + 1.0 / f_arr[t];
             }
         }
-        let scale = ot_weight * wt;
-        total += (scale * l_tail) as f64;
+        total += ((wt * l_tail) * ot_weight) as f64;
         let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
         for (k, out_k) in out_row.iter_mut().enumerate() {
             let xk = row[k];
@@ -386,14 +434,18 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
             } else {
                 0.0
             };
-            *out_k = scale * (r_m2 * p[k] - bm - am);
+            *out_k = wt * (r_m2 * p[k] - bm - am);
         }
     }
     let out = Tensor::scalar(total as f32).to_device(dev)?;
     let shape = [n, 4, r];
     Tensor::custom_op("ot_dfl_tail", &[logits], out, move |g| {
         let gv = g.item::<f32>()?;
-        let scaled: Vec<f32> = grad_unit.iter().map(|&u| u * gv).collect();
+        let scaled: Vec<f32> = if gv.abs() <= 1.0 {
+            grad_unit.iter().map(|&u| (u * gv) * ot_weight).collect()
+        } else {
+            grad_unit.iter().map(|&u| (u * ot_weight) * gv).collect()
+        };
         Ok(vec![Some(Tensor::from_vec(scaled, shape)?.to_device(dev)?)])
     })
 }

@@ -131,7 +131,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 }
             }
             // Subtracted because det_combine.wgsl negates r.z (signed-negative DFL convention).
-            dfl = dfl - dfl_ot_w * wt * l_tail;
+            dfl = dfl - (wt * l_tail) * dfl_ot_w;
         }
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
@@ -191,18 +191,31 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let dy2 = pd.w - tb.w;
         let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
         let ke2_raw = rpiou_kappa * e2;
-        var sx = 0.0;
-        var sy = 0.0;
+        var ex1 = 0.0;
+        var ey1 = 0.0;
+        var ex2 = 0.0;
+        var ey2 = 0.0;
         if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
             let inv1 = 1.0 / (1.0 + ke2_raw);
-            let g_e = (g_base * 0.5) * (rpiou_kappa * inv1) * inv1;
-            sx = g_e / denom_x;
-            sy = g_e / denom_y;
+            let k_inv1 = rpiou_kappa * inv1;
+            let g_half = g_base * 0.5;
+            if (abs(g_half) <= 1.0) {
+                let kg = k_inv1 * g_half;
+                ex1 = ((dx1 / denom_x) * kg) * inv1;
+                ey1 = ((dy1 / denom_y) * kg) * inv1;
+                ex2 = ((dx2 / denom_x) * kg) * inv1;
+                ey2 = ((dy2 / denom_y) * kg) * inv1;
+            } else {
+                ex1 = (((dx1 / denom_x) * k_inv1) * inv1) * g_half;
+                ey1 = (((dy1 / denom_y) * k_inv1) * inv1) * g_half;
+                ex2 = (((dx2 / denom_x) * k_inv1) * inv1) * g_half;
+                ey2 = (((dy2 / denom_y) * k_inv1) * inv1) * g_half;
+            }
         }
-        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + sx * dx1;
-        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + sy * dy1;
-        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + sx * dx2;
-        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + sy * dy2;
+        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + ex1;
+        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + ey1;
+        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + ex2;
+        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + ey2;
     } else {
         let eps = 1e-7;
         let w1 = pd.z - pd.x;
@@ -264,7 +277,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}) + S_dfl · OT_tail.
     let sd = STATS[10] * g;
     let use_ot = dfl_ot_w > 0.0 && R > 2u;
-    let ot_scale = sd * dfl_ot_w * wt;
     let r_m2 = f32(R - 2u);
     for (var side = 0u; side < 4u; side++) {
         let wsum = wl[side] + wr[side];
@@ -337,7 +349,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                     let ti = max(k, ju + 1u);
                     am = safe_exp_neg(xk - mf_arr[ti]) * ap_mant[ti];
                 }
-                gk = gk + ot_scale * (r_m2 * q - bm - am);
+                let u_ot = wt * (r_m2 * q - bm - am);
+                if (abs(sd) <= 1.0) {
+                    gk = gk + (u_ot * sd) * dfl_ot_w;
+                } else {
+                    gk = gk + (u_ot * dfl_ot_w) * sd;
+                }
             }
             OUT[base + (side * R + k) * na] = gk;
         }

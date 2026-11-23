@@ -720,12 +720,20 @@ impl Optimizer for MuSgd {
         self.weights = weights;
         self.ortho = c.muon_ortho.unwrap_or(MuonOrtho::Ns5);
         self.geo = c.muon_geo.unwrap_or(MuonGeoMode::Legacy);
-        let dw_set: std::collections::HashSet<&str> = c.muon_depthwise.iter().map(String::as_str).collect();
-        for g in self.sgd.groups_mut() {
-            if self.geo == MuonGeoMode::Geo && !dw_set.is_empty() && is_muon_group(&g.name) {
-                g.depthwise = g.params.iter().map(|(n, _)| dw_set.contains(n.as_str())).collect();
-            } else {
-                g.depthwise.clear();
+        if self.geo == MuonGeoMode::Geo {
+            let dw_set: std::collections::HashSet<&str> =
+                c.muon_depthwise.iter().map(String::as_str).collect();
+            for g in self.sgd.groups_mut() {
+                if !dw_set.is_empty() && is_muon_group(&g.name) {
+                    let mask: Vec<bool> = g.params.iter().map(|(n, _)| dw_set.contains(n.as_str())).collect();
+                    if mask.iter().any(|&b| b) {
+                        g.depthwise = mask;
+                    } else {
+                        g.depthwise.clear();
+                    }
+                } else {
+                    g.depthwise.clear();
+                }
             }
         }
         self.ensure_buffers()?;

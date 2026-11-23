@@ -930,7 +930,7 @@ mod tests {
         ok.musgd.geo = folo_nn::optim::MuonGeoMode::Geo;
         ok.validate().unwrap();
 
-        for mut bad in [
+        for bad in [
             {
                 let mut c = ok.clone();
                 c.loss.rpiou_beta = -0.01;
@@ -948,6 +948,11 @@ mod tests {
             },
             {
                 let mut c = ok.clone();
+                c.loss.rpiou_kappa = f32::INFINITY;
+                c
+            },
+            {
+                let mut c = ok.clone();
                 c.loss.rpiou_delta = f32::NAN;
                 c
             },
@@ -957,8 +962,6 @@ mod tests {
                 c
             },
         ] {
-            assert!(bad.validate().is_err());
-            bad.loss.rpiou_kappa = f32::INFINITY;
             assert!(bad.validate().is_err());
         }
     }

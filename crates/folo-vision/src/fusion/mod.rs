@@ -6,17 +6,21 @@
 //! - [`BoxFusion::Vote`]: score-weighted box voting (each member weighs its class score);
 //! - [`BoxFusion::Dfl`]: DFL evidence fusion, the score times the member's **per-side precision**, read from its
 //!   DFL distribution ([`crate::decode::side_precision`]): an anchor near an object's left edge knows that edge
-//!   sharply and the far edge vaguely, so its left edge counts more than its right.
+//!   sharply and the far edge vaguely, so its left edge counts more than its right;
+//! - [`BoxFusion::Sebf`]: two-pass IRLS Spatial-Evidence Bayesian Box Fusion over each kept box's NMS-owned
+//!   cluster, weighting members by `score · IoU^4 · side_precision`.
 //!
 //! Scores, classes, the kept set and its order are NMS's; only the boxes move. The cluster of a kept candidate is
 //! every candidate that entered NMS (after the confidence filter and the candidate cap) with its class (any class
-//! under `agnostic`) whose IoU with the kept box is `>= iou`, the kept candidate included. Lane `fusion` of
+//! under `agnostic`) whose IoU with the kept box is `>= iou`, the kept candidate included (or, for
+//! [`BoxFusion::Sebf`], the candidates actually owned/suppressed by that kept box during NMS). Lane `fusion` of
 //! hill-climb 3 chose the rule and the weights on 5000 train2017 images (docs/notes/hill/r3-fusion.md).
 //!
-//! [`ScoreRule::Consensus`], opt-in through [`crate::nms::NmsConfig::score`], uses such a cluster for the other half
-//! of a detection, always within the box's own class: it scales each kept box's score by the score mass of its
-//! cluster and re-sorts ([`consensus_scores`], docs/MODEL.md §9.4, docs/notes/hill/r6-consensus.md). Boxes, classes
-//! and the kept set do not change.
+//! [`ScoreRule::Consensus`], [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`], and
+//! [`ScoreRule::DflCgr`], opt-in through [`crate::nms::NmsConfig::score`], use such a cluster for the other half
+//! of a detection, always within the box's own class: they recalibrate each kept box's score from its cluster
+//! evidence (and soft-repulsion from higher-scoring boxes) and re-sort (docs/MODEL.md §9.4). Boxes, classes and
+//! the kept set do not change.
 
 use serde::{Deserialize, Serialize};
 
@@ -34,10 +38,12 @@ pub const CONSENSUS_IOU: f32 = 0.75;
 /// The cap `R` of [`ScoreRule::Consensus`]: a cluster carrying this many times the kept box's score keeps the score.
 pub const CONSENSUS_CAP: f64 = 10.0;
 
-/// The cluster IoU `τ` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
+/// The cluster IoU `τ` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`], and
+/// [`ScoreRule::DflCgr`].
 pub const ELC_IOU: f32 = 0.75;
 
-/// The cluster support cap `R` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`] and [`ScoreRule::DflRepulse`].
+/// The cluster support cap `R` of [`ScoreRule::Elc`], [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`], and
+/// [`ScoreRule::DflCgr`].
 pub const ELC_CAP: f64 = 10.0;
 
 /// The log-support slope `α` of [`ScoreRule::Elc`] and [`ScoreRule::DflConsensus`].
@@ -55,22 +61,23 @@ pub const DFL_CONSENSUS_SIG_REF: f64 = 0.50;
 /// Lower clamp on the 4-side mean fused DFL excess std (bins) in [`ScoreRule::DflConsensus`].
 const DFL_CONSENSUS_SIG_MIN: f64 = 0.1;
 
-/// Power exponent `q` on cluster scores in [`ScoreRule::DflRepulse`] (`s^1.5 = s · √s`).
+/// Power exponent `q` on cluster scores in [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`] (`s^1.5 = s · √s`).
 pub const DFL_REPULSE_Q: f64 = 1.5;
 
-/// Log-support slope `α` of [`ScoreRule::DflRepulse`].
+/// Log-support slope `α` of [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_ALPHA: f64 = 0.70;
 
-/// Scale-preserving power-weighted support reference `R_ref` of [`ScoreRule::DflRepulse`].
+/// Scale-preserving power-weighted support reference `R_ref` of [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_R_REF: f64 = 3.0;
 
-/// DFL Shannon-entropy slope `β` (nats⁻¹) of [`ScoreRule::DflRepulse`].
+/// DFL Shannon-entropy slope `β` (nats⁻¹) of [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_BETA: f64 = 0.55;
 
-/// Scale-preserving mean 4-side DFL entropy reference `H_ref` (nats) of [`ScoreRule::DflRepulse`].
+/// Scale-preserving mean 4-side DFL entropy reference `H_ref` (nats) of [`ScoreRule::DflRepulse`] and
+/// [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_ENT_REF: f64 = 1.5;
 
-/// Cross-stride support weight `λ` of [`ScoreRule::DflRepulse`].
+/// Cross-stride support weight `λ` of [`ScoreRule::DflRepulse`] and [`ScoreRule::DflCgr`].
 pub const DFL_REPULSE_STRIDE_W: f64 = 0.30;
 
 /// Log-survival soft-repulsion strength `γ` of [`ScoreRule::DflRepulse`].

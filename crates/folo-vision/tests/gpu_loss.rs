@@ -454,4 +454,83 @@ fn new_math_extreme_edge_cases_match_host() {
         let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
         close_vec(&g_gpu, &g_cpu, 2e-4 * scale.max(1e-4), 2e-3, "saturated_rpiou/box_raw");
     }
+
+    // 3. Exact-match `R-PIoU` (`reg_max = 2`, equal logits, target half a grid cell from anchor on every side,
+    //    `rpiou_kappa = 3e38`, `box_gain = 7.5`): `ke2_raw == 0` must not overflow into `Inf * 0 = NaN` on CPU or GPU.
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        // Equal logits -> softmax = [0.5, 0.5] -> decoded ltrb = 0.5 grid cells (4 px) on every side.
+        let box_raw = Tensor::zeros([1, 8, a]);
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        // Anchor (3, 3) is at px (28, 28); target [24, 24, 32, 32] matches predicted box identically.
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(24.0, 24.0, 32.0, 32.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 2,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_kappa: 3e38,
+            box_gain: 7.5,
+            dfl_gain: 0.0,
+            cls_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite() && got.num_fg > 0, "exact-match R-PIoU must be finite");
+        assert!(
+            (got.total_value - want.total_value).abs() <= 1e-5,
+            "{} vs {}",
+            got.total_value,
+            want.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()), "exact-match R-PIoU CPU grad must be finite");
+        assert!(g_gpu.iter().all(|v| v.is_finite()), "exact-match R-PIoU GPU grad must be finite");
+        close_vec(&g_gpu, &g_cpu, 1e-5, 1e-4, "exact_match_rpiou/box_raw");
+    }
+
+    // 4. Extreme `OT-DFL` weight (`reg_max = 3`, uniform logits, target distances 0.5 bins, `dfl_ot_weight = 3e38`,
+    //    `dfl_gain = 1.5`): both loss and gradients fit in `f32` and must match across CPU and GPU without Inf.
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let box_raw = Tensor::zeros([1, 12, a]);
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(24.0, 24.0, 32.0, 32.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 3,
+            box_gain: 0.0,
+            cls_gain: 0.0,
+            dfl_gain: 1.5,
+            dfl_ot_weight: 3e38,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite() && got.num_fg > 0, "huge-weight OT-DFL must be finite");
+        assert!(
+            (got.total_value - want.total_value).abs() <= 2e-4 * want.total_value.abs().max(1.0),
+            "huge-weight OT-DFL loss: {} vs {}",
+            got.total_value,
+            want.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()), "huge-weight OT-DFL CPU grad must be finite");
+        assert!(g_gpu.iter().all(|v| v.is_finite()), "huge-weight OT-DFL GPU grad must be finite");
+        assert!(g_gpu.iter().any(|v| v.abs() > 0.0), "huge-weight OT-DFL GPU grad must be non-zero");
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&g_gpu, &g_cpu, 2e-4 * scale.max(1.0), 2e-3, "huge_weight_otdfl/box_raw");
+    }
 }

@@ -726,6 +726,37 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
     train_steps(&mut dense_geo_run, 6);
     assert_ne!(snapshot(&dense_geo_run), want_geo, "depthwise Polar LMO must diverge from dense Geo");
 
+    // Resuming a legacy MuSGD checkpoint must preserve model-derived depthwise masks so switching to `Geo`
+    // afterward via `set_geo_mode` still routes depthwise convs through the depthwise Polar LMO branch.
+    {
+        let mut leg_src = build_geo_run(24, folo_nn::optim::MuonGeoMode::Legacy, false);
+        train_steps(&mut leg_src, 3);
+        let lpath = tmp("resume-musgd-legacy-dw.folo");
+        save(&leg_src, &lpath);
+
+        let mut init = Rng::seed(92);
+        let model = net_geo(&mut init);
+        let mut ema = ModelEma::new(net_geo(&mut Rng::seed(192)), &model).unwrap();
+        let sg = StandardGroups::from_module(&model);
+        let last = sg.decay.last().unwrap().0.rsplit_once('.').unwrap().0.to_string() + ".";
+        let groups = sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0);
+        let mut opt = MuSgd::with_ortho_and_geo(
+            groups,
+            MuSgdWeights::default(),
+            MuonOrtho::Polar4,
+            folo_nn::optim::MuonGeoMode::Legacy,
+        )
+        .unwrap();
+        let fl = ModelFile::open(&lpath).unwrap();
+        fl.resume(&model, &mut opt, Some(&mut ema), Some(classes(3))).unwrap();
+        opt.set_geo_mode(folo_nn::optim::MuonGeoMode::Geo).unwrap();
+        assert_eq!(
+            opt.contract().muon_depthwise,
+            vec!["head.cls.p3.dw0.weight".to_string()],
+            "legacy checkpoint resume must preserve model-derived depthwise masks"
+        );
+    }
+
     // Contract validation errors for `muon_geo` and `muon_depthwise`.
     let mut gopt = optim_json(&gpath);
     gopt["type"] = "sgd".into();
