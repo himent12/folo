@@ -398,6 +398,72 @@ unsafe fn input_transform_avx2(
     }
 }
 
+const _: () = assert!(SEG <= 64);
+
+/// Recompute any 4x4 tile in segment `(ty, tx0..)` marked in `bad` via the exact direct 3x3 sum plus epilogue,
+/// recovering cleanly when transform-domain arithmetic (`Bᵀ d B`, `U · V`, or `Aᵀ M A`) overflows `f32::MAX`
+/// while the direct conv stays finite. Checked before bias and activation so `ReLU`/`Sigmoid` never mask `±inf`.
+///
+/// # Safety
+/// Every set bit `k` in `bad` must identify a tile `(ty, tx0 + k)` of channel `oc` owned exclusively by this task.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn direct_bad_tiles(
+    planes: &[&[f32]],
+    wt: &[f32],
+    oc: usize,
+    ty: usize,
+    tx0: usize,
+    mut bad: u64,
+    g: &ConvGeom,
+    epi: Option<ChannelEpilogue<'_>>,
+    out: *mut f32,
+) {
+    let [ph, pw] = g.p.padding.map(|p| p as isize);
+    let (h, w, oh, ow) = (g.h as isize, g.w as isize, g.oh, g.ow);
+    let w_oc = &wt[oc * g.c * 9..(oc + 1) * g.c * 9];
+    while bad != 0 {
+        let k = bad.trailing_zeros() as usize;
+        bad &= bad - 1;
+        let tx = tx0 + k;
+        let ox0 = 4 * tx;
+        let cols = 4.min(ow - ox0);
+        let rows = 4.min(oh - 4 * ty);
+        for r in 0..rows {
+            let oy = 4 * ty + r;
+            let mut row_out = [0.0f32; 4];
+            for (col, slot) in row_out[..cols].iter_mut().enumerate() {
+                let ox = ox0 + col;
+                let mut sum = 0.0f32;
+                for (ci, plane) in planes.iter().enumerate() {
+                    let kern = &w_oc[ci * 9..ci * 9 + 9];
+                    for ky in 0..3 {
+                        let iy = oy as isize + ky as isize - ph;
+                        if !(0..h).contains(&iy) {
+                            continue;
+                        }
+                        let row = &plane[(iy * w) as usize..((iy + 1) * w) as usize];
+                        for kx in 0..3 {
+                            let ix = ox as isize + kx as isize - pw;
+                            if (0..w).contains(&ix) {
+                                sum += row[ix as usize] * kern[ky * 3 + kx];
+                            }
+                        }
+                    }
+                }
+                *slot = sum;
+            }
+            if let Some(e) = epi {
+                e.apply(oc, &mut row_out[..cols]);
+            }
+            // SAFETY: `(oc, oy, ox0..ox0 + cols)` belongs exclusively to this task.
+            let dst = unsafe { std::slice::from_raw_parts_mut(out.add((oc * oh + oy) * ow + ox0), cols) };
+            dst.copy_from_slice(&row_out[..cols]);
+        }
+    }
+}
+
 /// Output transform `Y = Aᵀ M A` of `m` (`36 x m_stride x tb`, reading channels `os`) into `out`, plus epilogue.
 ///
 /// # Safety
@@ -413,15 +479,17 @@ pub(super) unsafe fn output_transform(
     t0: usize,
     t1: usize,
     tb: usize,
+    planes: &[&[f32]],
+    wt: &[f32],
     out: *mut f32,
 ) {
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
         // SAFETY: AVX2 and FMA were detected; pointer contract forwarded.
-        return unsafe { output_transform_avx2(m, m_stride, os, g, epi, ts, t0, t1, tb, out) };
+        return unsafe { output_transform_avx2(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out) };
     }
     // SAFETY: forwarded.
-    unsafe { output_transform_scalar(m, m_stride, os, g, epi, ts, t0, t1, tb, out) }
+    unsafe { output_transform_scalar(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out) }
 }
 
 /// Portable scalar output transform (also used by tests to verify bit-exact AVX2 parity).
@@ -439,6 +507,8 @@ pub(super) unsafe fn output_transform_scalar(
     t0: usize,
     t1: usize,
     tb: usize,
+    planes: &[&[f32]],
+    wt: &[f32],
     out: *mut f32,
 ) {
     let (oh, ow) = (g.oh, g.ow);
@@ -461,6 +531,7 @@ pub(super) unsafe fn output_transform_scalar(
             }
             let ox0 = 4 * tx0;
             let ox1 = (ox0 + 4 * len).min(ow);
+            let mut bad = 0u64;
             for (r, sm_r) in sm.iter().enumerate() {
                 let oy = 4 * ty + r;
                 if oy >= oh {
@@ -469,6 +540,9 @@ pub(super) unsafe fn output_transform_scalar(
                 for (k, yy) in y.as_chunks_mut::<4>().0[..len].iter_mut().enumerate() {
                     *yy =
                         at_1d_scalar(sm_r[0][k], sm_r[1][k], sm_r[2][k], sm_r[3][k], sm_r[4][k], sm_r[5][k]);
+                    if yy.iter().any(|v| !v.is_finite()) {
+                        bad |= 1u64 << k;
+                    }
                 }
                 // SAFETY: row `oy`, columns `ox0..ox1` of channel `oc` are inside `out` and owned by this task.
                 let dst =
@@ -477,6 +551,10 @@ pub(super) unsafe fn output_transform_scalar(
                 if let Some(e) = epi {
                     e.apply(oc, dst);
                 }
+            }
+            if bad != 0 {
+                // SAFETY: every set bit in `bad` is in `0..len` of this task's owned segment.
+                unsafe { direct_bad_tiles(planes, wt, oc, ty, tx0, bad, g, epi, out) };
             }
         }
     }
@@ -495,6 +573,8 @@ unsafe fn output_transform_avx2(
     t0: usize,
     t1: usize,
     tb: usize,
+    planes: &[&[f32]],
+    wt: &[f32],
     out: *mut f32,
 ) {
     use std::arch::x86_64::*;
@@ -509,6 +589,7 @@ unsafe fn output_transform_avx2(
         Some(e) => matches!(e.act, None | Some(UnaryOp::Silu) | Some(UnaryOp::Relu)),
     };
     let zero = _mm256_setzero_ps();
+    let zero128 = _mm_setzero_ps();
     for oc in os {
         let mrow = |xi: usize| &m[(xi * m_stride + (oc - oc0)) * tb..][..tb];
         let bias_val = epi.and_then(|e| e.bias).map_or(0.0, |b| b[oc]);
@@ -568,6 +649,7 @@ unsafe fn output_transform_avx2(
             let ox0 = 4 * tx0;
             let ox1 = (ox0 + 4 * len).min(ow);
             let out_len = ox1 - ox0;
+            let mut bad = 0u64;
             for (r, sm_r) in sm.iter().enumerate() {
                 let oy = 4 * ty + r;
                 if oy >= oh {
@@ -588,6 +670,13 @@ unsafe fn output_transform_avx2(
                             _mm256_loadu_ps(sm_r[4].as_ptr().add(k)),
                             _mm256_loadu_ps(sm_r[5].as_ptr().add(k)),
                         );
+                        // Pre-epilogue finiteness check per tile: `finite * 0 == 0`, `±inf/NaN * 0 == NaN`.
+                        let nf = _mm256_fmadd_ps(
+                            y3,
+                            zero,
+                            _mm256_fmadd_ps(y2, zero, _mm256_fmadd_ps(y1, zero, _mm256_mul_ps(y0, zero))),
+                        );
+                        bad |= (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_UNORD_Q>(nf, nf)) as u64) << k;
                         let u0 = _mm256_unpacklo_ps(y0, y1);
                         let u1 = _mm256_unpackhi_ps(y0, y1);
                         let u2 = _mm256_unpacklo_ps(y2, y3);
@@ -646,6 +735,12 @@ unsafe fn output_transform_avx2(
                             _mm_loadu_ps(sm_r[4].as_ptr().add(k)),
                             _mm_loadu_ps(sm_r[5].as_ptr().add(k)),
                         );
+                        let nf = _mm_fmadd_ps(
+                            y3,
+                            zero128,
+                            _mm_fmadd_ps(y2, zero128, _mm_fmadd_ps(y1, zero128, _mm_mul_ps(y0, zero128))),
+                        );
+                        bad |= (_mm_movemask_ps(_mm_cmpunord_ps(nf, nf)) as u64) << k;
                         let t0 = _mm_unpacklo_ps(y0, y1);
                         let t1 = _mm_unpacklo_ps(y2, y3);
                         let t2 = _mm_unpackhi_ps(y0, y1);
@@ -694,6 +789,9 @@ unsafe fn output_transform_avx2(
                         sm_r[4][kk],
                         sm_r[5][kk],
                     );
+                    if yy.iter().any(|v| !v.is_finite()) {
+                        bad |= 1u64 << kk;
+                    }
                 }
                 if direct_done < out_len {
                     // SAFETY: remaining `out_len - direct_done` elements of row `oy` belong to this task.
@@ -705,6 +803,10 @@ unsafe fn output_transform_avx2(
                         e.apply(oc, dst);
                     }
                 }
+            }
+            if bad != 0 {
+                // SAFETY: every set bit in `bad` is in `0..len` of this task's owned segment.
+                unsafe { direct_bad_tiles(planes, wt, oc, ty, tx0, bad, g, epi, out) };
             }
         }
     }

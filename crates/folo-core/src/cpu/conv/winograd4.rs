@@ -57,12 +57,19 @@ pub(crate) fn uses_winograd4(g: &ConvGeom) -> bool {
 #[cfg(test)]
 thread_local! {
     static CALLS4: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+    static TRANSFORM4_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `[transform_weights4 calls, winograd4_forward calls]` made on this thread so far.
 #[cfg(test)]
 pub(crate) fn calls4() -> [usize; 2] {
     CALLS4.get()
+}
+
+/// Total `try_transform_weights4` invocations on this thread (including rejections cached as `None`).
+#[cfg(test)]
+pub(crate) fn transform4_attempts() -> usize {
+    TRANSFORM4_ATTEMPTS.get()
 }
 
 #[cfg(test)]
@@ -79,6 +86,8 @@ fn count4(i: usize) {
 /// huge finite weights like `1e38` scaled by `G[0,0]² = 16`), signalling the caller to fall back to the direct
 /// conv rather than introducing `0 * inf = NaN`.
 pub(crate) fn try_transform_weights4(wt: &[f32], o: usize, c: usize) -> Option<Vec<f32>> {
+    #[cfg(test)]
+    TRANSFORM4_ATTEMPTS.with(|n| n.set(n.get() + 1));
     let oc = o.checked_mul(c).expect("winograd4: o * c overflow");
     let wt_len = oc.checked_mul(9).expect("winograd4: weight length overflow");
     let u_len = oc.checked_mul(36).expect("winograd4: transformed weight length overflow");
@@ -168,21 +177,24 @@ impl Tiles<'_> {
     }
 }
 
-/// Forward conv2d via Winograd F(4x4, 3x3) into `out` (`[N, O, OH, OW]`, overwritten) with transformed weights `u`.
+/// Forward conv2d via Winograd F(4x4, 3x3) into `out` (`[N, O, OH, OW]`, overwritten) with transformed weights `u`
+/// (and raw OIHW weights `wt` for exact per-tile fallback if transform-domain arithmetic overflows `f32`).
 pub(crate) fn winograd4_forward(
     x: ConvInput<'_>,
+    wt: &[f32],
     u: &[f32],
     out: &mut [f32],
     g: &ConvGeom,
     epi: Option<ChannelEpilogue<'_>>,
 ) {
-    winograd4_run(x, u, out, g, epi, None);
+    winograd4_run(x, wt, u, out, g, epi, None);
 }
 
 /// [`winograd4_forward`] of only the 4x4 output tiles `tiles[img]` (`ty · ⌈OW/4⌉ + tx`, ascending and distinct):
 /// bit for bit [`winograd4_forward`] on those tiles, leaving every other element of `out` untouched.
 pub(crate) fn winograd4_forward_at(
     x: ConvInput<'_>,
+    wt: &[f32],
     u: &[f32],
     out: &mut [f32],
     g: &ConvGeom,
@@ -197,11 +209,12 @@ pub(crate) fn winograd4_forward_at(
             .all(|l| l.windows(2).all(|w| w[0] < w[1]) && l.last().is_none_or(|&t| (t as usize) < all)),
         "winograd4: tile list not strictly ascending and within bounds"
     );
-    winograd4_run(x, u, out, g, epi, Some(tiles));
+    winograd4_run(x, wt, u, out, g, epi, Some(tiles));
 }
 
 fn winograd4_run(
     x: ConvInput<'_>,
+    wt: &[f32],
     u: &[f32],
     out: &mut [f32],
     g: &ConvGeom,
@@ -215,7 +228,10 @@ fn winograd4_run(
         count4(1);
     }
     let (c, o) = (g.c, g.o);
-    let u_len = o.checked_mul(c).and_then(|v| v.checked_mul(36)).expect("winograd4: weight size overflow");
+    let oc = o.checked_mul(c).expect("winograd4: o * c overflow");
+    let wt_len = oc.checked_mul(9).expect("winograd4: weight length overflow");
+    let u_len = oc.checked_mul(36).expect("winograd4: weight size overflow");
+    assert_eq!(wt.len(), wt_len, "winograd4: weights are not O x C x 3 x 3");
     assert_eq!(u.len(), u_len, "winograd4: transformed weights are not 36 x O x C");
     let out_len =
         g.n.checked_mul(o).and_then(|v| v.checked_mul(g.ohw())).expect("winograd4: output overflow");
@@ -229,6 +245,7 @@ fn winograd4_run(
             return;
         }
         let planes = x.planes(img, hw);
+        let planes_ref = &planes;
         let tb = block_tiles(c, o, tiles, threads);
         let blocks = tiles.div_ceil(tb);
         let span = |b: usize| (b * tb, ((b + 1) * tb).min(tiles));
@@ -252,7 +269,9 @@ fn winograd4_run(
                 let (t0, t1) = span(b);
                 let (ci0, ci1) = (part * cstep, ((part + 1) * cstep).min(c));
                 // SAFETY: block b's V is at `b * vlen`; this task owns rows `(xi, ci0..ci1)`.
-                unsafe { input_transform(&planes[ci0..ci1], ci0, g, ts, t0, t1, tb, vptr.0.add(b * vlen)) };
+                unsafe {
+                    input_transform(&planes_ref[ci0..ci1], ci0, g, ts, t0, t1, tb, vptr.0.add(b * vlen))
+                };
             });
             let vall_ref = &vall;
             par_for(blocks * oparts, &|q| {
@@ -283,7 +302,9 @@ fn winograd4_run(
                         }
                     }
                     // SAFETY: each `(b, o0..o1)` owns disjoint output elements.
-                    unsafe { output_transform(m, on, o0..o1, g, epi, ts, t0, t1, tb, optr.0) };
+                    unsafe {
+                        output_transform(m, on, o0..o1, g, epi, ts, t0, t1, tb, planes_ref, wt, optr.0)
+                    };
                 });
             });
             crate::cpu::recycle(vall);
@@ -294,7 +315,7 @@ fn winograd4_run(
             with_scratch(36 * (c + o) * tb, |buf| {
                 let (v, m) = buf[..36 * (c + o) * tb].split_at_mut(36 * c * tb);
                 // SAFETY: `v` is this block's entire V.
-                unsafe { input_transform(&planes, 0, g, ts, t0, t1, tb, v.as_mut_ptr()) };
+                unsafe { input_transform(planes_ref, 0, g, ts, t0, t1, tb, v.as_mut_ptr()) };
                 let mut rows = Vec::with_capacity(c);
                 for xi in 0..36 {
                     rows.clear();
@@ -306,7 +327,7 @@ fn winograd4_run(
                     };
                 }
                 // SAFETY: blocks own disjoint output tiles.
-                unsafe { output_transform(m, o, 0..o, g, epi, ts, t0, t1, tb, optr.0) };
+                unsafe { output_transform(m, o, 0..o, g, epi, ts, t0, t1, tb, planes_ref, wt, optr.0) };
             });
         };
         if threads > 1 && blocks > 1 {
@@ -321,6 +342,7 @@ fn winograd4_run(
 #[cfg(test)]
 pub(crate) fn winograd4_forward_scalar(
     x: ConvInput<'_>,
+    wt: &[f32],
     u: &[f32],
     out: &mut [f32],
     g: &ConvGeom,
@@ -345,7 +367,20 @@ pub(crate) fn winograd4_forward_scalar(
                     let a = &u[xi * o * c..(xi + 1) * o * c];
                     gemm_rows_serial(o, c, a, c, &rows, tb, &mut m[xi * o * tb..(xi + 1) * o * tb], tb);
                 }
-                output_transform_scalar(&m, o, 0..o, g, epi, ts, t0, t1, tb, out_img.as_mut_ptr());
+                output_transform_scalar(
+                    &m,
+                    o,
+                    0..o,
+                    g,
+                    epi,
+                    ts,
+                    t0,
+                    t1,
+                    tb,
+                    &planes,
+                    wt,
+                    out_img.as_mut_ptr(),
+                );
             }
         }
     }

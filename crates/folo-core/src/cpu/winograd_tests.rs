@@ -3,7 +3,7 @@
 //! observed through the calls counted on the test's thread (`conv::winograd_calls`).
 
 use super::CpuBackend;
-use super::conv::{winograd_calls, winograd4_calls};
+use super::conv::{transform4_attempts, winograd_calls, winograd4_calls};
 use crate::backend::Backend;
 use crate::rng::Rng;
 use crate::{Conv2dParams, CpuStorage, Storage, Tensor, UnaryOp, no_grad};
@@ -201,12 +201,18 @@ fn winograd4_large_finite_weight_falls_back_without_nan() {
     w_data[0] = 1e38_f32;
     let w = Tensor::from_vec(w_data, [64, 64, 3, 3]).unwrap();
 
-    // Zero input: must return all exact zeros (zero NaNs), matching `conv2d_with`, and cache the fallback.
+    // Zero input: must return all exact zeros (zero NaNs), matching `conv2d_with`, and cache the `None` rejection.
     let x_zero = Tensor::zeros([1, 64, 40, 40]);
     let direct_zero = x_zero.conv2d_with(&w, None, &P).unwrap().to_vec::<f32>().unwrap();
     for pass in 0..2 {
+        let attempts_before = transform4_attempts();
         let (got, calls4) =
             counting4(|| x_zero.conv2d_act(&w, None, &P, None).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(
+            transform4_attempts() - attempts_before,
+            usize::from(pass == 0),
+            "pass {pass}: expected cached None rejection"
+        );
         assert_eq!(calls4, [0, 0], "pass {pass}: overflowed weights must not run F(4x4)");
         assert!(got.iter().all(|&v| v.to_bits() == 0), "pass {pass}: expected all exact zeros");
         assert_eq!(
@@ -215,8 +221,10 @@ fn winograd4_large_finite_weight_falls_back_without_nan() {
         );
     }
     let at = Tensor::from_vec(vec![0u32, 41, 1599], [3]).unwrap();
+    let attempts_before = transform4_attempts();
     let (got_at, calls4) =
         counting4(|| x_zero.conv2d_act_at(&w, None, &P, None, &at).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(transform4_attempts() - attempts_before, 0, "conv2d_act_at must reuse cached None rejection");
     assert_eq!(calls4, [0, 0]);
     for &s in &[0usize, 41, 1599] {
         for oc in 0..64 {
@@ -235,4 +243,60 @@ fn winograd4_large_finite_weight_falls_back_without_nan() {
         got_small.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         direct_small.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
     );
+}
+
+/// Transform-domain GEMM (`U * V`) or input-transform (`Bᵀ d B`) overflow with finite `U`:
+/// per-tile pre-epilogue finiteness detection falls back to the exact direct 3x3 sum for the overflowing
+/// `(oc, tile)` so neither `conv2d_act` nor `conv2d_act_at` emits `NaN`/`inf` even under `ReLU`/`SiLU`/`Sigmoid`.
+#[test]
+fn winograd4_transform_domain_gemm_overflow_falls_back_per_tile() {
+    let _g = no_grad();
+    // Exact repro: `weight[0,0,0,0] = 2e37` (`U[0,0] = 3.2e38`, finite), `input[0,0,5,5] = 2.0` (`U*V` overflows).
+    let mut w_data = vec![0.0f32; 64 * 64 * 9];
+    w_data[0] = 2e37_f32;
+    let w = Tensor::from_vec(w_data, [64, 64, 3, 3]).unwrap();
+    let mut x_data = vec![0.0f32; 64 * 40 * 40];
+    x_data[5 * 40 + 5] = 2.0_f32;
+    let x = Tensor::from_vec(x_data, [1, 64, 40, 40]).unwrap();
+
+    let sites_idx = [4 * 40 + 4, 6 * 40 + 6, 0, 39 * 40 + 39];
+    let at = Tensor::from_vec(sites_idx.map(|s| s as u32).to_vec(), [sites_idx.len()]).unwrap();
+    let direct = x.conv2d_with(&w, None, &P).unwrap().to_vec::<f32>().unwrap();
+    assert_eq!(direct[4 * 40 + 4], 0.0);
+    assert_eq!(direct[6 * 40 + 6], 4e37_f32);
+
+    for (i, act) in
+        [None, Some(UnaryOp::Relu), Some(UnaryOp::Silu), Some(UnaryOp::Sigmoid)].into_iter().enumerate()
+    {
+        let (dense, calls4) = counting4(|| x.conv2d_act(&w, None, &P, act).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4, [usize::from(i == 0), 1], "act={act:?}: expected F(4x4) dispatch");
+        assert!(dense.iter().all(|v| v.is_finite()), "act={act:?}: non-finite output in dense");
+        if act.is_none() || act == Some(UnaryOp::Relu) {
+            assert_eq!(dense[4 * 40 + 4], 0.0, "act={act:?}: (4,4)");
+            assert_eq!(dense[6 * 40 + 6], 4e37_f32, "act={act:?}: (6,6)");
+        }
+        let (sparse, calls4_at) =
+            counting4(|| x.conv2d_act_at(&w, None, &P, act, &at).unwrap().to_vec::<f32>().unwrap());
+        assert_eq!(calls4_at, [0, 1], "act={act:?}: expected F(4x4) sparse dispatch");
+        for &s in &sites_idx {
+            for oc in 0..64 {
+                let idx = oc * 1600 + s;
+                assert_eq!(
+                    sparse[idx].to_bits(),
+                    dense[idx].to_bits(),
+                    "act={act:?}: sparse != dense at oc={oc}, s={s}"
+                );
+            }
+        }
+    }
+
+    // Input-transform `Bᵀ d B` overflow (`input = 3e38`, `weight = 0`): must return exact zeros (zero NaNs).
+    let w_zero = Tensor::zeros([64, 64, 3, 3]);
+    let mut x_huge = vec![0.0f32; 64 * 40 * 40];
+    x_huge[5 * 40 + 5] = 3e38_f32;
+    let x_huge = Tensor::from_vec(x_huge, [1, 64, 40, 40]).unwrap();
+    let (got, calls4) =
+        counting4(|| x_huge.conv2d_act(&w_zero, None, &P, None).unwrap().to_vec::<f32>().unwrap());
+    assert_eq!(calls4, [1, 1]);
+    assert!(got.iter().all(|&v| v.to_bits() == 0), "V overflow with zero weight must return exact zeros");
 }

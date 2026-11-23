@@ -240,14 +240,14 @@ fn tile_list4_writes_its_tiles_only() {
     let input = ConvInput { parts: &part };
     let (tw, all) = (w.div_ceil(4), h.div_ceil(4) * w.div_ceil(4));
     let mut dense = vec![0f32; n * o * h * w];
-    winograd4_forward(input, &u, &mut dense, &g, None);
+    winograd4_forward(input, &wt, &u, &mut dense, &g, None);
     let list: Vec<u32> =
         vec![0, 1, 2, 4, (tw + 2) as u32, (2 * tw - 1) as u32, (all - 2) as u32, (all - 1) as u32];
     let lists = vec![list.clone(), Vec::new()];
     for threads in [1, 3, rayon::current_num_threads()] {
         let mut out = vec![f32::NAN; n * o * h * w];
         let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-        pool.install(|| winograd4_forward_at(input, &u, &mut out, &g, None, &lists));
+        pool.install(|| winograd4_forward_at(input, &wt, &u, &mut out, &g, None, &lists));
         for (i, (&got, &want)) in out.iter().zip(&dense).enumerate() {
             let (img, pix) = (i / (o * h * w), i % (h * w));
             let tile = ((pix / w) / 4 * tw + (pix % w) / 4) as u32;

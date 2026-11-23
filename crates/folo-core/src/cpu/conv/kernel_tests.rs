@@ -422,7 +422,7 @@ fn winograd4(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, epi: Option<C
     assert!(super::winograd::winograd_shape(g));
     let u = transform_weights4(wt, g.o, g.c);
     let part = [ConvPart::contiguous(x, g.c, g.h * g.w)];
-    winograd4_forward(ConvInput { parts: &part }, &u, out, g, epi);
+    winograd4_forward(ConvInput { parts: &part }, wt, &u, out, g, epi);
 }
 
 /// Well-conditioned Winograd F(4x4, 3x3) error bound (points `0, ±1/2, ±1, ∞`):
@@ -547,8 +547,8 @@ fn winograd4_avx2_matches_scalar_bit_for_bit() {
         for (ei, epi) in epis.into_iter().enumerate() {
             let mut got = vec![f32::NAN; n * o * g.ohw()];
             let mut want = vec![f32::NAN; n * o * g.ohw()];
-            winograd4_forward(input, &u, &mut got, &g, epi);
-            super::winograd4::winograd4_forward_scalar(input, &u, &mut want, &g, epi);
+            winograd4_forward(input, &wt, &u, &mut got, &g, epi);
+            super::winograd4::winograd4_forward_scalar(input, &wt, &u, &mut want, &g, epi);
             let bad = got.iter().zip(&want).position(|(a, b)| a.to_bits() != b.to_bits());
             assert_eq!(bad, None, "shape {idx} ({n}x{c}->{o}@{hw:?}) epi {ei}: AVX2 vs scalar bit mismatch");
         }

@@ -677,9 +677,9 @@ fn conv_forward(
                 match sites {
                     Some(at) => {
                         let tiles = conv::winograd4_tiles_at(&g, at);
-                        conv::winograd4_forward_at(input, u, &mut out, &g, fused.then_some(epi), &tiles);
+                        conv::winograd4_forward_at(input, &wd, u, &mut out, &g, fused.then_some(epi), &tiles);
                     }
-                    None => conv::winograd4_forward(input, u, &mut out, &g, fused.then_some(epi)),
+                    None => conv::winograd4_forward(input, &wd, u, &mut out, &g, fused.then_some(epi)),
                 }
                 return Ok(f32_storage(out));
             }

@@ -243,7 +243,7 @@ fn deinterleave_even_odd_scalar(src: &[u32], even: &mut [u32], odd: &mut [u32], 
 }
 
 /// # Safety
-/// Caller must ensure AVX2 and FMA are available and `odd.len() >= even.len()`.
+/// Caller must ensure AVX2 and FMA are available and `odd.len() == even.len()`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn deinterleave_even_odd_avx2(src: &[u32], even: &mut [u32], odd: &mut [u32], pad: u32) {
