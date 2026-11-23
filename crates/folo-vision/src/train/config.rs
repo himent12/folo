@@ -918,4 +918,48 @@ mod tests {
             assert_eq!(ResolvedOptim::from_run_config(&broken), None, "{broken}");
         }
     }
+
+    #[test]
+    fn validates_rpiou_otdfl_and_geomuon_settings() {
+        let mut ok = TrainConfig::default();
+        ok.loss.box_loss = crate::loss::BoxLossKind::Rpiou;
+        ok.loss.rpiou_beta = 0.25;
+        ok.loss.rpiou_kappa = 1.5;
+        ok.loss.rpiou_delta = 0.4;
+        ok.loss.dfl_ot_weight = 0.25;
+        ok.musgd.geo = folo_nn::optim::MuonGeoMode::Geo;
+        ok.validate().unwrap();
+
+        for mut bad in [
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_beta = -0.01;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_beta = 1.01;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_kappa = 0.0;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_delta = f32::NAN;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.dfl_ot_weight = -0.1;
+                c
+            },
+        ] {
+            assert!(bad.validate().is_err());
+            bad.loss.rpiou_kappa = f32::INFINITY;
+            assert!(bad.validate().is_err());
+        }
+    }
 }

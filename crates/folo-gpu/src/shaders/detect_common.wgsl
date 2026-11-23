@@ -146,11 +146,6 @@ fn nwd_lambda(gt_w_px: f32, gt_h_px: f32, weight: f32) -> f32 {
     return weight * fexp(-area / (24.0 * 24.0));
 }
 
-// Numerically stable ln(exp(a) + exp(b)) using fexp + log1p_unit.
-fn lse2(a: f32, b: f32) -> f32 {
-    return max(a, b) + log1p_unit(fexp(-abs(a - b)));
-}
-
 // Rational-Focal Edge-Decoupled IoU loss (R-PIoU) between predicted xyxy `a` and GT xyxy `b` (grid units).
 fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) -> f32 {
     let eps = 1e-7;

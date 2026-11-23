@@ -81,10 +81,11 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   `orthogonalize_many_with` expose the schedules directly), and `MuSgd::with_ortho_and_geo(groups, weights, ortho, geo)`
   selects Conv-GeoMuon (`MuonGeoMode::Geo`: true 2-D flattened conv aspect scaling + exact zero-GEMM per-channel Polar
   LMO for depthwise convs; default `Legacy`). Weights other than the defaults (`musgd`), schedules other than legacy
-  `Ns5` (`muon_ortho`), and non-legacy geometric modes (`muon_geo`) are part of its contract; `apply_contract` adopts
-  the file's weights when present (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent
-  `muon_ortho` to `Ns5` so pre-Polar checkpoints resume with legacy 5-step Newton–Schulz) and `muon_geo` (defaulting
-  absent `muon_geo` to `Legacy`).
+  `Ns5` (`muon_ortho`), and non-legacy geometric modes (`muon_geo`, plus `muon_depthwise` naming the depthwise conv
+  weights when `Geo` is active) are part of its contract; `apply_contract` adopts the file's weights when present
+  (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent `muon_ortho` to `Ns5` so pre-Polar
+  checkpoints resume with legacy 5-step Newton–Schulz), `muon_geo` (defaulting absent `muon_geo` to `Legacy`), and the
+  depthwise parameter mask from `muon_depthwise`.
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially

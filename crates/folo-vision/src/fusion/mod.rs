@@ -756,6 +756,9 @@ pub fn fuse_boxes_sebf(
             for e in 0..4 {
                 b1[e] = if sum1[e] > 0.0 { acc1[e] / sum1[e] } else { old[e] as f64 };
             }
+            if !(b1[2] >= b1[0] && b1[3] >= b1[1]) {
+                return b;
+            }
             let b1_xyxy = Xyxy::new(b1[0] as f32, b1[1] as f32, b1[2] as f32, b1[3] as f32);
             let b1_area = b1_xyxy.area();
             let bw = (b1[2] - b1[0]).max(1.0);
@@ -769,8 +772,7 @@ pub fn fuse_boxes_sebf(
             let (mut acc2, mut sum2) = ([0f64; 4], [0f64; 4]);
             for &(j, _, p) in &members {
                 let s = scores[j] as f64;
-                let o1_raw = overlap(&b1_xyxy, b1_area, &boxes[j]) as f64;
-                let o1 = if j == k { o1_raw.max(1.0) } else { o1_raw };
+                let o1 = if j == k { 1.0 } else { overlap(&b1_xyxy, b1_area, &boxes[j]) as f64 };
                 let o1_2 = o1 * o1;
                 let aff2 = o1_2 * o1_2;
                 let x = boxes[j].to_array();

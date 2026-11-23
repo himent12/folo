@@ -117,7 +117,7 @@ pub struct ParamGroup {
     /// Cautious decoupled weight decay: apply decoupled decay only where `u · p > 0`.
     pub cautious_wd: bool,
     /// Per-parameter depthwise conv mask (`groups > 1 && groups == in_channels == out_channels`), aligned with
-    /// `params` (empty means all false). Used by `MuSgd`'s `Conv-GeoNorMuon` Branch A.
+    /// `params` (empty means all false). Used by `MuSgd`'s `Conv-GeoMuon` depthwise Polar LMO.
     pub depthwise: Vec<bool>,
 }
 
@@ -213,6 +213,14 @@ impl ParamGroup {
         if !ok {
             return Err(Error::Invalid(format!("optimizer group `{}`: invalid hyperparameters", self.name)));
         }
+        if !self.depthwise.is_empty() && self.depthwise.len() != self.params.len() {
+            return Err(Error::Invalid(format!(
+                "optimizer group `{}`: depthwise mask length {} does not match {} parameters",
+                self.name,
+                self.depthwise.len(),
+                self.params.len()
+            )));
+        }
         Ok(())
     }
 }
@@ -294,6 +302,7 @@ fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
         musgd: None,
         muon_ortho: None,
         muon_geo: None,
+        muon_depthwise: Vec::new(),
     }
 }
 
@@ -323,7 +332,32 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
             kind.as_str()
         )));
     }
+    if !c.muon_depthwise.is_empty() && (kind != OptimKind::MuSgd || c.muon_geo != Some(MuonGeoMode::Geo)) {
+        return Err(Error::Load(
+            "folo.optim: `muon_depthwise` is only valid on a `musgd` contract with `muon_geo: \"geo\"`"
+                .into(),
+        ));
+    }
     check_param_sets(o.groups(), &c.groups)?;
+    if !c.muon_depthwise.is_empty() {
+        let mut seen = std::collections::HashSet::with_capacity(c.muon_depthwise.len());
+        let muon_params: std::collections::HashSet<&str> = c
+            .groups
+            .iter()
+            .filter(|g| is_muon_group(&g.name))
+            .flat_map(|g| g.params.iter().map(String::as_str))
+            .collect();
+        for name in &c.muon_depthwise {
+            if !seen.insert(name.as_str()) {
+                return Err(Error::Load(format!("folo.optim: duplicate `{name}` in `muon_depthwise`")));
+            }
+            if !muon_params.contains(name.as_str()) {
+                return Err(Error::Load(format!(
+                    "folo.optim: `muon_depthwise` names `{name}`, which is not in a Muon group"
+                )));
+            }
+        }
+    }
     for (g, gc) in o.groups_mut().iter_mut().zip(&c.groups) {
         gc.apply_to(g, kind)?;
     }
@@ -354,6 +388,10 @@ pub struct OptimContract {
     /// Optional `Conv-GeoMuon` mode (`"geo"`). Omitted for `Legacy` for byte-exact compat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muon_geo: Option<MuonGeoMode>,
+    /// Parameter names in Muon groups routed to the zero-GEMM depthwise Polar LMO under `muon_geo: "geo"`.
+    /// Omitted when empty or in legacy mode so existing checkpoints stay byte-for-byte identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub muon_depthwise: Vec<String>,
 }
 
 /// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.
@@ -570,13 +608,14 @@ impl StandardGroups {
     /// The three groups `decay`, `bn`, `bias` (in that order) with the same `lr` and `momentum` (μ or β1),
     /// Nesterov on, and `weight_decay` on `decay` only.
     pub fn into_groups(self, lr: f64, momentum: f64, weight_decay: f64) -> Vec<ParamGroup> {
-        let dw_mask: Vec<bool> = self.decay.iter().map(|(n, _)| self.depthwise.contains(n)).collect();
+        let mut decay =
+            ParamGroup::new("decay", self.decay).lr(lr).momentum(momentum).weight_decay(weight_decay);
+        let dw_mask: Vec<bool> = decay.params.iter().map(|(n, _)| self.depthwise.contains(n)).collect();
+        if dw_mask.iter().any(|&b| b) {
+            decay = decay.with_depthwise(dw_mask);
+        }
         vec![
-            ParamGroup::new("decay", self.decay)
-                .with_depthwise(dw_mask)
-                .lr(lr)
-                .momentum(momentum)
-                .weight_decay(weight_decay),
+            decay,
             ParamGroup::new("bn", self.bn).lr(lr).momentum(momentum),
             ParamGroup::new(BIAS_GROUP, self.bias).lr(lr).momentum(momentum),
         ]
@@ -603,8 +642,10 @@ impl StandardGroups {
             let is_decay = name == "decay";
             let mut g_rest = ParamGroup::new(name, rest).lr(lr).momentum(momentum).weight_decay(wd);
             if is_decay {
-                let mask = g_rest.params.iter().map(|(n, _)| dw.contains(n)).collect();
-                g_rest = g_rest.with_depthwise(mask);
+                let mask: Vec<bool> = g_rest.params.iter().map(|(n, _)| dw.contains(n)).collect();
+                if mask.iter().any(|&d| d) {
+                    g_rest = g_rest.with_depthwise(mask);
+                }
             }
             out.push(g_rest);
             if !b.is_empty() {
@@ -613,8 +654,10 @@ impl StandardGroups {
                     .momentum(momentum)
                     .weight_decay(wd);
                 if is_decay {
-                    let mask = g.params.iter().map(|(n, _)| dw.contains(n)).collect();
-                    g = g.with_depthwise(mask);
+                    let mask: Vec<bool> = g.params.iter().map(|(n, _)| dw.contains(n)).collect();
+                    if mask.iter().any(|&d| d) {
+                        g = g.with_depthwise(mask);
+                    }
                 }
                 out.push(g);
             }

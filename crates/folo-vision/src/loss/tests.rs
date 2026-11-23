@@ -141,8 +141,8 @@ fn sum_fixed_order_matches_sum() {
     }
 }
 
-/// Finite-difference gradient verification + fused/composite parity for `R-PIoU`, `OT-DFL` (`reg_max = 16` and
-/// `reg_max = 2` edge case + extreme logits `±500`), and `CBQ-Loss` (`r = 0.5, 1.0`).
+/// Finite-difference gradient verification + fused/composite parity for `R-PIoU` and `OT-DFL` (`reg_max = 16`,
+/// `reg_max = 2`, extreme logits `±500` on an active foreground anchor, and `[-1e8, -1e8, -1e8, 0]` exact ratios).
 #[test]
 fn new_losses_finite_diff_and_edge_cases() {
     let anchors = make_anchors(64, 64, &[8, 16], 0.5);
@@ -211,19 +211,81 @@ fn new_losses_finite_diff_and_edge_cases() {
         "reg_max=2",
     );
 
-    // Extreme logits (±500) remain finite for R-PIoU + OT-DFL.
+    // Extreme logits (±500) placed directly on an active foreground anchor remain finite for R-PIoU + OT-DFL.
+    let fg_anchor = 2 * 8 + 3; // stride-8 anchor at (28, 20), inside both GT boxes.
     let mut extreme_box = vec![-500.0f32; 4 * 16 * a];
     let mut extreme_cls = vec![-25.0f32; 2 * a];
     for side in 0..4 {
-        extreme_box[(side * 16 + 15) * a + 5] = 500.0;
+        extreme_box[(side * 16 + 15) * a + fg_anchor] = 500.0;
     }
-    extreme_cls[5] = 25.0;
+    extreme_cls[fg_anchor] = 25.0;
     let bx = Tensor::from_vec(extreme_box, [1, 64, a]).unwrap().requires_grad_();
     let cx = Tensor::from_vec(extreme_cls, [1, 2, a]).unwrap().requires_grad_();
     let cfg = LossConfig { box_loss: BoxLossKind::Rpiou, dfl_ot_weight: 0.35, ..LossConfig::default() };
     let out = detection_loss_host(&bx, &cx, &anchors, &targets, &cfg).unwrap();
-    assert!(out.is_finite(), "extreme logits produced non-finite loss: {:?}", out.items);
+    assert!(out.num_fg > 0 && out.is_finite(), "extreme logits produced non-finite loss: {:?}", out.items);
     let g = out.total.backward().unwrap();
-    assert!(g.get(&bx).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    let gb = g.get(&bx).unwrap().to_vec::<f32>().unwrap();
+    assert!(gb.iter().all(|v| v.is_finite()));
+    assert!(gb[(15 * a) + fg_anchor].abs() > 0.0 || gb[fg_anchor].abs() > 0.0, "fg anchor got gradient");
     assert!(g.get(&cx).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+
+    // Exact OT-DFL gradient ratios on extreme finite logits `[-1e8, -1e8, -1e8, 0]` with `R = 4, j = 0`:
+    // unweighted OT gradient must be `[-5/6, -5/6, -1/3, +2]` (zero-sum shift invariance, no f32 ln(2)/ln(3) loss).
+    let r4 = 4usize;
+    let mut asg_ot = BatchAssignment {
+        batch: 1,
+        num_classes: 1,
+        num_anchors: a,
+        inputs_finite: true,
+        ..Default::default()
+    };
+    asg_ot.image.push(0);
+    asg_ot.anchor.push(fg_anchor as u32);
+    asg_ot.label.push(0);
+    asg_ot.score.push(1.0);
+    // Anchor at (28, 20) stride 8 -> grid (3.5, 2.5); target box centered with ltrb = (0.5, 0.5, 0.5, 0.5) => j = 0.
+    asg_ot.target.push(Xyxy::new(24.0, 16.0, 32.0, 24.0));
+    let mut b4 = vec![0.0f32; 4 * r4 * a];
+    for side in 0..4 {
+        b4[(side * r4) * a + fg_anchor] = -1e8;
+        b4[(side * r4 + 1) * a + fg_anchor] = -1e8;
+        b4[(side * r4 + 2) * a + fg_anchor] = -1e8;
+        b4[(side * r4 + 3) * a + fg_anchor] = 0.0;
+    }
+    let bx4 = Tensor::from_vec(b4, [1, 4 * r4, a]).unwrap().requires_grad_();
+    let cx1 = Tensor::zeros([1, 1, a]).requires_grad_();
+    let cfg_base =
+        LossConfig { box_gain: 0.0, cls_gain: 0.0, dfl_gain: 1.0, reg_max: r4, ..LossConfig::default() };
+    let cfg_ot = LossConfig { dfl_ot_weight: 1.0, ..cfg_base };
+    let g_base = loss_with_assignment(&bx4, &cx1, &anchors, &asg_ot, &cfg_base)
+        .unwrap()
+        .total
+        .backward()
+        .unwrap()
+        .get(&bx4)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    let g_ot = loss_with_assignment(&bx4, &cx1, &anchors, &asg_ot, &cfg_ot)
+        .unwrap()
+        .total
+        .backward()
+        .unwrap()
+        .get(&bx4)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    let want = [-5.0f32 / 6.0, -5.0 / 6.0, -1.0 / 3.0, 2.0];
+    for side in 0..4 {
+        let mut sum = 0.0f32;
+        for (k, &w) in want.iter().enumerate() {
+            let idx = (side * r4 + k) * a + fg_anchor;
+            // Side weight is t / 4 = 0.25.
+            let got = (g_ot[idx] - g_base[idx]) * 4.0;
+            sum += got;
+            assert!((got - w).abs() < 1e-5, "side {side} bin {k}: got {got}, want {w}");
+        }
+        assert!(sum.abs() < 1e-5, "side {side}: OT gradient sum must be 0, got {sum}");
+    }
 }

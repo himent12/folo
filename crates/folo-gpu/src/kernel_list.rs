@@ -427,7 +427,8 @@ mod tests {
                     ew1 - KIND=u1 RANK=u60000\nmove - EB=u0 MODE=u0 RANK=u2\nscatter - EB=u4 RANK=u8\n\
                     tal_topk - K=u65536 WG=u128\ndet_box - R=u16 K=u10 MODE=u0\n\
                     muon_gather - J=u4294967295 NESTEROV=b1\nmuon_gather - J=u17 NESTEROV=b1\n\
-                    muon_gather - J=u3 NESTEROV=b1\nmuon_apply - J=u16\nmuon_gemm - MODE=u7\nmuon_norm -\n\
+                    muon_gather - J=u3 NESTEROV=b1\nmuon_apply - J=u16\nmuon_dw_lmo - J=u2 NESTEROV=b1\n\
+                    muon_gemm - MODE=u7\nmuon_norm -\n\
                     optim_many - J=u4294967295 NS=u1\n";
         let file = encode_as(MAGIC, FORMAT, text.as_bytes(), "id");
         let got = decode(&file, "id").unwrap();
@@ -443,6 +444,7 @@ mod tests {
                 "det_box R=16 K=10 MODE=0",
                 "muon_gather J=3 NESTEROV=1",
                 "muon_apply J=16",
+                "muon_dw_lmo J=2 NESTEROV=1",
                 "muon_norm ",
             ]
         );
@@ -461,10 +463,11 @@ mod tests {
             "scale_many",
             "muon_gather",
             "muon_apply",
+            "muon_dw_lmo",
         ] {
             assert!(!names.contains(many), "{many} is built per layout");
         }
-        for (name, n) in [("muon_gather", 2 * 3 + 3), ("muon_apply", 3 + 2)] {
+        for (name, n) in [("muon_gather", 2 * 3 + 3), ("muon_apply", 3 + 2), ("muon_dw_lmo", 3 * 3 + 1)] {
             let def = crate::kernels::find_def(name, &Spec::new().u32("J", 3)).unwrap();
             assert_eq!((def.name, def.storage.len()), (name, n), "{name}: three matrices");
         }

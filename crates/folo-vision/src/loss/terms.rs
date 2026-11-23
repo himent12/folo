@@ -270,15 +270,16 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     focal_iou.add(&edge_pen)
 }
 
-/// Numerically stable `ln(exp(a) + exp(b))` matching `detect_common.wgsl::lse2`.
+/// Overflow/underflow-safe `exp(d)` for `d <= 0` (`d = -inf` maps to `0.0`).
 #[inline(always)]
-fn lse2(a: f32, b: f32) -> f32 {
-    a.max(b) + fast_exp(-(a - b).abs()).ln_1p()
+fn safe_exp_neg(d: f32) -> f32 {
+    if d > -100.0 { fast_exp(d) } else { 0.0 }
 }
 
-/// Exact `O(R)` log-space 1D optimal-transport cumulative tail-barrier DFL term:
+/// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:
 /// `ot_weight * Σ_{n, side} side_wt * (Σ_{k < j} max(-log S_k, 0) + Σ_{k > j} max(-log F_k, 0))`
-/// for `logits: [N, 4, R]`, with exact overflow/underflow-free `O(R)` backward.
+/// for `logits: [N, 4, R]`, keeping running maxima and mantissas separate so even extreme logits (e.g.
+/// `[-1e8, -1e8, -1e8, 0]`) preserve exact relative ratios (`1/2`, `1/3`) and the zero-sum gradient invariant.
 fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight: f32) -> Result<Tensor> {
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
@@ -291,9 +292,12 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
     let mut total = 0.0f64;
     let r_m2 = (r - 2) as f32;
     let mut p = vec![0.0f32; r];
-    let mut lp = vec![0.0f32; r];
-    let mut m_suf = vec![0.0f32; r];
-    let mut m_pre = vec![0.0f32; r];
+    let mut ms_arr = vec![0.0f32; r];
+    let mut s_arr = vec![0.0f32; r];
+    let mut mf_arr = vec![0.0f32; r];
+    let mut f_arr = vec![0.0f32; r];
+    let mut bs_mant = vec![0.0f32; r];
+    let mut ap_mant = vec![0.0f32; r];
     for idx in 0..n * 4 {
         let wt = side_wt[idx];
         if wt == 0.0 {
@@ -306,57 +310,82 @@ fn ot_dfl_tail(logits: &Tensor, left_bins: &[usize], side_wt: &[f32], ot_weight:
             m = m.max(x);
         }
         let mut z = 0.0f32;
-        for ((pk, lpk), &x) in p.iter_mut().zip(&mut lp).zip(row) {
-            let xm = x - m;
-            *lpk = xm;
-            let e = fast_exp(xm);
+        for (pk, &x) in p.iter_mut().zip(row) {
+            let e = safe_exp_neg(x - m);
             *pk = e;
             z += e;
         }
         let lz = z.ln();
-        for (pk, lpk) in p.iter_mut().zip(&mut lp) {
+        for pk in &mut p {
             *pk /= z;
-            *lpk -= lz;
         }
         let mut l_tail = 0.0f32;
         if j > 0 {
-            let mut acc_suf = lp[r - 1];
+            let mut ms = row[r - 1];
+            let mut s = 1.0f32;
             for step in 0..r - 1 {
                 let k = (r - 2) - step;
                 if step > 0 {
-                    acc_suf = lse2(acc_suf, lp[k + 1]);
+                    let x = row[k + 1];
+                    if x > ms {
+                        s = s * safe_exp_neg(ms - x) + 1.0;
+                        ms = x;
+                    } else {
+                        s += safe_exp_neg(x - ms);
+                    }
                 }
                 if k < j {
-                    l_tail += (-acc_suf).max(0.0);
-                    m_suf[k] = -acc_suf;
+                    l_tail += ((m - ms) + (lz - s.ln())).max(0.0);
+                    ms_arr[k] = ms;
+                    s_arr[k] = s;
                 }
             }
-            for i in 1..j {
-                m_suf[i] = lse2(m_suf[i - 1], m_suf[i]);
+            bs_mant[0] = 1.0 / s_arr[0];
+            for t in 1..j {
+                bs_mant[t] = bs_mant[t - 1] * safe_exp_neg(ms_arr[t] - ms_arr[t - 1]) + 1.0 / s_arr[t];
             }
         }
         if j + 2 < r {
-            let mut acc_pre = lp[0];
+            let mut mf = row[0];
+            let mut f = 1.0f32;
             for k in 1..r - 1 {
-                acc_pre = lse2(acc_pre, lp[k]);
+                let x = row[k];
+                if x > mf {
+                    f = f * safe_exp_neg(mf - x) + 1.0;
+                    mf = x;
+                } else {
+                    f += safe_exp_neg(x - mf);
+                }
                 if k > j {
-                    l_tail += (-acc_pre).max(0.0);
-                    m_pre[k] = -acc_pre;
+                    l_tail += ((m - mf) + (lz - f.ln())).max(0.0);
+                    mf_arr[k] = mf;
+                    f_arr[k] = f;
                 }
             }
-            let mut i = r - 2;
-            while i > j + 1 {
-                i -= 1;
-                m_pre[i] = lse2(m_pre[i + 1], m_pre[i]);
+            ap_mant[r - 2] = 1.0 / f_arr[r - 2];
+            let mut t = r - 2;
+            while t > j + 1 {
+                t -= 1;
+                ap_mant[t] = ap_mant[t + 1] * safe_exp_neg(mf_arr[t] - mf_arr[t + 1]) + 1.0 / f_arr[t];
             }
         }
         let scale = ot_weight * wt;
         total += (scale * l_tail) as f64;
         let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
         for (k, out_k) in out_row.iter_mut().enumerate() {
-            let lpk = lp[k];
-            let bm = if k > 0 && j > 0 { fast_exp(lpk + m_suf[(k - 1).min(j - 1)]) } else { 0.0 };
-            let am = if k + 1 < r && j + 2 < r { fast_exp(lpk + m_pre[k.max(j + 1)]) } else { 0.0 };
+            let xk = row[k];
+            let bm = if k > 0 && j > 0 {
+                let t = (k - 1).min(j - 1);
+                safe_exp_neg(xk - ms_arr[t]) * bs_mant[t]
+            } else {
+                0.0
+            };
+            let am = if k + 1 < r && j + 2 < r {
+                let t = k.max(j + 1);
+                safe_exp_neg(xk - mf_arr[t]) * ap_mant[t]
+            } else {
+                0.0
+            };
             *out_k = scale * (r_m2 * p[k] - bm - am);
         }
     }
@@ -453,8 +482,9 @@ pub(super) fn loss_impl(
     let mut tbox = Vec::with_capacity(n * 4);
     let mut bins = Vec::with_capacity(n * 8);
     let mut bin_w = Vec::with_capacity(n * 8);
-    let mut left_bins = Vec::with_capacity(n * 4);
-    let mut side_wt = Vec::with_capacity(n * 4);
+    let use_ot = cfg.dfl_ot_weight > 0.0 && r > 2;
+    let mut left_bins = if use_ot { Vec::with_capacity(n * 4) } else { Vec::new() };
+    let mut side_wt = if use_ot { Vec::with_capacity(n * 4) } else { Vec::new() };
     for k in 0..n {
         let (i, a, c) = (asg.image[k] as usize, asg.anchor[k] as usize, asg.label[k] as usize);
         if i >= b || a >= n_a || c >= nc {
@@ -475,8 +505,10 @@ pub(super) fn loss_impl(
             let (j, wl, wr) = dfl_bins(d);
             bins.extend([j as i64, j as i64 + 1]);
             bin_w.extend([wl * wt, wr * wt]);
-            left_bins.push(j);
-            side_wt.push(wt);
+            if use_ot {
+                left_bins.push(j);
+                side_wt.push(wt);
+            }
         }
     }
     // An anchor has at most one gt (§7.3 step 4); the BCE kernels rely on distinct foreground positions.

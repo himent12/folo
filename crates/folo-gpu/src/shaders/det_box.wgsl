@@ -20,6 +20,8 @@
 // Gradient share of `a` in min(a, b) / max(a, b): folo-core gives ties half to each side.
 fn w_min(a: f32, b: f32) -> f32 { return select(select(0.0, 0.5, a == b), 1.0, a < b); }
 fn w_max(a: f32, b: f32) -> f32 { return select(select(0.0, 0.5, a == b), 1.0, a > b); }
+// Overflow/underflow-safe exp(d) for d <= 0 (d = -inf maps to 0.0 without NaN).
+fn safe_exp_neg(d: f32) -> f32 { return select(0.0, fexp(d), d > -100.0); }
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
@@ -98,18 +100,34 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
             var l_tail = 0.0;
             if (ju > 0u) {
-                var acc_suf = lp[side * R + (R - 1u)];
+                var ms = BOX[base + (side * R + (R - 1u)) * na];
+                var s_acc = 1.0;
                 for (var step = 0u; step + 1u < R; step++) {
                     let k = (R - 2u) - step;
-                    if (step > 0u) { acc_suf = lse2(acc_suf, lp[side * R + k + 1u]); }
-                    if (k < ju) { l_tail = l_tail + max(-acc_suf, 0.0); }
+                    if (step > 0u) {
+                        let x = BOX[base + (side * R + k + 1u) * na];
+                        if (x > ms) {
+                            s_acc = s_acc * safe_exp_neg(ms - x) + 1.0;
+                            ms = x;
+                        } else {
+                            s_acc = s_acc + safe_exp_neg(x - ms);
+                        }
+                    }
+                    if (k < ju) { l_tail = l_tail + max((m - ms) + (lz - log_ge1(s_acc)), 0.0); }
                 }
             }
             if (ju + 2u < R) {
-                var acc_pre = lp[side * R];
+                var mf = BOX[base + (side * R) * na];
+                var f_acc = 1.0;
                 for (var k = 1u; k + 1u < R; k++) {
-                    acc_pre = lse2(acc_pre, lp[side * R + k]);
-                    if (k > ju) { l_tail = l_tail + max(-acc_pre, 0.0); }
+                    let x = BOX[base + (side * R + k) * na];
+                    if (x > mf) {
+                        f_acc = f_acc * safe_exp_neg(mf - x) + 1.0;
+                        mf = x;
+                    } else {
+                        f_acc = f_acc + safe_exp_neg(x - mf);
+                    }
+                    if (k > ju) { l_tail = l_tail + max((m - mf) + (lz - log_ge1(f_acc)), 0.0); }
                 }
             }
             // Subtracted because det_combine.wgsl negates r.z (signed-negative DFL convention).
@@ -122,12 +140,16 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let lam = nwd_lambda((tb.z - tb.x) / inv, (tb.w - tb.y) / inv, nwd_w);
     let c_s = 12.8 * inv;
     if (MODE == 0u) {
-        let l_base = select(
-            1.0 - ciou_eps(pd, tb),
-            rpiou_loss_f(pd, tb, rpiou_beta, rpiou_kappa, rpiou_delta),
-            box_kind == 1u,
-        );
-        let l_box = select(l_base, (1.0 - lam) * l_base + lam * (1.0 - nwd_box(pd, tb, c_s)), lam > 0.0);
+        var l_base = 0.0;
+        if (box_kind == 1u) {
+            l_base = rpiou_loss_f(pd, tb, rpiou_beta, rpiou_kappa, rpiou_delta);
+        } else {
+            l_base = 1.0 - ciou_eps(pd, tb);
+        }
+        var l_box = l_base;
+        if (lam > 0.0) {
+            l_box = (1.0 - lam) * l_base + lam * (1.0 - nwd_box(pd, tb, c_s));
+        }
         OUT[2u * s] = l_box * t;
         OUT[2u * s + 1u] = dfl;
         return;
@@ -169,11 +191,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let dy2 = pd.w - tb.w;
         let e2 = 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
         let ke2_raw = rpiou_kappa * e2;
-        let active_e = is_finite_f(ke2_raw) && ke2_raw < 1e16;
-        let inv1 = select(0.0, 1.0 / (1.0 + ke2_raw), active_e);
-        let g_e = g_base * 0.5 * rpiou_kappa * (inv1 * inv1);
-        let sx = g_e / denom_x;
-        let sy = g_e / denom_y;
+        var sx = 0.0;
+        var sy = 0.0;
+        if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
+            let inv1 = 1.0 / (1.0 + ke2_raw);
+            let g_e = (g_base * 0.5) * (rpiou_kappa * inv1) * inv1;
+            sx = g_e / denom_x;
+            sy = g_e / denom_y;
+        }
         gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + sx * dx1;
         gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + sy * dy1;
         gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + sx * dx2;
@@ -244,30 +269,54 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     for (var side = 0u; side < 4u; side++) {
         let wsum = wl[side] + wr[side];
         let ju = jl[side];
-        var m_suf: array<f32, R>;
-        var m_pre: array<f32, R>;
+        var ms_arr: array<f32, R>;
+        var bs_mant: array<f32, R>;
+        var mf_arr: array<f32, R>;
+        var ap_mant: array<f32, R>;
         if (use_ot) {
             if (ju > 0u) {
-                var acc_suf = lp[side * R + (R - 1u)];
+                var ms = BOX[base + (side * R + (R - 1u)) * na];
+                var s_acc = 1.0;
                 for (var step = 0u; step + 1u < R; step++) {
                     let k = (R - 2u) - step;
-                    if (step > 0u) { acc_suf = lse2(acc_suf, lp[side * R + k + 1u]); }
-                    if (k < ju) { m_suf[k] = -acc_suf; }
+                    if (step > 0u) {
+                        let x = BOX[base + (side * R + k + 1u) * na];
+                        if (x > ms) {
+                            s_acc = s_acc * safe_exp_neg(ms - x) + 1.0;
+                            ms = x;
+                        } else {
+                            s_acc = s_acc + safe_exp_neg(x - ms);
+                        }
+                    }
+                    if (k < ju) {
+                        ms_arr[k] = ms;
+                        bs_mant[k] = 1.0 / s_acc;
+                    }
                 }
                 for (var r = 1u; r < ju; r++) {
-                    m_suf[r] = lse2(m_suf[r - 1u], m_suf[r]);
+                    bs_mant[r] = bs_mant[r - 1u] * safe_exp_neg(ms_arr[r] - ms_arr[r - 1u]) + bs_mant[r];
                 }
             }
             if (ju + 2u < R) {
-                var acc_pre = lp[side * R];
+                var mf = BOX[base + (side * R) * na];
+                var f_acc = 1.0;
                 for (var k = 1u; k + 1u < R; k++) {
-                    acc_pre = lse2(acc_pre, lp[side * R + k]);
-                    if (k > ju) { m_pre[k] = -acc_pre; }
+                    let x = BOX[base + (side * R + k) * na];
+                    if (x > mf) {
+                        f_acc = f_acc * safe_exp_neg(mf - x) + 1.0;
+                        mf = x;
+                    } else {
+                        f_acc = f_acc + safe_exp_neg(x - mf);
+                    }
+                    if (k > ju) {
+                        mf_arr[k] = mf;
+                        ap_mant[k] = 1.0 / f_acc;
+                    }
                 }
                 var r = R - 2u;
                 while (r > ju + 1u) {
                     r = r - 1u;
-                    m_pre[r] = lse2(m_pre[r + 1u], m_pre[r]);
+                    ap_mant[r] = ap_mant[r + 1u] * safe_exp_neg(mf_arr[r] - mf_arr[r + 1u]) + ap_mant[r];
                 }
             }
         }
@@ -277,11 +326,17 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
             if (use_ot) {
-                let lpk = lp[side * R + k];
+                let xk = BOX[base + (side * R + k) * na];
                 var bm = 0.0;
-                if (k > 0u && ju > 0u) { bm = fexp(lpk + m_suf[min(k - 1u, ju - 1u)]); }
+                if (k > 0u && ju > 0u) {
+                    let ti = min(k - 1u, ju - 1u);
+                    bm = safe_exp_neg(xk - ms_arr[ti]) * bs_mant[ti];
+                }
                 var am = 0.0;
-                if (k + 1u < R && ju + 2u < R) { am = fexp(lpk + m_pre[max(k, ju + 1u)]); }
+                if (k + 1u < R && ju + 2u < R) {
+                    let ti = max(k, ju + 1u);
+                    am = safe_exp_neg(xk - mf_arr[ti]) * ap_mant[ti];
+                }
                 gk = gk + ot_scale * (r_m2 * q - bm - am);
             }
             OUT[base + (side * R + k) * na] = gk;

@@ -33,10 +33,10 @@ use serde::{Deserialize, Serialize};
 mod topk;
 pub use topk::{topk_candidates, topk_detections};
 
-/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse`) when
-/// `conf > 0.10`: nearby supporting anchors down to `0.10` join the cluster before final scores are filtered by
-/// `score > conf`. When `conf <= 0.10` (e.g. evaluation at `0.001`), pre-NMS extraction uses `conf` and calibrated
-/// scores below `conf` are kept without post-filtering.
+/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse` /
+/// `DflCgr`) when `conf > 0.10`: nearby supporting anchors down to `0.10` join the cluster before final scores are
+/// filtered by `score > conf`. When `conf <= 0.10` (e.g. evaluation at `0.001`), pre-NMS extraction uses `conf` and
+/// calibrated scores below `conf` are kept without post-filtering.
 pub const CALIBRATED_PRE_CONF: f32 = 0.10;
 
 /// Remaining-box count above which one suppression pass is split across threads.
@@ -115,8 +115,8 @@ impl NmsConfig {
     }
 
     /// Pre-NMS candidate threshold: `0.10` for single-label calibrated scoring (`Elc` / `DflConsensus` /
-    /// `DflRepulse`) when `conf > 0.10`, else `self.conf` unchanged (for `conf <= 0.10`, post-calibration scores
-    /// below `conf` are kept in full).
+    /// `DflRepulse` / `DflCgr`) when `conf > 0.10`, else `self.conf` unchanged (for `conf <= 0.10`, post-calibration
+    /// scores below `conf` are kept in full).
     #[inline]
     pub fn candidate_conf(&self) -> f32 {
         if self.post_filter_calibrated() { CALIBRATED_PRE_CONF } else { self.conf }
@@ -282,8 +282,18 @@ fn batched_nms_inner(
 
     if agnostic {
         let sorted: Vec<Xyxy> = order.iter().map(|&i| boxes[i as usize]).collect();
+        if track_owner {
+            let (kept_s, own_s) = nms_sorted_inner(&sorted, iou_thr, max_det, true);
+            let kept: Vec<usize> = kept_s.into_iter().map(|k| order[k] as usize).collect();
+            let mut own = vec![u32::MAX; n];
+            for (pos, &o) in own_s.iter().enumerate() {
+                if o != u32::MAX {
+                    own[order[pos] as usize] = o;
+                }
+            }
+            return (kept, Some(own));
+        }
         let kept = nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| order[k] as usize).collect();
-        // Agnostic NMS mixes classes; calibrated score rules derive class-local ownership when `None`.
         return (kept, None);
     }
 
@@ -375,20 +385,23 @@ struct Cand {
 }
 
 /// Per-side precisions ([`crate::decode::side_precision`]) of the candidates' sources, by source index (anchor
-/// or input position): what [`BoxFusion::Dfl`] weighs a cluster member's sides by. `None`: equal precisions.
+/// or input position): what [`BoxFusion::Dfl`] and [`BoxFusion::Sebf`] weigh a cluster member's sides by.
+/// `None`: equal precisions.
 pub type Precisions<'a> = Option<&'a [[f32; 4]]>;
 
-/// Optional per-source DFL and anchor metadata passed to post-processing ([`BoxFusion::Dfl`],
-/// [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`]), indexed by source position (anchor or candidate).
+/// Optional per-source DFL and anchor metadata passed to post-processing ([`BoxFusion::Dfl`], [`BoxFusion::Sebf`],
+/// [`ScoreRule::DflConsensus`], [`ScoreRule::DflRepulse`], [`ScoreRule::DflCgr`]), indexed by source position
+/// (anchor or candidate).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DflInputs<'a> {
-    /// Per-side DFL precisions ([`crate::decode::side_precision`]) for [`BoxFusion::Dfl`].
+    /// Per-side DFL precisions ([`crate::decode::side_precision`]) for [`BoxFusion::Dfl`] / [`BoxFusion::Sebf`].
     pub precision: Precisions<'a>,
     /// Scale-free per-side DFL bin precisions ([`crate::decode::bin_precision`]) for [`ScoreRule::DflConsensus`].
     pub bin_precision: Precisions<'a>,
-    /// Mean 4-side DFL Shannon entropy in nats ([`crate::decode::dfl_entropy`]) for [`ScoreRule::DflRepulse`].
+    /// Mean 4-side DFL Shannon entropy in nats ([`crate::decode::dfl_entropy`]) for [`ScoreRule::DflRepulse`] /
+    /// [`ScoreRule::DflCgr`].
     pub entropy: Option<&'a [f32]>,
-    /// Anchor stride in input pixels for [`ScoreRule::DflRepulse`]'s cross-scale consensus term.
+    /// Anchor stride in input pixels for [`ScoreRule::DflRepulse`] / [`ScoreRule::DflCgr`]'s cross-scale consensus.
     pub strides: Option<&'a [f32]>,
 }
 
@@ -491,14 +504,17 @@ fn finish(
             class: classes[k],
         })
         .collect();
+    // Calibrated score rules always use class-local ownership (docs/MODEL.md §9.4), so under `agnostic` NMS
+    // pass `None` to derive class-local owners while `BoxFusion::Sebf` above receives the actual agnostic NMS owners.
+    let score_owner = if cfg.agnostic { None } else { owner.as_deref() };
     let new_scores = match cfg.score {
         ScoreRule::None => None,
         ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes)),
-        ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou)),
+        ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou)),
         ScoreRule::DflConsensus => {
             let bp = dfl.bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
             let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
-            Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, owner.as_deref(), cfg.iou, bp))
+            Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou, bp))
         }
         ScoreRule::DflRepulse | ScoreRule::DflCgr => {
             let repulse_boxes: Vec<Xyxy> = dets.iter().map(|d| d.bbox).collect();
@@ -507,7 +523,7 @@ fn finish(
             let st = dfl.strides.map(|s| move |k: usize| s[cands_slice[k].idx as usize]);
             let st = st.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
             let scorer = if cfg.score == ScoreRule::DflCgr { dfl_cgr_scores } else { dfl_repulse_scores };
-            Some(scorer(&kept, &boxes, &repulse_boxes, &scores, &classes, owner.as_deref(), cfg.iou, ent, st))
+            Some(scorer(&kept, &boxes, &repulse_boxes, &scores, &classes, score_owner, cfg.iou, ent, st))
         }
     };
     if let Some(new_scores) = new_scores {

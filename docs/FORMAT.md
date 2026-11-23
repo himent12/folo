@@ -106,7 +106,8 @@ separately.
   "step": 1234,                                            // number of optimizer.step() calls; equals optim.__step
   "musgd": { "muon": 0.5, "sgd": 0.5 },                    // MuSGD step weights; only when not the defaults
   "muon_ortho": "polar4" | "polar5",                       // MuSGD ortho schedule; omitted for legacy "ns5"
-  "muon_geo": "geo" }                                      // MuSGD Conv-GeoMuon mode; omitted for legacy
+  "muon_geo": "geo",                                       // MuSGD Conv-GeoMuon mode; omitted for legacy
+  "muon_depthwise": ["..."] }                              // Muon-group depthwise convs under "geo"; omitted when empty
 ```
 `musgd` holds MuSGD's step weights (docs/MODEL.md §8.2, `train.musgd.muon` / `train.musgd.sgd`): both finite and
 `>= 0`, and only on a `"musgd"` contract. It is written only when the weights differ from the defaults 0.2 / 1.0, so a
@@ -118,7 +119,9 @@ resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's ort
 compatible with pre-Polar checkpoints (note that trainer checkpoints' informational `folo.train` adds `musgd.ortho`).
 `muon_geo` holds MuSGD's optional geometric conditioning mode (`"geo"` for Conv-GeoMuon, docs/MODEL.md §8.2; only on a
 `"musgd"` contract, omitted for legacy so existing checkpoints stay byte-for-byte identical and absent `muon_geo`
-resumes in legacy mode).
+resumes in legacy mode). `muon_depthwise` lists the Muon-group parameter names routed to the zero-GEMM per-channel
+Polar LMO under `"muon_geo": "geo"` (omitted when empty or in legacy mode; rejected on non-`"musgd"` or non-`"geo"`
+contracts, on duplicates, or on names outside Muon groups), and resuming restores each group's depthwise mask from it.
 When `muon_ortho` is absent, resuming restores legacy `"ns5"` (5-step Newton–Schulz: bit-exact with pre-Polar `"ns5"`
 on the CPU and deterministic save/resume within the same binary; GPU `"ns5"` runs through the current 4-aligned
 symmetric `muon_gemm` kernel rather than preserving pre-Polar GPU tile reduction order or binding-limit boundaries),

@@ -25,17 +25,17 @@ use crate::nms::{Candidate, Detection, DflInputs, NmsConfig, class_allowed};
 pub struct ImageCandidates {
     /// The candidates that [`FoloModel::finish_candidates`] can keep, with their boxes.
     pub cands: Vec<Candidate>,
-    /// With DFL evidence fusion (`NmsConfig::fusion == BoxFusion::Dfl`, an `o2m` head): each candidate's side
-    /// precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
+    /// With DFL evidence fusion (`NmsConfig::fusion.wants_side_precision()`, i.e. `Dfl` or `Sebf`, on an `o2m`
+    /// head): each candidate's side precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
     pub precisions: Option<Vec<[f32; 4]>>,
     /// With DFL consensus scoring (`NmsConfig::score == ScoreRule::DflConsensus`, an `o2m` head): each candidate's
     /// scale-free bin precisions, parallel to `cands`, the dense path's bit for bit. `None` otherwise.
     pub bin_precisions: Option<Vec<[f32; 4]>>,
-    /// With DFL entropy repulsion scoring (`NmsConfig::score == ScoreRule::DflRepulse`, an `o2m` head): each
+    /// With DFL entropy repulsion scoring (`ScoreRule::DflRepulse` or `ScoreRule::DflCgr`, an `o2m` head): each
     /// candidate's mean 4-side DFL Shannon entropy in nats, parallel to `cands`. `None` otherwise.
     pub entropies: Option<Vec<f32>>,
-    /// With a score rule that uses anchor strides (`ScoreRule::DflRepulse`, an `o2m` head): each candidate's
-    /// anchor stride in input pixels, parallel to `cands`. `None` otherwise.
+    /// With a score rule that uses anchor strides (`ScoreRule::DflRepulse` or `ScoreRule::DflCgr`, an `o2m` head):
+    /// each candidate's anchor stride in input pixels, parallel to `cands`. `None` otherwise.
     pub strides: Option<Vec<f32>>,
 }
 

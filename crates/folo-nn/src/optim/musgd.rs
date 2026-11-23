@@ -694,10 +694,25 @@ impl Optimizer for MuSgd {
         // older readers cleanly reject `Polar4` / `Polar5` checkpoints instead of silently resuming with `Ns5`.
         c.muon_ortho = (self.ortho != MuonOrtho::Ns5).then_some(self.ortho);
         c.muon_geo = (!self.geo.is_legacy()).then_some(self.geo);
+        if self.geo == MuonGeoMode::Geo {
+            let mut dw = Vec::new();
+            for g in self.sgd.groups() {
+                if !is_muon_group(&g.name) {
+                    continue;
+                }
+                for (pi, (name, p)) in g.params.iter().enumerate() {
+                    if Self::uses_muon(g, p) && g.is_depthwise(pi) {
+                        dw.push(name.clone());
+                    }
+                }
+            }
+            c.muon_depthwise = dw;
+        }
         c
     }
 
-    /// Also adopts the contract's step weights, orthogonalisation schedule and geometric conditioning mode.
+    /// Also adopts the contract's step weights, orthogonalisation schedule, geometric conditioning mode and
+    /// depthwise parameter selection.
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
         let weights = c.musgd.unwrap_or(self.weights);
         weights.validate().map_err(|e| Error::Load(format!("folo.optim: {e}")))?;
@@ -705,6 +720,14 @@ impl Optimizer for MuSgd {
         self.weights = weights;
         self.ortho = c.muon_ortho.unwrap_or(MuonOrtho::Ns5);
         self.geo = c.muon_geo.unwrap_or(MuonGeoMode::Legacy);
+        let dw_set: std::collections::HashSet<&str> = c.muon_depthwise.iter().map(String::as_str).collect();
+        for g in self.sgd.groups_mut() {
+            if self.geo == MuonGeoMode::Geo && !dw_set.is_empty() && is_muon_group(&g.name) {
+                g.depthwise = g.params.iter().map(|(n, _)| dw_set.contains(n.as_str())).collect();
+            } else {
+                g.depthwise.clear();
+            }
+        }
         self.ensure_buffers()?;
         Ok(())
     }

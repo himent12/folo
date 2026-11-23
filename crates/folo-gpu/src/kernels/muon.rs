@@ -223,7 +223,7 @@ pub(crate) fn muon_step_within(
     Ok(true)
 }
 
-/// Branch A: exact zero-GEMM per-channel block-diagonal Polar LMO for depthwise conv weights.
+/// Exact zero-GEMM per-channel block-diagonal Polar LMO for depthwise conv weights (`Conv-GeoMuon`).
 fn run_dw_group(
     ctx: &GpuContext,
     items: &[&MuonMatrix<'_>],
@@ -477,7 +477,7 @@ mod tests {
             let (r, c) = (rows.min(cols), rows.max(cols));
             let n = (r * align4(c)) as u64;
             let n_sq = (r * align4(r)) as u64;
-            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 3]) {
+            for (s, v) in sum.iter_mut().zip([n, n_sq, n.div_ceil(256) * 2, STRIDE as u64 + 2]) {
                 *s += v;
             }
         }

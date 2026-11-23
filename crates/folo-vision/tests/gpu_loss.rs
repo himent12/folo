@@ -279,7 +279,7 @@ fn unsupported_settings_fall_back_to_the_host() {
     assert_eq!(got.total_value, want.total_value);
 }
 
-/// CPU-vs-GPU parity for `R-PIoU`, `OT-DFL`, and `R-PIoU + OT-DFL`.
+/// CPU-vs-GPU parity for `R-PIoU`, `OT-DFL`, `R-PIoU + OT-DFL`, `R-PIoU + NWD`, and `reg_max = 2`.
 #[test]
 fn new_math_formulas_match_host() {
     let dev = gpu!();
@@ -287,8 +287,14 @@ fn new_math_formulas_match_host() {
     let rpiou = LossConfig { box_loss: BoxLossKind::Rpiou, ..LossConfig::default() };
     let otdfl = LossConfig { dfl_ot_weight: 0.25, ..LossConfig::default() };
     let box_combo = LossConfig { dfl_ot_weight: 0.25, ..rpiou };
+    let rpiou_nwd = LossConfig { nwd_weight: 0.5, ..rpiou };
 
-    for (name, seed, cfg) in [("rpiou", 61, rpiou), ("otdfl", 62, otdfl), ("rpiou+otdfl", 63, box_combo)] {
+    for (name, seed, cfg) in [
+        ("rpiou", 61, rpiou),
+        ("otdfl", 62, otdfl),
+        ("rpiou+otdfl", 63, box_combo),
+        ("rpiou+nwd", 64, rpiou_nwd),
+    ] {
         let (anchors, box_raw, cls_raw, targets) = case(seed, 128, 5);
         let (bd, cd) = (
             box_raw.to_device(dev).unwrap().requires_grad_(),
@@ -321,5 +327,131 @@ fn new_math_formulas_match_host() {
             let scale = w.iter().fold(0f32, |m, v| m.max(v.abs()));
             close_vec(&g, &w, 2e-4 * scale.max(1e-4), 2e-3, &format!("{name}/{tensor_name}"));
         }
+    }
+
+    // `reg_max = 2` (OT-DFL vanishes identically; R-PIoU + DFL still match CPU).
+    {
+        let anchors = make_anchors(64, 64, &[8, 16], 0.5);
+        let mut rng = Rng::seed(65);
+        let cfg = LossConfig {
+            reg_max: 2,
+            box_loss: BoxLossKind::Rpiou,
+            dfl_ot_weight: 0.5,
+            ..LossConfig::default()
+        };
+        let box_raw = Tensor::randn([1, 8, anchors.len()], 0.0, 1.0, &mut rng);
+        let cls_raw = Tensor::rand_uniform([1, 3, anchors.len()], -4.0, 1.0, &mut rng);
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(10.0, 12.0, 38.0, 44.0)], labels: vec![1] }];
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite() && got.num_fg > 0);
+        assert!((got.total_value - want.total_value).abs() <= 2e-4 * want.total_value.abs().max(1e-3));
+        let (gg, gw) = (got.total.backward().unwrap(), want.total.backward().unwrap());
+        let g = gg.get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let w = gw.get(&bh).unwrap().to_vec::<f32>().unwrap();
+        let scale = w.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&g, &w, 2e-4 * scale.max(1e-4), 2e-3, "reg_max=2/box_raw");
+    }
+}
+
+/// Edge-case CPU-vs-GPU regressions:
+/// 1. Extreme OT-DFL logits `[-1e8, -1e8, -1e8, 0]` on an active foreground anchor (`R = 4`, left bin `j = 0`):
+///    shifted tail accumulators keep `ln(2)` / `ln(3)` exact, matching CPU and preserving zero-sum gradients.
+/// 2. Saturated `R-PIoU` edge penalty (`rpiou_kappa = 3e38`, `box_gain = 7.5`): GPU backward must stay finite
+///    (no `Inf * 0 = NaN` overflow) and match CPU.
+#[test]
+fn new_math_extreme_edge_cases_match_host() {
+    let dev = gpu!();
+    use folo_vision::loss::BoxLossKind;
+
+    // 1. Extreme OT-DFL logits on active foreground anchor (`R = 4`, `j = 0`).
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let mut box_data = vec![0.0f32; 16 * a];
+        for side in 0..4 {
+            for k in 0..3 {
+                for j in 0..a {
+                    box_data[(side * 4 + k) * a + j] = -1e8;
+                }
+            }
+        }
+        let box_raw = Tensor::from_slice(&box_data, [1, 16, a]).unwrap();
+        let cls_raw = Tensor::from_slice(&vec![0.0f32; a], [1, 1, a]).unwrap();
+        // Anchor (3, 3) sits at px (28, 28); target box gives exact ltrb = 0.25 grid cells -> j = 0.
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(26.0, 26.0, 30.0, 30.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 4,
+            box_gain: 0.0,
+            cls_gain: 0.0,
+            dfl_gain: 1.0,
+            dfl_ot_weight: 1.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite() && got.num_fg > 0, "extreme OT-DFL must be finite with fg > 0");
+        assert!(
+            (got.total_value - want.total_value).abs() <= 1e-4 * want.total_value.abs().max(1.0),
+            "extreme OT-DFL loss: {} vs {}",
+            got.total_value,
+            want.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_gpu.iter().all(|v| v.is_finite()), "extreme OT-DFL GPU grad must be finite");
+        assert!(g_gpu.iter().any(|v| v.abs() > 0.0), "extreme OT-DFL GPU grad must be non-zero");
+        close_vec(&g_gpu, &g_cpu, 1e-4, 1e-4, "extreme_otdfl/box_raw");
+        // Verify shift invariance: per-(anchor, side) sum of logits gradient is 0.
+        for j in 0..a {
+            for side in 0..4 {
+                let s: f32 = (0..4).map(|k| g_gpu[(side * 4 + k) * a + j]).sum();
+                assert!(s.abs() < 1e-4, "anchor {j} side {side}: non-zero logit grad sum {s}");
+            }
+        }
+    }
+
+    // 2. Saturated `R-PIoU` (`rpiou_kappa = 3e38`, `box_gain = 7.5`).
+    {
+        let anchors = make_anchors(64, 64, &[8, 16], 0.5);
+        let mut rng = Rng::seed(71);
+        let cfg = LossConfig {
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_kappa: 3e38,
+            box_gain: 7.5,
+            ..LossConfig::default()
+        };
+        let box_raw = Tensor::randn([1, 64, anchors.len()], 0.0, 1.0, &mut rng);
+        let cls_raw = Tensor::rand_uniform([1, 2, anchors.len()], -3.0, 1.0, &mut rng);
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(10.0, 12.0, 46.0, 50.0)], labels: vec![0] }];
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert!(got.is_finite() && got.num_fg > 0, "saturated R-PIoU must be finite");
+        assert!(
+            (got.total_value - want.total_value).abs() <= 2e-4 * want.total_value.abs().max(1e-3),
+            "saturated R-PIoU loss: {} vs {}",
+            got.total_value,
+            want.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_gpu.iter().all(|v| v.is_finite()), "saturated R-PIoU GPU grad must be finite");
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&g_gpu, &g_cpu, 2e-4 * scale.max(1e-4), 2e-3, "saturated_rpiou/box_raw");
     }
 }

@@ -251,3 +251,45 @@ fn deterministic() {
     let s = fuse_boxes_sebf(&kept, &boxes, &scores, &classes, false, 0.75, None, 0.78, Some(&prec));
     assert_eq!(s, fuse_boxes_sebf(&kept, &boxes, &scores, &classes, false, 0.75, None, 0.78, Some(&prec)));
 }
+
+/// Regression: if asymmetric per-side precisions at a low `fusion_iou` invert the first weighted fit `b1`, SEBF
+/// must return the original kept box `b` instead of an inverted box.
+#[test]
+fn sebf_inverted_first_fit_falls_back_to_kept_box() {
+    let boxes = [b(0.0, 0.0, 10.0, 10.0), b(-6.0, 0.0, 4.0, 10.0), b(6.0, 0.0, 16.0, 10.0)];
+    let scores = [0.9f32, 0.8, 0.8];
+    let classes = [0u32, 0, 0];
+    // Kept box has zero horizontal precision; left neighbor pins x2 = 4, right neighbor pins x1 = 6 -> b1 = [6, 4].
+    let prec = |j: usize| match j {
+        0 => [0.0, 1.0, 0.0, 1.0],
+        1 => [0.0, 1.0, 100.0, 1.0],
+        _ => [100.0, 1.0, 0.0, 1.0],
+    };
+    let got = fuse_boxes_sebf(&[0], &boxes, &scores, &classes, false, 0.2, None, 0.2, Some(&prec))[0];
+    assert_eq!(got, boxes[0], "inverted b1 must fall back to kept box");
+}
+
+/// Regression: under `agnostic: true` NMS with a non-finite highest-scoring kept box that suppresses a candidate,
+/// SEBF receives actual agnostic NMS ownership and must not let the next kept box steal that suppressed candidate.
+#[test]
+fn sebf_agnostic_respects_actual_nms_ownership_with_nan_box() {
+    use crate::nms::{Detection, NmsConfig, nms_detections};
+    let boxes = [b(f32::NAN, 0.0, 5.5, 10.0), b(1.2, 0.0, 11.2, 10.0), b(0.0, 0.0, 10.0, 10.0)];
+    let input = [
+        Detection { bbox: boxes[0], score: 0.9, class: 0 },
+        Detection { bbox: boxes[1], score: 0.8, class: 1 },
+        Detection { bbox: boxes[2], score: 0.7, class: 2 },
+    ];
+    let cfg = NmsConfig {
+        conf: 0.0,
+        iou: 0.78,
+        fusion: BoxFusion::Sebf,
+        fusion_iou: 0.78,
+        score: ScoreRule::None,
+        agnostic: true,
+        ..NmsConfig::default()
+    };
+    let dets = nms_detections(&input, &cfg);
+    assert_eq!(dets.len(), 2, "box 0 (NaN) suppresses box 2, keeping boxes 0 and 1");
+    assert_eq!(dets[1].bbox, boxes[1], "box 1 must not fuse box 2 owned by box 0");
+}
