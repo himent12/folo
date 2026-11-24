@@ -295,8 +295,9 @@ pub(crate) fn map2(
     out
 }
 
-/// Map two strided `f32` operands using vectorised contiguous/unit-stride slice kernels (both `(1, 1)` and
-/// `(1, 0)` broadcast-`b`, common in `sum_all`/`mean_all` backwards) and their scalar twin.
+/// Map two strided `f32` operands of the form `b * deriv(a)` using vectorised contiguous/unit-stride slice
+/// kernels (both `(1, 1)` and `(1, 0)` broadcast-`b`, common in `sum_all`/`mean_all` backwards), hoisting
+/// `deriv(a)` out of `(0, 1)` broadcast-`a` rows, and using the scalar twin on general strides.
 #[inline]
 fn map2_slice(
     a: &[f32],
@@ -305,7 +306,7 @@ fn map2_slice(
     lb: &Layout,
     slice_fn: fn(&[f32], &[f32], &mut [f32]),
     bc_b_fn: fn(&[f32], f32, &mut [f32]),
-    scalar_fn: fn(f32, f32) -> f32,
+    deriv_scalar: fn(f32) -> f32,
 ) -> Vec<f32> {
     let n = la.numel();
     let mut out = alloc_uninit(n);
@@ -330,14 +331,14 @@ fn map2_slice(
             (1, 1) => slice_fn(&a[oa..oa + len], &b[ob..ob + len], row),
             (1, 0) => bc_b_fn(&a[oa..oa + len], b[ob], row),
             (0, 1) => {
-                let av = a[oa];
+                let d = deriv_scalar(a[oa]);
                 for (r, &bv) in row.iter_mut().zip(&b[ob..ob + len]) {
-                    *r = scalar_fn(av, bv);
+                    *r = bv * d;
                 }
             }
             _ => {
                 for (i, r) in row.iter_mut().enumerate() {
-                    *r = scalar_fn(a[oa + i * sa], b[ob + i * sb]);
+                    *r = b[ob + i * sb] * deriv_scalar(a[oa + i * sa]);
                 }
             }
         }
@@ -400,10 +401,11 @@ pub fn fast_exp(x: f32) -> f32 {
     if x.is_nan() { x } else { v }
 }
 
-/// `x · sigmoid(x)`: the CPU's SiLU, element by element, bitwise identical to `Tensor::silu` on the CPU.
+/// `x · sigmoid(x)`: the CPU's SiLU, element by element, bitwise identical to `Tensor::silu` on the CPU for
+/// all non-NaN inputs (NaN stays NaN).
 #[inline(always)]
 pub fn silu(x: f32) -> f32 {
-    simd::silu_epilogue_scalar(x)
+    simd::silu_scalar(x)
 }
 
 /// `g · silu'(x)`: bitwise identical to the CPU backward of `Tensor::silu` for all non-NaN inputs.
@@ -504,7 +506,7 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Acos => map1(x, lx, f32::acos),
         Erf => map1(x, lx, erf),
         Sigmoid => map1_slice(x, lx, simd::sigmoid_slice, simd::sigmoid_scalar),
-        Silu => map1_slice(x, lx, simd::silu_slice, simd::silu_epilogue_scalar),
+        Silu => map1_slice(x, lx, simd::silu_slice, simd::silu_scalar),
         Relu => map1(x, lx, |v| v.max(0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
@@ -539,7 +541,7 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
     match op {
         Neg => map2(x, lx, g, lg, |_, g| -g),
         Abs => map2(x, lx, g, lg, |x, g| g * sign(x)),
-        Exp => map2_slice(x, lx, g, lg, simd::exp_bwd_slice, simd::exp_bwd_broadcast_g, simd::exp_bwd_scalar),
+        Exp => map2_slice(x, lx, g, lg, simd::exp_bwd_slice, simd::exp_bwd_broadcast_g, simd::exp_scalar),
         Log => map2(x, lx, g, lg, |x, g| g / x),
         Sqrt => map2(x, lx, g, lg, |x, g| g * 0.5 / x.sqrt()),
         // Divide in stages rather than squaring x, which under/overflows for representable results.
@@ -571,11 +573,17 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
             lg,
             simd::sigmoid_bwd_slice,
             simd::sigmoid_bwd_broadcast_g,
-            simd::sigmoid_bwd_scalar,
+            simd::sigmoid_deriv_scalar,
         ),
-        Silu => {
-            map2_slice(x, lx, g, lg, simd::silu_bwd_slice, simd::silu_bwd_broadcast_g, simd::silu_bwd_scalar)
-        }
+        Silu => map2_slice(
+            x,
+            lx,
+            g,
+            lg,
+            simd::silu_bwd_slice,
+            simd::silu_bwd_broadcast_g,
+            simd::silu_deriv_scalar,
+        ),
         Relu => map2(x, lx, g, lg, |x, g| if x > 0.0 { g } else { 0.0 }),
         LeakyRelu(a) => map2(x, lx, g, lg, move |x, g| if x > 0.0 { g } else { a * g }),
         Hardswish => map2(x, lx, g, lg, |x, g| {
@@ -594,7 +602,7 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
             lg,
             simd::softplus_bwd_slice,
             simd::softplus_bwd_broadcast_g,
-            simd::softplus_bwd_scalar,
+            simd::sigmoid_scalar,
         ),
         Clamp(lo, hi) => map2(x, lx, g, lg, move |x, g| if x >= lo && x <= hi { g } else { 0.0 }),
         PowScalar(p) => map2(x, lx, g, lg, move |x, g| if p == 0.0 { 0.0 } else { g * p * x.powf(p - 1.0) }),

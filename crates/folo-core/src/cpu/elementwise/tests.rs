@@ -209,13 +209,13 @@ fn exp_sigmoid_silu_simd_accuracy_and_edges() {
         // Single-input exp/sigmoid preserve NaN payload; all kernels match scalar twin bitwise on non-NaNs.
         assert_eq!(y_exp[i].to_bits(), simd::exp_scalar(x).to_bits(), "exp bits at {x}");
         assert_eq!(y_sig[i].to_bits(), simd::sigmoid_scalar(x).to_bits(), "sigmoid bits at {x}");
-        assert_same_val(y_silu[i], simd::silu_epilogue_scalar(x), "silu");
+        assert_same_val(y_silu[i], simd::silu_scalar(x), "silu");
         assert_same_val(y_silu[i], silu(x), "public silu");
-        assert_same_val(b_exp[i], simd::exp_bwd_scalar(x, g), "exp_bwd");
-        assert_same_val(b_sig[i], simd::sigmoid_bwd_scalar(x, g), "sig_bwd");
+        assert_same_val(b_exp[i], g * simd::exp_scalar(x), "exp_bwd");
+        assert_same_val(b_sig[i], g * simd::sigmoid_deriv_scalar(x), "sig_bwd");
         assert_same_val(b_silu[i], simd::silu_bwd_scalar(x, g), "silu_bwd");
         assert_same_val(b_silu[i], silu_backward(x, g), "public silu_backward");
-        assert_same_val(b_sp[i], simd::softplus_bwd_scalar(x, g), "softplus_bwd");
+        assert_same_val(b_sp[i], g * simd::sigmoid_scalar(x), "softplus_bwd");
 
         if x.is_nan() {
             assert!(y_exp[i].is_nan() && y_sig[i].is_nan() && y_silu[i].is_nan());
@@ -283,9 +283,9 @@ fn exp_sigmoid_silu_simd_accuracy_and_edges() {
     assert_eq!(simd::sigmoid_scalar(90.0), 1.0);
     assert_eq!(simd::sigmoid_scalar(f32::INFINITY), 1.0);
     assert_eq!(simd::sigmoid_scalar(f32::NEG_INFINITY), 0.0);
-    assert_eq!(simd::sigmoid_bwd_scalar(0.0, 2.0), 0.5);
-    assert_eq!(simd::sigmoid_bwd_scalar(f32::INFINITY, 2.0), 0.0);
-    assert_eq!(simd::sigmoid_bwd_scalar(f32::NEG_INFINITY, 2.0), 0.0);
+    assert_eq!(2.0 * simd::sigmoid_deriv_scalar(0.0), 0.5);
+    assert_eq!(2.0 * simd::sigmoid_deriv_scalar(f32::INFINITY), 0.0);
+    assert_eq!(2.0 * simd::sigmoid_deriv_scalar(f32::NEG_INFINITY), 0.0);
     assert_eq!(simd::silu_bwd_scalar(0.0, 2.0), 1.0);
     assert_eq!(simd::silu_bwd_scalar(90.0, 2.0), 2.0);
     assert!(simd::silu_bwd_scalar(f32::INFINITY, 2.0).is_nan());
