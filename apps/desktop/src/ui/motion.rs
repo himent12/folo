@@ -9,8 +9,10 @@ static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
 /// Settings › Reduce motion: stops pulses and shimmers and makes transitions instant.
 /// Whether the OS asks for less motion (Windows: Settings › Accessibility › Animation effects off).
+/// Unit tests return `false` so headless tests stay deterministic on Windows Server CI runners where
+/// client-area animations are off by default.
 pub fn os_prefers_reduced_motion() -> bool {
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
@@ -21,7 +23,7 @@ pub fn os_prefers_reduced_motion() -> bool {
             unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
         ok != 0 && on == 0
     }
-    #[cfg(not(windows))]
+    #[cfg(not(all(windows, not(test))))]
     {
         false
     }
