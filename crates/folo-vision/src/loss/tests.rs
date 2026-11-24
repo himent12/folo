@@ -288,4 +288,36 @@ fn new_losses_finite_diff_and_edge_cases() {
         }
         assert!(sum.abs() < 1e-5, "side {side}: OT gradient sum must be 0, got {sum}");
     }
+
+    // Regression: CPU R-PIoU must reuse the tensor-decoded box (`softmax` -> `dist` -> `pd`) bit-for-bit so a
+    // ground truth matched to the tensor-decoded box incurs zero edge penalty even at `kappa = 1e16`.
+    let p_left =
+        Tensor::from_slice(&[0.0f32, -2.0], [1, 2]).unwrap().softmax(1).unwrap().to_vec::<f32>().unwrap();
+    let d_left = p_left[1];
+    let anchors1 =
+        crate::decode::Anchors { points: vec![[d_left, 0.5]], strides: vec![1.0], ..Default::default() };
+    let bx2 = Tensor::from_slice(&[0.0f32, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1, 8, 1]).unwrap();
+    let cx1b = Tensor::zeros([1, 1, 1]);
+    let mut asg1 = BatchAssignment { batch: 1, num_classes: 1, num_anchors: 1, ..Default::default() };
+    asg1.image.push(0);
+    asg1.anchor.push(0);
+    asg1.label.push(0);
+    asg1.score.push(1.0);
+    asg1.target.push(Xyxy::new(0.0, 0.0, d_left + 0.5, 1.0));
+    let cfg_rpi = LossConfig {
+        reg_max: 2,
+        box_loss: BoxLossKind::Rpiou,
+        rpiou_kappa: 1e16,
+        rpiou_delta: 0.1,
+        box_gain: 1.0,
+        cls_gain: 0.0,
+        dfl_gain: 0.0,
+        ..LossConfig::default()
+    };
+    let out_rpi = loss_with_assignment(&bx2, &cx1b, &anchors1, &asg1, &cfg_rpi).unwrap();
+    assert!(
+        out_rpi.total_value.abs() < 1e-6,
+        "exact tensor-decoded match must have 0 R-PIoU loss, got {}",
+        out_rpi.total_value
+    );
 }

@@ -907,4 +907,78 @@ fn new_math_extreme_edge_cases_match_host() {
         );
         close_vec(&g_gpu, &g_cpu, 2e-2 * logit_g_ref.abs(), 2e-2, "extreme_box_gain_rpiou/box_raw");
     }
+
+    // 11. Small excluded OT-DFL mass (`reg_max = 4`, target distance `1.5`, logits `[-20, 0, 0, -1000]` on all
+    //     sides, `dfl_ot_weight = 1e8`, `dfl_gain = 1.0`): naive `ln(Z) - ln(S)` rounds both sums to `2.0` and
+    //     drops the barrier to `0`; `softplus(log_excl - log_ret)` preserves `~0.10306` on both CPU and GPU.
+    {
+        let anchors = Anchors { points: vec![[3.5, 3.5]], strides: vec![8.0], ..Anchors::default() };
+        let mut bd_v = vec![0.0f32; 16];
+        for s in 0..4 {
+            bd_v[s * 4] = -20.0;
+            bd_v[s * 4 + 3] = -1000.0;
+        }
+        let bx = Tensor::from_slice(&bd_v, [1, 16, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(16.0, 16.0, 40.0, 40.0)], labels: vec![0] }];
+        let cfg0 =
+            LossConfig { reg_max: 4, box_gain: 0.0, cls_gain: 0.0, dfl_gain: 1.0, ..LossConfig::default() };
+        let cfg1 = LossConfig { dfl_ot_weight: 1e8, ..cfg0 };
+        let b0 = detection_loss_host(&bx, &cx, &anchors, &tgts, &cfg0).unwrap();
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg1).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg1).unwrap();
+        let ot_ref = (1e8f64 * ((-20.0f64 - 2.0f64.ln()).exp().ln_1p())) as f32; // ~0.1030577
+        assert!(
+            ((want.total_value - b0.total_value) - ot_ref).abs() <= 1e-4,
+            "CPU small-excl OT {} vs {ot_ref}",
+            want.total_value - b0.total_value
+        );
+        assert!(
+            ((got.total_value - b0.total_value) - ot_ref).abs() <= 1e-4,
+            "GPU small-excl OT {} vs {ot_ref}",
+            got.total_value - b0.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        close_vec(&g_gpu, &g_cpu, 1e-4, 1e-3, "small_excl_otdfl/box_raw");
+    }
+
+    // 12. Extreme `box_gain = 2e38` on R-PIoU focal-IoU (`0.25x0.25` centered inside `0.5x0.5`, `beta = 0`,
+    //     `kappa = 1e-30`): loss is `~1.5e38` and per-bin logit grad is `~±2.19e37` (finite on CPU and GPU).
+    {
+        let anchors = Anchors { points: vec![[0.5, 0.5]], strides: vec![1.0], ..Anchors::default() };
+        let l1 = (1.0f32 / 7.0).ln(); // softmax([0, l1])[1] = 0.125 -> 0.25x0.25 box centered at (0.5, 0.5)
+        let bx = Tensor::from_slice(&[0.0, l1, 0.0, l1, 0.0, l1, 0.0, l1], [1, 8, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(0.25, 0.25, 0.75, 0.75)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 2,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.0,
+            rpiou_kappa: 1e-30,
+            box_gain: 2e38,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            tal: folo_vision::assign::TalConfig {
+                nwd_weight: 1.0,
+                ..folo_vision::assign::TalConfig::default()
+            },
+            ..LossConfig::default()
+        };
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
+        assert!(got.is_finite() && want.is_finite());
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()) && g_gpu.iter().all(|v| v.is_finite()));
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(scale > 1e36, "expected ~2.19e37 finite focal-IoU logit grad, got {scale}");
+        close_vec(&g_gpu, &g_cpu, 1e-3 * scale, 2e-3, "extreme_focal_iou_box_gain/box_raw");
+    }
 }

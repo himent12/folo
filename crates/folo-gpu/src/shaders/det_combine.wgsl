@@ -56,7 +56,7 @@ fn main(@builtin(local_invocation_index) lid: u32) {
             let on = norm_f32(OT[0] / tss);
             let wn = norm_f32(dfl_ot_w);
             let gn = norm_f32(dfl_g);
-            wd = wd + mul_pow2(on.x * wn.x * gn.x, i32(on.y) + i32(wn.y) + i32(gn.y) + 32);
+            wd = wd + mul_pow2(on.x * wn.x * gn.x, i32(on.y) + i32(wn.y) + i32(gn.y) + 24);
         }
         var total = (wb + wc + wd) * nb;
         let bad = MISC[0] != 0u;

@@ -232,6 +232,87 @@ fn gather_flat_cpu(x: &Tensor, idx: Vec<usize>) -> Result<Tensor> {
     })
 }
 
+/// Single-box `R-PIoU` forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64`, matching `det_box.wgsl` tie-breaking.
+fn rpiou_box_f64(a: [f64; 4], b: [f64; 4], beta: f64, kappa: f64, delta0: f64) -> (f64, [f64; 4]) {
+    const EPS: f64 = 1e-7;
+    const KE2_MAX: f64 = 1e16;
+    let w_min = |x: f64, y: f64| {
+        if x < y {
+            1.0
+        } else if x == y {
+            0.5
+        } else {
+            0.0
+        }
+    };
+    let w_max = |x: f64, y: f64| {
+        if x > y {
+            1.0
+        } else if x == y {
+            0.5
+        } else {
+            0.0
+        }
+    };
+    let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
+    let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
+    let w1 = (ax2 - ax1).max(0.0);
+    let h1 = (ay2 - ay1).max(0.0);
+    let w2 = (bx2 - bx1).max(0.0);
+    let h2 = (by2 - by1).max(0.0);
+    let ix = ax2.min(bx2) - ax1.max(bx1);
+    let iy = ay2.min(by2) - ay1.max(by1);
+    let iw = ix.max(0.0);
+    let ih = iy.max(0.0);
+    let inter = iw * ih;
+    let uni = w1 * h1 + w2 * h2 - inter + EPS;
+    let iou = inter / uni;
+    let focal = (1.0 - iou) * (1.0 + beta * iou);
+    let g_u = -(1.0 - beta + 2.0 * beta * iou);
+    let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
+    let g_uni = -g_u * inter / (uni * uni);
+    let g_w1 = if ax2 > ax1 { g_uni * h1 } else { 0.0 };
+    let g_h1 = if ay2 > ay1 { g_uni * w1 } else { 0.0 };
+    let g_ix = if ix > 0.0 { g_inter * ih } else { 0.0 };
+    let g_iy = if iy > 0.0 { g_inter * iw } else { 0.0 };
+    let mut g = [
+        -g_w1 - g_ix * w_max(ax1, bx1),
+        -g_h1 - g_iy * w_max(ay1, by1),
+        g_w1 + g_ix * w_min(ax2, bx2),
+        g_h1 + g_iy * w_min(ay2, by2),
+    ];
+    let d2 = delta0 * delta0;
+    let denom_x = w2 * w2 + d2;
+    let denom_y = h2 * h2 + d2;
+    let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
+    let ke2_raw = kappa * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
+    let edge = if ke2_raw.is_finite() {
+        let ke2 = ke2_raw.min(KE2_MAX);
+        ke2 / (1.0 + ke2)
+    } else if ke2_raw.is_infinite() {
+        1.0
+    } else {
+        ke2_raw
+    };
+    if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
+        let inv1 = 1.0 / (1.0 + ke2_raw);
+        let c = 0.5 * kappa * inv1 * inv1;
+        if dx1 != 0.0 {
+            g[0] += c * (dx1 / denom_x);
+        }
+        if dy1 != 0.0 {
+            g[1] += c * (dy1 / denom_y);
+        }
+        if dx2 != 0.0 {
+            g[2] += c * (dx2 / denom_x);
+        }
+        if dy2 != 0.0 {
+            g[3] += c * (dy2 / denom_y);
+        }
+    }
+    (focal + edge, g)
+}
+
 /// Differentiable Rational-Focal Edge-Decoupled IoU loss (`R-PIoU`) between rows of `b1` (predicted) and `b2`
 /// (ground truth), both `[N, 4]` `xyxy` in grid units, returning `[N]`:
 ///
@@ -239,171 +320,76 @@ fn gather_flat_cpu(x: &Tensor, idx: Vec<usize>) -> Result<Tensor> {
 ///
 /// where `u = IoU(b1, b2)` and
 /// `E^2 = 0.25 * (((ax1 - bx1)^2 + (ax2 - bx2)^2) / (w_g^2 + delta0^2) + ((ay1 - by1)^2 + (ay2 - by2)^2) / (h_g^2 + delta0^2))`.
-/// Focal IoU term `(1 - u) * (1 + beta * u)` of [`rpiou_loss`].
-fn rpiou_focal_iou(b1: &Tensor, b2: &Tensor, beta: f32) -> Result<Tensor> {
-    const EPS: f32 = 1e-7;
-    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
-    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
-    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
-    let (w1, h1) = (ax2.sub(&ax1)?.relu()?, ay2.sub(&ay1)?.relu()?);
-    let (w2, h2) = (bx2.sub(&bx1)?.relu()?, by2.sub(&by1)?.relu()?);
-    let iw = ax2.minimum(&bx2)?.sub(&ax1.maximum(&bx1)?)?.relu()?;
-    let ih = ay2.minimum(&by2)?.sub(&ay1.maximum(&by1)?)?.relu()?;
-    let inter = iw.mul(&ih)?;
-    let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.add_scalar(EPS)?;
-    let iou = inter.div(&union)?;
-    iou.rsub_scalar(1.0)?.mul(&iou.mul_scalar(beta)?.add_scalar(1.0)?)
-}
-
 /// Purely algebraic (no `atan` or `exp`), with zero enclosing-box expansion and a global gradient bound; `b2` is
-/// treated as constant ground truth for the edge penalty (GPU training uses the fused `det_box.wgsl` kernel).
+/// treated as constant ground truth (evaluated in `f64` on CPU; GPU training uses the fused `det_box.wgsl` kernel).
 pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
-    let focal_iou = rpiou_focal_iou(b1, b2, beta)?;
-    let edge_pen = rpiou_edge_penalty(b1, b2, kappa, delta0)?;
-    focal_iou.add(&edge_pen)
-}
-
-/// Overflow- and underflow-safe rational edge penalty `ke2 / (1 + ke2)` with `ke2 = min(kappa * E^2, 1e16)` for
-/// `b1, b2: [N, 4]`.
-///
-/// Evaluated in `f64` so extreme `delta0`, `w2`, and `kappa` across the entire finite `f32` range never overflow,
-/// underflow, or produce `Inf * 0 = NaN` in forward or backward.
-fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Result<Tensor> {
-    const KE2_MAX: f64 = 1e16;
     let (n, c) = b1.dims2()?;
     debug_assert_eq!(c, 4);
     let dev = b1.device();
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
-    let k64 = kappa as f64;
-    let d2 = (delta0 as f64) * (delta0 as f64);
+    let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
     let mut out = vec![0.0f32; n];
+    let mut g_box = vec![[0.0f64; 4]; n];
     for i in 0..n {
-        let (ax1, ay1, ax2, ay2) =
-            (a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64);
-        let (bx1, by1, bx2, by2) =
-            (b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64);
-        let w2 = (bx2 - bx1).max(0.0);
-        let h2 = (by2 - by1).max(0.0);
-        let denom_x = w2 * w2 + d2;
-        let denom_y = h2 * h2 + d2;
-        let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-        let ke2_raw = k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-        out[i] = if ke2_raw.is_finite() {
-            let ke2 = ke2_raw.min(KE2_MAX);
-            (ke2 / (1.0 + ke2)) as f32
-        } else if ke2_raw.is_infinite() {
-            1.0
-        } else {
-            ke2_raw as f32
-        };
+        let ai = [a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64];
+        let bi = [b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64];
+        let (lv, gv) = rpiou_box_f64(ai, bi, b64, k64, d64);
+        out[i] = lv as f32;
+        g_box[i] = gv;
     }
     let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
-    Tensor::custom_op("rpiou_edge_penalty", &[b1], out_t, move |g| {
+    Tensor::custom_op("rpiou_loss", &[b1], out_t, move |g| {
         let gv = g.to_vec::<f32>()?;
         let mut grad = vec![0.0f32; 4 * n];
         for i in 0..n {
-            let (ax1, ay1, ax2, ay2) =
-                (a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64);
-            let (bx1, by1, bx2, by2) =
-                (b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64);
-            let w2 = (bx2 - bx1).max(0.0);
-            let h2 = (by2 - by1).max(0.0);
-            let denom_x = w2 * w2 + d2;
-            let denom_y = h2 * h2 + d2;
-            let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-            let ke2_raw =
-                k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-            if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
-                let inv1 = 1.0 / (1.0 + ke2_raw);
-                let c = 0.5 * (gv[i] as f64) * k64 * inv1 * inv1;
-                grad[4 * i] = if dx1 == 0.0 { 0.0 } else { (c * (dx1 / denom_x)) as f32 };
-                grad[4 * i + 1] = if dy1 == 0.0 { 0.0 } else { (c * (dy1 / denom_y)) as f32 };
-                grad[4 * i + 2] = if dx2 == 0.0 { 0.0 } else { (c * (dx2 / denom_x)) as f32 };
-                grad[4 * i + 3] = if dy2 == 0.0 { 0.0 } else { (c * (dy2 / denom_y)) as f32 };
+            let gi = gv[i] as f64;
+            if gi == 0.0 {
+                continue;
+            }
+            for s in 0..4 {
+                grad[4 * i + s] = (gi * g_box[i][s]) as f32;
             }
         }
         Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
     })
 }
 
-/// Rational edge penalty `ke2 / (1 + ke2)` directly from DFL `logits: [N, 4, R]`, carrying the edge derivative
-/// through the DFL softmax Jacobian in `f64` before rounding the final logit gradient to `f32`, so extreme
-/// `box_gain * kappa` never overflows an intermediate coordinate gradient when the final logit gradient fits in `f32`.
-fn rpiou_edge_from_logits(
+/// Full `R-PIoU` directly from DFL `logits: [N, 4, R]`, reusing the tensor-decoded `probs`, `dist`, and `pd` so
+/// focal-IoU and edge terms evaluate the exact same predicted box and carry both derivatives through the DFL softmax
+/// Jacobian in `f64` before rounding the final logit gradient to `f32`.
+#[allow(clippy::too_many_arguments)]
+fn rpiou_from_logits(
     logits: &Tensor,
-    anchor4: &[f32],
+    probs_t: &Tensor,
+    dist_t: &Tensor,
+    pd_t: &Tensor,
     tbox: &[f32],
+    beta: f32,
     kappa: f32,
     delta0: f32,
 ) -> Result<Tensor> {
-    const KE2_MAX: f64 = 1e16;
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
     let dev = logits.device();
-    let data = logits.to_vec::<f32>()?;
-    let mut probs = vec![0.0f32; n * 4 * r];
-    let mut dists = vec![0.0f32; n * 4];
-    for idx in 0..n * 4 {
-        let row = &data[idx * r..(idx + 1) * r];
-        let mut m = f32::NEG_INFINITY;
-        for &x in row {
-            m = m.max(x);
-        }
-        let mut z = 0.0f32;
-        let prow = &mut probs[idx * r..(idx + 1) * r];
-        for (pk, &x) in prow.iter_mut().zip(row) {
-            let e = (x - m).exp();
-            *pk = e;
-            z += e;
-        }
-        let mut d = 0.0f32;
-        for (k, pk) in prow.iter_mut().enumerate() {
-            *pk /= z;
-            d += *pk * k as f32;
-        }
-        dists[idx] = d;
-    }
-    let k64 = kappa as f64;
-    let d2 = (delta0 as f64) * (delta0 as f64);
-    let signs = [-1.0f32, -1.0, 1.0, 1.0];
+    let probs = probs_t.to_vec::<f32>()?;
+    let dists = dist_t.to_vec::<f32>()?;
+    let pds = pd_t.to_vec::<f32>()?;
+    let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
     let mut out = vec![0.0f32; n];
     let mut base_d = vec![0.0f64; n * 4];
     for i in 0..n {
-        let pd = [
-            anchor4[4 * i] + signs[0] * dists[4 * i],
-            anchor4[4 * i + 1] + signs[1] * dists[4 * i + 1],
-            anchor4[4 * i + 2] + signs[2] * dists[4 * i + 2],
-            anchor4[4 * i + 3] + signs[3] * dists[4 * i + 3],
-        ];
-        let (ax1, ay1, ax2, ay2) = (pd[0] as f64, pd[1] as f64, pd[2] as f64, pd[3] as f64);
-        let (bx1, by1, bx2, by2) =
-            (tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64);
-        let w2 = (bx2 - bx1).max(0.0);
-        let h2 = (by2 - by1).max(0.0);
-        let denom_x = w2 * w2 + d2;
-        let denom_y = h2 * h2 + d2;
-        let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-        let ke2_raw = k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
-        out[i] = if ke2_raw.is_finite() {
-            let ke2 = ke2_raw.min(KE2_MAX);
-            (ke2 / (1.0 + ke2)) as f32
-        } else if ke2_raw.is_infinite() {
-            1.0
-        } else {
-            ke2_raw as f32
-        };
-        if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
-            let inv1 = 1.0 / (1.0 + ke2_raw);
-            let c = 0.5 * k64 * inv1 * inv1;
-            base_d[4 * i] = if dx1 == 0.0 { 0.0 } else { -c * (dx1 / denom_x) };
-            base_d[4 * i + 1] = if dy1 == 0.0 { 0.0 } else { -c * (dy1 / denom_y) };
-            base_d[4 * i + 2] = if dx2 == 0.0 { 0.0 } else { c * (dx2 / denom_x) };
-            base_d[4 * i + 3] = if dy2 == 0.0 { 0.0 } else { c * (dy2 / denom_y) };
-        }
+        let ai = [pds[4 * i] as f64, pds[4 * i + 1] as f64, pds[4 * i + 2] as f64, pds[4 * i + 3] as f64];
+        let bi = [tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64];
+        let (lv, g_xyxy) = rpiou_box_f64(ai, bi, b64, k64, d64);
+        out[i] = lv as f32;
+        base_d[4 * i] = -g_xyxy[0];
+        base_d[4 * i + 1] = -g_xyxy[1];
+        base_d[4 * i + 2] = g_xyxy[2];
+        base_d[4 * i + 3] = g_xyxy[3];
     }
     let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
-    Tensor::custom_op("rpiou_edge_logits", &[logits], out_t, move |g| {
+    Tensor::custom_op("rpiou_from_logits", &[logits], out_t, move |g| {
         let gv = g.to_vec::<f32>()?;
         let mut grad = vec![0.0f32; n * 4 * r];
         for i in 0..n {
@@ -435,11 +421,10 @@ fn safe_exp_neg(d: f32) -> f32 {
 }
 
 /// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:
-/// `(dfl_gain * ot_weight / tss) * Σ_{n, side} side_wt * (Σ_{k < j} max(-log S_k, 0) + Σ_{k > j} max(-log F_k, 0))`
-/// for `logits: [N, 4, R]`, keeping running maxima and mantissas separate so even extreme logits (e.g.
-/// `[-1e8, -1e8, -1e8, 0]`) preserve exact relative ratios (`1/2`, `1/3`) and the zero-sum gradient invariant,
-/// and normalizing by `tss` in `f64` before scaling by `ot_weight * dfl_gain` so multi-positive sums never overflow
-/// prematurely in `f32`.
+/// `(dfl_gain * ot_weight / tss) * Σ_{n, side} side_wt * Σ_{k != j} softplus(log Z_excl(k) - log Z_ret(k))`
+/// for `logits: [N, 4, R]`, accumulating retained and excluded masses separately in `f64` so tiny excluded masses
+/// (e.g. `[-20, 0, 0, -1000]`), extreme logits (`[-1e38; 5, 0]`, `[-1e8, -1e8, -1e8, 0]`), and multi-positive sums
+/// never suffer cancellation or premature overflow.
 fn ot_dfl_tail(
     logits: &Tensor,
     left_bins: &[usize],
@@ -454,118 +439,133 @@ fn ot_dfl_tail(
     if r <= 2 || ot_weight <= 0.0 || n == 0 {
         return Tensor::zeros_with([], DType::F32, dev);
     }
+    let softplus_sig = |m_e: f32, a_e: f64, m_r: f32, a_r: f64| -> (f64, f64) {
+        let delta = (m_e as f64 - m_r as f64) + (a_e.ln() - a_r.ln());
+        if delta >= 0.0 {
+            let e = (-delta).exp();
+            (delta + e.ln_1p(), 1.0 / (1.0 + e))
+        } else if delta > -700.0 {
+            let e = delta.exp();
+            (e.ln_1p(), e / (1.0 + e))
+        } else {
+            (0.0, 0.0)
+        }
+    };
     let data = logits.to_vec::<f32>()?;
-    let mut grad_unit = vec![0.0f32; n * 4 * r];
+    let mut grad_unit = vec![0.0f64; n * 4 * r];
     let mut total = 0.0f64;
-    let r_m2 = (r - 2) as f32;
-    let mut p = vec![0.0f32; r];
-    let mut ms_arr = vec![0.0f32; r];
-    let mut s_arr = vec![0.0f32; r];
-    let mut mf_arr = vec![0.0f32; r];
-    let mut f_arr = vec![0.0f32; r];
-    let mut bs_mant = vec![0.0f32; r];
-    let mut ap_mant = vec![0.0f32; r];
+    let mut pref_m = vec![0.0f32; r];
+    let mut pref_a = vec![0.0f64; r];
+    let mut m_ret = vec![0.0f32; r];
+    let mut ret_mant = vec![0.0f64; r];
+    let mut m_exc = vec![0.0f32; r];
+    let mut exc_mant = vec![0.0f64; r];
     for idx in 0..n * 4 {
-        let wt = side_wt[idx];
+        let wt = side_wt[idx] as f64;
         if wt == 0.0 {
             continue;
         }
         let j = left_bins[idx];
         let row = &data[idx * r..(idx + 1) * r];
-        let mut m = f32::NEG_INFINITY;
-        for &x in row {
-            m = m.max(x);
-        }
-        let mut z = 0.0f32;
-        for (pk, &x) in p.iter_mut().zip(row) {
-            let e = safe_exp_neg(x - m);
-            *pk = e;
-            z += e;
-        }
-        let lz = (z as f64).ln();
-        for pk in &mut p {
-            *pk /= z;
+        let mut pm = row[0];
+        let mut pa = 1.0f64;
+        pref_m[0] = pm;
+        pref_a[0] = pa;
+        for k in 1..r - 1 {
+            let x = row[k];
+            if x > pm {
+                pa = pa * (safe_exp_neg(pm - x) as f64) + 1.0;
+                pm = x;
+            } else {
+                pa += safe_exp_neg(x - pm) as f64;
+            }
+            pref_m[k] = pm;
+            pref_a[k] = pa;
         }
         let mut l_tail = 0.0f64;
-        if j > 0 {
-            let mut ms = row[r - 1];
-            let mut s = 1.0f32;
-            for step in 0..r - 1 {
-                let k = (r - 2) - step;
-                if step > 0 {
-                    let x = row[k + 1];
-                    if x > ms {
-                        s = s * safe_exp_neg(ms - x) + 1.0;
-                        ms = x;
-                    } else {
-                        s += safe_exp_neg(x - ms);
-                    }
-                }
-                if k < j {
-                    l_tail += ((m as f64 - ms as f64) + (lz - (s as f64).ln())).max(0.0);
-                    ms_arr[k] = ms;
-                    s_arr[k] = s;
+        let mut sm = row[r - 1];
+        let mut sa = 1.0f64;
+        for step in 0..r - 1 {
+            let k = (r - 2) - step;
+            if step > 0 {
+                let x = row[k + 1];
+                if x > sm {
+                    sa = sa * (safe_exp_neg(sm - x) as f64) + 1.0;
+                    sm = x;
+                } else {
+                    sa += safe_exp_neg(x - sm) as f64;
                 }
             }
-            bs_mant[0] = 1.0 / s_arr[0];
+            if k < j {
+                let (sp, sig) = softplus_sig(pref_m[k], pref_a[k], sm, sa);
+                l_tail += sp;
+                m_exc[k] = pref_m[k];
+                exc_mant[k] = sig / pref_a[k];
+                m_ret[k] = sm;
+                ret_mant[k] = sig / sa;
+            } else if k > j {
+                let (sp, sig) = softplus_sig(sm, sa, pref_m[k], pref_a[k]);
+                l_tail += sp;
+                m_ret[k] = pref_m[k];
+                ret_mant[k] = sig / pref_a[k];
+                m_exc[k] = sm;
+                exc_mant[k] = sig / sa;
+            }
+        }
+        if j > 0 {
             for t in 1..j {
-                bs_mant[t] = bs_mant[t - 1] * safe_exp_neg(ms_arr[t] - ms_arr[t - 1]) + 1.0 / s_arr[t];
+                ret_mant[t] += ret_mant[t - 1] * (safe_exp_neg(m_ret[t] - m_ret[t - 1]) as f64);
+            }
+            let mut t = j - 1;
+            while t > 0 {
+                t -= 1;
+                exc_mant[t] += exc_mant[t + 1] * (safe_exp_neg(m_exc[t] - m_exc[t + 1]) as f64);
             }
         }
         if j + 2 < r {
-            let mut mf = row[0];
-            let mut f = 1.0f32;
-            for k in 1..r - 1 {
-                let x = row[k];
-                if x > mf {
-                    f = f * safe_exp_neg(mf - x) + 1.0;
-                    mf = x;
-                } else {
-                    f += safe_exp_neg(x - mf);
-                }
-                if k > j {
-                    l_tail += ((m as f64 - mf as f64) + (lz - (f as f64).ln())).max(0.0);
-                    mf_arr[k] = mf;
-                    f_arr[k] = f;
-                }
-            }
-            ap_mant[r - 2] = 1.0 / f_arr[r - 2];
             let mut t = r - 2;
             while t > j + 1 {
                 t -= 1;
-                ap_mant[t] = ap_mant[t + 1] * safe_exp_neg(mf_arr[t] - mf_arr[t + 1]) + 1.0 / f_arr[t];
+                ret_mant[t] += ret_mant[t + 1] * (safe_exp_neg(m_ret[t] - m_ret[t + 1]) as f64);
+            }
+            for t in j + 2..r - 1 {
+                exc_mant[t] += exc_mant[t - 1] * (safe_exp_neg(m_exc[t] - m_exc[t - 1]) as f64);
             }
         }
-        total += (wt as f64) * l_tail;
+        total += wt * l_tail;
         let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
         for (k, out_k) in out_row.iter_mut().enumerate() {
             let xk = row[k];
-            let bm = if k > 0 && j > 0 {
-                let t = (k - 1).min(j - 1);
-                safe_exp_neg(xk - ms_arr[t]) * bs_mant[t]
-            } else {
-                0.0
-            };
-            let am = if k + 1 < r && j + 2 < r {
-                let t = k.max(j + 1);
-                safe_exp_neg(xk - mf_arr[t]) * ap_mant[t]
-            } else {
-                0.0
-            };
-            *out_k = wt * (r_m2 * p[k] - bm - am);
+            let mut d_ot = 0.0f64;
+            if j > 0 {
+                if k < j {
+                    d_ot += (safe_exp_neg(xk - m_exc[k]) as f64) * exc_mant[k];
+                }
+                if k > 0 {
+                    let ti = (k - 1).min(j - 1);
+                    d_ot -= (safe_exp_neg(xk - m_ret[ti]) as f64) * ret_mant[ti];
+                }
+            }
+            if j + 2 < r {
+                if k + 1 < r {
+                    let ti = k.max(j + 1);
+                    d_ot -= (safe_exp_neg(xk - m_ret[ti]) as f64) * ret_mant[ti];
+                }
+                if k > j + 1 {
+                    let ti = (k - 1).min(r - 2);
+                    d_ot += (safe_exp_neg(xk - m_exc[ti]) as f64) * exc_mant[ti];
+                }
+            }
+            *out_k = wt * d_ot;
         }
     }
     let out_val = ((total / tss as f64) * ot_weight as f64 * dfl_gain as f64) as f32;
     let out = Tensor::scalar(out_val).to_device(dev)?;
     let shape = [n, 4, r];
     Tensor::custom_op("ot_dfl_tail", &[logits], out, move |g| {
-        let gv = g.item::<f32>()?;
-        let sd = gv * (dfl_gain / tss);
-        let scaled: Vec<f32> = if sd.abs() <= 1.0 {
-            grad_unit.iter().map(|&u| (u * sd) * ot_weight).collect()
-        } else {
-            grad_unit.iter().map(|&u| (u * ot_weight) * sd).collect()
-        };
+        let gv = g.item::<f32>()? as f64;
+        let scale = gv * (dfl_gain as f64 / tss as f64) * (ot_weight as f64);
+        let scaled: Vec<f32> = grad_unit.iter().map(|&u| (u * scale) as f32).collect();
         Ok(vec![Some(Tensor::from_vec(scaled, shape)?.to_device(dev)?)])
     })
 }
@@ -754,18 +754,23 @@ pub(super) fn loss_impl(
 
         // Box: DFL expectation → grid-unit xyxy → CIoU or R-PIoU against the target.
         let proj = on_dev(Tensor::arange(0.0, r as f32, 1.0)?)?;
-        let dist = logits.softmax(2)?.mul(&proj)?.sum(2, false)?;
+        let probs = logits.softmax(2)?;
+        let dist = probs.mul(&proj)?.sum(2, false)?;
         let sign = on_dev(Tensor::from_slice(&[-1.0f32, -1.0, 1.0, 1.0], [4])?)?;
-        let rpiou_edge = if cfg.box_loss == BoxLossKind::Rpiou {
-            Some(rpiou_edge_from_logits(&logits, &anchor4, &tbox, cfg.rpiou_kappa, cfg.rpiou_delta)?)
-        } else {
-            None
-        };
         let pd = on_dev(Tensor::from_vec(anchor4, [n, 4])?)?.add(&dist.mul(&sign)?)?;
-        let tb = on_dev(Tensor::from_vec(tbox, [n, 4])?)?;
+        let tb = on_dev(Tensor::from_slice(&tbox, [n, 4])?)?;
         let l_base = match cfg.box_loss {
             BoxLossKind::Ciou => ciou(&pd, &tb)?.rsub_scalar(1.0)?,
-            BoxLossKind::Rpiou => rpiou_focal_iou(&pd, &tb, cfg.rpiou_beta)?.add(&rpiou_edge.unwrap())?,
+            BoxLossKind::Rpiou => rpiou_from_logits(
+                &logits,
+                &probs,
+                &dist,
+                &pd,
+                &tbox,
+                cfg.rpiou_beta,
+                cfg.rpiou_kappa,
+                cfg.rpiou_delta,
+            )?,
         };
         let box_per = if cfg.nwd_weight > 0.0 {
             let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();

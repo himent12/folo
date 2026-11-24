@@ -3,8 +3,8 @@
 // cross-entropy at the two bins around each side's clamped target distance, weighted t / 4. Slots that are not
 // positive, or have t = 0, contribute nothing.
 // MODE 0 writes OUT[3s] = box term, OUT[3s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL CE
-// term before its sign), and OUT[3s + 2] = Σ_sides wt · (OT_SHIFT · L_ot) (scaled by OT_SHIFT = 2^-32 and unscaled
-// by dfl_ot_weight so det_combine normalises by tss before restoring +32 and multiplying). MODE 1 writes the gradient
+// term before its sign), and OUT[3s + 2] = Σ_sides wt · (OT_SHIFT · L_ot) (scaled by OT_SHIFT = 2^-24 and unscaled
+// by dfl_ot_weight so det_combine normalises by tss before restoring +24 and multiplying). MODE 1 writes the gradient
 // of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
 // first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
 // S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
@@ -19,9 +19,39 @@
 @group(0) @binding(6) var<storage, read> STATS: array<f32>;
 @group(0) @binding(7) var<storage, read> GRAD: array<f32>;
 
-// Exact 2^-32 scaling factor for OT-DFL slot accumulation so extreme logits (e.g. -1e38) never overflow f32 before
-// `det_combine.wgsl` normalises by `tss` and restores the +32 exponent alongside `dfl_ot_weight` and `dfl_gain`.
-const OT_SHIFT: f32 = 2.3283064365386963e-10; // 2^-32
+// Exact 2^-24 scaling factor for OT-DFL slot accumulation so both tiny excluded masses (e.g. exp(-20)) and extreme
+// logits (e.g. -1e38) stay in normal f32 range before `det_combine.wgsl` normalises by `tss` and restores +24.
+const OT_SHIFT: f32 = 5.960464477539063e-8; // 2^-24
+
+// Scaled softplus `OT_SHIFT * softplus((m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r)))` without f32 overflow or
+// small-excluded-mass cancellation.
+fn ot_softplus_s(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> f32 {
+    let dm_s = m_e * OT_SHIFT - m_r * OT_SHIFT;
+    let dl = log_ge1(a_e) - log_ge1(a_r);
+    if (dm_s > 100.0 * OT_SHIFT) {
+        return dm_s + dl * OT_SHIFT;
+    }
+    let delta = (m_e - m_r) + dl;
+    if (delta >= 0.0) {
+        return (delta + log1p_unit(safe_exp_neg(-delta))) * OT_SHIFT;
+    }
+    if (delta > -88.0) {
+        return log1p_unit(fexp(delta)) * OT_SHIFT;
+    }
+    return 0.0;
+}
+
+// Overflow-safe sigmoid `1 / (1 + exp(-delta))` for `delta = (m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r))`.
+fn ot_sigmoid(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> f32 {
+    let dm_s = m_e * OT_SHIFT - m_r * OT_SHIFT;
+    if (dm_s > 100.0 * OT_SHIFT) { return 1.0; }
+    let delta = (m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r));
+    if (delta >= 0.0) {
+        return 1.0 / (1.0 + safe_exp_neg(-delta));
+    }
+    let e = safe_exp_neg(delta);
+    return e / (1.0 + e);
+}
 
 // Exponent-split R-PIoU edge derivative `sign_s * (u / denom) * inv1^2 * (q_m * 2^e_q) * g_half` as `(mant, exp)`.
 // Kept in split form until multiplied by the DFL softmax Jacobian so extreme `box_gain * kappa` never overflows an
@@ -117,42 +147,41 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         wr[side] = (1.0 - l) * wt;
         dfl = dfl + lp[side * R + ju] * wl[side] + lp[side * R + ju + 1u] * wr[side];
         if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
+            var pref_m: array<f32, R>;
+            var pref_a: array<f32, R>;
+            var pm = BOX[base + (side * R) * na];
+            var pa = 1.0;
+            pref_m[0] = pm;
+            pref_a[0] = pa;
+            for (var k = 1u; k + 1u < R; k++) {
+                let x = BOX[base + (side * R + k) * na];
+                if (x > pm) {
+                    pa = pa * safe_exp_neg(pm - x) + 1.0;
+                    pm = x;
+                } else {
+                    pa = pa + safe_exp_neg(x - pm);
+                }
+                pref_m[k] = pm;
+                pref_a[k] = pa;
+            }
             var l_tail_s = 0.0;
-            let ms_base = m * OT_SHIFT;
-            let lz_s = lz * OT_SHIFT;
-            if (ju > 0u) {
-                var ms = BOX[base + (side * R + (R - 1u)) * na];
-                var s_acc = 1.0;
-                for (var step = 0u; step + 1u < R; step++) {
-                    let k = (R - 2u) - step;
-                    if (step > 0u) {
-                        let x = BOX[base + (side * R + k + 1u) * na];
-                        if (x > ms) {
-                            s_acc = s_acc * safe_exp_neg(ms - x) + 1.0;
-                            ms = x;
-                        } else {
-                            s_acc = s_acc + safe_exp_neg(x - ms);
-                        }
-                    }
-                    if (k < ju) {
-                        l_tail_s = l_tail_s + max((ms_base - ms * OT_SHIFT) + (lz_s - log_ge1(s_acc) * OT_SHIFT), 0.0);
+            var sm = BOX[base + (side * R + (R - 1u)) * na];
+            var sa = 1.0;
+            for (var step = 0u; step + 1u < R; step++) {
+                let k = (R - 2u) - step;
+                if (step > 0u) {
+                    let x = BOX[base + (side * R + k + 1u) * na];
+                    if (x > sm) {
+                        sa = sa * safe_exp_neg(sm - x) + 1.0;
+                        sm = x;
+                    } else {
+                        sa = sa + safe_exp_neg(x - sm);
                     }
                 }
-            }
-            if (ju + 2u < R) {
-                var mf = BOX[base + (side * R) * na];
-                var f_acc = 1.0;
-                for (var k = 1u; k + 1u < R; k++) {
-                    let x = BOX[base + (side * R + k) * na];
-                    if (x > mf) {
-                        f_acc = f_acc * safe_exp_neg(mf - x) + 1.0;
-                        mf = x;
-                    } else {
-                        f_acc = f_acc + safe_exp_neg(x - mf);
-                    }
-                    if (k > ju) {
-                        l_tail_s = l_tail_s + max((ms_base - mf * OT_SHIFT) + (lz_s - log_ge1(f_acc) * OT_SHIFT), 0.0);
-                    }
+                if (k < ju) {
+                    l_tail_s = l_tail_s + ot_softplus_s(pref_m[k], pref_a[k], sm, sa);
+                } else if (k > ju) {
+                    l_tail_s = l_tail_s + ot_softplus_s(sm, sa, pref_m[k], pref_a[k]);
                 }
             }
             ot_sum = ot_sum + wt * l_tail_s;
@@ -187,6 +216,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var gy1 = 0.0;
     var gx2 = 0.0;
     var gy2 = 0.0;
+    var fiou_d = vec4<f32>(0.0);
     var edge_m = vec4<f32>(0.0);
     var edge_e = vec4<i32>(0);
     if (box_kind == 1u) {
@@ -202,13 +232,21 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let inter = iw * ih;
         let uni = w1 * h1 + w2 * h2 - inter + eps;
         let iou = inter / uni;
-        let g_u = -g_base * (1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
+        // Keep focal-IoU derivatives unscaled by `g_base` until multiplied by the DFL softmax Jacobian so extreme
+        // `box_gain` values cannot overflow `g_base / uni` when the final logit gradient fits in f32.
+        let g_u = -(1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
         let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
         let g_uni = -g_u * inter / (uni * uni);
         let g_w1 = select(0.0, g_uni * h1, pd.z > pd.x);
         let g_h1 = select(0.0, g_uni * w1, pd.w > pd.y);
         let g_ix = select(0.0, g_inter * ih, ix > 0.0);
         let g_iy = select(0.0, g_inter * iw, iy > 0.0);
+        fiou_d = vec4<f32>(
+            g_w1 + g_ix * w_max(pd.x, tb.x),
+            g_h1 + g_iy * w_max(pd.y, tb.y),
+            g_w1 + g_ix * w_min(pd.z, tb.z),
+            g_h1 + g_iy * w_min(pd.w, tb.w),
+        );
         let rkn = norm_f32(sqrt(rpiou_kappa));
         let sx = max(w2, rpiou_delta);
         let sy = max(h2, rpiou_delta);
@@ -239,10 +277,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             edge_m = vec4<f32>(s0.x, s1.x, s2.x, s3.x);
             edge_e = vec4<i32>(i32(s0.y), i32(s1.y), i32(s2.y), i32(s3.y));
         }
-        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x);
-        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y);
-        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z);
-        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w);
     } else {
         let eps = 1e-7;
         let w1 = pd.z - pd.x;
@@ -304,58 +338,81 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}) + S_dfl · OT_tail.
     let sd = STATS[10] * g;
     let use_ot = dfl_ot_w > 0.0 && R > 2u;
-    let r_m2 = f32(R - 2u);
+    let gbn = norm_f32(g_base);
     for (var side = 0u; side < 4u; side++) {
         let wsum = wl[side] + wr[side];
         let ju = jl[side];
-        var ms_arr: array<f32, R>;
-        var bs_mant: array<f32, R>;
-        var mf_arr: array<f32, R>;
-        var ap_mant: array<f32, R>;
+        var m_ret: array<f32, R>;
+        var ret_mant: array<f32, R>;
+        var m_exc: array<f32, R>;
+        var exc_mant: array<f32, R>;
         if (use_ot) {
-            if (ju > 0u) {
-                var ms = BOX[base + (side * R + (R - 1u)) * na];
-                var s_acc = 1.0;
-                for (var step = 0u; step + 1u < R; step++) {
-                    let k = (R - 2u) - step;
-                    if (step > 0u) {
-                        let x = BOX[base + (side * R + k + 1u) * na];
-                        if (x > ms) {
-                            s_acc = s_acc * safe_exp_neg(ms - x) + 1.0;
-                            ms = x;
-                        } else {
-                            s_acc = s_acc + safe_exp_neg(x - ms);
-                        }
-                    }
-                    if (k < ju) {
-                        ms_arr[k] = ms;
-                        bs_mant[k] = 1.0 / s_acc;
+            // Prefix `0..=k` in `pref_m/pref_a` (left-tail excluded for k < ju, right-tail retained for k > ju).
+            var pref_m: array<f32, R>;
+            var pref_a: array<f32, R>;
+            var pm = BOX[base + (side * R) * na];
+            var pa = 1.0;
+            pref_m[0] = pm;
+            pref_a[0] = pa;
+            for (var k = 1u; k + 1u < R; k++) {
+                let x = BOX[base + (side * R + k) * na];
+                if (x > pm) {
+                    pa = pa * safe_exp_neg(pm - x) + 1.0;
+                    pm = x;
+                } else {
+                    pa = pa + safe_exp_neg(x - pm);
+                }
+                pref_m[k] = pm;
+                pref_a[k] = pa;
+            }
+            // Suffix `(k+1)..R` (left-tail retained for k < ju, right-tail excluded for k > ju).
+            var sm = BOX[base + (side * R + (R - 1u)) * na];
+            var sa = 1.0;
+            for (var step = 0u; step + 1u < R; step++) {
+                let k = (R - 2u) - step;
+                if (step > 0u) {
+                    let x = BOX[base + (side * R + k + 1u) * na];
+                    if (x > sm) {
+                        sa = sa * safe_exp_neg(sm - x) + 1.0;
+                        sm = x;
+                    } else {
+                        sa = sa + safe_exp_neg(x - sm);
                     }
                 }
+                if (k < ju) {
+                    let sig = ot_sigmoid(pref_m[k], pref_a[k], sm, sa);
+                    m_exc[k] = pref_m[k];
+                    exc_mant[k] = sig / pref_a[k];
+                    m_ret[k] = sm;
+                    ret_mant[k] = sig / sa;
+                } else if (k > ju) {
+                    let sig = ot_sigmoid(sm, sa, pref_m[k], pref_a[k]);
+                    m_ret[k] = pref_m[k];
+                    ret_mant[k] = sig / pref_a[k];
+                    m_exc[k] = sm;
+                    exc_mant[k] = sig / sa;
+                }
+            }
+            if (ju > 0u) {
+                // Left-tail retained: prefix sum 0..ju; left-tail excluded: suffix sum ju-1 down to 0.
                 for (var r = 1u; r < ju; r++) {
-                    bs_mant[r] = bs_mant[r - 1u] * safe_exp_neg(ms_arr[r] - ms_arr[r - 1u]) + bs_mant[r];
+                    ret_mant[r] = ret_mant[r - 1u] * safe_exp_neg(m_ret[r] - m_ret[r - 1u]) + ret_mant[r];
+                }
+                var r = ju - 1u;
+                while (r > 0u) {
+                    r = r - 1u;
+                    exc_mant[r] = exc_mant[r + 1u] * safe_exp_neg(m_exc[r] - m_exc[r + 1u]) + exc_mant[r];
                 }
             }
             if (ju + 2u < R) {
-                var mf = BOX[base + (side * R) * na];
-                var f_acc = 1.0;
-                for (var k = 1u; k + 1u < R; k++) {
-                    let x = BOX[base + (side * R + k) * na];
-                    if (x > mf) {
-                        f_acc = f_acc * safe_exp_neg(mf - x) + 1.0;
-                        mf = x;
-                    } else {
-                        f_acc = f_acc + safe_exp_neg(x - mf);
-                    }
-                    if (k > ju) {
-                        mf_arr[k] = mf;
-                        ap_mant[k] = 1.0 / f_acc;
-                    }
-                }
+                // Right-tail retained: suffix sum R-2 down to ju+1; right-tail excluded: prefix sum ju+1..R-1.
                 var r = R - 2u;
                 while (r > ju + 1u) {
                     r = r - 1u;
-                    ap_mant[r] = ap_mant[r + 1u] * safe_exp_neg(mf_arr[r] - mf_arr[r + 1u]) + ap_mant[r];
+                    ret_mant[r] = ret_mant[r + 1u] * safe_exp_neg(m_ret[r] - m_ret[r + 1u]) + ret_mant[r];
+                }
+                for (var t = ju + 2u; t + 1u < R; t++) {
+                    exc_mant[t] = exc_mant[t - 1u] * safe_exp_neg(m_exc[t] - m_exc[t - 1u]) + exc_mant[t];
                 }
             }
         }
@@ -363,6 +420,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let q = p[side * R + k];
             let jac = q * (f32(k) - d[side]);
             var gk = g_d[side] * jac + sd * wsum * q;
+            if (fiou_d[side] != 0.0 && jac != 0.0 && gbn.x != 0.0) {
+                let fn_ = norm_f32(fiou_d[side]);
+                let jn = norm_f32(jac);
+                gk = gk + mul_pow2(fn_.x * jn.x * gbn.x, i32(fn_.y) + i32(jn.y) + i32(gbn.y));
+            }
             if (edge_m[side] != 0.0 && jac != 0.0) {
                 let jn = norm_f32(jac);
                 gk = gk + mul_pow2(edge_m[side] * jn.x, edge_e[side] + i32(jn.y));
@@ -371,17 +433,27 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
             if (use_ot) {
                 let xk = BOX[base + (side * R + k) * na];
-                var bm = 0.0;
-                if (k > 0u && ju > 0u) {
-                    let ti = min(k - 1u, ju - 1u);
-                    bm = safe_exp_neg(xk - ms_arr[ti]) * bs_mant[ti];
+                var d_ot = 0.0;
+                if (ju > 0u) {
+                    if (k < ju) {
+                        d_ot = d_ot + safe_exp_neg(xk - m_exc[k]) * exc_mant[k];
+                    }
+                    if (k > 0u) {
+                        let ti = min(k - 1u, ju - 1u);
+                        d_ot = d_ot - safe_exp_neg(xk - m_ret[ti]) * ret_mant[ti];
+                    }
                 }
-                var am = 0.0;
-                if (k + 1u < R && ju + 2u < R) {
-                    let ti = max(k, ju + 1u);
-                    am = safe_exp_neg(xk - mf_arr[ti]) * ap_mant[ti];
+                if (ju + 2u < R) {
+                    if (k + 1u < R) {
+                        let ti = max(k, ju + 1u);
+                        d_ot = d_ot - safe_exp_neg(xk - m_ret[ti]) * ret_mant[ti];
+                    }
+                    if (k > ju + 1u) {
+                        let ti = min(k - 1u, R - 2u);
+                        d_ot = d_ot + safe_exp_neg(xk - m_exc[ti]) * exc_mant[ti];
+                    }
                 }
-                let u_ot = wt * (r_m2 * q - bm - am);
+                let u_ot = wt * d_ot;
                 if (abs(sd) <= 1.0) {
                     gk = gk + (u_ot * sd) * dfl_ot_w;
                 } else {

@@ -554,7 +554,8 @@ E²    = 0.25 · ( ((x1 − x1_gt)² + (x2 − x2_gt)²) / (w_gt² + δ₀²)
 L_rpi = (1 − iou) · (1 + β · iou) + κ · E² / (1 + κ · E²)             (β = 0.5, κ = 2.0)
 ```
 The uncapped rational edge penalty is bounded and smooth everywhere; the full loss inherits IoU's standard piecewise
-corners where boxes touch or edges coincide, requires no `atan` host round-trip, and couples with `loss.nwd_weight`
+corners where boxes touch or edges coincide, requires no `atan` host round-trip on the fused GPU path (`det_box.wgsl`,
+while the CPU / `reg_max > 32` fallback evaluates R-PIoU in host `f64`), and couples with `loss.nwd_weight`
 identically to CIoU.
 
 ### 7.3 Task-aligned assigner
