@@ -33,8 +33,8 @@ interface Item {
   state?: OwnStatus;
   name: string;
   detail: string;
-  /** True when the latest refresh for this item's detail failed transiently. */
-  refreshFailed?: boolean;
+  /** Non-truncating refresh failure notice shown beside `detail` when the latest poll failed. */
+  refreshNote?: string;
   path: string;
 }
 
@@ -95,29 +95,26 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
     },
     { poll: 5000 },
   );
-  const atWorkEntry = (b: Bench) => {
-    const list = work.data?.get(b.id)?.entries ?? [];
+  const atWorkEntry = (w: BenchWork | undefined) => {
+    const list = w?.entries ?? [];
     return list.find((x) => x.status === 'running' || x.status === 'stopping') ?? list.find((x) => x.status === 'queued');
   };
-  const loopsAtWork = (b: Bench) => (work.data?.get(b.id)?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
+  const loopsAtWork = (w: BenchWork | undefined) => (w?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
   /** A benchmark's line: its entry at work and how far it is, preserving last known detail and noting refresh failures. */
-  const benchDetail = (b: Bench): { detail: string; failed: boolean } => {
-    const w = work.data?.get(b.id);
-    const e = atWorkEntry(b);
+  const benchDetail = (w: BenchWork | undefined, e: BenchEntry | undefined, loops: BenchLoop[]): { detail: string; refreshNote?: string } => {
     const listStale = benches.stale !== undefined;
     if (e) {
       const p = progressFacts(e);
       const base = `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
-      if (w?.entriesFailed) return { detail: `${base} · refresh failed`, failed: true };
-      if (w?.loopsFailed && !loopsAtWork(b).length) return { detail: `${base} · could not refresh loops`, failed: true };
-      if (listStale) return { detail: `${base} · refresh failed`, failed: true };
-      return { detail: base, failed: false };
+      if (w?.entriesFailed || listStale) return { detail: base, refreshNote: 'Refresh failed' };
+      if (w?.loopsFailed && !loops.length) return { detail: base, refreshNote: 'Could not refresh loops' };
+      return { detail: base };
     }
-    if (w?.entriesFailed && w?.loopsFailed) return { detail: 'Could not refresh benchmark activity', failed: true };
-    if (w?.entriesFailed) return { detail: 'Could not refresh benchmark entries', failed: true };
-    if (w?.loopsFailed) return { detail: 'Could not refresh benchmark loops', failed: true };
-    if (listStale) return { detail: 'An entry or a loop is running · refresh failed', failed: true };
-    return { detail: 'An entry or a loop is running', failed: false };
+    if (w?.entriesFailed && w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark activity' };
+    if (w?.entriesFailed) return { detail: '', refreshNote: 'Could not refresh benchmark entries' };
+    if (w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark loops' };
+    if (listStale) return { detail: 'An entry or a loop is running', refreshNote: 'Refresh failed' };
+    return { detail: 'An entry or a loop is running' };
   };
 
   const items = computed<Item[]>(() => [
@@ -128,21 +125,20 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
         kind: 'Cloud',
         state: { status: 'failed' as const, label: 'Cloud' },
         name: i.name,
-        detail: instances.stale !== undefined ? 'Termination not confirmed: it may still be billed · refresh failed' : 'Termination not confirmed: it may still be billed',
-        refreshFailed: instances.stale !== undefined,
+        detail: 'Termination not confirmed: it may still be billed',
+        refreshNote: instances.stale !== undefined ? 'Refresh failed' : undefined,
         path: '/settings?section=cloud',
       })),
     ...(jobs.data ?? [])
       .filter((j) => j.status !== 'idle')
       .map((j) => {
         const base = j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`;
-        const failed = jobs.stale !== undefined;
         return {
           id: j.id,
           kind: 'Labeling',
           name: j.name,
-          detail: failed ? `${base} · refresh failed` : base,
-          refreshFailed: failed,
+          detail: base,
+          refreshNote: jobs.stale !== undefined ? 'Refresh failed' : undefined,
           path: `/datasets/label/${j.id}`,
         };
       }),
@@ -150,46 +146,73 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
       .filter((b) => b.active)
       .flatMap((b) => {
         const w = work.data?.get(b.id);
-        const loops = loopsAtWork(b);
-        const showBenchRow = !!atWorkEntry(b) || !loops.length || !!w?.entriesFailed;
-        const bd = benchDetail(b);
+        const entry = atWorkEntry(w);
+        const loops = loopsAtWork(w);
+        const showBenchRow = !!entry || !loops.length || !!w?.entriesFailed;
         const loopFailed = !!w?.loopsFailed || benches.stale !== undefined;
         return [
           // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row,
           // unless refreshing entries failed and needs to be surfaced.
-          ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, detail: bd.detail, refreshFailed: bd.failed, path: `/benchmarks/${b.id}` }] : []),
+          ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, ...benchDetail(w, entry, loops), path: `/benchmarks/${b.id}` }] : []),
           ...loops.map((l) => ({
             id: l.id,
             kind: 'Loop',
             name: l.name,
-            detail: loopFailed ? `${loopStatus(l).label} · ${b.name} · refresh failed` : `${loopStatus(l).label} · ${b.name}`,
-            refreshFailed: loopFailed,
+            detail: `${loopStatus(l).label} · ${b.name}`,
+            refreshNote: loopFailed ? 'Refresh failed' : undefined,
             path: `/benchmarks/${b.id}/loops/${l.id}`,
           })),
         ];
       }),
   ]);
 
+  // Top-level poll failures whose resource has no visible row to carry the failure note.
+  const hiddenStale = computed(() => {
+    if (hub.offline) return [] as string[];
+    const list = items.get();
+    const out: string[] = [];
+    if (instances.stale !== undefined && !list.some((i) => i.kind === 'Cloud')) out.push('cloud instances');
+    if (jobs.stale !== undefined && !list.some((i) => i.kind === 'Labeling')) out.push('labeling jobs');
+    if (benches.stale !== undefined && !list.some((i) => i.kind === 'Benchmark' || i.kind === 'Loop')) out.push('benchmarks');
+    return out;
+  });
+
   return (
     <>
-      {items.get().length ? (
+      {items.get().length || hiddenStale.get().length ? (
         <section class="activity" aria-label="Also running">
-          <ul>
-            <For each={items.get()} key={(i) => i.id}>
-              {(i) => (
-                <li>
-                  <a href={href(i().path)}>
-                    <StatusBadge plain state={i().state ?? atWork(i().kind)} />{' '}
-                    <span class="name truncate">{i().name}</span>{' '}
-                    <span class="detail num truncate" class:stale={!!i().refreshFailed} data-refresh-failed={i().refreshFailed ? 'true' : undefined}>
-                      {i().detail}
-                    </span>{' '}
-                    <ArrowRight size={14} strokeWidth={1.75} />
-                  </a>
-                </li>
-              )}
-            </For>
-          </ul>
+          {items.get().length ? (
+            <ul>
+              <For each={items.get()} key={(i) => i.id}>
+                {(i) => (
+                  <li>
+                    <a href={href(i().path)}>
+                      <StatusBadge plain state={i().state ?? atWork(i().kind)} />{' '}
+                      <span class="name truncate">{i().name}</span>{' '}
+                      <span class="detail-cell">
+                        {i().detail ? (
+                          <span class="detail num truncate" title={i().detail}>
+                            {i().detail}
+                          </span>
+                        ) : null}
+                        {i().refreshNote ? (
+                          <span class="refresh-note" data-fact data-refresh-failed="true">
+                            {i().refreshNote}
+                          </span>
+                        ) : null}
+                      </span>{' '}
+                      <ArrowRight size={14} strokeWidth={1.75} />
+                    </a>
+                  </li>
+                )}
+              </For>
+            </ul>
+          ) : null}
+          {hiddenStale.get().length ? (
+            <p class="stale-notice" data-fact data-refresh-failed="true">
+              Could not refresh {hiddenStale.get().join(', ')}
+            </p>
+          ) : null}
         </section>
       ) : null}
     </>
@@ -221,22 +244,49 @@ css`
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
+  .detail-cell {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+  }
   .detail {
     font-size: var(--type-sm-size);
+    flex: 0 1 auto;
+    min-width: 0;
   }
-  .detail.stale {
+  .refresh-note {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .stale-notice {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  /* Phones: the kind and the name on one line, what it is doing under the name. */
+  /* Phones: the kind and the name on one line, what it is doing under the name; a refresh failure wraps intact below
+     the detail rather than clipping behind an ellipsis. */
   @media (max-width: 767px) {
     a {
       grid-template-columns: 104px minmax(0, 1fr) auto;
       row-gap: 0;
       padding: var(--space-2) var(--space-3);
     }
-    .detail {
+    .detail-cell {
       grid-column: 2;
       grid-row: 2;
+      flex-wrap: wrap;
+      gap: var(--space-1) var(--space-2);
+    }
+    .detail {
+      max-width: 100%;
+    }
+    .refresh-note {
+      white-space: normal;
+      max-width: 100%;
     }
   }
 `;
