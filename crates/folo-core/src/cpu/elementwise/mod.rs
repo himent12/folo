@@ -1,11 +1,18 @@
 //! Copies, casts and elementwise kernels.
 
+mod simd;
+
 use super::pool_alloc::alloc_uninit;
 use super::{CHUNK, PAR_MIN};
 use crate::Layout;
 use crate::backend::{BinaryOp, UnaryOp};
 use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
+
+pub use simd::SILU_MAX_REL_ERR;
+pub(crate) use simd::silu_bias_inplace;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use simd::silu8;
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
 #[inline]
@@ -192,6 +199,41 @@ pub(crate) fn map1(x: &[f32], lx: &Layout, f: impl Fn(f32) -> f32 + Sync) -> Vec
     out
 }
 
+/// Map one strided `f32` operand using a vectorised contiguous/unit-stride slice kernel and its bit-exact
+/// scalar twin for non-unit strides.
+#[inline]
+fn map1_slice(
+    x: &[f32],
+    lx: &Layout,
+    slice_fn: fn(&[f32], &mut [f32]),
+    scalar_fn: fn(f32) -> f32,
+) -> Vec<f32> {
+    let n = lx.numel();
+    let mut out = alloc_uninit(n);
+    if let Some(r) = lx.contiguous_range() {
+        let x = &x[r];
+        let piece = |c: usize, o: &mut [f32]| slice_fn(&x[c * CHUNK..c * CHUNK + o.len()], o);
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
+        }
+        return out;
+    }
+    let plan = RowPlan::<1>::new(lx.dims(), [lx.strides()], [lx.offset()]);
+    let s = plan.inner[0];
+    fill_rows(&mut out, &plan, |row, [o]| {
+        if s == 1 {
+            slice_fn(&x[o..o + row.len()], row);
+        } else {
+            for (i, r) in row.iter_mut().enumerate() {
+                *r = scalar_fn(x[o + i * s]);
+            }
+        }
+    });
+    out
+}
+
 /// Map two strided `f32` operands of the same logical shape to a contiguous output.
 #[inline]
 pub(crate) fn map2(
@@ -244,6 +286,56 @@ pub(crate) fn map2(
             _ => {
                 for (i, r) in row.iter_mut().enumerate() {
                     *r = f(a[oa + i * sa], b[ob + i * sb]);
+                }
+            }
+        }
+    });
+    out
+}
+
+/// Map two strided `f32` operands using vectorised contiguous/unit-stride slice kernels (both `(1, 1)` and
+/// `(1, 0)` broadcast-`b`, common in `sum_all`/`mean_all` backwards) and their bit-exact scalar twin.
+#[inline]
+fn map2_slice(
+    a: &[f32],
+    la: &Layout,
+    b: &[f32],
+    lb: &Layout,
+    slice_fn: fn(&[f32], &[f32], &mut [f32]),
+    bc_b_fn: fn(&[f32], f32, &mut [f32]),
+    scalar_fn: fn(f32, f32) -> f32,
+) -> Vec<f32> {
+    let n = la.numel();
+    let mut out = alloc_uninit(n);
+    if let (Some(ra), Some(rb)) = (la.contiguous_range(), lb.contiguous_range()) {
+        let (a, b) = (&a[ra], &b[rb]);
+        let piece = |c: usize, o: &mut [f32]| {
+            let r = c * CHUNK..c * CHUNK + o.len();
+            slice_fn(&a[r.clone()], &b[r], o);
+        };
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
+        }
+        return out;
+    }
+    let plan = RowPlan::<2>::new(la.dims(), [la.strides(), lb.strides()], [la.offset(), lb.offset()]);
+    let [sa, sb] = plan.inner;
+    fill_rows(&mut out, &plan, |row, [oa, ob]| {
+        let len = row.len();
+        match (sa, sb) {
+            (1, 1) => slice_fn(&a[oa..oa + len], &b[ob..ob + len], row),
+            (1, 0) => bc_b_fn(&a[oa..oa + len], b[ob], row),
+            (0, 1) => {
+                let av = a[oa];
+                for (r, &bv) in row.iter_mut().zip(&b[ob..ob + len]) {
+                    *r = scalar_fn(av, bv);
+                }
+            }
+            _ => {
+                for (i, r) in row.iter_mut().enumerate() {
+                    *r = scalar_fn(a[oa + i * sa], b[ob + i * sb]);
                 }
             }
         }
@@ -314,13 +406,13 @@ fn sigmoid(x: f32) -> f32 {
     if x >= 0.0 { r } else { e * r }
 }
 
-/// `x · sigmoid(x)`: the CPU's SiLU, element by element, exactly as `Tensor::silu` computes it on the CPU.
+/// `x · sigmoid(x)`: scalar SiLU helper for fused CPU layers (matches `Tensor::silu` within [`SILU_MAX_REL_ERR`]).
 #[inline(always)]
 pub fn silu(x: f32) -> f32 {
     x * sigmoid(x)
 }
 
-/// `g · silu'(x)`, exactly as the CPU backward of `Tensor::silu` computes it.
+/// `g · silu'(x)`: scalar SiLU backward helper for fused CPU layers.
 #[inline(always)]
 pub fn silu_backward(x: f32, g: f32) -> f32 {
     let s = sigmoid(x);
@@ -343,165 +435,6 @@ fn sign(x: f32) -> f32 {
     }
 }
 
-/// `max(a, b)` with x86 `vmaxps` NaN semantics (`b` when either is NaN), for bit-exact scalar == AVX2.
-#[inline(always)]
-fn maxps(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
-}
-
-// Degree-5 minimax coefficients for `(exp(r) - 1) / r` on `r ∈ [-ln(2)/2, ln(2)/2]` (max rel err `9.54e-8`).
-const EXP5_C5: f32 = 8.290_312e-3;
-const EXP5_C4: f32 = 4.189_795_3e-2;
-const EXP5_C3: f32 = 1.666_763_6e-1;
-const EXP5_C2: f32 = 4.999_915e-1;
-const EXP5_C1: f32 = 9.999_997e-1;
-
-/// `1.5 * 2^23` (`0x4B40_0000`): adding `u ∈ [-150, 0]` rounds to nearest-even integer in the low mantissa bits.
-const EXP_MAGIC_0: f32 = 12_582_912.0;
-const EXP_MAGIC_0_BITS: i32 = 0x4B40_0000;
-/// Minimax IEEE-754 reciprocal seed magic (`max |1 - d * r0| ≈ 0.05051`, exact `r(1.0) == 1.0`, `r(2.0) == 0.5`).
-const RECIP_MAGIC: u32 = 0x7EF3_11C3;
-
-/// Division-free, bit-exact scalar twin of `silu8`: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
-/// minimax polynomial, `1 / (1 + e)` via bit-hack seed + 4-FMA Householder-6 `(1 + e0)(1 + e0^2 + e0^4)`
-/// (error `e0^6 <= 1.66e-8`), `sigmoid = r` for `x >= 0` else `e * r`.
-#[inline]
-pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
-    let t_abs = f32::from_bits(x.to_bits() & 0x7FFF_FFFF);
-    let t = maxps(0.0 - t_abs, -104.0);
-    let z = t.mul_add(LOG2E, EXP_MAGIC_0);
-    let n = z - EXP_MAGIC_0;
-    let r = (-0.693_359_4f32).mul_add(n, t);
-    let r = (2.121_944_4e-4f32).mul_add(n, r);
-    let mut p = EXP5_C5;
-    p = p.mul_add(r, EXP5_C4);
-    p = p.mul_add(r, EXP5_C3);
-    p = p.mul_add(r, EXP5_C2);
-    p = p.mul_add(r, EXP5_C1);
-    let y = p.mul_add(r, 1.0);
-    let ni = (z.to_bits() as i32).wrapping_sub(EXP_MAGIC_0_BITS);
-    let n1 = ni >> 1;
-    let n2 = ni - n1;
-    let s1 = f32::from_bits(((n1 + 127) as u32) << 23);
-    let s2 = f32::from_bits(((n2 + 127) as u32) << 23);
-    let e = (y * s1) * s2;
-    let d = 1.0 + e;
-    let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
-    let e0 = (-d).mul_add(r0, 1.0);
-    let u = r0.mul_add(e0, r0);
-    let e2 = e0 * e0;
-    let t2 = e2.mul_add(e2, e2);
-    let rec = u.mul_add(t2, u);
-    let sig = if x >= 0.0 { rec } else { e * rec };
-    x * sig
-}
-
-/// `v[i] = silu(v[i] + bias)` in place: the fused-epilogue SiLU. With AVX2 + FMA (detected at runtime) eight
-/// lanes at a time through `silu8` (a ragged tail too, padded), whose error against the exact SiLU is
-/// bounded by [`SILU_MAX_REL_ERR`] (tested); otherwise the bit-exact scalar twin [`silu_epilogue_scalar`]. Either
-/// way every element's result depends only on its value, never on its position in `v` or the CPU's ISA.
-pub(crate) fn silu_bias_inplace(v: &mut [f32], bias: f32) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            // SAFETY: AVX2 and FMA were detected above.
-            return unsafe { silu_bias_avx2(v, bias) };
-        }
-    }
-    for x in v.iter_mut() {
-        *x = silu_epilogue_scalar(*x + bias);
-    }
-}
-
-/// Bound on the relative error of the vectorised SiLU (`|y - silu(x)| <= SILU_MAX_REL_ERR * |silu(x)|`, plus
-/// the subnormal spacing once `silu(x)` underflows), checked by `silu_avx2_error_bound`: about 4 ulp.
-pub const SILU_MAX_REL_ERR: f64 = 5e-7;
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn silu_bias_avx2(v: &mut [f32], bias: f32) {
-    use std::arch::x86_64::*;
-    let b = _mm256_set1_ps(bias);
-    let (pairs, rem) = v.as_chunks_mut::<16>();
-    for c in pairs {
-        // SAFETY: `c` is 16 floats; unaligned loads and stores. Processing two 8-wide vectors per
-        // iteration hides `silu8`'s FMA chain latency across independent lanes.
-        unsafe {
-            let p = c.as_mut_ptr();
-            let x0 = _mm256_add_ps(_mm256_loadu_ps(p), b);
-            let x1 = _mm256_add_ps(_mm256_loadu_ps(p.add(8)), b);
-            _mm256_storeu_ps(p, silu8(x0));
-            _mm256_storeu_ps(p.add(8), silu8(x1));
-        }
-    }
-    let (chunks, tail) = rem.as_chunks_mut::<8>();
-    for c in chunks {
-        // SAFETY: `c` is 8 floats; unaligned loads and stores.
-        unsafe {
-            let x = _mm256_add_ps(_mm256_loadu_ps(c.as_ptr()), b);
-            _mm256_storeu_ps(c.as_mut_ptr(), silu8(x));
-        }
-    }
-    if !tail.is_empty() {
-        // The tail goes through the same lanes (padded), so an element's value never depends on where a
-        // caller's segment boundaries fall (GEMM tiles move with the thread count).
-        let mut pad = [0f32; 8];
-        pad[..tail.len()].copy_from_slice(tail);
-        // SAFETY: `pad` is 8 floats.
-        unsafe {
-            let x = _mm256_add_ps(_mm256_loadu_ps(pad.as_ptr()), b);
-            _mm256_storeu_ps(pad.as_mut_ptr(), silu8(x));
-        }
-        let n = tail.len();
-        tail.copy_from_slice(&pad[..n]);
-    }
-}
-
-/// `x * sigmoid(x)` on eight lanes, division-free and bit-identical to [`silu_epilogue_scalar`]: `e = exp(-|x|)`
-/// by Cody-Waite reduction and degree-5 minimax polynomial (FMA), `1 / (1 + e)` by bit-hack seed plus 4-FMA
-/// Householder-6 refinement `(1 + e0)(1 + e0^2 + e0^4)` (zero `vdivps`, zero `vroundps`, zero `vcvtps2dq`),
-/// `sigmoid = r` for `x >= 0` and `e * r` below. NaN stays NaN.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-#[inline]
-pub(crate) fn silu8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
-    use std::arch::x86_64::*;
-    let one = _mm256_set1_ps(1.0);
-    let zero = _mm256_setzero_ps();
-    let magic0 = _mm256_set1_ps(EXP_MAGIC_0);
-    // t = -|x| clamped to the bottom of the exp range (a NaN lane becomes -104; x * sig is NaN again below).
-    let t_abs = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
-    let t = _mm256_max_ps(_mm256_sub_ps(zero, t_abs), _mm256_set1_ps(-104.0));
-    let z = _mm256_fmadd_ps(t, _mm256_set1_ps(LOG2E), magic0);
-    let n = _mm256_sub_ps(z, magic0);
-    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693_359_4), t);
-    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.121_944_4e-4), r);
-    let mut p = _mm256_set1_ps(EXP5_C5);
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C4));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C3));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C2));
-    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C1));
-    let y = _mm256_fmadd_ps(p, r, one);
-    // 2^n as two normal powers of two (n is in -150..=0), so tiny results underflow gradually.
-    let ni = _mm256_sub_epi32(_mm256_castps_si256(z), _mm256_set1_epi32(EXP_MAGIC_0_BITS));
-    let n1 = _mm256_srai_epi32::<1>(ni);
-    let n2 = _mm256_sub_epi32(ni, n1);
-    let bias127 = _mm256_set1_epi32(127);
-    let s1 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n1, bias127)));
-    let s2 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n2, bias127)));
-    let e = _mm256_mul_ps(_mm256_mul_ps(y, s1), s2);
-    let d = _mm256_add_ps(one, e);
-    let r0 =
-        _mm256_castsi256_ps(_mm256_sub_epi32(_mm256_set1_epi32(RECIP_MAGIC as i32), _mm256_castps_si256(d)));
-    let e0 = _mm256_fnmadd_ps(d, r0, one);
-    let u = _mm256_fmadd_ps(r0, e0, r0);
-    let e2 = _mm256_mul_ps(e0, e0);
-    let t2 = _mm256_fmadd_ps(e2, e2, e2);
-    let rec = _mm256_fmadd_ps(u, t2, u);
-    let sig = _mm256_blendv_ps(_mm256_mul_ps(e, rec), rec, _mm256_cmp_ps::<_CMP_GE_OQ>(x, zero));
-    _mm256_mul_ps(x, sig)
-}
-
 /// `v[i] = op(v[i] + bias)` in place (`op = None`: just the bias), for fused epilogues. The usual activations
 /// have dedicated loops; other ops go through [`unary`].
 pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
@@ -514,9 +447,9 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
     match op {
         None if bias == 0.0 => {}
         None => go(v, bias, |x| x),
-        Some(UnaryOp::Silu) => silu_bias_inplace(v, bias),
+        Some(UnaryOp::Silu) => simd::silu_bias_inplace(v, bias),
         Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
-        Some(UnaryOp::Sigmoid) => go(v, bias, sigmoid),
+        Some(UnaryOp::Sigmoid) => simd::sigmoid_bias_inplace(v, bias),
         Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
         Some(UnaryOp::Hardswish) => go(v, bias, |x| x * (x + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
         Some(op) => {
@@ -564,7 +497,7 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
     match op {
         Neg => map1(x, lx, |v| -v),
         Abs => map1(x, lx, f32::abs),
-        Exp => map1(x, lx, fast_exp),
+        Exp => map1_slice(x, lx, simd::exp_slice, simd::exp_scalar),
         Log => map1(x, lx, f32::ln),
         Sqrt => map1(x, lx, f32::sqrt),
         Rsqrt => map1(x, lx, |v| 1.0 / v.sqrt()),
@@ -577,8 +510,8 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Asin => map1(x, lx, f32::asin),
         Acos => map1(x, lx, f32::acos),
         Erf => map1(x, lx, erf),
-        Sigmoid => map1(x, lx, sigmoid),
-        Silu => map1(x, lx, silu),
+        Sigmoid => map1_slice(x, lx, simd::sigmoid_slice, simd::sigmoid_scalar),
+        Silu => map1_slice(x, lx, simd::silu_slice, simd::silu_epilogue_scalar),
         Relu => map1(x, lx, |v| v.max(0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
@@ -613,7 +546,7 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
     match op {
         Neg => map2(x, lx, g, lg, |_, g| -g),
         Abs => map2(x, lx, g, lg, |x, g| g * sign(x)),
-        Exp => map2(x, lx, g, lg, |x, g| g * fast_exp(x)),
+        Exp => map2_slice(x, lx, g, lg, simd::exp_bwd_slice, simd::exp_bwd_broadcast_g, simd::exp_bwd_scalar),
         Log => map2(x, lx, g, lg, |x, g| g / x),
         Sqrt => map2(x, lx, g, lg, |x, g| g * 0.5 / x.sqrt()),
         // Divide in stages rather than squaring x, which under/overflows for representable results.
@@ -638,11 +571,18 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
             let x = x as f64;
             (g as f64 * std::f64::consts::FRAC_2_SQRT_PI * (-x * x).exp()) as f32
         }),
-        Sigmoid => map2(x, lx, g, lg, |x, g| {
-            let s = sigmoid(x);
-            g * s * (1.0 - s)
-        }),
-        Silu => map2(x, lx, g, lg, silu_backward),
+        Sigmoid => map2_slice(
+            x,
+            lx,
+            g,
+            lg,
+            simd::sigmoid_bwd_slice,
+            simd::sigmoid_bwd_broadcast_g,
+            simd::sigmoid_bwd_scalar,
+        ),
+        Silu => {
+            map2_slice(x, lx, g, lg, simd::silu_bwd_slice, simd::silu_bwd_broadcast_g, simd::silu_bwd_scalar)
+        }
         Relu => map2(x, lx, g, lg, |x, g| if x > 0.0 { g } else { 0.0 }),
         LeakyRelu(a) => map2(x, lx, g, lg, move |x, g| if x > 0.0 { g } else { a * g }),
         Hardswish => map2(x, lx, g, lg, |x, g| {
@@ -654,7 +594,15 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
                 g * (2.0 * x + 3.0) * (1.0 / 6.0)
             }
         }),
-        Softplus => map2(x, lx, g, lg, |x, g| g * sigmoid(x)),
+        Softplus => map2_slice(
+            x,
+            lx,
+            g,
+            lg,
+            simd::softplus_bwd_slice,
+            simd::softplus_bwd_broadcast_g,
+            simd::softplus_bwd_scalar,
+        ),
         Clamp(lo, hi) => map2(x, lx, g, lg, move |x, g| if x >= lo && x <= hi { g } else { 0.0 }),
         PowScalar(p) => map2(x, lx, g, lg, move |x, g| if p == 0.0 { 0.0 } else { g * p * x.powf(p - 1.0) }),
         AddScalar(_) => map2(x, lx, g, lg, |_, g| g),
@@ -696,6 +644,7 @@ pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layou
 
 #[cfg(test)]
 mod tests {
+    use super::simd::silu_epilogue_scalar;
     use super::*;
 
     #[test]
@@ -818,6 +767,139 @@ mod tests {
             }
         }
         assert!(silu_epilogue_scalar(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn exp_sigmoid_silu_simd_accuracy_and_edges() {
+        // Dense sweep across finite, subnormal, and tail inputs (odd length exercises 16 + 8 + tail paths).
+        let mut xs: Vec<f32> = (0..100_005).map(|i| -105.0 + i as f32 * 0.002_05).collect();
+        xs.extend([
+            f32::NEG_INFINITY,
+            -110.0,
+            -104.0,
+            -103.5,
+            -95.0,
+            -90.0,
+            -88.0,
+            -87.3,
+            -20.0,
+            -1.0,
+            -1e-30,
+            -0.0,
+            0.0,
+            1e-30,
+            1e-7,
+            1.0,
+            20.0,
+            88.0,
+            88.72,
+            88.8,
+            90.0,
+            110.0,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NAN,
+            f32::from_bits(0x7fc0_1234),
+        ]);
+        let gs: Vec<f32> = (0..xs.len()).map(|i| ((i as f32 * 0.73).sin()) * 2.5).collect();
+        let n = xs.len();
+
+        let (mut y_exp, mut y_sig, mut y_silu) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+        let (mut b_exp, mut b_sig, mut b_silu) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+        simd::exp_slice(&xs, &mut y_exp);
+        simd::sigmoid_slice(&xs, &mut y_sig);
+        simd::silu_slice(&xs, &mut y_silu);
+        simd::exp_bwd_slice(&xs, &gs, &mut b_exp);
+        simd::sigmoid_bwd_slice(&xs, &gs, &mut b_sig);
+        simd::silu_bwd_slice(&xs, &gs, &mut b_silu);
+
+        let sub = f32::from_bits(1) as f64;
+        for i in 0..n {
+            let (x, g) = (xs[i], gs[i]);
+            // Bit-exact parity between AVX2 slice and scalar twin (including NaN payload).
+            assert_eq!(y_exp[i].to_bits(), simd::exp_scalar(x).to_bits(), "exp bits at {x}");
+            assert_eq!(y_sig[i].to_bits(), simd::sigmoid_scalar(x).to_bits(), "sigmoid bits at {x}");
+            assert_eq!(y_silu[i].to_bits(), simd::silu_epilogue_scalar(x).to_bits(), "silu bits at {x}");
+            assert_eq!(b_exp[i].to_bits(), simd::exp_bwd_scalar(x, g).to_bits(), "exp_bwd bits at {x}");
+            assert_eq!(b_sig[i].to_bits(), simd::sigmoid_bwd_scalar(x, g).to_bits(), "sig_bwd bits at {x}");
+            assert_eq!(b_silu[i].to_bits(), simd::silu_bwd_scalar(x, g).to_bits(), "silu_bwd bits at {x}");
+
+            if x.is_nan() {
+                assert!(y_exp[i].is_nan() && y_sig[i].is_nan() && y_silu[i].is_nan());
+                assert!(b_exp[i].is_nan() && b_sig[i].is_nan() && b_silu[i].is_nan());
+                continue;
+            }
+            // Accuracy vs f64 reference.
+            let x64 = x as f64;
+            let g64 = g as f64;
+            let want_exp = x64.exp();
+            if want_exp.is_infinite() || want_exp > f32::MAX as f64 {
+                assert_eq!(y_exp[i], f32::INFINITY, "exp overflow at {x}");
+            } else {
+                let err = (y_exp[i] as f64 - want_exp).abs();
+                assert!(err <= 4e-7 * want_exp + 2.0 * sub, "exp({x}) = {}, want {want_exp}", y_exp[i]);
+            }
+            let want_sig = 1.0 / (1.0 + (-x64).exp());
+            let sig_err = (y_sig[i] as f64 - want_sig).abs();
+            assert!(sig_err <= 5e-7 * want_sig + 2.0 * sub, "sigmoid({x}) = {}, want {want_sig}", y_sig[i]);
+
+            let want_sig_bwd = g64 * (-x64.abs()).exp() / (1.0 + (-x64.abs()).exp()).powi(2);
+            let sb_err = (b_sig[i] as f64 - want_sig_bwd).abs();
+            assert!(
+                sb_err <= 8e-7 * want_sig_bwd.abs() + (2.0 * g64.abs() + 1.0) * sub,
+                "sig_bwd({x}) = {}, want {want_sig_bwd}",
+                b_sig[i]
+            );
+
+            if x.is_finite() {
+                let dsig = (-x64.abs()).exp() / (1.0 + (-x64.abs()).exp()).powi(2);
+                let want_silu_bwd = g64 * (want_sig + x64 * dsig);
+                let scale = g64.abs() * (want_sig + x64.abs() * dsig);
+                let sib_err = (b_silu[i] as f64 - want_silu_bwd).abs();
+                let slack = ((x64.abs() + 1.0) * g64.abs() * 2.0 + 1.0) * sub;
+                assert!(
+                    sib_err <= 8e-7 * scale + slack,
+                    "silu_bwd({x}) = {}, want {want_silu_bwd}",
+                    b_silu[i]
+                );
+            }
+        }
+
+        // Exact edge-value checks.
+        assert_eq!(simd::exp_scalar(0.0), 1.0);
+        assert_eq!(simd::exp_scalar(-0.0), 1.0);
+        assert_eq!(simd::exp_scalar(90.0), f32::INFINITY);
+        assert_eq!(simd::exp_scalar(f32::INFINITY), f32::INFINITY);
+        assert_eq!(simd::exp_scalar(f32::NEG_INFINITY), 0.0);
+        assert!(simd::exp_scalar(-90.0) > 0.0 && simd::exp_scalar(-90.0) < 1e-38);
+        assert_eq!(simd::sigmoid_scalar(0.0), 0.5);
+        assert_eq!(simd::sigmoid_scalar(-0.0), 0.5);
+        assert_eq!(simd::sigmoid_scalar(90.0), 1.0);
+        assert_eq!(simd::sigmoid_scalar(f32::INFINITY), 1.0);
+        assert_eq!(simd::sigmoid_scalar(f32::NEG_INFINITY), 0.0);
+        assert_eq!(simd::sigmoid_bwd_scalar(0.0, 2.0), 0.5);
+        assert_eq!(simd::sigmoid_bwd_scalar(f32::INFINITY, 2.0), 0.0);
+        assert_eq!(simd::sigmoid_bwd_scalar(f32::NEG_INFINITY, 2.0), 0.0);
+        assert_eq!(simd::silu_bwd_scalar(0.0, 2.0), 1.0);
+        assert_eq!(simd::silu_bwd_scalar(90.0, 2.0), 2.0);
+        assert!(simd::silu_bwd_scalar(f32::INFINITY, 2.0).is_nan());
+        assert!(simd::silu_bwd_scalar(f32::NEG_INFINITY, 2.0).is_nan());
+
+        // Broadcast-g backward matches dense-g backward bit-for-bit.
+        let mut bc_sig = vec![0f32; n];
+        let mut bc_silu = vec![0f32; n];
+        let mut dense_sig = vec![0f32; n];
+        let mut dense_silu = vec![0f32; n];
+        let g_const = vec![1.25f32; n];
+        simd::sigmoid_bwd_broadcast_g(&xs, 1.25, &mut bc_sig);
+        simd::sigmoid_bwd_slice(&xs, &g_const, &mut dense_sig);
+        simd::silu_bwd_broadcast_g(&xs, 1.25, &mut bc_silu);
+        simd::silu_bwd_slice(&xs, &g_const, &mut dense_silu);
+        for i in 0..n {
+            assert_eq!(bc_sig[i].to_bits(), dense_sig[i].to_bits());
+            assert_eq!(bc_silu[i].to_bits(), dense_silu[i].to_bits());
+        }
     }
 
     #[test]
