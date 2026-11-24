@@ -76,22 +76,21 @@ stream sends a keep-alive comment every 15 s (`KEEP_ALIVE`) and ends when the se
                       │
                       ▼
            routes::api() handlers
-             ├── request/response ──► routes::blocking (spawn_blocking)
-             │                              │
-             │                              ▼
-             │                        Arc<dyn Store> (RealStore / MockStore)
-             │                          ├── Datasets  ◄── folo-index
-             │                          ├── Runs      ◄── folo-runs (FIFO local trainer)
-             │                          ├── Models / Predictors ◄── folo-gpu-idle
-             │                          ├── Uploads   ◄── folo-uploads + folo-<upload_id>
-             │                          ├── Cloud     ◄── folo-cloud-reaper, folo-cloud-<run_id>,
-             │                          │                 folo-cloud-copy-<run_id>
-             │                          ├── Labeler   ◄── folo-label-<job_id> (agent CLI calls)
-             │                          └── Benches   ◄── folo-bench-models, folo-bench-expiry,
-             │                                            folo-bench-agent-<id>, folo-bench-loop-<id>
-             │
-             └── SSE streams (/runs/{id}/events, /label/jobs/{id}/events, /bench/benchmarks/{id}/events)
-                    └── initial snapshot + tokio::sync::broadcast + 15 s KEEP_ALIVE + shutdown watch
+             ├── request/response ──► direct Store call or routes::blocking (spawn_blocking)
+             ├── SSE streams (/runs/{id}/events, /label/jobs/{id}/events, /bench/benchmarks/{id}/events)
+             │      └── subscribe via Store / service ──► initial snapshot + tokio::sync::broadcast
+             │                                            + 15 s KEEP_ALIVE + shutdown watch
+             ▼
+           Arc<dyn Store> (RealStore / MockStore)
+             ├── Datasets  ◄── folo-index
+             ├── Runs      ◄── folo-runs (FIFO local trainer)
+             ├── Models / Predictors ◄── folo-gpu-idle
+             ├── Uploads   ◄── folo-uploads + folo-<upload_id>
+             ├── Cloud     ◄── folo-cloud-reaper, folo-cloud-<run_id>,
+             │                 folo-cloud-copy-<run_id>
+             ├── Labeler   ◄── folo-label-<job_id> (agent CLI calls)
+             └── Benches   ◄── folo-bench-models, folo-bench-expiry,
+                               folo-bench-agent-<id>, folo-bench-loop-<id>
 ```
 
 ## The Store trait
@@ -226,7 +225,8 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 | `<data dir>/runs/<id>/cloud.lock` | Non-blocking OS file lock (`cloud/files.rs`, `try_lock_run`) | Exclusive ownership of an active cloud run by one executor; `folo-cloud-reaper` skips locked runs and another process returns `409 run_active` on stop. |
 | `RealStore::files` | `RwLock<()>` (`real/mod.rs`) | Shared during dataset registration and run creation/resume; exclusive during dataset unregister and `DELETE /api/datasets/{id}?files=true` so tombstones and file deletion cannot race run admission. |
 | `RunEntry::state` → `Runs::queue` | `Mutex` lock order (`runs/queue.rs`) | `move_queued` and `stop_as` always lock the run's `state` before `Runs::queue` so queue moves, starts, stops and deletes cannot deadlock. |
-| Service registries & slots | `RwLock` + per-item `Mutex` (`real/`, `label/`, `bench/`, `uploads.rs`) | Collection locks (`entries`, `jobs`, `benches`, `sessions`) are held briefly to clone an `Arc`; per-item locks (`Entry::{reg, slot, deleted}` + `Condvar`, `Job`, `Slot`, `Session`) guard state mutations and atomic saves. |
+| Service registries & slots | `RwLock` + per-item `Mutex` (`real/`, `label/`, `bench/`) | Read locks on `entries`, `jobs` and `benches` are held briefly for lookups to clone an `Arc`; write locks serialize additions/removals (including registry writes). Per-item locks (`Entry::{reg, slot, deleted}` + `Condvar`, `Job`, `Slot`) guard state mutations and atomic saves. |
+| Upload sessions | `Mutex` + per-session `Mutex` (`uploads.rs`) | `Uploads::sessions` (`Mutex<HashMap<…>>`) guards session creation (including session folder creation and tar unpacker startup), lookup and expiry; per-session `Session::state` serializes parts of one upload. |
 
 ### Background threads
 | thread name | started by | lifecycle & job |
@@ -236,7 +236,7 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 | `folo-runs` | `Runs::ensure_worker` (`runs/queue.rs`) | Spawned lazily on the first local run; trains queued local runs one at a time in FIFO order. |
 | `folo-gpu-idle` | `RealStore::open_with_cloud` (`real/gpu_idle.rs`) | Holds `Weak` refs; clears cached predictors after 300 s (`PREDICTOR_IDLE`) and releases GPU pool buffers after 30 s (`GPU_IDLE_RELEASE`) when idle. Exits when `RealStore` drops. |
 | `folo-uploads`, `folo-<upload_id>` | `Uploads::open` / `Unpacker::start` (`uploads.rs`) | Sweeper expires idle upload sessions (`UPLOAD_IDLE` = 1 h; holds `Weak` ref). Each dataset tar upload spawns one streaming unpacker thread `folo-<id>` joined on session close/drop. |
-| `folo-cloud-reaper`, `folo-cloud-<run_id>`, `folo-cloud-copy-<run_id>` | `Cloud::recover_and_reap` / `executor::spawn` (`cloud/`) | Reaper sweeps every 30 s (`reaper_every`) for unfollowed/terminating/unseen instances; one executor thread per active cloud run; optional background checkpoint-download thread during `training`. |
+| `folo-cloud-reaper`, `folo-cloud-<run_id>`, `folo-cloud-copy-<run_id>` | `Cloud::recover_and_reap` / `executor::spawn` / `Exec::start_copy` (`cloud/`) | Reaper sweeps every 30 s (`reaper_every`) for unfollowed/terminating/unseen instances; one executor thread per active cloud run; optional background checkpoint-download thread (`Exec::start_copy`) during `training`. |
 | `folo-label-<job_id>` | `Labeler::start` (`label/labeling.rs`) | One thread per active labeling job, driving `parallel` worker calls in a thread scope and child CLI processes. |
 | `folo-bench-models`, `folo-bench-expiry`, `folo-bench-agent-<id>`, `folo-bench-loop-<id>` | `Benches::open` / `entries.rs` / `bench/mod.rs` | Persistent FIFO model-entry worker and open external-entry expiry sweeper (30 min timeout); one thread per active agent entry or self-improvement loop. |
 
@@ -245,12 +245,12 @@ When `Ctrl+C` or `SIGTERM` resolves `shutdown_signal()`:
 1. `Server::serve` (`lib.rs`) sets the `watch` shutdown channel (`shutdown.send_replace(true)`), ending all open SSE streams, and lets `axum::serve` drain in-flight HTTP requests.
 2. `Server::serve` runs `Store::shutdown()` on tokio's blocking pool (`RealStore::shutdown` in `real/store.rs`):
    1. `uploads.shutdown()` — closes and deletes in-progress upload sessions and joins their unpacker threads.
-   2. `cloud.shutdown()` — sets `Halt`, lets `training` cloud runs continue on their workers (earlier phases release their instances), stops `folo-cloud-reaper` and joins cloud threads (up to `cloud::SHUTDOWN_WAIT` = 30 s).
+   2. `cloud.shutdown()` — sets `Halt`, lets runs in `training` or `collecting` continue on their workers (earlier phases release their instances), stops `folo-cloud-reaper`, waits up to `cloud::SHUTDOWN_WAIT` (30 s) for tracked executors and the reaper, and joins those that finished (in-flight `folo-cloud-copy-*` threads are cancelled separately and may outlive their executor).
    3. `benches.shutdown()` — sets `closing`, fails open external entries, cancels active entries and loops, drains the model queue, unparks `folo-bench-expiry` and joins benchmark threads (before `runs`, because a loop may stop the run it follows).
    4. `labeler.shutdown()` — cancels active labeling jobs (killing in-flight agent CLI process trees) and joins `folo-label-*` threads.
-   5. `runs.shutdown(Some(SHUTDOWN_WAIT))` — rejects new runs (`503 shutting_down`), marks queued runs `stopped` (`interrupted`), signals the active local run to stop after its current batch (keeping its last checkpoint) and waits up to `SHUTDOWN_WAIT` (60 s) for `folo-runs` to finish.
+   5. `runs.shutdown(Some(SHUTDOWN_WAIT))` — rejects new runs (`503 shutting_down`), marks queued runs `stopped` (`interrupted`), signals the active local run to stop after its current batch (keeping its last checkpoint) and waits up to `SHUTDOWN_WAIT` (60 s) for the active-run slot to clear (the `folo-runs` thread's handle is not retained or joined).
    6. `throughput.flush()` — writes buffered throughput measurements to `throughput.json`.
-3. Dropping `RealStore` lets weak-referenced sweepers (`folo-gpu-idle`, `folo-uploads`) exit; `Drop for RealStore` also runs `benches`, `labeler` and non-waiting `runs` shutdown as a safety net when a store is dropped without `Server::serve`.
+3. Dropping `RealStore` lets weak-referenced sweepers (`folo-gpu-idle`, `folo-uploads`) exit; `Drop for RealStore` (and `Drop for Cloud`) also run `benches`, `labeler`, `cloud` and non-waiting `runs` shutdown as a safety net when a store is dropped without `Server::serve`.
 
 ## folo-cli on the server
 - `folo serve` (`crates/folo-cli/src/serve.rs`) opens `RealStore` on the data dir (or `MockStore` with `--mock`) and
