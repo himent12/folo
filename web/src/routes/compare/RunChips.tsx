@@ -118,22 +118,23 @@ export default function RunChips(props: RunChipsProps) {
                 )}
               </span>{' '}
               <span class="acts">
+                <a class="open" href={href(`/runs/${r().id}`)} aria-label={`Open ${r().name}`} title="Open run">
+                  <ArrowUpRight size={12} />
+                </a>{' '}
                 {failed() && props.onRetryMetric ? (
-                  <button
-                    type="button"
-                    class="rm"
-                    aria-label={`Retry metrics for ${r().name}`}
-                    title="Retry metrics"
-                    disabled={retrying()}
-                    onclick={() => props.onRetryMetric?.(r().id)}
-                  >
-                    <RotateCw size={12} />
-                  </button>
-                ) : (
-                  <a class="open" href={href(`/runs/${r().id}`)} aria-label={`Open ${r().name}`} title="Open run">
-                    <ArrowUpRight size={12} />
-                  </a>
-                )}{' '}
+                  <>
+                    <button
+                      type="button"
+                      class="rm"
+                      aria-label={`Retry metrics for ${r().name}`}
+                      title="Retry metrics"
+                      disabled={retrying()}
+                      onclick={() => props.onRetryMetric?.(r().id)}
+                    >
+                      <RotateCw size={12} />
+                    </button>{' '}
+                  </>
+                ) : null}
                 <button class="rm" aria-label={`Remove ${r().name}`} onclick={() => props.setIds(props.ids.filter((id) => id !== r().id))}>
                   <X size={12} />
                 </button>

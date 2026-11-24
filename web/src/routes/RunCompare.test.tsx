@@ -333,7 +333,7 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     state.epoch = 3;
     await tick(COMPARE_POLL_MS);
     expect(chip()).toContain(second);
-    // The other run is deleted in another tab: its chip goes, the link still names it.
+    // The other run is deleted in another tab: its chip goes and the link drops it.
     state.deleted = true;
     await tick(COMPARE_POLL_MS);
     expect([...target.querySelectorAll('.chip')].some((el) => el.textContent?.includes(other.name))).toBe(false);
@@ -389,11 +389,21 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     const callsAfterSync = runsSpy.mock.calls.length;
     await tick(COMPARE_POLL_MS * 4);
     expect(runsSpy.mock.calls.length).toBe(callsAfterSync);
-    // Resumed in another tab: returning to this tab refreshes once and restarts live polling.
+    // Resumed in another tab: switching away and returning to this tab refreshes once and restarts live polling.
     state.training = true;
-    document.dispatchEvent(new Event('visibilitychange'));
-    await tick();
-    expect(chip()).toContain('live');
+    const vis = vi.spyOn(document, 'visibilityState', 'get');
+    try {
+      vis.mockReturnValue('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await tick();
+      expect(chip()).not.toContain('live');
+      vis.mockReturnValue('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await tick();
+      expect(chip()).toContain('live');
+    } finally {
+      vis.mockRestore();
+    }
     // Completes again: once final metrics catch up, polling stops again.
     state.training = false;
     await tick(COMPARE_POLL_MS);
@@ -401,6 +411,69 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     const callsAfterComplete = runsSpy.mock.calls.length;
     await tick(COMPARE_POLL_MS * 4);
     expect(runsSpy.mock.calls.length).toBe(callsAfterComplete);
+  });
+
+  it('stops polling for a run that failed mid-epoch once synced', async () => {
+    const api = hub.api as MockApi;
+    const [run, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    const runsSpy = vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
+      const list = await listRuns(...a);
+      // Failed during epoch 2: only epoch 1 has validated metrics.
+      return list.map((r) => (r.id === run!.id ? { ...r, status: 'failed', epoch: 2, best: null } : r));
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await readMetrics(id, ...rest);
+      return id === run!.id ? { ...m, epochs: m.epochs.slice(0, 1) } : m;
+    });
+    vi.useFakeTimers();
+    router.route = parse(`#/runs/compare?ids=${run!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    await tick();
+    const callsAfterSync = runsSpy.mock.calls.length;
+    await tick(COMPARE_POLL_MS * 4);
+    expect(runsSpy.mock.calls.length).toBe(callsAfterSync);
+  });
+
+  it('keeps advancing a healthy live run while another run fails persistently, and recovers cleanly', async () => {
+    const api = hub.api as MockApi;
+    const [live, broken] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const fullLive = (await api.runMetrics(live!.id)).epochs;
+    const fullBroken = (await api.runMetrics(broken!.id)).epochs;
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    const st = { training: true, epoch: 2, failBroken: true };
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
+      const list = await listRuns(...a);
+      return list.map((r) => (st.training && r.id === live!.id ? { ...r, status: 'running', epoch: st.epoch, best: null } : r));
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      if (id === broken!.id && st.failBroken) throw new ApiError(500, 'internal', 'broken');
+      const m = await readMetrics(id, ...rest);
+      return st.training && id === live!.id ? { ...m, epochs: m.epochs.slice(0, st.epoch - 1) } : m;
+    });
+    vi.useFakeTimers();
+    router.route = parse(`#/runs/compare?ids=${live!.id},${broken!.id}`);
+    c = mount(RunCompare, { target });
+    const chip = (name: string) => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(name))?.textContent ?? '';
+    await tick();
+    expect(chip(live!.name)).toContain(metric(fullLive[0]!.val.map50_95));
+    expect(chip(broken!.name)).toContain('metrics failed');
+
+    // Live run advances and completes while broken still fails 500.
+    st.training = false;
+    await tick(COMPARE_POLL_MS);
+    expect(chip(live!.name)).not.toContain('live');
+    expect(chip(live!.name)).toContain(metric(fullLive.at(-1)!.val.map50_95));
+    expect(chip(broken!.name)).toContain('metrics failed');
+
+    // Broken recovers on the next retry; live keeps its final value.
+    st.failBroken = false;
+    await tick(COMPARE_POLL_MS);
+    expect(target.querySelector('.stale-note')).toBeNull();
+    expect(chip(broken!.name)).toContain(metric(fullBroken.at(-1)!.val.map50_95));
+    expect(chip(live!.name)).toContain(metric(fullLive.at(-1)!.val.map50_95));
   });
 });
 
@@ -440,32 +513,70 @@ describe('Compare: deleted run slot reclamation, partial metrics error, and Prec
     const api = hub.api as MockApi;
     const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
     const real = api.runMetrics.bind(api);
+    const fullA = (await real(a!.id)).epochs;
+    const fullB = (await real(b!.id)).epochs;
     let failB = true;
     const metricsSpy = vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
       if (id === b!.id && failB) throw new ApiError(500, 'internal', 'metrics unavailable');
       return real(id, ...rest);
     });
-    const fullA = (await real(a!.id)).epochs;
-    const fullB = (await real(b!.id)).epochs;
+    vi.useFakeTimers();
+    try {
+      const settle = async () => {
+        for (let i = 0; i < 6; i++) {
+          await vi.advanceTimersByTimeAsync(0);
+          flushSync();
+        }
+      };
+      router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+      c = mount(RunCompare, { target });
+      await settle();
+
+      // Healthy run A's curve renders and its chip shows its value; run B reports metrics failure with a per-run Retry and keeps Open run link.
+      const chipText = (name: string) => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(name))?.textContent ?? '';
+      expect(target.querySelector('.swap')).not.toBeNull();
+      expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
+      expect(chipText(b!.name)).toContain('metrics failed');
+      expect(target.querySelector(`a[aria-label="Open ${b!.name}"]`)).not.toBeNull();
+      expect(target.querySelector('.stale-note')?.textContent).toContain(`Could not load metrics for ${b!.name}`);
+
+      // Clicking per-run Retry fetches only run B and restores its value without wiping run A.
+      metricsSpy.mockClear();
+      failB = false;
+      const retryBtn = target.querySelector<HTMLButtonElement>(`button[aria-label="Retry metrics for ${b!.name}"]`)!;
+      retryBtn.click();
+      await settle();
+      expect(target.querySelector('.stale-note')).toBeNull();
+      expect(metricsSpy).toHaveBeenCalledTimes(1);
+      expect(metricsSpy).toHaveBeenCalledWith(b!.id, expect.any(AbortSignal));
+      expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
+      expect(chipText(b!.name)).toContain(metric(fullB.at(-1)!.val.map50_95));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers cleanly from a total initial metrics failure via ErrorState Retry', async () => {
+    setWidth(1440);
+    const api = hub.api as MockApi;
+    const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const real = api.runMetrics.bind(api);
+    let failAll = true;
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      if (failAll) throw new ApiError(500, 'internal', 'all metrics down');
+      return real(id, ...rest);
+    });
     router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
     c = mount(RunCompare, { target });
+    await until(() => target.textContent?.includes("Could not load these runs' metrics"), 'full error state');
+    // Total initial failure is owned by ErrorState, not duplicated in chip/stale notices.
+    expect(target.querySelector('.stale-note')).toBeNull();
 
-    // Healthy run A's curve renders and its chip shows its value; run B reports metrics failure with a per-run Retry.
-    await until(() => target.querySelector('.swap') && target.querySelector('.stale-note'), 'partial curve and error');
-    const chipText = (name: string) => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(name))?.textContent ?? '';
-    expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
-    expect(chipText(b!.name)).toContain('metrics failed');
-    expect(target.querySelector('.stale-note')?.textContent).toContain(`Could not load metrics for ${b!.name}`);
-
-    // Clicking per-run Retry fetches only run B and restores its value without wiping run A.
-    metricsSpy.mockClear();
-    failB = false;
-    const retryBtn = target.querySelector<HTMLButtonElement>(`button[aria-label="Retry metrics for ${b!.name}"]`)!;
-    retryBtn.click();
-    await until(() => !target.querySelector('.stale-note') && chipText(b!.name).includes(metric(fullB.at(-1)!.val.map50_95)), 'run B recovered');
-    expect(metricsSpy).toHaveBeenCalledTimes(1);
-    expect(metricsSpy).toHaveBeenCalledWith(b!.id, expect.any(AbortSignal));
-    expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
+    failAll = false;
+    const retry = [...target.querySelectorAll<HTMLButtonElement>('button')].find((btn) => btn.textContent?.trim() === 'Retry')!;
+    retry.click();
+    await until(() => target.querySelector('.swap') && !target.textContent?.includes("Could not load these runs' metrics"), 'chart recovered');
+    expect(target.querySelector('.swap')).not.toBeNull();
   });
 
   it('supports Precision in the metric selector and annotates its best-F1 operating point', async () => {
