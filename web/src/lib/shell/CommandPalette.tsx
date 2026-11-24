@@ -116,7 +116,6 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const loadingEntities = computed(() => pendingSources.get().size > 0);
   const failedEntityList = computed(() => [...failedSources.get()]);
 
-  const isAbort = (e: unknown) => e instanceof DOMException && e.name === 'AbortError';
   const isUnsupported = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
   /** The hub epoch the lists above were fetched under. */
@@ -124,9 +123,12 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** Per-opening generation token + AbortControllers so closed/superseded fetches are aborted and discarded. */
   let openSeq = 0;
   let activeEpoch = -1;
+  let activeApi: typeof hub.api | null = null;
   let fetchCtrl: AbortController | null = null;
   let loopsCtrl: AbortController | null = null;
   let loopsFetchedSeq = -1;
+  /** Reactive generation token of the latest completed `benches()` response for the current opening. */
+  const benchesSeq = signal(-1);
   /** Pointer guard: ignore stationary pointermove coordinates triggered when keyboard ArrowDown/ArrowUp scrolls the list. */
   let lastPointer: { x: number; y: number } | null = null;
   let keyboardNav = false;
@@ -138,6 +140,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
     fetchCtrl = null;
     loopsCtrl = null;
     loopsFetchedSeq = -1;
+    benchesSeq.set(-1);
   };
   onCleanup(cancelFetches);
 
@@ -166,32 +169,43 @@ export default function CommandPalette(props: CommandPaletteProps) {
     }
   }
 
+  const closePalette = () => {
+    cancelFetches();
+    pendingSources.set(new Set());
+    if (el.open) el.close();
+  };
+
   // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
-  const backdrop = backdropClose(() => el, () => el.close());
+  const backdrop = backdropClose(() => el, closePalette);
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
   let restore: (() => void) | null = null;
   effect(() => {
-    if (open.get() && !el.open) {
-      restore = rememberFocus();
-      el.showModal();
-      backdrop.opened();
+    if (open.get()) {
+      const epoch = hub.epoch;
+      const opening = !el.open;
+      if (!opening && epoch === listed) return;
+      if (opening) {
+        restore = rememberFocus();
+        el.showModal();
+        backdrop.opened();
+        lastPointer = null;
+        keyboardNav = false;
+        query.set('');
+        selected.set(null);
+        recent.set(recentIds());
+        queueMicrotask(() => input.peek()?.focus());
+      }
       cancelFetches();
       const seq = ++openSeq;
       const ctrl = new AbortController();
       fetchCtrl = ctrl;
-      lastPointer = null;
-      keyboardNav = false;
-      query.set('');
-      selected.set(null);
-      recent.set(recentIds());
       pendingSources.set(new Set());
       failedSources.set(new Set());
-      queueMicrotask(() => input.peek()?.focus());
       const api = hub.api;
+      activeEpoch = epoch;
+      activeApi = api;
       // What the lists hold came from the server in use at the last opening: another one's (a reconnect since) goes,
       // and so does an answer that arrives after the next reconnect or a subsequent open/close cycle.
-      const epoch = hub.epoch;
-      activeEpoch = epoch;
       if (epoch !== listed) {
         listed = epoch;
         runs.set([]);
@@ -203,7 +217,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
         loops.set([]);
         cloud.set(false);
       }
-      const isCurrent = () => hub.epoch === epoch && openSeq === seq && !ctrl.signal.aborted;
+      const isCurrent = () => el.open && hub.epoch === epoch && openSeq === seq && !ctrl.signal.aborted;
       const mine =
         <A extends unknown[]>(f: (...a: A) => void) =>
         (...a: A) => {
@@ -217,7 +231,6 @@ export default function CommandPalette(props: CommandPaletteProps) {
             settlePending(key, false);
           }),
           mine((err) => {
-            if (isAbort(err)) return;
             const failed = onErr ? onErr(err) : true;
             settlePending(key, failed);
           }),
@@ -232,6 +245,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
         (b) => {
           benches.set(b);
           benchesOk.set(true);
+          if (!b.length) loops.set([]);
+          benchesSeq.set(seq);
         },
         (err) => {
           benches.set([]);
@@ -254,53 +269,53 @@ export default function CommandPalette(props: CommandPaletteProps) {
         );
       }
       api.system(ctrl.signal).then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
-    } else if (!open.get()) {
-      cancelFetches();
-      pendingSources.set(new Set());
-      if (el.open) el.close();
+    } else {
+      closePalette();
     }
   });
 
-  // Defer per-benchmark loop fetches until a relevant search query (or a recent loop entry) needs them,
-  // avoiding N+1 benchLoops calls on open when a server has many benchmarks.
+  // Defer per-benchmark loop fetches until a non-empty query (or a recent loop entry) needs them AND the current
+  // opening's benchmark list has arrived, avoiding N+1 benchLoops calls on open and stale benchmark races on reopen.
   effect(() => {
-    if (!open.get() || !benchesOk.get()) return;
+    if (!open.get() || !el.open || !benchesOk.get()) return;
+    if (hub.epoch !== activeEpoch || benchesSeq.get() !== openSeq || !activeApi) return;
     const list = benches.get();
     if (!list.length) return;
     const q = query.get().trim();
-    const wantsLoops = q.length >= 2 || recent.get().some((id) => id.startsWith('loop-'));
+    const wantsLoops = q.length > 0 || recent.get().some((id) => id.startsWith('loop-'));
     if (!wantsLoops) return;
     const seq = openSeq;
     if (loopsFetchedSeq === seq) return;
     loopsFetchedSeq = seq;
     const epoch = activeEpoch;
-    const api = hub.api;
+    const api = activeApi;
     loopsCtrl?.abort();
     const ctrl = new AbortController();
     loopsCtrl = ctrl;
     untrack(() => {
       markPending('loops');
-      const out: BenchLoop[] = [];
+      const perBench: BenchLoop[][] = Array.from({ length: list.length }, () => []);
       let failed = false;
       let idx = 0;
       const workers = Math.min(6, list.length);
       Promise.all(
         Array.from({ length: workers }, async () => {
-          while (idx < list.length && !ctrl.signal.aborted) {
-            const b = list[idx++]!;
+          while (idx < list.length && !ctrl.signal.aborted && el.open) {
+            const myIdx = idx++;
+            const b = list[myIdx]!;
             try {
               const res = await api.benchLoops(b.id, ctrl.signal);
               if (ctrl.signal.aborted) return;
-              out.push(...res);
+              perBench[myIdx] = res;
             } catch (err) {
-              if (ctrl.signal.aborted || isAbort(err)) return;
+              if (ctrl.signal.aborted) return;
               if (!isUnsupported(err)) failed = true;
             }
           }
         }),
       ).then(() => {
-        if (hub.epoch !== epoch || openSeq !== seq || ctrl.signal.aborted) return;
-        loops.set(out);
+        if (!el.open || hub.epoch !== epoch || openSeq !== seq || ctrl.signal.aborted) return;
+        loops.set(perBench.flat());
         settlePending('loops', failed);
       });
     });
@@ -534,6 +549,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const index = computed(() => Math.max(0, flat.get().findIndex((i) => i.id === selected.get())));
   effect(() => {
     void query.get();
+    keyboardNav = true;
     selected.set(null);
   });
   // The first item is highlighted by its id too, at open, on a new query and when the highlighted one goes, so a row
@@ -553,7 +569,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
   function choose(item: Item | undefined) {
     if (!item) return;
     if (item.group !== 'This page') rememberRecent(item.origin ?? item.id);
-    el.close();
+    closePalette();
     item.run();
   }
 
@@ -642,7 +658,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
               <Kbd keys="Escape" subtle />
             </span>
           ) : null}
-          <button class="close" type="button" aria-label="Close" onclick={() => el.close()}>
+          <button class="close" type="button" aria-label="Close" onclick={closePalette}>
             <X size={18} />
           </button>
         </div>

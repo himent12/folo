@@ -356,6 +356,7 @@ describe('CommandPalette after a switch to another server', () => {
 describe('CommandPalette: async hardening, deferred loops, clear button, and pointer guard', () => {
   afterEach(() => {
     hub.features = null;
+    localStorage.removeItem('folo.palette.recent');
   });
 
   it('aborts and discards stale fetches across open/close cycles on the same server', async () => {
@@ -507,5 +508,76 @@ describe('CommandPalette: async hardening, deferred loops, clear button, and poi
     items[2]!.dispatchEvent(new PointerEvent('pointermove', { clientX: 124, clientY: 240, bubbles: true }));
     flushSync();
     expect(input.getAttribute('aria-activedescendant')).toBe(items[2]!.id);
+  });
+
+  it('restarts fetches cleanly on a server switch while already open without wedging Searching…', async () => {
+    const a = new MockApi('normal', 0);
+    let aSignal: AbortSignal | undefined;
+    a.runs = (signal?: AbortSignal) => {
+      aSignal = signal;
+      return new Promise(() => {});
+    };
+    hub.api = a;
+    const open = signal(true);
+    c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    input.value = 'zzzz-unmatched-query';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(document.querySelector('.none')?.textContent).toContain('Searching');
+
+    // Switch servers while the palette stays open: old request aborts, new server settles cleanly.
+    hub.api = new MockApi('normal', 0);
+    hub.epoch++;
+    flushSync();
+    expect(aSignal?.aborted).toBe(true);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.none')?.textContent).toContain('No matches for “zzzz-unmatched-query”');
+    });
+  });
+
+  it('gates deferred loop fetches on the current opening benchmarks and caps concurrency at 6', async () => {
+    const api = hub.api as MockApi;
+    const baseBench = (await api.benches())[0]!;
+    const tenBenches = Array.from({ length: 10 }, (_, i) => ({ ...baseBench, id: `bn_c${i}`, name: `Bench ${i}` }));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const resolvers: (() => void)[] = [];
+    vi.spyOn(api, 'benches').mockResolvedValue(tenBenches);
+    vi.spyOn(api, 'benchLoops').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          inFlight++;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          resolvers.push(() => {
+            inFlight--;
+            resolve([]);
+          });
+        }),
+    );
+
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.getElementById('pi-bench-new')).not.toBeNull();
+    });
+    expect(maxInFlight).toBe(0);
+
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    input.value = 'x';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await vi.waitFor(() => expect(resolvers.length).toBe(6));
+    expect(maxInFlight).toBe(6);
+
+    while (resolvers.length) {
+      resolvers.shift()!();
+      await Promise.resolve();
+    }
+    await vi.waitFor(() => expect(inFlight).toBe(0));
+    expect(maxInFlight).toBe(6);
   });
 });
