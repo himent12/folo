@@ -83,7 +83,7 @@ runs `val` and `predict` in f16 on the GPU (`--tensor-cores` puts it on the tens
 
 FOLO reads YOLO and COCO datasets as they are, including Roboflow exports. You can pass a folder, a `data.yaml` or a
 COCO instances `.json` ([DATA.md](DATA.md) has the detection rules). Images but no labels yet? Studio can have
-Claude Code or Codex draw the boxes for you to review ([LABELING.md](LABELING.md)).
+Claude Code, Codex or Antigravity draw the boxes for you to review ([LABELING.md](LABELING.md)).
 
 **YOLO**: images, plus one `.txt` per image holding `class cx cy w h` lines (normalised to 0–1):
 
@@ -273,7 +273,7 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 Everything above is also available to agents in two ways:
 - **MCP**: `folo mcp`, with 40 tools, `folo://` resources and prompts. It keeps its datasets and runs in the same
   data dir as `folo serve` (`~/.folo` by default, `--data-dir` to change it). To register it:
-  `claude mcp add folo -- folo mcp`.
+  `claude mcp add folo -- folo mcp` (or `codex mcp add folo -- folo mcp` / `agy mcp add folo -- folo mcp`).
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 
 [AGENT_COOKBOOK.md](AGENT_COOKBOOK.md) has the recipes in both forms. [MCP.md](MCP.md) is the contract.
