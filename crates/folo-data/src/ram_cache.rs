@@ -28,7 +28,7 @@ pub enum CacheMode {
 pub const RAM_CACHE_SHARE: f64 = 0.8;
 
 /// A cached image: the sample resized, and its decoded size.
-type Entry = Arc<(Sample, [u32; 2])>;
+pub(crate) type Entry = Arc<(Sample, [u32; 2])>;
 
 /// Bytes the live RAM caches of this process reserved (each its [`ram_cache_bytes`], from creation to drop), so
 /// two loaders created before either fills are not both admitted against the same free memory. A cache that has

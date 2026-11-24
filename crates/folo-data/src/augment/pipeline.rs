@@ -1,22 +1,20 @@
 //! The training transform: mosaic → affine → mixup → HSV → flips, ending at `imgsz x imgsz`.
 
-use super::geometry::{random_affine_matrix, transform_boxes};
+use super::geometry::{long_side_dims, random_affine_matrix, transform_boxes};
 use super::hsv::{HsvTables, random_hsv_tables};
 use super::mosaic::mosaic_plane;
-use super::{
-    AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_affine, random_hsv, resize_long_side,
-};
+use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_affine, random_hsv};
 use crate::bbox::BBox;
 use crate::buffers;
 use crate::dataset::Dataset;
 use crate::error::Result;
 use crate::image::{Image, Sample};
 use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox_sample};
+use crate::ram_cache::Entry as RamEntry;
 use crate::rng::Rng;
 use crate::simd::hsv_fused::rgb_row_to_planar_fused;
 use crate::simd::{PlanarDst, for_planar_bands};
 use crate::warp::{Plane, Tile, warp_plane, warp_plane_fused};
-use std::sync::Arc;
 
 /// A sample as the transform's `fetch` delivers it.
 #[derive(Clone, Debug)]
@@ -42,7 +40,7 @@ impl Fetched {
 /// read-only entry from [`crate::ram_cache::RamCache`] (zero-copy, never recycled).
 pub(crate) enum FetchedSample {
     Owned(Fetched),
-    Shared { index: usize, entry: Arc<(Sample, [u32; 2])> },
+    Shared { index: usize, entry: RamEntry },
 }
 
 impl FetchedSample {
@@ -76,18 +74,20 @@ impl FetchedSample {
     fn into_resized_long_side(self, long: u32) -> Self {
         let s = self.sample();
         let (w, h) = (s.image.width, s.image.height);
-        let r = long as f64 / w.max(h) as f64;
-        let nw = ((w as f64 * r).round() as u32).max(1);
-        let nh = ((h as f64 * r).round() as u32).max(1);
+        let (nw, nh) = long_side_dims(w, h, long);
         if (nw, nh) == (w, h) {
             return self;
         }
         match self {
-            FetchedSample::Owned(f) => FetchedSample::Owned(Fetched {
-                index: f.index,
-                sample: resize_long_side(f.sample, long),
-                orig_size: f.orig_size,
-            }),
+            FetchedSample::Owned(f) => {
+                let image = crate::resize::resize(&f.sample.image, nw, nh);
+                buffers::recycle(f.sample.image.data);
+                FetchedSample::Owned(Fetched {
+                    index: f.index,
+                    sample: Sample { image, boxes: f.sample.boxes },
+                    orig_size: f.orig_size,
+                })
+            }
             FetchedSample::Shared { index, entry } => {
                 let image = crate::resize::resize(&entry.0.image, nw, nh);
                 FetchedSample::Owned(Fetched {
