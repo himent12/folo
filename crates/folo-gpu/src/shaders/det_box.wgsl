@@ -3,8 +3,9 @@
 // cross-entropy at the two bins around each side's clamped target distance, weighted t / 4. Slots that are not
 // positive, or have t = 0, contribute nothing.
 // MODE 0 writes OUT[3s] = box term, OUT[3s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL CE
-// term before its sign), and OUT[3s + 2] = Σ_sides wt · L_ot (unscaled by dfl_ot_weight so det_combine normalises
-// by tss before multiplying). MODE 1 writes the gradient of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
+// term before its sign), and OUT[3s + 2] = Σ_sides wt · (OT_SHIFT · L_ot) (scaled by OT_SHIFT = 2^-32 and unscaled
+// by dfl_ot_weight so det_combine normalises by tss before restoring +32 and multiplying). MODE 1 writes the gradient
+// of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
 // first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
 // S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
 // Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
@@ -22,11 +23,15 @@
 // `det_combine.wgsl` normalises by `tss` and restores the +32 exponent alongside `dfl_ot_weight` and `dfl_gain`.
 const OT_SHIFT: f32 = 2.3283064365386963e-10; // 2^-32
 
-// Exponent-scaled R-PIoU edge gradient `(u / denom) * inv1^2 * (q_m * 2^e_q) * g_half`.
-fn rpiou_edge_grad(u: f32, denom: f32, in1: vec2<f32>, q_m: f32, e_q: i32, gn: vec2<f32>) -> f32 {
-    if (u == 0.0 || gn.x == 0.0) { return 0.0; }
+// Exponent-split R-PIoU edge derivative `sign_s * (u / denom) * inv1^2 * (q_m * 2^e_q) * g_half` as `(mant, exp)`.
+// Kept in split form until multiplied by the DFL softmax Jacobian so extreme `box_gain * kappa` never overflows an
+// intermediate coordinate gradient when the final logit gradient fits in f32.
+fn rpiou_edge_split(sign_s: f32, u: f32, denom: f32, in1: vec2<f32>, q_m: f32, e_q: i32, gn: vec2<f32>) -> vec2<f32> {
+    if (u == 0.0 || gn.x == 0.0) { return vec2<f32>(0.0, 0.0); }
     let un = norm_f32(u / denom);
-    return mul_pow2(un.x * in1.x * in1.x * q_m * gn.x, i32(un.y) + 2 * i32(in1.y) + e_q + i32(gn.y));
+    let m = sign_s * un.x * in1.x * in1.x * q_m * gn.x;
+    let e = i32(un.y) + 2 * i32(in1.y) + e_q + i32(gn.y);
+    return vec2<f32>(m, f32(e));
 }
 
 // Gradient share of `a` in min(a, b) / max(a, b): folo-core gives ties half to each side.
@@ -182,6 +187,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var gy1 = 0.0;
     var gx2 = 0.0;
     var gy2 = 0.0;
+    var edge_m = vec4<f32>(0.0);
+    var edge_e = vec4<i32>(0);
     if (box_kind == 1u) {
         let eps = 1e-7;
         let w1 = max(pd.z - pd.x, 0.0);
@@ -222,22 +229,20 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let uy1 = scaled_edge_u(pd.y - tb.y, q_ym, e_qy);
         let uy2 = scaled_edge_u(pd.w - tb.w, q_ym, e_qy);
         let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
-        var ex1 = 0.0;
-        var ey1 = 0.0;
-        var ex2 = 0.0;
-        var ey2 = 0.0;
         if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
             let in1 = norm_f32(1.0 / (1.0 + ke2_raw));
             let gn = norm_f32(g_base * 0.5);
-            ex1 = rpiou_edge_grad(ux1, denom_x, in1, q_xm, e_qx, gn);
-            ey1 = rpiou_edge_grad(uy1, denom_y, in1, q_ym, e_qy, gn);
-            ex2 = rpiou_edge_grad(ux2, denom_x, in1, q_xm, e_qx, gn);
-            ey2 = rpiou_edge_grad(uy2, denom_y, in1, q_ym, e_qy, gn);
+            let s0 = rpiou_edge_split(-1.0, ux1, denom_x, in1, q_xm, e_qx, gn);
+            let s1 = rpiou_edge_split(-1.0, uy1, denom_y, in1, q_ym, e_qy, gn);
+            let s2 = rpiou_edge_split(1.0, ux2, denom_x, in1, q_xm, e_qx, gn);
+            let s3 = rpiou_edge_split(1.0, uy2, denom_y, in1, q_ym, e_qy, gn);
+            edge_m = vec4<f32>(s0.x, s1.x, s2.x, s3.x);
+            edge_e = vec4<i32>(i32(s0.y), i32(s1.y), i32(s2.y), i32(s3.y));
         }
-        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + ex1;
-        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + ey1;
-        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z) + ex2;
-        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w) + ey2;
+        gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x);
+        gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y);
+        gx2 = g_w1 + g_ix * w_min(pd.z, tb.z);
+        gy2 = g_h1 + g_iy * w_min(pd.w, tb.w);
     } else {
         let eps = 1e-7;
         let w1 = pd.z - pd.x;
@@ -356,7 +361,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         }
         for (var k = 0u; k < R; k++) {
             let q = p[side * R + k];
-            var gk = g_d[side] * q * (f32(k) - d[side]) + sd * wsum * q;
+            let jac = q * (f32(k) - d[side]);
+            var gk = g_d[side] * jac + sd * wsum * q;
+            if (edge_m[side] != 0.0 && jac != 0.0) {
+                let jn = norm_f32(jac);
+                gk = gk + mul_pow2(edge_m[side] * jn.x, edge_e[side] + i32(jn.y));
+            }
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
             if (use_ot) {

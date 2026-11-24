@@ -267,11 +267,12 @@ fn branch_safe_sigmoid(z: f64) -> f64 {
     }
 }
 
-/// Class-local suppressor ownership of every candidate `j` relative to `kept` (assumed in descending score order):
-/// each kept box owns itself, and every other candidate of class `c` is owned by the first kept box of class `c`
-/// whose IoU with it is `> nms_iou` (`u32::MAX` if none). Used when NMS ran `agnostic` or when a caller invokes
-/// [`elc_scores`] / [`dfl_consensus_scores`] / [`dfl_repulse_scores`] without precomputed owners.
-fn class_local_owners(
+/// Suppressor ownership of every candidate `j` relative to `kept` (assumed in descending score order): each kept box
+/// owns itself, and every other lower-ranked candidate in `buckets.of(classes[k])` (same class when
+/// `!buckets.agnostic`, all classes when `buckets.agnostic`) is owned by the first kept box whose IoU with it is
+/// `> nms_iou` (`u32::MAX` if none). Used when a caller invokes [`elc_scores`] / [`dfl_consensus_scores`] /
+/// [`dfl_repulse_scores`] / [`dfl_cgr_scores`] / [`fuse_boxes_sebf`] without precomputed owners.
+fn reconstruct_owners(
     kept: &[usize],
     boxes: &[Xyxy],
     scores: &[f32],
@@ -353,7 +354,7 @@ pub fn dfl_consensus_scores(
             o
         }
         None => {
-            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
             &computed_owners
         }
     };
@@ -516,7 +517,7 @@ fn dfl_repulse_scores_impl(
             o
         }
         None => {
-            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
             &computed_owners
         }
     };
@@ -711,7 +712,7 @@ pub fn fuse_boxes_sebf(
             o
         }
         None => {
-            computed_owners = class_local_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
             &computed_owners
         }
     };

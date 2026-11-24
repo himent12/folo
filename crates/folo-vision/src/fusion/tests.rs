@@ -293,3 +293,25 @@ fn sebf_agnostic_respects_actual_nms_ownership_with_nan_box() {
     assert_eq!(dets.len(), 2, "box 0 (NaN) suppresses box 2, keeping boxes 0 and 1");
     assert_eq!(dets[1].bbox, boxes[1], "box 1 must not fuse box 2 owned by box 0");
 }
+
+/// Regression: calling `fuse_boxes_sebf` directly with `agnostic = true` and `owner = None` reconstructs
+/// cross-class ownership identically to precomputed agnostic NMS owners, so an earlier cross-class survivor A
+/// keeps ownership of suppressed box B instead of letting a later same-class survivor C steal B.
+#[test]
+fn sebf_agnostic_owner_none_matches_precomputed_owner() {
+    // A = [0,0,10,10] (class 0, kept #0), C = [2,0,12,10] (class 1, kept #1; IoU(A,C)=8/12=0.667 <= 0.75),
+    // B = [1,0,11,10] (class 1, suppressed by A with IoU=9/11=0.818 > 0.75; also overlaps C with IoU=9/11).
+    let boxes = [b(0.0, 0.0, 10.0, 10.0), b(2.0, 0.0, 12.0, 10.0), b(1.0, 0.0, 11.0, 10.0)];
+    let scores = [0.9f32, 0.8, 0.7];
+    let classes = [0u32, 1, 1];
+    let kept = [0usize, 1];
+    let precomputed = [0u32, 1, 0];
+    let with_owner =
+        fuse_boxes_sebf(&kept, &boxes, &scores, &classes, true, 0.75, Some(&precomputed), 0.75, None);
+    let without_owner = fuse_boxes_sebf(&kept, &boxes, &scores, &classes, true, 0.75, None, 0.75, None);
+    assert_eq!(
+        without_owner, with_owner,
+        "agnostic owner=None fallback must match precomputed agnostic owners"
+    );
+    assert_eq!(without_owner[1], boxes[1], "later survivor C must not fuse B owned by earlier survivor A");
+}

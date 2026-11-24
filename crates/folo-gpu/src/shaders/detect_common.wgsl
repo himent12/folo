@@ -146,20 +146,21 @@ fn nwd_lambda(gt_w_px: f32, gt_h_px: f32, weight: f32) -> f32 {
     return weight * fexp(-area / (24.0 * 24.0));
 }
 
-// Split finite `x` into `(m, e)` with `|m| in [1, 2)` and `x = m * 2^e` (`0` maps to `(0, 0)`), exact for normals
-// and subnormals.
+// Split finite `x` into `(m, e)` with `|m| in [1, 2)` and `x = m * 2^e` (`0` maps to `(0, 0)`).
+// Uses pure integer bit manipulation (no float arithmetic on subnormals) so it is exact even on FTZ GPUs.
 fn norm_f32(x: f32) -> vec2<f32> {
-    if (x == 0.0) { return vec2<f32>(0.0, 0.0); }
-    var v = x;
-    var e = 0;
-    if ((bitcast<u32>(v) & 0x7f800000u) == 0u) {
-        v = v * bitcast<f32>(0x4b800000u); // 2^24 promotes subnormals to normal range
-        e = -24;
+    let bits = bitcast<u32>(x);
+    let exp_bits = (bits >> 23u) & 0xffu;
+    let mant_bits = bits & 0x007fffffu;
+    let sign_bit = bits & 0x80000000u;
+    if (exp_bits == 0u) {
+        if (mant_bits == 0u) { return vec2<f32>(0.0, 0.0); }
+        let shift = countLeadingZeros(mant_bits) - 8u;
+        let m = bitcast<f32>(sign_bit | 0x3f800000u | ((mant_bits << shift) & 0x007fffffu));
+        return vec2<f32>(m, f32(-126 - i32(shift)));
     }
-    let bits = bitcast<u32>(v);
-    e = e + i32((bits >> 23u) & 0xffu) - 127;
-    let m = bitcast<f32>((bits & 0x807fffffu) | 0x3f800000u);
-    return vec2<f32>(m, f32(e));
+    let m = bitcast<f32>(sign_bit | 0x3f800000u | mant_bits);
+    return vec2<f32>(m, f32(i32(exp_bits) - 127));
 }
 
 // Exact power-of-two scaling `x * 2^e` across the full exponent range without intermediate overflow/underflow.

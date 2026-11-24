@@ -801,4 +801,110 @@ fn new_math_extreme_edge_cases_match_host() {
         assert!(g_cpu.iter().all(|v| v.is_finite()) && g_gpu.iter().all(|v| v.is_finite()));
         close_vec(&g_gpu, &g_cpu, 1e-4, 1e-3, "extreme_neg1e38_otdfl/box_raw");
     }
+
+    // 9. Equal tail and full sums in `OT-DFL` (`reg_max = 4`, target distance `1.5`, logits `[-1000, 0, 0, -1000]`,
+    //    `dfl_ot_weight = 1e8`, `dfl_gain = 1.0`): all probability mass sits in bins `{1, 2}` so both retained tails
+    //    equal the full sum (`2`). CPU and GPU must both report exact `0` OT contribution (matching `dfl_ot_weight = 0`).
+    {
+        let anchors = Anchors { points: vec![[3.5, 3.5]], strides: vec![8.0], ..Anchors::default() };
+        let a = anchors.len();
+        let mut box_data = vec![0.0f32; 16 * a];
+        for side in 0..4 {
+            box_data[side * 4] = -1000.0;
+            box_data[side * 4 + 3] = -1000.0;
+        }
+        let box_raw = Tensor::from_slice(&box_data, [1, 16, a]).unwrap();
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        // Anchor at grid (3.5, 3.5) = px (28, 28); target [16, 16, 40, 40] gives exact ltrb = 1.5 grid cells -> j = 1.
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(16.0, 16.0, 40.0, 40.0)], labels: vec![0] }];
+        let cfg0 = LossConfig {
+            reg_max: 4,
+            box_gain: 0.0,
+            cls_gain: 0.0,
+            dfl_gain: 1.0,
+            dfl_ot_weight: 0.0,
+            ..LossConfig::default()
+        };
+        let cfg_ot = LossConfig { dfl_ot_weight: 1e8, ..cfg0 };
+        let base_cpu = detection_loss_host(&box_raw, &cls_raw, &anchors, &targets, &cfg0).unwrap();
+        let ot_cpu = detection_loss_host(&box_raw, &cls_raw, &anchors, &targets, &cfg_ot).unwrap();
+        let (bd, cd) = (box_raw.to_device(dev).unwrap(), cls_raw.to_device(dev).unwrap());
+        let ot_gpu = detection_loss(&bd, &cd, &anchors, &targets, &cfg_ot).unwrap();
+        assert_eq!((ot_cpu.num_fg, ot_gpu.num_fg), (1, 1));
+        assert!(
+            (ot_cpu.total_value - base_cpu.total_value).abs() <= 1e-6,
+            "CPU equal-sum OT-DFL added spurious loss: {} vs base {}",
+            ot_cpu.total_value,
+            base_cpu.total_value
+        );
+        assert!(
+            (ot_gpu.total_value - base_cpu.total_value).abs() <= 1e-5,
+            "GPU equal-sum OT-DFL {} vs base {}",
+            ot_gpu.total_value,
+            base_cpu.total_value
+        );
+    }
+
+    // 10. Extreme `box_gain * kappa` where intermediate coordinate gradient (`~3.2e44`) overflows `f32` while the
+    //     final logit gradient after the DFL softmax Jacobian (`~-3.2e24`) fits in `f32`:
+    //     `d_left ≈ 1e-20`, `rpiou_delta = 0.1`, `rpiou_kappa = 1e38`, `box_gain = 1e25`.
+    {
+        let l_left = (1e-20f32).ln();
+        let d_left = Tensor::from_slice(&[0.0f32, l_left], [1, 2])
+            .unwrap()
+            .softmax(1)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[1];
+        let ax = 2.0 * d_left;
+        let anchors = Anchors { points: vec![[ax, 0.5]], strides: vec![1.0], ..Anchors::default() };
+        let box_raw =
+            Tensor::from_slice(&[0.0, l_left, 0.0, 0.0, 0.0, -1000.0, 0.0, 0.0], [1, 8, 1]).unwrap();
+        let cls_raw = Tensor::zeros([1, 1, 1]);
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(0.0, 0.0, ax, 1.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 2,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 1e38,
+            rpiou_delta: 0.1,
+            box_gain: 1e25,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            tal: folo_vision::assign::TalConfig {
+                nwd_weight: 1.0,
+                ..folo_vision::assign::TalConfig::default()
+            },
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        let t_w = want.target_score_sum as f64;
+        assert!(got.is_finite() && want.is_finite() && t_w > 0.9);
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()), "CPU logit grad must be finite: {g_cpu:?}");
+        assert!(g_gpu.iter().all(|v| v.is_finite()), "GPU logit grad must be finite: {g_gpu:?}");
+        let d2 = (0.1f32 as f64).powi(2);
+        let ke2 = 1e38f64 * 0.25 * (d_left as f64).powi(2) / ((ax as f64).powi(2) + d2);
+        let coord_g = 0.5f64 * (t_w * 1e25f64) * 1e38f64 * (d_left as f64)
+            / (((ax as f64).powi(2) + d2) * (1.0 + ke2).powi(2));
+        let logit_g_ref = -(coord_g * d_left as f64) as f32;
+        assert!(
+            (g_cpu[1] - logit_g_ref).abs() <= 1e-3 * logit_g_ref.abs(),
+            "CPU logit grad {} vs f64 ref {logit_g_ref}",
+            g_cpu[1]
+        );
+        assert!(
+            (g_gpu[1] - logit_g_ref).abs() <= 2e-2 * logit_g_ref.abs(),
+            "GPU logit grad {} vs f64 ref {logit_g_ref}",
+            g_gpu[1]
+        );
+        close_vec(&g_gpu, &g_cpu, 2e-2 * logit_g_ref.abs(), 2e-2, "extreme_box_gain_rpiou/box_raw");
+    }
 }

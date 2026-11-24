@@ -239,9 +239,8 @@ fn gather_flat_cpu(x: &Tensor, idx: Vec<usize>) -> Result<Tensor> {
 ///
 /// where `u = IoU(b1, b2)` and
 /// `E^2 = 0.25 * (((ax1 - bx1)^2 + (ax2 - bx2)^2) / (w_g^2 + delta0^2) + ((ay1 - by1)^2 + (ay2 - by2)^2) / (h_g^2 + delta0^2))`.
-/// Purely algebraic (no `atan` or `exp`), with zero enclosing-box expansion and a global gradient bound; `b2` is
-/// treated as constant ground truth for the edge penalty (GPU training uses the fused `det_box.wgsl` kernel).
-pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
+/// Focal IoU term `(1 - u) * (1 + beta * u)` of [`rpiou_loss`].
+fn rpiou_focal_iou(b1: &Tensor, b2: &Tensor, beta: f32) -> Result<Tensor> {
     const EPS: f32 = 1e-7;
     let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
     let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
@@ -253,7 +252,13 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     let inter = iw.mul(&ih)?;
     let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.add_scalar(EPS)?;
     let iou = inter.div(&union)?;
-    let focal_iou = iou.rsub_scalar(1.0)?.mul(&iou.mul_scalar(beta)?.add_scalar(1.0)?)?;
+    iou.rsub_scalar(1.0)?.mul(&iou.mul_scalar(beta)?.add_scalar(1.0)?)
+}
+
+/// Purely algebraic (no `atan` or `exp`), with zero enclosing-box expansion and a global gradient bound; `b2` is
+/// treated as constant ground truth for the edge penalty (GPU training uses the fused `det_box.wgsl` kernel).
+pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
+    let focal_iou = rpiou_focal_iou(b1, b2, beta)?;
     let edge_pen = rpiou_edge_penalty(b1, b2, kappa, delta0)?;
     focal_iou.add(&edge_pen)
 }
@@ -322,6 +327,107 @@ fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Resu
     })
 }
 
+/// Rational edge penalty `ke2 / (1 + ke2)` directly from DFL `logits: [N, 4, R]`, carrying the edge derivative
+/// through the DFL softmax Jacobian in `f64` before rounding the final logit gradient to `f32`, so extreme
+/// `box_gain * kappa` never overflows an intermediate coordinate gradient when the final logit gradient fits in `f32`.
+fn rpiou_edge_from_logits(
+    logits: &Tensor,
+    anchor4: &[f32],
+    tbox: &[f32],
+    kappa: f32,
+    delta0: f32,
+) -> Result<Tensor> {
+    const KE2_MAX: f64 = 1e16;
+    let (n, sides, r) = logits.dims3()?;
+    debug_assert_eq!(sides, 4);
+    let dev = logits.device();
+    let data = logits.to_vec::<f32>()?;
+    let mut probs = vec![0.0f32; n * 4 * r];
+    let mut dists = vec![0.0f32; n * 4];
+    for idx in 0..n * 4 {
+        let row = &data[idx * r..(idx + 1) * r];
+        let mut m = f32::NEG_INFINITY;
+        for &x in row {
+            m = m.max(x);
+        }
+        let mut z = 0.0f32;
+        let prow = &mut probs[idx * r..(idx + 1) * r];
+        for (pk, &x) in prow.iter_mut().zip(row) {
+            let e = (x - m).exp();
+            *pk = e;
+            z += e;
+        }
+        let mut d = 0.0f32;
+        for (k, pk) in prow.iter_mut().enumerate() {
+            *pk /= z;
+            d += *pk * k as f32;
+        }
+        dists[idx] = d;
+    }
+    let k64 = kappa as f64;
+    let d2 = (delta0 as f64) * (delta0 as f64);
+    let signs = [-1.0f32, -1.0, 1.0, 1.0];
+    let mut out = vec![0.0f32; n];
+    let mut base_d = vec![0.0f64; n * 4];
+    for i in 0..n {
+        let pd = [
+            anchor4[4 * i] + signs[0] * dists[4 * i],
+            anchor4[4 * i + 1] + signs[1] * dists[4 * i + 1],
+            anchor4[4 * i + 2] + signs[2] * dists[4 * i + 2],
+            anchor4[4 * i + 3] + signs[3] * dists[4 * i + 3],
+        ];
+        let (ax1, ay1, ax2, ay2) = (pd[0] as f64, pd[1] as f64, pd[2] as f64, pd[3] as f64);
+        let (bx1, by1, bx2, by2) =
+            (tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64);
+        let w2 = (bx2 - bx1).max(0.0);
+        let h2 = (by2 - by1).max(0.0);
+        let denom_x = w2 * w2 + d2;
+        let denom_y = h2 * h2 + d2;
+        let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
+        let ke2_raw = k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
+        out[i] = if ke2_raw.is_finite() {
+            let ke2 = ke2_raw.min(KE2_MAX);
+            (ke2 / (1.0 + ke2)) as f32
+        } else if ke2_raw.is_infinite() {
+            1.0
+        } else {
+            ke2_raw as f32
+        };
+        if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
+            let inv1 = 1.0 / (1.0 + ke2_raw);
+            let c = 0.5 * k64 * inv1 * inv1;
+            base_d[4 * i] = if dx1 == 0.0 { 0.0 } else { -c * (dx1 / denom_x) };
+            base_d[4 * i + 1] = if dy1 == 0.0 { 0.0 } else { -c * (dy1 / denom_y) };
+            base_d[4 * i + 2] = if dx2 == 0.0 { 0.0 } else { c * (dx2 / denom_x) };
+            base_d[4 * i + 3] = if dy2 == 0.0 { 0.0 } else { c * (dy2 / denom_y) };
+        }
+    }
+    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    Tensor::custom_op("rpiou_edge_logits", &[logits], out_t, move |g| {
+        let gv = g.to_vec::<f32>()?;
+        let mut grad = vec![0.0f32; n * 4 * r];
+        for i in 0..n {
+            let gi = gv[i] as f64;
+            if gi == 0.0 {
+                continue;
+            }
+            for side in 0..4 {
+                let gd = gi * base_d[4 * i + side];
+                if gd == 0.0 {
+                    continue;
+                }
+                let d_s = dists[4 * i + side] as f64;
+                let prow = &probs[(4 * i + side) * r..(4 * i + side + 1) * r];
+                let grow = &mut grad[(4 * i + side) * r..(4 * i + side + 1) * r];
+                for (k, (&pk, gk)) in prow.iter().zip(grow.iter_mut()).enumerate() {
+                    *gk = (gd * (pk as f64) * (k as f64 - d_s)) as f32;
+                }
+            }
+        }
+        Ok(vec![Some(Tensor::from_vec(grad, [n, 4, r])?.to_device(dev)?)])
+    })
+}
+
 /// Overflow/underflow-safe `exp(d)` for `d <= 0` (`d = -inf` maps to `0.0`).
 #[inline(always)]
 fn safe_exp_neg(d: f32) -> f32 {
@@ -376,7 +482,7 @@ fn ot_dfl_tail(
             *pk = e;
             z += e;
         }
-        let lz = z.ln();
+        let lz = (z as f64).ln();
         for pk in &mut p {
             *pk /= z;
         }
@@ -396,7 +502,7 @@ fn ot_dfl_tail(
                     }
                 }
                 if k < j {
-                    l_tail += ((m as f64 - ms as f64) + (lz as f64 - (s as f64).ln())).max(0.0);
+                    l_tail += ((m as f64 - ms as f64) + (lz - (s as f64).ln())).max(0.0);
                     ms_arr[k] = ms;
                     s_arr[k] = s;
                 }
@@ -418,7 +524,7 @@ fn ot_dfl_tail(
                     f += safe_exp_neg(x - mf);
                 }
                 if k > j {
-                    l_tail += ((m as f64 - mf as f64) + (lz as f64 - (f as f64).ln())).max(0.0);
+                    l_tail += ((m as f64 - mf as f64) + (lz - (f as f64).ln())).max(0.0);
                     mf_arr[k] = mf;
                     f_arr[k] = f;
                 }
@@ -650,11 +756,16 @@ pub(super) fn loss_impl(
         let proj = on_dev(Tensor::arange(0.0, r as f32, 1.0)?)?;
         let dist = logits.softmax(2)?.mul(&proj)?.sum(2, false)?;
         let sign = on_dev(Tensor::from_slice(&[-1.0f32, -1.0, 1.0, 1.0], [4])?)?;
+        let rpiou_edge = if cfg.box_loss == BoxLossKind::Rpiou {
+            Some(rpiou_edge_from_logits(&logits, &anchor4, &tbox, cfg.rpiou_kappa, cfg.rpiou_delta)?)
+        } else {
+            None
+        };
         let pd = on_dev(Tensor::from_vec(anchor4, [n, 4])?)?.add(&dist.mul(&sign)?)?;
         let tb = on_dev(Tensor::from_vec(tbox, [n, 4])?)?;
         let l_base = match cfg.box_loss {
             BoxLossKind::Ciou => ciou(&pd, &tb)?.rsub_scalar(1.0)?,
-            BoxLossKind::Rpiou => rpiou_loss(&pd, &tb, cfg.rpiou_beta, cfg.rpiou_kappa, cfg.rpiou_delta)?,
+            BoxLossKind::Rpiou => rpiou_focal_iou(&pd, &tb, cfg.rpiou_beta)?.add(&rpiou_edge.unwrap())?,
         };
         let box_per = if cfg.nwd_weight > 0.0 {
             let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
