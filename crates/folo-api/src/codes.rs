@@ -16,6 +16,13 @@ pub struct Code {
     pub meaning: &'static str,
 }
 
+impl Code {
+    /// The entry for `code`, if it is part of the vocabulary.
+    pub fn find(code: &str) -> Option<&'static Self> {
+        find(code)
+    }
+}
+
 const fn c(code: &'static str, status: u16, exit: u8, meaning: &'static str) -> Code {
     Code { code, status, exit, meaning }
 }
@@ -265,7 +272,7 @@ pub const CODES: &[Code] = &[
         "download_failed",
         502,
         1,
-        "`folo weights pull`: the HTTPS download failed (no network, a timeout, a server error, a cut body); nothing          was installed (CLI)",
+        "`folo weights pull`: the HTTPS download failed (no network, a timeout, a server error, a cut body); nothing was installed (CLI)",
     ),
     c(
         "gh_failed",
@@ -318,6 +325,7 @@ mod tests {
     fn codes_are_unique_snake_case() {
         let mut seen = std::collections::HashSet::new();
         for c in CODES {
+            assert!(!c.code.is_empty(), "empty code entry");
             assert!(seen.insert(c.code), "{} twice", c.code);
             assert!(c.code.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'), "{}", c.code);
             assert!((1..=4).contains(&c.exit) && (400..600).contains(&c.status), "{}", c.code);
@@ -329,5 +337,30 @@ mod tests {
         assert_eq!(exit_code("something_else"), 1);
         assert_eq!(cap("héllo\n", 2), "hé…");
         assert_eq!(cap("hi\n", 5), "hi");
+    }
+
+    #[test]
+    fn code_meanings_are_clean_single_spaced_text() {
+        for c in CODES {
+            assert!(!c.meaning.is_empty(), "{}: empty meaning", c.code);
+            assert_eq!(c.meaning.trim(), c.meaning, "{}: leading or trailing whitespace in meaning", c.code);
+            assert!(
+                !c.meaning.chars().any(|ch| ch.is_whitespace() && ch != ' '),
+                "{}: non-space whitespace in meaning: {:?}",
+                c.code,
+                c.meaning
+            );
+            assert!(!c.meaning.contains("  "), "{}: repeated spaces in meaning: {:?}", c.code, c.meaning);
+        }
+    }
+
+    #[test]
+    fn code_find_looks_up_every_registered_code() {
+        for c in CODES {
+            assert_eq!(Code::find(c.code), Some(c));
+            assert_eq!(find(c.code), Some(c));
+        }
+        assert_eq!(Code::find(""), None);
+        assert_eq!(Code::find("not_a_real_code"), None);
     }
 }
