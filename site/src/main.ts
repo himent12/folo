@@ -54,26 +54,36 @@ labelTheme();
 const navBtn = $<HTMLButtonElement>('.nav-toggle');
 const scrim = $<HTMLElement>('.scrim');
 const sidebar = $<HTMLElement>('#sidebar');
+const desktopNav = matchMedia('(min-width: 960px)');
+const navInertTargets = $$<HTMLElement>('.skip, #main, .topbar > :not(.nav-toggle)');
+const isNavOpen = () => document.documentElement.classList.contains('nav-open');
+
 function setNav(open: boolean, restoreFocus = true) {
-  document.body.classList.toggle('nav-open', open);
+  if (open && desktopNav.matches) return;
+  if (open === isNavOpen()) return;
+  document.documentElement.classList.toggle('nav-open', open);
+  for (const el of navInertTargets) el.inert = open;
   navBtn?.setAttribute('aria-expanded', String(open));
   navBtn?.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
   if (scrim) scrim.hidden = !open;
-  if (open) ($<HTMLElement>('a[aria-current="page"]', sidebar ?? document) ?? $<HTMLElement>('a', sidebar ?? document))?.focus();
-  else if (restoreFocus) navBtn?.focus();
+  if (open && sidebar) ($<HTMLElement>('a[aria-current="page"]', sidebar) ?? $<HTMLElement>('a', sidebar))?.focus();
+  else if (!open && restoreFocus) navBtn?.focus();
 }
-navBtn?.addEventListener('click', () => setNav(!document.body.classList.contains('nav-open')));
+navBtn?.addEventListener('click', () => setNav(!isNavOpen()));
 scrim?.addEventListener('click', () => setNav(false));
-sidebar?.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) setNav(false);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isNavOpen() && !dialog?.open) {
+    e.preventDefault();
+    setNav(false);
+  }
 });
-// Keep Tab inside the open drawer.
+// Close the drawer if focus somehow leaves both the drawer and its toggle button.
 sidebar?.addEventListener('focusout', (e) => {
-  if (!document.body.classList.contains('nav-open')) return;
+  if (!isNavOpen()) return;
   const to = e.relatedTarget as Node | null;
   if (to && !sidebar.contains(to) && to !== navBtn) setNav(false, false);
 });
-matchMedia('(min-width: 960px)').addEventListener('change', (e) => {
+desktopNav.addEventListener('change', (e) => {
   if (e.matches) setNav(false, false);
 });
 $<HTMLElement>('a[aria-current="page"]', sidebar ?? document)?.scrollIntoView({ block: 'center' });
@@ -133,7 +143,7 @@ async function runSearch() {
 
 function openSearch() {
   if (!dialog || !input || dialog.open) return;
-  setNav(false, false);
+  setNav(false, true);
   dialog.showModal();
   input.select();
   void runSearch();
