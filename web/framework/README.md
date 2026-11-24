@@ -16,7 +16,7 @@ Related: [Studio's README](../README.md) (the app built on it, and how to add a 
 | Path | What it holds |
 |---|---|
 | `runtime/` | The runtime, imported as `fw` (`runtime/index.ts`, the public exports) |
-| `runtime/core.ts`, `flushOrder.ts` | Signals, lazy computeds, effects, the owner tree, context, the scheduler and zero-allocation tree-order job sorting |
+| `runtime/core.ts`, `flushOrder.ts` | Signals, lazy computeds, effects, the owner tree, context, the scheduler and tree-order job sorting without per-job path allocations |
 | `runtime/dom.ts` | Cloned templates, `insert` with the keyed list reconciler, attribute, property, class and style setters |
 | `runtime/events.ts` | Delegated events (one listener per type on each render root and the document) and direct ones |
 | `runtime/flow.ts` | `Show`, `For`, `Index`, `Switch`/`Match`, `Key`, `Dynamic`, `Portal` |

@@ -375,6 +375,10 @@ describe('flushOrder', () => {
     });
     const r1 = mk(1, null);
     const r2 = mk(2, null);
+    // Top-level memo and branch root sharing `_id = 12` at `_parent: null, _depth: 0`.
+    const topMemo = mk(12, null);
+    const topMemoRoot = mk(12, null);
+    const topMemoChild = mk(13, topMemoRoot);
     const a = mk(3, r1);
     const b = mk(4, r1);
     // Owning memo `m` and two branch roots `mRoot1` (old) / `mRoot2` (recreated) share `_id = 5` under `a`.
@@ -384,11 +388,33 @@ describe('flushOrder', () => {
     const mChild1 = mk(6, mRoot1);
     const mChild2 = mk(7, mRoot2);
     const mDeep = mk(8, mChild2);
+    // Shallower diff (`a._id = 3` vs `b._id = 4`) above a shared-id layer (`5`) and opposite deeper diff (`7` vs `6`).
+    const bShared = mk(5, b);
+    const bSharedChild = mk(6, bShared);
     const bChild = mk(9, b);
     const r2Child = mk(10, r2);
     const r2Grand = mk(11, r2Child);
 
-    const nodes = [r1, r2, a, b, m, mRoot1, mRoot2, mChild1, mChild2, mDeep, bChild, r2Child, r2Grand];
+    const nodes = [
+      r1,
+      r2,
+      topMemo,
+      topMemoRoot,
+      topMemoChild,
+      a,
+      b,
+      m,
+      mRoot1,
+      mRoot2,
+      mChild1,
+      mChild2,
+      mDeep,
+      bShared,
+      bSharedChild,
+      bChild,
+      r2Child,
+      r2Grand,
+    ];
     for (const x of nodes) {
       for (const y of nodes) {
         expect(compareJobs(x, y)).toBe(refCompare(x, y));
@@ -448,7 +474,10 @@ describe('flushOrder', () => {
   });
 
   it('evaluates an owning memo before effects inside its branch even when the branch effect queues first', () => {
-    const cond = signal(true);
+    // Start false so `branch` subscribes to `cond` via the reader effect first; when `cond` turns true, `inner`
+    // subscribes to `cond` AFTER `branch` (at the head of `cond._targets`), so toggling `cond` back to false notifies
+    // `inner` BEFORE `branch` (LIFO). Tree order must still run `branch` first, disposing `inner` before it can run.
+    const cond = signal(false);
     const log: string[] = [];
 
     createRoot(() => {
@@ -465,10 +494,12 @@ describe('flushOrder', () => {
       renderEffect(() => void branch());
     });
     flush();
+
+    cond.set(true);
+    flush();
+    expect(log).toEqual(['memo false', 'memo true', 'inner true']);
     log.length = 0;
 
-    // `inner` subscribed to `cond` after `branch` did, so `cond._targets` notifies `inner` first (LIFO).
-    // Tree order must still run `branch` first, disposing `inner` before `inner` can run with `cond = false`.
     cond.set(false);
     flush();
     expect(log).toEqual(['memo false']);
