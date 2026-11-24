@@ -1438,8 +1438,8 @@ GPU forwards, training, export and the `f32` default are unchanged.
   points become one constant per output channel, `corr[o] = Σ q[o, c, ky, kx] · zero(c)`, and zero padding uses each
   channel's zero point, so it is exact.
 - **Conv.** `acc[o] = Σ q · u` in i32 (u8 × s8; exact: no product or partial sum saturates), then
-  `y = fma(acc − corr, s_o, bias)` (or per-part FMA accumulation into `bias` when decoupled), division-free minimax
-  SiLU (`q8::silu_q8`, docs/CORE.md) when the conv uses SiLU (else identity), the residual via FMA
+  `y = fma(acc − corr, s_o, bias)` (or per-part FMA accumulation into `0.0` followed by `+ bias` when decoupled),
+  division-free minimax SiLU (`q8::silu_q8`, docs/CORE.md) when the conv uses SiLU (else identity), the residual via FMA
   (`fma(u_r − zero_r(o), scale_r(o), y)`) if any, and the per-channel output code
   `clamp(round_half_even(clamp(y / scale_out(o), −512, 512)) + zero_out(o), 0, 255)` (multiplying by the `f32`
   reciprocal of `scale_out(o)`). Every step is `f32` arithmetic in a fixed order, so the result does not depend on
