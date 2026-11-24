@@ -52,13 +52,11 @@ fn main(@builtin(local_invocation_index) lid: u32) {
         var wc = r.x / tss * pf(4u);
         let dfl_g = pf(5u);
         var wd = -r.z / tss * dfl_g;
-        if (dfl_ot_w > 0.0) {
-            let ot_norm = OT[0] / tss;
-            if (abs(dfl_g) <= 1.0) {
-                wd = wd + (ot_norm * dfl_g) * dfl_ot_w;
-            } else {
-                wd = wd + (ot_norm * dfl_ot_w) * dfl_g;
-            }
+        if (dfl_ot_w > 0.0 && dfl_g != 0.0 && OT[0] > 0.0) {
+            let on = norm_f32(OT[0] / tss);
+            let wn = norm_f32(dfl_ot_w);
+            let gn = norm_f32(dfl_g);
+            wd = wd + mul_pow2(on.x * wn.x * gn.x, i32(on.y) + i32(wn.y) + i32(gn.y) + 32);
         }
         var total = (wb + wc + wd) * nb;
         let bad = MISC[0] != 0u;

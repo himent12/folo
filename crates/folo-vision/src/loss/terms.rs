@@ -261,42 +261,36 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
 /// Overflow- and underflow-safe rational edge penalty `ke2 / (1 + ke2)` with `ke2 = min(kappa * E^2, 1e16)` for
 /// `b1, b2: [N, 4]`.
 ///
-/// Scales each axis by `q = sqrt(kappa) / max(w, delta0)` so extreme `delta0` / `kappa` never overflow or underflow
-/// `delta0^2`, and guards `dx == 0` so exact matches never produce `Inf * 0 = NaN`.
+/// Evaluated in `f64` so extreme `delta0`, `w2`, and `kappa` across the entire finite `f32` range never overflow,
+/// underflow, or produce `Inf * 0 = NaN` in forward or backward.
 fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Result<Tensor> {
-    const KE2_MAX: f32 = 1e16;
+    const KE2_MAX: f64 = 1e16;
     let (n, c) = b1.dims2()?;
     debug_assert_eq!(c, 4);
     let dev = b1.device();
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
-    let rk = kappa.sqrt();
+    let k64 = kappa as f64;
+    let d2 = (delta0 as f64) * (delta0 as f64);
     let mut out = vec![0.0f32; n];
     for i in 0..n {
-        let (ax1, ay1, ax2, ay2) = (a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
-        let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
+        let (ax1, ay1, ax2, ay2) =
+            (a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64);
+        let (bx1, by1, bx2, by2) =
+            (b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64);
         let w2 = (bx2 - bx1).max(0.0);
         let h2 = (by2 - by1).max(0.0);
-        let sx = w2.max(delta0);
-        let sy = h2.max(delta0);
-        let (wx, dx_f) = (w2 / sx, delta0 / sx);
-        let (hy, dy_f) = (h2 / sy, delta0 / sy);
-        let denom_x = wx * wx + dx_f * dx_f;
-        let denom_y = hy * hy + dy_f * dy_f;
-        let (qx, qy) = (rk / sx, rk / sy);
+        let denom_x = w2 * w2 + d2;
+        let denom_y = h2 * h2 + d2;
         let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-        let ux1 = if dx1 != 0.0 { dx1 * qx } else { 0.0 };
-        let ux2 = if dx2 != 0.0 { dx2 * qx } else { 0.0 };
-        let uy1 = if dy1 != 0.0 { dy1 * qy } else { 0.0 };
-        let uy2 = if dy2 != 0.0 { dy2 * qy } else { 0.0 };
-        let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
+        let ke2_raw = k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
         out[i] = if ke2_raw.is_finite() {
             let ke2 = ke2_raw.min(KE2_MAX);
-            ke2 / (1.0 + ke2)
+            (ke2 / (1.0 + ke2)) as f32
         } else if ke2_raw.is_infinite() {
             1.0
         } else {
-            ke2_raw
+            ke2_raw as f32
         };
     }
     let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
@@ -304,40 +298,24 @@ fn rpiou_edge_penalty(b1: &Tensor, b2: &Tensor, kappa: f32, delta0: f32) -> Resu
         let gv = g.to_vec::<f32>()?;
         let mut grad = vec![0.0f32; 4 * n];
         for i in 0..n {
-            let (ax1, ay1, ax2, ay2) = (a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
-            let (bx1, by1, bx2, by2) = (b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]);
+            let (ax1, ay1, ax2, ay2) =
+                (a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64);
+            let (bx1, by1, bx2, by2) =
+                (b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64);
             let w2 = (bx2 - bx1).max(0.0);
             let h2 = (by2 - by1).max(0.0);
-            let sx = w2.max(delta0);
-            let sy = h2.max(delta0);
-            let (wx, dx_f) = (w2 / sx, delta0 / sx);
-            let (hy, dy_f) = (h2 / sy, delta0 / sy);
-            let denom_x = wx * wx + dx_f * dx_f;
-            let denom_y = hy * hy + dy_f * dy_f;
-            let (qx, qy) = (rk / sx, rk / sy);
+            let denom_x = w2 * w2 + d2;
+            let denom_y = h2 * h2 + d2;
             let (dx1, dx2, dy1, dy2) = (ax1 - bx1, ax2 - bx2, ay1 - by1, ay2 - by2);
-            let ux1 = if dx1 != 0.0 { dx1 * qx } else { 0.0 };
-            let ux2 = if dx2 != 0.0 { dx2 * qx } else { 0.0 };
-            let uy1 = if dy1 != 0.0 { dy1 * qy } else { 0.0 };
-            let uy2 = if dy2 != 0.0 { dy2 * qy } else { 0.0 };
-            let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
+            let ke2_raw =
+                k64 * 0.25 * ((dx1 * dx1 + dx2 * dx2) / denom_x + (dy1 * dy1 + dy2 * dy2) / denom_y);
             if ke2_raw.is_finite() && ke2_raw < KE2_MAX {
                 let inv1 = 1.0 / (1.0 + ke2_raw);
-                let g_half = 0.5 * gv[i];
-                let (qx_i, qy_i) = (qx * inv1, qy * inv1);
-                let edge_g = |dx: f32, u: f32, denom: f32, q_i: f32| -> f32 {
-                    if dx == 0.0 {
-                        0.0
-                    } else if g_half.abs() <= 1.0 {
-                        (((u / denom) * g_half) * inv1) * q_i
-                    } else {
-                        (((u / denom) * inv1) * q_i) * g_half
-                    }
-                };
-                grad[4 * i] = edge_g(dx1, ux1, denom_x, qx_i);
-                grad[4 * i + 1] = edge_g(dy1, uy1, denom_y, qy_i);
-                grad[4 * i + 2] = edge_g(dx2, ux2, denom_x, qx_i);
-                grad[4 * i + 3] = edge_g(dy2, uy2, denom_y, qy_i);
+                let c = 0.5 * (gv[i] as f64) * k64 * inv1 * inv1;
+                grad[4 * i] = if dx1 == 0.0 { 0.0 } else { (c * (dx1 / denom_x)) as f32 };
+                grad[4 * i + 1] = if dy1 == 0.0 { 0.0 } else { (c * (dy1 / denom_y)) as f32 };
+                grad[4 * i + 2] = if dx2 == 0.0 { 0.0 } else { (c * (dx2 / denom_x)) as f32 };
+                grad[4 * i + 3] = if dy2 == 0.0 { 0.0 } else { (c * (dy2 / denom_y)) as f32 };
             }
         }
         Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
@@ -402,7 +380,7 @@ fn ot_dfl_tail(
         for pk in &mut p {
             *pk /= z;
         }
-        let mut l_tail = 0.0f32;
+        let mut l_tail = 0.0f64;
         if j > 0 {
             let mut ms = row[r - 1];
             let mut s = 1.0f32;
@@ -418,7 +396,7 @@ fn ot_dfl_tail(
                     }
                 }
                 if k < j {
-                    l_tail += ((m - ms) + (lz - s.ln())).max(0.0);
+                    l_tail += ((m as f64 - ms as f64) + (lz as f64 - (s as f64).ln())).max(0.0);
                     ms_arr[k] = ms;
                     s_arr[k] = s;
                 }
@@ -440,7 +418,7 @@ fn ot_dfl_tail(
                     f += safe_exp_neg(x - mf);
                 }
                 if k > j {
-                    l_tail += ((m - mf) + (lz - f.ln())).max(0.0);
+                    l_tail += ((m as f64 - mf as f64) + (lz as f64 - (f as f64).ln())).max(0.0);
                     mf_arr[k] = mf;
                     f_arr[k] = f;
                 }
@@ -452,7 +430,7 @@ fn ot_dfl_tail(
                 ap_mant[t] = ap_mant[t + 1] * safe_exp_neg(mf_arr[t] - mf_arr[t + 1]) + 1.0 / f_arr[t];
             }
         }
-        total += (wt as f64) * (l_tail as f64);
+        total += (wt as f64) * l_tail;
         let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
         for (k, out_k) in out_row.iter_mut().enumerate() {
             let xk = row[k];

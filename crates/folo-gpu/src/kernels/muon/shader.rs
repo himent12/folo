@@ -30,7 +30,8 @@ const ORIENT: &str = "fn oriented_pad(e: u32, r: u32, c: u32, ld_c: u32, trans: 
      \x20 return (e / c) * ld_c + e % c;\n}\n";
 
 /// The multi-tensor kernels' binding layouts, by name and matrix count, kept for the process: `muon_gather`
-/// (`G`, `M` per matrix, then `X`, `PART`, `TBL`), `muon_apply` (`P` per matrix, then `X`, `TBL`).
+/// (`G`, `M` per matrix, then `X`, `PART`, `TBL`), `muon_apply` (`P` per matrix, then `X`, `TBL`), and
+/// `muon_dw_lmo` (`P`, `G`, `M` per matrix, then `TBL`).
 pub(super) fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
     static DEFS: OnceLock<Mutex<HashMap<(&'static str, usize), &'static KernelDef>>> = OnceLock::new();
     let mut defs = DEFS.get_or_init(Default::default).lock().expect("muon defs lock");

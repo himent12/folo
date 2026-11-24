@@ -18,6 +18,17 @@
 @group(0) @binding(6) var<storage, read> STATS: array<f32>;
 @group(0) @binding(7) var<storage, read> GRAD: array<f32>;
 
+// Exact 2^-32 scaling factor for OT-DFL slot accumulation so extreme logits (e.g. -1e38) never overflow f32 before
+// `det_combine.wgsl` normalises by `tss` and restores the +32 exponent alongside `dfl_ot_weight` and `dfl_gain`.
+const OT_SHIFT: f32 = 2.3283064365386963e-10; // 2^-32
+
+// Exponent-scaled R-PIoU edge gradient `(u / denom) * inv1^2 * (q_m * 2^e_q) * g_half`.
+fn rpiou_edge_grad(u: f32, denom: f32, in1: vec2<f32>, q_m: f32, e_q: i32, gn: vec2<f32>) -> f32 {
+    if (u == 0.0 || gn.x == 0.0) { return 0.0; }
+    let un = norm_f32(u / denom);
+    return mul_pow2(un.x * in1.x * in1.x * q_m * gn.x, i32(un.y) + 2 * i32(in1.y) + e_q + i32(gn.y));
+}
+
 // Gradient share of `a` in min(a, b) / max(a, b): folo-core gives ties half to each side.
 fn w_min(a: f32, b: f32) -> f32 { return select(select(0.0, 0.5, a == b), 1.0, a < b); }
 fn w_max(a: f32, b: f32) -> f32 { return select(select(0.0, 0.5, a == b), 1.0, a > b); }
@@ -101,7 +112,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         wr[side] = (1.0 - l) * wt;
         dfl = dfl + lp[side * R + ju] * wl[side] + lp[side * R + ju + 1u] * wr[side];
         if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
-            var l_tail = 0.0;
+            var l_tail_s = 0.0;
+            let ms_base = m * OT_SHIFT;
+            let lz_s = lz * OT_SHIFT;
             if (ju > 0u) {
                 var ms = BOX[base + (side * R + (R - 1u)) * na];
                 var s_acc = 1.0;
@@ -116,7 +129,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                             s_acc = s_acc + safe_exp_neg(x - ms);
                         }
                     }
-                    if (k < ju) { l_tail = l_tail + max((m - ms) + (lz - log_ge1(s_acc)), 0.0); }
+                    if (k < ju) {
+                        l_tail_s = l_tail_s + max((ms_base - ms * OT_SHIFT) + (lz_s - log_ge1(s_acc) * OT_SHIFT), 0.0);
+                    }
                 }
             }
             if (ju + 2u < R) {
@@ -130,10 +145,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                     } else {
                         f_acc = f_acc + safe_exp_neg(x - mf);
                     }
-                    if (k > ju) { l_tail = l_tail + max((m - mf) + (lz - log_ge1(f_acc)), 0.0); }
+                    if (k > ju) {
+                        l_tail_s = l_tail_s + max((ms_base - mf * OT_SHIFT) + (lz_s - log_ge1(f_acc) * OT_SHIFT), 0.0);
+                    }
                 }
             }
-            ot_sum = ot_sum + wt * l_tail;
+            ot_sum = ot_sum + wt * l_tail_s;
         }
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
@@ -185,46 +202,37 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let g_h1 = select(0.0, g_uni * w1, pd.w > pd.y);
         let g_ix = select(0.0, g_inter * ih, ix > 0.0);
         let g_iy = select(0.0, g_inter * iw, iy > 0.0);
-        let rk = sqrt(rpiou_kappa);
+        let rkn = norm_f32(sqrt(rpiou_kappa));
         let sx = max(w2, rpiou_delta);
         let sy = max(h2, rpiou_delta);
+        let sxn = norm_f32(sx);
+        let syn = norm_f32(sy);
         let wx = w2 / sx;
         let dx_f = rpiou_delta / sx;
         let denom_x = wx * wx + dx_f * dx_f;
         let hy = h2 / sy;
         let dy_f = rpiou_delta / sy;
         let denom_y = hy * hy + dy_f * dy_f;
-        let qx = rk / sx;
-        let qy = rk / sy;
-        let dx1 = pd.x - tb.x;
-        let dx2 = pd.z - tb.z;
-        let dy1 = pd.y - tb.y;
-        let dy2 = pd.w - tb.w;
-        let ux1 = select(0.0, dx1 * qx, dx1 != 0.0);
-        let ux2 = select(0.0, dx2 * qx, dx2 != 0.0);
-        let uy1 = select(0.0, dy1 * qy, dy1 != 0.0);
-        let uy2 = select(0.0, dy2 * qy, dy2 != 0.0);
+        let q_xm = rkn.x / sxn.x;
+        let e_qx = i32(rkn.y) - i32(sxn.y);
+        let q_ym = rkn.x / syn.x;
+        let e_qy = i32(rkn.y) - i32(syn.y);
+        let ux1 = scaled_edge_u(pd.x - tb.x, q_xm, e_qx);
+        let ux2 = scaled_edge_u(pd.z - tb.z, q_xm, e_qx);
+        let uy1 = scaled_edge_u(pd.y - tb.y, q_ym, e_qy);
+        let uy2 = scaled_edge_u(pd.w - tb.w, q_ym, e_qy);
         let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
         var ex1 = 0.0;
         var ey1 = 0.0;
         var ex2 = 0.0;
         var ey2 = 0.0;
         if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
-            let inv1 = 1.0 / (1.0 + ke2_raw);
-            let g_half = g_base * 0.5;
-            let qx_i = qx * inv1;
-            let qy_i = qy * inv1;
-            if (abs(g_half) <= 1.0) {
-                if (dx1 != 0.0) { ex1 = (((ux1 / denom_x) * g_half) * inv1) * qx_i; }
-                if (dy1 != 0.0) { ey1 = (((uy1 / denom_y) * g_half) * inv1) * qy_i; }
-                if (dx2 != 0.0) { ex2 = (((ux2 / denom_x) * g_half) * inv1) * qx_i; }
-                if (dy2 != 0.0) { ey2 = (((uy2 / denom_y) * g_half) * inv1) * qy_i; }
-            } else {
-                if (dx1 != 0.0) { ex1 = (((ux1 / denom_x) * inv1) * qx_i) * g_half; }
-                if (dy1 != 0.0) { ey1 = (((uy1 / denom_y) * inv1) * qy_i) * g_half; }
-                if (dx2 != 0.0) { ex2 = (((ux2 / denom_x) * inv1) * qx_i) * g_half; }
-                if (dy2 != 0.0) { ey2 = (((uy2 / denom_y) * inv1) * qy_i) * g_half; }
-            }
+            let in1 = norm_f32(1.0 / (1.0 + ke2_raw));
+            let gn = norm_f32(g_base * 0.5);
+            ex1 = rpiou_edge_grad(ux1, denom_x, in1, q_xm, e_qx, gn);
+            ey1 = rpiou_edge_grad(uy1, denom_y, in1, q_ym, e_qy, gn);
+            ex2 = rpiou_edge_grad(ux2, denom_x, in1, q_xm, e_qx, gn);
+            ey2 = rpiou_edge_grad(uy2, denom_y, in1, q_ym, e_qy, gn);
         }
         gx1 = -g_w1 - g_ix * w_max(pd.x, tb.x) + ex1;
         gy1 = -g_h1 - g_iy * w_max(pd.y, tb.y) + ey1;

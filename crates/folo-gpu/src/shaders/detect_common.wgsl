@@ -146,9 +146,45 @@ fn nwd_lambda(gt_w_px: f32, gt_h_px: f32, weight: f32) -> f32 {
     return weight * fexp(-area / (24.0 * 24.0));
 }
 
+// Split finite `x` into `(m, e)` with `|m| in [1, 2)` and `x = m * 2^e` (`0` maps to `(0, 0)`), exact for normals
+// and subnormals.
+fn norm_f32(x: f32) -> vec2<f32> {
+    if (x == 0.0) { return vec2<f32>(0.0, 0.0); }
+    var v = x;
+    var e = 0;
+    if ((bitcast<u32>(v) & 0x7f800000u) == 0u) {
+        v = v * bitcast<f32>(0x4b800000u); // 2^24 promotes subnormals to normal range
+        e = -24;
+    }
+    let bits = bitcast<u32>(v);
+    e = e + i32((bits >> 23u) & 0xffu) - 127;
+    let m = bitcast<f32>((bits & 0x807fffffu) | 0x3f800000u);
+    return vec2<f32>(m, f32(e));
+}
+
+// Exact power-of-two scaling `x * 2^e` across the full exponent range without intermediate overflow/underflow.
+fn mul_pow2(x: f32, e: i32) -> f32 {
+    if (x == 0.0) { return 0.0; }
+    var v = x;
+    var r = e;
+    if (r > 127) { v = v * bitcast<f32>(0x7f000000u); r = r - 127; }
+    if (r > 127) { v = v * bitcast<f32>(0x7f000000u); r = r - 127; }
+    if (r < -126) { v = v * bitcast<f32>(0x00800000u); r = r + 126; }
+    if (r < -126) { v = v * bitcast<f32>(0x00800000u); r = r + 126; }
+    let ec = clamp(r, -126, 127);
+    return v * bitcast<f32>(u32(ec + 127) << 23u);
+}
+
+// Compute `dx * q_m * 2^e_q` without forming an overflowing or underflowing `q_m * 2^e_q`.
+fn scaled_edge_u(dx: f32, q_m: f32, e_q: i32) -> f32 {
+    if (dx == 0.0) { return 0.0; }
+    let dn = norm_f32(dx);
+    return mul_pow2(dn.x * q_m, i32(dn.y) + e_q);
+}
+
 // Rational-Focal Edge-Decoupled IoU loss (R-PIoU) between predicted xyxy `a` and GT xyxy `b` (grid units).
-// Uses scaled coordinates `q = sqrt(kappa) / max(w, delta0)` so extreme `delta0` / `kappa` never overflow or
-// underflow `delta0^2`.
+// Uses exponent-split scaling `q = sqrt(kappa) / max(w, delta0)` so extreme `delta0`, `w2`, and `kappa` never
+// prematurely overflow or underflow.
 fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) -> f32 {
     let eps = 1e-7;
     let w1 = max(a.z - a.x, 0.0);
@@ -159,25 +195,25 @@ fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) 
     let uni = w1 * h1 + w2 * h2 - inter + eps;
     let iou = inter / uni;
     let focal_iou = (1.0 - iou) * (1.0 + beta * iou);
-    let rk = sqrt(kappa);
+    let rkn = norm_f32(sqrt(kappa));
     let sx = max(w2, delta0);
     let sy = max(h2, delta0);
+    let sxn = norm_f32(sx);
+    let syn = norm_f32(sy);
     let wx = w2 / sx;
     let dx_f = delta0 / sx;
     let denom_x = wx * wx + dx_f * dx_f;
     let hy = h2 / sy;
     let dy_f = delta0 / sy;
     let denom_y = hy * hy + dy_f * dy_f;
-    let qx = rk / sx;
-    let qy = rk / sy;
-    let dx1 = a.x - b.x;
-    let dx2 = a.z - b.z;
-    let dy1 = a.y - b.y;
-    let dy2 = a.w - b.w;
-    let ux1 = select(0.0, dx1 * qx, dx1 != 0.0);
-    let ux2 = select(0.0, dx2 * qx, dx2 != 0.0);
-    let uy1 = select(0.0, dy1 * qy, dy1 != 0.0);
-    let uy2 = select(0.0, dy2 * qy, dy2 != 0.0);
+    let q_xm = rkn.x / sxn.x;
+    let e_qx = i32(rkn.y) - i32(sxn.y);
+    let q_ym = rkn.x / syn.x;
+    let e_qy = i32(rkn.y) - i32(syn.y);
+    let ux1 = scaled_edge_u(a.x - b.x, q_xm, e_qx);
+    let ux2 = scaled_edge_u(a.z - b.z, q_xm, e_qx);
+    let uy1 = scaled_edge_u(a.y - b.y, q_ym, e_qy);
+    let uy2 = scaled_edge_u(a.w - b.w, q_ym, e_qy);
     let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
     let ke2 = select(1e16, min(ke2_raw, 1e16), is_finite_f(ke2_raw));
     let inv1 = 1.0 / (1.0 + ke2);

@@ -660,4 +660,145 @@ fn new_math_extreme_edge_cases_match_host() {
         );
         close_vec(&g_gpu, &g_cpu, 1e-5, 1e-4, "scaled_rpiou_delta1e20/box_raw");
     }
+
+    // 7. Extreme `R-PIoU` ratio (`gt = [0, 0, 2.5e-20, 1]`, `pred = [1.25e-38, 0, 2.5e-20, 1]`, `kappa = 1e38`,
+    //    `delta0 = 1e-30`): `sqrt(kappa) / sx` overflows `f32`, so exponent-split scaling on GPU and `f64` on CPU
+    //    must keep the finite penalty (`~0.862069`) and finite edge gradient (`~1.9025e37`) instead of saturating.
+    {
+        // Direct CPU `rpiou_loss` check against exact f64 reference (`iou ≈ 2.5e-13` due to `eps = 1e-7`,
+        // so `focal_iou ≈ 1.0` and `loss ≈ 1.0 + edge_ref ≈ 1.862069`).
+        let b1 = Tensor::from_slice(&[1.25e-38f32, 0.0, 2.5e-20, 1.0], [1, 4]).unwrap().requires_grad_();
+        let b2 = Tensor::from_slice(&[0.0f32, 0.0, 2.5e-20, 1.0], [1, 4]).unwrap();
+        let l = folo_vision::loss::rpiou_loss(&b1, &b2, 0.5, 1e38, 1e-30).unwrap();
+        let lv = l.item::<f32>().unwrap();
+        let g = l.backward().unwrap().get(&b1).unwrap().to_vec::<f32>().unwrap();
+        let ke2_ref = 1e38f64 * 0.25 * ((1.25e-38f64).powi(2) / ((2.5e-20f64).powi(2) + (1e-30f64).powi(2)));
+        let edge_ref = (ke2_ref / (1.0 + ke2_ref)) as f32; // ~0.86206895
+        let loss_ref = 1.0 + edge_ref;
+        let grad_ref = (0.5f64 * 1e38 * 1.25e-38
+            / (((2.5e-20f64).powi(2) + (1e-30f64).powi(2)) * (1.0 + ke2_ref).powi(2)))
+            as f32; // ~1.902497e37
+        assert!((lv - loss_ref).abs() <= 1e-5, "CPU rpiou_loss {lv} vs f64 ref {loss_ref}");
+        assert!((g[0] - grad_ref).abs() <= 1e-4 * grad_ref, "CPU rpiou grad {} vs f64 ref {grad_ref}", g[0]);
+
+        // End-to-end GPU vs CPU `detection_loss` exercising the exact same `sqrt(kappa) / sx = 4e38 > f32::MAX`
+        // exponent-split path (`sx = max(w2, delta0) = 2.5e-20`, `kappa = 1e38`, `dx1 = d_left ≈ 1.25e-38`,
+        // `dx2 = dy1 = dy2 = 0` bit-exact via `r = [0, -1000]` -> `d2 = 0`, `tal.nwd_weight = 1.0` -> `t ≈ 1`).
+        let l_left = (1.25e-38f32).ln();
+        let d_left = Tensor::from_slice(&[0.0f32, l_left], [1, 2])
+            .unwrap()
+            .softmax(1)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[1];
+        let ax = 2.0 * d_left; // a.x = ax - d_left = d_left (~1.25e-38), a.z = ax + 0 = ax
+        let anchors = Anchors { points: vec![[ax, 0.5]], strides: vec![1.0], ..Anchors::default() };
+        let box_raw =
+            Tensor::from_slice(&[0.0, l_left, 0.0, 0.0, 0.0, -1000.0, 0.0, 0.0], [1, 8, 1]).unwrap();
+        let cls_raw = Tensor::zeros([1, 1, 1]);
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(0.0, 0.0, ax, 1.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 2,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 1e38,
+            rpiou_delta: 2.5e-20,
+            box_gain: 1.0,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            tal: folo_vision::assign::TalConfig {
+                nwd_weight: 1.0,
+                ..folo_vision::assign::TalConfig::default()
+            },
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        let t_w = want.target_score_sum as f64;
+        assert!(t_w > 0.9 && got.num_fg == 1 && want.num_fg == 1);
+        let ke2_g = 1e38f64 * 0.25 * ((d_left as f64).powi(2) / ((ax as f64).powi(2) + (2.5e-20f64).powi(2)));
+        let loss_g_ref = 1.0 + ke2_g / (1.0 + ke2_g);
+        let total_ref = (t_w * loss_g_ref) as f32;
+        assert!(
+            (want.total_value - total_ref).abs() <= 1e-4 * total_ref,
+            "CPU exponent-scaled R-PIoU {} vs ref {total_ref}",
+            want.total_value
+        );
+        assert!(
+            (got.total_value - total_ref).abs() <= 1e-3 * total_ref,
+            "GPU exponent-scaled R-PIoU {} vs ref {total_ref}",
+            got.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        let grad_g_ref = 0.5f64 * 1e38 * (d_left as f64)
+            / (((ax as f64).powi(2) + (2.5e-20f64).powi(2)) * (1.0 + ke2_g).powi(2));
+        // dL/d(logit_left_1) = -t_w * grad_g_ref * d_left ≈ -0.2378 (non-zero; false saturation would give ~0).
+        let logit_g_ref = -(t_w * grad_g_ref * d_left as f64) as f32;
+        assert!(
+            (g_gpu[1] - logit_g_ref).abs() <= 2e-2 * logit_g_ref.abs(),
+            "GPU exponent-scaled R-PIoU logit grad {} vs ref {logit_g_ref}",
+            g_gpu[1]
+        );
+        close_vec(&g_gpu, &g_cpu, 2e-2 * logit_g_ref.abs(), 2e-2, "exponent_scaled_rpiou/box_raw");
+    }
+
+    // 8. Extreme `OT-DFL` logits (`reg_max = 6`, logits `[-1e38; 5, 0]` per side, target distance `0.5` per side,
+    //    `dfl_ot_weight = 0.25`, `dfl_gain = 1.0`): naive `l_tail` sums four `1e38` terms and overflows `f32`;
+    //    widened CPU `f64` and GPU `2^-32` scaled reduction must match the finite `f64` reference (`~2e38 * t`).
+    {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let mut box_data = vec![0.0f32; 24 * a];
+        for side in 0..4 {
+            for k in 0..5 {
+                for j in 0..a {
+                    box_data[(side * 6 + k) * a + j] = -1e38;
+                }
+            }
+        }
+        let box_raw = Tensor::from_slice(&box_data, [1, 24, a]).unwrap();
+        let cls_raw = Tensor::zeros([1, 1, a]);
+        // Anchor (3, 3) sits at px (28, 28); target [24, 24, 32, 32] gives exact ltrb = 0.5 grid cells -> j = 0.
+        let targets = vec![ImageTargets { boxes: vec![Xyxy::new(24.0, 24.0, 32.0, 32.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 6,
+            box_gain: 0.0,
+            cls_gain: 0.0,
+            dfl_gain: 1.0,
+            dfl_ot_weight: 0.25,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (
+            box_raw.to_device(dev).unwrap().requires_grad_(),
+            cls_raw.to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (box_raw.requires_grad_(), cls_raw.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &targets, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        let t_w = want.target_score_sum as f64;
+        assert!(t_w > 0.0 && got.num_fg == 1 && want.num_fg == 1);
+        // CE contributes t * 1e38; OT contributes 0.25 * t * (4 * 1e38) = t * 1e38 -> total = 2e38 * t.
+        let ref_loss = (2e38f64 * t_w) as f32;
+        assert!(got.is_finite() && want.is_finite(), "extreme -1e38 OT-DFL must be finite");
+        assert!(
+            (want.total_value - ref_loss).abs() <= 1e-4 * ref_loss,
+            "CPU -1e38 OT-DFL {} vs f64 ref {ref_loss}",
+            want.total_value
+        );
+        assert!(
+            (got.total_value - ref_loss).abs() <= 1e-4 * ref_loss,
+            "GPU -1e38 OT-DFL {} vs f64 ref {ref_loss}",
+            got.total_value
+        );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu.iter().all(|v| v.is_finite()) && g_gpu.iter().all(|v| v.is_finite()));
+        close_vec(&g_gpu, &g_cpu, 1e-4, 1e-3, "extreme_neg1e38_otdfl/box_raw");
+    }
 }
