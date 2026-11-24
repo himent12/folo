@@ -7,7 +7,7 @@ import type { MarkdownIt } from 'markdown-it';
 import { BLOB_URL, GEN_DIR, LANDING_SRC, LLMS_SRC, NAV, REPO_DIR, slugFor } from './config.ts';
 import { renderLanding } from './landing.ts';
 import { ICONS, shell, toc } from './layout.ts';
-import { clearListings, relUrl, resolveHref, rewriteLinks, type LinkContext, type PageRef } from './links.ts';
+import { clearListings, relUrl, resolveHref, rewriteLinks, rewriteMarkdown, type LinkContext, type PageRef } from './links.ts';
 import { createMarkdown, escapeHtml, parsePage, sections, withoutTitle, type ParsedPage } from './markdown.ts';
 import { tokensCss } from './tokens.ts';
 
@@ -119,9 +119,13 @@ export async function generate({ write }: { write: boolean }): Promise<Generated
   // For agents: llms.txt (the repository's index, pointed at the Markdown copies served next to the pages) and
   // llms-full.txt (every page's Markdown in one file), plus the copies themselves at md/<repository path>.
   const all = [landing, ...order];
-  for (const p of all) outputs.push([resolve(GEN_DIR, 'public', 'md', p.src), p.markdown]);
+  for (const p of all) {
+    outputs.push([resolve(GEN_DIR, 'public', 'md', p.src), rewriteMarkdown(p.markdown, p.parsed.tokens, p.src, `md/${p.src}`, pages, media)]);
+  }
   outputs.push([resolve(GEN_DIR, 'public', 'llms.txt'), llmsTxt(pages, problems)]);
-  const full = all.map((p) => `<!-- source: ${p.src} (${BLOB_URL}/${p.src}) -->\n\n${p.markdown.trim()}\n`).join('\n---\n\n');
+  const full = all
+    .map((p) => `<!-- source: ${p.src} (${BLOB_URL}/${p.src}) -->\n\n${rewriteMarkdown(p.markdown, p.parsed.tokens, p.src, 'llms-full.txt', pages, media).trim()}\n`)
+    .join('\n---\n\n');
   outputs.push([resolve(GEN_DIR, 'public', 'llms-full.txt'), `${full}`]);
 
   for (const [repoPath, out] of media) outputs.push([resolve(GEN_DIR, 'public', out), readFileSync(resolve(REPO_DIR, repoPath))]);

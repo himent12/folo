@@ -282,3 +282,347 @@ export function rewriteLinks(tokens: Token[], ctx: LinkContext): void {
 function relFrom(src: string, repoPath: string): string {
   return posix.relative(posix.dirname(src), repoPath) || posix.basename(repoPath);
 }
+
+/** Percent-encodes a relative POSIX path while keeping `.` and `..` segments intact. */
+function encodeRelPath(rel: string): string {
+  return rel
+    .split('/')
+    .map((s) => (s === '.' || s === '..' ? s : encodeURIComponent(s)))
+    .join('/');
+}
+
+/** Unescapes CommonMark ASCII punctuation backslash escapes so file lookups match the parsed destination. */
+function unescapeMdDest(s: string): string {
+  return s.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1');
+}
+
+function resolveMdRef(
+  ref: string,
+  src: string,
+  fromFile: string,
+  isImage: boolean,
+  pages: Map<string, PageRef>,
+  media: Map<string, string>,
+): string {
+  const clean = unescapeMdDest(ref);
+  if (!clean || /^[a-z][a-z0-9+.-]*:/i.test(clean) || clean.startsWith('//')) return ref;
+  const { path, query, hash } = splitRef(clean);
+  if (path.startsWith('/')) return ref;
+  const tail = `${query}${hash ? `#${hash}` : ''}`;
+  const fromDir = posix.dirname(fromFile);
+  if (path === '') {
+    // In a bundled document like llms-full.txt, bare #fragments can collide across sections: qualify them to md/<src>.
+    const ownTarget = `md/${src}`;
+    if (!isImage && fromFile !== ownTarget && tail && pages.has(src)) {
+      const rel = posix.relative(fromDir, ownTarget) || posix.basename(ownTarget);
+      return `${encodeRelPath(rel)}${tail}`;
+    }
+    return ref;
+  }
+  const repoPath = resolveRepoPath(src, path);
+  if (repoPath === null) return ref;
+  if (!isImage && pages.has(repoPath)) {
+    const target = `md/${repoPath}`;
+    if (fromFile === target && tail.startsWith('#')) return tail === clean ? ref : tail;
+    const rel = posix.relative(fromDir, target) || posix.basename(target);
+    const next = `${encodeRelPath(rel)}${tail}`;
+    return next === clean ? ref : next;
+  }
+  if (isImage || media.has(repoPath)) {
+    if (repoPathKind(repoPath) === 'file') {
+      media.set(repoPath, `media/${repoPath}`);
+      const next = `${encodeRelPath(posix.relative(fromDir, `media/${repoPath}`))}${tail}`;
+      return next === clean ? ref : next;
+    }
+    return ref;
+  }
+  const kind = repoPathKind(repoPath);
+  if (!kind) return ref;
+  return `${kind === 'dir' ? TREE_URL : BLOB_URL}/${encodePath(repoPath)}${tail}`;
+}
+
+function rewriteSrcset(
+  value: string,
+  src: string,
+  fromFile: string,
+  pages: Map<string, PageRef>,
+  media: Map<string, string>,
+): string {
+  return value
+    .split(',')
+    .map((part) => {
+      const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
+      if (!m) return part;
+      const next = resolveMdRef(m[2], src, fromFile, true, pages, media);
+      return next === m[2] ? part : `${m[1]}${next}${m[3]}`;
+    })
+    .join(',');
+}
+
+function rewriteMdHtmlTag(
+  tag: string,
+  src: string,
+  fromFile: string,
+  pages: Map<string, PageRef>,
+  media: Map<string, string>,
+): string {
+  const head = HTML_TAG_NAME.exec(tag)![0];
+  let out = head;
+  let at = head.length;
+  for (;;) {
+    HTML_ATTR.lastIndex = at;
+    const m = HTML_ATTR.exec(tag);
+    if (!m) break;
+    at = HTML_ATTR.lastIndex;
+    const [whole, sp, name, eq, dq, sq, bare] = m;
+    const lower = name.toLowerCase();
+    const value = dq ?? sq ?? bare ?? '';
+    if (!eq || (lower !== 'href' && lower !== 'src' && lower !== 'srcset')) {
+      out += whole;
+      continue;
+    }
+    const quote = sq !== undefined ? "'" : '"';
+    const next =
+      lower === 'srcset'
+        ? rewriteSrcset(value, src, fromFile, pages, media)
+        : resolveMdRef(value, src, fromFile, lower !== 'href', pages, media);
+    out += next === value ? whole : `${sp}${name}${eq}${quote}${next}${quote}`;
+  }
+  return out + tag.slice(at);
+}
+
+const MD_HTML_TAG = /<[a-zA-Z][^\s/>]*(?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/y;
+const MD_REF_DEF =
+  /( {0,3}\[[^\]\n]+\]:[ \t]*(?:\n[ \t]*)?)(?:<([^>\n]+)>|([^\s\n]+))([ \t]*(?:\n?[ \t]*(?:"(?:\\.|[^"\n])*"|'(?:\\.|[^'\n])*'|\((?:\\.|[^()\n])*\)))?[ \t]*(?=\n|$))/y;
+
+function findClosingBackticks(s: string, from: number, count: number): number {
+  let i = from;
+  while (i < s.length) {
+    if (s[i] === '\n' && s[i + 1] === '\n') return -1;
+    if (s[i] === '`') {
+      let run = 0;
+      while (i + run < s.length && s[i + run] === '`') run++;
+      if (run === count) return i;
+      i += run;
+    } else {
+      i++;
+    }
+  }
+  return -1;
+}
+
+/** Finds the matching `]` for a `[` at `open`, respecting escapes, code spans, nested brackets and paragraph breaks. */
+function findLinkLabelEnd(s: string, open: number): number {
+  let depth = 1;
+  let i = open + 1;
+  while (i < s.length && depth > 0) {
+    const ch = s[i];
+    if (ch === '\n' && s[i + 1] === '\n') return -1;
+    if (ch === '\\' && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (ch === '`') {
+      let run = 0;
+      while (i + run < s.length && s[i + run] === '`') run++;
+      const close = findClosingBackticks(s, i + run, run);
+      i = close >= 0 ? close + run : i + run;
+      continue;
+    }
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    if (depth === 0) return i;
+    i++;
+  }
+  return -1;
+}
+
+/** Parses `(...)` starting at `open` (`(`); returns destination bounds and closing `)` index, or null. */
+function parseInlineDest(s: string, open: number): { destStart: number; destEnd: number; wrapped: boolean; close: number } | null {
+  let i = open + 1;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) {
+    if (s[i] === '\n' && s[i + 1] === '\n') return null;
+    i++;
+  }
+  if (i >= s.length) return null;
+  let destStart: number;
+  let destEnd: number;
+  let wrapped = false;
+  if (s[i] === '<') {
+    wrapped = true;
+    destStart = i + 1;
+    i++;
+    while (i < s.length && s[i] !== '>' && s[i] !== '\n') {
+      if (s[i] === '\\' && i + 1 < s.length) i += 2;
+      else i++;
+    }
+    if (s[i] !== '>') return null;
+    destEnd = i;
+    i++;
+  } else {
+    destStart = i;
+    let parens = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === '\\' && i + 1 < s.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === ' ' || ch === '\t' || ch === '\n') break;
+      if (ch === '(') parens++;
+      else if (ch === ')') {
+        if (parens === 0) break;
+        parens--;
+      }
+      i++;
+    }
+    destEnd = i;
+    if (destEnd === destStart) return null;
+  }
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) {
+    if (s[i] === '\n' && s[i + 1] === '\n') return null;
+    i++;
+  }
+  if (i < s.length && (s[i] === '"' || s[i] === "'" || s[i] === '(')) {
+    const endQuote = s[i] === '(' ? ')' : s[i];
+    i++;
+    while (i < s.length && s[i] !== endQuote) {
+      if (s[i] === '\n' && s[i + 1] === '\n') return null;
+      if (s[i] === '\\' && i + 1 < s.length) i += 2;
+      else i++;
+    }
+    if (s[i] !== endQuote) return null;
+    i++;
+    while (i < s.length && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) {
+      if (s[i] === '\n' && s[i + 1] === '\n') return null;
+      i++;
+    }
+  }
+  if (s[i] !== ')') return null;
+  return { destStart, destEnd, wrapped, close: i };
+}
+
+function rewriteProseChunk(
+  s: string,
+  src: string,
+  fromFile: string,
+  pages: Map<string, PageRef>,
+  media: Map<string, string>,
+  allowRefDef = true,
+): string {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < s.length) {
+      out += s.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch === '`') {
+      let run = 0;
+      while (i + run < s.length && s[i + run] === '`') run++;
+      const close = findClosingBackticks(s, i + run, run);
+      const end = close >= 0 ? close + run : i + run;
+      out += s.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (allowRefDef && (ch === '[' || ch === ' ') && (i === 0 || s[i - 1] === '\n')) {
+      MD_REF_DEF.lastIndex = i;
+      const ref = MD_REF_DEF.exec(s);
+      if (ref) {
+        const prefix = ref[1];
+        const raw = ref[2] ?? ref[3];
+        const suffix = ref[4];
+        const next = resolveMdRef(raw, src, fromFile, false, pages, media);
+        const formatted = ref[2] !== undefined || (next !== raw && /[\s()]/.test(next)) ? `<${next}>` : next;
+        out += `${prefix}${formatted}${suffix}`;
+        i += ref[0].length;
+        continue;
+      }
+    }
+    if (ch === '<') {
+      if (s.startsWith('<!--', i)) {
+        const end = s.indexOf('-->', i + 4);
+        const to = end >= 0 ? end + 3 : s.length;
+        out += s.slice(i, to);
+        i = to;
+        continue;
+      }
+      MD_HTML_TAG.lastIndex = i;
+      const tag = MD_HTML_TAG.exec(s);
+      if (tag) {
+        out += rewriteMdHtmlTag(tag[0], src, fromFile, pages, media);
+        i += tag[0].length;
+        continue;
+      }
+    }
+    if (ch === '[' || (ch === '!' && s[i + 1] === '[')) {
+      const isImage = ch === '!';
+      const openBracket = isImage ? i + 1 : i;
+      const closeBracket = findLinkLabelEnd(s, openBracket);
+      if (closeBracket >= 0 && s[closeBracket + 1] === '(') {
+        const dest = parseInlineDest(s, closeBracket + 1);
+        if (dest) {
+          const inner = rewriteProseChunk(s.slice(openBracket + 1, closeBracket), src, fromFile, pages, media, false);
+          const rawDest = s.slice(dest.destStart, dest.destEnd);
+          const nextDest = resolveMdRef(rawDest, src, fromFile, isImage, pages, media);
+          const needsAngles = !dest.wrapped && nextDest !== rawDest && /[\s()]/.test(nextDest);
+          const beforeDest = s.slice(closeBracket + 1, dest.destStart);
+          const afterDest = s.slice(dest.destEnd, dest.close + 1);
+          out += `${isImage ? '!' : ''}[${inner}]${beforeDest}${needsAngles ? `<${nextDest}>` : nextDest}${afterDest}`;
+          i = dest.close + 1;
+          continue;
+        }
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Rewrites relative Markdown/HTML links and images in an LF-normalized Markdown source file for serving at `fromFile`
+ * (e.g. `md/docs/CLI.md` or `llms-full.txt`). Uses parsed `tokens` to skip all CommonMark fenced and indented code
+ * blocks (including inside lists/blockquotes) and skips inline code spans; expects `media` to be pre-populated by
+ * `rewriteLinks()`.
+ */
+export function rewriteMarkdown(
+  markdown: string,
+  tokens: Token[],
+  src: string,
+  fromFile: string,
+  pages: Map<string, PageRef>,
+  media: Map<string, string>,
+): string {
+  const codeLines = new Set<number>();
+  for (const t of tokens) {
+    if ((t.type === 'fence' || t.type === 'code_block') && t.map) {
+      for (let ln = t.map[0]; ln < t.map[1]; ln++) codeLines.add(ln);
+    }
+  }
+  const lines = markdown.split('\n');
+  let out = '';
+  let chunk: string[] = [];
+
+  const flushChunk = () => {
+    if (!chunk.length) return;
+    out += rewriteProseChunk(chunk.join(''), src, fromFile, pages, media);
+    chunk = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const sep = i < lines.length - 1 ? '\n' : '';
+    if (codeLines.has(i)) {
+      flushChunk();
+      out += line + sep;
+    } else {
+      chunk.push(line + sep);
+    }
+  }
+  flushChunk();
+  return out;
+}
