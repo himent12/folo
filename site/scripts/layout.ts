@@ -15,6 +15,7 @@ export const ICONS = {
   search: icon('<circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3.25 3.25"/>'),
   sun: icon('<circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.25M8 13.25v1.25M1.5 8h1.25M13.25 8h1.25M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9"/>'),
   moon: icon('<path d="M13.25 9.6A5.5 5.5 0 0 1 6.4 2.75a5.5 5.5 0 1 0 6.85 6.85Z"/>'),
+  monitor: icon('<rect x="2" y="2.75" width="12" height="8.5" rx="1.5"/><path d="M5.5 13.75h5M8 11.25v2.5"/>'),
   github: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.71 1.22 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>`,
   arrowLeft: icon('<path d="M13 8H3M7 4 3 8l4 4"/>'),
   arrowRight: icon('<path d="M3 8h10M9 4l4 4-4 4"/>'),
@@ -89,7 +90,7 @@ ${themeInitScript(darkBg, lightBg)}
   <button class="search-trigger" type="button" aria-haspopup="dialog" aria-controls="search" aria-label="Search docs" aria-keyshortcuts="/ Control+K Meta+K">${ICONS.search}<span class="search-trigger-label">Search docs</span><kbd class="kbd">/</kbd></button>
   <div class="topbar-end">
     <a class="icon-btn" href="${REPO_URL}" aria-label="FOLO on GitHub">${ICONS.github}</a>
-    <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme"><span class="i-sun">${ICONS.sun}</span><span class="i-moon">${ICONS.moon}</span></button>
+    <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme"><span class="i-system">${ICONS.monitor}</span><span class="i-sun">${ICONS.sun}</span><span class="i-moon">${ICONS.moon}</span></button>
   </div>
 </header>
 <div class="scrim" hidden></div>
