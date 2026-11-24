@@ -20,6 +20,7 @@ export const ICONS = {
   arrowLeft: icon('<path d="M13 8H3M7 4 3 8l4 4"/>'),
   arrowRight: icon('<path d="M3 8h10M9 4l4 4-4 4"/>'),
   external: icon('<path d="M6.5 3.5h-3v9h9v-3M9.5 2.5h4v4M13.5 2.5 7.5 8.5"/>', 12),
+  fileText: icon('<path d="M4 2h5.5L13 5.5V14H4V2Z"/><path d="M9.5 2v3.5H13M6 8.5h5M6 11h3.5"/>', 12),
 };
 
 // The wordmark (design/logo-wordmark.svg): "folo" with its last o as the accent dot.
