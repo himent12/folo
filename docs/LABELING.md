@@ -78,6 +78,27 @@ folo label review lb_3f9a 18 19 20
 folo label export lb_3f9a --json                           # {"dataset_id":"ds_8c1e",...,"train":192,"val":48}
 ```
 
+### CLI vs MCP cheat sheet
+`folo label` and the 10 MCP labeling tools ([MCP.md](MCP.md#labeling)) share the same underlying operations (pass
+`--json` to any CLI subcommand for machine-readable output; list envelopes differ by front end — CLI `jobs` returns
+`{jobs}` and `images` uses `--offset`/`--limit`, while MCP list tools use cursor paging `{items, next_cursor,
+total}`):
+
+| step | CLI (`folo label ...`) | MCP tool (`folo mcp`) |
+|---|---|---|
+| Check installed CLIs | `folo label agents` | *(none; `GET /api/label/agents`, or `start_labeling` error hint)* |
+| List jobs | `folo label jobs` | `list_label_jobs` |
+| Create job (+ initial paths) | `folo label create NAME --classes A,B [--instructions T] [--path P]...` | `create_label_job { name, classes, instructions?, paths? }` |
+| Add images to existing job | `folo label add JOB PATH...` | `create_label_job { job_id, paths }` |
+| Start agent run | `folo label start JOB --agent claude\|codex\|antigravity [--model M] [--effort low\|medium\|high] [--fast] [--images ID,...\|--all] [--note T] [--batch N] [--parallel N] [--wait]` | `start_labeling { job_id, agent, model?, effort?, fast?, scope?, image_ids?, note?, batch?, parallel? }` |
+| Stop agent run | `folo label stop JOB` | `stop_labeling { job_id }` |
+| Check progress, tokens & log | `folo label status JOB [--log 5]` | `label_status { job_id, log_lines? }` |
+| List / filter images | `folo label images JOB [--status ...] [--reviewed true\|false] [--boxes]` | `list_label_images { job_id, status?, reviewed?, include_boxes? }` |
+| View next or specific image | `folo label view JOB [IMAGE] [-o FILE] [--size 1024] [--from 1]` | `view_label_image { job_id, image_id?, size?, from? }` |
+| Edit boxes (manual + reviewed) | `folo label set JOB IMAGE (--box ... \| --clear \| --relabel/--remove/--add) --expect REV [--size WxH]` *(required with `--box`/`--add`)* | `set_label_boxes { job_id, image_id, expect, size?, boxes? \| relabel/remove/add }` *(`size` required with non-empty `boxes`/`add`)* |
+| Mark reviewed ("Looks right") | `folo label review JOB IMAGE... [--undo] [--expect ID=REV]...` | `review_label_images { job_id, image_ids, reviewed?, expect? }` |
+| Export registered YOLO dataset | `folo label export JOB [--name N] [--val-fraction 0.2] [--seed 0]` | `export_label_dataset { job_id, name?, val_fraction?, seed? }` |
+
 Everything Studio does is also the HTTP API ([API.md](API.md), Agent labeling):
 
 ```sh
@@ -204,7 +225,9 @@ difference of 3 points is noise: two passes of the same setup differ by that muc
 
 The Codex rows at medium effort and with gpt-6.2-astra were measured with the boxes in thousandths of the image
 (the shape before November 2026), which Codex labels as well with as with pixels; the Haiku medium, 8-a-call,
-Sonnet medium and Opus rows with an earlier wording of the image sizes in the prompt.
+Sonnet medium and Opus rows with an earlier wording of the image sizes in the prompt. Antigravity (`agy acp`) was
+added after that November 2026 sweep, so it is not in the table above; run `label_eval --agent antigravity` below to
+measure your own Antigravity model (such as `gemini-4-neon` or `gemini-3.8-flash`) on the same 60 COCO photos.
 
 That is where the defaults come from:
 - **Haiku at low effort**: as good as at medium (two passes at low found 77% and 78% before the final one), with
@@ -225,12 +248,31 @@ That is where the defaults come from:
 
 To measure your own setup, run the eval against the real CLIs (it spends about 60 images' worth of tokens a
 pass; COCO val2017 and its annotations are a free download):
-`cargo run -p folo-server --release --example label_eval -- --coco <coco dir> --agent claude --out eval.jsonl`,
-with `--model`, `--effort`, `--batch`, `--side` and `--fast` to try other settings, and `--table eval.jsonl` to
-print the passes side by side. On clean synthetic shapes `cargo test -p folo-server --test label_live --
---ignored --nocapture` checks the real CLIs end to end (`FOLO_LABEL_LIVE_MODEL` picks a model). `npm run
-label-smoke` in `web/` drives the whole flow through Studio against a running `folo serve` and a real agent, with
-a folder of your own images, and prints what the agent reported using.
+
+```sh
+cargo run -p folo-server --release --example label_eval -- --coco /data/coco --agent claude --out eval.jsonl
+cargo run -p folo-server --release --example label_eval -- --coco /data/coco --agent codex --out eval.jsonl
+cargo run -p folo-server --release --example label_eval -- --coco /data/coco --agent antigravity --model gemini-4-neon --out eval.jsonl
+cargo run -p folo-server --release --example label_eval -- --table eval.jsonl
+```
+
+Pass `--model`, `--effort`, `--batch`, `--side`, `--parallel` or `--fast` (Codex only) to try other settings. On
+clean synthetic shapes, `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex` /
+`antigravity`) checks each real CLI end to end (`FOLO_LABEL_LIVE_MODEL` picks a model). `npm run label-smoke` in
+`web/` drives the whole flow through Studio against a running `folo serve` and a real agent, with a folder of your
+own images, and prints what the agent reported using.
+
+## Troubleshooting
+| symptom / error | cause | what to do |
+|---|---|---|
+| Agent unavailable (`not_supported`) | `claude`, `codex` or `agy` is not on the server's `PATH`, or `--version` did not succeed | Install the CLI on the server's machine, or point `FOLO_CLAUDE_BIN`, `FOLO_CODEX_BIN` or `FOLO_ANTIGRAVITY_BIN` at the executable. Verify with `folo label agents` (probes are cached for 60 s). |
+| Auth / sign-in failure (`401`, `/login`, `authentication required`, `printed no result` / `printed no reply` / `exited before replying`) | The CLI is signed out, expired, or blocked on an interactive prompt/update | Sign in on the server's machine: `claude`, `codex login`, or `agy` (`agy acp --login`). To see raw CLI output, run `claude -p hi`, `codex exec hi`, or `agy -p hi`. If Claude Code reports `unknown option`, run `claude update` (FOLO requires 2.1+). |
+| Codex logs *"calls go without FOLO's lean model catalog and cost about 7800 more input tokens each"*, or Fast is disabled | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) sets a top-level `model_catalog_json`, `profile`, `openai_base_url` or `chatgpt_base_url` or cannot be read (disables both the lean catalog and Fast); `codex debug models` failed or printed no readable catalog; that Codex version refused the generated `model_catalog_json` on start (remembered for that version; falls back without the lean catalog while Fast eligibility still follows the catalog); or the catalog lists no `priority` tier for the chosen model | For a config conflict, remove or move those top-level keys (keys inside `[profiles.*]` tables do not conflict), fix `config.toml` permissions/syntax, or use a clean `CODEX_HOME` (and run `codex login` under it unless using an API key). For a catalog probe failure or version-specific refusal, run `codex debug models` to inspect the error or update `codex`; for a model without `priority`, omit `--fast` / `fast` or pick a Fast-capable model from `folo label agents`. |
+| Antigravity fails before or during a turn (settings, non-restricted mode, or `attempted to invoke a tool`) | FOLO writes `<home>/.gemini/antigravity-cli/folo-label/settings.json` (needs writable `HOME` / `USERPROFILE`) and fails closed if `agy acp` leaves an allowlisted restricted mode (`strict`, `default`, `request-review`, `ask`, `read-only`, `plan`) or emits `tool_call` / `tool_call_update` | Ensure `HOME` (Unix) or `USERPROFILE` (Windows) is set and writable by the server user, and update `agy` if it ignores `--agent folo-labeler --cli_dir_name folo-label --sandbox --include-default-customizations=false`. |
+| Antigravity rejects model + effort (`already specifies effort ...`) | An effort-suffixed slug such as `gemini-4-neon-xhigh` was passed alongside a different explicit `--effort` / `effort` | Omit `--effort` / `effort` when using an effort-suffixed slug, or pass the base slug (e.g. `gemini-4-neon`) with `--effort`. |
+| Run stops on account usage / quota limit (`usage limit`, `session limit`, `weekly limit`, `hour limit`, `credit balance`, `spending cap`, `out of extra usage`, or Google daily `*PerDay*` quota) | Hard plan or daily quota exhaustion; FOLO never retries these so it does not burn remaining quota | Wait until the reset time quoted in `run.hint` (from `label_status` or `folo label status --json`), or switch to another agent. |
+| Run pauses or stops on rate limit (`429`, `RESOURCE_EXHAUSTED`) or `500`/`502`/`503`/`504`/`529` / overloaded | Per-minute rate limits with a parseable wait ≤ 60 s and transient server/connection faults retry once after `max(15 s, retry-after)` (at most 2 calls per batch); a rate limit with no parseable delay or a wait > 60 s stops immediately without retrying, and 3 consecutive calls that time out, return unreadable output, or fail again on retry end the run | Wait for any quoted backoff and restart with the default `unlabeled` scope and fewer calls in flight (`--parallel 1` or `2`), or switch agents. Previously labeled images stay saved unless you pass `--all` or explicit `--images` / `image_ids`. |
+| `label_boxes_changed` (`409`) or `label_job_active` (`409`) | Boxes were modified since the `revision` passed in `expect`; or the job has an active agent run, an export in progress (even while `status` is `idle`), or an in-flight call holding that image | For `label_boxes_changed`, call `view_label_image` / `folo label view` again to get the new `revision` and box numbers. For `label_job_active`, wait for the export or in-flight call to finish, or stop the run with `stop_labeling` / `folo label stop`. |
 
 ## Getting better labels
 - Write the instructions for someone who has never seen your data. Name look-alikes ("vans count as car"), say
