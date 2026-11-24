@@ -348,7 +348,7 @@ impl Trainer {
                 Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
             }
             // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
-            OptimKind::MuSgd => Box::new(MuSgd::with_ortho(
+            OptimKind::MuSgd => Box::new(MuSgd::with_ortho_and_geo(
                 apply_wd_mode(std_groups.into_boosted_groups(
                     resolved.lr0,
                     resolved.momentum,
@@ -358,6 +358,7 @@ impl Trainer {
                 )),
                 resolved.musgd,
                 cfg.musgd.ortho,
+                cfg.musgd.geo,
             )?),
         };
         let nb = n_train.div_ceil(cfg.batch);

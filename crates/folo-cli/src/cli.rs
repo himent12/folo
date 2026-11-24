@@ -336,6 +336,8 @@ pub enum FusionArg {
     Vote,
     /// DFL evidence fusion: score times per-side DFL certainty.
     Dfl,
+    /// Student-t Exclusive Box Fusion: exclusive NMS ownership + IoU^4 affinity + 1-step Student-t IRLS.
+    Sebf,
 }
 
 impl From<FusionArg> for folo_vision::fusion::BoxFusion {
@@ -344,6 +346,7 @@ impl From<FusionArg> for folo_vision::fusion::BoxFusion {
             FusionArg::None => folo_vision::fusion::BoxFusion::None,
             FusionArg::Vote => folo_vision::fusion::BoxFusion::Vote,
             FusionArg::Dfl => folo_vision::fusion::BoxFusion::Dfl,
+            FusionArg::Sebf => folo_vision::fusion::BoxFusion::Sebf,
         }
     }
 }
@@ -364,6 +367,10 @@ pub enum ScoreArg {
     /// log-survival soft repulsion on output boxes.
     #[value(name = "dfl-repulse")]
     DflRepulse,
+    /// Confidence-gated DFL repulsion: `dfl-repulse` with `p_m^{0.25}` suppressor gating (`γ = 3.0`), best
+    /// paired with `--fusion sebf --iou 0.78 --max-det 1000`.
+    #[value(name = "dfl-cgr")]
+    DflCgr,
 }
 
 impl From<ScoreArg> for folo_vision::fusion::ScoreRule {
@@ -374,6 +381,7 @@ impl From<ScoreArg> for folo_vision::fusion::ScoreRule {
             ScoreArg::Elc => folo_vision::fusion::ScoreRule::Elc,
             ScoreArg::DflConsensus => folo_vision::fusion::ScoreRule::DflConsensus,
             ScoreArg::DflRepulse => folo_vision::fusion::ScoreRule::DflRepulse,
+            ScoreArg::DflCgr => folo_vision::fusion::ScoreRule::DflCgr,
         }
     }
 }
@@ -479,7 +487,8 @@ pub struct ValArgs {
     pub max_det: u32,
     /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
     /// score-weighted mean of its cluster, `dfl` weighs each member's side by its score times the certainty of its
-    /// DFL distribution. Off by default.
+    /// DFL distribution, and `sebf` (Student-t Exclusive Box Fusion) fuses exclusively owned cluster members with
+    /// `IoU⁴` affinity and 1-step Student-t (`ν = 3`) IRLS outlier rejection. Off by default.
     #[arg(long, value_enum, default_value_t = FusionArg::None)]
     pub fusion: FusionArg,
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
@@ -488,8 +497,9 @@ pub struct ValArgs {
     /// Score of each kept box (docs/MODEL.md §9.4): `elc` updates log-odds from exclusive NMS suppressor mass,
     /// `dfl-consensus` adds scale-free fused DFL precision, `dfl-repulse` combines power-weighted exclusive
     /// consensus, DFL Shannon entropy, cross-stride agreement and greedy log-survival soft repulsion (best with
-    /// `--fusion dfl --iou 0.75 --max-det 1000`), and `consensus` scales probabilities by cluster mass (changes
-    /// the score scale). Off by default.
+    /// `--fusion dfl --iou 0.75 --max-det 1000`), `dfl-cgr` gates greedy repulsion by suppressor confidence
+    /// `p_m^{0.25}` (`γ = 3.0`, best with `--fusion sebf --iou 0.78 --max-det 1000`), and `consensus` scales
+    /// probabilities by cluster mass (changes the score scale). Off by default.
     #[arg(long, value_enum, default_value_t = ScoreArg::None)]
     pub score: ScoreArg,
     /// Head to evaluate [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
@@ -544,17 +554,18 @@ pub struct PredictArgs {
     pub max_det: u32,
     /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
     /// score-weighted mean of its cluster, `dfl` weighs each member's side by its score times the certainty of its
-    /// DFL distribution. Off by default.
+    /// DFL distribution, and `sebf` (Student-t Exclusive Box Fusion) fuses exclusively owned cluster members with
+    /// `IoU⁴` affinity and 1-step Student-t (`ν = 3`) IRLS outlier rejection. Off by default.
     #[arg(long, value_enum, default_value_t = FusionArg::None)]
     pub fusion: FusionArg,
     /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
-    /// Score of each kept box (docs/MODEL.md §9.4): `elc`, `dfl-consensus` and `dfl-repulse` update log-odds
-    /// from exclusive suppressor mass (plus DFL precision / entropy and soft repulsion) while preserving the
-    /// `[0, 1]` scale; when `--conf > 0.10`, supporting anchors are gathered down to 0.10 before filtering final
-    /// scores by `--conf` (for `--conf <= 0.10`, calibrated scores below `--conf` are kept in full). `consensus`
-    /// scales probabilities by cluster mass (changes the score scale). Off by default.
+    /// Score of each kept box (docs/MODEL.md §9.4): `elc`, `dfl-consensus`, `dfl-repulse` and `dfl-cgr` update
+    /// log-odds from exclusive suppressor mass (plus DFL precision / entropy and soft repulsion) while preserving
+    /// the `[0, 1]` scale; when `--conf > 0.10`, supporting anchors are gathered down to 0.10 before filtering
+    /// final scores by `--conf` (for `--conf <= 0.10`, calibrated scores below `--conf` are kept in full).
+    /// `consensus` scales probabilities by cluster mass (changes the score scale). Off by default.
     #[arg(long, value_enum, default_value_t = ScoreArg::None)]
     pub score: ScoreArg,
     /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`

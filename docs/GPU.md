@@ -792,7 +792,7 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   assigner and the detection loss straight on the head outputs: `detect::assign` returns the assignment as device
   tensors, `detect::detection_loss` the total as a custom op (its backward is the BCE and box backward kernels)
   plus a 12-float `stats` tensor (items, positives, target score sum) that the caller reads once. folo-vision's
-  `detection_loss` takes this path for GPU tensors; `crates/folo-vision/tests/gpu_loss.rs` checks the assignment
+  `detection_loss` takes this path for GPU tensors; `crates/folo-vision/tests/gpu_loss/` checks the assignment
   against the host assigner (identical positives, gts and labels, soft targets to 1e-5) and the loss and both
   gradients against the host loss.
 - **Staged uploads.** `GpuContext::stage(&[u8])` copies host data into a new mapped-at-creation staging buffer and

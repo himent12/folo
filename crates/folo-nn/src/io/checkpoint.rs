@@ -163,11 +163,27 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
             optim.kind.as_str()
         )));
     }
+    if optim.muon_geo.is_some() && optim.kind != OptimKind::MuSgd {
+        return Err(Error::Metadata(format!(
+            "folo.optim: `muon_geo` on a `{}` contract",
+            optim.kind.as_str()
+        )));
+    }
+    if !optim.muon_depthwise.is_empty()
+        && (optim.kind != OptimKind::MuSgd || optim.muon_geo != Some(crate::optim::MuonGeoMode::Geo))
+    {
+        return Err(Error::Metadata(
+            "folo.optim: `muon_depthwise` is only valid on a `musgd` contract with `muon_geo: \"geo\"`"
+                .into(),
+        ));
+    }
 
     // Every model tensor is in exactly one group, and every group parameter is a model tensor.
     let model: BTreeSet<&str> = file.names(Namespace::Model).into_iter().collect();
     let mut seen = BTreeSet::new();
+    let mut muon_params = BTreeSet::new();
     for g in &optim.groups {
+        let is_muon = crate::optim::is_muon_group(&g.name);
         for p in &g.params {
             if !seen.insert(p.as_str()) {
                 return Err(Error::Metadata(format!("folo.optim: `{p}` is in more than one group")));
@@ -178,6 +194,27 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
                     g.name
                 )));
             }
+            if is_muon {
+                muon_params.insert(p.as_str());
+            }
+        }
+    }
+    let mut dw_seen = BTreeSet::new();
+    for p in &optim.muon_depthwise {
+        if !dw_seen.insert(p.as_str()) {
+            return Err(Error::Metadata(format!("folo.optim: duplicate `{p}` in `muon_depthwise`")));
+        }
+        if !muon_params.contains(p.as_str()) {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `muon_depthwise` names `{p}`, which is not in a Muon group"
+            )));
+        }
+        let info = file.info(p.as_str()).expect("muon param is a model tensor");
+        if !crate::optim::is_depthwise_conv_shape(&info.shape) {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `muon_depthwise` names `{p}` with shape {:?}, expected depthwise conv weight `[C > 1, 1, kH, kW]`",
+                info.shape
+            )));
         }
     }
 

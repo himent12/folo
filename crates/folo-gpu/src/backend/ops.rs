@@ -795,6 +795,7 @@ impl Backend for GpuBackend {
                 rows: it.rows,
                 cols: it.cols,
                 scale: it.scale,
+                depthwise: it.depthwise,
             });
         }
         let settings = muon::MuonSettings {

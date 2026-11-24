@@ -76,12 +76,16 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step
-  weights (MODEL.md §8.2; default 0.2 / 1.0) and `MuSgd::with_ortho(groups, weights, ortho)` sets its
+  weights (MODEL.md §8.2; default 0.2 / 1.0), `MuSgd::with_ortho(groups, weights, ortho)` sets its
   orthogonalisation schedule (`MuonOrtho::Polar4` default, `Polar5`, or legacy `Ns5`; `orthogonalize_with` /
-  `orthogonalize_many_with` expose the schedules directly). Weights other than the defaults (`musgd`) and schedules
-  other than legacy `Ns5` (`muon_ortho`) are part of its contract; `apply_contract` adopts the file's weights when
-  present (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent `muon_ortho` to `Ns5` so
-  pre-Polar checkpoints resume with legacy 5-step Newton–Schulz).
+  `orthogonalize_many_with` expose the schedules directly), and `MuSgd::with_ortho_and_geo(groups, weights, ortho, geo)`
+  selects Conv-GeoMuon (`MuonGeoMode::Geo`: true 2-D flattened conv aspect scaling + exact zero-GEMM per-channel Polar
+  LMO for depthwise convs; default `Legacy`). Weights other than the defaults (`musgd`), schedules other than legacy
+  `Ns5` (`muon_ortho`), and non-legacy geometric modes (`muon_geo`, plus `muon_depthwise` naming the depthwise conv
+  weights when `Geo` is active) are part of its contract; `apply_contract` adopts the file's weights when present
+  (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent `muon_ortho` to `Ns5` so pre-Polar
+  checkpoints resume with legacy 5-step Newton–Schulz), `muon_geo` (defaulting absent `muon_geo` to `Legacy`), and the
+  depthwise parameter mask from `muon_depthwise`.
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially

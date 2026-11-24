@@ -41,8 +41,11 @@ Subagent guidelines:
 - **Always make a PR to `main` and dual-review it with GPT-6.2 Sol (`high`, fast) + Gemini 4 Neon (`high`) until good
   to merge:** every change opens a pull request against `main`, and every review round runs fresh, independent reviews
   on **both** **GPT-6.2 Sol (`reasoningEffort: high`, `serviceTier: priority` / fast)** **and** **Gemini 4 Neon
-  (`thought_level: high`)**. Fix findings and repeat fresh review rounds until **both** reviewers have zero blocking
-  findings and CI is green before merging.
+  (`thought_level: high`)**. Fix real findings and repeat fresh review rounds until CI is green and **both** reviewers
+  have zero blocking findings — **with a pragmatic stop rule**: if **Gemini 4 Neon (`high`)** agrees (`NO BLOCKING
+  FINDINGS`), you agree, CI is green, and **GPT-6.2 Sol** is only continuing to raise minor, low-impact, or contrived
+  extreme edge cases rather than real correctness, soundness, or user-facing bugs, document why those remaining Sol
+  items were declined in the PR comment and merge rather than looping indefinitely.
 - **Never grade your own PR:** code review and app play-testing always run on fresh, independent reviewer subagents.
   When a Gemini 4 Neon agent splits its own implementation work with Antigravity's agent spawning, it checks what its
   sub-agents return, and PR review still runs on fresh independent **GPT-6.2 Sol (`high`, fast)** and **Gemini 4 Neon
@@ -88,8 +91,10 @@ Subagent guidelines:
    how it was tested, benchmark numbers if relevant.
 5. Play-test & dual review: app-facing changes are play-tested and every PR is reviewed by **both GPT-6.2 Sol (`high`,
    fast) and Gemini 4 Neon (`high`)** in fresh, independent reviewer passes before it merges; findings are fixed or
-   answered and re-reviewed until **both** reviewers have no blocking findings and the PR is good to merge.
-6. The orchestrator or a maintainer merges (squash) once CI is green and both Sol and Neon reviews are clean. Do not
+   answered and re-reviewed until CI is green and **both** reviewers have no blocking findings (or, if Neon reports
+   `NO BLOCKING FINDINGS` and you agree that Sol's only remaining points are minor/contrived edge cases, those points
+   are documented in a PR comment and the PR can merge).
+6. The orchestrator or a maintainer merges (squash) once CI is green and reviews are satisfied per step 5. Do not
    merge your own PR unless your task says so.
 7. Rebase on `main` if you fall behind; never force-push someone else's branch.
 

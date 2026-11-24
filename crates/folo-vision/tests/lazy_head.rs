@@ -117,7 +117,7 @@ fn check(m: &FoloModel, x: &Tensor, nms: &NmsConfig) -> Vec<usize> {
     let best = dense_best(&out);
     let got = m.predict_candidates(x, nms).unwrap();
     assert_eq!(got.len(), x.dims()[0]);
-    let dfl = nms.fusion == BoxFusion::Dfl && m.head_mode() == HeadMode::O2m;
+    let dfl = nms.fusion.wants_side_precision() && m.head_mode() == HeadMode::O2m;
     let prec = if dfl { Some(out.side_precisions().unwrap()) } else { None };
     for (i, (g, b)) in got.iter().zip(&best).enumerate() {
         let want = expected(b, nms, m.head_mode());

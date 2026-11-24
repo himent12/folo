@@ -4,8 +4,66 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::autograd::is_grad_enabled;
-use crate::backend::{MuonItem, MuonSettings, View};
-use crate::{DType, Error, Result, Tensor};
+use crate::backend::View;
+use crate::{DType, Error, Result, Storage, Tensor};
+
+/// One matrix (or depthwise channel bank) of [`crate::backend::Backend::muon_step_many`].
+#[derive(Debug)]
+pub struct MuonItem<'a> {
+    /// Parameter, updated in place.
+    pub param: &'a mut Storage,
+    /// Muon momentum buffer (`rows · cols` `F32`, already updated this step).
+    pub momentum: View<'a>,
+    /// Gradient (`rows · cols` `F32`).
+    pub grad: View<'a>,
+    /// Rows (first dimension).
+    pub rows: usize,
+    /// Columns (product of remaining dimensions).
+    pub cols: usize,
+    /// Factor of the orthogonalised direction.
+    pub scale: f32,
+    /// Exact per-row block-diagonal Polar LMO (depthwise convs; skips matrix orthogonalisation).
+    pub depthwise: bool,
+}
+
+/// Maximum odd-quintic orthogonalisation steps a single [`MuonSettings`] holds.
+pub const MAX_MUON_STEPS: usize = 8;
+
+/// The settings of [`crate::backend::Backend::muon_step_many`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuonSettings {
+    /// `μ`.
+    pub momentum: f32,
+    /// Nesterov: `u = (g · (1 − μ)) · 1 + m · μ`; else `u = m`.
+    pub nesterov: bool,
+    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`.
+    pub step_coeffs: [(f32, f32, f32); MAX_MUON_STEPS],
+    /// Number of polynomial steps (`<= MAX_MUON_STEPS`).
+    pub steps: usize,
+    /// Step-0 Schatten-4 spectral rescaling.
+    pub schatten4: bool,
+    /// Added to Frobenius / row norm before division.
+    pub eps: f32,
+    /// Learning rate (`p += (−lr) · scale · O`).
+    pub lr: f32,
+}
+
+impl MuonSettings {
+    /// Per-step schedule `schedule` (`len <= MAX_MUON_STEPS`) with optional step-0 Schatten-4 rescaling.
+    pub fn from_schedule(
+        mu: f32,
+        nesterov: bool,
+        schedule: &[(f32, f32, f32)],
+        schatten4: bool,
+        eps: f32,
+        lr: f32,
+    ) -> Self {
+        let mut step_coeffs = [(0.0, 0.0, 0.0); MAX_MUON_STEPS];
+        let n = schedule.len().min(MAX_MUON_STEPS);
+        step_coeffs[..n].copy_from_slice(&schedule[..n]);
+        MuonSettings { momentum: mu, nesterov, step_coeffs, steps: schedule.len(), schatten4, eps, lr }
+    }
+}
 
 impl Tensor {
     /// MuSGD's Muon update of many matrix-shaped parameters in one backend call
@@ -25,16 +83,35 @@ impl Tensor {
         scales: &[f32],
         settings: &MuonSettings,
     ) -> Result<bool> {
+        let no_dw = vec![false; params.len()];
+        Self::muon_step_many_geo_(params, momenta, grads, scales, &no_dw, settings)
+    }
+
+    /// Extended [`Tensor::muon_step_many_`] with per-parameter `depthwise` flags for zero-GEMM per-channel
+    /// Polar LMO (`Conv-GeoMuon`).
+    pub fn muon_step_many_geo_(
+        params: &[&Tensor],
+        momenta: &[&Tensor],
+        grads: &[&Tensor],
+        scales: &[f32],
+        depthwise: &[bool],
+        settings: &MuonSettings,
+    ) -> Result<bool> {
         const OP: &str = "muon_step_many_";
-        if params.len() != momenta.len() || params.len() != grads.len() || params.len() != scales.len() {
+        if params.len() != momenta.len()
+            || params.len() != grads.len()
+            || params.len() != scales.len()
+            || params.len() != depthwise.len()
+        {
             return Err(Error::invalid_arg(
                 OP,
                 format!(
-                    "{} parameters, {} momenta, {} gradients, {} scales",
+                    "{} parameters, {} momenta, {} gradients, {} scales, {} depthwise",
                     params.len(),
                     momenta.len(),
                     grads.len(),
-                    scales.len()
+                    scales.len(),
+                    depthwise.len()
                 ),
             ));
         }
@@ -45,6 +122,8 @@ impl Tensor {
             )));
         }
         let dev = first.device();
+        let ok = |t: &Tensor| t.dtype() == DType::F32 && t.device() == dev;
+        let dense = |t: &Tensor| t.layout().contiguous_range() == Some(0..t.numel());
         for ((p, m), g) in params.iter().zip(momenta).zip(grads) {
             if p.rank() < 2 || m.shape() != p.shape() || g.shape() != p.shape() {
                 return Err(Error::invalid_arg(
@@ -52,16 +131,17 @@ impl Tensor {
                     format!("parameter {:?}, momentum {:?}, gradient {:?}", p.dims(), m.dims(), g.dims()),
                 ));
             }
-            let ok = |t: &Tensor| t.dtype() == DType::F32 && t.device() == dev;
-            let dense = |t: &Tensor| t.layout().contiguous_range() == Some(0..t.numel());
             if !ok(p) || !ok(m) || !ok(g) || !dense(p) || !dense(m) {
                 return Ok(false);
             }
         }
-        let written: HashSet<*const _> = params.iter().map(|p| Arc::as_ptr(p.cell())).collect();
-        if written.len() != params.len()
-            || momenta.iter().chain(grads).any(|t| written.contains(&Arc::as_ptr(t.cell())))
-        {
+        let mut written: HashSet<*const _> = HashSet::with_capacity(params.len());
+        for t in params {
+            if !written.insert(Arc::as_ptr(t.cell())) {
+                return Ok(false);
+            }
+        }
+        if momenta.iter().chain(grads).any(|t| written.contains(&Arc::as_ptr(t.cell()))) {
             return Ok(false);
         }
         let b = first.backend()?;
@@ -84,8 +164,8 @@ impl Tensor {
             .iter_mut()
             .zip(&ids)
             .zip(params.iter().zip(momenta.iter().zip(grads)))
-            .zip(scales)
-            .map(|(((pg, &(mi, gi)), (p, (m, g))), &scale)| {
+            .zip(scales.iter().zip(depthwise))
+            .map(|(((pg, &(mi, gi)), (p, (m, g))), (&scale, &dw))| {
                 let rows = p.dims()[0];
                 MuonItem {
                     param: pg,
@@ -94,14 +174,15 @@ impl Tensor {
                     rows,
                     cols: p.numel() / rows.max(1),
                     scale,
+                    depthwise: dw,
                 }
             })
             .collect();
         let r = b.muon_step_many(&mut items, settings);
         // Bump versions only if the backend may have written, so a fallback keeps existing graphs valid.
         if !matches!(&r, Err(Error::NotSupported { .. })) {
-            for p in params {
-                p.cell().mark_modified();
+            for t in params {
+                t.cell().mark_modified();
             }
         }
         match r {

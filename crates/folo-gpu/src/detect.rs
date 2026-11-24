@@ -46,6 +46,16 @@ pub struct TalSettings {
     pub nwd_weight: f32,
 }
 
+/// Which box regression geometry loss [`detection_loss`] uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoxLossKind {
+    /// Complete IoU (default).
+    #[default]
+    Ciou,
+    /// Rational-Focal Edge-Decoupled IoU (`R-PIoU`).
+    Rpiou,
+}
+
 /// Loss settings (folo-vision's `LossConfig`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LossSettings {
@@ -59,6 +69,16 @@ pub struct LossSettings {
     pub mal_gamma: f32,
     /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
     pub nwd_weight: f32,
+    /// Box regression geometry loss (`Ciou` or `Rpiou`).
+    pub box_loss: BoxLossKind,
+    /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`].
+    pub rpiou_beta: f32,
+    /// Rational edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`].
+    pub rpiou_kappa: f32,
+    /// Grid-unit GT-size floor `δ₀ > 0` for [`BoxLossKind::Rpiou`].
+    pub rpiou_delta: f32,
+    /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
+    pub dfl_ot_weight: f32,
 }
 
 /// The anchors: points in grid units and the stride of each.
@@ -233,6 +253,13 @@ fn check(
         tal_nwd_weight: tal.nwd_weight,
         mal_gamma: 0.0,
         box_nwd_weight: 0.0,
+        box_loss_kind: 0,
+        rpiou_beta: 0.5,
+        rpiou_kappa: 2.0,
+        rpiou_delta: 0.5,
+        dfl_ot_weight: 0.0,
+        box_gain: 0.0,
+        dfl_gain: 0.0,
     })
 }
 
@@ -379,18 +406,40 @@ pub fn detection_loss_with_assignment(
     if !(s.nwd_weight.is_finite() && (0.0..=1.0).contains(&s.nwd_weight)) {
         return Err(err(format!("nwd_weight {} must be finite and in [0, 1]", s.nwd_weight)));
     }
+    if !(s.rpiou_beta.is_finite() && (0.0..=1.0).contains(&s.rpiou_beta)) {
+        return Err(err(format!("rpiou_beta {} must be finite and in [0, 1]", s.rpiou_beta)));
+    }
+    if !(s.rpiou_kappa.is_finite() && s.rpiou_kappa > 0.0) {
+        return Err(err(format!("rpiou_kappa {} must be finite and > 0", s.rpiou_kappa)));
+    }
+    if !(s.rpiou_delta.is_finite() && s.rpiou_delta > 0.0) {
+        return Err(err(format!("rpiou_delta {} must be finite and > 0", s.rpiou_delta)));
+    }
+    if !(s.dfl_ot_weight.is_finite() && s.dfl_ot_weight >= 0.0) {
+        return Err(err(format!("dfl_ot_weight {} must be finite and >= 0", s.dfl_ot_weight)));
+    }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
     let mut d = asg.desc;
     d.mal_gamma = s.mal_gamma;
     d.box_nwd_weight = s.nwd_weight;
+    d.box_loss_kind = match s.box_loss {
+        BoxLossKind::Ciou => 0,
+        BoxLossKind::Rpiou => 1,
+    };
+    d.rpiou_beta = s.rpiou_beta;
+    d.rpiou_kappa = s.rpiou_kappa;
+    d.rpiou_delta = s.rpiou_delta;
+    d.dfl_ot_weight = s.dfl_ot_weight;
+    d.box_gain = s.gains[0];
+    d.dfl_gain = s.gains[2];
     let ctx = &bufs.ctx;
     let raw = |t: &Tensor| dense_buffer(t).ok_or_else(|| err("assignment tensor is not dense"));
     let (dense_b, misc_b, slot_b, pick_b, meta_b) =
         (raw(&asg.dense)?, raw(&asg.misc)?, raw(&asg.slots)?, raw(&asg.picks)?, raw(&asg.meta)?);
     let (_part, part) = bufs.alloc(DType::F32, &[d.bce_partials()], false)?;
     k::bce_forward(ctx, &d, &cls_buf, &dense_b, &part, &misc_b).map_err(gpu)?;
-    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 2], false)?;
+    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 4], false)?;
     let dummy = ctx.dummy().clone();
     k::box_terms(ctx, &d, false, &box_buf, &meta_b, &pick_b, &slot_b, &terms, &dummy, &dummy).map_err(gpu)?;
     let (stats, stats_b) = bufs.alloc(DType::F32, &[12], false)?;

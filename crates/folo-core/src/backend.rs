@@ -879,61 +879,7 @@ pub struct OptimItem<'a> {
     pub state: Vec<&'a mut Storage>,
 }
 
-/// One matrix of [`Backend::muon_step_many`].
-#[derive(Debug)]
-pub struct MuonItem<'a> {
-    /// The parameter, updated in place.
-    pub param: &'a mut Storage,
-    /// The Muon momentum buffer (`rows · cols` `F32` elements, already updated this step).
-    pub momentum: View<'a>,
-    /// The gradient (`rows · cols` `F32` elements).
-    pub grad: View<'a>,
-    /// Rows of the matrix (the parameter's first dimension).
-    pub rows: usize,
-    /// Columns (the product of its other dimensions).
-    pub cols: usize,
-    /// Factor of the orthogonalised direction.
-    pub scale: f32,
-}
-
-/// Maximum odd-quintic orthogonalisation steps a single [`MuonSettings`] holds.
-pub const MAX_MUON_STEPS: usize = 8;
-
-/// The settings of [`Backend::muon_step_many`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MuonSettings {
-    /// `μ`.
-    pub momentum: f32,
-    /// Nesterov: `u = (g · (1 − μ)) · 1 + m · μ`; else `u = m`.
-    pub nesterov: bool,
-    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`: `X ← a_k·X + (b_k·A + c_k·A²)·X`.
-    pub step_coeffs: [(f32, f32, f32); MAX_MUON_STEPS],
-    /// Number of polynomial steps (`<= MAX_MUON_STEPS`).
-    pub steps: usize,
-    /// Step-0 Schatten-4 spectral rescaling (`α = ‖X₀·X₀ᵀ‖_F^(1/2) + eps / (‖U‖_F + eps)`).
-    pub schatten4: bool,
-    /// Added to the Frobenius norm before the division.
-    pub eps: f32,
-    /// The learning rate of the update (MuSGD's `0.2 · lr`).
-    pub lr: f32,
-}
-
-impl MuonSettings {
-    /// Per-step schedule `schedule` (`len <= MAX_MUON_STEPS`) with optional step-0 Schatten-4 rescaling.
-    pub fn from_schedule(
-        mu: f32,
-        nesterov: bool,
-        schedule: &[(f32, f32, f32)],
-        schatten4: bool,
-        eps: f32,
-        lr: f32,
-    ) -> Self {
-        let mut step_coeffs = [(0.0, 0.0, 0.0); MAX_MUON_STEPS];
-        let n = schedule.len().min(MAX_MUON_STEPS);
-        step_coeffs[..n].copy_from_slice(&schedule[..n]);
-        MuonSettings { momentum: mu, nesterov, step_coeffs, steps: schedule.len(), schatten4, eps, lr }
-    }
-}
+pub use crate::ops::muon::{MAX_MUON_STEPS, MuonItem, MuonSettings};
 
 /// The running statistics [`Backend::batch_norm_act`] updates in place.
 #[derive(Debug)]

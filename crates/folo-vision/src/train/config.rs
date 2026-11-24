@@ -168,6 +168,9 @@ pub struct MuSgdConfig {
     /// Muon orthogonalisation schedule (`polar4` default for new runs; missing in older configs reads as `ns5`).
     #[serde(default = "legacy_muon_ortho")]
     pub ortho: folo_nn::optim::MuonOrtho,
+    /// Geometric conditioning mode (`legacy` default; `geo` = conv aspect + depthwise Polar LMO).
+    #[serde(default)]
+    pub geo: folo_nn::optim::MuonGeoMode,
 }
 
 impl Default for MuSgdConfig {
@@ -178,6 +181,7 @@ impl Default for MuSgdConfig {
             sgd: w.sgd,
             cls_lr: super::MUSGD_CLS_LR_FACTOR,
             ortho: folo_nn::optim::MuonOrtho::default(),
+            geo: folo_nn::optim::MuonGeoMode::default(),
         }
     }
 }
@@ -428,6 +432,18 @@ impl TrainConfig {
         }
         if !(0.0..=1.0).contains(&l.tal.nwd_weight) {
             return bad(format!("loss.tal.nwd_weight must be in 0..=1, got {}", l.tal.nwd_weight));
+        }
+        if !(l.rpiou_beta.is_finite() && (0.0..=1.0).contains(&l.rpiou_beta)) {
+            return bad(format!("loss.rpiou_beta must be finite and in 0..=1, got {}", l.rpiou_beta));
+        }
+        if !(l.rpiou_kappa.is_finite() && l.rpiou_kappa > 0.0) {
+            return bad(format!("loss.rpiou_kappa must be finite and > 0, got {}", l.rpiou_kappa));
+        }
+        if !(l.rpiou_delta.is_finite() && l.rpiou_delta > 0.0) {
+            return bad(format!("loss.rpiou_delta must be finite and > 0, got {}", l.rpiou_delta));
+        }
+        if !(l.dfl_ot_weight.is_finite() && l.dfl_ot_weight >= 0.0) {
+            return bad(format!("loss.dfl_ot_weight must be finite and >= 0, got {}", l.dfl_ot_weight));
         }
         if let Some(w) = self.wd_eff
             && !(w.is_finite() && w >= 0.0)
@@ -900,6 +916,53 @@ mod tests {
             [serde_json::json!({}), serde_json::json!({ "optimizer": { "type": "auto" }, "train": {} })]
         {
             assert_eq!(ResolvedOptim::from_run_config(&broken), None, "{broken}");
+        }
+    }
+
+    #[test]
+    fn validates_rpiou_otdfl_and_geomuon_settings() {
+        let mut ok = TrainConfig::default();
+        ok.loss.box_loss = crate::loss::BoxLossKind::Rpiou;
+        ok.loss.rpiou_beta = 0.25;
+        ok.loss.rpiou_kappa = 1.5;
+        ok.loss.rpiou_delta = 0.4;
+        ok.loss.dfl_ot_weight = 0.25;
+        ok.musgd.geo = folo_nn::optim::MuonGeoMode::Geo;
+        ok.validate().unwrap();
+
+        for bad in [
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_beta = -0.01;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_beta = 1.01;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_kappa = 0.0;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_kappa = f32::INFINITY;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.rpiou_delta = f32::NAN;
+                c
+            },
+            {
+                let mut c = ok.clone();
+                c.loss.dfl_ot_weight = -0.1;
+                c
+            },
+        ] {
+            assert!(bad.validate().is_err());
         }
     }
 }

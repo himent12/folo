@@ -5,7 +5,9 @@
 
 use folo_core::{Result, Tensor};
 
-use super::{BatchAssignment, ImageTargets, LossConfig, LossItems, LossOutput, check_inputs, nan_loss};
+use super::{
+    BatchAssignment, BoxLossKind, ImageTargets, LossConfig, LossItems, LossOutput, check_inputs, nan_loss,
+};
 use crate::boxes::Xyxy;
 use crate::decode::Anchors;
 
@@ -52,12 +54,21 @@ pub(super) fn detection_loss_device_with_assignment(
     let tables = gpu_targets(targets);
     let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
     let at = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let box_loss = match cfg.box_loss {
+        BoxLossKind::Ciou => folo_gpu::detect::BoxLossKind::Ciou,
+        BoxLossKind::Rpiou => folo_gpu::detect::BoxLossKind::Rpiou,
+    };
     let s = folo_gpu::detect::LossSettings {
         reg_max: cfg.reg_max,
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         tal: gpu_tal(cfg),
         mal_gamma: cfg.mal_gamma,
         nwd_weight: cfg.nwd_weight,
+        box_loss,
+        rpiou_beta: cfg.rpiou_beta,
+        rpiou_kappa: cfg.rpiou_kappa,
+        rpiou_delta: cfg.rpiou_delta,
+        dfl_ot_weight: cfg.dfl_ot_weight,
     };
     let (out, asg) = folo_gpu::detect::detection_loss_with_assignment(box_raw, cls_raw, &at, &gts, &s)?;
     // The loss's one readback: the reported items, the positives and the target score sum.

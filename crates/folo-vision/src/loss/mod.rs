@@ -56,7 +56,7 @@ pub use distill::{
     DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_with_context,
     gt_verify_weights_cpu,
 };
-pub use terms::{ciou, loss_with_assignment, nwd_loss};
+pub use terms::{ciou, loss_with_assignment, nwd_loss, rpiou_loss};
 
 use crate::assign::TalConfig;
 use crate::boxes::Xyxy;
@@ -72,11 +72,22 @@ fn invalid(msg: impl Into<String>) -> Error {
     Error::InvalidArgument { op: OP, msg: msg.into() }
 }
 
+/// Which box regression geometry loss [`detection_loss`] uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoxLossKind {
+    /// Complete IoU (default, `docs/MODEL.md` §7.2).
+    #[default]
+    Ciou,
+    /// Rational-Focal Edge-Decoupled IoU (`R-PIoU`): `(1 - u)(1 + β·u) + κ·E² / (1 + κ·E²)`, purely algebraic.
+    Rpiou,
+}
+
 /// Loss hyper-parameters. Defaults are `docs/MODEL.md` §7.4's.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LossConfig {
-    /// Weight of the CIoU term.
+    /// Weight of the box regression term.
     pub box_gain: f32,
     /// Weight of the classification BCE.
     pub cls_gain: f32,
@@ -89,8 +100,18 @@ pub struct LossConfig {
     /// Matchability-Aware Loss (MAL) background focal exponent (`0.0` = plain BCE). When `> 0`, negatives use
     /// `p^γ · softplus(x)` while positives keep 100% unweighted BCE.
     pub mal_gamma: f32,
-    /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = pure CIoU).
+    /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
+    /// Box regression geometry loss (`Ciou` default, or `Rpiou`).
+    pub box_loss: BoxLossKind,
+    /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`] (`0.5` default).
+    pub rpiou_beta: f32,
+    /// Rational edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`] (`2.0` default).
+    pub rpiou_kappa: f32,
+    /// Grid-unit GT-size floor `δ₀ > 0` for [`BoxLossKind::Rpiou`] (`0.5` default).
+    pub rpiou_delta: f32,
+    /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier term added to DFL (`0.0` = standard DFL).
+    pub dfl_ot_weight: f32,
 }
 
 impl Default for LossConfig {
@@ -103,6 +124,11 @@ impl Default for LossConfig {
             tal: TalConfig::default(),
             mal_gamma: 0.0,
             nwd_weight: 0.0,
+            box_loss: BoxLossKind::Ciou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            rpiou_delta: 0.5,
+            dfl_ot_weight: 0.0,
         }
     }
 }
@@ -328,6 +354,18 @@ fn check_inputs(
     }
     if cfg.reg_max < 2 {
         return Err(invalid(format!("reg_max must be >= 2, got {}", cfg.reg_max)));
+    }
+    if !(cfg.rpiou_beta.is_finite() && (0.0..=1.0).contains(&cfg.rpiou_beta)) {
+        return Err(invalid(format!("rpiou_beta {} must be finite and in [0, 1]", cfg.rpiou_beta)));
+    }
+    if !(cfg.rpiou_kappa.is_finite() && cfg.rpiou_kappa > 0.0) {
+        return Err(invalid(format!("rpiou_kappa {} must be finite and > 0", cfg.rpiou_kappa)));
+    }
+    if !(cfg.rpiou_delta.is_finite() && cfg.rpiou_delta > 0.0) {
+        return Err(invalid(format!("rpiou_delta {} must be finite and > 0", cfg.rpiou_delta)));
+    }
+    if !(cfg.dfl_ot_weight.is_finite() && cfg.dfl_ot_weight >= 0.0) {
+        return Err(invalid(format!("dfl_ot_weight {} must be finite and >= 0", cfg.dfl_ot_weight)));
     }
     let shapes = || format!("box_raw {}, cls_raw {}", box_raw.shape(), cls_raw.shape());
     let ((b, ch, a), (b2, nc, a2)) = match (box_raw.dims3(), cls_raw.dims3()) {

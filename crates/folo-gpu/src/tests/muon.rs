@@ -42,6 +42,7 @@ fn run_with(
             rows: *r,
             cols: *c,
             scale: (*r as f32 / *c as f32).max(1.0).sqrt(),
+            depthwise: false,
         })
         .collect();
     let ran = muon_step_within(ctx, &items, s, max_bytes, bindings).unwrap();

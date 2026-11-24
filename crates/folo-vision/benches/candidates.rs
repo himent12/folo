@@ -96,7 +96,8 @@ fn main() {
         None | Some("none") => BoxFusion::None,
         Some("vote") => BoxFusion::Vote,
         Some("dfl") => BoxFusion::Dfl,
-        Some(f) => panic!("FOLO_BENCH_FUSION: {f} is not none, vote or dfl"),
+        Some("sebf") => BoxFusion::Sebf,
+        Some(f) => panic!("FOLO_BENCH_FUSION: {f} is not none, vote, dfl or sebf"),
     };
     let nms = NmsConfig { conf, fusion, ..NmsConfig::default() };
     let verify = env::<String>("FOLO_BENCH_VERIFY").is_some_and(|v| v == "1");

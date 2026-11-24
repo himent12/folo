@@ -10,7 +10,7 @@
 //!   `own [2, B, A]`: the step-4 owner (max `u` bits, then the complemented gt index). `slot [B, G, K, 2]`:
 //!   `(t or 0, positive)`. `dense [2, B, A]`: `(label + 1 or 0, t)` per anchor. `misc [4]`: bit 0 of word 0 is
 //!   set when a head value is not finite.
-//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 2]`, `stats [12]` f32 and `total [1]` (see
+//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 4]`, `stats [12]` f32 and `total [1]` (see
 //!   `shaders/det_combine.wgsl`).
 
 use crate::context::GpuContext;
@@ -90,6 +90,20 @@ pub struct DetectDesc {
     pub mal_gamma: f32,
     /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
     pub box_nwd_weight: f32,
+    /// Box geometry loss kind (`0` = CIoU, `1` = R-PIoU).
+    pub box_loss_kind: u32,
+    /// High-IoU focusing slope `β` in `[0, 1]` for R-PIoU.
+    pub rpiou_beta: f32,
+    /// Rational edge-penalty sharpness `κ > 0` for R-PIoU.
+    pub rpiou_kappa: f32,
+    /// Grid-unit GT-size floor `δ₀ > 0` for R-PIoU.
+    pub rpiou_delta: f32,
+    /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
+    pub dfl_ot_weight: f32,
+    /// Box loss gain (passed into `det_box` backward for exponent-split scaling).
+    pub box_gain: f32,
+    /// DFL loss gain (passed into `det_box` backward for exponent-split OT-DFL scaling).
+    pub dfl_gain: f32,
 }
 
 impl DetectDesc {
@@ -156,7 +170,11 @@ impl DetectDesc {
             .checked_mul(self.k)
             .and_then(|v| v.checked_mul(3))
             .ok_or_else(|| shape_err("detect: pick buffer size overflow"))?;
-        let words = meta.max(box_words).max(cls_words).max(pick_words);
+        let terms_words = bg
+            .checked_mul(self.k)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| shape_err("detect: terms buffer size overflow"))?;
+        let words = meta.max(box_words).max(cls_words).max(pick_words).max(terms_words);
         if words >= u32::MAX as usize / 4 {
             return Err(shape_err("detect: problem too large for 32-bit indexing"));
         }
@@ -294,7 +312,20 @@ pub fn box_terms(
     let spec = Spec::new().u32("R", d.reg_max as u32).u32("K", d.k as u32).u32("MODE", backward as u32);
     let k = ctx.kernel(&BOX, spec)?;
     let hi = d.reg_max as f32 - 1.0 - 0.01;
-    let p = Params::new().uz(d.slots())?.uz(d.a)?.uz(d.g)?.uz(d.gt_box_offset())?.f(hi).f(d.box_nwd_weight);
+    let p = Params::new()
+        .uz(d.slots())?
+        .uz(d.a)?
+        .uz(d.g)?
+        .uz(d.gt_box_offset())?
+        .f(hi)
+        .f(d.box_nwd_weight)
+        .u(d.box_loss_kind)
+        .f(d.rpiou_beta)
+        .f(d.rpiou_kappa)
+        .f(d.rpiou_delta)
+        .f(d.dfl_ot_weight)
+        .f(d.box_gain)
+        .f(d.dfl_gain);
     ctx.dispatch(&k, &[box_raw, meta, pick, slot, out, stats, grad], &p, ctx.grid_1d(d.slots() as u64, 64)?)
 }
 
@@ -312,8 +343,14 @@ pub fn combine(
     total: &wgpu::Buffer,
 ) -> Result<()> {
     let k = ctx.kernel(&COMBINE, Spec::new())?;
-    let p =
-        Params::new().uz(d.bce_partials())?.uz(d.slots())?.f(d.b as f32).f(gains[0]).f(gains[1]).f(gains[2]);
+    let p = Params::new()
+        .uz(d.bce_partials())?
+        .uz(d.slots())?
+        .f(d.b as f32)
+        .f(gains[0])
+        .f(gains[1])
+        .f(gains[2])
+        .f(d.dfl_ot_weight);
     ctx.dispatch(&k, &[part, terms, slot, misc, stats, total], &p, [1, 1, 1])
 }
 
@@ -394,6 +431,13 @@ mod tests {
             tal_nwd_weight: 0.0,
             mal_gamma: 0.0,
             box_nwd_weight: 0.0,
+            box_loss_kind: 0,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            rpiou_delta: 0.5,
+            dfl_ot_weight: 0.0,
+            box_gain: 7.5,
+            dfl_gain: 1.5,
         }
     }
 

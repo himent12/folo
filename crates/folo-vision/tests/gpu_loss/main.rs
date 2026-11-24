@@ -4,6 +4,8 @@
 //!
 //! Skips (with a note) without a hardware adapter; set `FOLO_GPU_TEST_SOFTWARE=1` to run on WARP / llvmpipe.
 
+mod new_math;
+
 use folo_core::rng::Rng;
 use folo_core::{Device, Tensor};
 use folo_vision::boxes::Xyxy;
@@ -13,7 +15,7 @@ use folo_vision::loss::{
     detection_loss_host,
 };
 
-fn gpu() -> Option<Device> {
+pub(crate) fn gpu_device() -> Option<Device> {
     let ctx = match folo_gpu::GpuContext::shared() {
         Ok(c) => c,
         Err(e) => {
@@ -30,17 +32,18 @@ fn gpu() -> Option<Device> {
 
 macro_rules! gpu {
     () => {
-        match gpu() {
+        match crate::gpu_device() {
             Some(d) => d,
             None => return,
         }
     };
 }
+pub(crate) use gpu;
 
 /// A batch: head outputs that decode to boxes of a few cells around each anchor, and ground truth with overlapping
 /// boxes (conflicts), a box smaller than 16 px (the candidate enlargement), boxes on several levels and an empty
 /// image.
-fn case(seed: u64, size: u32, nc: usize) -> (Anchors, Tensor, Tensor, Vec<ImageTargets>) {
+pub(crate) fn case(seed: u64, size: u32, nc: usize) -> (Anchors, Tensor, Tensor, Vec<ImageTargets>) {
     let anchors = make_anchors(size, size, &[8, 16, 32], 0.5);
     let a = anchors.len();
     let mut rng = Rng::seed(seed);
@@ -70,7 +73,7 @@ fn case(seed: u64, size: u32, nc: usize) -> (Anchors, Tensor, Tensor, Vec<ImageT
     (anchors, box_raw, cls_raw, targets)
 }
 
-fn assert_same_assignment(got: &BatchAssignment, want: &BatchAssignment) {
+pub(crate) fn assert_same_assignment(got: &BatchAssignment, want: &BatchAssignment) {
     assert!(want.num_fg() > 0, "the case has positives");
     assert_eq!(got.image, want.image, "images");
     assert_eq!(got.anchor, want.anchor, "anchors");
@@ -123,7 +126,7 @@ fn assigner_matches_host_with_other_settings() {
 }
 
 #[track_caller]
-fn close_vec(got: &[f32], want: &[f32], atol: f32, rtol: f32, what: &str) {
+pub(crate) fn close_vec(got: &[f32], want: &[f32], atol: f32, rtol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let mut worst = (0usize, f32::NEG_INFINITY);
     for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
@@ -231,6 +234,11 @@ fn returned_stats_do_not_feed_the_backward() {
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         mal_gamma: cfg.mal_gamma,
         nwd_weight: cfg.nwd_weight,
+        box_loss: folo_gpu::detect::BoxLossKind::Ciou,
+        rpiou_beta: cfg.rpiou_beta,
+        rpiou_kappa: cfg.rpiou_kappa,
+        rpiou_delta: cfg.rpiou_delta,
+        dfl_ot_weight: cfg.dfl_ot_weight,
         tal: folo_gpu::detect::TalSettings {
             topk: cfg.tal.topk,
             topk2: cfg.tal.topk2,

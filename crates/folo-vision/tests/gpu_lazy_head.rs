@@ -92,7 +92,7 @@ fn check_precisions(
     nms: &NmsConfig,
     what: &str,
 ) {
-    let dfl = nms.fusion == BoxFusion::Dfl && m.head_mode() == HeadMode::O2m;
+    let dfl = nms.fusion.wants_side_precision() && m.head_mode() == HeadMode::O2m;
     for (i, c) in got.iter().enumerate() {
         if !dfl {
             assert_eq!(c.precisions, None, "{what}: image {i}");
@@ -166,7 +166,7 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
         assert!(m.candidates_first_applies(x.device(), &nms), "{what}: candidate-first applies");
         let want = dense.detections(&nms).unwrap();
         let cands = m.predict_candidates(x, &nms).unwrap();
-        if fusion == BoxFusion::Dfl {
+        if fusion.wants_side_precision() {
             check_precisions(
                 m,
                 &cands,
@@ -187,7 +187,7 @@ fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion, score: ScoreR
                 let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
                 changed += got.iter().zip(&off).map(|(on, off)| lowered_by_consensus(on, off)).sum::<usize>();
             }
-            ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse => {
+            ScoreRule::Elc | ScoreRule::DflConsensus | ScoreRule::DflRepulse | ScoreRule::DflCgr => {
                 let off = dense.detections(&NmsConfig { score: ScoreRule::None, ..nms.clone() }).unwrap();
                 changed += got.iter().zip(&off).filter(|(on, off)| bits(on) != bits(off)).count();
             }
@@ -245,16 +245,20 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
     for &(dtype, on) in &dtypes {
         let m = model(3, "o2m", dev, dtype);
         ctx.set_tensor_cores(on);
-        for fusion in [BoxFusion::Vote, BoxFusion::Dfl] {
+        for fusion in [BoxFusion::Vote, BoxFusion::Dfl, BoxFusion::Sebf] {
             // 320²: every anchor passing overflows P3's site list; 384×640 is rectangular.
             for (dims, seed) in [([2, 3, 320, 320], 4), ([1, 3, 384, 640], 5)] {
                 let what = format!("{fusion:?} {dtype:?} tensor cores {on} {dims:?}");
                 let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, ScoreRule::None);
                 assert!(n > 0, "{what}: nothing compared");
-                // The consensus / ELC / DFL-consensus / DFL-repulse rules run on the host after NMS.
-                for rule in
-                    [ScoreRule::Consensus, ScoreRule::Elc, ScoreRule::DflConsensus, ScoreRule::DflRepulse]
-                {
+                // The consensus / ELC / DFL-consensus / DFL-repulse / DFL-CGR rules run on the host after NMS.
+                for rule in [
+                    ScoreRule::Consensus,
+                    ScoreRule::Elc,
+                    ScoreRule::DflConsensus,
+                    ScoreRule::DflRepulse,
+                    ScoreRule::DflCgr,
+                ] {
                     let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion, rule);
                     assert!(n > 0, "{what}, {rule:?}: nothing compared");
                 }
@@ -278,15 +282,21 @@ fn gpu_box_fusion_matches_dense_bit_for_bit() {
             (out.detections(&nms(BoxFusion::Dfl)).unwrap(), out.detections(&nms(BoxFusion::Vote)).unwrap());
         assert_ne!(bits(&dfl[0]), bits(&vote[0]), "{dtype:?}: DFL fusion moved no box past voting");
         // Exercise calibrated rules with real NMS suppression on GPU candidates-first.
-        for (rule, iou) in
-            [(ScoreRule::Elc, 0.70), (ScoreRule::DflConsensus, 0.70), (ScoreRule::DflRepulse, 0.75)]
-        {
-            let cfg =
-                NmsConfig { conf: 0.3, iou, fusion: BoxFusion::Dfl, score: rule, ..NmsConfig::default() };
+        for (fusion, rule, iou) in [
+            (BoxFusion::Dfl, ScoreRule::Elc, 0.70),
+            (BoxFusion::Dfl, ScoreRule::DflConsensus, 0.70),
+            (BoxFusion::Dfl, ScoreRule::DflRepulse, 0.75),
+            (BoxFusion::Sebf, ScoreRule::DflCgr, 0.78),
+        ] {
+            let cfg = NmsConfig { conf: 0.3, iou, fusion, score: rule, ..NmsConfig::default() };
             let want = out.detections(&cfg).unwrap();
             let cands = m.predict_candidates(&x, &cfg).unwrap();
             let got: Vec<Vec<Detection>> = cands.iter().map(|c| m.finish_candidates(c, &cfg)).collect();
-            assert_eq!(bits(&got[0]), bits(&want[0]), "{dtype:?} tensor cores {on}: {rule:?} at iou={iou}");
+            assert_eq!(
+                bits(&got[0]),
+                bits(&want[0]),
+                "{dtype:?} tensor cores {on}: {fusion:?}+{rule:?} at iou={iou}"
+            );
         }
         assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
     }
