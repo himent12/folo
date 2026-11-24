@@ -4,6 +4,7 @@
  */
 import X from '$icons/x';
 import ArrowUpRight from '$icons/arrow-up-right';
+import RotateCw from '$icons/rotate-cw';
 import { bindable, css, For } from 'fw';
 import type { Run } from '$lib/api/types';
 import { runEnd } from '$lib/charts/runAxis';
@@ -31,6 +32,12 @@ export interface RunChipsProps {
   candidates: Run[];
   /** Add run…, as the page draws it. */
   adder: JSX.Element;
+  /** Per-run metrics error, when this run's curve could not load or refresh. */
+  metricErrorOf?: (id: string) => unknown;
+  /** Whether this run's metrics are currently retrying. */
+  retryingOf?: (id: string) => boolean;
+  /** Retry loading this run's metrics. */
+  onRetryMetric?: (id: string) => void;
 }
 
 export default function RunChips(props: RunChipsProps) {
@@ -62,6 +69,8 @@ export default function RunChips(props: RunChipsProps) {
           const v = () => props.valueOf(r().id);
           const from = () => props.startOf(r());
           const end = () => runEnd(r().status);
+          const failed = () => props.metricErrorOf?.(r().id) !== undefined;
+          const retrying = () => !!props.retryingOf?.(r().id);
           return (
             <span
               class="chip"
@@ -86,7 +95,12 @@ export default function RunChips(props: RunChipsProps) {
               {/* How the line ended (live, stopped, failed) in words beside its value. */}
               <span class="v num">
                 {v() === null ? '—' : metric(v())}
-                {end() ? (
+                {failed() ? (
+                  <span class="st">
+                    <span class="sep">{' · '}</span>
+                    metrics failed
+                  </span>
+                ) : end() ? (
                   <span class="st">
                     <span class="sep">{' · '}</span>
                     {end()}
@@ -104,9 +118,22 @@ export default function RunChips(props: RunChipsProps) {
                 )}
               </span>{' '}
               <span class="acts">
-                <a class="open" href={href(`/runs/${r().id}`)} aria-label={`Open ${r().name}`} title="Open run">
-                  <ArrowUpRight size={12} />
-                </a>{' '}
+                {failed() && props.onRetryMetric ? (
+                  <button
+                    type="button"
+                    class="rm"
+                    aria-label={`Retry metrics for ${r().name}`}
+                    title="Retry metrics"
+                    disabled={retrying()}
+                    onclick={() => props.onRetryMetric?.(r().id)}
+                  >
+                    <RotateCw size={12} />
+                  </button>
+                ) : (
+                  <a class="open" href={href(`/runs/${r().id}`)} aria-label={`Open ${r().name}`} title="Open run">
+                    <ArrowUpRight size={12} />
+                  </a>
+                )}{' '}
                 <button class="rm" aria-label={`Remove ${r().name}`} onclick={() => props.setIds(props.ids.filter((id) => id !== r().id))}>
                   <X size={12} />
                 </button>

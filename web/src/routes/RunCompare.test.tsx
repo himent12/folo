@@ -380,15 +380,111 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     expect(reads).toBe(2);
   });
 
-  it('follows a stopped run resumed in another tab (review round 1)', async () => {
-    // Not training when the page opens (stopped, say).
+  it('stops polling once all compared runs are terminal and synced, and checks again on tab return', async () => {
+    // Completed runs when the page opens: once metrics are synced, no 3s poll fires while idle.
     const { state, chip } = await trainingCompare(null, false);
+    const runsSpy = hub.api.runs as unknown as ReturnType<typeof vi.fn>;
     await tick();
     expect(chip()).not.toContain('live');
-    // Resumed elsewhere: it trains again.
+    const callsAfterSync = runsSpy.mock.calls.length;
+    await tick(COMPARE_POLL_MS * 4);
+    expect(runsSpy.mock.calls.length).toBe(callsAfterSync);
+    // Resumed in another tab: returning to this tab refreshes once and restarts live polling.
     state.training = true;
-    await tick(COMPARE_POLL_MS);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await tick();
     expect(chip()).toContain('live');
+    // Completes again: once final metrics catch up, polling stops again.
+    state.training = false;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
+    const callsAfterComplete = runsSpy.mock.calls.length;
+    await tick(COMPARE_POLL_MS * 4);
+    expect(runsSpy.mock.calls.length).toBe(callsAfterComplete);
+  });
+});
+
+describe('Compare: deleted run slot reclamation, partial metrics error, and Precision', () => {
+  it('reconciles 4 missing IDs out of ?ids=, announces them, and restores the picker', async () => {
+    setWidth(1440);
+    router.route = parse('#/runs/compare?ids=missing_1,missing_2,missing_3,missing_4');
+    c = mount(RunCompare, { target });
+    const notice = await until(() => target.querySelector('[data-missing-runs]'), 'the missing runs notice');
+    expect(notice.textContent).toContain('Removed 4 missing runs');
+    expect(notice.textContent).toContain('missing_1');
+    expect(notice.textContent).toContain('missing_4');
+    expect(router.route.query.get('ids')).toBeNull();
+    expect(target.textContent).toContain('Pick runs to compare');
+    // Picker is restored (not trapped in an empty dead end).
+    expect(target.querySelector('.empty select[aria-label="Add a run to the comparison"]')).not.toBeNull();
+    // Dismiss clears the notice.
+    notice.querySelector<HTMLButtonElement>('button')!.click();
+    flushSync();
+    expect(target.querySelector('[data-missing-runs]')).toBeNull();
+  });
+
+  it('reclaims slots for deleted IDs alongside valid runs so Add run stays available', async () => {
+    setWidth(1440);
+    const [a] = (await hub.api.runs()).filter((r) => r.status !== 'queued');
+    router.route = parse(`#/runs/compare?ids=${a!.id},gone_1,gone_2,gone_3`);
+    c = mount(RunCompare, { target });
+    await until(() => target.querySelector('[data-missing-runs]'), 'the missing runs notice');
+    expect(router.route.query.get('ids')).toBe(a!.id);
+    expect(target.querySelectorAll('.chip')).toHaveLength(1);
+    // Add run control is available again because 3 dead slots were reclaimed.
+    expect(target.querySelector('select[aria-label="Add a run to the comparison"]')).not.toBeNull();
+  });
+
+  it('preserves healthy curves when one run fails to load metrics and recovers via per-run Retry', async () => {
+    setWidth(1440);
+    const api = hub.api as MockApi;
+    const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const real = api.runMetrics.bind(api);
+    let failB = true;
+    const metricsSpy = vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      if (id === b!.id && failB) throw new ApiError(500, 'internal', 'metrics unavailable');
+      return real(id, ...rest);
+    });
+    const fullA = (await real(a!.id)).epochs;
+    const fullB = (await real(b!.id)).epochs;
+    router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+    c = mount(RunCompare, { target });
+
+    // Healthy run A's curve renders and its chip shows its value; run B reports metrics failure with a per-run Retry.
+    await until(() => target.querySelector('.swap') && target.querySelector('.stale-note'), 'partial curve and error');
+    const chipText = (name: string) => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(name))?.textContent ?? '';
+    expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
+    expect(chipText(b!.name)).toContain('metrics failed');
+    expect(target.querySelector('.stale-note')?.textContent).toContain(`Could not load metrics for ${b!.name}`);
+
+    // Clicking per-run Retry fetches only run B and restores its value without wiping run A.
+    metricsSpy.mockClear();
+    failB = false;
+    const retryBtn = target.querySelector<HTMLButtonElement>(`button[aria-label="Retry metrics for ${b!.name}"]`)!;
+    retryBtn.click();
+    await until(() => !target.querySelector('.stale-note') && chipText(b!.name).includes(metric(fullB.at(-1)!.val.map50_95)), 'run B recovered');
+    expect(metricsSpy).toHaveBeenCalledTimes(1);
+    expect(metricsSpy).toHaveBeenCalledWith(b!.id, expect.any(AbortSignal));
+    expect(chipText(a!.name)).toContain(metric(fullA.at(-1)!.val.map50_95));
+  });
+
+  it('supports Precision in the metric selector and annotates its best-F1 operating point', async () => {
+    setWidth(1440);
+    const [a, b] = (await hub.api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const mA = await hub.api.runMetrics(a!.id);
+    router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+    c = mount(RunCompare, { target });
+    await until(() => target.querySelector('.swap'), 'the chart');
+
+    const precRadio = [...target.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Metric"] [role="radio"]')].find((el) => el.textContent?.trim() === 'Precision')!;
+    expect(precRadio).toBeDefined();
+    precRadio.click();
+    flushSync();
+
+    expect(precRadio.getAttribute('aria-checked')).toBe('true');
+    const chipA = [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(a!.name))?.textContent ?? '';
+    expect(chipA).toContain(metric(mA.epochs.at(-1)!.val.precision));
+    expect(target.querySelector('.chips-head .at')?.textContent).toContain('at best-F1 conf');
   });
 });
 
