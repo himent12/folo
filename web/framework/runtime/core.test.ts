@@ -16,6 +16,7 @@ import {
   untrack,
 } from './core';
 import { createComponent } from './component';
+import { compareJobs, sortJobs, type TreeNode } from './flushOrder';
 
 describe('signal', () => {
   it('reads, writes, updates with a function, and skips equal writes', () => {
@@ -349,5 +350,127 @@ describe('steady state', () => {
       flush();
     }
     expect((a as unknown as { _targets: unknown })._targets).toBe(node);
+  });
+});
+
+describe('flushOrder', () => {
+  const refPath = (n: TreeNode): number[] => {
+    const out: number[] = [];
+    for (let o: TreeNode | null = n; o !== null; o = o._parent) out.push(o._id);
+    return out.reverse();
+  };
+  const refCompare = (a: TreeNode, b: TreeNode): number => {
+    const pa = refPath(a);
+    const pb = refPath(b);
+    const len = Math.min(pa.length, pb.length);
+    for (let i = 0; i < len; i++) if (pa[i] !== pb[i]) return pa[i]! - pb[i]!;
+    return pa.length - pb.length;
+  };
+
+  it('matches lexicographic path order across depths, separate roots, and shared-id memo branches', () => {
+    const mk = (id: number, parent: TreeNode | null): TreeNode => ({
+      _id: id,
+      _parent: parent,
+      _depth: parent === null ? 0 : parent._depth + 1,
+    });
+    const r1 = mk(1, null);
+    const r2 = mk(2, null);
+    const a = mk(3, r1);
+    const b = mk(4, r1);
+    // Owning memo `m` and two branch roots `mRoot1` (old) / `mRoot2` (recreated) share `_id = 5` under `a`.
+    const m = mk(5, a);
+    const mRoot1 = mk(5, a);
+    const mRoot2 = mk(5, a);
+    const mChild1 = mk(6, mRoot1);
+    const mChild2 = mk(7, mRoot2);
+    const mDeep = mk(8, mChild2);
+    const bChild = mk(9, b);
+    const r2Child = mk(10, r2);
+    const r2Grand = mk(11, r2Child);
+
+    const nodes = [r1, r2, a, b, m, mRoot1, mRoot2, mChild1, mChild2, mDeep, bChild, r2Child, r2Grand];
+    for (const x of nodes) {
+      for (const y of nodes) {
+        expect(compareJobs(x, y)).toBe(refCompare(x, y));
+      }
+    }
+
+    // 2-element fast path (ordered and reversed) and general sort
+    const pairOrdered = [m, mDeep];
+    sortJobs(pairOrdered);
+    expect(pairOrdered).toEqual([m, mDeep]);
+
+    const pairReversed = [mDeep, m];
+    sortJobs(pairReversed);
+    expect(pairReversed).toEqual([m, mDeep]);
+
+    const reversed = [...nodes].reverse();
+    sortJobs(reversed);
+    expect(reversed).toEqual([...nodes].sort(refCompare));
+
+    // Already-ordered fast path leaves the array intact
+    const ordered = [...reversed];
+    sortJobs(ordered);
+    expect(ordered).toEqual(reversed);
+  });
+
+  it('flushes sibling, cousin, nested unattached root, and memo-branch effects in strict tree order', () => {
+    const s = signal(0);
+    const show = signal(true);
+    const log: string[] = [];
+
+    createRoot(() => {
+      // Memo created first: even after recreating its branch, its effects run before later siblings.
+      const branch = memo(() => {
+        if (!show.get()) return null;
+        renderEffect(() => void log.push(`memo-branch ${s.get()}`));
+        return 1;
+      });
+      renderEffect(() => void branch());
+      // Nested unattached root inside the outer root (inherits `_parent = owner` without `attach`).
+      createRoot(() => {
+        renderEffect(() => void log.push(`nested-root ${s.get()}`));
+      });
+      renderEffect(() => void log.push(`tail-sibling ${s.get()}`));
+    });
+    flush();
+
+    // Recreate the memo branch so its effects have newer `_id`s than `nested-root` and `tail-sibling`.
+    show.set(false);
+    flush();
+    show.set(true);
+    flush();
+    log.length = 0;
+
+    s.set(1);
+    flush();
+    expect(log).toEqual(['memo-branch 1', 'nested-root 1', 'tail-sibling 1']);
+  });
+
+  it('evaluates an owning memo before effects inside its branch even when the branch effect queues first', () => {
+    const cond = signal(true);
+    const log: string[] = [];
+
+    createRoot(() => {
+      const branch = memo(() => {
+        const on = cond.get();
+        log.push(`memo ${on}`);
+        if (on) {
+          renderEffect(() => {
+            log.push(`inner ${cond.get()}`);
+          });
+        }
+        return on;
+      });
+      renderEffect(() => void branch());
+    });
+    flush();
+    log.length = 0;
+
+    // `inner` subscribed to `cond` after `branch` did, so `cond._targets` notifies `inner` first (LIFO).
+    // Tree order must still run `branch` first, disposing `inner` before `inner` can run with `cond = false`.
+    cond.set(false);
+    flush();
+    expect(log).toEqual(['memo false']);
   });
 });
