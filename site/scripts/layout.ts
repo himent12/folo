@@ -103,7 +103,10 @@ ${p.main}
   <div class="search-box">
     <div class="search-field">${ICONS.search}<input id="search-input" type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list"><button class="search-close" type="button" aria-label="Close search"><kbd class="kbd">Esc</kbd><span class="search-close-icon">${ICONS.close}</span></button></div>
     <ul class="search-results" id="search-results" role="listbox" aria-label="Results"></ul>
-    <p class="search-status" role="status" aria-live="polite"></p>
+    <div class="search-foot">
+      <p class="search-status" role="status" aria-live="polite"></p>
+      <button class="search-retry" type="button" hidden>Retry</button>
+    </div>
   </div>
 </dialog>
 </body>

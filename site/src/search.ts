@@ -25,15 +25,21 @@ export interface Hit {
 }
 
 let entries: Promise<Entry[]> | undefined;
+let loaded = false;
 
-export function loadIndex(root: string): Promise<Entry[]> {
-  entries ??= fetch(`${root}search.json`)
+export function isIndexLoaded(): boolean {
+  return loaded;
+}
+
+export function loadIndex(root: string, reload = false): Promise<Entry[]> {
+  entries ??= fetch(`${root}search.json`, reload ? { cache: 'reload' } : undefined)
     .then((r) => {
       if (!r.ok) throw new Error(`search.json: HTTP ${r.status}`);
       return r.json() as Promise<Index>;
     })
-    .then((ix) =>
-      ix.sections.map(([p, title, id, text]) => {
+    .then((ix) => {
+      loaded = true;
+      return ix.sections.map(([p, title, id, text]) => {
         const page = ix.pages[p];
         return {
           page,
@@ -45,9 +51,10 @@ export function loadIndex(root: string): Promise<Entry[]> {
           lPageLabel: page.l.toLowerCase().replace(/\s+/g, ' ').trim(),
           lText: text.toLowerCase(),
         };
-      }),
-    )
+      });
+    })
     .catch((e: unknown) => {
+      loaded = false;
       entries = undefined;
       throw e;
     });
