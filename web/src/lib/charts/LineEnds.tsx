@@ -91,7 +91,9 @@ export default function LineEnds(props: LineEndsProps) {
                     ) : s().end === 'live' ? (
                       <>
                         {/* Still training: a filled lime dot with the heartbeat, StatusBadge's running mark. */}
-                        <circle class="end-beat" cx={px()} cy={py()} r={r() + LIVE_GROW} />
+                        <g class="end-beat-wrap" transform={`translate(${px()},${py()})`}>
+                          <circle class="end-beat" r={r() + LIVE_GROW} />
+                        </g>
                         <circle class="end-dot end-live" cx={px()} cy={py()} r={r() + LIVE_GROW} style:fill={endMarkInk(s().end, ink())} />
                       </>
                     ) : (
@@ -187,15 +189,16 @@ css`
     stroke-linecap: round;
     filter: drop-shadow(0 0 1px var(--plot-bg, var(--bg-panel)));
   }
-  /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's \`live-pulse\`
-     drawn in SVG; off under reduced motion, where the dot still says "now". */
+  /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's pulse drawn in
+     SVG; off under reduced motion, where the dot still says "now". Centered at the wrapper group's origin so the pulse
+     scales without \`transform-box: fill-box\` bbox queries. */
   .end-beat {
     fill: none;
     stroke: var(--accent-line);
     stroke-width: 1.5;
     opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
+    transform-origin: 0 0;
+    will-change: transform, opacity;
     animation: end-beat 2.4s var(--ease-out) infinite;
   }
   @keyframes end-beat {
@@ -212,6 +215,8 @@ css`
   @media (prefers-reduced-motion: reduce) {
     .end-beat {
       display: none;
+      animation: none;
+      will-change: auto;
     }
   }
   .end-label {
@@ -254,8 +259,7 @@ css`
     stroke: var(--text-primary);
     stroke-width: 1.5;
     opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
+    transform-origin: 0 0;
     animation: best-pulse var(--dur-chart) var(--ease-out);
   }
   @keyframes best-pulse {
@@ -275,8 +279,7 @@ css`
     stroke-width: 1.5;
     stroke-linecap: square;
     opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
+    transform-origin: 0 0;
     animation: best-focus 1s var(--ease-out);
   }
   @keyframes best-focus {
