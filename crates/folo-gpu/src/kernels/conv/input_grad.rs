@@ -640,8 +640,8 @@ pub fn conv2d_backward_input(
     if phased(d) {
         return conv2d_backward_input_phased(ctx, d, grad, weight, gx, coop);
     }
-    if d.is_pointwise() && !coop {
-        // gx[n, g] = W[g]^T · G[n, g].
+    if d.is_pointwise() {
+        // gx[n, g] = W[g]^T · G[n, g] directly via TRANS_A (no temporary weight buffer or permute dispatch).
         let mut g = GemmDesc::new(cin_g, hw_in, cout_g, true, false, d.n);
         g.batch = (d.n, d.groups);
         g.lda = cin_g;
@@ -651,7 +651,22 @@ pub fn conv2d_backward_input(
         g.b = BatchStrides { offset: 0, outer: d.c_out * hw_in, inner: cout_g * hw_in };
         g.c = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
         g.dtype = dt;
-        return gemm::gemm(ctx, &g, weight, grad, None, gx);
+        if coop
+            && coop::encode_gemm(
+                ctx,
+                &g,
+                DType::F16,
+                weight,
+                grad,
+                ctx.dummy(),
+                gx,
+                coop::conv_config_batched(ctx, g.m, g.n, d.n.saturating_mul(d.groups)),
+            )?
+        {
+            return Ok(());
+        }
+        let cfg = gemm::pick_config_conv(ctx, &g);
+        return gemm::gemm_with_config(ctx, &g, weight, grad, None, gx, cfg);
     }
     // A[g][ci][(co, kh, kw)] = W[g * cout_g + co][ci][kh, kw].
     let wt = ctx.alloc(dt.bytes(prod(&[d.c_out, cin_g, khkw])?))?;
@@ -673,17 +688,8 @@ pub fn conv2d_backward_input(
     g.b = BatchStrides { offset: 0, outer: d.c_out * hw_out, inner: cout_g * hw_out };
     g.c = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
     g.dtype = dt;
-    if coop {
-        // A 1×1 conv (stride 1, no padding) has the same view as a plain GEMM over the transposed weight.
-        let done = if d.is_pointwise() {
-            coop::encode_gemm(ctx, &g, DType::F16, wt.raw(), grad, ctx.dummy(), gx, None)?
-        } else {
-            coop::encode_conv_backward_input(ctx, d, &g, wt.raw(), grad, gx)?
-        };
-        if done {
-            return Ok(());
-        }
-        // The tensor-core kernel failed to build (tensor cores are off now): the regular kernel below.
+    if coop && coop::encode_conv_backward_input(ctx, d, &g, wt.raw(), grad, gx)? {
+        return Ok(());
     }
     let cfg = gemm::pick_config_conv(ctx, &g);
     gemm::check_config(ctx, cfg)?;
