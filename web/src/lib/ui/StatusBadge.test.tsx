@@ -3,6 +3,8 @@
 // badge says that phase, in the neutral look of a waiting run, wherever a status is shown. Once its worker has it, or
 // for a run of this machine, the badge says the status as before. What is not a run (a labeling job) passes its own
 // `state`: the mark of a run status with its own word.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RunCloud, RunStatus } from '$lib/api/types';
 import { render as mount, type Rendered } from '../../../framework/testing';
@@ -43,5 +45,23 @@ describe('StatusBadge', () => {
     const job = render({ state: { status: 'running', label: 'Labeling' }, plain: true });
     expect(job.classList.contains('running')).toBe(true);
     expect(job.textContent?.trim()).toBe('Labeling');
+  });
+
+  it('uses a compositor-only pseudo-element pulse on live running badges and stills it when held or under reduced motion', () => {
+    const live = render({ run: run('running') });
+    expect(live.classList.contains('running')).toBe(true);
+    expect(live.classList.contains('held')).toBe(false);
+    expect(live.querySelector('.dot')).not.toBeNull();
+
+    const held = render({ run: run('running'), lastKnown: 'Last known: Running · 2m ago' });
+    expect(held.classList.contains('running')).toBe(true);
+    expect(held.classList.contains('held')).toBe(true);
+
+    const cssText = readFileSync(resolve(import.meta.dirname, 'StatusBadge.tsx'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(cssText).not.toContain('live-pulse');
+    expect(cssText).toContain('.running:not(.held) .dot::after');
+    expect(cssText).toContain('@keyframes status-badge-pulse');
+    expect(cssText).toContain('will-change: transform, opacity');
+    expect(cssText).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*content: none/);
   });
 });

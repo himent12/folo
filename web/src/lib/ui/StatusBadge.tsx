@@ -136,16 +136,38 @@ css`
   .plain .mark {
     stroke: var(--c);
   }
-  /* Running: a dot in a ring (it reads "live" even when the pulse is off for reduced motion). */
+  /* Running: a dot in a ring (it reads "live" even when the pulse is off for reduced motion). The heartbeat rides on a
+     pseudo-element animating only transform + opacity so Chromium runs it on the compositor instead of recalculating
+     style on the main thread every frame (as a box-shadow animation does). */
   .running .dot {
+    position: relative;
     width: 4px;
     height: 4px;
     margin: 0 2px;
     background: var(--c);
     outline: 1px solid var(--c);
     outline-offset: 1px;
-    --pulse: var(--c);
-    animation: live-pulse 2.4s var(--ease-out) infinite;
+  }
+  .running:not(.held) .dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: var(--c);
+    pointer-events: none;
+    will-change: transform, opacity;
+    animation: status-badge-pulse 2.4s var(--ease-out) infinite;
+  }
+  @keyframes status-badge-pulse {
+    0% {
+      opacity: 0.55;
+      transform: scale(1);
+    }
+    33%,
+    100% {
+      opacity: 0;
+      transform: scale(3);
+    }
   }
   .completed {
     --c: var(--success-text);
@@ -214,14 +236,13 @@ css`
     --c: var(--text-secondary);
     --bg: var(--bg-active);
   }
-  .held .dot {
-    animation: none;
-  }
-  /* The live heartbeat (\`live-pulse\`, base.css): one ring every 2.4 s; off under reduced motion, where the ringed dot
-     and the word still say "running". */
+  /* The live heartbeat: one ring every 2.4 s; off under reduced motion, where the ringed dot and the word still say
+     "running". */
   @media (prefers-reduced-motion: reduce) {
-    .running .dot {
+    .running:not(.held) .dot::after {
+      content: none;
       animation: none;
+      will-change: auto;
     }
   }
 `;
