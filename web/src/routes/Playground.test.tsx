@@ -98,6 +98,19 @@ describe('Playground on a phone', () => {
     const sheet = await until(() => target.querySelector('#pg-more'), 'the sheet');
     expect(sheet.classList.contains('pop')).toBe(false);
     expect(sheet.querySelector('.slider input')).not.toBeNull();
+    expect(sheet.querySelectorAll('.slider').length).toBe(3);
+  });
+
+  it('hides the IoU slider and footer IoU readout for an end-to-end (o2o) model on phones', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 390 });
+    await run('normal', 'm_shapes_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    expect(target.querySelector('.vfoot')?.textContent).not.toContain('IoU');
+    const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('Thresholds'))!;
+    btn.click();
+    const sheet = await until(() => target.querySelector('#pg-more'), 'the sheet');
+    expect(sheet.querySelectorAll('.slider').length).toBe(2);
+    expect(sheet.querySelector('.no-nms')?.textContent).toContain('Not used · end-to-end model');
   });
 });
 
@@ -113,6 +126,7 @@ describe('Playground on a tablet', () => {
     (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 820 });
     await run('normal', 'm_hard_s');
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    expect(target.querySelector('.qconf .qiou')).not.toBeNull();
     const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('More settings'))!;
     btn.click();
     const pop = await until(() => target.querySelector<HTMLElement>('#pg-more'), 'the popover');
@@ -123,6 +137,21 @@ describe('Playground on a tablet', () => {
     flushSync();
     expect(target.querySelector('#pg-more')).toBeNull();
     expect(document.activeElement).toBe(btn);
+  });
+
+  it('hides the IoU slider in the quick strip and explains it in More settings for an end-to-end (o2o) model on tablets', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 820 });
+    await run('normal', 'm_shapes_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const qconf = target.querySelector('.qconf')!;
+    expect(qconf.classList.contains('single')).toBe(true);
+    expect(qconf.querySelector('.qiou')).toBeNull();
+    expect(qconf.querySelectorAll('.slider').length).toBe(1);
+    expect(target.querySelector('.vfoot')?.textContent).not.toContain('IoU');
+    const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('More settings'))!;
+    btn.click();
+    const pop = await until(() => target.querySelector<HTMLElement>('#pg-more'), 'the popover');
+    expect(pop.querySelector('.no-nms')?.textContent).toContain('Not used · end-to-end model');
   });
 });
 

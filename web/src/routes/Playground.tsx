@@ -39,7 +39,7 @@ import SidePanels from './playground/SidePanels';
 import Rail from './playground/Rail';
 import DisplayToggles from './playground/DisplayToggles';
 import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
-import { ask, BACKEND_NAME, DEFAULTS, FETCH, noServerWeights, type RunOn } from './playground/predict';
+import { ask, DEFAULTS, FETCH, noServerWeights, type RunOn } from './playground/predict';
 import { askAllWhenCut } from './playground/allCandidates';
 import { ACCEPT, droppedImages, takeImage } from './playground/intake';
 import { keepSession } from './playground/keepSession';
@@ -47,13 +47,26 @@ import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import type { Source } from './playground/source';
 import { followVanished } from './playground/vanished';
+import {
+  areDefaultThresholds,
+  classCounts,
+  detectionIndex,
+  deviceLabel,
+  nextRowIndex,
+  predictionJson,
+  scrollRowIntoView,
+  smallerModelOf,
+  sourceDims,
+  sourceFullName,
+  sourceShortName,
+  visibleClasses,
+  visibleRows,
+  whereLabel,
+  type Det,
+} from './playground/viewState';
 import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
 type Seg = 'file' | 'dataset' | 'webcam';
-type Det = Prediction['boxes'][number];
-
-/** Model sizes, smallest first: a smaller model of the same classes may fit where this one does not. */
-const ARCH_ORDER = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
 
 
 export default function Playground() {
@@ -132,6 +145,7 @@ export default function Playground() {
   const wanted = computed(() => pickedModel.get() ?? queryModel.get());
   const model = computed((): Model | null => ranked.get().find((m) => m.id === wanted.get()) ?? best.get());
   const modelId = computed(() => model.get()?.id ?? null);
+  const o2o = computed(() => model.get()?.head === 'o2o');
   /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
   const pickedMeta = computed(() => choices.get().find((c) => c.model.id === modelId.get())?.meta ?? null);
 
@@ -203,6 +217,7 @@ export default function Playground() {
     decodeSeq++;
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    engine.clearImageCache();
     source.set(null);
     pred.set(null);
     error.set(null);
@@ -263,6 +278,7 @@ export default function Playground() {
   const runOn = signal<RunOn>('server');
   const webgpu = hasWebGpu();
   const engine = new BrowserEngine();
+  onCleanup(() => engine.dispose());
   // Whether this build has the in-browser runtime (folo-wasm): what /api/system says, else one probe of its files.
   // The demo simulates the browser path, so there only its server's answer counts. Unknown (null) leaves both on.
   const system = new Resource((s) => hub.api.system(s));
@@ -295,14 +311,8 @@ export default function Playground() {
   /** The server cannot send this model's file: ask for it. */
   const weightsMissing = signal(false);
   let weightsInput!: HTMLInputElement;
-  const where = computed(() => {
-    const p = pred.get();
-    return p?.backend ? `browser · ${BACKEND_NAME[p.backend]}` : 'server';
-  });
-  const deviceText = computed(() => {
-    const p = pred.get();
-    return p?.backend ? `${BACKEND_NAME[p.backend]}${p.backend === 'webgpu' && engine.info?.adapter ? ` · ${engine.info.adapter}` : ''}` : (p?.device ?? '');
-  });
+  const where = computed(() => whereLabel(pred.get()));
+  const deviceText = computed(() => deviceLabel(pred.get(), engine.info?.adapter));
 
   /** A picked file that was refused as weights (not a .folo), or that the runtime could not load; cleared on a new pick. */
   const badFile = signal<{ name: string; why: string | null } | null>(null);
@@ -436,12 +446,7 @@ export default function Playground() {
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
   // may fit where this one does not.
   const oom = computed(() => runOn.get() === 'server' && isOom(error.get()));
-  const smaller = computed(() => {
-    const m = model.get();
-    if (!m) return null;
-    const rank = (x: Model) => ARCH_ORDER.indexOf(x.arch);
-    return ranked.get().find((x) => x.id !== m.id && rank(x) < rank(m) && x.classes.join('|') === m.classes.join('|')) ?? null;
-  });
+  const smaller = computed(() => smallerModelOf(model.get(), ranked.get()));
   const localBackend: Backend = webgpu ? 'webgpu' : 'cpu';
 
   // What stands between the image and its boxes, shown in a strip under the image (which stays in view).
@@ -463,35 +468,18 @@ export default function Playground() {
     if (!p) return null;
     const t0 = performance.now();
     // An end-to-end (o2o) model predicts without NMS (docs/MODEL.md §6.6): an IoU of 1 suppresses nothing, as the server.
-    const boxes = filterDetections(p.boxes, { conf: conf.get(), iou: model.get()?.head === 'o2o' ? 1 : iou.get(), maxDet: maxDet.get() });
+    const boxes = filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = computed(() => result.get()?.boxes ?? []);
   const classes = computed(() => model.get()?.classes ?? []);
-  const only = computed(() => {
-    const h = hidden.get();
-    return h.size ? new Set(classes.get().map((_, i) => i).filter((i) => !h.has(i))) : null;
-  });
-  const rows = computed(() => {
-    const h = hidden.get();
-    return kept
-      .get()
-      .map((b, i) => ({ b, i }))
-      .filter((r) => !h.has(r.b.class));
-  });
-  const counts = computed(() => {
-    const m = new Map<number, number>();
-    for (const b of kept.get()) m.set(b.class, (m.get(b.class) ?? 0) + 1);
-    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
-  });
+  const only = computed(() => visibleClasses(classes.get(), hidden.get()));
+  const rows = computed(() => visibleRows(kept.get(), hidden.get()));
+  const counts = computed(() => classCounts(kept.get()));
   const maxCount = computed(() => Math.max(1, ...counts.get().map((c) => c[1])));
 
-  const at = (b: Det | null) => {
-    const i = b && !hidden.get().has(b.class) ? kept.get().indexOf(b) : -1;
-    return i < 0 ? null : i;
-  };
-  const selectedIdx = computed(() => at(picked.get()));
-  const activeIdx = computed(() => at(hover.get()) ?? selectedIdx.get());
+  const selectedIdx = computed(() => detectionIndex(picked.get(), kept.get(), hidden.get()));
+  const activeIdx = computed(() => detectionIndex(hover.get(), kept.get(), hidden.get()) ?? selectedIdx.get());
   /** The row that takes Tab focus (roving tabindex): the selected one, else the first. */
   const tabRow = computed(() => selectedIdx.get() ?? rows.get()[0]?.i ?? null);
 
@@ -503,22 +491,15 @@ export default function Playground() {
     if (!b) return;
     const next = picked.peek() === b ? null : b;
     picked.set(next);
-    const row = next && rowEl(i);
-    // The rail scrolls as a whole (the page does not): the row comes into view in it.
-    if (row && !narrow.peek()) return row.scrollIntoView({ block: 'nearest' });
-    const box = row?.closest<HTMLElement>('.scroll');
-    if (!row || !box) return;
-    const head = box.querySelector('thead')?.offsetHeight ?? 0;
-    if (row.offsetTop - head < box.scrollTop) box.scrollTop = row.offsetTop - head;
-    else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+    if (next) scrollRowIntoView(rowEl(i), narrow.peek());
   }
 
   function onrowkey(e: KeyboardEvent, k: number) {
     const list = rows.peek();
-    const to = e.key === 'ArrowDown' ? k + 1 : e.key === 'ArrowUp' ? k - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? list.length - 1 : null;
+    const to = nextRowIndex(e.key, k, list.length);
     if (to === null) return;
     e.preventDefault();
-    const r = list[Math.max(0, Math.min(list.length - 1, to))];
+    const r = list[to];
     if (r) rowEl(r.i)?.focus();
   }
 
@@ -536,40 +517,22 @@ export default function Playground() {
   onWindow('keydown', onwindowkey);
   onWindow('pointerdown', onwindowdown);
 
-  const dims = computed(() => {
-    const p = pred.get();
-    if (p) return p.image;
-    const s = source.get();
-    if (s?.kind === 'file') return { width: s.width, height: s.height };
-    if (s?.kind === 'dataset') return { width: s.img.width, height: s.img.height };
-    return null;
-  });
-  const sourceName = computed(() => {
-    const s = source.get();
-    return s ? (s.kind === 'file' ? s.name : `${s.ds.name} / ${s.img.file}`) : '';
-  });
-  const shortName = computed(() => {
-    const s = source.get();
-    return s ? (s.kind === 'file' ? s.name : (s.img.file.split('/').pop() ?? s.img.file)) : '';
-  });
+  const dims = computed(() => sourceDims(pred.get(), source.get()));
+  const sourceName = computed(() => sourceFullName(source.get()));
+  const shortName = computed(() => sourceShortName(source.get()));
   const truthBoxes = computed(() => {
     const s = source.get();
     return truth.get() && s?.kind === 'dataset' ? s.img.boxes : [];
   });
 
-  const json = computed(() => {
-    const p = pred.get();
-    return p && result.get()
-      ? {
-          model_id: p.model_id,
-          image: p.image,
-          boxes: kept.get().map((b) => ({ class: b.class, name: b.name, score: b.score, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 })),
-          timing: p.timing,
-          device: p.device,
-          filter: { conf: conf.get(), iou: iou.get(), max_det: maxDet.get() },
-        }
-      : null;
-  });
+  const json = computed(() =>
+    predictionJson(pred.get(), !!result.get(), kept.get(), {
+      conf: conf.get(),
+      iou: iou.get(),
+      maxDet: maxDet.get(),
+      o2o: o2o.get(),
+    }),
+  );
 
   function toggleClass(c: number) {
     const next = new Set(hidden.peek());
@@ -583,14 +546,14 @@ export default function Playground() {
     iou.set(DEFAULTS.iou);
     maxDet.set(DEFAULTS.maxDet);
   }
-  const isDefault = computed(() => conf.get() === DEFAULTS.conf && iou.get() === DEFAULTS.iou && maxDet.get() === DEFAULTS.maxDet);
+  const isDefault = computed(() => areDefaultThresholds(conf.get(), iou.get(), maxDet.get(), o2o.get()));
 
   // ---------- snippets ----------
   const displayToggles = () => <DisplayToggles bind:labels={labels} bind:scores={scores} bind:truth={truth} dataset={source.get()?.kind === 'dataset'} />;
 
-  const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} bind:iou={iou} bind:maxDet={maxDet} />;
-  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={model.get()?.head === 'o2o'} />;
-  const moreBody = () => <MoreBody tablet={tablet.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
+  const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} o2o={o2o.get()} bind:iou={iou} bind:maxDet={maxDet} />;
+  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={o2o.get()} />;
+  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={o2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
 
   const resetButton = () => (
     <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault.get()} onclick={resetThresholds}>
@@ -812,6 +775,7 @@ export default function Playground() {
                 engine={engine}
                 sheetShown={sheetShown.get()}
                 tablet={tablet.get()}
+                o2o={o2o.get()}
                 rail={!narrow.current}
                 bind:conf={conf}
                 bind:iou={iou}

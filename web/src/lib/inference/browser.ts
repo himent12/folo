@@ -162,8 +162,10 @@ export class BrowserEngine {
   }
 
   #detectors = new Map<string, Entry>();
-  /** The last weights downloaded (by model and ETag): loading the same model on the other backend reuses them. */
-  #lastDownload: { key: string; bytes: Promise<ArrayBuffer> } | null = null;
+  /** In-flight server weights download shared across concurrent backend loads, released once loaded into wasm. */
+  #inFlightDownload: DownloadSlot | null = null;
+  /** Most recently decoded image pixels, reused when re-running inference on the same image. */
+  #lastImage: { key: string; data: ImageData } | null = null;
   #runtimeReady = false;
 
   /** `load` provides the folo-wasm module and `decode` an image's pixels (tests pass fakes). */
@@ -171,6 +173,22 @@ export class BrowserEngine {
     readonly load: () => Promise<WasmModule> = loadWasm,
     readonly decode: (image: Blob) => Promise<ImageData> = toImageData,
   ) {}
+
+  /** Releases cached decoded pixels (e.g. when clearing the current image). */
+  clearImageCache() {
+    this.#lastImage = null;
+  }
+
+  /** Frees all cached detectors and releases temporary image and download references. */
+  dispose() {
+    for (const e of this.#detectors.values()) {
+      e.evicted = true;
+      this.#release(e);
+    }
+    this.#detectors.clear();
+    this.#lastImage = null;
+    this.#inFlightDownload = null;
+  }
 
   /**
    * Runs `modelId` on an image in the browser. `file` is a .folo the user picked for this model; without one the
@@ -185,6 +203,8 @@ export class BrowserEngine {
     tag?: string | null;
     backend: Backend;
     image: () => Promise<Blob>;
+    /** Stable identity for the image (e.g. dataset+image id or file id) so repeated runs skip re-fetching and re-decoding. */
+    imageKey?: string;
     options: { conf: number; iou: number; maxDet: number };
     /** Aborted when a newer request replaces this one: it stops before decoding and before detecting. */
     signal?: AbortSignal;
@@ -199,7 +219,7 @@ export class BrowserEngine {
       this.phase = 'ready';
       // Requests replaced while the detector loaded all wake here: only the latest decodes and runs.
       superseded();
-      const pixels = await this.decode(await req.image());
+      const pixels = await this.#pixels(req, superseded);
       superseded();
       const p = await det.detect(pixels, undefined, undefined, req.options);
       this.info = det.info();
@@ -208,6 +228,27 @@ export class BrowserEngine {
       entry.users--;
       this.#release(entry);
     }
+  }
+
+  async #pixels(req: { image: () => Promise<Blob>; imageKey?: string }, superseded: () => void): Promise<ImageData> {
+    if (req.imageKey !== undefined) {
+      const key = `key:${req.imageKey}`;
+      if (this.#lastImage?.key === key) return this.#lastImage.data;
+      const blob = await req.image();
+      superseded();
+      const data = await this.decode(blob);
+      superseded();
+      this.#lastImage = { key, data };
+      return data;
+    }
+    const blob = await req.image();
+    superseded();
+    const key = `blob:${fileId(blob)}`;
+    if (this.#lastImage?.key === key) return this.#lastImage.data;
+    const data = await this.decode(blob);
+    superseded();
+    this.#lastImage = { key, data };
+    return data;
   }
 
   #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; tag?: string | null; backend: Backend }): Entry {
@@ -229,9 +270,19 @@ export class BrowserEngine {
       const m = await this.load();
       this.#runtimeReady = true;
       this.phase = 'weights';
-      const bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : this.#download(req)));
-      this.phase = 'compile';
-      return m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
+      const dl = req.file ? null : this.#acquireDownload(req);
+      let bytes: Uint8Array | null = null;
+      try {
+        bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : dl!.bytes));
+        this.phase = 'compile';
+        const loading = m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
+        // Drop local reference immediately once handed to wasm (folo-wasm copies bytes before its first await).
+        bytes = null;
+        return await loading;
+      } finally {
+        bytes = null;
+        if (dl) this.#releaseDownload(dl);
+      }
     })();
     // Uncached: born evicted, so it is freed as soon as its request is done.
     const entry: Entry = { detector, users: 0, evicted: !cacheable };
@@ -249,22 +300,40 @@ export class BrowserEngine {
     return entry;
   }
 
-  #download(req: { modelId: string; download: () => Promise<ArrayBuffer>; tag?: string | null }): Promise<ArrayBuffer> {
-    const key = `${req.modelId}|${req.tag ?? ''}`;
-    // Without an ETag the bytes may have changed: fetch again.
-    if (req.tag && this.#lastDownload?.key === key) return this.#lastDownload.bytes;
+  #acquireDownload(req: { modelId: string; download: () => Promise<ArrayBuffer>; tag?: string | null }): DownloadSlot {
+    // Without an ETag the bytes may have changed: fetch directly without retaining them.
+    if (!req.tag) return { key: null, bytes: req.download(), readers: 1 };
+    const key = `${req.modelId}|${req.tag}`;
+    if (this.#inFlightDownload?.key === key) {
+      this.#inFlightDownload.readers++;
+      return this.#inFlightDownload;
+    }
     const bytes = req.download();
-    this.#lastDownload = { key, bytes };
+    const slot: DownloadSlot = { key, bytes, readers: 1 };
+    this.#inFlightDownload = slot;
     bytes.catch(() => {
-      if (this.#lastDownload?.bytes === bytes) this.#lastDownload = null;
+      if (this.#inFlightDownload === slot) this.#inFlightDownload = null;
     });
-    return bytes;
+    return slot;
+  }
+
+  #releaseDownload(slot: DownloadSlot) {
+    slot.readers = Math.max(0, slot.readers - 1);
+    if (slot.readers === 0 && this.#inFlightDownload === slot) {
+      this.#inFlightDownload = null;
+    }
   }
 
   /** Frees an evicted detector once no request is using it. */
   #release(e: Entry) {
     if (e.evicted && e.users === 0) e.detector.then((d) => d.free(), () => {});
   }
+}
+
+interface DownloadSlot {
+  key: string | null;
+  bytes: Promise<ArrayBuffer>;
+  readers: number;
 }
 
 interface Entry {
@@ -283,14 +352,66 @@ function fileId(f: Blob): number {
   return id;
 }
 
+type DecodeCanvas = {
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+};
+
+let decodeCanvas: DecodeCanvas | null = null;
+
+function getDecodeCanvas(width: number, height: number): DecodeCanvas {
+  if (!decodeCanvas) {
+    let canvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+    let ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
+    if (typeof OffscreenCanvas !== 'undefined') {
+      try {
+        const off = new OffscreenCanvas(width, height);
+        const c = off.getContext('2d', { willReadFrequently: true });
+        if (c) {
+          canvas = off;
+          ctx = c;
+        }
+      } catch {
+        // Fall through to HTMLCanvasElement when OffscreenCanvas 2D is unavailable.
+      }
+    }
+    if (!ctx && typeof document !== 'undefined') {
+      const el = document.createElement('canvas');
+      el.width = width;
+      el.height = height;
+      const c = el.getContext('2d', { willReadFrequently: true });
+      if (c) {
+        canvas = el;
+        ctx = c;
+      }
+    }
+    if (!canvas || !ctx) throw new Error('This browser cannot read image pixels (no 2D canvas).');
+    decodeCanvas = { canvas, ctx };
+    return decodeCanvas;
+  }
+  if (decodeCanvas.canvas.width !== width || decodeCanvas.canvas.height !== height) {
+    decodeCanvas.canvas.width = width;
+    decodeCanvas.canvas.height = height;
+  } else {
+    decodeCanvas.ctx.clearRect(0, 0, width, height);
+  }
+  return decodeCanvas;
+}
+
+/** Releases the reusable decode canvas (tests and cleanup). */
+export function resetDecodeCanvas() {
+  if (decodeCanvas) {
+    decodeCanvas.canvas.width = 0;
+    decodeCanvas.canvas.height = 0;
+    decodeCanvas = null;
+  }
+}
+
 /** Decodes an image to RGBA pixels (EXIF orientation applied, as browsers display it). */
-async function toImageData(blob: Blob): Promise<ImageData> {
+export async function toImageData(blob: Blob): Promise<ImageData> {
   const bmp = await createImageBitmap(blob);
   try {
-    const canvas =
-      typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(bmp.width, bmp.height) : Object.assign(document.createElement('canvas'), { width: bmp.width, height: bmp.height });
-    const ctx = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-    if (!ctx) throw new Error('This browser cannot read image pixels (no 2D canvas).');
+    const { ctx } = getDecodeCanvas(bmp.width, bmp.height);
     ctx.drawImage(bmp, 0, 0);
     return ctx.getImageData(0, 0, bmp.width, bmp.height);
   } finally {

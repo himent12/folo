@@ -1,7 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Prediction } from '$lib/api/types';
 import type { SystemInfo } from '$lib/api/types';
-import { BrowserEngine, probeWasm, resetWasmProbe, servedBy, wasmFromSystem, type Backend, type Detector, type WasmModule } from './browser';
+import {
+  BrowserEngine,
+  probeWasm,
+  resetDecodeCanvas,
+  resetWasmProbe,
+  servedBy,
+  toImageData,
+  wasmFromSystem,
+  type Backend,
+  type Detector,
+  type WasmModule,
+} from './browser';
 
 /** A fake folo-wasm: counts loads, records frees, and lets a test hold a detect call open. */
 function fakeWasm() {
@@ -157,15 +168,92 @@ describe('BrowserEngine', () => {
     expect(w.loads).toEqual(['m1:1:cpu', 'm1:2:cpu']);
   });
 
-  it('downloads the weights once for both backends when the ETag is the same', async () => {
+  it('shares one download across concurrent backend loads and releases the weights buffer once loaded', async () => {
     const w = fakeWasm();
     const e = new BrowserEngine(async () => w.mod, pixels);
     let downloads = 0;
-    const r = (backend: 'cpu' | 'webgpu') => ({ ...req('m1', null, backend), tag: '"a"', download: async () => (downloads++, new Uint8Array([1]).buffer) });
-    await e.predict(r('cpu'));
-    await e.predict(r('webgpu'));
+    let releaseDownload!: () => void;
+    const holdDownload = new Promise<void>((r) => (releaseDownload = r));
+    const r = (backend: 'cpu' | 'webgpu') => ({
+      ...req('m1', null, backend),
+      tag: '"a"',
+      download: async () => {
+        downloads++;
+        if (downloads === 1) await holdDownload;
+        return new Uint8Array([1]).buffer;
+      },
+    });
+    const concurrent = Promise.all([e.predict(r('cpu')), e.predict(r('webgpu'))]);
+    releaseDownload();
+    await concurrent;
     expect(downloads).toBe(1);
     expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:webgpu']);
+
+    // Once loaded into the wasm detector, the temporary weights buffer is no longer pinned:
+    // loading a model on a second backend later fetches fresh instead of retaining the old ArrayBuffer in RAM.
+    const e2 = new BrowserEngine(async () => w.mod, pixels);
+    let seqDownloads = 0;
+    const r2 = (backend: 'cpu' | 'webgpu') => ({
+      ...req('m2', null, backend),
+      tag: '"b"',
+      download: async () => (seqDownloads++, new Uint8Array([2]).buffer),
+    });
+    await e2.predict(r2('cpu'));
+    await e2.predict(r2('webgpu'));
+    expect(seqDownloads).toBe(2);
+  });
+
+  it('caches decoded ImageData for repeated runs on the same imageKey or Blob and invalidates on change or clear', async () => {
+    const w = fakeWasm();
+    let fetches = 0;
+    let decodes = 0;
+    const e = new BrowserEngine(
+      async () => w.mod,
+      async () => {
+        decodes++;
+        return { data: new Uint8ClampedArray([decodes, 0, 0, 255]), width: 1, height: 1 } as ImageData;
+      },
+    );
+    const makeReq = (imageKey: string, conf = 0.25) => ({
+      ...req('m1', null),
+      imageKey,
+      image: async () => {
+        fetches++;
+        return new Blob();
+      },
+      options: { conf, iou: 1, maxDet: 1000 },
+    });
+    await e.predict(makeReq('dataset:d1:img1', 0.25));
+    await e.predict(makeReq('dataset:d1:img1', 0.05));
+    expect(fetches).toBe(1);
+    expect(decodes).toBe(1);
+
+    // Switching to another image replaces the cache; clearing drops it too.
+    await e.predict(makeReq('dataset:d1:img2', 0.25));
+    expect(fetches).toBe(2);
+    expect(decodes).toBe(2);
+    e.clearImageCache();
+    await e.predict(makeReq('dataset:d1:img2', 0.25));
+    expect(fetches).toBe(3);
+    expect(decodes).toBe(3);
+
+    // Without imageKey, reusing the same Blob instance still skips decode.
+    const sameBlob = new Blob([new Uint8Array([1, 2, 3])]);
+    await e.predict({ ...req('m1', null), image: async () => sameBlob });
+    await e.predict({ ...req('m1', null), image: async () => sameBlob });
+    expect(decodes).toBe(4);
+  });
+
+  it('dispose frees cached detectors and clears the image cache', async () => {
+    const w = fakeWasm();
+    let decodes = 0;
+    const e = new BrowserEngine(async () => w.mod, async () => (decodes++, pixels()));
+    await e.predict({ ...req('m1', null), imageKey: 'img1' });
+    e.dispose();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.freed).toEqual(['m1:1:cpu']);
+    await e.predict({ ...req('m1', null), imageKey: 'img1' });
+    expect(decodes).toBe(2);
   });
 
   it('never reuses server weights without an ETag (they may have changed), and frees them after the request', async () => {
@@ -244,5 +332,90 @@ describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
     expect(servedBy('http://127.0.0.1:7878', 'http://127.0.0.1:7878', false)).toBe(true);
     expect(servedBy('http://gpu-box:7878', 'http://127.0.0.1:7878', false)).toBe(false);
     expect(servedBy('', 'http://localhost:5173', true)).toBe(false);
+  });
+});
+
+describe('toImageData canvas reuse and fallback', () => {
+  afterEach(() => {
+    resetDecodeCanvas();
+    vi.unstubAllGlobals();
+  });
+
+  it('reuses one OffscreenCanvas across decodes, clears on same size, and resizes on new dimensions', async () => {
+    let created = 0;
+    const clearCalls: number[][] = [];
+    const drawCalls: number[][] = [];
+    const closed: number[] = [];
+
+    class FakeOffscreenCanvas {
+      width: number;
+      height: number;
+      constructor(w: number, h: number) {
+        created++;
+        this.width = w;
+        this.height = h;
+      }
+      getContext() {
+        return {
+          clearRect: (x: number, y: number, w: number, h: number) => clearCalls.push([x, y, w, h]),
+          drawImage: () => drawCalls.push([this.width, this.height]),
+          getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }) as ImageData,
+        };
+      }
+    }
+
+    const sizes = [
+      [10, 20],
+      [10, 20],
+      [30, 40],
+    ];
+    let idx = 0;
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    vi.stubGlobal('createImageBitmap', async () => {
+      const i = idx++;
+      const [width, height] = sizes[i]!;
+      return { width, height, close: () => closed.push(i) };
+    });
+
+    const a = await toImageData(new Blob());
+    const b = await toImageData(new Blob());
+    const c = await toImageData(new Blob());
+
+    expect(created).toBe(1);
+    expect(clearCalls).toEqual([[0, 0, 10, 20]]);
+    expect(drawCalls).toEqual([
+      [10, 20],
+      [10, 20],
+      [30, 40],
+    ]);
+    expect([a.width, b.width, c.width]).toEqual([10, 10, 30]);
+    expect(closed).toEqual([0, 1, 2]);
+  });
+
+  it('falls back gracefully to HTMLCanvasElement when OffscreenCanvas is unavailable', async () => {
+    let createdEl = 0;
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => {
+        expect(tag).toBe('canvas');
+        createdEl++;
+        return {
+          width: 0,
+          height: 0,
+          getContext: () => ({
+            clearRect: () => {},
+            drawImage: () => {},
+            getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }) as ImageData,
+          }),
+        };
+      },
+    });
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 8, height: 6, close: () => {} }));
+
+    const first = await toImageData(new Blob());
+    const second = await toImageData(new Blob());
+    expect(createdEl).toBe(1);
+    expect(first.width).toBe(8);
+    expect(second.height).toBe(6);
   });
 });
