@@ -2,6 +2,7 @@
 import { NAV, REPO_URL, slugFor } from './config.ts';
 import { relUrl } from './links.ts';
 import { escapeHtml, type Heading } from './markdown.ts';
+import { themeColors } from './tokens.ts';
 
 export const SITE_NAME = 'FOLO docs';
 
@@ -24,7 +25,9 @@ export const ICONS = {
 export const LOGO = `<svg class="logo" viewBox="0 0 207 93" width="35.6" height="16" fill="none" aria-hidden="true"><path d="M16 91V29A20 20 0 0 1 36 9h8" stroke="currentColor" stroke-width="16"/><path d="M0 38h38" stroke="currentColor" stroke-width="14"/><circle cx="74" cy="61" r="23" stroke="currentColor" stroke-width="16"/><path d="M125 1v90" stroke="currentColor" stroke-width="16"/><circle cx="176" cy="61" r="31" fill="var(--accent-solid)"/></svg>`;
 
 // Before first paint: the saved theme, else the system's (the CSS already follows the system without a script).
-const THEME_INIT = `<script>try{const t=localStorage.getItem('folo.docs.theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>`;
+function themeInitScript(darkBg: string, lightBg: string): string {
+  return `<script>try{let t;try{t=localStorage.getItem('folo.docs.theme')}catch{}const r=document.documentElement;if(t==='light'||t==='dark')r.dataset.theme=t;const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==='light'||(t!=='dark'&&matchMedia('(prefers-color-scheme: light)').matches)?'${lightBg}':'${darkBg}'}catch{}</script>`;
+}
 
 export interface ShellPage {
   /** Site path of this page ('' is the landing page). */
@@ -61,6 +64,7 @@ export function toc(headings: Heading[]): string {
 }
 
 export function shell(p: ShellPage): string {
+  const { dark: darkBg, light: lightBg } = themeColors();
   const root = relUrl(p.slug, '');
   const title = p.slug === '' ? `${SITE_NAME}: FOLO Only Looks Once` : `${p.title} · ${SITE_NAME}`;
   return `<!doctype html>
@@ -69,11 +73,12 @@ export function shell(p: ShellPage): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="${darkBg}">
 <title>${escapeHtml(title)}</title>
 <meta name="description" content="${escapeHtml(p.description)}">
 <link rel="icon" type="image/svg+xml" href="${root}favicon.svg">
 <link rel="alternate" type="text/plain" title="llms.txt" href="${root}llms.txt">
-${THEME_INIT}
+${themeInitScript(darkBg, lightBg)}
 <script type="module" src="/entry.ts"></script>
 </head>
 <body class="kind-${p.kind}" data-root="${root}">

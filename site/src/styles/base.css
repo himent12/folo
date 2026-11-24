@@ -146,3 +146,12 @@ table {
 .eyebrow-strong {
   color: var(--text-secondary);
 }
+
+@media print {
+  html,
+  body {
+    min-height: auto;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+  }
+}
