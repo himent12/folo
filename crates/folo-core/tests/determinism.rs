@@ -128,9 +128,11 @@ fn elementwise_simd_ops_are_bitwise_reproducible() {
         let ye = x.exp().unwrap();
         let ys = x.sigmoid().unwrap();
         let ysi = x.silu().unwrap();
+        let ysp = x.softplus().unwrap();
         let ge = ye.backward_with(&g).unwrap().get(&x).unwrap().clone();
         let gs = ys.backward_with(&g).unwrap().get(&x).unwrap().clone();
         let gsi = ysi.backward_with(&g).unwrap().get(&x).unwrap().clone();
-        vec![ye, ys, ysi, ge, gs, gsi]
+        let gsp = ysp.backward_with(&g).unwrap().get(&x).unwrap().clone();
+        vec![ye, ys, ysi, ge, gs, gsi, gsp]
     });
 }

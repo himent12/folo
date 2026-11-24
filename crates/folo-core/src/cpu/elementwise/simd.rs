@@ -1,7 +1,9 @@
 //! AVX2 + FMA vectorised transcendental kernels and their bit-exact scalar twins.
 //!
-//! Every kernel here has an 8-lane AVX2 + FMA implementation and a bit-identical scalar twin so that
-//! results depend only on each element's value — never on slice boundaries, rayon thread counts, or
+//! Every kernel here has an 8-lane AVX2 + FMA implementation and a scalar twin that produces bitwise
+//! identical results for all non-NaN inputs (including `±0.0`, subnormals, and `±∞`), while any NaN
+//! input always yields NaN (and single-operand `exp`/`sigmoid` preserve the input NaN payload). Results
+//! therefore depend only on each element's value — never on slice boundaries, rayon thread counts, or
 //! whether an operand is strided or contiguous.
 
 const LOG2E: f32 = std::f32::consts::LOG2_E;
@@ -82,7 +84,7 @@ fn recip_1_plus_scalar(e: f32) -> f32 {
     u.mul_add(t2, u)
 }
 
-/// Bit-exact scalar twin of [`exp8`].
+/// Scalar twin of `exp8` (bitwise identical for all non-NaN inputs; preserves NaN payload).
 #[inline]
 pub(crate) fn exp_scalar(x: f32) -> f32 {
     let xc = minps(maxps(x, -104.0), 89.0);
@@ -90,7 +92,7 @@ pub(crate) fn exp_scalar(x: f32) -> f32 {
     if x.is_nan() { x } else { v }
 }
 
-/// Bit-exact scalar twin of [`sigmoid8`].
+/// Scalar twin of `sigmoid8` (bitwise identical for all non-NaN inputs; preserves NaN payload).
 #[inline]
 pub(crate) fn sigmoid_scalar(x: f32) -> f32 {
     let e = exp_neg_abs_scalar(x);
@@ -99,9 +101,9 @@ pub(crate) fn sigmoid_scalar(x: f32) -> f32 {
     if x.is_nan() { x } else { sig }
 }
 
-/// Division-free, bit-exact scalar twin of [`silu8`]: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
+/// Division-free scalar twin of `silu8`: `e = exp(-|x|)` via Cody-Waite reduction and degree-5
 /// minimax polynomial, `1 / (1 + e)` via bit-hack seed + 4-FMA Householder-6, `sigmoid = r` for `x >= 0` else
-/// `e * r`.
+/// `e * r`. Bitwise identical to `silu8` for all non-NaN inputs; NaN stays NaN.
 #[inline]
 pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
     let e = exp_neg_abs_scalar(x);
@@ -110,13 +112,13 @@ pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
     x * sig
 }
 
-/// Bit-exact scalar twin of `exp` backward (`g * exp(x)`).
+/// Scalar twin of `exp` backward (`g * exp(x)`).
 #[inline]
 pub(crate) fn exp_bwd_scalar(x: f32, g: f32) -> f32 {
     g * exp_scalar(x)
 }
 
-/// Bit-exact scalar twin of [`sigmoid_bwd8`]: `g * s * (1 - s)` written stably as `g * e * rec * rec`.
+/// Scalar twin of `sigmoid_bwd8`: `g * s * (1 - s)` written stably as `g * e * rec * rec`.
 #[inline]
 pub(crate) fn sigmoid_bwd_scalar(x: f32, g: f32) -> f32 {
     let e = exp_neg_abs_scalar(x);
@@ -126,7 +128,7 @@ pub(crate) fn sigmoid_bwd_scalar(x: f32, g: f32) -> f32 {
     g * ds
 }
 
-/// Bit-exact scalar twin of [`silu_bwd8`]: `g * (s + x * s * (1 - s))` with `s * (1 - s) = e * rec * rec`.
+/// Scalar twin of `silu_bwd8`: `g * (s + x * s * (1 - s))` with `s * (1 - s) = e * rec * rec`.
 #[inline]
 pub(crate) fn silu_bwd_scalar(x: f32, g: f32) -> f32 {
     let e = exp_neg_abs_scalar(x);
@@ -137,7 +139,7 @@ pub(crate) fn silu_bwd_scalar(x: f32, g: f32) -> f32 {
     g * ds
 }
 
-/// Bit-exact scalar twin of `softplus` backward (`g * sigmoid(x)`).
+/// Scalar twin of `softplus` backward (`g * sigmoid(x)`).
 #[inline]
 pub(crate) fn softplus_bwd_scalar(x: f32, g: f32) -> f32 {
     g * sigmoid_scalar(x)
@@ -167,7 +169,7 @@ fn exp_clamped8(xc: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C2));
     p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP5_C1));
     let y = _mm256_fmadd_ps(p, r, one);
-    // 2^n as two normal powers of two (n is in -150..=129), so huge results overflow to +inf and tiny ones
+    // 2^n as two normal powers of two (n is in -150..=128), so huge results overflow to +inf and tiny ones
     // underflow gradually instead of wrapping the exponent field.
     let ni = _mm256_sub_epi32(_mm256_castps_si256(z), _mm256_set1_epi32(EXP_MAGIC_0_BITS));
     let n1 = _mm256_srai_epi32::<1>(ni);
@@ -207,23 +209,23 @@ fn recip_1_plus8(e: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     _mm256_fmadd_ps(u, t2, u)
 }
 
-/// `exp(x)` on eight lanes, bit-identical to [`exp_scalar`]: Cody-Waite reduction, degree-5 minimax
+/// `exp(x)` on eight lanes, bitwise identical to [`exp_scalar`]: Cody-Waite reduction, degree-5 minimax
 /// polynomial, gradual subnormal underflow and `+inf` overflow, NaN payload preserved.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub(crate) fn exp8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+fn exp8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let xc = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-104.0)), _mm256_set1_ps(89.0));
     let v = exp_clamped8(xc);
     _mm256_blendv_ps(v, x, _mm256_cmp_ps::<_CMP_UNORD_Q>(x, x))
 }
 
-/// `1 / (1 + exp(-x))` on eight lanes, division-free and bit-identical to [`sigmoid_scalar`].
+/// `1 / (1 + exp(-x))` on eight lanes, division-free and bitwise identical to [`sigmoid_scalar`].
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub(crate) fn sigmoid8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+fn sigmoid8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let e = exp_neg_abs8(x);
     let rec = recip_1_plus8(e);
@@ -232,10 +234,10 @@ pub(crate) fn sigmoid8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m25
     _mm256_blendv_ps(sig, x, _mm256_cmp_ps::<_CMP_UNORD_Q>(x, x))
 }
 
-/// `x * sigmoid(x)` on eight lanes, division-free and bit-identical to [`silu_epilogue_scalar`]: `e = exp(-|x|)`
-/// by Cody-Waite reduction and degree-5 minimax polynomial (FMA), `1 / (1 + e)` by bit-hack seed plus 4-FMA
-/// Householder-6 refinement `(1 + e0)(1 + e0^2 + e0^4)` (zero `vdivps`, zero `vroundps`, zero `vcvtps2dq`),
-/// `sigmoid = r` for `x >= 0` and `e * r` below. NaN stays NaN.
+/// `x * sigmoid(x)` on eight lanes, division-free and bitwise identical to [`silu_epilogue_scalar`] on all
+/// non-NaN inputs: `e = exp(-|x|)` by Cody-Waite reduction and degree-5 minimax polynomial (FMA),
+/// `1 / (1 + e)` by bit-hack seed plus 4-FMA Householder-6 refinement `(1 + e0)(1 + e0^2 + e0^4)` (zero
+/// `vdivps`, zero `vroundps`, zero `vcvtps2dq`), `sigmoid = r` for `x >= 0` and `e * r` below. NaN stays NaN.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -248,14 +250,12 @@ pub(crate) fn silu8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     _mm256_mul_ps(x, sig)
 }
 
-/// `g * sigmoid'(x)` on eight lanes, division-free and bit-identical to [`sigmoid_bwd_scalar`].
+/// `g * sigmoid'(x)` on eight lanes, division-free and bitwise identical to [`sigmoid_bwd_scalar`] on all
+/// non-NaN inputs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub(crate) fn sigmoid_bwd8(
-    x: std::arch::x86_64::__m256,
-    g: std::arch::x86_64::__m256,
-) -> std::arch::x86_64::__m256 {
+fn sigmoid_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let e = exp_neg_abs8(x);
     let rec = recip_1_plus8(e);
@@ -264,14 +264,12 @@ pub(crate) fn sigmoid_bwd8(
     _mm256_mul_ps(g, ds)
 }
 
-/// `g * silu'(x)` on eight lanes, division-free and bit-identical to [`silu_bwd_scalar`].
+/// `g * silu'(x)` on eight lanes, division-free and bitwise identical to [`silu_bwd_scalar`] on all non-NaN
+/// inputs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub(crate) fn silu_bwd8(
-    x: std::arch::x86_64::__m256,
-    g: std::arch::x86_64::__m256,
-) -> std::arch::x86_64::__m256 {
+fn silu_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let e = exp_neg_abs8(x);
     let rec = recip_1_plus8(e);
@@ -282,7 +280,7 @@ pub(crate) fn silu_bwd8(
     _mm256_mul_ps(g, ds)
 }
 
-/// `g * exp(x)` on eight lanes, bit-identical to [`exp_bwd_scalar`].
+/// `g * exp(x)` on eight lanes, bitwise identical to [`exp_bwd_scalar`] on all non-NaN inputs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -290,7 +288,7 @@ fn exp_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> std::
     std::arch::x86_64::_mm256_mul_ps(g, exp8(x))
 }
 
-/// `g * sigmoid(x)` on eight lanes, bit-identical to [`softplus_bwd_scalar`].
+/// `g * sigmoid(x)` on eight lanes, bitwise identical to [`softplus_bwd_scalar`] on all non-NaN inputs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -300,7 +298,7 @@ fn softplus_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> 
 
 /// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 unary slice loop and its runtime-dispatched wrapper.
 macro_rules! define_unary_slice {
-    ($pub_fn:ident, $avx_fn:ident, $vec8:ident, $scalar:ident, $pad_val:expr) => {
+    ($pub_fn:ident, $avx_fn:ident, $vec8:ident, $scalar:ident) => {
         pub(crate) fn $pub_fn(x: &[f32], out: &mut [f32]) {
             debug_assert_eq!(x.len(), out.len());
             #[cfg(target_arch = "x86_64")]
@@ -335,15 +333,17 @@ macro_rules! define_unary_slice {
             for (xc, oc) in x8.iter().zip(o8.iter_mut()) {
                 // SAFETY: `xc` and `oc` are 8 floats; unaligned loads and stores.
                 unsafe {
-                    _mm256_storeu_ps(oc.as_mut_ptr(), $vec8(_mm256_loadu_ps(xc.as_ptr())));
+                    let v = $vec8(_mm256_loadu_ps(xc.as_ptr()));
+                    _mm256_storeu_ps(oc.as_mut_ptr(), v);
                 }
             }
             if !xt.is_empty() {
-                let mut pad = [$pad_val; 8];
+                let mut pad = [0f32; 8];
                 pad[..xt.len()].copy_from_slice(xt);
-                // SAFETY: `pad` is 8 floats.
+                // SAFETY: `pad` is 8 floats; load completes before taking the mutable store pointer.
                 unsafe {
-                    _mm256_storeu_ps(pad.as_mut_ptr(), $vec8(_mm256_loadu_ps(pad.as_ptr())));
+                    let v = $vec8(_mm256_loadu_ps(pad.as_ptr()));
+                    _mm256_storeu_ps(pad.as_mut_ptr(), v);
                 }
                 ot.copy_from_slice(&pad[..xt.len()]);
             }
@@ -413,7 +413,7 @@ macro_rules! define_bwd_slice {
                 let mut gpad = [0f32; 8];
                 xpad[..xt.len()].copy_from_slice(xt);
                 gpad[..gt.len()].copy_from_slice(gt);
-                // SAFETY: `xpad` and `gpad` are 8 floats.
+                // SAFETY: `xpad` and `gpad` are 8 floats; load completes before taking the store pointer.
                 unsafe {
                     let v = $vec8(_mm256_loadu_ps(xpad.as_ptr()), _mm256_loadu_ps(gpad.as_ptr()));
                     _mm256_storeu_ps(xpad.as_mut_ptr(), v);
@@ -445,15 +445,17 @@ macro_rules! define_bwd_slice {
             for (xc, oc) in x8.iter().zip(o8.iter_mut()) {
                 // SAFETY: `xc` and `oc` are 8 floats; unaligned loads and stores.
                 unsafe {
-                    _mm256_storeu_ps(oc.as_mut_ptr(), $vec8(_mm256_loadu_ps(xc.as_ptr()), gv));
+                    let v = $vec8(_mm256_loadu_ps(xc.as_ptr()), gv);
+                    _mm256_storeu_ps(oc.as_mut_ptr(), v);
                 }
             }
             if !xt.is_empty() {
                 let mut xpad = [0f32; 8];
                 xpad[..xt.len()].copy_from_slice(xt);
-                // SAFETY: `xpad` is 8 floats.
+                // SAFETY: `xpad` is 8 floats; load completes before taking the mutable store pointer.
                 unsafe {
-                    _mm256_storeu_ps(xpad.as_mut_ptr(), $vec8(_mm256_loadu_ps(xpad.as_ptr()), gv));
+                    let v = $vec8(_mm256_loadu_ps(xpad.as_ptr()), gv);
+                    _mm256_storeu_ps(xpad.as_mut_ptr(), v);
                 }
                 ot.copy_from_slice(&xpad[..xt.len()]);
             }
@@ -503,7 +505,7 @@ macro_rules! define_bias_inplace {
                 // Padded lanes keep results independent of segment boundaries (GEMM tiles move with threads).
                 let mut pad = [0f32; 8];
                 pad[..tail.len()].copy_from_slice(tail);
-                // SAFETY: `pad` is 8 floats.
+                // SAFETY: `pad` is 8 floats; load completes before taking the mutable store pointer.
                 unsafe {
                     let x = _mm256_add_ps(_mm256_loadu_ps(pad.as_ptr()), b);
                     _mm256_storeu_ps(pad.as_mut_ptr(), $vec8(x));
@@ -515,9 +517,9 @@ macro_rules! define_bias_inplace {
     };
 }
 
-define_unary_slice!(exp_slice, exp_avx2, exp8, exp_scalar, 0.0f32);
-define_unary_slice!(sigmoid_slice, sigmoid_avx2, sigmoid8, sigmoid_scalar, 0.0f32);
-define_unary_slice!(silu_slice, silu_avx2, silu8, silu_epilogue_scalar, 0.0f32);
+define_unary_slice!(exp_slice, exp_avx2, exp8, exp_scalar);
+define_unary_slice!(sigmoid_slice, sigmoid_avx2, sigmoid8, sigmoid_scalar);
+define_unary_slice!(silu_slice, silu_avx2, silu8, silu_epilogue_scalar);
 
 define_bwd_slice!(
     exp_bwd_slice,
