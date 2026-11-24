@@ -154,6 +154,27 @@ const HTML_TAG_NAME = /^<[a-zA-Z][^\s/>]*/;
 /** One attribute, its whole value consumed, so text inside another attribute's value is never read as an attribute. */
 const HTML_ATTR = /(\s+)([^\s"'>\/=]+)(?:(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/y;
 
+/** Extracts `href` values from HTML `<a>` start tags using the quote-aware attribute scanner (skipping comments). */
+export function extractHtmlAnchorHrefs(html: string): string[] {
+  const out: string[] = [];
+  for (const part of html.matchAll(HTML_PART)) {
+    const tag = part[0];
+    if (tag.startsWith('<!--')) continue;
+    const head = HTML_TAG_NAME.exec(tag)![0];
+    if (head.slice(1).toLowerCase() !== 'a') continue;
+    let at = head.length;
+    for (;;) {
+      HTML_ATTR.lastIndex = at;
+      const m = HTML_ATTR.exec(tag);
+      if (!m) break;
+      at = HTML_ATTR.lastIndex;
+      const [, , name, eq, dq, sq, bare] = m;
+      if (eq && name.toLowerCase() === 'href') out.push(dq ?? sq ?? bare ?? '');
+    }
+  }
+  return out;
+}
+
 /**
  * Links and images in raw HTML (`<a href>`, `<img src>`, ...) get the same checks and rewriting as Markdown ones, so
  * HTML can't slip a broken or GitHub-only `.md` link past the build. Only attributes inside start tags count: a link
