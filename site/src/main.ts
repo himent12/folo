@@ -5,7 +5,7 @@ import './styles/layout.css';
 import './styles/prose.css';
 import './styles/landing.css';
 import './styles/search.css';
-import { escapeHtml, highlight, loadIndex, search, type Hit } from './search.ts';
+import { escapeHtml, highlight, isIndexLoaded, loadIndex, search, type Hit } from './search.ts';
 
 const root = document.body.dataset.root ?? './';
 const $ = <T extends Element>(sel: string, from: ParentNode = document) => from.querySelector<T>(sel);
@@ -98,8 +98,11 @@ const dialog = $<HTMLDialogElement>('#search');
 const input = $<HTMLInputElement>('#search-input');
 const results = $<HTMLUListElement>('#search-results');
 const status = $<HTMLElement>('.search-status', dialog ?? document);
+const retryBtn = $<HTMLButtonElement>('.search-retry', dialog ?? document);
 let hits: Hit[] = [];
 let active = -1;
+let searchSeq = 0;
+let indexError = false;
 let lastPointerX = Number.NaN;
 let lastPointerY = Number.NaN;
 
@@ -122,6 +125,7 @@ function renderHits(query: string) {
         `<li class="search-result" id="sr-${i}" data-index="${i}" role="option" aria-selected="${i === active}"><a href="${h.href}" tabindex="-1"><span class="sr-path">${escapeHtml(h.path)}</span><span class="sr-title">${highlight(h.title, terms)}</span><span class="sr-snippet">${h.snippet}</span></a></li>`,
     )
     .join('');
+  results.scrollTop = 0;
   input.setAttribute('aria-expanded', String(hits.length > 0));
   if (active >= 0) input.setAttribute('aria-activedescendant', `sr-${active}`);
   else input.removeAttribute('aria-activedescendant');
@@ -132,23 +136,60 @@ function renderHits(query: string) {
       : `No results for “${query.trim()}”.`;
 }
 
-async function runSearch() {
-  if (!input || !status) return;
-  const q = input.value;
+async function runSearch(fromRetry = false) {
+  if (!input || !status || !results) return;
+  if (indexError && !fromRetry) return;
+  const seq = ++searchSeq;
+  if (!isIndexLoaded()) {
+    indexError = false;
+    if (dialog) {
+      delete dialog.dataset.error;
+      dialog.dataset.loading = '';
+    }
+    results.setAttribute('aria-busy', 'true');
+    if (retryBtn) {
+      if (document.activeElement === retryBtn && dialog?.open) input.focus();
+      retryBtn.hidden = true;
+    }
+    if (status.textContent !== 'Loading search index…') status.textContent = 'Loading search index…';
+  }
   try {
-    const all = await loadIndex(root);
-    if (q !== input.value) return;
+    const all = await loadIndex(root, fromRetry);
+    if (seq !== searchSeq) return;
+    indexError = false;
+    if (dialog) {
+      delete dialog.dataset.loading;
+      delete dialog.dataset.error;
+    }
+    results.removeAttribute('aria-busy');
+    if (retryBtn) retryBtn.hidden = true;
+    const q = input.value;
     hits = search(all, q, root);
     active = hits.length ? 0 : -1;
     renderHits(q);
   } catch {
+    if (seq !== searchSeq) return;
+    indexError = true;
+    hits = [];
+    active = -1;
+    results.innerHTML = '';
+    results.scrollTop = 0;
+    results.removeAttribute('aria-busy');
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    if (dialog) {
+      delete dialog.dataset.loading;
+      dialog.dataset.error = '';
+    }
     status.textContent = 'Search is unavailable: the index did not load.';
+    if (retryBtn) retryBtn.hidden = false;
   }
 }
 
 function openSearch() {
   if (!dialog || !input || dialog.open) return;
   setNav(false, true);
+  indexError = false;
   dialog.showModal();
   input.select();
   void runSearch();
@@ -174,6 +215,7 @@ function moveActive(by: number) {
 
 $('.search-trigger')?.addEventListener('click', openSearch);
 $('.search-close')?.addEventListener('click', () => dialog?.close());
+retryBtn?.addEventListener('click', () => void runSearch(true));
 input?.addEventListener('input', () => void runSearch());
 input?.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
