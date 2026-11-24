@@ -73,15 +73,16 @@ export default function Model() {
   // `epochs`: how many the run finished (model/weightsEpoch `finishedEpochs`); null while not known.
   const context = new Resource<ModelContext>(async (s) => {
     const rid = runId.get();
-    if (!rid) return { run: null, dataset: null, parent: null, epochs: null, errors: {} };
+    if (!rid) return { runId: null, run: null, dataset: null, parent: null, epochs: null, errors: {} };
     let run: Run | null = null;
     try {
       run = await hub.api.run(rid, s);
     } catch (e) {
       if (s.aborted || (e instanceof DOMException && e.name === 'AbortError')) throw e;
-      if (isNotFound(e)) return { run: null, dataset: null, parent: null, epochs: null, errors: {} };
-      return { run: null, dataset: null, parent: null, epochs: null, errors: { run: e } };
+      if (isNotFound(e)) return { runId: rid, run: null, dataset: null, parent: null, epochs: null, errors: {} };
+      return { runId: rid, run: null, dataset: null, parent: null, epochs: null, errors: { run: e } };
     }
+    if (s.aborted) throw new DOMException('Aborted', 'AbortError');
     const from = origin(run.config.weights);
     // Run the three independent provenance lookups in parallel (cutting 4 sequential RTTs to 2).
     const [metricsRes, datasetRes, parentRes] = await Promise.allSettled([
@@ -96,7 +97,7 @@ export default function Model() {
       epochs = finishedEpochs(run, metricsRes.value.epochs);
     } else {
       epochs = finishedEpochs(run, null);
-      if (!isNotFound(metricsRes.reason)) errors.metrics = metricsRes.reason;
+      if (!isNotFound(metricsRes.reason) && run.status !== 'completed' && run.status !== 'stopped') errors.metrics = metricsRes.reason;
     }
     let dataset: Dataset | null = null;
     if (datasetRes.status === 'fulfilled') {
@@ -110,7 +111,7 @@ export default function Model() {
     } else if (!isNotFound(parentRes.reason)) {
       errors.parent = parentRes.reason;
     }
-    return { run, dataset, parent, epochs, errors };
+    return { runId: rid, run, dataset, parent, epochs, errors };
   });
   // A run resumed elsewhere that ends changes the models: the run and its epochs are read again with them.
   refreshOnModelsChange(context);

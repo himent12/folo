@@ -3,7 +3,7 @@
  * A full-width panel's facts, each label beside its value: three columns of rows from 1280 px (as Desktop's), the rows
  * two to a line on laptops and tablets, one on phones.
  */
-import { bindable, computed, css, effect, For, signal } from 'fw';
+import { bindable, computed, css, For, signal } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run, ThroughputTable } from '$lib/api/types';
 import type { Evaluation } from '$lib/api/evaluation';
@@ -38,6 +38,8 @@ export interface ProvenanceErrors {
  * finishedEpochs; null while not known).
  */
 export interface ModelContext {
+  /** Run id this context snapshot was fetched for (guards against stale banners across model navigation). */
+  runId?: string | null;
   run: Run | null;
   dataset: Dataset | null;
   parent: Model | null;
@@ -75,19 +77,12 @@ const F16_BYTES_PER_PARAM = 2.03;
 
 export default function DetailsList(props: DetailsListProps) {
   const aboutOpen = bindable(props, 'aboutOpen');
-  const classesOpen = signal(false);
-  let lastModelId = props.m.id;
-  effect(() => {
-    const cur = props.m.id;
-    if (cur !== lastModelId) {
-      lastModelId = cur;
-      classesOpen.set(false);
-    }
-  });
-  const visibleClasses = computed(() => (classesOpen.get() ? props.m.classes : props.m.classes.slice(0, 10)));
+  const expandedFor = signal<string | null>(null);
+  const classesOpen = computed(() => expandedFor.get() === props.m.id);
   const provErrorParts = computed(() => {
-    const errs = props.context.data?.errors;
-    if (!errs) return [];
+    const data = props.context.data;
+    const errs = data?.errors;
+    if (props.context.loading || !errs || (data.runId !== undefined && data.runId !== props.m.run_id)) return [];
     const parts: string[] = [];
     if (errs.run !== undefined) parts.push('source run');
     if (errs.metrics !== undefined) parts.push('training history');
@@ -174,7 +169,7 @@ export default function DetailsList(props: DetailsListProps) {
         <div class="kv">
           <dt>Classes</dt>
           <dd class="classes" id="model-classes">
-            <For each={visibleClasses.get()} key={(_, i) => i}>
+            <For each={m().classes.slice(0, 10)} key={(_, i) => i}>
               {(c, i) => (
                 <span class="chip">
                   <span class="sw" style:background={classInk(i())} aria-hidden="true"></span>
@@ -183,15 +178,29 @@ export default function DetailsList(props: DetailsListProps) {
               )}
             </For>
             {m().classes.length > 10 ? (
-              <button
-                type="button"
-                class="more-classes"
-                aria-expanded={classesOpen.get()}
-                aria-controls="model-classes"
-                onclick={() => classesOpen.set(!classesOpen.peek())}
-              >
-                {classesOpen.get() ? 'Show fewer' : `+${m().classes.length - 10} more`}
-              </button>
+              <>
+                <button
+                  type="button"
+                  class="more-classes"
+                  aria-expanded={classesOpen.get()}
+                  aria-controls="model-classes-more"
+                  onclick={() => expandedFor.set(classesOpen.peek() ? null : props.m.id)}
+                >
+                  {classesOpen.get() ? 'Show fewer' : `+${m().classes.length - 10} more`}
+                </button>
+                {classesOpen.get() ? (
+                  <span class="classes-more" id="model-classes-more">
+                    <For each={m().classes.slice(10)} key={(_, i) => i + 10}>
+                      {(c, i) => (
+                        <span class="chip">
+                          <span class="sw" style:background={classInk(i() + 10)} aria-hidden="true"></span>
+                          {c()}
+                        </span>
+                      )}
+                    </For>
+                  </span>
+                ) : null}
+              </>
             ) : null}
           </dd>
         </div>
@@ -418,6 +427,14 @@ css`
   .classes {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .classes-more {
+    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-1);
   }
   .chip {

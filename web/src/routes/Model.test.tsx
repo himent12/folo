@@ -422,7 +422,10 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     const realModel = api.model.bind(api);
     // Give m_fast_n's source run a parent model weight reference so all three secondary lookups execute.
     const parentId = 'm_mini_n';
-    api.run = async (id: string) => ({ ...(await realRun(id)), config: { ...(await realRun(id)).config, weights: parentId } });
+    api.run = async (id: string) => {
+      const r = await realRun(id);
+      return { ...r, config: { ...r.config, weights: parentId } };
+    };
 
     const started: string[] = [];
     let releaseMetrics!: () => void;
@@ -456,25 +459,29 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     await until(() => started.length === 3, 'all three provenance calls started in parallel');
     expect(new Set(started)).toEqual(new Set(['metrics', 'dataset', 'parent']));
 
+    const sourceDd = () => [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Source')?.querySelector('dd');
     releaseMetrics();
     releaseDataset();
     releaseParent();
-    await until(() => text('#details').includes('fasteners'), 'provenance populated');
+    await until(() => sourceDd()?.querySelector('a[href^="#/datasets/"]'), 'source dataset link populated');
+    expect(text('#details')).toContain('fasteners-mini-n');
   });
 
   it('distinguishes 404 missing provenance from transient failures and exposes Retry on transient failures', async () => {
     const api = hub.api as MockApi;
     const realDataset = api.dataset.bind(api);
+    const sourceDd = () => [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Source')?.querySelector('dd');
 
     // 404 dataset_not_found: treated as missing, no provenance error or Retry shown.
     api.dataset = async () => {
       throw new ApiError(404, 'dataset_not_found', 'deleted');
     };
     await open('m_fast_n');
-    await until(() => text('#details').includes('fasteners-n'), 'details loaded');
+    await until(() => sourceDd()?.textContent?.includes('fasteners-n'), 'source run resolved');
+    expect(sourceDd()?.querySelector('a[href^="#/datasets/"]')).toBeNull();
     expect(target.querySelector('[data-provenance-error]')).toBeNull();
 
-    // Transient 503 on dataset: surfaced with Retry, and clicking Retry recovers the dataset link.
+    // Transient 503 on dataset: surfaced with Retry, and clicking Retry recovers the Source dataset link.
     unmount(c!);
     c = undefined;
     let fail = true;
@@ -485,12 +492,14 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     await open('m_fast_n');
     const errBox = await until(() => target.querySelector('[data-provenance-error]'), 'transient provenance error');
     expect(errBox.textContent).toContain('Could not load source dataset.');
+    expect(sourceDd()?.querySelector('a[href^="#/datasets/"]')).toBeNull();
     const retry = errBox.querySelector<HTMLButtonElement>('button')!;
     expect(retry.textContent?.trim()).toBe('Retry');
 
     fail = false;
     retry.click();
-    await until(() => !target.querySelector('[data-provenance-error]') && text('#details').includes('fasteners'), 'provenance recovered');
+    const dsLink = await until(() => !target.querySelector('[data-provenance-error]') && sourceDd()?.querySelector<HTMLAnchorElement>('a[href^="#/datasets/"]'), 'source dataset link recovered');
+    expect(dsLink.getAttribute('href')).toBe('#/datasets/ds_fasteners');
   });
 
   it('turns +N more on >10-class models into a disclosure button while keeping the compact default', async () => {
@@ -506,12 +515,13 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(10);
     expect(btn.textContent?.trim()).toBe('+70 more');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
-    expect(btn.getAttribute('aria-controls')).toBe('model-classes');
+    expect(btn.getAttribute('aria-controls')).toBe('model-classes-more');
 
-    // Expanding shows all 80 classes.
+    // Expanding shows all 80 classes with the extra 70 in #model-classes-more while keeping the button in place.
     btn.click();
     flushSync();
     expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(80);
+    expect(target.querySelectorAll('#model-classes-more .chip')).toHaveLength(70);
     expect(btn.textContent?.trim()).toBe('Show fewer');
     expect(btn.getAttribute('aria-expanded')).toBe('true');
 
@@ -519,6 +529,7 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     btn.click();
     flushSync();
     expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(10);
+    expect(target.querySelector('#model-classes-more')).toBeNull();
     expect(btn.textContent?.trim()).toBe('+70 more');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
