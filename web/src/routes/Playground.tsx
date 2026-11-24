@@ -191,6 +191,7 @@ export default function Playground() {
     toast.clear('image');
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    engine.clearImageCache();
     source.set(s);
     seg.set(s.kind);
     pred.set(null);

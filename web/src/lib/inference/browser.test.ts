@@ -417,5 +417,14 @@ describe('toImageData canvas reuse and fallback', () => {
     expect(createdEl).toBe(1);
     expect(first.width).toBe(8);
     expect(second.height).toBe(6);
+
+    // Clearing the image cache or disposing the engine resets the backing canvas (width/height -> 0).
+    const engine = new BrowserEngine(async () => fakeWasm().mod, toImageData);
+    engine.clearImageCache();
+    await toImageData(new Blob());
+    expect(createdEl).toBe(2);
+    engine.dispose();
+    await toImageData(new Blob());
+    expect(createdEl).toBe(3);
   });
 });

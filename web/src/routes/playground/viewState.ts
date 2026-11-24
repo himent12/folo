@@ -1,5 +1,5 @@
-// Pure view-state helpers extracted from Playground.tsx: detection filtering/grouping, source metadata,
-// smaller-model fallback lookup, keyboard row navigation, and JSON export formatting.
+// View-state and DOM helpers extracted from Playground.tsx: detection filtering/grouping, source metadata,
+// smaller-model fallback lookup, keyboard row navigation, row scrolling, and JSON export formatting.
 import type { Model, Prediction } from '$lib/api/types';
 import { BACKEND_NAME, DEFAULTS } from './predict';
 import type { Source } from './source';

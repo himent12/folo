@@ -174,12 +174,13 @@ export class BrowserEngine {
     readonly decode: (image: Blob) => Promise<ImageData> = toImageData,
   ) {}
 
-  /** Releases cached decoded pixels (e.g. when clearing the current image). */
+  /** Releases cached decoded pixels and the reusable decode canvas backing surface. */
   clearImageCache() {
     this.#lastImage = null;
+    resetDecodeCanvas();
   }
 
-  /** Frees all cached detectors and releases temporary image and download references. */
+  /** Frees all cached detectors and releases temporary image, canvas, and download references. */
   dispose() {
     for (const e of this.#detectors.values()) {
       e.evicted = true;
@@ -188,6 +189,7 @@ export class BrowserEngine {
     this.#detectors.clear();
     this.#lastImage = null;
     this.#inFlightDownload = null;
+    resetDecodeCanvas();
   }
 
   /**
@@ -276,7 +278,7 @@ export class BrowserEngine {
         bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : dl!.bytes));
         this.phase = 'compile';
         const loading = m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
-        // Drop local reference immediately once handed to wasm (folo-wasm copies bytes before its first await).
+        // Drop this closure's reference so the temporary weights buffer can be collected as soon as wasm finishes loading.
         bytes = null;
         return await loading;
       } finally {
