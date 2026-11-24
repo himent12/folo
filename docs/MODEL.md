@@ -31,6 +31,18 @@ Conventions used throughout:
 | precision | f32 training (no AMP); f32 or f16 inference after Conv+BN fusion |
 | distillation | opt-in (`distill`, §8.9): a frozen teacher's class probabilities and DFL distributions at the shared anchors; off by default, training-only |
 
+### 0.1 Recipe & inference extensions (summary)
+
+| extension | switch / default | what it changes | spec |
+|---|---|---|---|
+| **Polar-FOLO** | `musgd.ortho = polar4` (default for new MuSGD runs; `polar5`, legacy `ns5`) | 4-step minimax Remez orthogonalisation + step-0 Schatten-4 spectral rescaling (12 GEMMs vs 15 for `ns5`) | §8.2 |
+| **Conv-GeoMuon** | `musgd.geo = geo` (opt-in; default `legacy`) | flattened 2-D conv aspect scaling `sqrt(max(1, c_out / (c_in · k_h · k_w)))` + zero-GEMM per-channel Polar LMO on depthwise convs | §8.2 |
+| **R-PIoU** | `loss.box_loss = rpiou` (opt-in; default `ciou`) | purely algebraic Rational-Focal Edge-Decoupled IoU (`rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`) | §7.2 |
+| **OT-DFL** | `loss.dfl_ot_weight > 0` (opt-in; default `0.0`) | exact `O(R)` log-space 1-D optimal-transport cumulative tail barrier added to DFL (active when `reg_max > 2`) | §7.4 |
+| **SEBF / DFL-CGR** | `--fusion sebf --score dfl-cgr` (opt-in; default `none`) | 1-step Student-t (`ν = 3`) IRLS exclusive-ownership box fusion (`IoU^4 · score · side_precision`) + confidence-gated greedy repulsion (`p_m^0.25`, `γ = 3.0`) | §9.4 |
+| **int8 CPU** | `folo quantize`, `--precision int8` (opt-in; default `f32`) | post-training CPU int8 backbone/neck (`version: 2` per-channel C4 grids, per-part concat decoupling, direct `u8` stem `q8::stem_u8`, P5-tail `neck.out5.*` in `f32`; head stays `f32`) | §9.6 |
+| **FOLO v2-Iso** | `FoloV2Model` / `FoloV2Config` (`folo2-n/s/m/l/x`) | clean-sheet `ceil16`-aligned detector family (`StemV2`, `WsQARepConv3x3`, `FoloBlock`, `HyperContext`, `FullPadGate`, `LazyAlignHead`, `PeakSuppress`) | §11 |
+
 ## 1. Design rationale
 
 **Topology: adopt YOLO11's, deliberately.** FOLO's risk is the from-scratch framework, not the architecture. YOLO11
@@ -1574,3 +1586,111 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 - Cost: folo-n at 320 px is 1.62 GFLOPs forward, so 30 epochs of 2000 images are roughly 0.3 PFLOP of training
   compute. That is minutes on the GPU backend and about an hour on a desktop CPU at 100 GFLOP/s effective, so the
   CPU variant of this test is `#[ignore]` and run on demand.
+
+## 11. FOLO v2-Iso (`folo2-n/s/m/l/x`)
+
+FOLO v2-Iso (`crates/folo-vision/src/model/v2/`) is a clean-sheet, hardware-co-designed detector family built on
+standard CPU/GPU autograd primitives and ONNX opset-17-expressible ops. `FoloV2Model::forward` returns
+`HeadOutputV2 { box_raw, cls_raw, iou_raw, mode, o2o, anchors, reg_max, num_classes }`, which converts into v1's
+`HeadOutput` via `HeadOutputV2::into_head_output()` (`export::onnx`, `model::quant`, and the v1 `Trainer`/`Predictor`
+CLI paths currently target v1 `FoloModel`).
+
+### 11.1 Scaling and `FoloV2Config`
+
+Stage widths returned by `ch(base)` and the head hidden widths `c_box`/`c_cls` are `ceil16`-aligned for 16×16×16
+tensor cores (internal `FoloBlock` `c_mid = ch(...) / 2` widths remain multiples of 8 when `ch(...)` is an odd multiple
+of 16):
+
+```
+ch(base) = max(1, ceil(min(base, max_channels) · width / 16)) · 16
+```
+
+`FoloV2Config::new(scale, num_classes)` defaults to `in_channels = 3`, `reg_max = 16` (`≥ 2`), `strides = [8, 16, 32]`,
+`head = O2m`, `iou_head = false`, `spd_stem = true`, `plus = false`, `fullpad = true`, `mal_bias_prior = false`,
+`bn_eps = 1e-3`, and `bn_momentum = 0.03`. Setting `plus = true` (`v2-Plus`) adds `+1` `WsQARepConv3x3` layer to
+`bb_m` (`stage3`/`stage4`/`stage5`) and `out3_m` (`neck.out3`).
+
+| scale | `width` | `max_ch` | `ch(64,128,256,512,1024)` | `stage2_m` | `bb_m` (`+plus`) | `neck_m` | `out3_m` (`+plus`) | `out5_m` | `hyper_edges` `M` | `c_box` | `c_cls` |
+|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `n` | 0.25 | 1024 | 16, 32, 64, 128, 256 | 1 | 2 (3) | 1 | 1 (2) | 2 | 16 | 48 | 64 |
+| `s` | 0.50 | 1024 | 32, 64, 128, 256, 512 | 1 | 2 (3) | 1 | 1 (2) | 2 | 32 | 48 | 64 |
+| `m` | 0.75 | 768 | 48, 96, 192, 384, 576 | 2 | 3 (4) | 2 | 2 (3) | 3 | 32 | 64 | 128 |
+| `l` | 1.00 | 768 | 64, 128, 256, 512, 768 | 2 | 4 (5) | 2 | 2 (3) | 3 | 48 | 64 | 160 |
+| `x` | 1.25 | 1024 | 80, 160, 320, 640, 1280 | 2 | 4 (5) | 2 | 2 (3) | 4 | 64 | 80 | 192 |
+
+`c_box = 48` and `c_cls = 64` are locked across `folo2-n` and `folo2-s` for zero-adapter Box + Cls CrossKD.
+
+### 11.2 Building blocks (`model/v2/blocks.rs`)
+
+- **`StemV2`:** when `spd_stem = true` (default), applies lossless `space_to_depth_2x2` (concatenating sub-pixel phases
+  `(0,0), (0,1), (1,0), (1,1)` along channels: `[B, C, H, W] → [B, 4·C, H/2, W/2]` for even `H, W`) followed by
+  `Conv(4·in_channels → c0, 1×1, s=1)`. When `spd_stem = false`, uses a standard `Conv(in_channels → c0, 3×3, s=2)`.
+- **`WsQARepConv3x3(c_in → c_out)`:** weight-space quantization-aware reparameterized `3×3` conv (`s=1, p=1`, SiLU by
+  default). During training, its linear branches sum in weight space before a single post-sum `BatchNorm2d` + activation:
+  ```
+  W_eff = w3x3 + pad(w1x3) + pad(w3x1) + pad(w1x1) [+ diag_3x3(gamma_id)  if c_in == c_out]
+  y = act(BN_post(conv3x3(x, W_eff)))
+  ```
+  Each of the four conv branches is Kaiming-uniform initialised at half the standard bound (`0.5 / sqrt(fan_in_branch)`,
+  variance scaled by `1/4`), and `gamma_id` starts at `1.0`. Forward outputs and gradients match explicit activation-space
+  branch summation at 1× activation compute/VRAM; `fuse()` folds `W_eff` and `BN_post` into a single dense `Conv2d(3×3)`
+  with bias and activation (zero residual adds).
+- **`FoloBlock(c1 → c2, m, c_mid)` (`m ≥ 1`):** `cv1: Conv(c1 → 2·c_mid, 1×1)` → second half `y[:, c_mid..2·c_mid]`
+  runs through `m` sequential `WsQARepConv3x3(c_mid → c_mid)` layers (`rep0..rep{m-1}`) → `cv2: Conv((2 + taps)·c_mid →
+  c2, 1×1)`. For `m ≤ 2`, `taps = 1` and `cv2` reads `[cv1_out, y_last]`; for `m ≥ 3`, `taps = 2` and `cv2` reads
+  `[cv1_out, y_mid, y_last]` where `mid_idx = m / 2 - 1`. Both `cv1` and `cv2` use `forward_cat` over at most 3 parts,
+  eliding concatenation on fused paths.
+- **`HyperContext(c_p5, M)` (`HyperACE-Lite` at P5, replacing `C2PSA`):** linear `O(N·M)` hypergraph global context
+  with `c_g = c_p5 / 2`. `av_proj: Conv(c_p5 → M + c_g, 1×1, act=none)` produces `A_logits [B, M, N]` and
+  `V [B, c_g, N]` (`N = H·W`); `A_gather = softmax(A_logits, dim=-1)` gathers tokens into `E = V · A_gather^T`
+  (`[B, c_g, M]`); two `Linear(c_g → c_g)` layers with SiLU refine `E' = E^T + ffn2(SiLU(ffn1(E^T)))`;
+  `g_scene = mean(E', dim=1)` (`[B, c_g]`); `A_bcast = softmax(A_logits, dim=1)` (`H·W`-invariant convex combination
+  over hyperedges) broadcasts `Y_ctx = E'^T · A_bcast` reshaped to `[B, c_g, H, W]`;
+  `out_proj: Conv(c_g → c_p5, 1×1, act=none)` adds back to `x` (`(x + out_proj(Y_ctx), g_scene)`).
+- **`FullPadGate(c_g → c_tgt)`:** residual FiLM gate `feat * (1 + tanh(proj(g_scene)))` with `proj: Linear(c_g → c_tgt)`
+  zero-initialised (weight and bias `0.0`), making step 0 exact identity.
+
+### 11.3 Backbone and SPD-PAN neck (`model/v2/mod.rs`)
+
+With `(c0, c1, c3, c4) = ch(64, 128, 256, 512)`, `(c5, c6, c7, c8) = ch(512, 512, 1024, 1024)`, `c9 = c8`, and
+`(c13, c16, c19, c22) = ch(512, 256, 512, 1024)`:
+
+- **Backbone (`backbone.*`):** `stem` (`P1/2, c0`) → `down2` (`Conv c0→c1, 3×3 s2`) → `stage2` (`stage2_m × WsQARepConv3x3`,
+  `P2` tap) → `down3` (`Conv c1→c3, 3×3 s2`) → `stage3` (`FoloBlock c3→c4, bb_m, c_mid = c3/2`, `P3` tap) → `down4`
+  (`Conv c4→c5, 3×3 s2`) → `stage4` (`FoloBlock c5→c6, bb_m, c_mid = c6/2`, `P4` tap) → `down5` (`Conv c6→c7, 3×3 s2`) →
+  `stage5` (`FoloBlock c7→c8, bb_m, c_mid = c8/2`) → `sppf` (`Sppf c8→c9, k=5`) → `hyper` (`HyperContext(c9, M)` →
+  `(P5, g_scene)`).
+- **SPD-PAN neck (`neck.*`):**
+  1. `td4 = FoloBlock(cat[up2(P5), P4] → c13, neck_m, c13/2)`
+  2. `p2_spd = p2_proj(space_to_depth_2x2(P2))` (`Conv(4·c1 → c1, 1×1)`)
+  3. `out3_raw = FoloBlock(cat[up2(td4), P3, p2_spd] → c16, out3_m, c16/2)` (keeps 8,400 anchors at 640×640)
+  4. `nd3 = down3(out3_raw)` (`Conv(c16 → c16, 3×3 s2)`), `out4_raw = FoloBlock(cat[nd3, td4] → c19, neck_m, c19/2)`
+  5. `nd4 = down4(out4_raw)` (`Conv(c19 → c19, 3×3 s2)`), `out5 = FoloBlock(cat[nd4, P5] → c22, out5_m, c22/2)`
+  6. When `fullpad = true`, relocated `pad_p3(out3_raw, g_scene)` and `pad_p4(out4_raw, g_scene)` modulate only the
+     `P3_head` and `P4_head` inputs *after* `down3`/`down4` have read `out3_raw`/`out4_raw`, keeping the bottom-up neck
+     free of float barriers by design.
+
+### 11.4 `LazyAlignHead` and `PeakSuppress` (`model/v2/head.rs`)
+
+Decoupled three-level head on `[P3_head, P4_head, out5]` (`[c16, c19, c22]`, strides `[8, 16, 32]`):
+
+- **`BoxBranchV2` (`head.box.{p3,p4,p5}.*`):** `conv0: WsQARepConv3x3(C_L → c_box)` → `conv1: WsQARepConv3x3(c_box →
+  c_box)` → `out: Conv2d(c_box → 4·reg_max, 1×1)` (bias `2.0`; `64` channels at default `reg_max = 16`), plus opt-in
+  separate `iou_out: Conv2d(c_box → 1, 1×1)` (bias `0.0`, when `iou_head = true`), keeping `box.out` at `4·reg_max`
+  channels without appending an extra IoU channel.
+- **`ClsBranchV2` (`head.cls.{p3,p4,p5}.*`):** depthwise-free dense branch: optional `align: Conv(C_L → c_cls, 1×1)`
+  (omitted when `C_L == c_cls`, e.g. P3 on `folo2-n`) → `conv0: WsQARepConv3x3(c_cls → c_cls)` → `out: Conv2d(c_cls →
+  nc, 1×1)`. Output bias is initialised to `MAL_CLS_BIAS_PRIOR = -4.59512` (`ln(0.01 / 0.99)`) when
+  `mal_bias_prior = true`, else v1's per-level `cls_bias_prior` (§6.5).
+- **`PeakSuppress` and `o2o` (`head.o2o.{p3,p4,p5}.{cls,suppress}.*`, when `head = O2o`):** each level runs an
+  `O2oClsLevel` (`ClsBranchV2` followed by `PeakSuppress`) and shares `BoxBranchV2` with `o2m`:
+  ```
+  g = sigmoid(Conv2d(feat_cls, c_cls → 1, 1×1))
+  Z_o2o = Z − softplus(alpha_raw) · g · (MaxPool3×3_s1_p1(Z) − Z)
+  ```
+  `alpha_raw` (`[nc]`) starts at `ln(e − 1) ≈ 0.54132485` so `softplus(alpha_raw) = 1.0`. Local `3×3` maxima satisfy
+  `MaxPool3×3(Z) − Z = 0`, preserving true peaks identically while suppressing non-peak duplicates (`Z_o2o ≤ Z`). In
+  training mode when both `o2o_detach = true` (default) and autograd is enabled (`is_grad_enabled()`), feature inputs
+  are detached before `o2o` and the shared `box_branch` replays `forward_box_only` (skipping `iou_out`) while
+  snapshotting and restoring training-mode BN running stats so BN updates only once per batch; when `o2o_detach = false`,
+  under `no_grad()`, or in eval mode, `box_branch` is not run twice.
