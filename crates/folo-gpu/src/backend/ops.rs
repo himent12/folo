@@ -22,6 +22,7 @@ use crate::kernels::muon;
 use crate::kernels::norm::{self, BnRunning};
 use crate::kernels::optim;
 use crate::kernels::pool_grad;
+use crate::kernels::pooling;
 use crate::kernels::reduce::{self, ReduceOp as GpuReduce};
 use crate::kernels::strided::{self, Indices};
 use crate::kernels::vision::{self, LetterboxDesc};
@@ -339,6 +340,27 @@ impl Backend for GpuBackend {
         pool_grad::max_pool2d_indices(&self.ctx, xd.raw(), vals.raw(), idx.raw(), planes, &win, kdt(dtype))
             .core()?;
         Ok((self.wrap(dtype, len, vals), self.wrap(CoreDType::I64, len, idx)))
+    }
+
+    fn max_pool2d_values(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
+        let (n, c, h, w) = nchw(x.shape());
+        let _p = profile::scope(|| format!("max_pool_values {:?}", x.shape().dims()));
+        let win = pooling::Window2d {
+            kernel: (p.kernel[0], p.kernel[1]),
+            stride: (p.stride[0], p.stride[1]),
+            padding: (p.padding[0], p.padding[1]),
+            dilation: (1, 1),
+        };
+        if win.check_limits().is_err() {
+            return Ok(self.max_pool2d(x, p)?.0);
+        }
+        let (oh, ow) = win.output(h, w).core()?;
+        let len = n * c * oh * ow;
+        let dtype = x.storage.dtype();
+        let vals = self.alloc(dtype, len)?;
+        let xd = self.dense(&x)?;
+        pooling::max_pool2d(&self.ctx, xd.raw(), vals.raw(), n * c, h, w, &win, kdt(dtype)).core()?;
+        Ok(self.wrap(dtype, len, vals))
     }
 
     fn max_pool2d_backward(
