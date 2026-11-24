@@ -26,7 +26,7 @@ mod results;
 mod runs;
 mod schemas;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use folo_api::{
     CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, Dataset, ExportResult,
@@ -50,8 +50,8 @@ pub struct ToolDef {
     pub description: &'static str,
     /// Changes state: hidden and rejected with `--read-only`.
     pub mutating: bool,
-    input: fn() -> Arc<JsonObject>,
-    output: fn() -> Arc<JsonObject>,
+    input: fn() -> JsonObject,
+    output: fn() -> JsonObject,
 }
 
 /// Every tool, in the order of docs/MCP.md.
@@ -359,7 +359,36 @@ pub const TOOLS: &[ToolDef] = &[
     },
 ];
 
+struct SchemaCache {
+    input: OnceLock<Arc<JsonObject>>,
+    output: OnceLock<Arc<JsonObject>>,
+}
+
+impl SchemaCache {
+    const fn new() -> Self {
+        Self { input: OnceLock::new(), output: OnceLock::new() }
+    }
+}
+
+/// Per-tool memoized schemas, indexed in lockstep with [`TOOLS`].
+static SCHEMAS: [SchemaCache; TOOLS.len()] = [const { SchemaCache::new() }; TOOLS.len()];
+
 impl ToolDef {
+    fn schema_cache(&self) -> &'static SchemaCache {
+        let idx = TOOLS.iter().position(|t| t.name == self.name).expect("every ToolDef belongs to TOOLS");
+        &SCHEMAS[idx]
+    }
+
+    /// The tool's compacted input JSON Schema, generated once and cached.
+    pub fn input_schema(&self) -> &'static Arc<JsonObject> {
+        self.schema_cache().input.get_or_init(|| Arc::new((self.input)()))
+    }
+
+    /// The tool's compacted output JSON Schema, generated once and cached.
+    pub fn output_schema(&self) -> &'static Arc<JsonObject> {
+        self.schema_cache().output.get_or_init(|| Arc::new((self.output)()))
+    }
+
     /// The MCP tool definition.
     pub fn tool(&self) -> Tool {
         let annotations = ToolAnnotations::new()
@@ -368,8 +397,8 @@ impl ToolDef {
             .destructive(self.name == "delete_benchmark")
             .idempotent(!self.mutating || matches!(self.name, "stop_run" | "stop_bench_entry"))
             .open_world(false);
-        Tool::new(self.name, self.description, (self.input)())
-            .with_raw_output_schema((self.output)())
+        Tool::new(self.name, self.description, Arc::clone(self.input_schema()))
+            .with_raw_output_schema(Arc::clone(self.output_schema()))
             .with_annotations(annotations)
     }
 }
@@ -394,8 +423,8 @@ pub fn describe() -> Value {
                     "name": t.name,
                     "description": t.description,
                     "mutating": t.mutating,
-                    "inputSchema": Value::Object((*(t.input)()).clone()),
-                    "outputSchema": Value::Object((*(t.output)()).clone()),
+                    "inputSchema": Value::Object((**t.input_schema()).clone()),
+                    "outputSchema": Value::Object((**t.output_schema()).clone()),
                 })
             })
             .collect(),

@@ -71,25 +71,53 @@ fn run_status_lists_distinct_warnings() {
 fn unknown_arguments_are_rejected_with_a_suggestion() {
     let args = |v: Value| v.as_object().unwrap().clone();
     let train = find("train").unwrap();
-    let schema = (train.input)();
+    let schema = train.input_schema();
     assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
     let ok = args(json!({ "dataset_id": "ds_1", "epochs": 1, "lr0": 0.1, "augment": { "mosaic": 0.5 } }));
-    assert!(unknown_argument("train", &schema, &ok).is_none());
-    assert!(unknown_argument("train", &schema, &args(json!({ "resume_run_id": "run_1" }))).is_none());
-    let e = unknown_argument("train", &schema, &args(json!({ "dataset_id": "d", "lr": 0.1 }))).unwrap();
+    assert!(unknown_argument("train", schema, &ok).is_none());
+    assert!(unknown_argument("train", schema, &args(json!({ "resume_run_id": "run_1" }))).is_none());
+    let e = unknown_argument("train", schema, &args(json!({ "dataset_id": "d", "lr": 0.1 }))).unwrap();
     assert_eq!(e.body.code, "invalid_arguments");
     assert_eq!(e.body.message, "unknown argument `lr`; did you mean `lr0`?");
     assert!(e.body.hint.as_deref().unwrap().contains("dataset_id"));
     let e =
-        unknown_argument("train", &schema, &args(json!({ "dataset_id": "d", "model": "folo-s" }))).unwrap();
+        unknown_argument("train", schema, &args(json!({ "dataset_id": "d", "model": "folo-s" }))).unwrap();
     assert!(e.body.message.contains("did you mean `arch`?"), "{}", e.body.message);
     let nested = args(json!({ "dataset_id": "d", "augment": { "mosiac": 0.5 } }));
-    let e = unknown_argument("train", &schema, &nested).unwrap();
+    let e = unknown_argument("train", schema, &nested).unwrap();
     assert_eq!(e.body.message, "unknown argument `augment.mosiac`; did you mean `mosaic`?");
     for t in TOOLS {
-        let s = (t.input)();
+        let s = t.input_schema();
         assert_eq!(s.get("additionalProperties"), Some(&json!(false)), "{}", t.name);
-        assert!(unknown_argument(t.name, &s, &args(json!({ "zzz_bogus": 1 }))).is_some(), "{}", t.name);
+        assert!(unknown_argument(t.name, s, &args(json!({ "zzz_bogus": 1 }))).is_some(), "{}", t.name);
+    }
+}
+
+#[test]
+fn tool_schemas_are_memoized_and_names_are_unique() {
+    let mut seen = std::collections::HashSet::new();
+    for t in TOOLS {
+        assert!(seen.insert(t.name), "duplicate tool name `{}`", t.name);
+        let in_a = t.input_schema();
+        let in_b = t.input_schema();
+        assert!(Arc::ptr_eq(in_a, in_b), "{}: input schema not memoized", t.name);
+        let out_a = t.output_schema();
+        let out_b = t.output_schema();
+        assert!(Arc::ptr_eq(out_a, out_b), "{}: output schema not memoized", t.name);
+        let tool_a = t.tool();
+        let tool_b = t.tool();
+        assert!(Arc::ptr_eq(&tool_a.input_schema, in_a), "{}: tool() rebuilt input schema", t.name);
+        assert!(Arc::ptr_eq(&tool_a.input_schema, &tool_b.input_schema), "{}", t.name);
+        assert!(
+            Arc::ptr_eq(tool_a.output_schema.as_ref().unwrap(), out_a),
+            "{}: tool() rebuilt output schema",
+            t.name
+        );
+        assert!(
+            Arc::ptr_eq(tool_a.output_schema.as_ref().unwrap(), tool_b.output_schema.as_ref().unwrap()),
+            "{}",
+            t.name
+        );
     }
 }
 
@@ -173,7 +201,7 @@ fn diff_lists_differing_fields() {
 #[tokio::test]
 async fn train_names_are_capped_as_the_server_caps_them() {
     use folo_server::store::{MAX_RUN_NAME_CHARS, Store};
-    let schema = (find("train").unwrap().input)();
+    let schema = find("train").unwrap().input_schema();
     assert_eq!(schema["properties"]["name"]["maxLength"], json!(MAX_RUN_NAME_CHARS));
     let store = std::sync::Arc::new(folo_server::MockStore::new());
     let ds = store.list_datasets().unwrap().remove(0).id;
