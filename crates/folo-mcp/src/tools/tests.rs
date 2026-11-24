@@ -225,3 +225,40 @@ async fn train_names_are_capped_as_the_server_caps_them() {
     );
     assert!(server.inner.train(args(MAX_RUN_NAME_CHARS)).await.is_ok());
 }
+
+#[test]
+fn tool_annotations_match_tool_semantics() {
+    let mut destructive = Vec::new();
+    let mut idempotent_mutating = Vec::new();
+    let mut open_world = Vec::new();
+    for t in TOOLS {
+        let ann = t.tool().annotations.expect("every tool carries annotations");
+        assert_eq!(ann.read_only_hint, Some(!t.mutating), "{}: read_only_hint", t.name);
+        if !t.mutating {
+            assert_eq!(ann.idempotent_hint, Some(true), "{}: read-only tool must be idempotent", t.name);
+            assert_eq!(
+                ann.destructive_hint,
+                Some(false),
+                "{}: read-only tool must not be destructive",
+                t.name
+            );
+        } else if ann.idempotent_hint == Some(true) {
+            idempotent_mutating.push(t.name);
+        }
+        if ann.destructive_hint == Some(true) {
+            destructive.push(t.name);
+        }
+        if ann.open_world_hint == Some(true) {
+            open_world.push(t.name);
+        }
+    }
+    assert_eq!(destructive, ["cloud_terminate", "delete_benchmark"]);
+    assert_eq!(
+        idempotent_mutating,
+        ["register_dataset", "stop_run", "stop_labeling", "review_label_images", "stop_bench_entry"]
+    );
+    assert_eq!(
+        open_world,
+        ["cloud_connections", "cloud_offers", "cloud_instances", "cloud_terminate", "start_labeling"]
+    );
+}
