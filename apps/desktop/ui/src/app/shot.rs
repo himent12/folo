@@ -50,7 +50,11 @@ pub(crate) fn flag_value<'a>(args: &'a [String], name: &str) -> Result<Option<&'
             None => return Err(anyhow!("{name}: missing its value")),
             Some("") => return Err(anyhow!("{name}: value cannot be empty")),
             Some(v) if v.starts_with("--") => return Err(anyhow!("{name}: missing its value (got `{v}`)")),
-            Some(v) => found = Some(v),
+            Some(v) => {
+                if found.is_none() {
+                    found = Some(v);
+                }
+            }
         }
     }
     Ok(found)
@@ -240,5 +244,9 @@ mod tests {
         ] {
             assert!(ShotArgs::parse(&args(bad)).is_err(), "{bad:?}");
         }
+        // Repeated valid flags keep first-value precedence while still validating every occurrence.
+        let repeated =
+            ShotArgs::parse(&args(&["--shot", "first.png", "--shot", "second.png"])).unwrap().unwrap();
+        assert_eq!(repeated.path, PathBuf::from("first.png"));
     }
 }

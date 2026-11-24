@@ -213,11 +213,7 @@ fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
                     i += 2;
                     continue;
                 }
-                _ => {
-                    if matches!(a, "--scenario" | "--open") {
-                        out.push(format!("{a}: missing its value (see --help)"));
-                    }
-                }
+                _ => out.push(format!("{a}: missing its value (see --help)")),
             }
         }
         i += 1;
@@ -596,6 +592,10 @@ mod tests {
         assert!(!headless_arg_errors(&["--scenario", "overview+ligth", "--bench-frames", "2"]).is_empty());
         assert!(!headless_arg_errors(&["--open", "run:", "--shot", "a.png"]).is_empty());
         assert!(!headless_arg_errors(&["--open", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--server", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--theme", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--bench-frames", "2", "--shot-time"]).is_empty());
+        assert!(!headless_arg_errors(&["--bench-frames", "2", "--server"]).is_empty());
         let combined =
             headless_arg_errors(&["--scenario", "overview+ligth", "--shot", "a.png", "--bench-frames", "1"]);
         assert!(
