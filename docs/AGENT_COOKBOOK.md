@@ -49,7 +49,7 @@ folo train --data /data/cats --model folo-s --epochs 50 --imgsz 640 --json --jso
 #  "weights":{"best":"runs/cats-s/weights/best.folo","last":".../last.folo"}}
 folo stop runs/cats-s                                      # from another process: stop after the current batch
 folo train --resume runs/cats-s/weights/last.folo --json   # after a stop, Ctrl+C or a killed process
-folo train --model runs/cats-s/weights/best.folo --data /data/cats --epochs 20 --json   # after it completed
+folo train --weights runs/cats-s/weights/best.folo --data /data/cats --epochs 20 --json   # after it completed
 ```
 
 ## 2. Evaluate and compare two runs
@@ -179,3 +179,164 @@ Every recipe above works unchanged; `folo_info` reports `"mode": "proxy"`. Run s
 second through the HTTP API. The same data dir also works the other way round: runs an embedded `folo mcp`
 trained are listed by a later `folo serve` on the same data dir (only one process should use a data dir at a
 time).
+
+## 7. Label an unlabeled folder of images
+Have Claude Code (`claude`), Codex (`codex`) or Antigravity (`antigravity`) draw draft boxes, inspect and fix them,
+then export a registered YOLO dataset ready for `train` ([LABELING.md](LABELING.md)).
+
+```
+→ create_label_job { "name": "street", "classes": ["car", "person"],
+                     "instructions": "Label every car and pedestrian.", "paths": ["/data/street"] }
+                                                  ← { "job_id": "lb_3f9a", "images": 240, "added": 240, "skipped": 0 }
+→ start_labeling { "job_id": "lb_3f9a", "agent": "claude", "image_ids": ["1", "2", "3", "4", "5"] }
+                                                  ← { "job_id": "lb_3f9a", "total": 5, "model": ... }
+→ label_status { "job_id": "lb_3f9a" }            ← poll until status: "idle" (counts, reviewed, run, log)
+→ view_label_image { "job_id": "lb_3f9a" }        ← image: { id: "1", size: [1024, 576], revision: "3-5d01c2e7", boxes }
+                                                    + image/jpeg content item with numbered boxes
+→ review_label_images { "job_id": "lb_3f9a", "image_ids": ["1"], "expect": { "1": "3-5d01c2e7" } }
+                                                  ← { "updated": 1, "to_review": 4 } (check failed[] for conflicts)
+→ view_label_image { "job_id": "lb_3f9a" }        ← next unreviewed image: id: "2", size: [1024, 576], revision: "2-1c9e04aa"
+→ set_label_boxes { "job_id": "lb_3f9a", "image_id": "2", "expect": "2-1c9e04aa",
+                    "size": [1024, 576], "relabel": [[2, 1]], "add": [[0, 120, 80, 340, 400]] }
+                                                  ← updated image view (source: "manual", reviewed: true, new revision)
+→ start_labeling { "job_id": "lb_3f9a", "agent": "claude" }          # or "codex" / "antigravity"; labels the rest
+→ label_status { "job_id": "lb_3f9a" }            ← wait until status: "idle" (export fails with label_job_active while running)
+→ export_label_dataset { "job_id": "lb_3f9a", "val_fraction": 0.2, "seed": 0 }
+                                                  ← { "dataset_id": "ds_8c1e", "name": "street", "path": "...", "train": 192, "val": 48 }
+```
+
+Start with a small sample (`image_ids`) and check it before labeling the whole folder; if the agent made a systematic
+mistake, re-run those ids with `"note"` explaining what to change. Boxes are `[class, x1, y1, x2, y2]` in pixels of
+the view's `size` (1024 px on the long side by default). Pass the view's `revision` as `expect` on every
+`set_label_boxes` and `review_label_images` call: if another run or user changed the boxes in the meantime,
+`set_label_boxes` fails with an `isError` result (`label_boxes_changed`), while `review_label_images` returns a
+normal batch response listing any stale ids in `failed` (`code: "label_boxes_changed"`), so always check `failed`.
+The prompt `label_folder { "folder_path": "/data/street", "classes": "car, person" }` returns this walk-through as
+instructions.
+
+CLI (`folo label` shares the same operations and records; without a `folo serve` owning the data dir, `start` waits
+until the run ends):
+```sh
+folo label agents --json                                   # check which CLIs (claude, codex, agy) are installed
+folo label create street --classes car,person --instructions "Label every car and pedestrian." \
+  --path /data/street --json                               # {"job_id":"lb_3f9a","images":240,"added":240,"skipped":0}
+folo label start lb_3f9a --agent antigravity --images 1,2,3,4,5 --wait --json
+folo label view lb_3f9a -o next.jpg --json                 # writes next.jpg for image 1; prints size, revision, boxes
+folo label review lb_3f9a 1 --expect 1=3-5d01c2e7 --json
+folo label view lb_3f9a -o next.jpg --json                 # next unreviewed image (id 2): read its size, revision, box numbers
+folo label set lb_3f9a 2 --expect 2-1c9e04aa --size 1024x576 --relabel 2=person --add car,120,80,340,400 --json
+folo label start lb_3f9a --agent antigravity --wait --json # label the remaining unlabeled images
+folo label export lb_3f9a --val-fraction 0.2 --seed 0 --json
+```
+
+## 8. Create and run a vision benchmark
+Freeze a labeled split (or labeling job) with a stress-condition plan and score models or external predictions across
+accuracy, robustness, self-labeling, calibration and localization ([BENCH.md](BENCH.md)).
+
+```
+→ bench_catalog {}                                ← conditions: [{ id, group, description }], severities: 5,
+                                                    default_plan: [...], axes: [{ axis, weight }]
+→ create_benchmark { "name": "cats-stress", "dataset_id": "ds_8f21", "split": "val", "max_images": 300, "seed": 0 }
+                                                  ← { "id": "bn_3f9a0c1e5b7d", "images": 300, "conditions": ..., "entries": 0 }
+→ start_bench_entry { "benchmark_id": "bn_3f9a0c1e5b7d", "model_id": "m_4c1a" }
+                                                  ← { "benchmark_id": "bn_3f9a0c1e5b7d", "entry_id": "be_91c2", "status": "queued", ... }
+→ bench_entry { "benchmark_id": "bn_3f9a0c1e5b7d", "entry_id": "be_91c2", "wait": 50 }
+                                                  ← status: "done", result: { score, partial, axes, accuracy: { map50_95, ci95 },
+                                                    conditions: [...], ece, mean_iou, self_labeling, ms_per_image }
+→ get_benchmark { "benchmark_id": "bn_3f9a0c1e5b7d" }
+                                                  ← plan, fingerprint, leaderboard (best first, up to 50 rows)
+```
+
+Pass `plan: { "conditions": [{ "condition": "haze", "severities": [1, 3], "weight": 1 }] }` to override
+`default_plan`, or `label_job_id` instead of `dataset_id` (omit `split`; passing `split` with `label_job_id` fails
+with `invalid_arguments`) to benchmark a labeling job's labeled images. To score another detector, pass
+`predictions_file` and `name` to `start_bench_entry` (JSON Lines of
+`{"image", "condition"?, "severity"?, "boxes": [{"class", "score", "x1", "y1", "x2", "y2"}]}` records; scored at
+once). Call `bench_entry` with `wait: 50` in a loop while `status` is `queued`, `running`, or `stopping`, then check
+the terminal state: `done` carries `result`, `failed` carries `error`/`hint`, and `stopped` has no `result`
+(`stop_bench_entry` cancels a running entry). Note that benchmark tools are unavailable under `folo mcp --confine`
+(`not_supported`).
+
+CLI:
+```sh
+folo bench catalog --json
+folo bench create cats-stress --data /data/cats --split val --max-images 300 --seed 0 --json
+folo bench run bn_3f9a0c1e5b7d --model m_4c1a --wait --json      # progress records, then finished state with result
+folo bench run bn_3f9a0c1e5b7d --predictions yolo.jsonl --name yolo26n --json
+folo bench status bn_3f9a0c1e5b7d be_91c2 --wait --json
+folo bench show bn_3f9a0c1e5b7d --json                           # benchmark plan and ranked leaderboard
+```
+
+## 9. Fine-tune on a rented cloud GPU
+Pull published pretrained weights once into the local cache (`folo weights pull`), connect a cloud provider once in
+Studio, Desktop or with `folo cloud connect` (MCP never handles credentials), then start a cloud run with `compute`
+([CLOUD.md](CLOUD.md)).
+
+```
+→ list_models {}                                  ← includes { "id": "folo-n-coco-v5", "source": "published", ... } once pulled
+→ cloud_connections {}                            ← { "connections": [{ "id": "cc_4d2a", "provider": "runpod", "status": "ok", ... }] }
+→ cloud_offers { "connection_id": "cc_4d2a" }     ← { "offers": [{ "id", "gpu", "vram_bytes", "price_per_hour", "availability" }], "fetched" }
+→ train { "dataset_id": "ds_8f21", "weights": "folo-n-coco-v5", "epochs": 50, "imgsz": 640, "amp": true,
+          "compute": { "connection_id": "cc_4d2a", "offer_id": "NVIDIA GeForce RTX 4090@secure", "max_hours": 4 } }
+                                                  ← { "run_id": "run_7b2e", "status": "queued" }
+→ run_status { "run_id": "run_7b2e" }             ← status, epoch, best, cloud: { phase, instance_id, deadline, cost_usd, synced }
+→ cloud_instances {}                              ← alive instances first, then those ended in the last 7 days
+→ cloud_terminate { "instance_id": "ci_8a2f" }    ← manual termination if needed (the run fails with cloud_instance_lost)
+```
+
+Leave `arch` out when `weights` is set: fine-tuning takes the weights' architecture (`"folo-n-coco-v5"` or
+`"folo-s-coco"`). `compute.max_hours` (default 12, range 0.25–720) caps spend and arms the worker watchdog. Once in
+`training`, a cloud run keeps going even if the MCP session closes; `train { "resume_run_id": "run_7b2e", "compute":
+... }` resumes a stopped or lost run on a fresh instance. Passing `"compute": null` resumes on this machine instead,
+keeping the run's stored `amp` setting (so an `amp: true` run needs a local GPU started with `--tensor-cores` /
+`FOLO_GPU_TENSOR_CORES=1`, or else start a new f32 run using the run's weights).
+
+CLI (`folo weights` and `folo cloud` manage the local cache, connections, offers and instances; `folo train` runs
+locally, so launch cloud runs via MCP `train` above or `POST /api/runs` on `folo serve`):
+```sh
+folo weights pull folo-n-coco-v5 --json
+RUNPOD_API_KEY=rpa_... folo cloud connect runpod --secret api_key=env:RUNPOD_API_KEY --json
+folo cloud offers cc_4d2a --json                  # one offer per line, cheapest first
+curl -s http://127.0.0.1:7878/api/runs -H 'Content-Type: application/json' -d '{
+  "dataset_id": "ds_8f21", "weights": "folo-n-coco-v5", "epochs": 50, "imgsz": 640, "amp": true,
+  "compute": { "connection_id": "cc_4d2a", "offer_id": "NVIDIA GeForce RTX 4090@secure", "max_hours": 4 }
+}'
+folo cloud instances --json
+folo cloud terminate ci_8a2f --json
+```
+
+## 10. CPU int8 calibration and SEBF + DFL-CGR post-processing
+For faster CPU inference on AVX-VNNI processors, calibrate a trained model with `folo quantize` and run it with
+`--precision int8` ([MODEL.md](MODEL.md#96-int8-inference-opt-in-cpu)). For higher AP on one-to-many (`o2m`) models at any
+precision, enable Student-t Exclusive Box Fusion (`--fusion sebf`) with confidence-gated DFL repulsion
+(`--score dfl-cgr`) ([MODEL.md](MODEL.md#94-box-fusion-opt-in)).
+
+CLI:
+```sh
+# 1. Calibrate int8 activation ranges on 512 sampled training images (writes best-int8.folo; never overwrites)
+folo quantize --model runs/cats-s/weights/best.folo --data /data/cats --images 512 --method percentile --json
+# {"path":"runs/cats-s/weights/best-int8.folo","bytes":...,"images":512,"imgsz":640,"method":"percentile","tail":0.0001,"boundaries":...,"seconds":...}
+
+# 2. Evaluate and predict in int8 on the CPU (--device auto picks cpu; a GPU device is a usage error)
+folo val --model runs/cats-s/weights/best-int8.folo --data /data/cats --precision int8 --json
+folo predict --model runs/cats-s/weights/best-int8.folo /data/photos --precision int8 --conf 0.25 --json
+
+# 3. Higher-AP post-processing on o2m models (pairs with f32, --half / --precision f16, or --precision int8)
+folo val --model runs/cats-s/weights/best.folo --data /data/cats \
+  --fusion sebf --score dfl-cgr --iou 0.78 --max-det 1000 --json
+folo predict --model runs/cats-s/weights/best.folo /data/photos \
+  --fusion sebf --score dfl-cgr --iou 0.78 --max-det 1000 --conf 0.25 --json
+```
+
+MCP note: `quantize`, `--precision int8`, `--fusion` and `--score` are CLI workflows only. Embedded `folo mcp` has
+no `--precision` flag and always runs `f32` on `--device`; `f16` inference through MCP only applies in proxy mode
+when `folo serve` is started with `--precision f16`. In both modes, MCP `val` and `predict` use the model's default
+head (standard NMS for `o2m`, NMS-free for `o2o`):
+
+```
+→ val { "model_id": "m_4c1a", "dataset_id": "ds_8f21", "split": "val" }   ← default baseline (f32 embedded; f32/f16 via folo serve)
+```
+
+On CPUs without AVX-VNNI (including AVX-512 VNNI), `--precision int8` falls back to a portable path slower than `f32`
+and prints a `note:` on stderr. Models trained with `--head o2o` predict end-to-end without NMS by default and ignore
+`--fusion` and `--score` unless evaluated with `--head o2m`.
