@@ -9,10 +9,11 @@
  * the same at length), so a user who never opens Settings learns of it.
  */
 import ArrowRight from '$icons/arrow-right';
-import { computed, css, For } from 'fw';
-import { hub } from '$lib/api/index';
+import { computed, css, For, untrack } from 'fw';
+import { ApiError, hub } from '$lib/api/index';
 import { hasFeature } from '$lib/api/queue';
 import { Resource } from '$lib/api/resource';
+import { abortError } from '$lib/api/share';
 import type { Bench, BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
 import { hasCloud } from '$lib/cloud';
@@ -32,8 +33,19 @@ interface Item {
   state?: OwnStatus;
   name: string;
   detail: string;
+  /** True when the latest refresh for this item's detail failed transiently. */
+  refreshFailed?: boolean;
   path: string;
 }
+
+interface BenchWork {
+  entries: BenchEntry[];
+  loops: BenchLoop[];
+  entriesFailed: boolean;
+  loopsFailed: boolean;
+}
+
+const isMissingOrUnsupported = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   // Polled with the run list (the same period, so one timer): a job or entry that starts shows within seconds.
@@ -43,15 +55,43 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   const instances = new Resource((s) => (hasCloud(props.system) ? hub.api.cloudInstances(s) : Promise.resolve([] as CloudInstance[])), { poll: 5000 });
   // The entries and loops of the benchmarks at work (seldom more than one), polled with them, for how far each is.
   const activeIds = computed(() => (benches.data ?? []).filter((b) => b.active).map((b) => b.id).join(' '));
-  const work = new Resource(
+  const work = new Resource<Map<string, BenchWork>>(
     async (s) => {
       const ids = activeIds.get().split(' ').filter(Boolean);
+      if (!ids.length) return new Map();
+      const prev = untrack(() => work.data);
       const lists = await Promise.all(
-        ids.map((id) =>
-          Promise.all([hub.api.benchEntries(id, s).catch((): BenchEntry[] => []), hub.api.benchLoops(id, s).catch((): BenchLoop[] => [])]),
-        ),
+        ids.map((id) => Promise.allSettled([hub.api.benchEntries(id, s), hub.api.benchLoops(id, s)])),
       );
-      return new Map(ids.map((id, i) => [id, { entries: lists[i]![0], loops: lists[i]![1] }]));
+      if (s.aborted) throw abortError();
+      const next = new Map<string, BenchWork>();
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const prior = prev?.get(id);
+        const [entriesRes, loopsRes] = lists[i]!;
+        let entries: BenchEntry[];
+        let entriesFailed = false;
+        if (entriesRes.status === 'fulfilled') {
+          entries = entriesRes.value;
+        } else if (isMissingOrUnsupported(entriesRes.reason)) {
+          entries = [];
+        } else {
+          entries = prior?.entries ?? [];
+          entriesFailed = true;
+        }
+        let loops: BenchLoop[];
+        let loopsFailed = false;
+        if (loopsRes.status === 'fulfilled') {
+          loops = loopsRes.value;
+        } else if (isMissingOrUnsupported(loopsRes.reason)) {
+          loops = [];
+        } else {
+          loops = prior?.loops ?? [];
+          loopsFailed = true;
+        }
+        next.set(id, { entries, loops, entriesFailed, loopsFailed });
+      }
+      return next;
     },
     { poll: 5000 },
   );
@@ -60,12 +100,24 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
     return list.find((x) => x.status === 'running' || x.status === 'stopping') ?? list.find((x) => x.status === 'queued');
   };
   const loopsAtWork = (b: Bench) => (work.data?.get(b.id)?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
-  /** A benchmark's line: its entry at work and how far it is, else what its flag says (until its lists are in). */
-  const benchDetail = (b: Bench) => {
+  /** A benchmark's line: its entry at work and how far it is, preserving last known detail and noting refresh failures. */
+  const benchDetail = (b: Bench): { detail: string; failed: boolean } => {
+    const w = work.data?.get(b.id);
     const e = atWorkEntry(b);
-    if (!e) return 'An entry or a loop is running';
-    const p = progressFacts(e);
-    return `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
+    const listStale = benches.stale !== undefined;
+    if (e) {
+      const p = progressFacts(e);
+      const base = `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
+      if (w?.entriesFailed) return { detail: `${base} · refresh failed`, failed: true };
+      if (w?.loopsFailed && !loopsAtWork(b).length) return { detail: `${base} · could not refresh loops`, failed: true };
+      if (listStale) return { detail: `${base} · refresh failed`, failed: true };
+      return { detail: base, failed: false };
+    }
+    if (w?.entriesFailed && w?.loopsFailed) return { detail: 'Could not refresh benchmark activity', failed: true };
+    if (w?.entriesFailed) return { detail: 'Could not refresh benchmark entries', failed: true };
+    if (w?.loopsFailed) return { detail: 'Could not refresh benchmark loops', failed: true };
+    if (listStale) return { detail: 'An entry or a loop is running · refresh failed', failed: true };
+    return { detail: 'An entry or a loop is running', failed: false };
   };
 
   const items = computed<Item[]>(() => [
@@ -76,31 +128,46 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
         kind: 'Cloud',
         state: { status: 'failed' as const, label: 'Cloud' },
         name: i.name,
-        detail: 'Termination not confirmed: it may still be billed',
+        detail: instances.stale !== undefined ? 'Termination not confirmed: it may still be billed · refresh failed' : 'Termination not confirmed: it may still be billed',
+        refreshFailed: instances.stale !== undefined,
         path: '/settings?section=cloud',
       })),
     ...(jobs.data ?? [])
       .filter((j) => j.status !== 'idle')
-      .map((j) => ({
-        id: j.id,
-        kind: 'Labeling',
-        name: j.name,
-        detail: j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`,
-        path: `/datasets/label/${j.id}`,
-      })),
+      .map((j) => {
+        const base = j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`;
+        const failed = jobs.stale !== undefined;
+        return {
+          id: j.id,
+          kind: 'Labeling',
+          name: j.name,
+          detail: failed ? `${base} · refresh failed` : base,
+          refreshFailed: failed,
+          path: `/datasets/label/${j.id}`,
+        };
+      }),
     ...(benches.data ?? [])
       .filter((b) => b.active)
-      .flatMap((b) => [
-        // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row.
-        ...(atWorkEntry(b) || !loopsAtWork(b).length ? [{ id: b.id, kind: 'Benchmark', name: b.name, detail: benchDetail(b), path: `/benchmarks/${b.id}` }] : []),
-        ...loopsAtWork(b).map((l) => ({
-          id: l.id,
-          kind: 'Loop',
-          name: l.name,
-          detail: `${loopStatus(l).label} · ${b.name}`,
-          path: `/benchmarks/${b.id}/loops/${l.id}`,
-        })),
-      ]),
+      .flatMap((b) => {
+        const w = work.data?.get(b.id);
+        const loops = loopsAtWork(b);
+        const showBenchRow = !!atWorkEntry(b) || !loops.length || !!w?.entriesFailed;
+        const bd = benchDetail(b);
+        const loopFailed = !!w?.loopsFailed || benches.stale !== undefined;
+        return [
+          // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row,
+          // unless refreshing entries failed and needs to be surfaced.
+          ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, detail: bd.detail, refreshFailed: bd.failed, path: `/benchmarks/${b.id}` }] : []),
+          ...loops.map((l) => ({
+            id: l.id,
+            kind: 'Loop',
+            name: l.name,
+            detail: loopFailed ? `${loopStatus(l).label} · ${b.name} · refresh failed` : `${loopStatus(l).label} · ${b.name}`,
+            refreshFailed: loopFailed,
+            path: `/benchmarks/${b.id}/loops/${l.id}`,
+          })),
+        ];
+      }),
   ]);
 
   return (
@@ -114,7 +181,9 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
                   <a href={href(i().path)}>
                     <StatusBadge plain state={i().state ?? atWork(i().kind)} />{' '}
                     <span class="name truncate">{i().name}</span>{' '}
-                    <span class="detail num truncate">{i().detail}</span>{' '}
+                    <span class="detail num truncate" class:stale={!!i().refreshFailed} data-refresh-failed={i().refreshFailed ? 'true' : undefined}>
+                      {i().detail}
+                    </span>{' '}
                     <ArrowRight size={14} strokeWidth={1.75} />
                   </a>
                 </li>
@@ -154,6 +223,9 @@ css`
   }
   .detail {
     font-size: var(--type-sm-size);
+  }
+  .detail.stale {
+    color: var(--text-secondary);
   }
   /* Phones: the kind and the name on one line, what it is doing under the name. */
   @media (max-width: 767px) {
