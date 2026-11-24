@@ -134,6 +134,159 @@ describe('tooltip', () => {
     page.remove();
   });
 
+  it('does not dismiss an open or pending tooltip when an unrelated tooltip anchor unmounts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_000);
+    const active = document.createElement('button');
+    const other = document.createElement('button');
+    document.body.append(active, other);
+    const tActive = tooltip(active, 'Keep open');
+    const tOther = tooltip(other, 'Unrelated');
+
+    // Pending timer on `active` survives `other.destroy()`.
+    active.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(100);
+    tOther.destroy();
+    other.remove();
+    vi.advanceTimersByTime(400);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Keep open');
+    expect(active.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // A second unrelated anchor mounting and unmounting while `active` is visible leaves it open.
+    const another = document.createElement('button');
+    document.body.appendChild(another);
+    const tAnother = tooltip(another, 'Transient');
+    tAnother.destroy();
+    another.remove();
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(active.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // Destroying the active anchor itself dismisses the tooltip and releases its description.
+    tActive.destroy();
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(active.hasAttribute('aria-describedby')).toBe(false);
+    active.remove();
+  });
+
+  it('ignores update(null) on unrelated anchors and dismisses when the active anchor clears', () => {
+    vi.useFakeTimers();
+    const active = document.createElement('button');
+    const other = document.createElement('button');
+    document.body.append(active, other);
+    const tActive = tooltip(active, 'Active tip');
+    const tOther = tooltip(other, 'Other tip');
+    active.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+
+    tOther.update(null);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(active.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    tActive.update(null);
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(active.hasAttribute('aria-describedby')).toBe(false);
+    tActive.destroy();
+    tOther.destroy();
+    active.remove();
+    other.remove();
+  });
+
+  it('dismisses on ancestor or window scroll, ignores unrelated sibling scrollers, and removes the exact listener', () => {
+    vi.useFakeTimers();
+    const scroller = document.createElement('div');
+    const sibling = document.createElement('div');
+    const b = document.createElement('button');
+    scroller.appendChild(b);
+    document.body.append(scroller, sibling);
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+    const t = tooltip(b, 'Scroll away');
+
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    const scrollAdd = addSpy.mock.calls.find(([type]) => type === 'scroll');
+    expect(scrollAdd?.[2]).toEqual({ capture: true, passive: true });
+    const scrollListener = scrollAdd?.[1];
+    expect(typeof scrollListener).toBe('function');
+
+    // Unrelated sibling container scroll (e.g. live streaming logs) must not dismiss the tooltip.
+    sibling.dispatchEvent(new Event('scroll', { bubbles: false }));
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // Ancestor container scroll does not bubble, so capture-phase listening dismisses it and removes the exact callback.
+    scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    expect(removeSpy).toHaveBeenCalledWith('scroll', scrollListener, true);
+
+    // Window scroll also dismisses a visible tooltip.
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    window.dispatchEvent(new Event('scroll'));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+    t.destroy();
+    scroller.remove();
+    sibling.remove();
+  });
+
+  it('cancels a queued handoff on scroll and keeps handoff descriptions and grace timers clean', () => {
+    vi.useFakeTimers();
+    const a = document.createElement('button');
+    const b = document.createElement('button');
+    a.setAttribute('aria-describedby', 'hint-a');
+    document.body.append(a, b);
+    const tA = tooltip(a, 'First');
+    const tB = tooltip(b, 'Second');
+
+    // Scroll mid-handoff: A is visible, pointer enters B (0 ms timer queued), window scrolls before timer fires.
+    a.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    window.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+
+    // Direct handoff: A's own aria-describedby survives, B gets folo-tooltip, and A's grace timer does not dismiss B.
+    a.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a folo-tooltip');
+    a.dispatchEvent(new PointerEvent('pointerleave'));
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Second');
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // Dismissing while hovered on the tooltip element then entering B must not let a stale hideTimer close B.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    tip.dispatchEvent(new PointerEvent('pointerleave'));
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    tA.destroy();
+    tB.destroy();
+    a.remove();
+    b.remove();
+  });
+
   describe('placeTip', () => {
     const view = { left: 4, top: 4, right: 1020, bottom: 764 };
     const size = { width: 240, height: 40 };

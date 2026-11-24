@@ -63,7 +63,7 @@ impl Inner {
         if self.opts.read_only && def.mutating {
             return Err(read_only(def.name));
         }
-        if let Some(e) = unknown_argument(def.name, &(def.input)(), &args) {
+        if let Some(e) = unknown_argument(def.name, def.input_schema(), &args) {
             return Err(e);
         }
         super::bench::refuse_confined(def.name, self.opts.confine)?;

@@ -168,7 +168,10 @@ impl TextLayout {
         let align = window.text_style().text_align;
         let mut origin = bounds.origin;
         for line in &state.lines {
-            if let Err(error) = line.paint_background(origin, line_height, align, Some(bounds), window, cx) {
+            if line.decoration_runs().iter().any(|run| run.background_color.is_some())
+                && let Err(error) =
+                    line.paint_background(origin, line_height, align, Some(bounds), window, cx)
+            {
                 eprintln!("folo-ui: painting text background failed: {error:#}");
             }
             if let Err(error) = line.paint(origin, line_height, align, Some(bounds), window, cx) {
