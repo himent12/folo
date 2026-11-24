@@ -146,8 +146,9 @@ const BARE_FLAGS: &[&str] = &["--mock", "--list-scenarios", "-h", "--help", "-V"
 
 /// What is wrong with `args` (without the program name) that the app would otherwise pass over in
 /// silence: an unknown option, an option missing its value, a theme that is no mode and no theme of
-/// `themes`, a scenario whose screen is not one of `scenario::ALL`'s. One stderr line each; the app
-/// still opens.
+/// `themes`, a scenario with an unknown screen or modifier, or an invalid `--open` target. One
+/// stderr line each; interactive launches still open, while headless launches (`--shot` /
+/// `--bench-frames`) fail closed on invalid scenario or `--open` requests.
 fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -161,10 +162,13 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
                             "--theme {v}: not dark, light, system or a theme's id; using the last theme, else dark"
                         ));
                     }
-                    let screen = v.split('+').next().unwrap_or("").trim();
-                    if a == "--scenario" && !scenario::ALL.iter().any(|s| s.split('+').next() == Some(screen))
+                    if a == "--scenario"
+                        && let Err(err) = scenario::validate(v)
                     {
-                        out.push(format!("--scenario {v}: no such scenario (see --list-scenarios)"));
+                        out.push(err);
+                    }
+                    if a == "--open" && v != "new-run" && app::Route::parse(v).is_none() {
+                        out.push(format!("--open {v}: not a screen (see --help)"));
                     }
                     i += 2;
                     continue;
@@ -173,6 +177,43 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
             }
         } else if a.starts_with('-') && !BARE_FLAGS.contains(&a) {
             out.push(format!("{a}: unknown option, ignored (see --help)"));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Errors that must fail a headless capture or benchmark (`--shot` or `--bench-frames`) before a
+/// frame is rendered, so an invalid `--scenario` or `--open` never silently produces a default PNG.
+fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    let is_headless = args.iter().any(|a| matches!(a.as_ref(), "--shot" | "--bench-frames"));
+    if !is_headless {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_ref();
+        if VALUE_FLAGS.contains(&a) {
+            match args.get(i + 1).map(AsRef::as_ref) {
+                Some(v) if !v.starts_with("--") => {
+                    if a == "--scenario"
+                        && let Err(err) = scenario::validate(v)
+                    {
+                        out.push(err);
+                    }
+                    if a == "--open" && v != "new-run" && app::Route::parse(v).is_none() {
+                        out.push(format!("--open {v}: not a screen (see --help)"));
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    if matches!(a, "--scenario" | "--open") {
+                        out.push(format!("{a}: missing its value (see --help)"));
+                    }
+                }
+            }
         }
         i += 1;
     }
@@ -190,9 +231,11 @@ fn launch_prefs(cli: Option<&str>, saved: &window_state::State, themes: &Catalog
     prefs
 }
 
-fn arg(name: &str) -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+fn arg_value<'a, S: AsRef<str>>(args: &'a [S], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a.as_ref() == name)
+        .and_then(|i| args.get(i + 1).map(AsRef::as_ref))
+        .filter(|v| !v.starts_with("--"))
 }
 
 /// Run FOLO Desktop with the process's arguments: print `--help`, `--version` or `--list-scenarios`, else open
@@ -214,22 +257,27 @@ pub fn run() {
     for warning in arg_warnings(&args, &themes) {
         eprintln!("folo-desktop: {warning}");
     }
-    let scenario = arg("--scenario");
-    let width: f32 = arg("--width").and_then(|w| w.parse().ok()).unwrap_or(1280.0);
-    let height: f32 = arg("--height").and_then(|h| h.parse().ok()).unwrap_or(800.0);
+    if !headless_arg_errors(&args).is_empty() {
+        std::process::exit(2);
+    }
+    let scenario = arg_value(&args, "--scenario").map(str::to_string);
+    let width: f32 = arg_value(&args, "--width").and_then(|w| w.parse().ok()).unwrap_or(1280.0);
+    let height: f32 = arg_value(&args, "--height").and_then(|h| h.parse().ok()).unwrap_or(800.0);
     // The window and theme from the last launch, unless this one is for a screenshot.
-    let remember =
-        window_state::remembers(scenario.is_some(), arg("--width").is_some() || arg("--height").is_some());
+    let remember = window_state::remembers(
+        scenario.is_some(),
+        arg_value(&args, "--width").is_some() || arg_value(&args, "--height").is_some(),
+    );
     let state_path = remember.then(window_state::path);
     let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
-    let mut prefs = launch_prefs(arg("--theme").as_deref(), &saved, &themes);
+    let mut prefs = launch_prefs(arg_value(&args, "--theme"), &saved, &themes);
     let spec = scenario.as_deref().map(scenario::Spec::parse);
     // Data source: `--server URL` connects to a running folo serve; `--mock` uses the built-in demo
     // data; by default the app finds or starts a server (see `FoloApp::autoconnect`).
-    let server = arg("--server");
+    let server = arg_value(&args, "--server").map(str::to_string);
     // `--open run:run_3c02` starts on a screen (also `dataset:ID`, `model:ID`, `runs`, …).
-    let open = arg("--open");
-    let use_mock = std::env::args().any(|a| a == "--mock");
+    let open = arg_value(&args, "--open").map(str::to_string);
+    let use_mock = args.iter().any(|a| a == "--mock");
     let default_url = std::env::var("FOLO_SERVER").unwrap_or_else(|_| "http://127.0.0.1:7878".into());
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
@@ -316,10 +364,6 @@ pub fn run() {
                             app.open_new_run_pending = true;
                         } else if let Some(route) = open.as_deref().and_then(app::Route::parse) {
                             app.route = route;
-                        } else if let Some(target) = &open {
-                            eprintln!(
-                                "folo-desktop: --open {target}: not a screen (see --help); opening Overview"
-                            );
                         }
                         let this = cx.weak_entity();
                         app::follow_system_appearance(window, this.clone(), cx);
@@ -481,6 +525,11 @@ mod tests {
         let p = launch(Some("contrast-light"), Some("system"));
         assert_eq!((p.mode, p.light.as_str()), (ModePref::Light, "contrast-light"));
         assert!(one(&["--scenario", "nope-not-real", "--shot", "a.png"]).contains("no such scenario"));
+        assert!(one(&["--scenario", "overview+ligth", "--shot", "a.png"]).contains("unknown modifier"));
+        assert!(one(&["--scenario", "overview+hover", "--shot", "a.png"]).contains("does not apply"));
+        assert!(one(&["--open", "run:"]).contains("not a screen"));
+        assert!(one(&["--open", "dataset:"]).contains("not a screen"));
+        assert!(one(&["--open", "bench-entry:abc/"]).contains("not a screen"));
         assert!(one(&["--sever", "http://127.0.0.1:1"]).contains("unknown option"));
         assert!(one(&["--mock", "--server"]).contains("missing its value"));
         // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
@@ -489,5 +538,51 @@ mod tests {
         for flag in VALUE_FLAGS.iter().chain(BARE_FLAGS) {
             assert!(USAGE.contains(flag), "{flag}");
         }
+    }
+
+    #[test]
+    fn route_parse_rejects_empty_and_malformed_ids() {
+        for bad in [
+            "",
+            "dataset:",
+            "dataset:   ",
+            "run:",
+            "model:",
+            "bench:",
+            "bench-entry:",
+            "bench-entry:abc",
+            "bench-entry:abc/",
+            "bench-entry:/def",
+            "bench-entry:/",
+            "bench-entry:abc/def/ghi",
+            "bench-entry:   /def",
+            "bench-entry:abc/   ",
+            "overview:extra",
+            "runs:123",
+        ] {
+            assert!(app::Route::parse(bad).is_none(), "expected None for `{bad}`");
+        }
+        assert_eq!(app::Route::parse("run:run_1"), Some(app::Route::Run("run_1".into())));
+        assert_eq!(app::Route::parse("dataset:ds_1"), Some(app::Route::Dataset("ds_1".into())));
+        assert_eq!(
+            app::Route::parse("bench-entry:bn_1/be_1"),
+            Some(app::Route::BenchEntry("bn_1".into(), "be_1".into()))
+        );
+    }
+
+    #[test]
+    fn headless_requests_fail_closed_on_invalid_scenario_or_open() {
+        assert!(headless_arg_errors(&["--scenario", "overview+ligth"]).is_empty());
+        assert!(headless_arg_errors(&["--open", "run:"]).is_empty());
+        assert!(headless_arg_errors(&["--scenario", "overview+light", "--shot", "a.png"]).is_empty());
+        assert!(headless_arg_errors(&["--open", "run:run_1", "--shot", "a.png"]).is_empty());
+        assert!(headless_arg_errors(&["--open", "new-run", "--shot", "a.png"]).is_empty());
+
+        assert!(!headless_arg_errors(&["--scenario", "overview+ligth", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--scenario", "nope", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--scenario", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--scenario", "overview+ligth", "--bench-frames", "2"]).is_empty());
+        assert!(!headless_arg_errors(&["--open", "run:", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--open", "--shot", "a.png"]).is_empty());
     }
 }

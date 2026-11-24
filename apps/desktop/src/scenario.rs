@@ -116,6 +116,96 @@ pub const ALL: &[&str] = &[
     "kb-focus",
 ];
 
+/// Modifiers that apply on any screen.
+const GLOBAL_MODIFIERS: &[&str] =
+    &["light", "dark", "loading", "error", "empty", "cloud", "lost", "trouble", "silent"];
+
+/// Modifiers supported for a specific scenario screen.
+fn screen_modifiers(screen: &str) -> &'static [&'static str] {
+    match screen {
+        "synth" => &["invalid"],
+        "dataset" => &["filter", "stats"],
+        "inspector" => &["sample"],
+        "run-live" | "stop-confirm" => &["hover", "charts-focus", "log-focus", "no-history"],
+        "run-done" => &["bottom", "sample-focus", "no-history"],
+        "run-failed" => &["no-history"],
+        "delete-confirm" => &["dataset"],
+        "new-run" => &["deleted", "amp"],
+        "model" => &["bottom", "table-focus"],
+        "playground" => &["nms", "canvas-focus"],
+        "settings" => &["reference", "bottom"],
+        "bench-design" => &["proposal"],
+        "bench-entry" => &["bottom"],
+        "cloud-connect" => &["remote", "rejected"],
+        "run-cloud" => &["syncing", "training", "released", "no-history"],
+        _ => &[],
+    }
+}
+
+/// All screen-specific modifier names across every scenario (used to distinguish a typo from a
+/// modifier that belongs to another screen).
+const ALL_SCREEN_MODIFIERS: &[&str] = &[
+    "invalid",
+    "filter",
+    "stats",
+    "sample",
+    "hover",
+    "charts-focus",
+    "log-focus",
+    "no-history",
+    "bottom",
+    "sample-focus",
+    "dataset",
+    "deleted",
+    "amp",
+    "table-focus",
+    "nms",
+    "canvas-focus",
+    "reference",
+    "proposal",
+    "remote",
+    "rejected",
+    "syncing",
+    "training",
+    "released",
+];
+
+/// Validates a `--scenario` string: checks both the base screen name and every `+`-separated
+/// modifier token so typos like `overview+ligth` are caught instead of silently ignored.
+pub fn validate(name: &str) -> Result<(), String> {
+    let parts: Vec<&str> = name.split('+').map(str::trim).collect();
+    let screen = parts.first().copied().unwrap_or("");
+    if screen.is_empty() || !ALL.iter().any(|s| s.split('+').next() == Some(screen)) {
+        return Err(format!("--scenario {name}: no such scenario (see --list-scenarios)"));
+    }
+    let allowed = screen_modifiers(screen);
+    let mut saw_light = false;
+    let mut saw_dark = false;
+    for &modifier in &parts[1..] {
+        if modifier.is_empty() {
+            return Err(format!("--scenario {name}: empty modifier (see --list-scenarios)"));
+        }
+        if modifier == "light" {
+            saw_light = true;
+        } else if modifier == "dark" {
+            saw_dark = true;
+        }
+        if GLOBAL_MODIFIERS.contains(&modifier) || allowed.contains(&modifier) {
+            continue;
+        }
+        if ALL_SCREEN_MODIFIERS.contains(&modifier) {
+            return Err(format!(
+                "--scenario {name}: modifier `{modifier}` does not apply to `{screen}` (see --list-scenarios)"
+            ));
+        }
+        return Err(format!("--scenario {name}: unknown modifier `{modifier}` (see --list-scenarios)"));
+    }
+    if saw_light && saw_dark {
+        return Err(format!("--scenario {name}: conflicting modifiers `light` and `dark`"));
+    }
+    Ok(())
+}
+
 impl Spec {
     pub fn parse(name: &str) -> Spec {
         let parts: Vec<String> = name.split('+').map(|s| s.trim().to_string()).collect();
@@ -535,4 +625,37 @@ fn preload_cloud(app: &mut FoloApp) {
     app.cloud.providers = api.cloud_providers().into();
     app.cloud.connections = api.cloud_connections().into();
     app.cloud.instances = api.cloud_instances().into();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_all_review_scenarios_and_supported_compositions() {
+        for scenario in ALL {
+            assert!(validate(scenario).is_ok(), "{scenario}: {:?}", validate(scenario));
+        }
+        for valid in [
+            "overview+dark",
+            "new-run+deleted",
+            "new-run+deleted+light",
+            "run-live+no-history",
+            "run-cloud+training+dark",
+            "dataset+filter+light",
+        ] {
+            assert!(validate(valid).is_ok(), "{valid}: {:?}", validate(valid));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_empty_wrong_screen_and_conflicting_modifiers() {
+        assert!(validate("").unwrap_err().contains("no such scenario"));
+        assert!(validate("nope-not-real").unwrap_err().contains("no such scenario"));
+        assert!(validate("overview+ligth").unwrap_err().contains("unknown modifier `ligth`"));
+        assert!(validate("overview+").unwrap_err().contains("empty modifier"));
+        assert!(validate("overview++light").unwrap_err().contains("empty modifier"));
+        assert!(validate("overview+hover").unwrap_err().contains("does not apply to `overview`"));
+        assert!(validate("overview+light+dark").unwrap_err().contains("conflicting modifiers"));
+    }
 }
