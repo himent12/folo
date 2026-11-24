@@ -108,6 +108,7 @@ let hideCurrent: (() => void) | null = null;
 const GRACE_MS = 150;
 
 const leave = () => {
+  if (!activeAnchor) return;
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => hideCurrent?.(), GRACE_MS);
 };
@@ -160,6 +161,15 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') hide();
   };
+  // Dismiss only when the scrolling target can actually move this anchor (ignore unrelated sibling scrollers like live logs).
+  const onScroll = (e: Event) => {
+    const t = e.target;
+    if (t !== window && t !== e.currentTarget && t !== document && !(t instanceof Node && t.contains(node))) return;
+    // Cancel any queued handoff timer too so scrolling mid-handoff cannot reopen the tooltip.
+    clearTimeout(showTimer);
+    pendingAnchor = null;
+    hide();
+  };
 
   const show = (immediate: boolean, focused?: HTMLElement) => {
     if (!o) return;
@@ -170,6 +180,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     showTimer = setTimeout(() => {
       if (pendingAnchor === node) pendingAnchor = null;
       if (!o || !node.isConnected) return;
+      clearTimeout(hideTimer);
       if (activeAnchor && activeAnchor !== node) hideCurrent?.();
       const el = mount(node.closest<HTMLElement>('dialog[open]') ?? document.body);
       el.textContent = o.text;
@@ -198,7 +209,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       described = next;
       described.setAttribute('aria-describedby', [...own(described), el.id].join(' '));
       document.addEventListener('keydown', onKey);
-      window.addEventListener('scroll', hide, { capture: true, passive: true });
+      window.addEventListener('scroll', onScroll, { capture: true, passive: true });
     }, delay);
   };
 
@@ -216,10 +227,10 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
         lastHide = Date.now();
         if (popovers() && tip.matches(':popover-open')) tip.hidePopover();
       }
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+      release(described);
     }
-    document.removeEventListener('keydown', onKey);
-    window.removeEventListener('scroll', hide, true);
-    release(described);
   };
 
   const onEnter = () => {
