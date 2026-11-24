@@ -1,7 +1,5 @@
 //! The tools' input and output schemas: generated from the Rust types with schemars, then shrunk for
-//! `tools/list` (docs/MCP.md "Schemas").
-
-use std::sync::Arc;
+//! `tools/list` (docs/MCP.md "Schemas"). Callers memoize the resulting `JsonObject` in `OnceLock`.
 
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::JsonObject;
@@ -10,20 +8,20 @@ use serde_json::{Value, json};
 
 use crate::types::*;
 
-pub(super) fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+pub(super) fn input<T: JsonSchema + 'static>() -> JsonObject {
     let mut s = (*schema_for_input::<T>().expect("tool inputs are objects")).clone();
     compact(&mut s, false);
     close_objects(&mut s);
     s.entry("additionalProperties").or_insert(Value::Bool(false)); // `{}` has no `properties`
-    Arc::new(s)
+    s
 }
 
 /// [`input`] of a labeling tool, shrunk further: a `oneOf` of string constants becomes an `enum`, the `$defs`
 /// lose their descriptions (the field's own description says what the values mean), as output schemas do, empty
 /// defaults (`null`, `false`, `""`, `[]`, `{}`) and `null` in the types of optional fields go (a field that is
 /// not `required` is left out; `null` is still accepted), and `job_id` / `image_id` lose their descriptions.
-pub(super) fn terse_input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
-    let mut s = (*input::<T>()).clone();
+pub(super) fn terse_input<T: JsonSchema + 'static>() -> JsonObject {
+    let mut s = input::<T>();
     s.remove("description");
     s.remove("title");
     if let Some(Value::Object(defs)) = s.get_mut("$defs") {
@@ -70,12 +68,12 @@ pub(super) fn terse_input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
             }
         }
     }
-    Arc::new(s)
+    s
 }
 
 /// [`output`] of a labeling tool, without descriptions or `required` lists: docs/MCP.md documents the fields,
 /// whose names say what they are, and a result always has them all (`null` when absent).
-pub(super) fn terse_output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+pub(super) fn terse_output<T: JsonSchema + 'static>() -> JsonObject {
     fn strip(v: &mut Value) {
         match v {
             Value::Object(o) => {
@@ -92,10 +90,10 @@ pub(super) fn terse_output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
             _ => {}
         }
     }
-    let mut v = Value::Object((*output::<T>()).clone());
+    let mut v = Value::Object(output::<T>());
     strip(&mut v);
     let Value::Object(s) = v else { unreachable!("an object stays an object") };
-    Arc::new(s)
+    s
 }
 
 /// Writes a `oneOf` of string constants (a Rust enum with documented variants) as an `enum`.
@@ -130,8 +128,8 @@ fn close_objects(s: &mut JsonObject) {
 
 /// `train`'s input: TrainConfig plus `resume_run_id`, where `dataset_id` is required unless `resume_run_id` is
 /// given (a resume may leave every other field out). `name` says the server's limit (`maxLength`).
-pub(super) fn train_input() -> Arc<JsonObject> {
-    let mut s = (*input::<TrainArgs>()).clone();
+pub(super) fn train_input() -> JsonObject {
+    let mut s = input::<TrainArgs>();
     if let Some(Value::Object(name)) = s.get_mut("properties").and_then(|p| p.get_mut("name")) {
         name.insert("maxLength".into(), json!(folo_server::store::MAX_RUN_NAME_CHARS));
     }
@@ -144,25 +142,25 @@ pub(super) fn train_input() -> Arc<JsonObject> {
     let resume =
         json!({ "required": ["resume_run_id"], "properties": { "resume_run_id": { "type": "string" } } });
     s.insert("anyOf".into(), json!([{ "required": ["dataset_id"] }, resume]));
-    Arc::new(s)
+    s
 }
 
-pub(super) fn output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+pub(super) fn output<T: JsonSchema + 'static>() -> JsonObject {
     let mut s = (*schema_for_output::<T>()).clone();
     compact(&mut s, true);
-    Arc::new(s)
+    s
 }
 
 /// [`output`] of a shared `folo-api` type (`Run`, `Dataset`, ...): its fields lose their descriptions at the root
 /// too, as they do in `$defs`; docs/API.md documents them.
-pub(super) fn api_output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
-    let mut s = (*output::<T>()).clone();
+pub(super) fn api_output<T: JsonSchema + 'static>() -> JsonObject {
+    let mut s = output::<T>();
     if let Some(Value::Object(props)) = s.get_mut("properties") {
         for p in props.values_mut().filter_map(Value::as_object_mut) {
             p.remove("description");
         }
     }
-    Arc::new(s)
+    s
 }
 
 /// Shrinks a generated schema for `tools/list` (docs/MCP.md "Schemas"), keeping what validates. Everywhere: no
