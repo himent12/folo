@@ -38,16 +38,22 @@ pub(crate) struct ShotArgs {
 }
 
 /// Reads a flag's value from `args` (program name first): `Ok(None)` when the flag is absent,
-/// `Err` when the flag is present without a value (trailing, empty, or followed by another `--` flag).
+/// `Err` when any occurrence lacks a value (trailing, empty, or followed by another `--` flag).
 pub(crate) fn flag_value<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
     let rest = args.get(1..).unwrap_or(&[]);
-    let Some(i) = rest.iter().position(|a| a == name) else { return Ok(None) };
-    match rest.get(i + 1).map(String::as_str) {
-        None => Err(anyhow!("{name}: missing its value")),
-        Some("") => Err(anyhow!("{name}: value cannot be empty")),
-        Some(v) if v.starts_with("--") => Err(anyhow!("{name}: missing its value (got `{v}`)")),
-        Some(v) => Ok(Some(v)),
+    let mut found = None;
+    for (i, arg) in rest.iter().enumerate() {
+        if arg != name {
+            continue;
+        }
+        match rest.get(i + 1).map(String::as_str) {
+            None => return Err(anyhow!("{name}: missing its value")),
+            Some("") => return Err(anyhow!("{name}: value cannot be empty")),
+            Some(v) if v.starts_with("--") => return Err(anyhow!("{name}: missing its value (got `{v}`)")),
+            Some(v) => found = Some(v),
+        }
     }
+    Ok(found)
 }
 
 impl ShotArgs {
@@ -229,6 +235,8 @@ mod tests {
             &["--shot", "a.png", "--scale"],
             &["--shot", "a.png", "--text"],
             &["--shot", "a.png", "--shot-time"],
+            &["--shot", "a.png", "--shot"],
+            &["--shot", "a.png", "--width", "960", "--width"],
         ] {
             assert!(ShotArgs::parse(&args(bad)).is_err(), "{bad:?}");
         }

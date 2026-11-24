@@ -117,8 +117,10 @@ pub const ALL: &[&str] = &[
 ];
 
 /// Modifiers that apply on any screen.
-const GLOBAL_MODIFIERS: &[&str] =
-    &["light", "dark", "loading", "error", "empty", "cloud", "lost", "trouble", "silent"];
+const GLOBAL_MODIFIERS: &[&str] = &["light", "dark", "loading", "error", "empty", "cloud", "lost"];
+
+/// Modifiers that alter the active cloud-runs fixture (`+cloud`, `run-cloud`, `cloud-*`).
+const CLOUD_MODIFIERS: &[&str] = &["trouble", "silent"];
 
 /// Modifiers supported for a specific scenario screen.
 fn screen_modifiers(screen: &str) -> &'static [&'static str] {
@@ -179,6 +181,8 @@ pub fn validate(name: &str) -> Result<(), String> {
         return Err(format!("--scenario {name}: no such scenario (see --list-scenarios)"));
     }
     let allowed = screen_modifiers(screen);
+    let has_cloud_fixture =
+        screen == "run-cloud" || screen.starts_with("cloud-") || parts[1..].contains(&"cloud");
     let mut saw_light = false;
     let mut saw_dark = false;
     for &modifier in &parts[1..] {
@@ -192,6 +196,14 @@ pub fn validate(name: &str) -> Result<(), String> {
         }
         if GLOBAL_MODIFIERS.contains(&modifier) || allowed.contains(&modifier) {
             continue;
+        }
+        if CLOUD_MODIFIERS.contains(&modifier) {
+            if has_cloud_fixture {
+                continue;
+            }
+            return Err(format!(
+                "--scenario {name}: modifier `{modifier}` requires `+cloud` or a cloud scenario (see --list-scenarios)"
+            ));
         }
         if ALL_SCREEN_MODIFIERS.contains(&modifier) {
             return Err(format!(
@@ -656,6 +668,9 @@ mod tests {
         assert!(validate("overview+").unwrap_err().contains("empty modifier"));
         assert!(validate("overview++light").unwrap_err().contains("empty modifier"));
         assert!(validate("overview+hover").unwrap_err().contains("does not apply to `overview`"));
+        assert!(validate("overview+silent").unwrap_err().contains("requires `+cloud`"));
+        assert!(validate("overview+trouble").unwrap_err().contains("requires `+cloud`"));
+        assert!(validate("overview+cloud+silent").is_ok());
         assert!(validate("overview+light+dark").unwrap_err().contains("conflicting modifiers"));
     }
 }

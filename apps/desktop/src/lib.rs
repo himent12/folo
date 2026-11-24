@@ -184,13 +184,18 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
 }
 
 /// Errors that must fail a headless capture or benchmark (`--shot` or `--bench-frames`) before a
-/// frame is rendered, so an invalid `--scenario` or `--open` never silently produces a default PNG.
+/// frame is rendered, so an invalid `--scenario`, `--open`, or conflicting headless mode never
+/// silently produces a default PNG or suppresses a conflict diagnostic.
 fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
-    let is_headless = args.iter().any(|a| matches!(a.as_ref(), "--shot" | "--bench-frames"));
-    if !is_headless {
+    let has_shot = args.iter().any(|a| a.as_ref() == "--shot");
+    let has_bench = args.iter().any(|a| a.as_ref() == "--bench-frames");
+    if !has_shot && !has_bench {
         return Vec::new();
     }
     let mut out = Vec::new();
+    if has_shot && has_bench {
+        out.push("--shot and --bench-frames cannot be used together".to_string());
+    }
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_ref();
@@ -254,10 +259,17 @@ pub fn run() {
     }
     // Custom themes are read before the arguments: `--theme` may name one.
     let themes = Catalog::load(&theme::catalog::custom_folder());
-    for warning in arg_warnings(&args, &themes) {
+    let warnings = arg_warnings(&args, &themes);
+    for warning in &warnings {
         eprintln!("folo-desktop: {warning}");
     }
-    if !headless_arg_errors(&args).is_empty() {
+    let headless_errors = headless_arg_errors(&args);
+    if !headless_errors.is_empty() {
+        for err in &headless_errors {
+            if !warnings.contains(err) {
+                eprintln!("folo-desktop: {err}");
+            }
+        }
         std::process::exit(2);
     }
     let scenario = arg_value(&args, "--scenario").map(str::to_string);
@@ -584,5 +596,12 @@ mod tests {
         assert!(!headless_arg_errors(&["--scenario", "overview+ligth", "--bench-frames", "2"]).is_empty());
         assert!(!headless_arg_errors(&["--open", "run:", "--shot", "a.png"]).is_empty());
         assert!(!headless_arg_errors(&["--open", "--shot", "a.png"]).is_empty());
+        let combined =
+            headless_arg_errors(&["--scenario", "overview+ligth", "--shot", "a.png", "--bench-frames", "1"]);
+        assert!(
+            combined.iter().any(|e| e.contains("--shot") && e.contains("--bench-frames")),
+            "{combined:?}"
+        );
+        assert!(combined.iter().any(|e| e.contains("unknown modifier")), "{combined:?}");
     }
 }

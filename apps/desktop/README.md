@@ -152,9 +152,11 @@ cargo run -- --scenario run-live+hover             # a fixed, deterministic stat
 cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
 
-An unknown option, an option missing its value, a `--theme` that is no mode and no installed theme's id, and an
-unknown `--scenario` each print one `folo-desktop: …` line on stderr; the app still opens (a bad `--theme` opens in
-the remembered theme, else dark).
+An unknown option, an option missing its value, a `--theme` that is no mode and no installed theme's id, an
+invalid `--open` target, and an unknown `--scenario` (or modifier) each print one `folo-desktop: …` line on
+stderr; an interactive launch still opens (a bad `--theme` opens in the remembered theme, else dark, and a bad
+`--open` opens Overview). Headless launches (`--shot` or `--bench-frames`) fail closed with exit 2 on missing
+values, conflicting `--shot` and `--bench-frames`, or an invalid `--scenario` or `--open`.
 
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 

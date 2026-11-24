@@ -340,8 +340,11 @@ mod tests {
             &["--bench-frames", ""],
             &["--bench-frames", "--width", "960"],
             &["--bench-frames", "3", "--width"],
+            &["--bench-frames", "3", "--height"],
             &["--bench-frames", "3", "--scale"],
             &["--bench-frames", "3", "--text"],
+            &["--bench-frames", "3", "--bench-frames"],
+            &["--bench-frames", "3", "--width", "960", "--width"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
