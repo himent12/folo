@@ -54,12 +54,13 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 - [ ] still open after #175 and hill-climb 4: a whole distilled COCO run with the teacher from epoch 1 (hill-climb 5 ran a continuation of v4 instead); a second seed per side; the teacher's training cost without other load; resume the folo-n 300-epoch run (paused at epoch 62); folo-m / folo-l weights; an equal-budget COCO comparison with Ultralytics (same schedule and data on both trainers); MuSGD against SGD at full scale; the incumbent's GPU batch-1 latency measured again with FOLO's warm-up (at least a second of calls, not only the 25 or 10; docs/BENCHMARKS.md, Summary)
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
-- [x] agent labeling: unlabeled images → boxes by Claude Code or Codex (one tool-free model request per batch) →
-  review in Studio, `folo label` or MCP tools → a registered YOLO dataset (`/api/label`, `folo label`, 10 MCP tools,
-  docs/LABELING.md; #165). Next: the same screen in FOLO Desktop
+- [x] agent labeling: unlabeled images → boxes by Claude Code, Codex or Antigravity (one tool-free model request per
+  batch) → review in Studio, `folo label` or MCP tools → a registered YOLO dataset (`/api/label`, `folo label`, 10 MCP
+  tools, docs/LABELING.md; #165, #423). Next: the same screen in FOLO Desktop
 
 - [x] vision benchmarks: a frozen set of labeled images plus a plan of stress conditions, any vision model as a
-  contestant (FOLO models, Claude Code / Codex, external predictions), a five-axis score with exact definitions,
+  contestant (FOLO models, Claude Code / Codex / Antigravity, external predictions), a five-axis score with exact
+  definitions,
   agent-designed plans, and self-improvement loops (`crates/folo-bench`, `/api/bench`, Benchmarks in Studio and
   FOLO Desktop, `folo bench`, MCP tools; docs/BENCH.md). Next: external predictions and Compare in FOLO Desktop;
   confidences from agents (so they get a calibration axis); generated images as a benchmark source; masks and

@@ -264,6 +264,7 @@ against the real engine in `--data-dir` (default `$FOLO_HOME` or `~/.folo`).
 ```sh
 claude mcp add folo -- folo mcp                 # Claude Code
 codex mcp add folo -- folo mcp                  # Codex
+agy mcp add folo -- folo mcp                    # Antigravity
 ```
 
 Or add it to `.mcp.json` (`claude_desktop_config.json` for Claude Desktop):
