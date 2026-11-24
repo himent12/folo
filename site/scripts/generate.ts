@@ -106,10 +106,13 @@ export async function generate({ write }: { write: boolean }): Promise<Generated
     html(page.slug, shell({ slug: page.slug, title: page.parsed.title, description: page.parsed.description, main: docMain(md, page, order[i - 1], order[i + 1]), kind: 'doc' }));
   });
 
-  // Search: one entry per H2/H3 section, loaded by the page on first use.
+  // Search: one entry per H2/H3 section (including the landing page's rendered excerpts), loaded on first use.
+  const indexed = [landing, ...order];
   const index = {
-    pages: order.map((p) => ({ t: p.parsed.title, l: p.label, u: p.slug, g: p.group })),
-    sections: order.flatMap((p, i) => sections(withoutTitle(p.parsed.tokens), p.parsed.title).map((s) => [i, s.title, s.id, s.text])),
+    pages: indexed.map((p) => ({ t: p.parsed.title, l: p.label, u: p.slug, g: p.group })),
+    sections: indexed.flatMap((p, i) =>
+      (p === landing ? lp.sections : sections(withoutTitle(p.parsed.tokens), p.parsed.title)).map((s) => [i, s.title, s.id, s.text]),
+    ),
   };
   outputs.push([resolve(GEN_DIR, 'public', 'search.json'), JSON.stringify(index)]);
 
