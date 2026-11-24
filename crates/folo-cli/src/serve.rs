@@ -75,14 +75,20 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         .build()
         .map_err(|e| CliError::new(ExitCode::Runtime, "runtime", format!("could not start tokio: {e}")))?;
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port)).await.map_err(|e| {
-            CliError::new(
-                ExitCode::Runtime,
-                "bind_failed",
-                format!("could not bind {}:{}: {e}", args.host, args.port),
-            )
-            .hint("is another `folo serve` running? pick another --port (0 chooses a free one)")
-        })?;
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((args.host.as_str(), args.port))
+            .await
+            .map_err(|e| host_lookup_failed(&args.host, args.port, e))?
+            .collect();
+        if addrs.is_empty() {
+            return Err(host_lookup_failed(
+                &args.host,
+                args.port,
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no socket addresses returned"),
+            ));
+        }
+        let listener = tokio::net::TcpListener::bind(addrs.as_slice())
+            .await
+            .map_err(|e| bind_failed(&args.host, args.port, e))?;
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
@@ -186,4 +192,67 @@ pub(crate) fn data_dir_lock_failed(dir: &std::path::Path, e: std::io::Error) -> 
     let lock = folo_api::json::path(dir.join("serve.lock"));
     CliError::new(ExitCode::Runtime, "data_dir_lock_failed", format!("could not lock {lock}: {e}"))
         .hint("the data dir must be writable and support file locks; pass another --data-dir")
+}
+
+/// Maps a hostname-resolution failure before `bind()` to `bind_failed` with `--host` guidance.
+fn host_lookup_failed(host: &str, port: u16, e: std::io::Error) -> CliError {
+    CliError::new(ExitCode::Runtime, "bind_failed", format!("could not bind {host}:{port}: {e}")).hint(
+        "could not resolve --host; pass an IP address or resolvable hostname (e.g. 127.0.0.1 or 0.0.0.0)",
+    )
+}
+
+/// Maps a `TcpListener::bind` failure to `bind_failed` with a hint that matches the failure kind: occupied ports
+/// point to `--port`, non-local addresses point to `--host`, and permission errors distinguish privileged ports.
+fn bind_failed(host: &str, port: u16, e: std::io::Error) -> CliError {
+    use std::io::ErrorKind;
+    let hint = match e.kind() {
+        ErrorKind::AddrInUse => "is another `folo serve` running? pick another --port (0 chooses a free one)",
+        ErrorKind::AddrNotAvailable => {
+            "that --host address is not assigned to this machine; use 127.0.0.1 (local) or 0.0.0.0 (all interfaces)"
+        }
+        ErrorKind::PermissionDenied if (1..1024).contains(&port) => {
+            "permission denied for this privileged port; pick a port >= 1024 (0 chooses a free one) or check --host"
+        }
+        ErrorKind::PermissionDenied => {
+            "permission denied (the port may be reserved or exclusively bound, or the address disallowed); pick another --port (0 chooses a free one) or check --host"
+        }
+        _ => "check --host and --port (e.g. --host 127.0.0.1 --port 0 chooses a free local port)",
+    };
+    CliError::new(ExitCode::Runtime, "bind_failed", format!("could not bind {host}:{port}: {e}")).hint(hint)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    use super::*;
+
+    #[test]
+    fn bind_failed_distinguishes_port_and_host_errors() {
+        let in_use = bind_failed("127.0.0.1", 7878, Error::new(ErrorKind::AddrInUse, "in use"));
+        assert_eq!(in_use.code, "bind_failed");
+        let h = in_use.hint.as_deref().unwrap();
+        assert!(h.contains("--port") && !h.contains("--host"), "{h}");
+
+        let not_avail = bind_failed("203.0.113.1", 0, Error::new(ErrorKind::AddrNotAvailable, "not local"));
+        let h = not_avail.hint.as_deref().unwrap();
+        assert!(h.contains("--host") && !h.contains("--port"), "{h}");
+
+        let dns = host_lookup_failed("no-such-host.invalid", 7878, Error::other("failed to lookup address"));
+        let h = dns.hint.as_deref().unwrap();
+        assert!(h.contains("resolve --host") && !h.contains("--port"), "{h}");
+
+        let priv_denied = bind_failed("127.0.0.1", 80, Error::new(ErrorKind::PermissionDenied, "denied"));
+        let h = priv_denied.hint.as_deref().unwrap();
+        assert!(h.contains("privileged port") && h.contains(">= 1024"), "{h}");
+
+        let high_denied = bind_failed("127.0.0.1", 7878, Error::new(ErrorKind::PermissionDenied, "denied"));
+        let h = high_denied.hint.as_deref().unwrap();
+        assert!(h.contains("exclusively bound") && !h.contains(">= 1024"), "{h}");
+
+        // A non-lookup socket error on a hostname does not claim DNS resolution failed.
+        let other = bind_failed("localhost", 7878, Error::other("too many open files"));
+        let h = other.hint.as_deref().unwrap();
+        assert!(!h.contains("resolve --host") && h.contains("--host") && h.contains("--port"), "{h}");
+    }
 }

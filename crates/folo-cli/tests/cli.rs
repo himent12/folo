@@ -590,6 +590,51 @@ fn serve_refuses_foreign_hosts_on_loopback() {
     assert!(stdout.contains("\"allow-host\"") || stdout.contains("--allow-host"), "{stdout}");
 }
 
+/// Clap suggestions and subcommand-scoped help survive into the `--json` usage error `hint`.
+#[test]
+fn usage_json_errors_preserve_suggestions_and_scoped_help() {
+    let (code, stdout, _) = folo(&["train", "--batc", "2", "--json"]);
+    assert_eq!(code, 2);
+    let e = &json_lines(&stdout)[0]["error"];
+    assert_eq!(e["code"], "usage");
+    let hint = e["hint"].as_str().unwrap();
+    assert!(hint.contains("`--batch`"), "{e}");
+    assert!(hint.contains("`folo train --help`"), "{e}");
+    assert!(hint.contains("`folo describe train --json`"), "{e}");
+}
+
+/// `folo serve` distinguishes an occupied port (`AddrInUse` -> `--port`) from an unassignable `--host`
+/// (`AddrNotAvailable` -> `--host`).
+#[test]
+fn serve_bind_errors_distinguish_occupied_port_from_bad_host() {
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = busy.local_addr().unwrap().port().to_string();
+    let (code, stdout, _) = folo(&["serve", "--mock", "--json", "--host", "127.0.0.1", "--port", &port]);
+    drop(busy);
+    assert_eq!(code, 1);
+    let e = &json_lines(&stdout)[0]["error"];
+    assert_eq!(e["code"], "bind_failed");
+    let hint = e["hint"].as_str().unwrap();
+    assert!(hint.contains("--port") && !hint.contains("--host"), "{e}");
+
+    let (code, stdout, _) = folo(&["serve", "--mock", "--json", "--host", "bad host", "--port", "0"]);
+    assert_eq!(code, 1);
+    let e = &json_lines(&stdout)[0]["error"];
+    assert_eq!(e["code"], "bind_failed");
+    let hint = e["hint"].as_str().unwrap();
+    assert!(hint.contains("resolve --host") && !hint.contains("--port"), "{e}");
+
+    // Guard against Linux environments with `net.ipv4.ip_nonlocal_bind=1`, where binding a non-local IP succeeds.
+    if std::net::TcpListener::bind("203.0.113.1:0").is_err() {
+        let (code, stdout, _) = folo(&["serve", "--mock", "--json", "--host", "203.0.113.1", "--port", "0"]);
+        assert_eq!(code, 1);
+        let e = &json_lines(&stdout)[0]["error"];
+        assert_eq!(e["code"], "bind_failed");
+        let hint = e["hint"].as_str().unwrap();
+        assert!(hint.contains("--host") && !hint.contains("--port"), "{e}");
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
