@@ -4,10 +4,20 @@ use std::collections::HashMap;
 
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor, no_grad};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::module::{Module, TensorKind};
 use crate::{Error, Result};
+
+/// Minimum total elements across tracked CPU tensors before parallelizing across tensors with rayon.
+const EMA_PAR_THRESHOLD: usize = 32_768;
+/// Minimum elements in a single contiguous CPU tensor before parallelizing chunks within the tensor.
+const EMA_CHUNK_PAR_THRESHOLD: usize = 65_536;
+/// Chunk size (in `f32` elements) when parallelizing within a single large tensor.
+const EMA_CHUNK_SIZE: usize = 16_384;
+/// Maximum number of tracked tensors for which the O(N²) cross-storage alias check enables cross-tensor rayon.
+const MAX_CROSS_TENSOR_PAR_CHECK: usize = 1024;
 
 /// docs/MODEL.md §8.5: `decay = 0.9999`.
 pub const EMA_DECAY: f64 = 0.9999;
@@ -79,9 +89,31 @@ fn exact_f64<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64,
 /// ```
 pub struct ModelEma<M: Module> {
     module: M,
+    /// Cached tensors of `self.module` in canonical order with their [`TensorKind`]. Filtering by
+    /// [`is_tracked`] on demand avoids module walks and `String` allocations while honoring in-place
+    /// dtype changes on buffers.
+    cached: Vec<CachedTensor>,
+    /// True when all entries in `cached` have pairwise distinct underlying storages.
+    cached_disjoint: bool,
+    /// Reusable dotted-name buffer for zero-allocation traversal of `source`.
+    prefix: String,
+    /// Reusable scratch list of `(cached_index, source_tensor)` pairs; always cleared by [`ClearGuard`]
+    /// before returning so `ModelEma` never retains handles to `source`.
+    pair_scratch: Vec<(usize, Tensor)>,
     decay: f64,
     tau: f64,
     updates: u64,
+}
+
+struct CachedTensor {
+    name: String,
+    tensor: Tensor,
+    kind: TensorKind,
+}
+
+#[inline]
+fn is_tracked(kind: TensorKind, tensor: &Tensor) -> bool {
+    kind == TensorKind::Parameter || tensor.dtype() == DType::F32
 }
 
 impl<M: Module> ModelEma<M> {
@@ -97,28 +129,58 @@ impl<M: Module> ModelEma<M> {
         if !(0.0..=1.0).contains(&decay) || !(tau.is_finite() && tau > 0.0) {
             return Err(Error::Invalid(format!("ModelEma: invalid decay {decay} / tau {tau}")));
         }
-        let mut ema = ModelEma { module, decay, tau, updates: 0 };
-        if let Some(t) = source.named_tensors().first() {
-            ema.module.to_device(t.tensor.device())?;
-        }
-        for t in ema.module.named_tensors() {
-            t.tensor.set_requires_grad(false);
+        let mut ema = ModelEma {
+            module,
+            cached: Vec::new(),
+            cached_disjoint: true,
+            prefix: String::new(),
+            pair_scratch: Vec::new(),
+            decay,
+            tau,
+            updates: 0,
+        };
+        if let Some(dev) = first_device(source) {
+            ema.module.to_device(dev)?;
         }
         ema.module.eval();
-        ema.zip(source, |e, m| Ok(e.copy_from(m)?))?;
+        ema.refresh_cached();
+        for c in &ema.cached {
+            c.tensor.set_requires_grad(false);
+        }
+        ema.copy_from_source(source)?;
         Ok(ema)
+    }
+
+    /// Rebuild the cached tensor list from `self.module` and size the scratch buffers.
+    fn refresh_cached(&mut self) {
+        self.cached = self
+            .module
+            .named_tensors()
+            .into_iter()
+            .map(|t| CachedTensor { name: t.name, tensor: t.tensor, kind: t.kind })
+            .collect();
+        self.cached_disjoint = self.cached.len() <= MAX_CROSS_TENSOR_PAR_CHECK
+            && (0..self.cached.len())
+                .all(|i| self.cached[i + 1..].iter().all(|b| !self.cached[i].tensor.same_storage(&b.tensor)));
+        let max_name = self.cached.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        self.prefix.clear();
+        self.prefix.reserve(max_name);
+        self.pair_scratch.clear();
+        self.pair_scratch.reserve(self.cached.len());
     }
 
     /// Restart the average from `source` (`updates = 0`), as at the start of training.
     pub fn reset(&mut self, source: &dyn Module) -> Result<()> {
-        self.zip(source, |e, m| Ok(e.copy_from(m)?))?;
+        self.copy_from_source(source)?;
         self.updates = 0;
         Ok(())
     }
 
     /// Move the averaged model to `device`, in place (call it when the source model moves).
     pub fn to_device(&mut self, device: Device) -> Result<()> {
-        self.module.to_device(device)
+        self.module.to_device(device)?;
+        self.refresh_cached();
+        Ok(())
     }
 
     /// The EMA model (eval mode).
@@ -145,74 +207,316 @@ impl<M: Module> ModelEma<M> {
     pub fn update(&mut self, source: &dyn Module) -> Result<()> {
         let d = self.decay_at(self.updates + 1);
         let (d32, w) = (d as f32, (1.0 - d) as f32);
+        let Self { cached, cached_disjoint, prefix, pair_scratch, updates, .. } = self;
+        let guard = ClearGuard(pair_scratch);
+        collect_matching_source(source, cached, prefix, guard.0)?;
+        let pairs: &[(usize, Tensor)] = guard.0;
+
         // On a device, every tracked tensor in one multi-tensor update (16 per dispatch on the GPU).
-        let (mine, theirs) = (tracked(&self.module), tracked(source));
-        if mine.iter().any(|(_, e)| !e.device().is_cpu()) && matches(&mine, &theirs) {
+        if pairs.iter().any(|&(idx, _)| !cached[idx].tensor.device().is_cpu()) {
             let _g = no_grad();
-            let es: Vec<&Tensor> = mine.iter().map(|(_, t)| t).collect();
-            let ms: Vec<&Tensor> = theirs.iter().map(|(_, t)| t).collect();
+            let es: Vec<&Tensor> = pairs.iter().map(|&(idx, _)| &cached[idx].tensor).collect();
+            let ms: Vec<&Tensor> = pairs.iter().map(|(_, m)| m).collect();
             let none = vec![Vec::new(); es.len()];
             if Tensor::optimizer_step_many_(&es, &ms, &none, &OptimStep::Axpby { a: d32, b: w })? {
-                self.updates += 1;
+                drop(guard);
+                *updates += 1;
                 return Ok(());
             }
         }
-        self.zip(source, |e, m| {
-            if e.device().is_cpu() && e.is_contiguous() && m.device().is_cpu() {
-                return m
-                    .with_f32_slice(|m| {
-                        e.update_f32(|e| {
-                            for (e, &m) in e.iter_mut().zip(m) {
-                                *e = *e * d32 + m * w;
-                            }
-                        })
-                    })?
-                    .map_err(Into::into);
+
+        let all_fast_cpu = pairs.iter().all(|(idx, m)| is_fast_cpu_pair(&cached[*idx].tensor, m));
+        if all_fast_cpu {
+            let total_numel: usize = pairs.iter().map(|&(idx, _)| cached[idx].tensor.numel()).sum();
+            let can_par_tensors = *cached_disjoint
+                && total_numel >= EMA_PAR_THRESHOLD
+                && pairs.len() > 1
+                && pairs.len() <= MAX_CROSS_TENSOR_PAR_CHECK
+                && cross_disjoint(cached, pairs);
+            if can_par_tensors {
+                folo_core::cpu::in_pool(|| {
+                    pairs.par_iter().try_for_each(|(idx, m)| {
+                        let _g = no_grad();
+                        ema_update_cpu_tensor(&cached[*idx].tensor, m, d32, w, false)
+                    })
+                })?;
+            } else {
+                let _g = no_grad();
+                for (idx, m) in pairs {
+                    ema_update_cpu_tensor(&cached[*idx].tensor, m, d32, w, true)?;
+                }
             }
-            if !e.device().is_cpu() && e.optimizer_step_(m, &[], &OptimStep::Axpby { a: d32, b: w })? {
-                return Ok(());
+        } else {
+            let _g = no_grad();
+            for (idx, m) in pairs {
+                let e = &cached[*idx].tensor;
+                if is_fast_cpu_pair(e, m) {
+                    ema_update_cpu_tensor(e, m, d32, w, true)?;
+                } else if e.device().is_cpu()
+                    && m.device().is_cpu()
+                    && e.dtype() == DType::F32
+                    && m.dtype() == DType::F32
+                    && e.is_contiguous()
+                {
+                    // `e` and `m` share storage: snapshot `m` first to avoid RwLock deadlock and
+                    // read-after-write corruption.
+                    let m_copy = snapshot_tensor(m)?;
+                    ema_update_cpu_tensor(e, &m_copy, d32, w, true)?;
+                } else {
+                    let m_copy;
+                    let m_ref = if e.same_storage(m) {
+                        m_copy = snapshot_tensor(m)?;
+                        &m_copy
+                    } else {
+                        m
+                    };
+                    if !e.device().is_cpu()
+                        && e.optimizer_step_(m_ref, &[], &OptimStep::Axpby { a: d32, b: w })?
+                    {
+                        continue;
+                    }
+                    e.mul_scalar_assign(d32)?;
+                    e.add_scaled_assign(m_ref, w)?;
+                }
             }
-            e.mul_scalar_assign(d32)?;
-            e.add_scaled_assign(m, w)?;
-            Ok(())
-        })?;
-        self.updates += 1;
+        }
+        drop(guard);
+        *updates += 1;
         Ok(())
     }
 
-    /// Run `f(ema_tensor, model_tensor)` for every tracked pair, under `no_grad`. The two models must have the
-    /// same tracked names, shapes and dtypes.
-    fn zip(&self, source: &dyn Module, f: impl Fn(&Tensor, &Tensor) -> Result<()>) -> Result<()> {
-        let (mine, theirs) = (tracked(&self.module), tracked(source));
-        if !matches(&mine, &theirs) {
-            return Err(Error::Invalid(
-                "ModelEma: the source model's tensors do not match the EMA model's".into(),
-            ));
-        }
+    /// Copy every tracked tensor from `source` into `self.module` under `no_grad`.
+    fn copy_from_source(&mut self, source: &dyn Module) -> Result<()> {
+        let Self { cached, prefix, pair_scratch, .. } = self;
+        let guard = ClearGuard(pair_scratch);
+        collect_matching_source(source, cached, prefix, guard.0)?;
         let _g = no_grad();
-        for ((_, e), (_, m)) in mine.iter().zip(&theirs) {
-            f(e, m)?;
+        for (idx, m) in guard.0.iter() {
+            cached[*idx].tensor.copy_from(m)?;
         }
         Ok(())
     }
 }
 
-/// Whether two tracked lists pair up: the same names, shapes and dtypes.
-fn matches(mine: &[(String, Tensor)], theirs: &[(String, Tensor)]) -> bool {
-    mine.len() == theirs.len()
-        && mine
-            .iter()
-            .zip(theirs)
-            .all(|((a, x), (b, y))| a == b && x.shape() == y.shape() && x.dtype() == y.dtype())
+/// Drops references to `source`'s tensors on every exit path (normal return, `?`, or panic).
+struct ClearGuard<'a>(&'a mut Vec<(usize, Tensor)>);
+
+impl Drop for ClearGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
 }
 
-/// Parameters and `F32` buffers, canonical order.
-fn tracked<M: Module + ?Sized>(m: &M) -> Vec<(String, Tensor)> {
-    m.named_tensors()
-        .into_iter()
-        .filter(|t| t.kind == TensorKind::Parameter || t.tensor.dtype() == DType::F32)
-        .map(|t| (t.name, t.tensor))
-        .collect()
+/// True when no destination EMA tensor shares storage with any source tensor in `pairs`.
+fn cross_disjoint(cached: &[CachedTensor], pairs: &[(usize, Tensor)]) -> bool {
+    pairs.iter().all(|&(idx, _)| {
+        let e = &cached[idx].tensor;
+        pairs.iter().all(|(_, m)| !e.same_storage(m))
+    })
+}
+
+fn snapshot_tensor(t: &Tensor) -> Result<Tensor> {
+    let copy = Tensor::zeros_with(t.shape(), t.dtype(), t.device())?;
+    copy.copy_from(t)?;
+    Ok(copy)
+}
+
+#[inline]
+fn is_fast_cpu_pair(e: &Tensor, m: &Tensor) -> bool {
+    e.device().is_cpu()
+        && m.device().is_cpu()
+        && e.dtype() == DType::F32
+        && m.dtype() == DType::F32
+        && e.is_contiguous()
+        && !e.same_storage(m)
+}
+
+#[inline]
+fn ema_update_cpu_tensor(e: &Tensor, m: &Tensor, d32: f32, w: f32, par_chunks: bool) -> Result<()> {
+    m.with_f32_slice(|ms| e.update_f32(|es| ema_update_slice(es, ms, d32, w, par_chunks)))??;
+    Ok(())
+}
+
+/// Update `dst[i] = dst[i] * d + src[i] * w` in place, using AVX2 (without FMA) and optional chunked
+/// rayon parallelism inside `folo_core::cpu::in_pool` when the caller is not already parallelizing
+/// across tensors.
+#[inline]
+fn ema_update_slice(dst: &mut [f32], src: &[f32], d: f32, w: f32, par_chunks: bool) {
+    assert_eq!(dst.len(), src.len());
+    if par_chunks && dst.len() >= EMA_CHUNK_PAR_THRESHOLD {
+        folo_core::cpu::in_pool(|| {
+            dst.par_chunks_mut(EMA_CHUNK_SIZE)
+                .zip(src.par_chunks(EMA_CHUNK_SIZE))
+                .for_each(|(dc, sc)| ema_chunk(dc, sc, d, w));
+        });
+    } else {
+        ema_chunk(dst, src, d, w);
+    }
+}
+
+#[inline]
+fn ema_chunk(dst: &mut [f32], src: &[f32], d: f32, w: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support is checked above; `ema_slice_avx2` enforces `dst.len() == src.len()`.
+        unsafe { ema_slice_avx2(dst, src, d, w) };
+        return;
+    }
+    ema_slice_scalar(dst, src, d, w);
+}
+
+#[inline]
+fn ema_slice_scalar(dst: &mut [f32], src: &[f32], d: f32, w: f32) {
+    for (e, &m) in dst.iter_mut().zip(src) {
+        *e = *e * d + m * w;
+    }
+}
+
+/// AVX2 implementation of `dst[i] = dst[i] * d + src[i] * w`.
+///
+/// Intentionally omits `fma` so every lane performs separate IEEE-754 multiply and add instructions,
+/// matching [`ema_slice_scalar`] bit-for-bit on all non-NaN IEEE-754 values (Rust does not guarantee
+/// identical NaN payloads across scalar and SIMD code generation).
+///
+/// # Safety
+/// Caller must ensure the current CPU supports `avx2`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ema_slice_avx2(dst: &mut [f32], src: &[f32], d: f32, w: f32) {
+    use std::arch::x86_64::*;
+
+    assert_eq!(dst.len(), src.len());
+    let n = dst.len();
+    let vd = _mm256_set1_ps(d);
+    let vw = _mm256_set1_ps(w);
+    let dst_ptr = dst.as_mut_ptr();
+    let src_ptr = src.as_ptr();
+    let mut i = 0;
+
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n` and `dst.len() == src.len() == n`.
+        unsafe {
+            let e0 = _mm256_loadu_ps(dst_ptr.add(i));
+            let m0 = _mm256_loadu_ps(src_ptr.add(i));
+            let e1 = _mm256_loadu_ps(dst_ptr.add(i + 8));
+            let m1 = _mm256_loadu_ps(src_ptr.add(i + 8));
+            let e2 = _mm256_loadu_ps(dst_ptr.add(i + 16));
+            let m2 = _mm256_loadu_ps(src_ptr.add(i + 16));
+            let e3 = _mm256_loadu_ps(dst_ptr.add(i + 24));
+            let m3 = _mm256_loadu_ps(src_ptr.add(i + 24));
+
+            let r0 = _mm256_add_ps(_mm256_mul_ps(e0, vd), _mm256_mul_ps(m0, vw));
+            let r1 = _mm256_add_ps(_mm256_mul_ps(e1, vd), _mm256_mul_ps(m1, vw));
+            let r2 = _mm256_add_ps(_mm256_mul_ps(e2, vd), _mm256_mul_ps(m2, vw));
+            let r3 = _mm256_add_ps(_mm256_mul_ps(e3, vd), _mm256_mul_ps(m3, vw));
+
+            _mm256_storeu_ps(dst_ptr.add(i), r0);
+            _mm256_storeu_ps(dst_ptr.add(i + 8), r1);
+            _mm256_storeu_ps(dst_ptr.add(i + 16), r2);
+            _mm256_storeu_ps(dst_ptr.add(i + 24), r3);
+        }
+        i += 32;
+    }
+
+    while i + 8 <= n {
+        // SAFETY: `i + 8 <= n` and `dst.len() == src.len() == n`.
+        unsafe {
+            let e0 = _mm256_loadu_ps(dst_ptr.add(i));
+            let m0 = _mm256_loadu_ps(src_ptr.add(i));
+            let r0 = _mm256_add_ps(_mm256_mul_ps(e0, vd), _mm256_mul_ps(m0, vw));
+            _mm256_storeu_ps(dst_ptr.add(i), r0);
+        }
+        i += 8;
+    }
+
+    ema_slice_scalar(&mut dst[i..], &src[i..], d, w);
+}
+
+/// Device of the first tensor in `m` (canonical order), without allocating.
+fn first_device(m: &dyn Module) -> Option<Device> {
+    let mut found = None;
+    m.visit_tensors(&mut |_, t, _| {
+        if found.is_none() {
+            found = Some(t.device());
+        }
+    });
+    if found.is_some() {
+        return found;
+    }
+    m.visit_children(&mut |_, child| {
+        if found.is_none() {
+            found = first_device(child);
+        }
+    });
+    found
+}
+
+fn join_prefix(prefix: &mut String, name: &str) -> usize {
+    let len = prefix.len();
+    if !name.is_empty() {
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(name);
+    }
+    len
+}
+
+/// Walk `source`'s tracked tensors in canonical order without allocating `String`s, verifying exact
+/// name, shape, dtype, and count against the currently tracked entries of `cached`, and storing
+/// matched `(cached_index, source_tensor)` pairs into `out`.
+fn collect_matching_source(
+    source: &dyn Module,
+    cached: &[CachedTensor],
+    prefix: &mut String,
+    out: &mut Vec<(usize, Tensor)>,
+) -> Result<()> {
+    prefix.clear();
+    out.clear();
+    let mut expected = cached.iter().enumerate().filter(|(_, c)| is_tracked(c.kind, &c.tensor));
+    let ok = walk_tracked(source, prefix, &mut |name, t| {
+        let Some((cached_idx, exp)) = expected.next() else {
+            return false;
+        };
+        if name != exp.name.as_str() || t.shape() != exp.tensor.shape() || t.dtype() != exp.tensor.dtype() {
+            return false;
+        }
+        out.push((cached_idx, t.clone()));
+        true
+    });
+    if !ok || expected.next().is_some() {
+        out.clear();
+        return Err(Error::Invalid(
+            "ModelEma: the source model's tensors do not match the EMA model's".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn walk_tracked(m: &dyn Module, prefix: &mut String, f: &mut dyn FnMut(&str, &Tensor) -> bool) -> bool {
+    let mut ok = true;
+    m.visit_tensors(&mut |name, t, kind| {
+        if !ok {
+            return;
+        }
+        if is_tracked(kind, t) {
+            let len = join_prefix(prefix, name);
+            ok = f(prefix.as_str(), t);
+            prefix.truncate(len);
+        }
+    });
+    if !ok {
+        return false;
+    }
+    m.visit_children(&mut |name, child| {
+        if !ok {
+            return;
+        }
+        let len = join_prefix(prefix, name);
+        ok = walk_tracked(child, prefix, f);
+        prefix.truncate(len);
+    });
+    ok
 }
 
 /// What a checkpoint needs from an EMA: object-safe, so checkpoint code does not depend on the model type.
@@ -235,7 +539,11 @@ pub trait EmaState {
 
 impl<M: Module> EmaState for ModelEma<M> {
     fn ema_tensors(&self) -> Vec<(String, Tensor)> {
-        tracked(&self.module)
+        self.cached
+            .iter()
+            .filter(|c| is_tracked(c.kind, &c.tensor))
+            .map(|c| (c.name.clone(), c.tensor.clone()))
+            .collect()
     }
 
     fn updates(&self) -> u64 {
@@ -252,9 +560,14 @@ impl<M: Module> EmaState for ModelEma<M> {
         updates: u64,
         contract: EmaContract,
     ) -> Result<()> {
-        let mine = tracked(&self.module);
+        let mine: Vec<(&str, &Tensor)> = self
+            .cached
+            .iter()
+            .filter(|c| is_tracked(c.kind, &c.tensor))
+            .map(|c| (c.name.as_str(), &c.tensor))
+            .collect();
         let mut problems = Vec::new();
-        for (n, t) in &mine {
+        for &(n, t) in &mine {
             match tensors.get(n) {
                 None => problems.push(format!("`ema.{n}` is missing")),
                 Some(s) if s.shape() != t.shape() => {
@@ -263,7 +576,7 @@ impl<M: Module> EmaState for ModelEma<M> {
                 Some(_) => {}
             }
         }
-        let names: std::collections::HashSet<&str> = mine.iter().map(|(n, _)| n.as_str()).collect();
+        let names: std::collections::HashSet<&str> = mine.iter().map(|&(n, _)| n).collect();
         for n in tensors.keys() {
             if !names.contains(n.as_str()) {
                 problems.push(format!("`ema.{n}` is not a tensor of this model"));
@@ -280,12 +593,67 @@ impl<M: Module> EmaState for ModelEma<M> {
             )));
         }
         let _g = no_grad();
-        for (n, t) in &mine {
+        for &(n, t) in &mine {
             t.copy_from(&tensors[n].to_dtype(DType::F32)?.to_device(t.device())?)?;
         }
         self.decay = contract.decay;
         self.tau = contract.tau;
         self.updates = updates;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ema_avx2_matches_scalar_bitwise() {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            let (d, w) = (0.9993f32, 0.0007f32);
+            for n in [0, 1, 7, 8, 15, 31, 32, 33, 63, 64, 65, 1023] {
+                let mut a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.13 - 5.0).collect();
+                let mut b = a.clone();
+                let src: Vec<f32> = (0..n).map(|i| (i as f32) * -0.07 + 1.25).collect();
+                ema_slice_scalar(&mut a, &src, d, w);
+                // SAFETY: AVX2 support was checked above.
+                unsafe { ema_slice_avx2(&mut b, &src, d, w) };
+                let ab: Vec<u32> = a.into_iter().map(f32::to_bits).collect();
+                let bb: Vec<u32> = b.into_iter().map(f32::to_bits).collect();
+                assert_eq!(ab, bb, "AVX2 vs scalar mismatch at len={n}");
+            }
+            // Special IEEE-754 non-NaN values: signed zeros, subnormals, infinities.
+            let special_e = [
+                0.0f32,
+                -0.0,
+                f32::MIN_POSITIVE / 8.0,
+                -f32::MIN_POSITIVE / 4.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                1.0,
+                -1.0,
+                0.0,
+            ];
+            let special_m = [
+                -0.0f32,
+                0.0,
+                f32::MIN_POSITIVE / 16.0,
+                f32::MIN_POSITIVE / 2.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -0.0,
+                0.0,
+                -0.0,
+            ];
+            let mut a = special_e.to_vec();
+            let mut b = special_e.to_vec();
+            ema_slice_scalar(&mut a, &special_m, 0.5, 0.5);
+            // SAFETY: AVX2 support was checked above.
+            unsafe { ema_slice_avx2(&mut b, &special_m, 0.5, 0.5) };
+            let ab: Vec<u32> = a.into_iter().map(f32::to_bits).collect();
+            let bb: Vec<u32> = b.into_iter().map(f32::to_bits).collect();
+            assert_eq!(ab, bb, "AVX2 vs scalar mismatch on special IEEE-754 values");
+        }
     }
 }

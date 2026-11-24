@@ -10,7 +10,7 @@
 use crate::augment::resize_long_side;
 use crate::dataset::Dataset;
 use crate::error::{DataError, Result};
-use crate::image::{Image, Sample};
+use crate::image::Sample;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -28,7 +28,7 @@ pub enum CacheMode {
 pub const RAM_CACHE_SHARE: f64 = 0.8;
 
 /// A cached image: the sample resized, and its decoded size.
-type Entry = Arc<(Sample, [u32; 2])>;
+pub(crate) type Entry = Arc<(Sample, [u32; 2])>;
 
 /// Bytes the live RAM caches of this process reserved (each its [`ram_cache_bytes`], from creation to drop), so
 /// two loaders created before either fills are not both admitted against the same free memory. A cache that has
@@ -301,31 +301,31 @@ impl RamCache {
         Ok(RamCache { imgsz, slots: (0..ds.len()).map(|_| OnceLock::new()).collect(), _reserved: reserved })
     }
 
-    /// Sample `i` resized, and its decoded size: from the cache, else loaded with `load` and kept.
-    pub fn get(&self, i: usize, load: impl FnOnce() -> Result<Sample>) -> Result<(Sample, [u32; 2])> {
+    /// Sample `i` resized, and its decoded size, shared from the cache (loaded with `load` and kept on first
+    /// access). Callers must treat the returned entry as read-only and never recycle its pixel buffer.
+    pub fn get(&self, i: usize, load: impl FnOnce() -> Result<Sample>) -> Result<Entry> {
         let slot = &self.slots[i];
-        let entry = match slot.get() {
-            Some(e) => e.clone(),
-            None => {
-                let s = load()?;
+        if let Some(e) = slot.get() {
+            return Ok(e.clone());
+        }
+        let mut decoded = Some(load()?);
+        // Workers racing on one image may each decode it; only the one whose `get_or_init` wins resizes it, and
+        // the others take the kept entry (the same pixels) and recycle their decode.
+        let entry = slot
+            .get_or_init(|| {
+                let s = decoded.take().expect("decoded once");
                 let orig = [s.image.width, s.image.height];
-                // Workers racing on one image may each decode it; only the one whose `get_or_init` wins resizes
-                // it, and the others take the kept entry (the same pixels) and drop their decode.
-                slot.get_or_init(|| {
-                    // Kept for the whole run: exactly its size (a pooled buffer of a larger class would hold memory
-                    // the cache's reservation does not count).
-                    let mut kept = resize_long_side(s, self.imgsz);
-                    kept.image.data.shrink_to_fit();
-                    Arc::new((kept, orig))
-                })
-                .clone()
-            }
-        };
-        let kept = &entry.0;
-        let mut data = crate::buffers::scratch(kept.image.data.len());
-        data.copy_from_slice(&kept.image.data);
-        let image = Image { width: kept.image.width, height: kept.image.height, data };
-        Ok((Sample { image, boxes: kept.boxes.clone() }, entry.1))
+                // Kept for the whole run: exactly its size (a pooled buffer of a larger class would hold memory
+                // the cache's reservation does not count).
+                let mut kept = resize_long_side(s, self.imgsz);
+                kept.image.data.shrink_to_fit();
+                Arc::new((kept, orig))
+            })
+            .clone();
+        if let Some(unused) = decoded {
+            crate::buffers::recycle(unused.image.data);
+        }
+        Ok(entry)
     }
 }
 
@@ -342,7 +342,7 @@ mod tests {
     }
 
     /// The cache keeps what `resize_long_side` makes of the decoded image (long side `imgsz`, for images larger
-    /// and smaller than it) with the decoded size, and serves it again without loading.
+    /// and smaller than it) with the decoded size, and serves the same shared `Arc` without loading or copying.
     #[test]
     fn keeps_the_resized_sample_and_its_decoded_size() {
         let ds = InMemoryDataset {
@@ -352,14 +352,16 @@ mod tests {
         };
         let cache = RamCache::new(&ds, 64).unwrap();
         for (i, size, orig) in [(0, [64, 38], [200, 120]), (1, [38, 64], [30, 50])] {
-            let (s, o) = cache.get(i, || ds.get(i)).unwrap();
+            let entry = cache.get(i, || ds.get(i)).unwrap();
+            let (s, o) = (&entry.0, entry.1);
             assert_eq!(([s.image.width, s.image.height], o), (size, orig), "image {i}");
-            assert_eq!(s, resize_long_side(ds.get(i).unwrap(), 64));
-            // What the slot holds, not only what `get` returns: the resized sample (the memory estimate's size).
+            assert_eq!(*s, resize_long_side(ds.get(i).unwrap(), 64));
+            // What the slot holds is the exact same `Arc` returned by `get` (zero-copy).
             let kept = cache.slots[i].get().expect("filled");
-            assert_eq!((&kept.0, kept.1), (&s, orig), "image {i} is stored resized");
-            let (again, o) = cache.get(i, || panic!("image {i} loaded twice")).unwrap();
-            assert_eq!((again, o), (s, orig));
+            assert!(Arc::ptr_eq(&entry, kept), "image {i} is shared without copying");
+            assert_eq!((&kept.0, kept.1), (s, orig), "image {i} is stored resized");
+            let again = cache.get(i, || panic!("image {i} loaded twice")).unwrap();
+            assert!(Arc::ptr_eq(&again, &entry), "image {i} repeat hit shares the same Arc");
         }
     }
 

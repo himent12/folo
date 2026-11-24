@@ -116,6 +116,7 @@ export class LiveBench {
       void this.#retry.get();
       const api = hub.api;
       let closed = false;
+      const view = new AbortController();
       let heard = Date.now();
       let lostTimer: ReturnType<typeof setTimeout> | undefined;
       let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -135,12 +136,17 @@ export class LiveBench {
       let issued = 0;
       let applied = 0;
       const load = async () => {
+        if (closed) return;
         const my = ++issued;
         const seq = this.#benchSeq;
         const flight = { sent: ++this.#seq, entries: new Map<string, BenchEntry | null>(), loops: new Map<string, BenchLoop | null>() };
         this.#inflight.add(flight);
         try {
-          const [bench, entries, loops] = await Promise.all([api.bench(benchId), api.benchEntries(benchId), api.benchLoops(benchId)]);
+          const [bench, entries, loops] = await Promise.all([
+            api.bench(benchId, view.signal),
+            api.benchEntries(benchId, view.signal),
+            api.benchLoops(benchId, view.signal),
+          ]);
           if (closed || my < applied) return;
           applied = my;
           if (this.#benchSeq === seq || !this.bench) this.bench = bench;
@@ -157,18 +163,31 @@ export class LiveBench {
         }
       };
       // The benchmark was deleted (elsewhere): the page shows it gone, not stale data that looks live; nothing retries.
-      const gone = (e: unknown) => {
-        if (!(e instanceof ApiError && e.status === 404)) return false;
+      let unsub = (): void => {};
+      const gone = (e: unknown): boolean => {
+        if (closed || !(e instanceof ApiError && e.status === 404)) return false;
+        closed = true;
+        view.abort();
+        clearTimeout(lostTimer);
+        lostTimer = undefined;
+        clearTimeout(syncTimer);
+        syncTimer = undefined;
+        clearTimeout(resync);
+        resync = undefined;
+        unsub();
         this.error = e;
         this.bench = undefined;
         this.entries = [];
         this.loops = [];
+        this.lost = null;
+        this.connection = 'idle';
         this.loading = false;
         this.listed = false;
         return true;
       };
       // Re-synchronising (on open, on a `bench` event, on reconnect) never gives up silently: a gap would stay.
       const sync = (attempt = 0) => {
+        if (closed) return;
         clearTimeout(syncTimer);
         load().catch((e) => {
           if (closed || gone(e)) return;
@@ -177,6 +196,7 @@ export class LiveBench {
             this.error = e;
             this.loading = false;
           }
+          clearTimeout(syncTimer);
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
@@ -196,7 +216,7 @@ export class LiveBench {
         for (const f of this.#inflight) (f[kind] as Map<string, T | null>).set(itemId, item);
       };
 
-      const unsub = api.benchEvents(benchId, {
+      unsub = api.benchEvents(benchId, {
         connection: (s) => {
           if (closed) return;
           // Events between the first load and the stream opening would be lost: load again once it is open.
@@ -244,7 +264,9 @@ export class LiveBench {
           this.entries = this.entries.filter((e) => e.id !== gone);
           this.loops = this.loops.filter((l) => l.id !== gone);
         },
-        reconnect: () => sync(),
+        reconnect: () => {
+          if (!closed) sync();
+        },
       });
 
       load().catch((e) => {
@@ -256,6 +278,7 @@ export class LiveBench {
 
       return () => {
         closed = true;
+        view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         clearTimeout(resync);

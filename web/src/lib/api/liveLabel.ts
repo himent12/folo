@@ -8,10 +8,10 @@
 // The images (at most 10,000 a job) are all kept, in the order they were added: the page filters them and the grid
 // draws only the ones in view.
 
-import { effect, signal, untrack } from 'fw';
+import { batch, effect, signal, untrack } from 'fw';
 import { hub } from './index';
 import { AppendLog } from './appendLog';
-import { MAX_LOGS, mergeLogs, STREAM_GRACE_MS } from './live';
+import { LOG_TRIM_BATCH, MAX_LOGS, mergeLogs, STREAM_GRACE_MS } from './live';
 import type { LabelImage, LabelJob, LogLine } from './types';
 import { ApiError } from './client';
 
@@ -72,7 +72,8 @@ export class LiveLabelJob {
     return this.#images.get();
   }
   set images(v: LabelImage[]) {
-    this.#images.set(v);
+    this.#pendingImages.clear();
+    this.#setImages(v);
   }
   get error(): unknown {
     return this.#error.get();
@@ -133,6 +134,12 @@ export class LiveLabelJob {
   #loaded = 0;
   /** Every `removed` event bumps it: a load in pages that saw one may have skipped an image (the offsets shifted). */
   #removals = 0;
+  /** `id -> index` in `#images` so SSE image bursts apply in O(1) per update without `findIndex`. */
+  #imageIndex = new Map<string, number>();
+  /** SSE image updates/removals queued for the next animation frame. */
+  #pendingImages = new Map<string, LabelImage | null>();
+  #logsDirty = false;
+  #raf = 0;
 
   constructor(id: () => string | null) {
     effect(() => {
@@ -142,9 +149,11 @@ export class LiveLabelJob {
       void this.#retry.get();
       const api = hub.api;
       let closed = false;
+      const view = new AbortController();
       let heard = Date.now();
       let lostTimer: ReturnType<typeof setTimeout> | undefined;
       let syncTimer: ReturnType<typeof setTimeout> | undefined;
+      this.#cancelFrame();
       untrack(() => {
         this.job = undefined;
         this.images = [];
@@ -165,11 +174,12 @@ export class LiveLabelJob {
           const out: LabelImage[] = [];
           let pages = 0;
           for (let total = Infinity; out.length < total; pages++) {
-            const page = await api.labelImages(jobId, { offset: out.length, limit: PAGE });
+            if (closed) return out;
+            const page = await api.labelImages(jobId, { offset: out.length, limit: PAGE }, view.signal);
             out.push(...page.images);
             total = page.images.length ? page.total : out.length;
           }
-          if (pages <= 1 || this.#removals === removals || attempt >= LOAD_ATTEMPTS) return out;
+          if (closed || pages <= 1 || this.#removals === removals || attempt >= LOAD_ATTEMPTS) return out;
         }
       };
 
@@ -177,24 +187,32 @@ export class LiveLabelJob {
       let issued = 0;
       let applied = 0;
       const load = async () => {
+        if (closed) return;
         const my = ++issued;
         const seq = this.#jobSeq;
         const flight = { sent: ++this.#imageSeq, changes: new Map<string, LabelImage | null>() };
         const { changes } = flight;
         this.#inflight.add(flight);
         try {
-          const [job, images, logs] = await Promise.all([api.labelJob(jobId), allImages(), api.labelLogs(jobId, 500).catch(() => ({ lines: [] }))]);
+          const [job, images, logs] = await Promise.all([
+            api.labelJob(jobId, view.signal),
+            allImages(),
+            api.labelLogs(jobId, 500, view.signal).catch(() => ({ lines: [] })),
+          ]);
           if (closed || my < applied) return;
           applied = my;
-          if (this.#jobSeq === seq || !this.job) this.job = job;
-          this.images = applyChanges(images, changes);
-          this.#loaded = flight.sent;
-          this.logs = mergeLogs(logs.lines, this.logs);
-          this.#version.set((v) => v + 1);
-          this.loading = false;
-          this.error = undefined;
-          heard = Date.now();
-          if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
+          this.#cancelFrame();
+          batch(() => {
+            if (this.#jobSeq === seq || !this.job) this.job = job;
+            this.images = applyChanges(images, changes);
+            this.#loaded = flight.sent;
+            this.logs = mergeLogs(logs.lines, this.logs);
+            this.#version.set((v) => v + 1);
+            this.loading = false;
+            this.error = undefined;
+            heard = Date.now();
+            if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
+          });
         } finally {
           this.#inflight.delete(flight);
         }
@@ -206,6 +224,8 @@ export class LiveLabelJob {
       const gone = (e: unknown): boolean => {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
+        view.abort();
+        this.#cancelFrame();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         unsub();
@@ -225,7 +245,7 @@ export class LiveLabelJob {
       const check = () => {
         if (checking || closed) return;
         checking = true;
-        api.labelJob(jobId).then(
+        api.labelJob(jobId, view.signal).then(
           () => void (checking = false),
           (e) => {
             checking = false;
@@ -235,9 +255,11 @@ export class LiveLabelJob {
       };
       // Re-synchronising (on open, on reconnect) never gives up silently: a gap would stay.
       const sync = (attempt = 0) => {
+        if (closed) return;
         clearTimeout(syncTimer);
         load().catch((e) => {
           if (closed || gone(e)) return;
+          clearTimeout(syncTimer);
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
@@ -248,7 +270,12 @@ export class LiveLabelJob {
         this.#heard.set(id, ++this.#imageSeq);
         if (!img) this.#removals++;
         for (const f of this.#inflight) f.changes.set(id, img);
-        this.images = img ? upsertImage(this.images, img) : this.images.filter((x) => x.id !== id);
+        if (!img && !this.#imageIndex.has(id)) {
+          this.#pendingImages.delete(id);
+          return;
+        }
+        this.#pendingImages.set(id, img);
+        this.#bump();
       };
 
       unsub = api.labelEvents(jobId, {
@@ -288,11 +315,14 @@ export class LiveLabelJob {
           // After the last line (strictly: an equal time may be a duplicate, which mergeLogs drops): appended in place.
           if (last === undefined || last.t.localeCompare(l.t) < 0) {
             this.logs.push(l);
-            if (this.logs.length > MAX_LOGS) this.logsLog.trimFront(this.logs.length - MAX_LOGS);
+            this.logsLog.trimTo(MAX_LOGS, LOG_TRIM_BATCH);
           } else this.logs = mergeLogs(this.logs, [l]);
-          this.#version.set((v) => v + 1);
+          this.#logsDirty = true;
+          this.#bump();
         },
-        reconnect: () => sync(),
+        reconnect: () => {
+          if (!closed) sync();
+        },
       });
 
       // The first load's failure is the page's error even when the stream has told of the job meanwhile (its `job`
@@ -306,6 +336,8 @@ export class LiveLabelJob {
 
       return () => {
         closed = true;
+        view.abort();
+        this.#cancelFrame();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         unsub();
@@ -338,17 +370,89 @@ export class LiveLabelJob {
    * did, or what became of it while the stream was down; what the action did later, the stream tells).
    */
   put(images: readonly LabelImage[], since: number) {
-    const fresh = images.filter((img) => (this.#heard.get(img.id) ?? 0) <= since);
-    if (!fresh.length) return;
-    const changes = fresh.map((img) => [img.id, img] as const);
-    // A load sent before the action began may predate what it did: the answer goes over what that load gets.
-    for (const f of this.#inflight) if (f.sent <= since) for (const [id, img] of changes) f.changes.set(id, img);
-    if (this.#loaded <= since) this.images = applyChanges(this.images, changes);
+    batch(() => {
+      if (this.#pendingImages.size) this.#flushImages();
+      const fresh = images.filter((img) => (this.#heard.get(img.id) ?? 0) <= since);
+      if (!fresh.length) return;
+      const changes = fresh.map((img) => [img.id, img] as const);
+      // A load sent before the action began may predate what it did: the answer goes over what that load gets.
+      for (const f of this.#inflight) if (f.sent <= since) for (const [id, img] of changes) f.changes.set(id, img);
+      if (this.#loaded <= since) this.images = applyChanges(this.images, changes);
+    });
   }
 
   /** Drops a deleted image (also from a load in flight, which may still have it). */
   drop(id: string) {
-    for (const f of this.#inflight) f.changes.set(id, null);
-    this.images = this.images.filter((x) => x.id !== id);
+    batch(() => {
+      if (this.#pendingImages.size) this.#flushImages();
+      for (const f of this.#inflight) f.changes.set(id, null);
+      if (!this.#imageIndex.has(id)) return;
+      this.images = this.images.filter((x) => x.id !== id);
+    });
+  }
+
+  #setImages(v: LabelImage[]) {
+    this.#imageIndex.clear();
+    for (let i = 0; i < v.length; i++) this.#imageIndex.set(v[i]!.id, i);
+    this.#images.set(v);
+  }
+
+  #flushImages() {
+    if (!this.#pendingImages.size) return;
+    const pending = this.#pendingImages;
+    const cur = this.#images.peek();
+    let hasRemoval = false;
+    for (const [id, img] of pending) {
+      if (img === null && this.#imageIndex.has(id)) {
+        hasRemoval = true;
+        break;
+      }
+    }
+    if (!hasRemoval) {
+      let next: LabelImage[] | null = null;
+      for (const [id, img] of pending) {
+        if (!img) continue;
+        next ??= cur.slice();
+        const idx = this.#imageIndex.get(id);
+        if (idx !== undefined) next[idx] = img;
+        else {
+          this.#imageIndex.set(id, next.length);
+          next.push(img);
+        }
+      }
+      pending.clear();
+      if (next) this.#images.set(next);
+    } else {
+      const next = applyChanges(cur, pending);
+      pending.clear();
+      this.#setImages(next);
+    }
+  }
+
+  #cancelFrame() {
+    if (this.#raf) cancelAnimationFrame(this.#raf);
+    this.#raf = 0;
+    this.#pendingImages.clear();
+    this.#logsDirty = false;
+  }
+
+  #flush() {
+    this.#raf = 0;
+    batch(() => {
+      this.#flushImages();
+      if (this.#logsDirty) {
+        this.#logsDirty = false;
+        this.#version.set((v) => v + 1);
+      }
+    });
+  }
+
+  #bump() {
+    if (typeof requestAnimationFrame === 'undefined') {
+      this.#flush();
+      return;
+    }
+    if (this.#raf) return;
+    this.#raf = requestAnimationFrame(() => this.#flush());
   }
 }

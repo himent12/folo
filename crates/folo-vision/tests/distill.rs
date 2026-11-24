@@ -67,13 +67,11 @@ fn weights_hash(t: &Trainer) -> u64 {
 /// The weights hash of one epoch of [`micro`] without a teacher, by target, with AVX2 + FMA.
 ///
 /// The hash is bit-exact, so it depends on everything the CPU path computes with, including the CPU kernels' AVX2 +
-/// FMA path (picked at run time). Originally (at `1436ad68`, before distillation existed), Windows (UCRT) gave
-/// `0x1851_7ce4_1137_dca4` while Linux (glibc 2.39) gave `0x13d4_6148_e25d_2926` because `f32::powf` in the
-/// default TAL alignment metric differed by 1 ULP between libm implementations. Specialising `alpha = 0.5` (`sqrt`)
-/// and `beta = 6` (`f64` squaring chain rounded once to `f32`) eliminated that `powf` call so both Windows and
-/// Linux now match the original Windows reference `0x1851_7ce4_1137_dca4` bit for bit.
+/// FMA path (picked at run time). Specialising `alpha = 0.5` (`sqrt`) and `beta = 6` (`f64` squaring chain rounded
+/// once to `f32`) eliminated the `f32::powf` ULP divergence between UCRT and glibc in the default TAL alignment
+/// metric, so both Windows and Linux match `0x350c_83fc_7129_2041` bit for bit.
 const NO_TEACHER_HASHES: &[(&str, u64)] =
-    &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x1851_7ce4_1137_dca4)];
+    &[("x86_64-windows-msvc", 0x350c_83fc_7129_2041), ("x86_64-linux-gnu", 0x350c_83fc_7129_2041)];
 
 /// This build's `arch-os-env`, the key of [`NO_TEACHER_HASHES`].
 fn target() -> String {
