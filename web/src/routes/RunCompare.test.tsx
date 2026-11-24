@@ -579,6 +579,60 @@ describe('Compare: deleted run slot reclamation, partial metrics error, and Prec
     expect(target.querySelector('.swap')).not.toBeNull();
   });
 
+  it('does not loop runMetrics on a confirmed 404 while runs refresh is delayed', async () => {
+    setWidth(1440);
+    const api = hub.api as MockApi;
+    const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const realRuns = api.runs.bind(api);
+    const realMetrics = api.runMetrics.bind(api);
+    let runsCall = 0;
+    let releaseRefresh!: () => void;
+    const heldRefresh = new Promise<void>((r) => (releaseRefresh = r));
+    vi.spyOn(api, 'runs').mockImplementation(async (...rest) => {
+      const list = await realRuns(...rest);
+      if (++runsCall === 1) return list;
+      await heldRefresh;
+      return list.filter((r) => r.id !== b!.id);
+    });
+    let bState: '500' | '404' = '500';
+    let bCalls = 0;
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      if (id === b!.id) {
+        bCalls++;
+        if (bState === '500') throw new ApiError(500, 'internal', 'boom');
+        throw new ApiError(404, 'run_not_found', 'deleted');
+      }
+      return realMetrics(id, ...rest);
+    });
+    vi.useFakeTimers();
+    try {
+      const settle = async () => {
+        for (let i = 0; i < 6; i++) {
+          await vi.advanceTimersByTimeAsync(0);
+          flushSync();
+        }
+      };
+      router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+      c = mount(RunCompare, { target });
+      await settle();
+      expect(bCalls).toBe(1);
+
+      // Run B is deleted on the server; retry gets 404 while runs.refresh() stays pending.
+      bState = '404';
+      target.querySelector<HTMLButtonElement>(`button[aria-label="Retry metrics for ${b!.name}"]`)!.click();
+      await settle();
+      // Must NOT spin runMetrics(b) while runs.refresh() is still in flight.
+      expect(bCalls).toBe(2);
+
+      releaseRefresh();
+      await settle();
+      expect(router.route.query.get('ids')).toBe(a!.id);
+      expect(bCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('supports Precision in the metric selector and annotates its best-F1 operating point', async () => {
     setWidth(1440);
     const [a, b] = (await hub.api.runs()).filter((r) => r.status === 'completed').slice(0, 2);

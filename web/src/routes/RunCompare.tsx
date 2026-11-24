@@ -140,6 +140,7 @@ export default function RunCompare() {
     const missing = cur.filter((id) => !known.has(id));
     if (!missing.length) return;
     untrack(() => {
+      if (router.route.path !== '/runs/compare') return;
       const keep = cur.filter((id) => known.has(id));
       dropped.set([...new Set([...dropped.peek(), ...missing])]);
       setIds(keep);
@@ -180,7 +181,7 @@ export default function RunCompare() {
     else void runs.refresh();
   }
   effect(() => {
-    if (!needRunsRefresh.get() || runs.loading || runs.refreshing) return;
+    if (!needRunsRefresh.get() || hub.mode === 'connecting' || runs.loading || runs.refreshing) return;
     untrack(() => {
       needRunsRefresh.set(false);
       void runs.refresh();
@@ -225,7 +226,10 @@ export default function RunCompare() {
         const err = res.reason;
         // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
         if (err instanceof ApiError && err.code === 'run_not_found') {
-          if (snapByRun?.has(id)) saw404 = true;
+          if (snapByRun?.has(id)) {
+            byRun.set(id, snapByRun.get(id)!);
+            saw404 = true;
+          }
           continue;
         }
         failedCount++;
@@ -287,9 +291,13 @@ export default function RunCompare() {
     } catch (err) {
       if (!alive || ctrl.signal.aborted || hub.epoch !== epoch || gen !== metricsGen || !ids.peek().includes(id)) return;
       if (err instanceof ApiError && err.code === 'run_not_found') {
-        const nextErrs = { ...metricErrors.peek() };
-        delete nextErrs[id];
-        metricErrors.set(nextErrs);
+        if (stamp !== null && metrics.data) readAt.get(metrics.data)?.byRun.set(id, stamp);
+        const curErrs = metricErrors.peek();
+        if (id in curErrs) {
+          const nextErrs = { ...curErrs };
+          delete nextErrs[id];
+          metricErrors.set(nextErrs);
+        }
         refreshRunsAfter404();
         return;
       }
@@ -347,7 +355,7 @@ export default function RunCompare() {
   effect(() => {
     if (!needsPoll.get()) return;
     return pollTogether(COMPARE_POLL_MS, () => {
-      if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
+      if (document.visibilityState === 'visible' && hub.mode !== 'connecting' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
     });
   });
   effect(() => {
@@ -365,7 +373,7 @@ export default function RunCompare() {
   effect(() => {
     const stale = metrics.stale !== undefined;
     const failed = Object.keys(metricErrors.get());
-    if ((!stale && !failed.length) || metrics.loading || metrics.refreshing || metrics.error !== undefined) return;
+    if ((!stale && !failed.length) || hub.mode === 'connecting' || metrics.loading || metrics.refreshing || metrics.error !== undefined) return;
     const t = setTimeout(() => {
       if (stale) void metrics.refresh();
       else for (const id of Object.keys(metricErrors.peek())) void fetchRunMetrics(id);
