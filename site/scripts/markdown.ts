@@ -20,7 +20,25 @@ export interface ParsedPage {
   description: string;
 }
 
-const LANGS = ['shellscript', 'powershell', 'json', 'jsonc', 'javascript', 'typescript', 'rust', 'python', 'toml', 'yaml'];
+const LANGS = [
+  'shellscript',
+  'powershell',
+  'json',
+  'jsonc',
+  'javascript',
+  'typescript',
+  'rust',
+  'python',
+  'toml',
+  'yaml',
+  'wgsl',
+  'http',
+  'diff',
+  'html',
+  'css',
+  'markdown',
+];
+const PLAIN_LANGS = new Set(['text', 'txt', 'plain', 'plaintext']);
 const THEME = 'folo';
 
 let highlighter: Promise<Highlighter> | undefined;
@@ -125,12 +143,15 @@ export async function createMarkdown(): Promise<MarkdownIt> {
     const lang = tok.info.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
     const code = tok.content.replace(/\n$/, '');
     let pre: string;
-    if (lang && hl.getLoadedLanguages().includes(lang)) {
+    if (lang && !PLAIN_LANGS.has(lang) && hl.getLoadedLanguages().includes(lang)) {
       pre = hl.codeToHtml(code, { lang, theme: THEME });
     } else {
       pre = `<pre class="shiki plain"><code>${escapeHtml(code)}</code></pre>`;
     }
-    return `<div class="code">${pre}<div class="code-tools">${copyButton()}</div></div>\n`;
+    const label = lang && !PLAIN_LANGS.has(lang) ? escapeHtml(lang) : '';
+    const langAttr = label ? ` data-lang="${label}"` : '';
+    const langBadge = label ? `<span class="code-lang" aria-hidden="true">${label}</span>` : '';
+    return `<div class="code"${langAttr}>${pre}<div class="code-tools">${copyButton()}${langBadge}</div></div>\n`;
   };
   md.renderer.rules.code_block = (tokens, idx) =>
     `<div class="code"><pre class="shiki plain"><code>${escapeHtml(tokens[idx].content.replace(/\n$/, ''))}</code></pre><div class="code-tools">${copyButton()}</div></div>\n`;
