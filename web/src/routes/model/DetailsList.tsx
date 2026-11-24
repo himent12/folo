@@ -3,7 +3,7 @@
  * A full-width panel's facts, each label beside its value: three columns of rows from 1280 px (as Desktop's), the rows
  * two to a line on laptops and tablets, one on phones.
  */
-import { bindable, computed, css, For } from 'fw';
+import { bindable, computed, css, effect, For, signal } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run, ThroughputTable } from '$lib/api/types';
 import type { Evaluation } from '$lib/api/evaluation';
@@ -14,6 +14,7 @@ import { bytes, compact, count, date, num } from '$lib/format';
 import { latencyMs, latencyRange, measuredLatency } from '$lib/throughput';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
+import Button from '$lib/ui/Button';
 import InfoButton from '$lib/ui/InfoButton';
 import { publishedSummary } from '$lib/published';
 import Ident from '$lib/ui/Ident';
@@ -24,6 +25,14 @@ import Meta from '$lib/ui/Meta';
 import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
 import { trainedFor, weightsEpoch } from './weightsEpoch';
 
+/** Transient (non-404) provenance lookup errors so Details can expose Retry rather than pretending data is missing. */
+export interface ProvenanceErrors {
+  run?: unknown;
+  metrics?: unknown;
+  dataset?: unknown;
+  parent?: unknown;
+}
+
 /**
  * The source run, its dataset, the model it was fine-tuned from, and the epochs the run finished (./weightsEpoch
  * finishedEpochs; null while not known).
@@ -33,6 +42,7 @@ export interface ModelContext {
   dataset: Dataset | null;
   parent: Model | null;
   epochs: number | null;
+  errors?: ProvenanceErrors;
 }
 
 export interface DetailsListProps {
@@ -65,6 +75,26 @@ const F16_BYTES_PER_PARAM = 2.03;
 
 export default function DetailsList(props: DetailsListProps) {
   const aboutOpen = bindable(props, 'aboutOpen');
+  const classesOpen = signal(false);
+  let lastModelId = props.m.id;
+  effect(() => {
+    const cur = props.m.id;
+    if (cur !== lastModelId) {
+      lastModelId = cur;
+      classesOpen.set(false);
+    }
+  });
+  const visibleClasses = computed(() => (classesOpen.get() ? props.m.classes : props.m.classes.slice(0, 10)));
+  const provErrorParts = computed(() => {
+    const errs = props.context.data?.errors;
+    if (!errs) return [];
+    const parts: string[] = [];
+    if (errs.run !== undefined) parts.push('source run');
+    if (errs.metrics !== undefined) parts.push('training history');
+    if (errs.dataset !== undefined) parts.push('source dataset');
+    if (errs.parent !== undefined) parts.push('parent model');
+    return parts;
+  });
   const here = computed(() => measuredLatency(props.tp.data, props.m.arch, props.m.imgsz));
   const m = () => props.m;
   const done = () => props.context.data?.epochs ?? null;
@@ -75,7 +105,8 @@ export default function DetailsList(props: DetailsListProps) {
   // where it came from and how fast its architecture runs. One label width and one row rhythm in every column; a long
   // value (the classes, the file-size note) wraps inside its row.
   return (
-    <dl class="details" id="model-details">
+    <>
+      <dl class="details" id="model-details">
       <div class="col">
         <div class="kv">
           <dt>Architecture</dt>
@@ -142,8 +173,8 @@ export default function DetailsList(props: DetailsListProps) {
         </div>
         <div class="kv">
           <dt>Classes</dt>
-          <dd class="classes">
-            <For each={m().classes.slice(0, 10)} key={(_, i) => i}>
+          <dd class="classes" id="model-classes">
+            <For each={visibleClasses.get()} key={(_, i) => i}>
               {(c, i) => (
                 <span class="chip">
                   <span class="sw" style:background={classInk(i())} aria-hidden="true"></span>
@@ -151,7 +182,17 @@ export default function DetailsList(props: DetailsListProps) {
                 </span>
               )}
             </For>
-            {m().classes.length > 10 ? <span class="faint">+{m().classes.length - 10} more</span> : null}
+            {m().classes.length > 10 ? (
+              <button
+                type="button"
+                class="more-classes"
+                aria-expanded={classesOpen.get()}
+                aria-controls="model-classes"
+                onclick={() => classesOpen.set(!classesOpen.peek())}
+              >
+                {classesOpen.get() ? 'Show fewer' : `+${m().classes.length - 10} more`}
+              </button>
+            ) : null}
           </dd>
         </div>
         <div class="kv" class:stack={!m().run_id && m().source === 'published'}>
@@ -276,7 +317,16 @@ export default function DetailsList(props: DetailsListProps) {
           </dd>
         </div>
       </div>
-    </dl>
+      </dl>
+      {provErrorParts.get().length ? (
+        <div class="prov-err" role="status" data-provenance-error>
+          <span>Could not load {provErrorParts.get().join(', ')}.</span>{' '}
+          <Button size="sm" variant="ghost" loading={props.context.refreshing} onclick={() => void props.context.refresh()}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -379,6 +429,44 @@ css`
     border-radius: var(--radius-xs);
     background: var(--bg-active);
     font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .more-classes {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-default);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition:
+      border-color var(--dur-fast) var(--ease-standard),
+      background-color var(--dur-fast) var(--ease-standard),
+      color var(--dur-fast) var(--ease-standard);
+  }
+  .more-classes:hover {
+    border-color: var(--line-strong);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  @media (pointer: coarse) {
+    .more-classes {
+      min-height: 44px;
+      padding: 0 var(--space-3);
+    }
+  }
+  .prov-err {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--line-subtle);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   /* Laptops and tablets: the rows two to a line, in the columns' order. */

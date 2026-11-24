@@ -412,3 +412,114 @@ describe('Model: one look (design/UNIFIED.md §4 Model)', () => {
     expect(text('#cm-title .meta')).toContain('objects per true class');
   });
 });
+
+describe('Model: parallel provenance, transient errors, and full class list', () => {
+  it('fetches runMetrics, dataset, and parent model in parallel after resolving the run', async () => {
+    const api = hub.api as MockApi;
+    const realRun = api.run.bind(api);
+    const realMetrics = api.runMetrics.bind(api);
+    const realDataset = api.dataset.bind(api);
+    const realModel = api.model.bind(api);
+    // Give m_fast_n's source run a parent model weight reference so all three secondary lookups execute.
+    const parentId = 'm_mini_n';
+    api.run = async (id: string) => ({ ...(await realRun(id)), config: { ...(await realRun(id)).config, weights: parentId } });
+
+    const started: string[] = [];
+    let releaseMetrics!: () => void;
+    let releaseDataset!: () => void;
+    let releaseParent!: () => void;
+    const holdMetrics = new Promise<void>((r) => (releaseMetrics = r));
+    const holdDataset = new Promise<void>((r) => (releaseDataset = r));
+    const holdParent = new Promise<void>((r) => (releaseParent = r));
+
+    api.runMetrics = async (id, s, every) => {
+      started.push('metrics');
+      await holdMetrics;
+      return realMetrics(id, s, every);
+    };
+    api.dataset = async (id: string) => {
+      started.push('dataset');
+      await holdDataset;
+      return realDataset(id);
+    };
+    api.model = async (id: string) => {
+      if (id === parentId) {
+        started.push('parent');
+        await holdParent;
+      }
+      return realModel(id);
+    };
+
+    router.route = parse('#/models/m_fast_n');
+    c = mount(Model, { target });
+    // All three independent provenance calls must be in flight simultaneously before any of them resolves.
+    await until(() => started.length === 3, 'all three provenance calls started in parallel');
+    expect(new Set(started)).toEqual(new Set(['metrics', 'dataset', 'parent']));
+
+    releaseMetrics();
+    releaseDataset();
+    releaseParent();
+    await until(() => text('#details').includes('fasteners'), 'provenance populated');
+  });
+
+  it('distinguishes 404 missing provenance from transient failures and exposes Retry on transient failures', async () => {
+    const api = hub.api as MockApi;
+    const realDataset = api.dataset.bind(api);
+
+    // 404 dataset_not_found: treated as missing, no provenance error or Retry shown.
+    api.dataset = async () => {
+      throw new ApiError(404, 'dataset_not_found', 'deleted');
+    };
+    await open('m_fast_n');
+    await until(() => text('#details').includes('fasteners-n'), 'details loaded');
+    expect(target.querySelector('[data-provenance-error]')).toBeNull();
+
+    // Transient 503 on dataset: surfaced with Retry, and clicking Retry recovers the dataset link.
+    unmount(c!);
+    c = undefined;
+    let fail = true;
+    api.dataset = async (id: string) => {
+      if (fail) throw new ApiError(503, 'unavailable', 'busy');
+      return realDataset(id);
+    };
+    await open('m_fast_n');
+    const errBox = await until(() => target.querySelector('[data-provenance-error]'), 'transient provenance error');
+    expect(errBox.textContent).toContain('Could not load source dataset.');
+    const retry = errBox.querySelector<HTMLButtonElement>('button')!;
+    expect(retry.textContent?.trim()).toBe('Retry');
+
+    fail = false;
+    retry.click();
+    await until(() => !target.querySelector('[data-provenance-error]') && text('#details').includes('fasteners'), 'provenance recovered');
+  });
+
+  it('turns +N more on >10-class models into a disclosure button while keeping the compact default', async () => {
+    const api = hub.api as MockApi;
+    api.modelEval = async () => {
+      throw new ApiError(404, 'no_matching_dataset', 'no match');
+    };
+    router.route = parse('#/models/m_coco_s');
+    c = mount(Model, { target });
+    const btn = await until(() => target.querySelector<HTMLButtonElement>('#model-classes button.more-classes'), 'classes disclosure');
+
+    // Compact default: first 10 classes + "+70 more" button.
+    expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(10);
+    expect(btn.textContent?.trim()).toBe('+70 more');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    expect(btn.getAttribute('aria-controls')).toBe('model-classes');
+
+    // Expanding shows all 80 classes.
+    btn.click();
+    flushSync();
+    expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(80);
+    expect(btn.textContent?.trim()).toBe('Show fewer');
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+
+    // Collapsing restores compact 10-class view.
+    btn.click();
+    flushSync();
+    expect(target.querySelectorAll('#model-classes .chip')).toHaveLength(10);
+    expect(btn.textContent?.trim()).toBe('+70 more');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+  });
+});
