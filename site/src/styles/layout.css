@@ -107,27 +107,23 @@
   display: block;
 }
 
-/* The theme button shows what it switches to. */
+/* The theme button shows the active mode: system (monitor), light (sun) or dark (moon). */
+.theme-toggle .i-sun,
 .theme-toggle .i-moon {
   display: none;
 }
 
-:root[data-theme='light'] .theme-toggle .i-sun {
+:root[data-theme='light'] .theme-toggle .i-system,
+:root[data-theme='dark'] .theme-toggle .i-system {
   display: none;
 }
 
-:root[data-theme='light'] .theme-toggle .i-moon {
+:root[data-theme='light'] .theme-toggle .i-sun {
   display: block;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) .theme-toggle .i-sun {
-    display: none;
-  }
-
-  :root:not([data-theme='dark']) .theme-toggle .i-moon {
-    display: block;
-  }
+:root[data-theme='dark'] .theme-toggle .i-moon {
+  display: block;
 }
 
 /* Shell */

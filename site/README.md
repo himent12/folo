@@ -42,7 +42,8 @@ npm run shoot      # screenshots of the built site into site/shots (installed Ch
   page's Markdown in one file) and the raw Markdown of each page at `md/<repository path>`.
 - **Theme.** Colours, type, spacing, radii and motion come from `design/tokens.json`, the tokens Studio and Desktop
   use, generated into CSS variables at build time (`scripts/tokens.ts`; the same variable names as Studio). With no
-  saved choice the site follows the system's light or dark setting; the top-bar button switches and remembers it.
+  saved choice the site follows the system's light or dark setting; the top-bar button cycles between system, light and
+  dark and remembers it.
   Fonts are the self-hosted Geist and Geist Mono from `design/fonts`. Highlighting colours are the tokens' status
   `text` colours, which meet AA on every surface.
 - **Layout.** Three columns from 1200 px, no side table of contents below that, and below 960 px the sidebar becomes

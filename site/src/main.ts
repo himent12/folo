@@ -27,32 +27,54 @@ function announce(msg: string) {
   });
 }
 
-// Theme: a saved choice wins; otherwise the CSS follows the system.
-function currentTheme(): 'light' | 'dark' {
+// Theme: cycle between system (no override), light and dark; start by flipping away from the system theme.
+type ThemePref = 'system' | 'light' | 'dark';
+const lightMq = matchMedia('(prefers-color-scheme: light)');
+const systemTheme = (): 'light' | 'dark' => (lightMq.matches ? 'light' : 'dark');
+function themePref(): ThemePref {
   const set = document.documentElement.dataset.theme;
-  if (set === 'light' || set === 'dark') return set;
-  return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return set === 'light' || set === 'dark' ? set : 'system';
+}
+function nextThemePref(pref: ThemePref, sys: 'light' | 'dark'): ThemePref {
+  const order: readonly ThemePref[] = sys === 'dark' ? ['system', 'light', 'dark'] : ['system', 'dark', 'light'];
+  return order[(order.indexOf(pref) + 1) % order.length];
 }
 const themeBtn = $<HTMLButtonElement>('.theme-toggle');
 const themeColorMeta = $<HTMLMetaElement>('meta[name="theme-color"]');
 function syncTheme() {
-  themeBtn?.setAttribute('aria-label', currentTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+  const pref = themePref();
+  const sys = systemTheme();
+  const next = nextThemePref(pref, sys);
+  const currentLabel = pref === 'system' ? `System (${sys})` : pref === 'light' ? 'Light' : 'Dark';
+  const label = `Theme: ${currentLabel}. Switch to ${next} theme`;
+  themeBtn?.setAttribute('aria-label', label);
+  themeBtn?.setAttribute('title', label);
   if (themeColorMeta) {
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg-panel').trim();
     if (bg) themeColorMeta.content = bg;
   }
 }
 themeBtn?.addEventListener('click', () => {
-  const next = currentTheme() === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next;
+  const sys = systemTheme();
+  const next = nextThemePref(themePref(), sys);
+  if (next === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = next;
   try {
-    localStorage.setItem('folo.docs.theme', next);
+    if (next === 'system') localStorage.removeItem('folo.docs.theme');
+    else localStorage.setItem('folo.docs.theme', next);
   } catch {
     // Storage can be unavailable (private windows); the choice then lasts for this page.
   }
   syncTheme();
+  announce(next === 'system' ? `Theme set to system (${sys})` : `Theme set to ${next}`);
 });
-matchMedia('(prefers-color-scheme: light)').addEventListener('change', syncTheme);
+lightMq.addEventListener('change', syncTheme);
+addEventListener('storage', (e) => {
+  if (e.key !== 'folo.docs.theme' && e.key !== null) return;
+  if (e.newValue === 'light' || e.newValue === 'dark') document.documentElement.dataset.theme = e.newValue;
+  else delete document.documentElement.dataset.theme;
+  syncTheme();
+});
 syncTheme();
 
 // Mobile navigation drawer.
