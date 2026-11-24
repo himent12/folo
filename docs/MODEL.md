@@ -1597,7 +1597,9 @@ CLI paths currently target v1 `FoloModel`).
 
 ### 11.1 Scaling and `FoloV2Config`
 
-Every channel width is `ceil16`-aligned for 16×16×16 tensor cores:
+Stage widths returned by `ch(base)` and the head hidden widths `c_box`/`c_cls` are `ceil16`-aligned for 16×16×16
+tensor cores (internal `FoloBlock` `c_mid = ch(...) / 2` widths remain multiples of 8 when `ch(...)` is an odd multiple
+of 16):
 
 ```
 ch(base) = max(1, ceil(min(base, max_channels) · width / 16)) · 16
@@ -1638,12 +1640,13 @@ ch(base) = max(1, ceil(min(base, max_channels) · width / 16)) · 16
   c2, 1×1)`. For `m ≤ 2`, `taps = 1` and `cv2` reads `[cv1_out, y_last]`; for `m ≥ 3`, `taps = 2` and `cv2` reads
   `[cv1_out, y_mid, y_last]` where `mid_idx = m / 2 - 1`. Both `cv1` and `cv2` use `forward_cat` over at most 3 parts,
   eliding concatenation on fused paths.
-- **`HyperContext(c5, M)` (`HyperACE-Lite` at P5, replacing `C2PSA`):** linear `O(N·M)` hypergraph global context with
-  `c_g = c5 / 2`. `av_proj: Conv(c5 → M + c_g, 1×1, act=none)` produces `A_logits [B, M, N]` and `V [B, c_g, N]`
-  (`N = H·W`); `A_gather = softmax(A_logits, dim=-1)` gathers tokens into `E = V · A_gather^T` (`[B, c_g, M]`); two
-  `Linear(c_g → c_g)` layers with SiLU refine `E' = E^T + ffn2(SiLU(ffn1(E^T)))`; `g_scene = mean(E', dim=1)` (`[B, c_g]`);
-  `A_bcast = softmax(A_logits, dim=1)` (`H·W`-invariant convex combination over hyperedges) broadcasts `Y_ctx = E'^T · A_bcast`
-  reshaped to `[B, c_g, H, W]`; `out_proj: Conv(c_g → c5, 1×1, act=none)` adds back to `x` (`(x + out_proj(Y_ctx), g_scene)`).
+- **`HyperContext(c_p5, M)` (`HyperACE-Lite` at P5, replacing `C2PSA`):** linear `O(N·M)` hypergraph global context
+  with `c_g = c_p5 / 2`. `av_proj: Conv(c_p5 → M + c_g, 1×1, act=none)` produces `A_logits [B, M, N]` and
+  `V [B, c_g, N]` (`N = H·W`); `A_gather = softmax(A_logits, dim=-1)` gathers tokens into `E = V · A_gather^T`
+  (`[B, c_g, M]`); two `Linear(c_g → c_g)` layers with SiLU refine `E' = E^T + ffn2(SiLU(ffn1(E^T)))`;
+  `g_scene = mean(E', dim=1)` (`[B, c_g]`); `A_bcast = softmax(A_logits, dim=1)` (`H·W`-invariant convex combination
+  over hyperedges) broadcasts `Y_ctx = E'^T · A_bcast` reshaped to `[B, c_g, H, W]`;
+  `out_proj: Conv(c_g → c_p5, 1×1, act=none)` adds back to `x` (`(x + out_proj(Y_ctx), g_scene)`).
 - **`FullPadGate(c_g → c_tgt)`:** residual FiLM gate `feat * (1 + tanh(proj(g_scene)))` with `proj: Linear(c_g → c_tgt)`
   zero-initialised (weight and bias `0.0`), making step 0 exact identity.
 
@@ -1673,7 +1676,8 @@ Decoupled three-level head on `[P3_head, P4_head, out5]` (`[c16, c19, c22]`, str
 
 - **`BoxBranchV2` (`head.box.{p3,p4,p5}.*`):** `conv0: WsQARepConv3x3(C_L → c_box)` → `conv1: WsQARepConv3x3(c_box →
   c_box)` → `out: Conv2d(c_box → 4·reg_max, 1×1)` (bias `2.0`; `64` channels at default `reg_max = 16`), plus opt-in
-  separate `iou_out: Conv2d(c_box → 1, 1×1)` (bias `0.0`, when `iou_head = true`) keeping `box.out` strictly aligned.
+  separate `iou_out: Conv2d(c_box → 1, 1×1)` (bias `0.0`, when `iou_head = true`), keeping `box.out` at `4·reg_max`
+  channels without appending an extra IoU channel.
 - **`ClsBranchV2` (`head.cls.{p3,p4,p5}.*`):** depthwise-free dense branch: optional `align: Conv(C_L → c_cls, 1×1)`
   (omitted when `C_L == c_cls`, e.g. P3 on `folo2-n`) → `conv0: WsQARepConv3x3(c_cls → c_cls)` → `out: Conv2d(c_cls →
   nc, 1×1)`. Output bias is initialised to `MAL_CLS_BIAS_PRIOR = -4.59512` (`ln(0.01 / 0.99)`) when
@@ -1686,6 +1690,7 @@ Decoupled three-level head on `[P3_head, P4_head, out5]` (`[c16, c19, c22]`, str
   ```
   `alpha_raw` (`[nc]`) starts at `ln(e − 1) ≈ 0.54132485` so `softplus(alpha_raw) = 1.0`. Local `3×3` maxima satisfy
   `MaxPool3×3(Z) − Z = 0`, preserving true peaks identically while suppressing non-peak duplicates (`Z_o2o ≤ Z`). In
-  training mode with `o2o_detach = true` (default), feature inputs are detached before `o2o` and the shared `box_branch`
-  replays `forward_box_only` (skipping `iou_out`) while snapshotting and restoring training-mode BN running stats so BN
-  updates only once per batch; when `o2o_detach = false` or in eval mode, `box_branch` is not run twice.
+  training mode when both `o2o_detach = true` (default) and autograd is enabled (`is_grad_enabled()`), feature inputs
+  are detached before `o2o` and the shared `box_branch` replays `forward_box_only` (skipping `iou_out`) while
+  snapshotting and restoring training-mode BN running stats so BN updates only once per batch; when `o2o_detach = false`,
+  under `no_grad()`, or in eval mode, `box_branch` is not run twice.
