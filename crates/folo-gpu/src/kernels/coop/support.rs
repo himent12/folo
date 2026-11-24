@@ -36,8 +36,8 @@ pub(crate) fn unavailable_reason(adapter: &wgpu::Adapter, features: wgpu::Featur
     if !adapter_supports(adapter) {
         return Some(format!("{} has no 16x16x16 f16 -> f32 cooperative matrix configuration", info.name));
     }
-    if !adapter.features().contains(wgpu::Features::SUBGROUP) {
-        return Some(format!("{} has no subgroup support", info.name));
+    if !adapter.features().contains(wgpu::Features::SUBGROUP | wgpu::Features::SUBGROUP_BARRIER) {
+        return Some(format!("{} has no subgroup barrier support", info.name));
     }
     if info.subgroup_min_size != 32 || info.subgroup_max_size != 32 {
         return Some(format!(
@@ -57,8 +57,9 @@ pub fn adapter_unavailable_reason(adapter: &wgpu::Adapter) -> Option<String> {
 }
 
 /// Device features the tensor-core kernels need on top of FOLO's usual ones.
-pub(crate) const FEATURES: wgpu::Features =
-    wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX.union(wgpu::Features::SUBGROUP);
+pub(crate) const FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX
+    .union(wgpu::Features::SUBGROUP)
+    .union(wgpu::Features::SUBGROUP_BARRIER);
 
 /// wgpu's opt-in for `EXPERIMENTAL_*` features. This is the one place FOLO enables them.
 ///

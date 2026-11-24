@@ -214,8 +214,9 @@ pub(crate) fn subpixel_epilogue_coop(fm: u32, fnn: u32, vc: bool) -> String {
     );
     for i in 0..fm {
         for j in 0..fnn {
+            let last = i + 1 == fm && j + 1 == fnn;
             let _ = writeln!(s, "  coopStoreT(acc{i}_{j}, &Cs[cbase], 16u);");
-            s.push_str("  workgroupBarrier();\n  {\n");
+            s.push_str("  subgroupBarrier();\n  {\n");
             let _ = writeln!(
                 s,
                 "    let ci = ((m0 + wm * {}u + {}u) >> 2u) + s_c4;\n\
@@ -257,7 +258,11 @@ pub(crate) fn subpixel_epilogue_coop(fm: u32, fnn: u32, vc: bool) -> String {
                     }
                 }
             }
-            s.push_str("    }\n  }\n  workgroupBarrier();\n");
+            if last {
+                s.push_str("    }\n  }\n");
+            } else {
+                s.push_str("    }\n  }\n  subgroupBarrier();\n");
+            }
         }
     }
     s
