@@ -320,4 +320,14 @@ fn new_losses_finite_diff_and_edge_cases() {
         "exact tensor-decoded match must have 0 R-PIoU loss, got {}",
         out_rpi.total_value
     );
+
+    // Public `rpiou_loss` rejects mismatched batch lengths, bad column counts, and wrong rank without panicking.
+    let b2x4 = Tensor::zeros([2, 4]);
+    let b1x4 = Tensor::zeros([1, 4]);
+    let b1x3 = Tensor::zeros([1, 3]);
+    let b4 = Tensor::zeros([4]);
+    assert!(rpiou_loss(&b2x4, &b1x4, 0.5, 2.0, 0.5).is_err());
+    assert!(rpiou_loss(&b1x4, &b2x4, 0.5, 2.0, 0.5).is_err());
+    assert!(rpiou_loss(&b1x3, &b1x3, 0.5, 2.0, 0.5).is_err());
+    assert!(rpiou_loss(&b4, &b1x4, 0.5, 2.0, 0.5).is_err());
 }

@@ -79,7 +79,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 |---|---|
 | Change a block or a layer table | `src/model/blocks.rs` or `src/model/mod.rs`; the same change in `src/export/onnx/blocks.rs`; `tests/model.rs` (when names change, re-bless `tests/golden/folo-n-names.txt` with `FOLO_BLESS=1 cargo test -p folo-vision --test model golden_names`); the parameter count in the `src/model/mod.rs` doctest; MODEL.md §2, §4, §5 |
 | Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train.rs`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
-| Change a loss term | `src/loss/terms.rs`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss.rs`; MODEL.md §7.4 |
+| Change a loss term | `src/loss/terms.rs`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss/`; MODEL.md §7.4 |
 | Change the post-process | `src/nms/mod.rs` or `src/fusion/mod.rs`; `tests/nms_reference.rs`, `tests/fusion_reference.rs`, `tests/elc_postproc.rs`, and `tests/lazy_head.rs` / `tests/gpu_lazy_head.rs` (candidate-first must equal the dense path); MODEL.md §9.3, §9.4 |
 | Change a metric | `src/metrics.rs` or `src/cocoeval.rs`; `tests/metrics_known.rs`, `tests/coco_parity.rs`, `tests/coco_full.rs`; METRICS.md |
 | Change the ONNX export | `src/export/onnx/graph.rs` (layer helpers), `blocks.rs` or `decode.rs`; the unit tests and the op table in `src/export/onnx/mod.rs`; CLI.md (`folo export`) |
@@ -102,7 +102,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `int8.rs` | int8 inference: the executor against the fake-quant reference, the same bits at every thread count, the calibration's JSON, metadata and weights fingerprint |
 | `train.rs` | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, the predictor on trained weights |
 | `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
-| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss.rs`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation (and its fused kernel against the tensor path) |
+| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss/`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation (and its fused kernel against the tensor path) |
 
 The `gpu*.rs` tests need a hardware GPU adapter and skip with a note without one (`FOLO_GPU_TEST_SOFTWARE=1` runs
 most of them on a software adapter); `gpu_f16.rs` also skips without f16 compute, and `gpu_tensor_cores.rs` and the

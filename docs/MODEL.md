@@ -626,7 +626,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
   per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
   backward written out by hand (α constant, min / max ties split as folo-core's autograd does), and a fixed-order
-  reduction. `detection_loss_host` keeps the host assigner on any device. `crates/folo-vision/tests/gpu_loss.rs`
+  reduction. `detection_loss_host` keeps the host assigner on any device. `crates/folo-vision/tests/gpu_loss/`
   checks the device assignment against the host one (the same positives, gts and labels; `t` to 1e-5) on several
   sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
   listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float

@@ -258,6 +258,8 @@ fn check(
         rpiou_kappa: 2.0,
         rpiou_delta: 0.5,
         dfl_ot_weight: 0.0,
+        box_gain: 0.0,
+        dfl_gain: 0.0,
     })
 }
 
@@ -429,13 +431,15 @@ pub fn detection_loss_with_assignment(
     d.rpiou_kappa = s.rpiou_kappa;
     d.rpiou_delta = s.rpiou_delta;
     d.dfl_ot_weight = s.dfl_ot_weight;
+    d.box_gain = s.gains[0];
+    d.dfl_gain = s.gains[2];
     let ctx = &bufs.ctx;
     let raw = |t: &Tensor| dense_buffer(t).ok_or_else(|| err("assignment tensor is not dense"));
     let (dense_b, misc_b, slot_b, pick_b, meta_b) =
         (raw(&asg.dense)?, raw(&asg.misc)?, raw(&asg.slots)?, raw(&asg.picks)?, raw(&asg.meta)?);
     let (_part, part) = bufs.alloc(DType::F32, &[d.bce_partials()], false)?;
     k::bce_forward(ctx, &d, &cls_buf, &dense_b, &part, &misc_b).map_err(gpu)?;
-    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 3], false)?;
+    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 4], false)?;
     let dummy = ctx.dummy().clone();
     k::box_terms(ctx, &d, false, &box_buf, &meta_b, &pick_b, &slot_b, &terms, &dummy, &dummy).map_err(gpu)?;
     let (stats, stats_b) = bufs.alloc(DType::F32, &[12], false)?;

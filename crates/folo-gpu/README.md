@@ -71,7 +71,7 @@ shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_
 | letterbox | `letterbox_rgb8` | `kernels::vision::letterbox_rgb8` | `letterbox.wgsl` | folo-vision `tests/gpu.rs` |
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
-| assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss.rs` |
+| assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss/` |
 | distillation term (not a `Backend` method) | `folo_gpu::distill::distill_loss` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
 
 `GpuTensor` (`src/tensor.rs`) has kernels of its own that the backend does not use: `kernels::elementwise`

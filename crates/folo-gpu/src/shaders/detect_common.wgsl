@@ -176,6 +176,62 @@ fn mul_pow2(x: f32, e: i32) -> f32 {
     return v * bitcast<f32>(u32(ec + 127) << 23u);
 }
 
+// Compute `exp(x)` for `x <= 0` in exponent-split form `(m, e)` with `m in [1, 2)` and `exp(x) = m * 2^e`
+// (`(0, 0)` when `x <= -700.0`). Keeps full 24-bit precision across `[-700, 0]` without subnormal underflow.
+fn exp_split_neg(x: f32) -> vec2<f32> {
+    if (x <= -700.0) { return vec2<f32>(0.0, 0.0); }
+    let n = round(x * 1.442695041);
+    let r = x - n * 0.6933594 - n * -2.1219444e-4;
+    var p = 1.9875691e-4;
+    p = p * r + 1.3981999e-3;
+    p = p * r + 8.333452e-3;
+    p = p * r + 4.1665796e-2;
+    p = p * r + 1.6666665e-1;
+    p = p * r + 0.5;
+    let y = p * r * r + r + 1.0;
+    let yn = norm_f32(y);
+    return vec2<f32>(yn.x, yn.y + n);
+}
+
+// Add two normalized exponent-split values `a = a.x * 2^a.y` and `b = b.x * 2^b.y` (`x == 0` encodes `0`).
+fn add_split(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    if (a.x == 0.0) { return b; }
+    if (b.x == 0.0) { return a; }
+    var hi = a;
+    var lo = b;
+    if (b.y > a.y) {
+        hi = b;
+        lo = a;
+    }
+    let diff = i32(hi.y) - i32(lo.y);
+    if (diff > 26) { return hi; }
+    let s = hi.x + mul_pow2(lo.x, -diff);
+    if (s == 0.0) { return vec2<f32>(0.0, 0.0); }
+    let sn = norm_f32(s);
+    return vec2<f32>(sn.x, sn.y + hi.y);
+}
+
+// Multiply two normalized exponent-split values.
+fn mul_split(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    if (a.x == 0.0 || b.x == 0.0) { return vec2<f32>(0.0, 0.0); }
+    let pn = norm_f32(a.x * b.x);
+    return vec2<f32>(pn.x, pn.y + a.y + b.y);
+}
+
+// Divide normalized exponent-split `a` by non-zero `b`.
+fn div_split(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    if (a.x == 0.0) { return vec2<f32>(0.0, 0.0); }
+    let qn = norm_f32(a.x / b.x);
+    return vec2<f32>(qn.x, qn.y + a.y - b.y);
+}
+
+// Materialize a normalized exponent-split value back to `f32`.
+fn split_to_f32(a: vec2<f32>) -> f32 {
+    if (a.x == 0.0 || a.y < -160.0) { return 0.0; }
+    if (a.y > 160.0) { return mul_pow2(a.x, 200); }
+    return mul_pow2(a.x, i32(a.y));
+}
+
 // Compute `dx * q_m * 2^e_q` without forming an overflowing or underflowing `q_m * 2^e_q`.
 fn scaled_edge_u(dx: f32, q_m: f32, e_q: i32) -> f32 {
     if (dx == 0.0) { return 0.0; }

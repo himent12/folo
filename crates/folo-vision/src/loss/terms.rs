@@ -323,8 +323,22 @@ fn rpiou_box_f64(a: [f64; 4], b: [f64; 4], beta: f64, kappa: f64, delta0: f64) -
 /// Purely algebraic (no `atan` or `exp`), with zero enclosing-box expansion and a global gradient bound; `b2` is
 /// treated as constant ground truth (evaluated in `f64` on CPU; GPU training uses the fused `det_box.wgsl` kernel).
 pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
-    let (n, c) = b1.dims2()?;
-    debug_assert_eq!(c, 4);
+    let (n, c1) = b1.dims2()?;
+    let (n2, c2) = b2.dims2()?;
+    if c1 != 4 || c2 != 4 || n != n2 {
+        return Err(invalid(format!(
+            "rpiou_loss expects matching [N, 4] box tensors, got {:?} and {:?}",
+            b1.dims(),
+            b2.dims()
+        )));
+    }
+    if b1.device() != b2.device() {
+        return Err(folo_core::Error::DeviceMismatch {
+            op: "rpiou_loss",
+            lhs: b1.device(),
+            rhs: b2.device(),
+        });
+    }
     let dev = b1.device();
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
@@ -355,9 +369,10 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     })
 }
 
-/// Full `R-PIoU` directly from DFL `logits: [N, 4, R]`, reusing the tensor-decoded `probs`, `dist`, and `pd` so
-/// focal-IoU and edge terms evaluate the exact same predicted box and carry both derivatives through the DFL softmax
-/// Jacobian in `f64` before rounding the final logit gradient to `f32`.
+/// Weighted `R-PIoU` scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_rpiou_i` directly from DFL
+/// `logits: [N, 4, R]`, reusing the tensor-decoded `probs`, `dist`, and `pd` so focal-IoU and edge terms evaluate
+/// the exact same predicted box and combine batch scaling, `box_gain`, `tss`, `t`, `(1 - lam)`, and the DFL
+/// softmax Jacobian entirely in `f64` before rounding the final logit gradient to `f32`.
 #[allow(clippy::too_many_arguments)]
 fn rpiou_from_logits(
     logits: &Tensor,
@@ -365,6 +380,10 @@ fn rpiou_from_logits(
     dist_t: &Tensor,
     pd_t: &Tensor,
     tbox: &[f32],
+    t_scores: &[f32],
+    lams: Option<&[f32]>,
+    tss: f32,
+    box_gain: f32,
     beta: f32,
     kappa: f32,
     delta0: f32,
@@ -372,41 +391,51 @@ fn rpiou_from_logits(
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
     let dev = logits.device();
+    if n == 0 {
+        return Tensor::zeros_with([], DType::F32, dev);
+    }
     let probs = probs_t.to_vec::<f32>()?;
     let dists = dist_t.to_vec::<f32>()?;
     let pds = pd_t.to_vec::<f32>()?;
     let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
-    let mut out = vec![0.0f32; n];
+    let mut sum_w = 0.0f64;
     let mut base_d = vec![0.0f64; n * 4];
+    let mut weights = vec![0.0f64; n];
     for i in 0..n {
         let ai = [pds[4 * i] as f64, pds[4 * i + 1] as f64, pds[4 * i + 2] as f64, pds[4 * i + 3] as f64];
         let bi = [tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64];
         let (lv, g_xyxy) = rpiou_box_f64(ai, bi, b64, k64, d64);
-        out[i] = lv as f32;
+        let wi = (t_scores[i] as f64) * lams.map_or(1.0, |v| 1.0 - v[i] as f64);
+        weights[i] = wi;
+        sum_w += wi * lv;
         base_d[4 * i] = -g_xyxy[0];
         base_d[4 * i + 1] = -g_xyxy[1];
         base_d[4 * i + 2] = g_xyxy[2];
         base_d[4 * i + 3] = g_xyxy[3];
     }
-    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    let out_val = ((sum_w / tss as f64) * box_gain as f64) as f32;
+    let out_t = Tensor::scalar(out_val).to_device(dev)?;
     Tensor::custom_op("rpiou_from_logits", &[logits], out_t, move |g| {
-        let gv = g.to_vec::<f32>()?;
+        let gv = g.item::<f32>()? as f64;
+        let scale = gv * (box_gain as f64 / tss as f64);
         let mut grad = vec![0.0f32; n * 4 * r];
-        for i in 0..n {
-            let gi = gv[i] as f64;
-            if gi == 0.0 {
-                continue;
-            }
-            for side in 0..4 {
-                let gd = gi * base_d[4 * i + side];
-                if gd == 0.0 {
+        if scale != 0.0 {
+            for i in 0..n {
+                let gi = scale * weights[i];
+                if gi == 0.0 {
                     continue;
                 }
-                let d_s = dists[4 * i + side] as f64;
-                let prow = &probs[(4 * i + side) * r..(4 * i + side + 1) * r];
-                let grow = &mut grad[(4 * i + side) * r..(4 * i + side + 1) * r];
-                for (k, (&pk, gk)) in prow.iter().zip(grow.iter_mut()).enumerate() {
-                    *gk = (gd * (pk as f64) * (k as f64 - d_s)) as f32;
+                for side in 0..4 {
+                    let gd = gi * base_d[4 * i + side];
+                    if gd == 0.0 {
+                        continue;
+                    }
+                    let d_s = dists[4 * i + side] as f64;
+                    let prow = &probs[(4 * i + side) * r..(4 * i + side + 1) * r];
+                    let grow = &mut grad[(4 * i + side) * r..(4 * i + side + 1) * r];
+                    for (k, (&pk, gk)) in prow.iter().zip(grow.iter_mut()).enumerate() {
+                        *gk = (gd * (pk as f64) * (k as f64 - d_s)) as f32;
+                    }
                 }
             }
         }
@@ -414,16 +443,17 @@ fn rpiou_from_logits(
     })
 }
 
-/// Overflow/underflow-safe `exp(d)` for `d <= 0` (`d = -inf` maps to `0.0`).
+/// Overflow/underflow-safe `exp(a - b)` in `f64` for `a <= b` down to `-700.0`.
 #[inline(always)]
-fn safe_exp_neg(d: f32) -> f32 {
-    if d > -100.0 { fast_exp(d) } else { 0.0 }
+fn exp_neg_f64(a: f32, b: f32) -> f64 {
+    let d = a as f64 - b as f64;
+    if d > -700.0 { d.exp() } else { 0.0 }
 }
 
 /// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:
 /// `(dfl_gain * ot_weight / tss) * Σ_{n, side} side_wt * Σ_{k != j} softplus(log Z_excl(k) - log Z_ret(k))`
 /// for `logits: [N, 4, R]`, accumulating retained and excluded masses separately in `f64` so tiny excluded masses
-/// (e.g. `[-20, 0, 0, -1000]`), extreme logits (`[-1e38; 5, 0]`, `[-1e8, -1e8, -1e8, 0]`), and multi-positive sums
+/// (e.g. `[-89, 0, 0, -1000]`), extreme logits (`[-1e38; 5, 0]`, `[-1e8, -1e8, -1e8, 0]`), and multi-positive sums
 /// never suffer cancellation or premature overflow.
 fn ot_dfl_tail(
     logits: &Tensor,
@@ -474,10 +504,10 @@ fn ot_dfl_tail(
         for k in 1..r - 1 {
             let x = row[k];
             if x > pm {
-                pa = pa * (safe_exp_neg(pm - x) as f64) + 1.0;
+                pa = pa * exp_neg_f64(pm, x) + 1.0;
                 pm = x;
             } else {
-                pa += safe_exp_neg(x - pm) as f64;
+                pa += exp_neg_f64(x, pm);
             }
             pref_m[k] = pm;
             pref_a[k] = pa;
@@ -490,10 +520,10 @@ fn ot_dfl_tail(
             if step > 0 {
                 let x = row[k + 1];
                 if x > sm {
-                    sa = sa * (safe_exp_neg(sm - x) as f64) + 1.0;
+                    sa = sa * exp_neg_f64(sm, x) + 1.0;
                     sm = x;
                 } else {
-                    sa += safe_exp_neg(x - sm) as f64;
+                    sa += exp_neg_f64(x, sm);
                 }
             }
             if k < j {
@@ -514,22 +544,22 @@ fn ot_dfl_tail(
         }
         if j > 0 {
             for t in 1..j {
-                ret_mant[t] += ret_mant[t - 1] * (safe_exp_neg(m_ret[t] - m_ret[t - 1]) as f64);
+                ret_mant[t] += ret_mant[t - 1] * exp_neg_f64(m_ret[t], m_ret[t - 1]);
             }
             let mut t = j - 1;
             while t > 0 {
                 t -= 1;
-                exc_mant[t] += exc_mant[t + 1] * (safe_exp_neg(m_exc[t] - m_exc[t + 1]) as f64);
+                exc_mant[t] += exc_mant[t + 1] * exp_neg_f64(m_exc[t], m_exc[t + 1]);
             }
         }
         if j + 2 < r {
             let mut t = r - 2;
             while t > j + 1 {
                 t -= 1;
-                ret_mant[t] += ret_mant[t + 1] * (safe_exp_neg(m_ret[t] - m_ret[t + 1]) as f64);
+                ret_mant[t] += ret_mant[t + 1] * exp_neg_f64(m_ret[t], m_ret[t + 1]);
             }
             for t in j + 2..r - 1 {
-                exc_mant[t] += exc_mant[t - 1] * (safe_exp_neg(m_exc[t] - m_exc[t - 1]) as f64);
+                exc_mant[t] += exc_mant[t - 1] * exp_neg_f64(m_exc[t], m_exc[t - 1]);
             }
         }
         total += wt * l_tail;
@@ -539,21 +569,21 @@ fn ot_dfl_tail(
             let mut d_ot = 0.0f64;
             if j > 0 {
                 if k < j {
-                    d_ot += (safe_exp_neg(xk - m_exc[k]) as f64) * exc_mant[k];
+                    d_ot += exp_neg_f64(xk, m_exc[k]) * exc_mant[k];
                 }
                 if k > 0 {
                     let ti = (k - 1).min(j - 1);
-                    d_ot -= (safe_exp_neg(xk - m_ret[ti]) as f64) * ret_mant[ti];
+                    d_ot -= exp_neg_f64(xk, m_ret[ti]) * ret_mant[ti];
                 }
             }
             if j + 2 < r {
                 if k + 1 < r {
                     let ti = k.max(j + 1);
-                    d_ot -= (safe_exp_neg(xk - m_ret[ti]) as f64) * ret_mant[ti];
+                    d_ot -= exp_neg_f64(xk, m_ret[ti]) * ret_mant[ti];
                 }
                 if k > j + 1 {
                     let ti = (k - 1).min(r - 2);
-                    d_ot += (safe_exp_neg(xk - m_exc[ti]) as f64) * exc_mant[ti];
+                    d_ot += exp_neg_f64(xk, m_exc[ti]) * exc_mant[ti];
                 }
             }
             *out_k = wt * d_ot;
@@ -742,7 +772,7 @@ pub(super) fn loss_impl(
         }
     };
 
-    let (l_box, l_dfl) = if n == 0 {
+    let (wb, wd) = if n == 0 {
         (Tensor::zeros_with([], DType::F32, dev)?, Tensor::zeros_with([], DType::F32, dev)?)
     } else {
         let logits = if fused {
@@ -759,30 +789,66 @@ pub(super) fn loss_impl(
         let sign = on_dev(Tensor::from_slice(&[-1.0f32, -1.0, 1.0, 1.0], [4])?)?;
         let pd = on_dev(Tensor::from_vec(anchor4, [n, 4])?)?.add(&dist.mul(&sign)?)?;
         let tb = on_dev(Tensor::from_slice(&tbox, [n, 4])?)?;
-        let l_base = match cfg.box_loss {
-            BoxLossKind::Ciou => ciou(&pd, &tb)?.rsub_scalar(1.0)?,
-            BoxLossKind::Rpiou => rpiou_from_logits(
-                &logits,
-                &probs,
-                &dist,
-                &pd,
-                &tbox,
-                cfg.rpiou_beta,
-                cfg.rpiou_kappa,
-                cfg.rpiou_delta,
-            )?,
+        let wb = match cfg.box_loss {
+            BoxLossKind::Ciou => {
+                let l_base = ciou(&pd, &tb)?.rsub_scalar(1.0)?;
+                let box_per = if cfg.nwd_weight > 0.0 {
+                    let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
+                    let cs: Vec<f32> =
+                        (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
+                    let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
+                    let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
+                    let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                    lam_t.rsub_scalar(1.0)?.mul(&l_base)?.add(&lam_t.mul(&l_nwd)?)?
+                } else {
+                    l_base
+                };
+                sum_fixed_order(&box_per.mul(&t)?)?.div_scalar(tss)?.mul_scalar(cfg.box_gain)?
+            }
+            BoxLossKind::Rpiou => {
+                if cfg.nwd_weight > 0.0 {
+                    let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
+                    let wb_rpiou = rpiou_from_logits(
+                        &logits,
+                        &probs,
+                        &dist,
+                        &pd,
+                        &tbox,
+                        &asg.score,
+                        Some(&lams),
+                        tss,
+                        cfg.box_gain,
+                        cfg.rpiou_beta,
+                        cfg.rpiou_kappa,
+                        cfg.rpiou_delta,
+                    )?;
+                    let cs: Vec<f32> =
+                        (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
+                    let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
+                    let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
+                    let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                    let wb_nwd = sum_fixed_order(&lam_t.mul(&l_nwd)?.mul(&t)?)?
+                        .div_scalar(tss)?
+                        .mul_scalar(cfg.box_gain)?;
+                    wb_rpiou.add(&wb_nwd)?
+                } else {
+                    rpiou_from_logits(
+                        &logits,
+                        &probs,
+                        &dist,
+                        &pd,
+                        &tbox,
+                        &asg.score,
+                        None,
+                        tss,
+                        cfg.box_gain,
+                        cfg.rpiou_beta,
+                        cfg.rpiou_kappa,
+                        cfg.rpiou_delta,
+                    )?
+                }
+            }
         };
-        let box_per = if cfg.nwd_weight > 0.0 {
-            let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
-            let cs: Vec<f32> = (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
-            let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
-            let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-            let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
-            lam_t.rsub_scalar(1.0)?.mul(&l_base)?.add(&lam_t.mul(&l_nwd)?)?
-        } else {
-            l_base
-        };
-        let l_box = sum_fixed_order(&box_per.mul(&t)?)?.div_scalar(tss)?;
 
         // DFL: cross-entropy against the two neighbouring bins, plus optional OT cumulative tail barrier.
         let bins = on_dev(Tensor::from_vec(bins, [n, 4, 2])?)?;
@@ -801,11 +867,10 @@ pub(super) fn loss_impl(
         } else {
             l_dfl_ce.mul_scalar(cfg.dfl_gain)?
         };
-        (l_box, wd)
+        (wb, wd)
     };
-    let l_cls = cls_sum.div_scalar(tss)?;
+    let wc = cls_sum.div_scalar(tss)?.mul_scalar(cfg.cls_gain)?;
 
-    let (wb, wc, wd) = (l_box.mul_scalar(cfg.box_gain)?, l_cls.mul_scalar(cfg.cls_gain)?, l_dfl);
     let items = LossItems { box_: wb.item::<f32>()?, cls: wc.item::<f32>()?, dfl: wd.item::<f32>()? };
     let total = wb.add(&wc)?.add(&wd)?.mul_scalar(b as f32)?;
     let total_value = total.item::<f32>()?;

@@ -10,7 +10,7 @@
 //!   `own [2, B, A]`: the step-4 owner (max `u` bits, then the complemented gt index). `slot [B, G, K, 2]`:
 //!   `(t or 0, positive)`. `dense [2, B, A]`: `(label + 1 or 0, t)` per anchor. `misc [4]`: bit 0 of word 0 is
 //!   set when a head value is not finite.
-//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 3]`, `stats [12]` f32 and `total [1]` (see
+//! - Loss: `part` (BCE partial sums), `terms [B·G·K, 4]`, `stats [12]` f32 and `total [1]` (see
 //!   `shaders/det_combine.wgsl`).
 
 use crate::context::GpuContext;
@@ -100,6 +100,10 @@ pub struct DetectDesc {
     pub rpiou_delta: f32,
     /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
     pub dfl_ot_weight: f32,
+    /// Box loss gain (passed into `det_box` backward for exponent-split scaling).
+    pub box_gain: f32,
+    /// DFL loss gain (passed into `det_box` backward for exponent-split OT-DFL scaling).
+    pub dfl_gain: f32,
 }
 
 impl DetectDesc {
@@ -166,7 +170,11 @@ impl DetectDesc {
             .checked_mul(self.k)
             .and_then(|v| v.checked_mul(3))
             .ok_or_else(|| shape_err("detect: pick buffer size overflow"))?;
-        let words = meta.max(box_words).max(cls_words).max(pick_words);
+        let terms_words = bg
+            .checked_mul(self.k)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| shape_err("detect: terms buffer size overflow"))?;
+        let words = meta.max(box_words).max(cls_words).max(pick_words).max(terms_words);
         if words >= u32::MAX as usize / 4 {
             return Err(shape_err("detect: problem too large for 32-bit indexing"));
         }
@@ -315,7 +323,9 @@ pub fn box_terms(
         .f(d.rpiou_beta)
         .f(d.rpiou_kappa)
         .f(d.rpiou_delta)
-        .f(d.dfl_ot_weight);
+        .f(d.dfl_ot_weight)
+        .f(d.box_gain)
+        .f(d.dfl_gain);
     ctx.dispatch(&k, &[box_raw, meta, pick, slot, out, stats, grad], &p, ctx.grid_1d(d.slots() as u64, 64)?)
 }
 
@@ -426,6 +436,8 @@ mod tests {
             rpiou_kappa: 2.0,
             rpiou_delta: 0.5,
             dfl_ot_weight: 0.0,
+            box_gain: 7.5,
+            dfl_gain: 1.5,
         }
     }
 

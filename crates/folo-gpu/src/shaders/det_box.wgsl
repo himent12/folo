@@ -2,15 +2,15 @@
 // pd = anchor ∓ Σ_i i · softmax(box logits) (grid units), L_box = t · (1 − CIoU(pd, gt / stride)) and the DFL
 // cross-entropy at the two bins around each side's clamped target distance, weighted t / 4. Slots that are not
 // positive, or have t = 0, contribute nothing.
-// MODE 0 writes OUT[3s] = box term, OUT[3s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL CE
-// term before its sign), and OUT[3s + 2] = Σ_sides wt · (OT_SHIFT · L_ot) (scaled by OT_SHIFT = 2^-24 and unscaled
-// by dfl_ot_weight so det_combine normalises by tss before restoring +24 and multiplying). MODE 1 writes the gradient
-// of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed
-// first; each anchor has at most one positive, so writes do not collide): g = GRAD[0], with S_box = STATS[8] and
-// S_dfl = STATS[10] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
+// MODE 0 writes OUT[4s] = box term, OUT[4s + 1] = Σ_sides (w_l · log p_j + w_r · log p_{j+1}) · t / 4 (the DFL CE
+// term before its sign), and OUT[4s + 2..=3] = exponent-split `(mant, exp)` of Σ_sides wt · L_ot (unscaled by
+// dfl_ot_weight so det_combine reduces and normalises by tss before multiplying by dfl_ot_weight · dfl_gain).
+// MODE 1 writes the gradient of the weighted loss into OUT = d box_raw ([B, 4R, A], zeroed first; each anchor has at
+// most one positive, so writes do not collide): g = GRAD[0], with tss = STATS[7], S_box = STATS[8], S_dfl = STATS[10],
+// and B = STATS[11] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
 // Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
 // 5 = nwd_weight (0 = pure CIoU), 6 = box_loss_kind (0 = CIoU, 1 = R-PIoU), 7 = rpiou_beta, 8 = rpiou_kappa,
-// 9 = rpiou_delta, 10 = dfl_ot_weight.
+// 9 = rpiou_delta, 10 = dfl_ot_weight, 11 = box_gain, 12 = dfl_gain.
 @group(0) @binding(1) var<storage, read> BOX: array<f32>;
 @group(0) @binding(2) var<storage, read> META: array<u32>;
 @group(0) @binding(3) var<storage, read> PICK: array<u32>;
@@ -19,49 +19,71 @@
 @group(0) @binding(6) var<storage, read> STATS: array<f32>;
 @group(0) @binding(7) var<storage, read> GRAD: array<f32>;
 
-// Exact 2^-24 scaling factor for OT-DFL slot accumulation so both tiny excluded masses (e.g. exp(-20)) and extreme
-// logits (e.g. -1e38) stay in normal f32 range before `det_combine.wgsl` normalises by `tss` and restores +24.
+// Exact 2^-24 guard factor for comparing huge opposite-sign logits (`m_e * OT_SHIFT - m_r * OT_SHIFT`) without
+// forming intermediate `±inf` in `m_e - m_r`.
 const OT_SHIFT: f32 = 5.960464477539063e-8; // 2^-24
 
-// Scaled softplus `OT_SHIFT * softplus((m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r)))` without f32 overflow or
-// small-excluded-mass cancellation.
-fn ot_softplus_s(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> f32 {
+// Overflow/underflow-safe `exp(a - b)` for `a <= b` when adding into a `>= 1.0` sum (avoids `-inf` in `a - b`).
+fn safe_exp_diff(a: f32, b: f32) -> f32 {
+    if (a * OT_SHIFT - b * OT_SHIFT <= -100.0 * OT_SHIFT) { return 0.0; }
+    return fexp(a - b);
+}
+
+// Exponent-split `exp(a - b)` for `a <= b` down to `-700.0` (avoids `-inf` in `a - b`).
+fn exp_diff_split(a: f32, b: f32) -> vec2<f32> {
+    if (a * OT_SHIFT - b * OT_SHIFT <= -700.0 * OT_SHIFT) { return vec2<f32>(0.0, 0.0); }
+    return exp_split_neg(a - b);
+}
+
+// Exponent-split `softplus((m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r)))` without f32 overflow, small-excluded-mass
+// cancellation, or subnormal underflow down to `delta = -700`.
+fn ot_softplus_split(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> vec2<f32> {
     let dm_s = m_e * OT_SHIFT - m_r * OT_SHIFT;
     let dl = log_ge1(a_e) - log_ge1(a_r);
     if (dm_s > 100.0 * OT_SHIFT) {
-        return dm_s + dl * OT_SHIFT;
+        let n = norm_f32(dm_s + dl * OT_SHIFT);
+        return vec2<f32>(n.x, n.y + 24.0);
+    }
+    if (dm_s < -700.0 * OT_SHIFT) {
+        return vec2<f32>(0.0, 0.0);
     }
     let delta = (m_e - m_r) + dl;
     if (delta >= 0.0) {
-        return (delta + log1p_unit(safe_exp_neg(-delta))) * OT_SHIFT;
+        return norm_f32(delta + log1p_unit(safe_exp_neg(-delta)));
     }
-    if (delta > -88.0) {
-        return log1p_unit(fexp(delta)) * OT_SHIFT;
+    if (delta > -20.0) {
+        return norm_f32(log1p_unit(fexp(delta)));
     }
-    return 0.0;
+    // For delta <= -20, ln(1 + e^delta) == e^delta to > 28 bits of precision.
+    return exp_split_neg(delta);
 }
 
-// Overflow-safe sigmoid `1 / (1 + exp(-delta))` for `delta = (m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r))`.
-fn ot_sigmoid(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> f32 {
+// Exponent-split `sigmoid((m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r)))` down to `delta = -700`.
+fn ot_sigmoid_split(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> vec2<f32> {
     let dm_s = m_e * OT_SHIFT - m_r * OT_SHIFT;
-    if (dm_s > 100.0 * OT_SHIFT) { return 1.0; }
+    if (dm_s > 100.0 * OT_SHIFT) { return vec2<f32>(1.0, 0.0); }
+    if (dm_s < -700.0 * OT_SHIFT) { return vec2<f32>(0.0, 0.0); }
     let delta = (m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r));
     if (delta >= 0.0) {
-        return 1.0 / (1.0 + safe_exp_neg(-delta));
+        return norm_f32(1.0 / (1.0 + safe_exp_neg(-delta)));
     }
-    let e = safe_exp_neg(delta);
-    return e / (1.0 + e);
+    if (delta > -20.0) {
+        let e = fexp(delta);
+        return norm_f32(e / (1.0 + e));
+    }
+    return exp_split_neg(delta);
 }
 
-// Exponent-split R-PIoU edge derivative `sign_s * (u / denom) * inv1^2 * (q_m * 2^e_q) * g_half` as `(mant, exp)`.
-// Kept in split form until multiplied by the DFL softmax Jacobian so extreme `box_gain * kappa` never overflows an
-// intermediate coordinate gradient when the final logit gradient fits in f32.
+// Exponent-split R-PIoU edge derivative `sign_s * (u / denom) * inv1^2 * (q_m * 2^e_q) * g_half` as normalized `(m, e)`.
+// Kept in split form until multiplied by the DFL softmax Jacobian so extreme `B * box_gain * kappa / tss` never
+// overflows an intermediate coordinate gradient when the final logit gradient fits in f32.
 fn rpiou_edge_split(sign_s: f32, u: f32, denom: f32, in1: vec2<f32>, q_m: f32, e_q: i32, gn: vec2<f32>) -> vec2<f32> {
     if (u == 0.0 || gn.x == 0.0) { return vec2<f32>(0.0, 0.0); }
     let un = norm_f32(u / denom);
-    let m = sign_s * un.x * in1.x * in1.x * q_m * gn.x;
-    let e = i32(un.y) + 2 * i32(in1.y) + e_q + i32(gn.y);
-    return vec2<f32>(m, f32(e));
+    let qn = norm_f32(q_m);
+    let base = mul_split(mul_split(un, mul_split(in1, in1)), vec2<f32>(qn.x, qn.y + f32(e_q)));
+    let res = mul_split(base, gn);
+    return vec2<f32>(sign_s * res.x, res.y);
 }
 
 // Gradient share of `a` in min(a, b) / max(a, b): folo-core gives ties half to each side.
@@ -78,9 +100,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let t = bitcast<f32>(SLOT[2u * s]);
     let pos = SLOT[2u * s + 1u] == 1u;
     if (MODE == 0u) {
-        OUT[3u * s] = 0.0;
-        OUT[3u * s + 1u] = 0.0;
-        OUT[3u * s + 2u] = 0.0;
+        OUT[4u * s] = 0.0;
+        OUT[4u * s + 1u] = 0.0;
+        OUT[4u * s + 2u] = 0.0;
+        OUT[4u * s + 3u] = 0.0;
     }
     if (!pos || t == 0.0) { return; }
     let na = pu(1u);
@@ -103,13 +126,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let rpiou_kappa = pf(8u);
     let rpiou_delta = pf(9u);
     let dfl_ot_w = pf(10u);
+    let box_gain = pf(11u);
+    let dfl_gain = pf(12u);
 
     // Softmax per side (p) and log-softmax (lp), kept for the backward.
     var p: array<f32, 4u * R>;
     var lp: array<f32, 4u * R>;
     var d: vec4<f32>;
     var dfl = 0.0;
-    var ot_sum = 0.0;
+    var ot_sum = vec2<f32>(0.0, 0.0);
     var jl: array<u32, 4>;
     var wl: vec4<f32>;
     var wr: vec4<f32>;
@@ -156,15 +181,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             for (var k = 1u; k + 1u < R; k++) {
                 let x = BOX[base + (side * R + k) * na];
                 if (x > pm) {
-                    pa = pa * safe_exp_neg(pm - x) + 1.0;
+                    pa = pa * safe_exp_diff(pm, x) + 1.0;
                     pm = x;
                 } else {
-                    pa = pa + safe_exp_neg(x - pm);
+                    pa = pa + safe_exp_diff(x, pm);
                 }
                 pref_m[k] = pm;
                 pref_a[k] = pa;
             }
-            var l_tail_s = 0.0;
+            var l_tail = vec2<f32>(0.0, 0.0);
             var sm = BOX[base + (side * R + (R - 1u)) * na];
             var sa = 1.0;
             for (var step = 0u; step + 1u < R; step++) {
@@ -172,19 +197,19 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 if (step > 0u) {
                     let x = BOX[base + (side * R + k + 1u) * na];
                     if (x > sm) {
-                        sa = sa * safe_exp_neg(sm - x) + 1.0;
+                        sa = sa * safe_exp_diff(sm, x) + 1.0;
                         sm = x;
                     } else {
-                        sa = sa + safe_exp_neg(x - sm);
+                        sa = sa + safe_exp_diff(x, sm);
                     }
                 }
                 if (k < ju) {
-                    l_tail_s = l_tail_s + ot_softplus_s(pref_m[k], pref_a[k], sm, sa);
+                    l_tail = add_split(l_tail, ot_softplus_split(pref_m[k], pref_a[k], sm, sa));
                 } else if (k > ju) {
-                    l_tail_s = l_tail_s + ot_softplus_s(sm, sa, pref_m[k], pref_a[k]);
+                    l_tail = add_split(l_tail, ot_softplus_split(sm, sa, pref_m[k], pref_a[k]));
                 }
             }
-            ot_sum = ot_sum + wt * l_tail_s;
+            ot_sum = add_split(ot_sum, mul_split(norm_f32(wt), l_tail));
         }
     }
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
@@ -203,22 +228,32 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         if (lam > 0.0) {
             l_box = (1.0 - lam) * l_base + lam * (1.0 - nwd_box(pd, tb, c_s));
         }
-        OUT[3u * s] = l_box * t;
-        OUT[3u * s + 1u] = dfl;
-        OUT[3u * s + 2u] = ot_sum;
+        OUT[4u * s] = l_box * t;
+        OUT[4u * s + 1u] = dfl;
+        OUT[4u * s + 2u] = ot_sum.x;
+        OUT[4u * s + 3u] = ot_sum.y;
         return;
     }
 
     // Backward: R-PIoU or CIoU (§7.2, α constant), then through the expectation.
     let g = GRAD[0];
+    let tss = STATS[7];
+    let nb = STATS[11];
     let g_base = t * STATS[8] * g * (1.0 - lam);
+    let g_base_sp = div_split(
+        mul_split(
+            mul_split(mul_split(norm_f32(t), norm_f32(nb)), mul_split(norm_f32(box_gain), norm_f32(g))),
+            norm_f32(1.0 - lam),
+        ),
+        norm_f32(tss),
+    );
     var gx1 = 0.0;
     var gy1 = 0.0;
     var gx2 = 0.0;
     var gy2 = 0.0;
     var fiou_d = vec4<f32>(0.0);
     var edge_m = vec4<f32>(0.0);
-    var edge_e = vec4<i32>(0);
+    var edge_e = vec4<f32>(0.0);
     if (box_kind == 1u) {
         let eps = 1e-7;
         let w1 = max(pd.z - pd.x, 0.0);
@@ -232,8 +267,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let inter = iw * ih;
         let uni = w1 * h1 + w2 * h2 - inter + eps;
         let iou = inter / uni;
-        // Keep focal-IoU derivatives unscaled by `g_base` until multiplied by the DFL softmax Jacobian so extreme
-        // `box_gain` values cannot overflow `g_base / uni` when the final logit gradient fits in f32.
+        // Keep focal-IoU derivatives unscaled by `g_base_sp` until multiplied by the DFL softmax Jacobian so extreme
+        // `B * box_gain / tss` values cannot overflow before the final logit gradient.
         let g_u = -(1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
         let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
         let g_uni = -g_u * inter / (uni * uni);
@@ -269,13 +304,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let ke2_raw = 0.25 * ((ux1 * ux1 + ux2 * ux2) / denom_x + (uy1 * uy1 + uy2 * uy2) / denom_y);
         if (is_finite_f(ke2_raw) && ke2_raw < 1e16) {
             let in1 = norm_f32(1.0 / (1.0 + ke2_raw));
-            let gn = norm_f32(g_base * 0.5);
+            let gn = select(vec2<f32>(0.0, 0.0), vec2<f32>(g_base_sp.x, g_base_sp.y - 1.0), g_base_sp.x != 0.0);
             let s0 = rpiou_edge_split(-1.0, ux1, denom_x, in1, q_xm, e_qx, gn);
             let s1 = rpiou_edge_split(-1.0, uy1, denom_y, in1, q_ym, e_qy, gn);
             let s2 = rpiou_edge_split(1.0, ux2, denom_x, in1, q_xm, e_qx, gn);
             let s3 = rpiou_edge_split(1.0, uy2, denom_y, in1, q_ym, e_qy, gn);
             edge_m = vec4<f32>(s0.x, s1.x, s2.x, s3.x);
-            edge_e = vec4<i32>(i32(s0.y), i32(s1.y), i32(s2.y), i32(s3.y));
+            edge_e = vec4<f32>(s0.y, s1.y, s2.y, s3.y);
         }
     } else {
         let eps = 1e-7;
@@ -338,14 +373,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // dL/dlogit for L = −S_dfl · Σ (w_l · lp_j + w_r · lp_{j+1}) + S_dfl · OT_tail.
     let sd = STATS[10] * g;
     let use_ot = dfl_ot_w > 0.0 && R > 2u;
-    let gbn = norm_f32(g_base);
+    let sd_sp = div_split(
+        mul_split(mul_split(norm_f32(nb), norm_f32(dfl_gain)), norm_f32(g)),
+        norm_f32(tss),
+    );
+    let ot_scale = mul_split(mul_split(sd_sp, norm_f32(dfl_ot_w)), norm_f32(wt));
     for (var side = 0u; side < 4u; side++) {
         let wsum = wl[side] + wr[side];
         let ju = jl[side];
         var m_ret: array<f32, R>;
-        var ret_mant: array<f32, R>;
+        var ret_sp: array<vec2<f32>, R>;
         var m_exc: array<f32, R>;
-        var exc_mant: array<f32, R>;
+        var exc_sp: array<vec2<f32>, R>;
         if (use_ot) {
             // Prefix `0..=k` in `pref_m/pref_a` (left-tail excluded for k < ju, right-tail retained for k > ju).
             var pref_m: array<f32, R>;
@@ -357,10 +396,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             for (var k = 1u; k + 1u < R; k++) {
                 let x = BOX[base + (side * R + k) * na];
                 if (x > pm) {
-                    pa = pa * safe_exp_neg(pm - x) + 1.0;
+                    pa = pa * safe_exp_diff(pm, x) + 1.0;
                     pm = x;
                 } else {
-                    pa = pa + safe_exp_neg(x - pm);
+                    pa = pa + safe_exp_diff(x, pm);
                 }
                 pref_m[k] = pm;
                 pref_a[k] = pa;
@@ -373,35 +412,35 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 if (step > 0u) {
                     let x = BOX[base + (side * R + k + 1u) * na];
                     if (x > sm) {
-                        sa = sa * safe_exp_neg(sm - x) + 1.0;
+                        sa = sa * safe_exp_diff(sm, x) + 1.0;
                         sm = x;
                     } else {
-                        sa = sa + safe_exp_neg(x - sm);
+                        sa = sa + safe_exp_diff(x, sm);
                     }
                 }
                 if (k < ju) {
-                    let sig = ot_sigmoid(pref_m[k], pref_a[k], sm, sa);
+                    let sig = ot_sigmoid_split(pref_m[k], pref_a[k], sm, sa);
                     m_exc[k] = pref_m[k];
-                    exc_mant[k] = sig / pref_a[k];
+                    exc_sp[k] = div_split(sig, norm_f32(pref_a[k]));
                     m_ret[k] = sm;
-                    ret_mant[k] = sig / sa;
+                    ret_sp[k] = div_split(sig, norm_f32(sa));
                 } else if (k > ju) {
-                    let sig = ot_sigmoid(sm, sa, pref_m[k], pref_a[k]);
+                    let sig = ot_sigmoid_split(sm, sa, pref_m[k], pref_a[k]);
                     m_ret[k] = pref_m[k];
-                    ret_mant[k] = sig / pref_a[k];
+                    ret_sp[k] = div_split(sig, norm_f32(pref_a[k]));
                     m_exc[k] = sm;
-                    exc_mant[k] = sig / sa;
+                    exc_sp[k] = div_split(sig, norm_f32(sa));
                 }
             }
             if (ju > 0u) {
                 // Left-tail retained: prefix sum 0..ju; left-tail excluded: suffix sum ju-1 down to 0.
                 for (var r = 1u; r < ju; r++) {
-                    ret_mant[r] = ret_mant[r - 1u] * safe_exp_neg(m_ret[r] - m_ret[r - 1u]) + ret_mant[r];
+                    ret_sp[r] = add_split(mul_split(ret_sp[r - 1u], exp_diff_split(m_ret[r], m_ret[r - 1u])), ret_sp[r]);
                 }
                 var r = ju - 1u;
                 while (r > 0u) {
                     r = r - 1u;
-                    exc_mant[r] = exc_mant[r + 1u] * safe_exp_neg(m_exc[r] - m_exc[r + 1u]) + exc_mant[r];
+                    exc_sp[r] = add_split(mul_split(exc_sp[r + 1u], exp_diff_split(m_exc[r], m_exc[r + 1u])), exc_sp[r]);
                 }
             }
             if (ju + 2u < R) {
@@ -409,10 +448,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 var r = R - 2u;
                 while (r > ju + 1u) {
                     r = r - 1u;
-                    ret_mant[r] = ret_mant[r + 1u] * safe_exp_neg(m_ret[r] - m_ret[r + 1u]) + ret_mant[r];
+                    ret_sp[r] = add_split(mul_split(ret_sp[r + 1u], exp_diff_split(m_ret[r], m_ret[r + 1u])), ret_sp[r]);
                 }
                 for (var t = ju + 2u; t + 1u < R; t++) {
-                    exc_mant[t] = exc_mant[t - 1u] * safe_exp_neg(m_exc[t] - m_exc[t - 1u]) + exc_mant[t];
+                    exc_sp[t] = add_split(mul_split(exc_sp[t - 1u], exp_diff_split(m_exc[t], m_exc[t - 1u])), exc_sp[t]);
                 }
             }
         }
@@ -420,45 +459,39 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let q = p[side * R + k];
             let jac = q * (f32(k) - d[side]);
             var gk = g_d[side] * jac + sd * wsum * q;
-            if (fiou_d[side] != 0.0 && jac != 0.0 && gbn.x != 0.0) {
-                let fn_ = norm_f32(fiou_d[side]);
-                let jn = norm_f32(jac);
-                gk = gk + mul_pow2(fn_.x * jn.x * gbn.x, i32(fn_.y) + i32(jn.y) + i32(gbn.y));
+            if (fiou_d[side] != 0.0 && jac != 0.0 && g_base_sp.x != 0.0) {
+                gk = gk + split_to_f32(mul_split(mul_split(norm_f32(fiou_d[side]), norm_f32(jac)), g_base_sp));
             }
             if (edge_m[side] != 0.0 && jac != 0.0) {
-                let jn = norm_f32(jac);
-                gk = gk + mul_pow2(edge_m[side] * jn.x, edge_e[side] + i32(jn.y));
+                gk = gk + split_to_f32(mul_split(vec2<f32>(edge_m[side], edge_e[side]), norm_f32(jac)));
             }
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
             if (use_ot) {
                 let xk = BOX[base + (side * R + k) * na];
-                var d_ot = 0.0;
+                var d_ot = vec2<f32>(0.0, 0.0);
                 if (ju > 0u) {
                     if (k < ju) {
-                        d_ot = d_ot + safe_exp_neg(xk - m_exc[k]) * exc_mant[k];
+                        d_ot = add_split(d_ot, mul_split(exp_diff_split(xk, m_exc[k]), exc_sp[k]));
                     }
                     if (k > 0u) {
                         let ti = min(k - 1u, ju - 1u);
-                        d_ot = d_ot - safe_exp_neg(xk - m_ret[ti]) * ret_mant[ti];
+                        let term = mul_split(exp_diff_split(xk, m_ret[ti]), ret_sp[ti]);
+                        d_ot = add_split(d_ot, vec2<f32>(-term.x, term.y));
                     }
                 }
                 if (ju + 2u < R) {
                     if (k + 1u < R) {
                         let ti = max(k, ju + 1u);
-                        d_ot = d_ot - safe_exp_neg(xk - m_ret[ti]) * ret_mant[ti];
+                        let term = mul_split(exp_diff_split(xk, m_ret[ti]), ret_sp[ti]);
+                        d_ot = add_split(d_ot, vec2<f32>(-term.x, term.y));
                     }
                     if (k > ju + 1u) {
                         let ti = min(k - 1u, R - 2u);
-                        d_ot = d_ot + safe_exp_neg(xk - m_exc[ti]) * exc_mant[ti];
+                        d_ot = add_split(d_ot, mul_split(exp_diff_split(xk, m_exc[ti]), exc_sp[ti]));
                     }
                 }
-                let u_ot = wt * d_ot;
-                if (abs(sd) <= 1.0) {
-                    gk = gk + (u_ot * sd) * dfl_ot_w;
-                } else {
-                    gk = gk + (u_ot * dfl_ot_w) * sd;
-                }
+                gk = gk + split_to_f32(mul_split(d_ot, ot_scale));
             }
             OUT[base + (side * R + k) * na] = gk;
         }
