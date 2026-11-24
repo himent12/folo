@@ -103,16 +103,16 @@ pub fn max_pool2d(
     let (oh, ow) = win.output(h, w)?;
     let in_elems = prod(&[planes, h, w])?;
     let n = prod(&[planes, oh, ow])?;
+    check_buf(x, in_elems, dtype, "max_pool2d input")?;
+    check_buf(y, n, dtype, "max_pool2d output")?;
+    if n == 0 {
+        return Ok((oh, ow));
+    }
     if in_elems > u32::MAX as usize || n > u32::MAX as usize {
         return Err(GpuError::Limit("max_pool2d: tensor exceeds u32 indexing".into()));
     }
     if h > i32::MAX as usize - 2 * win.padding.0 || w > i32::MAX as usize - 2 * win.padding.1 {
         return Err(GpuError::Limit("max_pool2d: plane dimensions exceed i32 indexing".into()));
-    }
-    check_buf(x, in_elems, dtype, "max_pool2d input")?;
-    check_buf(y, n, dtype, "max_pool2d output")?;
-    if n == 0 {
-        return Ok((oh, ow));
     }
     let k = ctx.kernel(&MAXPOOL, win.spec().f16(dtype == DType::F16))?;
     let p = Params::new().uz(n)?.uz(h)?.uz(w)?.uz(oh)?.uz(ow)?.f(f32::NEG_INFINITY);

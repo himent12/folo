@@ -332,7 +332,7 @@ impl Backend for GpuBackend {
         let _p = profile::scope(|| format!("max_pool {:?}", x.shape().dims()));
         let win = pool2d(p);
         let (oh, ow) = win.output(h, w).core()?;
-        let len = n * c * oh * ow;
+        let len = crate::kernels::prod(&[n, c, oh, ow]).core()?;
         let dtype = x.storage.dtype();
         let (vals, idx) = (self.alloc(dtype, len)?, self.alloc(CoreDType::I64, len)?);
         let xd = self.dense(&x)?;
@@ -355,7 +355,7 @@ impl Backend for GpuBackend {
             return Ok(self.max_pool2d(x, p)?.0);
         }
         let (oh, ow) = win.output(h, w).core()?;
-        let len = n * c * oh * ow;
+        let len = crate::kernels::prod(&[n, c, oh, ow]).core()?;
         let dtype = x.storage.dtype();
         let vals = self.alloc(dtype, len)?;
         let xd = self.dense(&x)?;
