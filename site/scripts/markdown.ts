@@ -90,6 +90,7 @@ const TASKS: Record<string, [string, string]> = {
 
 export async function createMarkdown(): Promise<MarkdownIt> {
   const hl = await getHighlighter();
+  const loadedLangs = new Set(hl.getLoadedLanguages());
   const md = new markdownIt({ html: true, linkify: true });
   // Only URLs with a scheme become links: `main.rs` or `axum.rs` in prose must stay text.
   md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
@@ -143,18 +144,18 @@ export async function createMarkdown(): Promise<MarkdownIt> {
     const lang = tok.info.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
     const code = tok.content.replace(/\n$/, '');
     let pre: string;
-    if (lang && !PLAIN_LANGS.has(lang) && hl.getLoadedLanguages().includes(lang)) {
+    if (lang && !PLAIN_LANGS.has(lang) && loadedLangs.has(lang)) {
       pre = hl.codeToHtml(code, { lang, theme: THEME });
     } else {
       pre = `<pre class="shiki plain"><code>${escapeHtml(code)}</code></pre>`;
     }
     const label = lang && !PLAIN_LANGS.has(lang) ? escapeHtml(lang) : '';
     const langAttr = label ? ` data-lang="${label}"` : '';
-    const langBadge = label ? `<span class="code-lang" aria-hidden="true">${label}</span>` : '';
-    return `<div class="code"${langAttr}>${pre}<div class="code-tools">${copyButton()}${langBadge}</div></div>\n`;
+    const langBadge = label ? `<span class="code-lang">${label}</span>` : '';
+    return `<div class="code"${langAttr}><div class="code-tools">${copyButton()}${langBadge}</div>${pre}</div>\n`;
   };
   md.renderer.rules.code_block = (tokens, idx) =>
-    `<div class="code"><pre class="shiki plain"><code>${escapeHtml(tokens[idx].content.replace(/\n$/, ''))}</code></pre><div class="code-tools">${copyButton()}</div></div>\n`;
+    `<div class="code"><div class="code-tools">${copyButton()}</div><pre class="shiki plain"><code>${escapeHtml(tokens[idx].content.replace(/\n$/, ''))}</code></pre></div>\n`;
 
   md.renderer.rules.table_open = () => '<div class="table-wrap"><table>\n';
   md.renderer.rules.table_close = () => '</table></div>\n';
