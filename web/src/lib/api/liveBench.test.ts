@@ -164,7 +164,13 @@ describe('LiveBench ordering', () => {
     stop();
   });
 
-  it('notices a benchmark deleted elsewhere: a 404 on a load shows it gone, and nothing retries', async () => {
+  it('notices a benchmark deleted elsewhere: a 404 on a load shows it gone, closes its stream, clears timers, and ignores late events', async () => {
+    const closes = vi.fn();
+    const events = hub.api.benchEvents;
+    hub.api.benchEvents = (id, h) => {
+      events(id, h);
+      return closes;
+    };
     const { live, stop } = mount();
     entries.resolve([entry('a', 'done', 70)]);
     await vi.advanceTimersByTimeAsync(0);
@@ -176,10 +182,38 @@ describe('LiveBench ordering', () => {
     expect(live.error).toBe(gone);
     expect(live.bench).toBeUndefined();
     expect(live.entries).toEqual([]);
+    expect(live.connection).toBe('idle');
+    expect(live.lost).toBeNull();
+    expect(closes).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
     const n = loads.mock.calls.length;
+    handlers.connection?.('reconnecting');
+    handlers.bench?.(bench('zombie'));
+    handlers.entry?.(entry('z', 'running'));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(loads.mock.calls.length).toBe(n);
+    expect(live.bench).toBeUndefined();
+    expect(live.entries).toEqual([]);
+    expect(live.lost).toBeNull();
     stop();
+  });
+
+  it('aborts in-flight requests and clears timers on unmount', async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    hub.api = {
+      ...hub.api,
+      bench: (_id, s) => (signals.push(s), new Promise(() => {})),
+      benchEntries: (_id, s) => (signals.push(s), new Promise(() => {})),
+      benchLoops: (_id, s) => (signals.push(s), new Promise(() => {})),
+    } as Api;
+    const { stop } = mount();
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals).toHaveLength(3);
+    expect(signals.every((s) => s && !s.aborted)).toBe(true);
+    stop();
+    expect(signals.every((s) => s?.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('shows a first load that failed as the error, even after a bench event, never as an empty board', async () => {

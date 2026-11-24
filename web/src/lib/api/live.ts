@@ -19,7 +19,7 @@
 // snapshots requested before a rewind are dropped (generation counter). A finished run's history is final: cached
 // steps beyond it (an attempt this client saw but the server replaced) are dropped.
 
-import { effect, ReactiveSet, signal, untrack } from 'fw';
+import { batch, effect, ReactiveSet, signal, untrack } from 'fw';
 import { AppendLog } from './appendLog';
 import { ApiError } from './client';
 import { hub } from './index';
@@ -28,6 +28,8 @@ import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, Step } from '.
 
 /** Log lines a live view keeps (the latest). */
 export const MAX_LOGS = 2000;
+/** Trimming chunk size for log buffers: avoids an O(MAX_LOGS) splice/shift on every incoming line. */
+export const LOG_TRIM_BATCH = 200;
 const ACTIVE = ['queued', 'running', 'stopping'];
 /**
  * How long the stream may be down before the view stops calling itself live. The stream (./sse) reopens a dropped
@@ -216,6 +218,8 @@ export class LiveRun {
     this.logsLog.replace(v);
   }
   #raf = 0;
+  /** Coalesced step progress from SSE `step` events, applied to `#run` on the next `#bump()` animation frame. */
+  #pendingStep: { step: number; epoch: number; eta_s: number | null; steps_per_epoch?: number; epochs?: number } | null = null;
   #retry = signal(0);
   /** The last time anything arrived from the stream or a history load (plain: steps arrive up to ~10/s). */
   #heard = 0;
@@ -253,6 +257,9 @@ export class LiveRun {
       this.#lastQueue = null;
       this.#lastCloud = null;
       this.#replay = null;
+      if (this.#raf) cancelAnimationFrame(this.#raf);
+      this.#raf = 0;
+      this.#pendingStep = null;
       let lostTimer: ReturnType<typeof setTimeout> | undefined;
       this.#heard = Date.now();
       untrack(() => {
@@ -379,6 +386,7 @@ export class LiveRun {
         clearTimeout(syncTimer);
         clearTimeout(replayTimer);
         unsub();
+        this.#pendingStep = null;
         this.run = undefined;
         this.steps = [];
         this.epochs = [];
@@ -392,7 +400,7 @@ export class LiveRun {
         this.connection = 'idle';
         this.loading = false;
         this.error = e;
-        this.#bump();
+        this.#publish();
         return true;
       };
       // A dropped stream may mean the run is gone (the stream answers 404 then, and EventSource gives no status): one
@@ -469,16 +477,18 @@ export class LiveRun {
             this.#rewind();
             sync();
           }
-          if (this.run) this.run = withLength({ ...this.run, status, error }, steps_per_epoch, epochs);
-          // Only a waiting run has a place in the queue.
-          if (this.run && status !== 'queued' && this.run.queue_position != null) this.run = { ...this.run, queue_position: null };
+          if (this.run) {
+            const next = withLength({ ...this.#takePendingStep(this.run), status, error }, steps_per_epoch, epochs);
+            // Only a waiting run has a place in the queue.
+            this.run = status !== 'queued' && next.queue_position != null ? { ...next, queue_position: null } : next;
+          }
           // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.
           if (status === 'running' && this.run && this.run.resolved == null && !resolvedAsked) {
             resolvedAsked = true;
             api.run(runId, view.signal).then(
               (r) => {
                 if (closed || !this.run || !r.resolved) return void (resolvedAsked = false);
-                this.run = { ...this.run, resolved: r.resolved };
+                this.run = { ...this.#takePendingStep(this.run), resolved: r.resolved };
               },
               () => (resolvedAsked = false),
             );
@@ -498,6 +508,7 @@ export class LiveRun {
             const cloudSeq = this.#cloudSeq;
             snapshot().then((snap) => {
               if (closed || seq !== this.#statusSeq || gen !== this.#gen || !snap.claim()) return;
+              this.#pendingStep = null;
               this.run = this.#clouded(keepStepsPerEpoch(snap.run, this.run), cloudSeq);
             }, () => {});
           }
@@ -523,16 +534,26 @@ export class LiveRun {
             if (last && s.step <= last.step) return;
             this.steps.push(s);
           }
-          if (this.run) this.run = withLength({ ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s }, s.steps_per_epoch, s.epochs);
+          const prev = this.#pendingStep;
+          this.#pendingStep = prev
+            ? {
+                step: s.step,
+                epoch: s.epoch,
+                eta_s: s.eta_s,
+                steps_per_epoch: s.steps_per_epoch !== undefined && s.steps_per_epoch > 0 ? s.steps_per_epoch : prev.steps_per_epoch,
+                epochs: s.epochs !== undefined && s.epochs > 0 ? s.epochs : prev.epochs,
+              }
+            : { step: s.step, epoch: s.epoch, eta_s: s.eta_s, steps_per_epoch: s.steps_per_epoch, epochs: s.epochs };
           // A real run reports 0 steps per epoch until its trainer has loaded the data, i.e. in the snapshot taken
           // at start. Current servers put the run's length on every step (above); for older ones, whose steps lack
           // it, ask once more (only that field is taken; progress needs it).
-          if (this.run?.steps_per_epoch === 0 && s.steps_per_epoch === undefined && !speAsked) {
+          const curSpe = this.#pendingStep.steps_per_epoch ?? this.run?.steps_per_epoch;
+          if (this.run && curSpe === 0 && s.steps_per_epoch === undefined && !speAsked) {
             speAsked = true;
             api.run(runId, view.signal).then(
               (r) => {
                 if (closed || !this.run || r.steps_per_epoch <= 0) return void (speAsked = false);
-                this.run = { ...this.run, steps_per_epoch: r.steps_per_epoch };
+                this.run = { ...this.#takePendingStep(this.run), steps_per_epoch: r.steps_per_epoch };
                 this.#bump();
               },
               () => (speAsked = false),
@@ -553,7 +574,7 @@ export class LiveRun {
           }
           const best = this.run?.best;
           if (this.run && (!best || e.val.map50_95 > best.map50_95))
-            this.run = { ...this.run, best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
+            this.run = { ...this.#takePendingStep(this.run), best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
           this.#bump();
         },
         queue: ({ position, waiting }) => {
@@ -564,7 +585,7 @@ export class LiveRun {
           this.#queueSeq++;
           this.#lastQueue = position;
           this.waiting = waiting;
-          if (this.run && this.run.status === 'queued') this.run = { ...this.run, queue_position: position };
+          if (this.run && this.run.status === 'queued') this.run = { ...this.#takePendingStep(this.run), queue_position: position };
         },
         cloud: (c) => {
           if (closed) return;
@@ -573,24 +594,23 @@ export class LiveRun {
           // snapshots still in flight (#absorb), which may hold an older phase or arrive before any run is loaded.
           this.#cloudSeq++;
           this.#lastCloud = c;
-          if (this.run) this.run = { ...this.run, cloud: c };
+          if (this.run) this.run = { ...this.#takePendingStep(this.run), cloud: c };
         },
         log: (l) => {
           if (closed) return;
           this.#heard = Date.now();
           this.#streamedLogs++;
           this.#streamedTail.push(l);
-          if (this.#streamedTail.length > MAX_LOGS) this.#streamedTail.shift();
-          this.logs.push(l);
-          if (this.logs.length > MAX_LOGS) {
-            this.logsEarlier += this.logs.length - MAX_LOGS;
-            this.logsLog.trimFront(this.logs.length - MAX_LOGS);
+          if (this.#streamedTail.length >= MAX_LOGS + LOG_TRIM_BATCH) {
+            this.#streamedTail.splice(0, this.#streamedTail.length - MAX_LOGS);
           }
+          this.logs.push(l);
+          this.logsEarlier += this.logsLog.trimTo(MAX_LOGS, LOG_TRIM_BATCH);
           this.#bump();
         },
         reconnect: () => {
           // The stream replays nothing: refetch history and merge it with what arrived meanwhile.
-          sync();
+          if (!closed) sync();
         },
       });
 
@@ -612,6 +632,7 @@ export class LiveRun {
         unsub();
         cancelAnimationFrame(this.#raf);
         this.#raf = 0;
+        this.#pendingStep = null;
       };
     });
   }
@@ -635,7 +656,7 @@ export class LiveRun {
     if (this.#statusSeq === seq && this.run && !ACTIVE.includes(this.run.status)) this.#rewind();
     // Progress comes from the rewind and the stream (the response may still carry the interrupted step count); the
     // status from the response unless an event already reported a newer one.
-    const cur = this.run;
+    const cur = this.run ? this.#takePendingStep(this.run) : undefined;
     const status = this.#statusSeq === seq ? { status: r.status, error: r.error } : (this.#lastStatus ?? { status: r.status, error: r.error });
     this.run = this.#clouded(this.#placed({ ...r, ...(cur ? { step: cur.step, epoch: cur.epoch, best: cur.best } : {}), ...status }, queueSeq), cloudSeq);
     return r;
@@ -655,8 +676,11 @@ export class LiveRun {
     const before = this.run?.status;
     const r = await call();
     if (!r) return null;
-    const cur = this.run;
-    if (cur && (seq !== this.#statusSeq || attempt !== this.#attempt || cur.status !== before)) return cur;
+    const cur = this.run ? this.#takePendingStep(this.run) : undefined;
+    if (cur && (seq !== this.#statusSeq || attempt !== this.#attempt || cur.status !== before)) {
+      if (cur !== this.run) this.run = cur;
+      return cur;
+    }
     this.run = keepStepsPerEpoch(r, cur);
     return this.run ?? r;
   }
@@ -668,6 +692,7 @@ export class LiveRun {
   #rewind() {
     this.#gen++;
     this.#attempt++;
+    this.#pendingStep = null;
     this.#replay = { until: this.steps[this.steps.length - 1]?.step ?? 0, steps: [], epochs: [] };
     const done = this.epochs[this.epochs.length - 1]?.epoch ?? 0;
     this.steps = this.steps.filter((s) => s.epoch <= done);
@@ -699,6 +724,8 @@ export class LiveRun {
     const last = this.steps[this.steps.length - 1];
     if (last && last.step > next.step && ['running', 'stopping'].includes(next.status))
       next = { ...next, step: last.step, epoch: last.epoch, eta_s: last.eta_s };
+    if (live && this.#pendingStep) next = withLength(next, this.#pendingStep.steps_per_epoch, this.#pendingStep.epochs);
+    this.#pendingStep = null;
     next = keepStepsPerEpoch(next, this.run);
     // During a replay the snapshot may still count the interrupted attempt: progress follows the steps held.
     if (this.#replay && live) next = { ...next, step: last?.step ?? 0, epoch: last?.epoch ?? this.epochs[this.epochs.length - 1]?.epoch ?? 0 };
@@ -724,22 +751,38 @@ export class LiveRun {
     return this.#cloudSeq !== cloudSeqAtStart && this.#lastCloud ? { ...run, cloud: this.#lastCloud } : run;
   }
 
+  /** Consumes any coalesced step progress and returns `run` updated with it. */
+  #takePendingStep(run: Run): Run {
+    const s = this.#pendingStep;
+    if (!s) return run;
+    this.#pendingStep = null;
+    return withLength({ ...run, step: s.step, epoch: s.epoch, eta_s: s.eta_s }, s.steps_per_epoch, s.epochs);
+  }
+
+  /** Applies coalesced step progress and bumps `version` in a single reactive batch. */
+  #flush() {
+    this.#raf = 0;
+    batch(() => {
+      if (this.#pendingStep) {
+        const cur = this.#run.peek();
+        if (cur) this.#run.set(this.#takePendingStep(cur));
+      }
+      this.#version.set((v) => v + 1);
+    });
+  }
+
   /** Publishes now rather than at the next frame (`#bump`): for what must be read together with the run's status. */
   #publish() {
     if (this.#raf) cancelAnimationFrame(this.#raf);
-    this.#raf = 0;
-    this.#version.set((v) => v + 1);
+    this.#flush();
   }
 
   #bump() {
     if (typeof requestAnimationFrame === 'undefined') {
-      this.#version.set((v) => v + 1);
+      this.#flush();
       return;
     }
     if (this.#raf) return;
-    this.#raf = requestAnimationFrame(() => {
-      this.#raf = 0;
-      this.#version.set((v) => v + 1);
-    });
+    this.#raf = requestAnimationFrame(() => this.#flush());
   }
 }
