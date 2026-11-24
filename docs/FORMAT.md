@@ -62,7 +62,7 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.imgsz` | yes | training image size, e.g. `"640"` |
 | `folo.fused` | no | `"true"` if Conv+BN are fused (an inference-only tensor set) |
 | `folo.dtype` | no | `"F32"` (default) or `"F16"`: the floating dtype of parameters and buffers |
-| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming) |
+| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming; `LossConfig` uses `#[serde(default)]`, so checkpoints trained with opt-in loss fields such as `box_loss: "rpiou"`, `dfl_ot_weight > 0`, `mal_gamma > 0`, or `nwd_weight > 0` must be resumed with a binary that supports those fields) |
 | `folo.optim` | checkpoint | JSON: optimizer contract, see below |
 | `folo.sched` | checkpoint | JSON: LR / momentum schedule contract, see below |
 | `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }` (a fine-tune's shorter window has a smaller pair: docs/MODEL.md §8.5). The effective decay at update `u` is `decay × (1 − exp(−u / tau))`, and `u` is `ema.__updates` |

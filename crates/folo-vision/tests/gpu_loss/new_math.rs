@@ -768,8 +768,10 @@ fn new_math_extreme_edge_cases_match_host() {
             dfl_gain: 0.0,
             ..LossConfig::default()
         };
-        let (bd, cd) = (bx.to_device(dev).unwrap(), cx.to_device(dev).unwrap());
-        let want = detection_loss_host(&bx, &cx, &anchors, &tgts, &cfg).unwrap();
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg).unwrap();
         let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
         let t_w = want.target_score_sum as f64;
         let uni = 9.0f64 + 1e-7f64;
@@ -785,6 +787,21 @@ fn new_math_extreme_edge_cases_match_host() {
             "GPU matching-3x3 R-PIoU {} vs ref {ref_loss}",
             got.total_value
         );
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        let g_u = -(1.0 - 0.5 + 2.0 * 0.5 * (9.0 / uni));
+        let bin2_ref = (t_w * 2e38f64 * (g_u * 1e-7 * 1.5 / (uni * uni)) * 0.25) as f32; // ~-1.39e29 * t
+        assert!(
+            (g_cpu[2] - bin2_ref).abs() <= 1e-3 * bin2_ref.abs(),
+            "CPU matching-3x3 bin-2 grad {} vs ref {bin2_ref}",
+            g_cpu[2]
+        );
+        assert!(
+            (g_gpu[2] - bin2_ref).abs() <= 2e-3 * bin2_ref.abs(),
+            "GPU matching-3x3 bin-2 grad {} vs ref {bin2_ref}",
+            g_gpu[2]
+        );
+        close_vec(&g_gpu, &g_cpu, 2e-3 * bin2_ref.abs(), 2e-3, "matching_3x3_rpiou/box_raw");
     }
 
     // 15. Subnormal-range softmax Jacobian in R-PIoU (`[-89, 0, 0, -1000]`, `box_gain = 1e38`, predicted 3x3 inside
@@ -873,5 +890,49 @@ fn new_math_extreme_edge_cases_match_host() {
             assert!(u_sum.abs() < 1e-4, "GPU side {side} shift invariance violated: sum {u_sum}");
         }
         close_vec(&g_gpu, &g_cpu, 1e-4, 1e-3, "dominant_bin_jac_rpiou/box_raw");
+    }
+
+    // 17. Symmetric inner neighbors (`[-89, -2, 0, -2, -1000]`, `R = 5`, `k* = 2`, centered 4x4 inside 4.5x4.5,
+    //     `box_gain = 1e38`): pairing offsets at equal distance `m` from `k*` cancels `p_1 == p_3` first so the
+    //     tiny `-2 * p_0` residual survives on dominant bin `k* = 2` on both CPU and GPU.
+    {
+        let anchors = Anchors { points: vec![[3.5, 3.5]], strides: vec![1.0], ..Anchors::default() };
+        let mut bd_v = vec![0.0f32; 20];
+        for s in 0..4 {
+            bd_v[s * 5] = -89.0;
+            bd_v[s * 5 + 1] = -2.0;
+            bd_v[s * 5 + 3] = -2.0;
+            bd_v[s * 5 + 4] = -1000.0;
+        }
+        let bx = Tensor::from_slice(&bd_v, [1, 20, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(1.25, 1.25, 5.75, 5.75)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 5,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            box_gain: 1e38,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
+        assert!(want.is_finite() && got.is_finite());
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        for side in 0..4 {
+            let (c0, c2) = (g_cpu[side * 5], g_cpu[side * 5 + 2]);
+            let (u0, u2) = (g_gpu[side * 5], g_gpu[side * 5 + 2]);
+            assert!(c0 > 0.01 && c2 < -0.01, "CPU side {side} paired-offset grad lost: ({c0}, {c2})");
+            assert!(u0 > 0.01 && u2 < -0.01, "GPU side {side} paired-offset grad lost: ({u0}, {u2})");
+            assert!((u2 - c2).abs() <= 2e-3 * c2.abs(), "side {side} dom bin {u2} vs {c2}");
+        }
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&g_gpu, &g_cpu, 2e-3 * scale, 2e-3, "paired_offset_jac_rpiou/box_raw");
     }
 }

@@ -274,23 +274,27 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let iy = min(pd.w, tb.w) - max(pd.y, tb.y);
         let iw = max(ix, 0.0);
         let ih = max(iy, 0.0);
+        let area1 = w1 * h1;
+        let area2 = w2 * h2;
         let inter = iw * ih;
-        let uni = w1 * h1 + w2 * h2 - inter + eps;
+        let uni = area1 + area2 - inter + eps;
         let iou = inter / uni;
-        // Keep focal-IoU derivatives unscaled by `g_base_sp` until multiplied by the DFL softmax Jacobian so extreme
-        // `B * box_gain / tss` values cannot overflow before the final logit gradient.
+        let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps;
+        // Keep focal-IoU derivatives unscaled by `g_base_sp` until multiplied by the DFL softmax Jacobian, and
+        // preserve `uni - inter = deficit` explicitly so exact-match boxes retain the `eps`-driven focal gradient.
         let g_u = -(1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
-        let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
-        let g_uni = -g_u * inter / (uni * uni);
-        let g_w1 = select(0.0, g_uni * h1, pd.z > pd.x);
-        let g_h1 = select(0.0, g_uni * w1, pd.w > pd.y);
-        let g_ix = select(0.0, g_inter * ih, ix > 0.0);
-        let g_iy = select(0.0, g_inter * iw, iy > 0.0);
+        let g_scale = g_u / uni;
+        let h1_act = select(0.0, h1, pd.z > pd.x);
+        let w1_act = select(0.0, w1, pd.w > pd.y);
+        let c_x1 = select(0.0, w_max(pd.x, tb.x), ix > 0.0);
+        let c_x2 = select(0.0, w_min(pd.z, tb.z), ix > 0.0);
+        let c_y1 = select(0.0, w_max(pd.y, tb.y), iy > 0.0);
+        let c_y2 = select(0.0, w_min(pd.w, tb.w), iy > 0.0);
         fiou_d = vec4<f32>(
-            g_w1 + g_ix * w_max(pd.x, tb.x),
-            g_h1 + g_iy * w_max(pd.y, tb.y),
-            g_w1 + g_ix * w_min(pd.z, tb.z),
-            g_h1 + g_iy * w_min(pd.w, tb.w),
+            g_scale * ((inter * (2.0 * c_x1 * ih - h1_act) + deficit * (c_x1 * ih)) / uni),
+            g_scale * ((inter * (2.0 * c_y1 * iw - w1_act) + deficit * (c_y1 * iw)) / uni),
+            g_scale * ((inter * (2.0 * c_x2 * ih - h1_act) + deficit * (c_x2 * ih)) / uni),
+            g_scale * ((inter * (2.0 * c_y2 * iw - w1_act) + deficit * (c_y2 * iw)) / uni),
         );
         let rkn = norm_f32(sqrt(rpiou_kappa));
         let sx = max(w2, rpiou_delta);
@@ -465,20 +469,38 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 }
             }
         }
-        // Dominant-bin-centered offset `delta = d - k* = Σ_{j != k*} p_j · (j - k*)` in exponent-split form so
-        // `k* - d = -delta` never cancels to `0` when `d` rounds to `k*`, preserving shift invariance `Σ_k jac_k = 0`.
+        // Dominant-bin-centered offset `delta = d - k* = Σ_{m >= 1} m · (p_{k*+m} - p_{k*-m})` in exponent-split
+        // form: pairing equal-distance offsets cancels symmetric neighbors first so tiny outer tails survive.
         let k_star = side_kstar[side];
         var delta_sp = vec2<f32>(0.0, 0.0);
         if (box_kind == 1u) {
-            for (var j = 0u; j < R; j++) {
-                if (j == k_star) { continue; }
-                let qj_raw = p[side * R + j];
-                var qj_sp = norm_f32(qj_raw);
-                if (qj_raw < 1e-30) {
-                    let xj = BOX[base + (side * R + j) * na];
-                    qj_sp = div_split(exp_diff_split(xj, side_m[side]), norm_f32(side_z[side]));
+            for (var m = 1u; m < R; m++) {
+                var pr = vec2<f32>(0.0, 0.0);
+                if (k_star + m < R) {
+                    let jr = k_star + m;
+                    let qr = p[side * R + jr];
+                    pr = norm_f32(qr);
+                    if (qr < 1e-30) {
+                        pr = div_split(
+                            exp_diff_split(BOX[base + (side * R + jr) * na], side_m[side]),
+                            norm_f32(side_z[side]),
+                        );
+                    }
                 }
-                delta_sp = add_split(delta_sp, mul_split(qj_sp, norm_f32(f32(i32(j) - i32(k_star)))));
+                var pl = vec2<f32>(0.0, 0.0);
+                if (m <= k_star) {
+                    let jl_m = k_star - m;
+                    let ql = p[side * R + jl_m];
+                    pl = norm_f32(ql);
+                    if (ql < 1e-30) {
+                        pl = div_split(
+                            exp_diff_split(BOX[base + (side * R + jl_m) * na], side_m[side]),
+                            norm_f32(side_z[side]),
+                        );
+                    }
+                }
+                let diff = add_split(pr, vec2<f32>(-pl.x, pl.y));
+                delta_sp = add_split(delta_sp, mul_split(diff, norm_f32(f32(m))));
             }
         }
         for (var k = 0u; k < R; k++) {

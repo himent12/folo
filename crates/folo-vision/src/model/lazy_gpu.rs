@@ -9,7 +9,7 @@
 //! slots in some image is flagged, and those images take their candidates from the dense head (a second round
 //! trip on the same features).
 //!
-//! DFL box fusion and DFL-based score rules (`dfl-consensus`, `dfl-repulse`) need per-candidate side moments
+//! DFL box fusion (`dfl`, `sebf`) and DFL-based score rules (`dfl-consensus`, `dfl-repulse`, `dfl-cgr`) need per-candidate side moments
 //! and/or Shannon entropy: [`dfl_stats_with`] runs on the candidates' box-logit columns, which hold the dense
 //! logits bit for bit, so the stats are the dense ones bit for bit. When any DFL stats are requested, all three
 //! levels' site lists are concatenated with the records into one `u32` buffer so the host downloads at most two

@@ -555,9 +555,10 @@ impl Predictor {
     /// the model predicts with its `o2o` head, [`FoloModel::head_mode`]) on each image's decoded
     /// `(boxes, scores)` (from [`HeadOutput::decode_images`] or [`HeadOutput::split_decoded`]), then the boxes
     /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count. Decoded boxes
-    /// carry no DFL logits or anchor strides, so [`BoxFusion::Dfl`] fuses as [`BoxFusion::Vote`],
-    /// [`ScoreRule::DflConsensus`] scores as [`ScoreRule::Elc`], and [`ScoreRule::DflRepulse`] omits its entropy
-    /// and cross-stride terms here.
+    /// carry no DFL logits or anchor strides, so [`BoxFusion::Dfl`] and [`BoxFusion::Sebf`] omit per-side DFL
+    /// precision weights (fusing as [`BoxFusion::Vote`] / unweighted `Sebf`), [`ScoreRule::DflConsensus`] scores as
+    /// [`ScoreRule::Elc`], and [`ScoreRule::DflRepulse`] / [`ScoreRule::DflCgr`] omit their entropy and cross-stride
+    /// terms here.
     pub fn finish(
         &self,
         batch: &PreparedBatch,

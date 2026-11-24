@@ -292,6 +292,10 @@ fn sebf_agnostic_respects_actual_nms_ownership_with_nan_box() {
     let dets = nms_detections(&input, &cfg);
     assert_eq!(dets.len(), 2, "box 0 (NaN) suppresses box 2, keeping boxes 0 and 1");
     assert_eq!(dets[1].bbox, boxes[1], "box 1 must not fuse box 2 owned by box 0");
+    let scores = [0.9f32, 0.8, 0.7];
+    let classes = [0u32, 1, 2];
+    let direct = fuse_boxes_sebf(&[0, 1], &boxes, &scores, &classes, true, 0.78, None, 0.78, None);
+    assert_eq!(direct[1], boxes[1], "owner = None fallback must match NMS ownership on NaN box");
 }
 
 /// Regression: calling `fuse_boxes_sebf` directly with `agnostic = true` and `owner = None` reconstructs

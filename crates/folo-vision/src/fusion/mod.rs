@@ -280,25 +280,23 @@ fn reconstruct_owners(
     buckets: &Buckets<'_>,
     nms_iou: f32,
 ) -> Vec<u32> {
-    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let score_key = |s: f32| if s.is_nan() { f32::NEG_INFINITY } else { s };
     let mut own = vec![u32::MAX; boxes.len()];
     for (kp, &k) in kept.iter().enumerate() {
         own[k] = kp as u32;
     }
     for (kp, &k) in kept.iter().enumerate() {
         let b = boxes[k];
-        if !finite(&b) {
-            continue;
-        }
-        let sk = scores[k];
+        let sk = score_key(scores[k]);
         let ba = b.area();
         for &j in buckets.of(classes[k]) {
             let j = j as usize;
-            // Require `j` to be lower-ranked than `k` so an agnostic cross-class suppression cannot let a weaker
-            // survivor steal a stronger suppressed same-class candidate.
-            let lower_ranked = scores[j] < sk || (scores[j] == sk && j > k);
-            if own[j] == u32::MAX && lower_ranked && finite(&boxes[j]) && overlap(&b, ba, &boxes[j]) > nms_iou
-            {
+            // Match `nms::score_order` and `nms::nms_indices` suppression rules (descending score with NaN last,
+            // ties by ascending index, `overlap > nms_iou`) so `owner = None` agrees with precomputed NMS owners
+            // even when a higher-ranked survivor has non-finite coordinates.
+            let sj = score_key(scores[j]);
+            let lower_ranked = sj.total_cmp(&sk).is_lt() || (sj.total_cmp(&sk).is_eq() && j > k);
+            if own[j] == u32::MAX && lower_ranked && overlap(&b, ba, &boxes[j]) > nms_iou {
                 own[j] = kp as u32;
             }
         }

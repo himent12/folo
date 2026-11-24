@@ -269,20 +269,22 @@ fn rpiou_box_f64(a: [f64; 4], b: [f64; 4], beta: f64, kappa: f64, delta0: f64) -
     let inter = iw * ih;
     let uni = area1 + area2 - inter + EPS;
     let iou = inter / uni;
-    let one_minus_iou = ((area1 - inter).max(0.0) + (area2 - inter).max(0.0) + EPS) / uni;
+    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0) + EPS;
+    let one_minus_iou = deficit / uni;
     let focal = one_minus_iou * (1.0 + beta * iou);
     let g_u = -(1.0 - beta + 2.0 * beta * iou);
-    let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
-    let g_uni = -g_u * inter / (uni * uni);
-    let g_w1 = if ax2 > ax1 { g_uni * h1 } else { 0.0 };
-    let g_h1 = if ay2 > ay1 { g_uni * w1 } else { 0.0 };
-    let g_ix = if ix > 0.0 { g_inter * ih } else { 0.0 };
-    let g_iy = if iy > 0.0 { g_inter * iw } else { 0.0 };
+    let g_scale = g_u / uni;
+    let h1_act = if ax2 > ax1 { h1 } else { 0.0 };
+    let w1_act = if ay2 > ay1 { w1 } else { 0.0 };
+    let c_x1 = if ix > 0.0 { w_max(ax1, bx1) } else { 0.0 };
+    let c_x2 = if ix > 0.0 { w_min(ax2, bx2) } else { 0.0 };
+    let c_y1 = if iy > 0.0 { w_max(ay1, by1) } else { 0.0 };
+    let c_y2 = if iy > 0.0 { w_min(ay2, by2) } else { 0.0 };
     let mut g = [
-        -g_w1 - g_ix * w_max(ax1, bx1),
-        -g_h1 - g_iy * w_max(ay1, by1),
-        g_w1 + g_ix * w_min(ax2, bx2),
-        g_h1 + g_iy * w_min(ay2, by2),
+        -g_scale * ((inter * (2.0 * c_x1 * ih - h1_act) + deficit * (c_x1 * ih)) / uni),
+        -g_scale * ((inter * (2.0 * c_y1 * iw - w1_act) + deficit * (c_y1 * iw)) / uni),
+        g_scale * ((inter * (2.0 * c_x2 * ih - h1_act) + deficit * (c_x2 * ih)) / uni),
+        g_scale * ((inter * (2.0 * c_y2 * iw - w1_act) + deficit * (c_y2 * iw)) / uni),
     ];
     let d2 = delta0 * delta0;
     let denom_x = w2 * w2 + d2;
@@ -444,12 +446,14 @@ fn rpiou_from_logits(
                         p_row[k] = e;
                         z_side += e;
                     }
-                    let mut delta = 0.0f64;
-                    for (k, pk) in p_row.iter_mut().enumerate() {
+                    for pk in p_row.iter_mut() {
                         *pk /= z_side;
-                        if k != k_star {
-                            delta += *pk * (k as isize - k_star as isize) as f64;
-                        }
+                    }
+                    let mut delta = 0.0f64;
+                    for m in 1..r {
+                        let pr = if k_star + m < r { p_row[k_star + m] } else { 0.0 };
+                        let pl = if m <= k_star { p_row[k_star - m] } else { 0.0 };
+                        delta += (m as f64) * (pr - pl);
                     }
                     for (k, (&pk, gk)) in p_row.iter().zip(grow.iter_mut()).enumerate() {
                         let k_minus_d =
