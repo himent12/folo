@@ -1,5 +1,6 @@
-//! Unit tests of the tools: the tool count and list the docs and llms.txt state, unknown arguments, paging and
-//! size limits, run warnings and config diffs, issue filtering for an older server, and capped run names.
+//! Unit tests of the tools: the tool count and list the docs and llms.txt state, schema memoization and unique
+//! names, unknown arguments, paging and size limits, run warnings and config diffs, issue filtering for an older
+//! server, and capped run names.
 
 use super::*;
 use folo_api::{IssuePage, IssueSeverity, LogLevel, LogLine};

@@ -52,312 +52,8 @@ pub struct ToolDef {
     pub mutating: bool,
     input: fn() -> JsonObject,
     output: fn() -> JsonObject,
+    schemas: SchemaCache,
 }
-
-/// Every tool, in the order of docs/MCP.md.
-pub const TOOLS: &[ToolDef] = &[
-    ToolDef {
-        name: "folo_info",
-        description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
-                      (params / GFLOPs). Call this first to pick a device, scale and image size.",
-        mutating: false,
-        input: input::<NoArgs>,
-        output: output::<FoloInfo>,
-    },
-    ToolDef {
-        name: "list_datasets",
-        description: "Lists registered datasets (summaries: id, name, format, classes, splits). Paged.",
-        mutating: false,
-        input: input::<PageArgs>,
-        output: output::<Page<DatasetSummary>>,
-    },
-    ToolDef {
-        name: "get_dataset",
-        description: "One dataset with statistics (class counts, box sizes, boxes per image), issue counts by \
-                      severity and kind, and its errors then warnings (first 50; infos are only counted).",
-        mutating: false,
-        input: input::<DatasetIdArgs>,
-        output: output::<DatasetDetail>,
-    },
-    ToolDef {
-        name: "list_dataset_issues",
-        description: "Lists a dataset's issues (the `folo dataset check` findings: kind, severity, file, line, \
-                      message, suggested fix) in dataset order, optionally one severity or kind. Paged.",
-        mutating: false,
-        input: input::<ListIssuesArgs>,
-        output: output::<IssuesPage>,
-    },
-    ToolDef {
-        name: "list_dataset_images",
-        description: "Lists a dataset's images (optionally one split or class, optionally with boxes). Paged. \
-                      Read folo://datasets/{dataset_id}/images/{image_id} (a 512 px JPEG; ?size=original: the file) to look at an image.",
-        mutating: false,
-        input: input::<ListImagesArgs>,
-        output: output::<Page<ImageSummary>>,
-    },
-    ToolDef {
-        name: "register_dataset",
-        description: "Registers a YOLO or COCO dataset folder on disk (never moves or changes files) and returns \
-                      it with statistics.",
-        mutating: true,
-        input: input::<RegisterArgs>,
-        output: api_output::<Dataset>,
-    },
-    ToolDef {
-        name: "create_synthetic_dataset",
-        description: "Generates a synthetic shapes dataset (circles, squares, triangles, stars on textured \
-                      backgrounds) for quick experiments. Reports progress.",
-        mutating: true,
-        input: input::<SyntheticArgs>,
-        output: api_output::<Dataset>,
-    },
-    ToolDef {
-        name: "list_models",
-        description: "Lists trained models (summaries: id, name, arch, imgsz, classes, metrics). Paged.",
-        mutating: false,
-        input: input::<PageArgs>,
-        output: output::<Page<ModelSummary>>,
-    },
-    ToolDef {
-        name: "train",
-        description: "Starts a training run (TrainConfig of docs/API.md; only dataset_id is required) and returns \
-                      at once. Follow it with run_status or by subscribing to folo://runs/{run_id}.",
-        mutating: true,
-        input: train_input,
-        output: output::<TrainResult>,
-    },
-    ToolDef {
-        name: "run_status",
-        description: "A run's status, progress, best epoch, latest step and epoch metrics, and its last log lines.",
-        mutating: false,
-        input: input::<RunStatusArgs>,
-        output: output::<RunStatusResult>,
-    },
-    ToolDef {
-        name: "list_runs",
-        description: "Lists training runs, newest first, optionally filtered by status. Paged.",
-        mutating: false,
-        input: input::<ListRunsArgs>,
-        output: output::<Page<Run>>,
-    },
-    ToolDef {
-        name: "stop_run",
-        description: "Stops a running run; its last checkpoint is kept.",
-        mutating: true,
-        input: input::<RunIdArgs>,
-        output: api_output::<Run>,
-    },
-    ToolDef {
-        name: "reorder_run",
-        description: "Moves a run waiting in the training queue: action top / up / down / bottom, or a 1-based \
-                      position; action start starts it now when nothing is training, else next (never preempting \
-                      the active run). Returns its status and new queue_position.",
-        mutating: true,
-        input: input::<ReorderRunArgs>,
-        output: output::<ReorderResult>,
-    },
-    ToolDef {
-        name: "val",
-        description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class. \
-                      Reports progress.",
-        mutating: false,
-        input: input::<ValArgs>,
-        output: api_output::<ValReport>,
-    },
-    ToolDef {
-        name: "predict",
-        description: "Detects objects in one image (a file path, base64 bytes, or a dataset image). Boxes are \
-                      pixel xyxy, highest score first.",
-        mutating: false,
-        input: input::<PredictArgs>,
-        output: api_output::<PredictResponse>,
-    },
-    ToolDef {
-        name: "predict_batch",
-        description: "Detects objects in up to 256 images (paths or a glob). Returns summaries; the per-image \
-                      boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
-        mutating: false,
-        input: input::<PredictBatchArgs>,
-        output: output::<PredictBatchResult>,
-    },
-    ToolDef {
-        name: "export",
-        description: "Exports a model (folo-f16 or onnx) to a new file under the data dir.",
-        mutating: true,
-        input: input::<ExportArgs>,
-        output: api_output::<ExportResult>,
-    },
-    ToolDef {
-        name: "compare_runs",
-        description: "Compares 2 to 8 runs: best metrics, final losses, epochs, duration, and the TrainConfig \
-                      fields that differ.",
-        mutating: false,
-        input: input::<CompareArgs>,
-        output: output::<CompareResult>,
-    },
-    ToolDef {
-        name: "cloud_connections",
-        description: "Lists the cloud connections (account, balance, last check). Connecting takes credentials, so \
-                      it is done in Studio, Desktop or `folo cloud connect`.",
-        mutating: false,
-        input: input::<NoArgs>,
-        output: api_output::<CloudConnectionList>,
-    },
-    ToolDef {
-        name: "cloud_offers",
-        description: "What a cloud connection can run on now, cheapest first; train on one with train's \
-                      compute.offer_id.",
-        mutating: false,
-        input: input::<CloudOffersArgs>,
-        output: api_output::<CloudOfferList>,
-    },
-    ToolDef {
-        name: "cloud_instances",
-        description: "Lists the cloud instances FOLO launched, alive first, with their run, status and cost.",
-        mutating: false,
-        input: input::<NoArgs>,
-        output: api_output::<CloudInstanceList>,
-    },
-    ToolDef {
-        name: "cloud_terminate",
-        description: "Terminates a cloud instance now; a run still using it fails (cloud_instance_lost).",
-        mutating: true,
-        input: input::<InstanceIdArgs>,
-        output: api_output::<CloudInstance>,
-    },
-    ToolDef {
-        name: "list_label_jobs",
-        description: "Lists labeling jobs, newest first. Paged.",
-        mutating: false,
-        input: terse_input::<PageArgs>,
-        output: terse_output::<Page<LabelJobSummary>>,
-    },
-    ToolDef {
-        name: "create_label_job",
-        description: "Creates a labeling job (name, classes, instructions) from folders or image files on the \
-                      server's machine; with job_id, adds paths to that job.",
-        mutating: true,
-        input: terse_input::<CreateLabelJobArgs>,
-        output: terse_output::<LabelImagesAddedResult>,
-    },
-    ToolDef {
-        name: "start_labeling",
-        description: "Starts an agent run on the job's unlabeled images (or image_ids); returns at once, follow \
-                      it with label_status.",
-        mutating: true,
-        input: terse_input::<StartLabelingArgs>,
-        output: terse_output::<LabelRunStarted>,
-    },
-    ToolDef {
-        name: "stop_labeling",
-        description: "Stops a job's agent run; labeled images stay.",
-        mutating: true,
-        input: terse_input::<JobIdArgs>,
-        output: terse_output::<LabelJobState>,
-    },
-    ToolDef {
-        name: "label_status",
-        description: "A job's counts, run progress, tokens and last log lines.",
-        mutating: false,
-        input: terse_input::<LabelStatusArgs>,
-        output: terse_output::<LabelStatusResult>,
-    },
-    ToolDef {
-        name: "list_label_images",
-        description: "Lists a job's images, optionally by status or review state, with boxes. Paged.",
-        mutating: false,
-        input: terse_input::<ListLabelImagesArgs>,
-        output: terse_output::<Page<LabelImageSummary>>,
-    },
-    ToolDef {
-        name: "view_label_image",
-        description: "Shows an image (default: the next to review) with its boxes numbered and pixel ticks on \
-                      the edges, plus the box list [class,x1,y1,x2,y2] in pixels of the view and its revision.",
-        mutating: false,
-        input: terse_input::<ViewLabelImageArgs>,
-        output: terse_output::<LabelImageViewResult>,
-    },
-    ToolDef {
-        name: "set_label_boxes",
-        description: "Corrects an image's boxes, in pixels of the view (size: its size): all of them (boxes), or \
-                      relabel / remove / add by number. expect: the view's revision. Saved as a reviewed hand edit.",
-        mutating: true,
-        input: terse_input::<SetLabelBoxesArgs>,
-        output: terse_output::<LabelImageView>,
-    },
-    ToolDef {
-        name: "review_label_images",
-        description: "Marks labeled images whose boxes are right as reviewed (expect: id -> revision seen).",
-        mutating: true,
-        input: terse_input::<ReviewLabelImagesArgs>,
-        output: terse_output::<ReviewLabelImagesResult>,
-    },
-    ToolDef {
-        name: "export_label_dataset",
-        description: "Writes the labeled images as a YOLO dataset, registers it and returns its dataset_id.",
-        mutating: true,
-        input: terse_input::<ExportLabelDatasetArgs>,
-        output: terse_output::<LabelDatasetResult>,
-    },
-    ToolDef {
-        name: "bench_catalog",
-        description: "The benchmark conditions (id, what each simulates), the default plan and the score's axes.",
-        mutating: false,
-        input: terse_input::<NoArgs>,
-        output: terse_output::<BenchCatalogResult>,
-    },
-    ToolDef {
-        name: "list_benchmarks",
-        description: "Lists vision benchmarks with their best entry. Paged.",
-        mutating: false,
-        input: terse_input::<PageArgs>,
-        output: terse_output::<Page<BenchSummary>>,
-    },
-    ToolDef {
-        name: "get_benchmark",
-        description: "A benchmark: source, classes, plan and its leaderboard (best first).",
-        mutating: false,
-        input: terse_input::<BenchmarkIdArgs>,
-        output: terse_output::<BenchDetail>,
-    },
-    ToolDef {
-        name: "create_benchmark",
-        description: "Freezes a benchmark from a dataset split or a labeling job, with a plan of conditions.",
-        mutating: true,
-        input: terse_input::<CreateBenchmarkArgs>,
-        output: terse_output::<BenchSummary>,
-    },
-    ToolDef {
-        name: "delete_benchmark",
-        description: "Deletes a benchmark: its frozen images and its entries' results, for good.",
-        mutating: true,
-        input: terse_input::<BenchmarkIdArgs>,
-        output: terse_output::<BenchDeleted>,
-    },
-    ToolDef {
-        name: "start_bench_entry",
-        description: "Enters a model (runs in the background: follow it with bench_entry) or a file of \
-                      predictions made elsewhere (scored at once).",
-        mutating: true,
-        input: terse_input::<StartBenchEntryArgs>,
-        output: terse_output::<BenchEntryBrief>,
-    },
-    ToolDef {
-        name: "bench_entry",
-        description: "An entry's progress, or once done its score: five axes, mAP with a 95% interval, per \
-                      condition [severity, mAP50-95, retention]. wait: seconds to wait for the end.",
-        mutating: false,
-        input: terse_input::<BenchEntryArgs>,
-        output: terse_output::<BenchEntryState>,
-    },
-    ToolDef {
-        name: "stop_bench_entry",
-        description: "Stops a running entry.",
-        mutating: true,
-        input: terse_input::<BenchEntryIdArgs>,
-        output: terse_output::<BenchEntryBrief>,
-    },
-];
 
 struct SchemaCache {
     input: OnceLock<Arc<JsonObject>>,
@@ -370,23 +66,362 @@ impl SchemaCache {
     }
 }
 
-/// Per-tool memoized schemas, indexed in lockstep with [`TOOLS`].
-static SCHEMAS: [SchemaCache; TOOLS.len()] = [const { SchemaCache::new() }; TOOLS.len()];
+/// Every tool, in the order of docs/MCP.md.
+pub static TOOLS: &[ToolDef] = &TOOL_TABLE;
+
+static TOOL_TABLE: [ToolDef; 40] = [
+    ToolDef {
+        name: "folo_info",
+        description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
+                      (params / GFLOPs). Call this first to pick a device, scale and image size.",
+        mutating: false,
+        input: input::<NoArgs>,
+        output: output::<FoloInfo>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_datasets",
+        description: "Lists registered datasets (summaries: id, name, format, classes, splits). Paged.",
+        mutating: false,
+        input: input::<PageArgs>,
+        output: output::<Page<DatasetSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "get_dataset",
+        description: "One dataset with statistics (class counts, box sizes, boxes per image), issue counts by \
+                      severity and kind, and its errors then warnings (first 50; infos are only counted).",
+        mutating: false,
+        input: input::<DatasetIdArgs>,
+        output: output::<DatasetDetail>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_dataset_issues",
+        description: "Lists a dataset's issues (the `folo dataset check` findings: kind, severity, file, line, \
+                      message, suggested fix) in dataset order, optionally one severity or kind. Paged.",
+        mutating: false,
+        input: input::<ListIssuesArgs>,
+        output: output::<IssuesPage>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_dataset_images",
+        description: "Lists a dataset's images (optionally one split or class, optionally with boxes). Paged. \
+                      Read folo://datasets/{dataset_id}/images/{image_id} (a 512 px JPEG; ?size=original: the file) to look at an image.",
+        mutating: false,
+        input: input::<ListImagesArgs>,
+        output: output::<Page<ImageSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "register_dataset",
+        description: "Registers a YOLO or COCO dataset folder on disk (never moves or changes files) and returns \
+                      it with statistics.",
+        mutating: true,
+        input: input::<RegisterArgs>,
+        output: api_output::<Dataset>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "create_synthetic_dataset",
+        description: "Generates a synthetic shapes dataset (circles, squares, triangles, stars on textured \
+                      backgrounds) for quick experiments. Reports progress.",
+        mutating: true,
+        input: input::<SyntheticArgs>,
+        output: api_output::<Dataset>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_models",
+        description: "Lists trained models (summaries: id, name, arch, imgsz, classes, metrics). Paged.",
+        mutating: false,
+        input: input::<PageArgs>,
+        output: output::<Page<ModelSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "train",
+        description: "Starts a training run (TrainConfig of docs/API.md; only dataset_id is required) and returns \
+                      at once. Follow it with run_status or by subscribing to folo://runs/{run_id}.",
+        mutating: true,
+        input: train_input,
+        output: output::<TrainResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "run_status",
+        description: "A run's status, progress, best epoch, latest step and epoch metrics, and its last log lines.",
+        mutating: false,
+        input: input::<RunStatusArgs>,
+        output: output::<RunStatusResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_runs",
+        description: "Lists training runs, newest first, optionally filtered by status. Paged.",
+        mutating: false,
+        input: input::<ListRunsArgs>,
+        output: output::<Page<Run>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "stop_run",
+        description: "Stops a running run; its last checkpoint is kept.",
+        mutating: true,
+        input: input::<RunIdArgs>,
+        output: api_output::<Run>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "reorder_run",
+        description: "Moves a run waiting in the training queue: action top / up / down / bottom, or a 1-based \
+                      position; action start starts it now when nothing is training, else next (never preempting \
+                      the active run). Returns its status and new queue_position.",
+        mutating: true,
+        input: input::<ReorderRunArgs>,
+        output: output::<ReorderResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "val",
+        description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class. \
+                      Reports progress.",
+        mutating: false,
+        input: input::<ValArgs>,
+        output: api_output::<ValReport>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "predict",
+        description: "Detects objects in one image (a file path, base64 bytes, or a dataset image). Boxes are \
+                      pixel xyxy, highest score first.",
+        mutating: false,
+        input: input::<PredictArgs>,
+        output: api_output::<PredictResponse>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "predict_batch",
+        description: "Detects objects in up to 256 images (paths or a glob). Returns summaries; the per-image \
+                      boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
+        mutating: false,
+        input: input::<PredictBatchArgs>,
+        output: output::<PredictBatchResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "export",
+        description: "Exports a model (folo-f16 or onnx) to a new file under the data dir.",
+        mutating: true,
+        input: input::<ExportArgs>,
+        output: api_output::<ExportResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "compare_runs",
+        description: "Compares 2 to 8 runs: best metrics, final losses, epochs, duration, and the TrainConfig \
+                      fields that differ.",
+        mutating: false,
+        input: input::<CompareArgs>,
+        output: output::<CompareResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "cloud_connections",
+        description: "Lists the cloud connections (account, balance, last check). Connecting takes credentials, so \
+                      it is done in Studio, Desktop or `folo cloud connect`.",
+        mutating: false,
+        input: input::<NoArgs>,
+        output: api_output::<CloudConnectionList>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "cloud_offers",
+        description: "What a cloud connection can run on now, cheapest first; train on one with train's \
+                      compute.offer_id.",
+        mutating: false,
+        input: input::<CloudOffersArgs>,
+        output: api_output::<CloudOfferList>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "cloud_instances",
+        description: "Lists the cloud instances FOLO launched, alive first, with their run, status and cost.",
+        mutating: false,
+        input: input::<NoArgs>,
+        output: api_output::<CloudInstanceList>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "cloud_terminate",
+        description: "Terminates a cloud instance now; a run still using it fails (cloud_instance_lost).",
+        mutating: true,
+        input: input::<InstanceIdArgs>,
+        output: api_output::<CloudInstance>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_label_jobs",
+        description: "Lists labeling jobs, newest first. Paged.",
+        mutating: false,
+        input: terse_input::<PageArgs>,
+        output: terse_output::<Page<LabelJobSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "create_label_job",
+        description: "Creates a labeling job (name, classes, instructions) from folders or image files on the \
+                      server's machine; with job_id, adds paths to that job.",
+        mutating: true,
+        input: terse_input::<CreateLabelJobArgs>,
+        output: terse_output::<LabelImagesAddedResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "start_labeling",
+        description: "Starts an agent run on the job's unlabeled images (or image_ids); returns at once, follow \
+                      it with label_status.",
+        mutating: true,
+        input: terse_input::<StartLabelingArgs>,
+        output: terse_output::<LabelRunStarted>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "stop_labeling",
+        description: "Stops a job's agent run; labeled images stay.",
+        mutating: true,
+        input: terse_input::<JobIdArgs>,
+        output: terse_output::<LabelJobState>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "label_status",
+        description: "A job's counts, run progress, tokens and last log lines.",
+        mutating: false,
+        input: terse_input::<LabelStatusArgs>,
+        output: terse_output::<LabelStatusResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_label_images",
+        description: "Lists a job's images, optionally by status or review state, with boxes. Paged.",
+        mutating: false,
+        input: terse_input::<ListLabelImagesArgs>,
+        output: terse_output::<Page<LabelImageSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "view_label_image",
+        description: "Shows an image (default: the next to review) with its boxes numbered and pixel ticks on \
+                      the edges, plus the box list [class,x1,y1,x2,y2] in pixels of the view and its revision.",
+        mutating: false,
+        input: terse_input::<ViewLabelImageArgs>,
+        output: terse_output::<LabelImageViewResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "set_label_boxes",
+        description: "Corrects an image's boxes, in pixels of the view (size: its size): all of them (boxes), or \
+                      relabel / remove / add by number. expect: the view's revision. Saved as a reviewed hand edit.",
+        mutating: true,
+        input: terse_input::<SetLabelBoxesArgs>,
+        output: terse_output::<LabelImageView>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "review_label_images",
+        description: "Marks labeled images whose boxes are right as reviewed (expect: id -> revision seen).",
+        mutating: true,
+        input: terse_input::<ReviewLabelImagesArgs>,
+        output: terse_output::<ReviewLabelImagesResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "export_label_dataset",
+        description: "Writes the labeled images as a YOLO dataset, registers it and returns its dataset_id.",
+        mutating: true,
+        input: terse_input::<ExportLabelDatasetArgs>,
+        output: terse_output::<LabelDatasetResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "bench_catalog",
+        description: "The benchmark conditions (id, what each simulates), the default plan and the score's axes.",
+        mutating: false,
+        input: terse_input::<NoArgs>,
+        output: terse_output::<BenchCatalogResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "list_benchmarks",
+        description: "Lists vision benchmarks with their best entry. Paged.",
+        mutating: false,
+        input: terse_input::<PageArgs>,
+        output: terse_output::<Page<BenchSummary>>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "get_benchmark",
+        description: "A benchmark: source, classes, plan and its leaderboard (best first).",
+        mutating: false,
+        input: terse_input::<BenchmarkIdArgs>,
+        output: terse_output::<BenchDetail>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "create_benchmark",
+        description: "Freezes a benchmark from a dataset split or a labeling job, with a plan of conditions.",
+        mutating: true,
+        input: terse_input::<CreateBenchmarkArgs>,
+        output: terse_output::<BenchSummary>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "delete_benchmark",
+        description: "Deletes a benchmark: its frozen images and its entries' results, for good.",
+        mutating: true,
+        input: terse_input::<BenchmarkIdArgs>,
+        output: terse_output::<BenchDeleted>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "start_bench_entry",
+        description: "Enters a model (runs in the background: follow it with bench_entry) or a file of \
+                      predictions made elsewhere (scored at once).",
+        mutating: true,
+        input: terse_input::<StartBenchEntryArgs>,
+        output: terse_output::<BenchEntryBrief>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "bench_entry",
+        description: "An entry's progress, or once done its score: five axes, mAP with a 95% interval, per \
+                      condition [severity, mAP50-95, retention]. wait: seconds to wait for the end.",
+        mutating: false,
+        input: terse_input::<BenchEntryArgs>,
+        output: terse_output::<BenchEntryState>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "stop_bench_entry",
+        description: "Stops a running entry.",
+        mutating: true,
+        input: terse_input::<BenchEntryIdArgs>,
+        output: terse_output::<BenchEntryBrief>,
+        schemas: SchemaCache::new(),
+    },
+];
 
 impl ToolDef {
-    fn schema_cache(&self) -> &'static SchemaCache {
-        let idx = TOOLS.iter().position(|t| t.name == self.name).expect("every ToolDef belongs to TOOLS");
-        &SCHEMAS[idx]
-    }
-
     /// The tool's compacted input JSON Schema, generated once and cached.
-    pub fn input_schema(&self) -> &'static Arc<JsonObject> {
-        self.schema_cache().input.get_or_init(|| Arc::new((self.input)()))
+    pub fn input_schema(&self) -> &Arc<JsonObject> {
+        self.schemas.input.get_or_init(|| Arc::new((self.input)()))
     }
 
     /// The tool's compacted output JSON Schema, generated once and cached.
-    pub fn output_schema(&self) -> &'static Arc<JsonObject> {
-        self.schema_cache().output.get_or_init(|| Arc::new((self.output)()))
+    pub fn output_schema(&self) -> &Arc<JsonObject> {
+        self.schemas.output.get_or_init(|| Arc::new((self.output)()))
     }
 
     /// The MCP tool definition.
@@ -423,8 +458,8 @@ pub fn describe() -> Value {
                     "name": t.name,
                     "description": t.description,
                     "mutating": t.mutating,
-                    "inputSchema": Value::Object((**t.input_schema()).clone()),
-                    "outputSchema": Value::Object((**t.output_schema()).clone()),
+                    "inputSchema": Value::Object(t.input_schema().as_ref().clone()),
+                    "outputSchema": Value::Object(t.output_schema().as_ref().clone()),
                 })
             })
             .collect(),
