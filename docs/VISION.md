@@ -72,8 +72,9 @@ A shared graph walk (`walk.rs`) drives three executors:
   64-bit FNV-1a weight fingerprint, `calibrate_sample` also adds the P5-tail `default_sensitivity_f32_convs`
   (`neck.out5.*`), and `Calibration::store` serializes `folo.quant` (used by `folo quantize`). Loading remains
   backward-compatible with `VERSION_V1` per-tensor files.
-- **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and AVX-VNNI `QConv` kernels
-  (with per-part concat scale decoupling and packed weights cached on each weight tensor via `Tensor::derived_f32`).
+- **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv` kernels (AVX-VNNI
+  when available, else portable scalar fallback; with per-part concat scale decoupling and packed weights cached on
+  each weight tensor via `Tensor::derived_f32`).
   When `u8_stem` is enabled, the stem is eligible (`stem_int8_able`), and it is not listed in `f32_convs`,
   `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from `Letterbox::apply_rgb0_u8`
   without materialising an `f32` image (falling back to `f32` otherwise).
