@@ -279,7 +279,9 @@ fn reconstruct_owners(
     classes: &[u32],
     buckets: &Buckets<'_>,
     nms_iou: f32,
+    skip_non_finite: bool,
 ) -> Vec<u32> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
     let score_key = |s: f32| if s.is_nan() { f32::NEG_INFINITY } else { s };
     let mut own = vec![u32::MAX; boxes.len()];
     for (kp, &k) in kept.iter().enumerate() {
@@ -287,16 +289,23 @@ fn reconstruct_owners(
     }
     for (kp, &k) in kept.iter().enumerate() {
         let b = boxes[k];
+        if skip_non_finite && !finite(&b) {
+            continue;
+        }
         let sk = score_key(scores[k]);
         let ba = b.area();
         for &j in buckets.of(classes[k]) {
             let j = j as usize;
             // Match `nms::score_order` and `nms::nms_indices` suppression rules (descending score with NaN last,
-            // ties by ascending index, `overlap > nms_iou`) so `owner = None` agrees with precomputed NMS owners
-            // even when a higher-ranked survivor has non-finite coordinates.
+            // ties by ascending index, `overlap > nms_iou`) so `owner = None` agrees with precomputed NMS owners.
+            // Calibrated score rules pass `skip_non_finite = true` to preserve class-local NaN skipping.
             let sj = score_key(scores[j]);
             let lower_ranked = sj.total_cmp(&sk).is_lt() || (sj.total_cmp(&sk).is_eq() && j > k);
-            if own[j] == u32::MAX && lower_ranked && overlap(&b, ba, &boxes[j]) > nms_iou {
+            if own[j] == u32::MAX
+                && lower_ranked
+                && (!skip_non_finite || finite(&boxes[j]))
+                && overlap(&b, ba, &boxes[j]) > nms_iou
+            {
                 own[j] = kp as u32;
             }
         }
@@ -352,7 +361,7 @@ pub fn dfl_consensus_scores(
             o
         }
         None => {
-            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou, true);
             &computed_owners
         }
     };
@@ -515,7 +524,7 @@ fn dfl_repulse_scores_impl(
             o
         }
         None => {
-            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou, true);
             &computed_owners
         }
     };
@@ -710,7 +719,7 @@ pub fn fuse_boxes_sebf(
             o
         }
         None => {
-            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou);
+            computed_owners = reconstruct_owners(kept, boxes, scores, classes, &buckets, nms_iou, false);
             &computed_owners
         }
     };

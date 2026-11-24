@@ -79,8 +79,10 @@ blocking findings.
      relevant checks, and push.
    - Each re-review round starts **fresh** reviewer instances summarizing the previous findings and what changed (never
      reusing an old review thread with `t3_thread_send`).
-   - Stop only when **both GPT-6.2 Sol (`high`, fast) and Gemini 4 Neon (`high`)** report `NO BLOCKING FINDINGS` on the
-     final PR head.
+   - Stop when **both GPT-6.2 Sol (`high`, fast) and Gemini 4 Neon (`high`)** report `NO BLOCKING FINDINGS` on the
+     final PR head — or, if **Gemini 4 Neon (`high`)** reports `NO BLOCKING FINDINGS`, you agree, CI is green, and
+     Sol's only remaining findings are minor, low-impact, or contrived extreme edge cases, note why they are declined
+     in the PR comment and proceed to merge rather than looping indefinitely.
 6. Post the final review summary as a PR comment (`pull_request_respond` or `gh pr comment`), noting which findings from
    Sol and Neon were fixed or declined and why.
 7. Do **not** merge unless your task says so. Finish with one line: `PR <full URL>, head <SHA>, checks and reviews <state>`.

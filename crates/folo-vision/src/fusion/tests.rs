@@ -296,6 +296,30 @@ fn sebf_agnostic_respects_actual_nms_ownership_with_nan_box() {
     let classes = [0u32, 1, 2];
     let direct = fuse_boxes_sebf(&[0, 1], &boxes, &scores, &classes, true, 0.78, None, 0.78, None);
     assert_eq!(direct[1], boxes[1], "owner = None fallback must match NMS ownership on NaN box");
+
+    // Same-class agnostic NMS with `ScoreRule::Elc` must preserve class-local NaN skipping so finite survivor 1
+    // still receives support from candidate 2 during calibrated scoring.
+    let same_cls_input = [
+        Detection { bbox: boxes[0], score: 0.9, class: 0 },
+        Detection { bbox: boxes[1], score: 0.8, class: 0 },
+        Detection { bbox: boxes[2], score: 0.7, class: 0 },
+    ];
+    let elc_cfg = NmsConfig {
+        conf: 0.0,
+        iou: 0.78,
+        fusion: BoxFusion::None,
+        score: ScoreRule::Elc,
+        agnostic: true,
+        ..NmsConfig::default()
+    };
+    let elc_dets = nms_detections(&same_cls_input, &elc_cfg);
+    let solo_elc = elc_scores(&[0], &[boxes[1]], &[0.8], &[0], None, 0.78)[0];
+    let finite_det = elc_dets.iter().find(|d| d.bbox == boxes[1]).expect("finite survivor kept");
+    assert!(
+        finite_det.score > solo_elc,
+        "class-local ELC must retain candidate-2 support on finite survivor: {} vs solo {solo_elc}",
+        finite_det.score
+    );
 }
 
 /// Regression: calling `fuse_boxes_sebf` directly with `agnostic = true` and `owner = None` reconstructs
