@@ -269,6 +269,9 @@ pub fn paint_line_background(
     text_system: &TextSystem,
     painter: &mut dyn GlyphPainter,
 ) -> Result<()> {
+    if !decoration_runs.iter().any(|run| run.background_color.is_some()) {
+        return Ok(());
+    }
     let mut decoration_runs = decoration_runs.iter();
     let mut wraps = wrap_boundaries.iter().peekable();
     let mut run_end = 0;

@@ -26,7 +26,7 @@ mod results;
 mod runs;
 mod schemas;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use folo_api::{
     CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, Dataset, ExportResult,
@@ -50,12 +50,26 @@ pub struct ToolDef {
     pub description: &'static str,
     /// Changes state: hidden and rejected with `--read-only`.
     pub mutating: bool,
-    input: fn() -> Arc<JsonObject>,
-    output: fn() -> Arc<JsonObject>,
+    input: fn() -> JsonObject,
+    output: fn() -> JsonObject,
+    schemas: SchemaCache,
+}
+
+struct SchemaCache {
+    input: OnceLock<Arc<JsonObject>>,
+    output: OnceLock<Arc<JsonObject>>,
+}
+
+impl SchemaCache {
+    const fn new() -> Self {
+        Self { input: OnceLock::new(), output: OnceLock::new() }
+    }
 }
 
 /// Every tool, in the order of docs/MCP.md.
-pub const TOOLS: &[ToolDef] = &[
+pub static TOOLS: &[ToolDef] = &TOOL_TABLE;
+
+static TOOL_TABLE: [ToolDef; 40] = [
     ToolDef {
         name: "folo_info",
         description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
@@ -63,6 +77,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<NoArgs>,
         output: output::<FoloInfo>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_datasets",
@@ -70,6 +85,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<PageArgs>,
         output: output::<Page<DatasetSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "get_dataset",
@@ -78,6 +94,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<DatasetIdArgs>,
         output: output::<DatasetDetail>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_dataset_issues",
@@ -86,6 +103,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<ListIssuesArgs>,
         output: output::<IssuesPage>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_dataset_images",
@@ -94,6 +112,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<ListImagesArgs>,
         output: output::<Page<ImageSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "register_dataset",
@@ -102,6 +121,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<RegisterArgs>,
         output: api_output::<Dataset>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "create_synthetic_dataset",
@@ -110,6 +130,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<SyntheticArgs>,
         output: api_output::<Dataset>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_models",
@@ -117,6 +138,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<PageArgs>,
         output: output::<Page<ModelSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "train",
@@ -125,6 +147,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: train_input,
         output: output::<TrainResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "run_status",
@@ -132,6 +155,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<RunStatusArgs>,
         output: output::<RunStatusResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_runs",
@@ -139,6 +163,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<ListRunsArgs>,
         output: output::<Page<Run>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "stop_run",
@@ -146,6 +171,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<RunIdArgs>,
         output: api_output::<Run>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "reorder_run",
@@ -155,6 +181,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<ReorderRunArgs>,
         output: output::<ReorderResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "val",
@@ -163,6 +190,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<ValArgs>,
         output: api_output::<ValReport>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "predict",
@@ -171,6 +199,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<PredictArgs>,
         output: api_output::<PredictResponse>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "predict_batch",
@@ -179,6 +208,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<PredictBatchArgs>,
         output: output::<PredictBatchResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "export",
@@ -186,6 +216,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<ExportArgs>,
         output: api_output::<ExportResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "compare_runs",
@@ -194,6 +225,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<CompareArgs>,
         output: output::<CompareResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "cloud_connections",
@@ -202,6 +234,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<NoArgs>,
         output: api_output::<CloudConnectionList>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "cloud_offers",
@@ -210,6 +243,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<CloudOffersArgs>,
         output: api_output::<CloudOfferList>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "cloud_instances",
@@ -217,6 +251,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<NoArgs>,
         output: api_output::<CloudInstanceList>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "cloud_terminate",
@@ -224,6 +259,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: input::<InstanceIdArgs>,
         output: api_output::<CloudInstance>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_label_jobs",
@@ -231,6 +267,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<PageArgs>,
         output: terse_output::<Page<LabelJobSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "create_label_job",
@@ -239,6 +276,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<CreateLabelJobArgs>,
         output: terse_output::<LabelImagesAddedResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "start_labeling",
@@ -247,6 +285,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<StartLabelingArgs>,
         output: terse_output::<LabelRunStarted>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "stop_labeling",
@@ -254,6 +293,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<JobIdArgs>,
         output: terse_output::<LabelJobState>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "label_status",
@@ -261,6 +301,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<LabelStatusArgs>,
         output: terse_output::<LabelStatusResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_label_images",
@@ -268,6 +309,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<ListLabelImagesArgs>,
         output: terse_output::<Page<LabelImageSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "view_label_image",
@@ -276,6 +318,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<ViewLabelImageArgs>,
         output: terse_output::<LabelImageViewResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "set_label_boxes",
@@ -284,6 +327,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<SetLabelBoxesArgs>,
         output: terse_output::<LabelImageView>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "review_label_images",
@@ -291,6 +335,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<ReviewLabelImagesArgs>,
         output: terse_output::<ReviewLabelImagesResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "export_label_dataset",
@@ -298,6 +343,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<ExportLabelDatasetArgs>,
         output: terse_output::<LabelDatasetResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "bench_catalog",
@@ -305,6 +351,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<NoArgs>,
         output: terse_output::<BenchCatalogResult>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "list_benchmarks",
@@ -312,6 +359,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<PageArgs>,
         output: terse_output::<Page<BenchSummary>>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "get_benchmark",
@@ -319,6 +367,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<BenchmarkIdArgs>,
         output: terse_output::<BenchDetail>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "create_benchmark",
@@ -326,6 +375,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<CreateBenchmarkArgs>,
         output: terse_output::<BenchSummary>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "delete_benchmark",
@@ -333,6 +383,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<BenchmarkIdArgs>,
         output: terse_output::<BenchDeleted>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "start_bench_entry",
@@ -341,6 +392,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<StartBenchEntryArgs>,
         output: terse_output::<BenchEntryBrief>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "bench_entry",
@@ -349,6 +401,7 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: terse_input::<BenchEntryArgs>,
         output: terse_output::<BenchEntryState>,
+        schemas: SchemaCache::new(),
     },
     ToolDef {
         name: "stop_bench_entry",
@@ -356,10 +409,21 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: true,
         input: terse_input::<BenchEntryIdArgs>,
         output: terse_output::<BenchEntryBrief>,
+        schemas: SchemaCache::new(),
     },
 ];
 
 impl ToolDef {
+    /// The tool's compacted input JSON Schema, generated once and cached.
+    pub fn input_schema(&self) -> &Arc<JsonObject> {
+        self.schemas.input.get_or_init(|| Arc::new((self.input)()))
+    }
+
+    /// The tool's compacted output JSON Schema, generated once and cached.
+    pub fn output_schema(&self) -> &Arc<JsonObject> {
+        self.schemas.output.get_or_init(|| Arc::new((self.output)()))
+    }
+
     /// The MCP tool definition.
     pub fn tool(&self) -> Tool {
         let annotations = ToolAnnotations::new()
@@ -368,8 +432,8 @@ impl ToolDef {
             .destructive(self.name == "delete_benchmark")
             .idempotent(!self.mutating || matches!(self.name, "stop_run" | "stop_bench_entry"))
             .open_world(false);
-        Tool::new(self.name, self.description, (self.input)())
-            .with_raw_output_schema((self.output)())
+        Tool::new(self.name, self.description, Arc::clone(self.input_schema()))
+            .with_raw_output_schema(Arc::clone(self.output_schema()))
             .with_annotations(annotations)
     }
 }
@@ -394,8 +458,8 @@ pub fn describe() -> Value {
                     "name": t.name,
                     "description": t.description,
                     "mutating": t.mutating,
-                    "inputSchema": Value::Object((*(t.input)()).clone()),
-                    "outputSchema": Value::Object((*(t.output)()).clone()),
+                    "inputSchema": Value::Object(t.input_schema().as_ref().clone()),
+                    "outputSchema": Value::Object(t.output_schema().as_ref().clone()),
                 })
             })
             .collect(),
