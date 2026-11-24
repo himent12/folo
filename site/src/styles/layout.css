@@ -419,6 +419,7 @@
   inset: 0;
   z-index: var(--z-overlay);
   background: var(--bg-scrim);
+  touch-action: pinch-zoom;
 }
 
 /* Landing: no sidebar beside the content, only the drawer on small screens. */
@@ -442,7 +443,7 @@
   }
 }
 
-@media (max-width: 959px) {
+@media (width < 960px) {
   :root {
     --gutter: var(--space-8);
   }
@@ -455,6 +456,10 @@
   /* The drawer opens below the top bar, whose menu button turns into its close button. */
   .nav-open .topbar {
     z-index: var(--z-dialog);
+  }
+
+  .nav-open .topbar > :not(.nav-toggle) {
+    opacity: 0.45;
   }
 
   .sidebar {
@@ -484,8 +489,9 @@
       visibility 0s;
   }
 
-  .nav-open {
+  html.nav-open {
     overflow: hidden;
+    overscroll-behavior: none;
   }
 }
 
