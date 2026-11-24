@@ -43,6 +43,38 @@ differentiable, so it works on folo-core tensors.
   (on a GPU the decode runs in one kernel that keeps only the candidates above `conf`, and only those are
   downloaded), `to_device()`, and `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 
+### FOLO v2-Iso (`model/v2/`)
+Clean-sheet, hardware-co-designed detector family (`folo2-n/s/m/l/x`) built for FOLO's custom Rust/WGSL/AVX-VNNI
+kernels while keeping standard CPU/GPU autograd and ONNX opset-17 compatibility:
+- **Config & scaling (`config.rs`):** `FoloV2Config` and `ScalingV2` enforce `ceil16`-aligned widths at every stage
+  and lock shared head widths (`c_box = 48`, `c_cls = 64`) across `n` and `s` for zero-adapter CrossKD; `plus = true`
+  selects the deeper `v2-Plus` tier.
+- **Blocks (`blocks.rs`):** `StemV2` (`space_to_depth_2x2` + `Conv1×1`, or `Conv3×3 s=2` when `spd_stem = false`),
+  `WsQARepConv3x3` (sums `3×3 + 1×3 + 3×1 + 1×1 + γ_id·I` in weight space before one post-BN + SiLU during training,
+  and collapses into a single dense `3×3` conv on `fuse()`), `FoloBlock` (`ceil16`-aligned QARep-CSP / Rep-ELAN with
+  at most three zero-copy `forward_cat` parts), `HyperContext` (linear `O(N·M)` P5 hypergraph global context replacing
+  C2PSA, returning `(P5, g_scene)`), and `FullPadGate` (zero-init residual FiLM gate `feat * (1 + tanh(proj(g_scene)))`).
+- **Backbone, SPD-PAN neck & `LazyAlignHead` (`mod.rs`, `head.rs`):** `NeckV2` injects lossless `SPD-P2→P3`
+  (`p2_proj` over `space_to_depth_2x2(P2)`, keeping 8,400 anchors at 640×640) and applies `pad_p3`/`pad_p4` strictly
+  to the `P3`/`P4` head inputs *after* `neck.down3`/`neck.down4` taps so the bottom-up neck stays contiguous for int8.
+  `LazyAlignHead` pairs a depthwise-free dense `ClsBranchV2` with `BoxBranchV2` (`2 × WsQARepConv3x3` + 64-channel
+  `out` and opt-in separate `iou_out: Conv1×1(c_box → 1)`), plus optional `o2o` (`O2oClsLevel` with `PeakSuppress`
+  3×3 local-peak-preserving lateral inhibition sharing `BoxBranchV2`). `HeadOutputV2::into_head_output()` converts
+  directly to v1's `HeadOutput`.
+
+### int8 inference (`model/quant/`)
+Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
+A shared graph walk (`walk.rs`) drives three executors:
+- **Calibration (`calib.rs`):** `Calibrator` / `calibrate_sample` run two `f32` passes over sample images (min/max,
+  then 2048-bin per-tensor and 256-bin per-channel histograms) and write a `Calibration` (`VERSION_V2`: per-channel
+  `channel_ranges`, `u8_stem: true`, and P5-tail `default_sensitivity_f32_convs` = `neck.out5.*`; backward-compatible
+  with `VERSION_V1` per-tensor files) into `folo.quant` with a 64-bit FNV-1a weight fingerprint.
+- **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and AVX-VNNI `QConv` kernels
+  (with per-part concat scale decoupling and packed weights cached on each weight tensor via `Tensor::derived_f32`).
+  When `u8_stem` is enabled, `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from
+  `Letterbox::apply_rgb0_u8` with zero `f32` image materialisation.
+- **Reference (`fake.rs`):** `FakeQuant` runs the same grids and integer accumulation order in `f32` for parity checks.
+
 ## The loss
 - Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
@@ -51,11 +83,37 @@ differentiable, so it works on folo-core tensors.
   branches.
 - On a GPU the whole loss runs as folo-gpu kernels (`folo_gpu::detect`: assigner, fused BCE, fused CIoU + DFL with a
   hand-written backward, as one custom op) and only the reported items are read back.
+- **Opt-in Wave-7 assigner, loss & distillation options (`assign.rs`, `loss/terms.rs`, `loss/device.rs`, `loss/distill/`):**
+  all default to off and run with CPU + GPU parity:
+  - *Assigner:* `TalConfig.eps_free` removes `eps` attenuation on small-box targets via `(m / m_max) * u_max`;
+    `TalConfig.nwd_weight` blends Plain-IoU with Normalized Wasserstein Distance (`C = 12.8 px`) using scale weight
+    `λ(s_g) = λ₀ · exp(−(s_g / 24)²)`.
+  - *Classification & box/DFL terms:* `LossConfig.mal_gamma > 0` enables Matchability-Aware Loss (`p^γ · softplus(x)`
+    on background negatives, unweighted BCE on positives); `LossConfig.box_loss = BoxLossKind::Rpiou` replaces CIoU
+    with purely algebraic Rational-Focal Edge-Decoupled IoU (`rpiou_beta`, `rpiou_kappa`, `rpiou_delta`);
+    `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend; `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)`
+    log-space 1D optimal-transport cumulative tail barrier to DFL (when `reg_max > 2`).
+  - *Distillation (`loss/distill/`):* dense teacher output KD (MODEL.md §8.9, fused GPU path in `distill/fused.rs`),
+    plus `DistillConfig.bckd_gamma > 0` (BCKD focal disagreement weighting `sg(|p_S − p_T|^γ)` with positive teacher
+    clamping) and `DistillConfig.gt_verify` (positive-only GT-verified DFL KD gating where `IoU(b_T, g) > IoU(b_S, g) +
+    0.02` and `IoU(b_T, g) > 0.50`, weighted by `IoU_T − IoU_S`).
 
 ## Box ops, NMS and metrics
 They work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU, xywh↔xyxy, class-aware batched
 NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision / recall / F1 curves, confusion matrix.
 [METRICS.md](METRICS.md) defines exactly how mAP is computed.
+
+### Cluster box fusion and calibrated scoring (`fusion/`, `nms/mod.rs`)
+Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `NmsConfig::fusion` and `NmsConfig::score`):
+- **Box fusion (`BoxFusion`):** `Vote` (score-weighted box voting), `Dfl` (score × per-side DFL precision from
+  `decode::side_precision`), and `Sebf` (Student-t Exclusive Box Fusion: 1-step Student-t `ν = 3` IRLS weighted by
+  `score · IoU^4 · side_precision` restricted to each kept box's NMS-owned cluster from `nms_sorted_with_owner`).
+- **Score rules (`ScoreRule`):** `Consensus` (cluster mass scaling), `Elc` (Exclusive Logit-Space Consensus preserving
+  the `[0, 1]` score scale), `DflConsensus` (adds scale-free fused DFL excess-std), `DflRepulse` (power-weighted
+  support `s^1.5`, 4-side DFL Shannon entropy, cross-stride agreement, and greedy sequential log-survival soft
+  repulsion `γ = 2.5`), and `DflCgr` (Confidence-Gated Repulsion: `p_m^0.25` suppressor confidence gating with
+  `γ = 3.0`, best paired with `Sebf`). Single-label calibrated rules lower pre-NMS candidate extraction to
+  `CALIBRATED_PRE_CONF = 0.10` when `conf > 0.10` and post-filter at `conf`.
 
 ## The Trainer
 `folo_vision::train::Trainer` implements MODEL.md §8.
@@ -63,6 +121,11 @@ NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision / 
   count) → tensors → train-mode forward → loss → backward into a `GradAccumulator` (nominal batch 64) → schedule
   (warmup + linear / cosine, in optimizer steps), global-norm clipping, SGD / AdamW / MuSGD with `decay` / `bn` /
   `bias` groups (`auto` picks per §8.2), EMA.
+- **Floor Conv+BN Gauge Normalization (`train/gauge.rs`):** opt-in (`TrainConfig.gauge_norm`), applied once at
+  transfer/continuation setup via `apply_floor_gauge_norm`. For every unfused, bias-free `ConvBnAct` output channel
+  with `1e-4 < ‖W_c‖₂ < √2`, it rescales `W_c` and `running_mean` by `α_c = clamp(√2 / ‖W_c‖₂, 1.0, 4.0)` and
+  `running_var` by `α_c² · (v_c + ε) − ε` without altering `γ` or `β`, preserving forward outputs while undoing
+  coupled weight-decay filter shrinkage.
 - **Non-finite batches:** batches with a non-finite loss or BatchNorm statistic are skipped and their running
   statistics restored.
 - **After every epoch:** validation of the EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` /
@@ -132,6 +195,7 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 - `.folo` export itself lives in folo-nn ([FORMAT.md](FORMAT.md), [NN.md](NN.md)).
 
 ## Tests
-The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `loss_cases.rs`,
-`assign_cases.rs`, `nms_reference.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train.rs`, `o2o.rs`,
-`lazy_head.rs`, `fusion_reference.rs`, and the GPU ones (`gpu*.rs`).
+The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
+`loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
+`elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train.rs`, `o2o.rs`, `lazy_head.rs`,
+`int8.rs`, and the GPU ones (`gpu*.rs`).
