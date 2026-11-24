@@ -109,10 +109,6 @@
   border-radius: var(--radius-md);
 }
 
-.search-result a:hover {
-  background: var(--bg-hover);
-}
-
 .search-result[aria-selected='true'] a {
   background: var(--bg-active);
   box-shadow: inset 2px 0 0 var(--accent-line);
@@ -125,8 +121,7 @@
   line-height: var(--type-xs-line);
 }
 
-/* On the hover and active overlays tertiary text drops below AA, so the breadcrumb steps up to secondary. */
-.search-result a:hover .sr-path,
+/* On the active overlay tertiary text drops below AA, so the breadcrumb steps up to secondary. */
 .search-result[aria-selected='true'] .sr-path {
   color: var(--text-secondary);
 }

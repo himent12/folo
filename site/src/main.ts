@@ -79,13 +79,26 @@ const results = $<HTMLUListElement>('#search-results');
 const status = $<HTMLElement>('.search-status', dialog ?? document);
 let hits: Hit[] = [];
 let active = -1;
+let lastPointerX = Number.NaN;
+let lastPointerY = Number.NaN;
+
+document.addEventListener(
+  'pointermove',
+  (e) => {
+    if (e.pointerType === 'touch' || dialog?.open) return;
+    lastPointerX = e.clientX;
+    lastPointerY = e.clientY;
+  },
+  { passive: true },
+);
 
 function renderHits(query: string) {
   if (!results || !status || !input) return;
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
   results.innerHTML = hits
     .map(
       (h, i) =>
-        `<li class="search-result" id="sr-${i}" role="option" aria-selected="${i === active}"><a href="${h.href}" tabindex="-1"><span class="sr-path">${escapeHtml(h.path)}</span><span class="sr-title">${highlight(h.title, query.toLowerCase().split(/\s+/).filter(Boolean))}</span><span class="sr-snippet">${h.snippet}</span></a></li>`,
+        `<li class="search-result" id="sr-${i}" data-index="${i}" role="option" aria-selected="${i === active}"><a href="${h.href}" tabindex="-1"><span class="sr-path">${escapeHtml(h.path)}</span><span class="sr-title">${highlight(h.title, terms)}</span><span class="sr-snippet">${h.snippet}</span></a></li>`,
     )
     .join('');
   input.setAttribute('aria-expanded', String(hits.length > 0));
@@ -120,21 +133,36 @@ function openSearch() {
   void runSearch();
 }
 
+function setActive(next: number, scroll: boolean) {
+  if (!hits.length || !input || !results) return;
+  const clamped = Math.max(0, Math.min(hits.length - 1, next));
+  if (clamped !== active) {
+    if (active >= 0) $(`#sr-${active}`, results)?.setAttribute('aria-selected', 'false');
+    active = clamped;
+    $(`#sr-${active}`, results)?.setAttribute('aria-selected', 'true');
+    input.setAttribute('aria-activedescendant', `sr-${active}`);
+  }
+  if (scroll) $(`#sr-${active}`, results)?.scrollIntoView({ block: 'nearest' });
+}
+
 function moveActive(by: number) {
-  if (!hits.length || !input) return;
-  active = (active + by + hits.length) % hits.length;
-  for (const [i, li] of $$<HTMLElement>('.search-result', results ?? document).entries()) li.setAttribute('aria-selected', String(i === active));
-  input.setAttribute('aria-activedescendant', `sr-${active}`);
-  $(`#sr-${active}`)?.scrollIntoView({ block: 'nearest' });
+  if (!hits.length) return;
+  const next = active < 0 ? (by > 0 ? 0 : hits.length - 1) : (active + by + hits.length) % hits.length;
+  setActive(next, true);
 }
 
 $('.search-trigger')?.addEventListener('click', openSearch);
 $('.search-close')?.addEventListener('click', () => dialog?.close());
 input?.addEventListener('input', () => void runSearch());
 input?.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  if (e.isComposing) return;
+  const modified = e.altKey || e.ctrlKey || e.metaKey;
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !modified && !e.shiftKey && hits.length) {
     e.preventDefault();
     moveActive(e.key === 'ArrowDown' ? 1 : -1);
+  } else if ((e.key === 'Home' || e.key === 'End') && !modified && !e.shiftKey && hits.length) {
+    e.preventDefault();
+    setActive(e.key === 'Home' ? 0 : hits.length - 1, true);
   } else if (e.key === 'Enter' && hits[active]) {
     e.preventDefault();
     dialog?.close();
@@ -144,6 +172,18 @@ input?.addEventListener('keydown', (e) => {
     e.preventDefault();
     dialog?.close();
   }
+});
+dialog?.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch') return;
+  const initial = Number.isNaN(lastPointerX);
+  const stationary = e.clientX === lastPointerX && e.clientY === lastPointerY;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  if (initial || stationary) return;
+  const item = (e.target as Element).closest<HTMLElement>('.search-result');
+  if (!item) return;
+  const idx = Number(item.dataset.index);
+  if (Number.isInteger(idx) && idx >= 0 && idx < hits.length) setActive(idx, false);
 });
 // Back to the button that opened it (the native dialog restores focus to whatever had it, which may be <body>).
 dialog?.addEventListener('close', () => {
