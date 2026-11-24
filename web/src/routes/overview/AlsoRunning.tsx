@@ -14,7 +14,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { hasFeature } from '$lib/api/queue';
 import { Resource } from '$lib/api/resource';
 import { abortError } from '$lib/api/share';
-import type { Bench, BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
+import type { BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
 import { hasCloud } from '$lib/cloud';
 import { count, num } from '$lib/format';
@@ -46,6 +46,9 @@ interface BenchWork {
 }
 
 const isMissingOrUnsupported = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
+const resourceFailed = (r: { stale: unknown; error: unknown }) =>
+  (r.stale !== undefined && !isMissingOrUnsupported(r.stale)) || (r.error !== undefined && !isMissingOrUnsupported(r.error));
+const joinNames = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
 
 export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   // Polled with the run list (the same period, so one timer): a job or entry that starts shows within seconds.
@@ -102,78 +105,83 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   const loopsAtWork = (w: BenchWork | undefined) => (w?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
   /** A benchmark's line: its entry at work and how far it is, preserving last known detail and noting refresh failures. */
   const benchDetail = (w: BenchWork | undefined, e: BenchEntry | undefined, loops: BenchLoop[]): { detail: string; refreshNote?: string } => {
-    const listStale = benches.stale !== undefined;
+    const listFailed = resourceFailed(benches);
     if (e) {
       const p = progressFacts(e);
       const base = `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
-      if (w?.entriesFailed || listStale) return { detail: base, refreshNote: 'Refresh failed' };
+      if (w?.entriesFailed || listFailed) return { detail: base, refreshNote: 'Refresh failed' };
       if (w?.loopsFailed && !loops.length) return { detail: base, refreshNote: 'Could not refresh loops' };
       return { detail: base };
     }
     if (w?.entriesFailed && w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark activity' };
     if (w?.entriesFailed) return { detail: '', refreshNote: 'Could not refresh benchmark entries' };
     if (w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark loops' };
-    if (listStale) return { detail: 'An entry or a loop is running', refreshNote: 'Refresh failed' };
+    if (listFailed) return { detail: 'An entry or a loop is running', refreshNote: 'Refresh failed' };
     return { detail: 'An entry or a loop is running' };
   };
 
-  const items = computed<Item[]>(() => [
-    ...(instances.data ?? [])
-      .filter((i) => i.status === 'terminating' && i.error)
-      .map((i) => ({
-        id: i.id,
-        kind: 'Cloud',
-        state: { status: 'failed' as const, label: 'Cloud' },
-        name: i.name,
-        detail: 'Termination not confirmed: it may still be billed',
-        refreshNote: instances.stale !== undefined ? 'Refresh failed' : undefined,
-        path: '/settings?section=cloud',
-      })),
-    ...(jobs.data ?? [])
-      .filter((j) => j.status !== 'idle')
-      .map((j) => {
-        const base = j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`;
-        return {
-          id: j.id,
-          kind: 'Labeling',
-          name: j.name,
-          detail: base,
-          refreshNote: jobs.stale !== undefined ? 'Refresh failed' : undefined,
-          path: `/datasets/label/${j.id}`,
-        };
-      }),
-    ...(benches.data ?? [])
-      .filter((b) => b.active)
-      .flatMap((b) => {
-        const w = work.data?.get(b.id);
-        const entry = atWorkEntry(w);
-        const loops = loopsAtWork(w);
-        const showBenchRow = !!entry || !loops.length || !!w?.entriesFailed;
-        const loopFailed = !!w?.loopsFailed || benches.stale !== undefined;
-        return [
-          // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row,
-          // unless refreshing entries failed and needs to be surfaced.
-          ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, ...benchDetail(w, entry, loops), path: `/benchmarks/${b.id}` }] : []),
-          ...loops.map((l) => ({
-            id: l.id,
-            kind: 'Loop',
-            name: l.name,
-            detail: `${loopStatus(l).label} · ${b.name}`,
-            refreshNote: loopFailed ? 'Refresh failed' : undefined,
-            path: `/benchmarks/${b.id}/loops/${l.id}`,
-          })),
-        ];
-      }),
-  ]);
+  const items = computed<Item[]>(() => {
+    const instancesFailed = resourceFailed(instances);
+    const jobsFailed = resourceFailed(jobs);
+    const benchesFailed = resourceFailed(benches);
+    return [
+      ...(instances.data ?? [])
+        .filter((i) => i.status === 'terminating' && i.error)
+        .map((i) => ({
+          id: i.id,
+          kind: 'Cloud',
+          state: { status: 'failed' as const, label: 'Cloud' },
+          name: i.name,
+          detail: 'Termination not confirmed: it may still be billed',
+          refreshNote: instancesFailed ? 'Refresh failed' : undefined,
+          path: '/settings?section=cloud',
+        })),
+      ...(jobs.data ?? [])
+        .filter((j) => j.status !== 'idle')
+        .map((j) => {
+          const base = j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`;
+          return {
+            id: j.id,
+            kind: 'Labeling',
+            name: j.name,
+            detail: base,
+            refreshNote: jobsFailed ? 'Refresh failed' : undefined,
+            path: `/datasets/label/${j.id}`,
+          };
+        }),
+      ...(benches.data ?? [])
+        .filter((b) => b.active)
+        .flatMap((b) => {
+          const w = work.data?.get(b.id);
+          const entry = atWorkEntry(w);
+          const loops = loopsAtWork(w);
+          const showBenchRow = !!entry || !loops.length || !!w?.entriesFailed;
+          const loopFailed = !!w?.loopsFailed || benchesFailed;
+          return [
+            // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row,
+            // unless refreshing entries failed and needs to be surfaced.
+            ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, ...benchDetail(w, entry, loops), path: `/benchmarks/${b.id}` }] : []),
+            ...loops.map((l) => ({
+              id: l.id,
+              kind: 'Loop',
+              name: l.name,
+              detail: `${loopStatus(l).label} · ${b.name}`,
+              refreshNote: loopFailed ? 'Refresh failed' : undefined,
+              path: `/benchmarks/${b.id}/loops/${l.id}`,
+            })),
+          ];
+        }),
+    ];
+  });
 
-  // Top-level poll failures whose resource has no visible row to carry the failure note.
+  // Top-level load or poll failures whose resource has no visible row to carry the failure note.
   const hiddenStale = computed(() => {
     if (hub.offline) return [] as string[];
     const list = items.get();
     const out: string[] = [];
-    if (instances.stale !== undefined && !list.some((i) => i.kind === 'Cloud')) out.push('cloud instances');
-    if (jobs.stale !== undefined && !list.some((i) => i.kind === 'Labeling')) out.push('labeling jobs');
-    if (benches.stale !== undefined && !list.some((i) => i.kind === 'Benchmark' || i.kind === 'Loop')) out.push('benchmarks');
+    if (resourceFailed(instances) && !list.some((i) => i.kind === 'Cloud')) out.push('cloud instances');
+    if (resourceFailed(jobs) && !list.some((i) => i.kind === 'Labeling')) out.push('labeling jobs');
+    if (resourceFailed(benches) && !list.some((i) => i.kind === 'Benchmark' || i.kind === 'Loop')) out.push('benchmarks');
     return out;
   });
 
@@ -210,7 +218,7 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
           ) : null}
           {hiddenStale.get().length ? (
             <p class="stale-notice" data-fact data-refresh-failed="true">
-              Could not refresh {hiddenStale.get().join(', ')}
+              Could not refresh {joinNames(hiddenStale.get())}
             </p>
           ) : null}
         </section>
@@ -228,11 +236,11 @@ css`
   }
   a {
     display: grid;
-    grid-template-columns: 112px minmax(0, auto) minmax(0, 1fr) auto;
+    grid-template-columns: 112px fit-content(45%) minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-3);
     min-height: var(--size-row);
-    padding: 0 var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     color: var(--text-tertiary);
     transition: background-color var(--dur-fast) var(--ease-standard);
@@ -246,20 +254,23 @@ css`
   }
   .detail-cell {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
-    gap: var(--space-2);
+    gap: var(--space-1) var(--space-2);
     min-width: 0;
   }
   .detail {
     font-size: var(--type-sm-size);
     flex: 0 1 auto;
     min-width: 0;
+    max-width: 100%;
   }
   .refresh-note {
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
     flex-shrink: 0;
-    white-space: nowrap;
+    white-space: normal;
+    max-width: 100%;
   }
   .stale-notice {
     margin: 0;
@@ -273,20 +284,10 @@ css`
     a {
       grid-template-columns: 104px minmax(0, 1fr) auto;
       row-gap: 0;
-      padding: var(--space-2) var(--space-3);
     }
     .detail-cell {
       grid-column: 2;
       grid-row: 2;
-      flex-wrap: wrap;
-      gap: var(--space-1) var(--space-2);
-    }
-    .detail {
-      max-width: 100%;
-    }
-    .refresh-note {
-      white-space: normal;
-      max-width: 100%;
     }
   }
 `;

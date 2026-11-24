@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { flush } from 'fw';
+import { flush, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
 import { ApiError } from '$lib/api/client';
@@ -136,11 +136,11 @@ describe('AlsoRunning', () => {
     expect(note()?.classList.contains('truncate')).toBe(false);
     expect(target.textContent).not.toContain('An entry or a loop is running');
 
-    // Verify phone CSS wraps the refresh note intact rather than clipping it inside an ellipsized cell.
-    const src = readFileSync(resolve(process.cwd(), 'src/routes/overview/AlsoRunning.tsx'), 'utf8');
-    const phone = src.match(/@media \(max-width: 767px\) \{([\s\S]*?)\n {2}\}/)![1]!;
-    expect(phone).toContain('flex-wrap: wrap');
-    expect(phone).toContain('white-space: normal');
+    // Verify desktop and phone CSS bound the name column and wrap refresh notes intact without overflowing or clipping.
+    const src = readFileSync(resolve(import.meta.dirname, 'AlsoRunning.tsx'), 'utf8');
+    expect(src).toContain('grid-template-columns: 112px fit-content(45%) minmax(0, 1fr) auto;');
+    expect(src).toContain('flex-wrap: wrap;');
+    expect(src).toContain('white-space: normal;');
   });
 
   it('surfaces initial activity refresh failure instead of generic fallback when no prior detail exists', async () => {
@@ -269,19 +269,26 @@ describe('AlsoRunning', () => {
     expect(target.querySelector('.activity .refresh-note')).toBeNull();
   });
 
-  it('surfaces top-level refresh failures both on visible rows and when no rows were previously active', async () => {
+  it('surfaces top-level refresh failures on visible rows without duplicating the notice, when no rows are active, and on initial load', async () => {
     const api = new MockApi('normal', 0);
     const system = await api.system();
     const [bench] = await api.benches();
-    api.labelJobs = async () => [];
+    const [job] = await api.labelJobs();
     api.cloudInstances = async () => [];
     api.benchEntries = async () => [];
     api.benchLoops = async () => [];
 
-    let failBenches = false;
+    // 1) Initial load failure on benches and labelJobs is surfaced (joined with "and") and clears on recovery.
+    let failBenches = true;
+    let failJobs = true;
+    let activeJob = false;
     api.benches = async () => {
       if (failBenches) throw new ApiError(503, 'unavailable', 'benches down');
       return [{ ...bench!, active: false }];
+    };
+    api.labelJobs = async () => {
+      if (failJobs) throw new ApiError(503, 'unavailable', 'jobs down');
+      return activeJob ? [{ ...job!, status: 'running', run: { ...job!.run!, finished: null, total: 40, done: 12 } }] : [];
     };
 
     hub.api = api;
@@ -291,16 +298,44 @@ describe('AlsoRunning', () => {
     document.body.appendChild(target);
     c = render(() => <AlsoRunning system={system} />, target);
     await settle();
-    expect(target.querySelector('.activity')).toBeNull();
 
-    // Top-level benches poll fails transiently with no active rows: section surfaces the stale resource.
+    expect(target.querySelector('.activity .stale-notice')?.textContent).toBe('Could not refresh labeling jobs and benchmarks');
+    expect(target.querySelector('.activity .stale-notice')?.getAttribute('data-refresh-failed')).toBe('true');
+
+    // Suppresses top-level notice when hub is offline (OfflineNotice owns that state).
+    const fakeOffline = signal(true);
+    const offlineSpy = vi.spyOn(hub, 'offline', 'get').mockImplementation(() => fakeOffline.get());
+    await settle(5000);
+    expect(target.querySelector('.activity')).toBeNull();
+    fakeOffline.set(false);
+    flush();
+    expect(target.querySelector('.activity .stale-notice')?.textContent).toBe('Could not refresh labeling jobs and benchmarks');
+    offlineSpy.mockRestore();
+
+    // Recover with one active labeling job and no active benchmarks.
+    failBenches = false;
+    failJobs = false;
+    activeJob = true;
+    await settle(5000);
+    expect(target.querySelectorAll('.activity li')).toHaveLength(1);
+    expect(target.querySelector('.activity .refresh-note')).toBeNull();
+    expect(target.querySelector('.activity .stale-notice')).toBeNull();
+
+    // 2) Visible row resource fails transiently: warning appears on the visible row, NOT duplicated in .stale-notice.
+    failJobs = true;
+    await settle(5000);
+    expect(target.querySelector('.activity li .refresh-note')?.textContent).toBe('Refresh failed');
+    expect(target.querySelector('.activity .stale-notice')).toBeNull();
+
+    // 3) Inactive resource fails transiently while visible row recovers: only .stale-notice appears for benchmarks.
+    failJobs = false;
+    activeJob = false;
     failBenches = true;
     await settle(5000);
-    const notice = target.querySelector('.activity .stale-notice');
-    expect(notice?.textContent).toBe('Could not refresh benchmarks');
-    expect(notice?.getAttribute('data-refresh-failed')).toBe('true');
+    expect(target.querySelectorAll('.activity li')).toHaveLength(0);
+    expect(target.querySelector('.activity .stale-notice')?.textContent).toBe('Could not refresh benchmarks');
 
-    // Recovers on next poll: section hides cleanly again.
+    // Recovers cleanly: section hides again.
     failBenches = false;
     await settle(5000);
     expect(target.querySelector('.activity')).toBeNull();
