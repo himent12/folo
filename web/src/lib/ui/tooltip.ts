@@ -98,12 +98,17 @@ let tip: HTMLDivElement | null = null;
 let showTimer: ReturnType<typeof setTimeout> | undefined;
 let hideTimer: ReturnType<typeof setTimeout> | undefined;
 let lastHide = 0;
+/** Anchor whose tooltip is currently visible, so unrelated unmounts never dismiss it. */
+let activeAnchor: HTMLElement | null = null;
+/** Anchor with a pending show timer, so its teardown never cancels another trigger's timer. */
+let pendingAnchor: HTMLElement | null = null;
 /** Hides the tooltip currently shown (set by the trigger that showed it). */
 let hideCurrent: (() => void) | null = null;
 /** Time the pointer has to cross from a trigger to its tooltip (8 px apart, the arrow between) or back. */
 const GRACE_MS = 150;
 
 const leave = () => {
+  if (!activeAnchor) return;
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => hideCurrent?.(), GRACE_MS);
 };
@@ -156,14 +161,27 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') hide();
   };
+  // Dismiss only when the scrolling target can actually move this anchor (ignore unrelated sibling scrollers like live logs).
+  const onScroll = (e: Event) => {
+    const t = e.target;
+    if (t !== window && t !== e.currentTarget && t !== document && !(t instanceof Node && t.contains(node))) return;
+    // Cancel any queued handoff timer too so scrolling mid-handoff cannot reopen the tooltip.
+    clearTimeout(showTimer);
+    pendingAnchor = null;
+    hide();
+  };
 
   const show = (immediate: boolean, focused?: HTMLElement) => {
     if (!o) return;
     clearTimeout(showTimer);
+    pendingAnchor = node;
     // Moving between neighbours while a tooltip is up shows the next one at once.
-    const delay = immediate || Date.now() - lastHide < 300 ? 0 : 450;
+    const delay = immediate || activeAnchor !== null || Date.now() - lastHide < 300 ? 0 : 450;
     showTimer = setTimeout(() => {
+      if (pendingAnchor === node) pendingAnchor = null;
       if (!o || !node.isConnected) return;
+      clearTimeout(hideTimer);
+      if (activeAnchor && activeAnchor !== node) hideCurrent?.();
       const el = mount(node.closest<HTMLElement>('dialog[open]') ?? document.body);
       el.textContent = o.text;
       if (o.keys) {
@@ -177,6 +195,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
         el.appendChild(k);
       }
       el.dataset.show = '';
+      activeAnchor = node;
       hideCurrent = hide;
       const r = node.getBoundingClientRect();
       const t = el.getBoundingClientRect();
@@ -190,30 +209,41 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       described = next;
       described.setAttribute('aria-describedby', [...own(described), el.id].join(' '));
       document.addEventListener('keydown', onKey);
+      window.addEventListener('scroll', onScroll, { capture: true, passive: true });
     }, delay);
   };
 
   const hide = () => {
-    clearTimeout(hideTimer);
-    if (hideCurrent === hide) hideCurrent = null;
-    clearTimeout(showTimer);
-    if (tip && 'show' in tip.dataset) {
-      delete tip.dataset.show;
-      lastHide = Date.now();
-      if (popovers() && tip.matches(':popover-open')) tip.hidePopover();
+    if (pendingAnchor === node) {
+      clearTimeout(showTimer);
+      pendingAnchor = null;
     }
-    document.removeEventListener('keydown', onKey);
-    release(described);
+    if (activeAnchor === node) {
+      clearTimeout(hideTimer);
+      activeAnchor = null;
+      if (hideCurrent === hide) hideCurrent = null;
+      if (tip && 'show' in tip.dataset) {
+        delete tip.dataset.show;
+        lastHide = Date.now();
+        if (popovers() && tip.matches(':popover-open')) tip.hidePopover();
+      }
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+      release(described);
+    }
   };
 
   const onEnter = () => {
-    clearTimeout(hideTimer);
+    if (activeAnchor === node) clearTimeout(hideTimer);
     show(false);
   };
   // Leaving before the delay is up cancels the pending show; a shown tooltip gets the grace period.
   const onLeave = () => {
-    if (hideCurrent !== hide) clearTimeout(showTimer);
-    leave();
+    if (pendingAnchor === node) {
+      clearTimeout(showTimer);
+      pendingAnchor = null;
+    }
+    if (activeAnchor === node) leave();
   };
   // focusin / focusout bubble: focus on the node or anything inside it (a wrapped button) counts.
   const onFocus = (e: FocusEvent) => {
@@ -228,10 +258,15 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   return {
     update(next: TooltipOptions) {
       o = norm(next);
-      if (!o) hide();
+      if (!o && (activeAnchor === node || pendingAnchor === node)) hide();
     },
     destroy() {
-      hide();
+      o = null;
+      if (pendingAnchor === node) {
+        clearTimeout(showTimer);
+        pendingAnchor = null;
+      }
+      if (activeAnchor === node) hide();
       node.removeEventListener('pointerenter', onEnter);
       node.removeEventListener('pointerleave', onLeave);
       node.removeEventListener('focusin', onFocus);
