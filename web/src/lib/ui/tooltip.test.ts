@@ -134,6 +134,76 @@ describe('tooltip', () => {
     page.remove();
   });
 
+  it('does not dismiss an open or pending tooltip when an unrelated tooltip anchor unmounts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_000);
+    const active = document.createElement('button');
+    const other = document.createElement('button');
+    document.body.append(active, other);
+    const tActive = tooltip(active, 'Keep open');
+    const tOther = tooltip(other, 'Unrelated');
+
+    // Pending timer on `active` survives `other.destroy()`.
+    active.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(100);
+    tOther.destroy();
+    other.remove();
+    vi.advanceTimersByTime(400);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Keep open');
+    expect(active.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // A second unrelated anchor mounting and unmounting while `active` is visible leaves it open.
+    const another = document.createElement('button');
+    document.body.appendChild(another);
+    const tAnother = tooltip(another, 'Transient');
+    tAnother.destroy();
+    another.remove();
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(active.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // Destroying the active anchor itself dismisses the tooltip and releases its description.
+    tActive.destroy();
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(active.hasAttribute('aria-describedby')).toBe(false);
+    active.remove();
+  });
+
+  it('dismisses a visible tooltip on capture-phase scroll and cleans up the listener', () => {
+    vi.useFakeTimers();
+    const scroller = document.createElement('div');
+    const b = document.createElement('button');
+    scroller.appendChild(b);
+    document.body.appendChild(scroller);
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+    const t = tooltip(b, 'Scroll away');
+
+    // Nested container scroll does not bubble, so capture-phase listening is required.
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(addSpy).toHaveBeenCalledWith('scroll', expect.any(Function), { capture: true, passive: true });
+    scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    expect(removeSpy).toHaveBeenCalledWith('scroll', expect.any(Function), true);
+
+    // Window scroll also dismisses a visible tooltip.
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    window.dispatchEvent(new Event('scroll'));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+    t.destroy();
+    scroller.remove();
+  });
+
   describe('placeTip', () => {
     const view = { left: 4, top: 4, right: 1020, bottom: 764 };
     const size = { width: 240, height: 40 };
