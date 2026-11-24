@@ -26,15 +26,31 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let a = i % na;
     let cb = b * nc * na + a;
     var best = 0u;
-    var bs = sig(f32(CLS[cb]));
+    var bx = f32(CLS[cb]);
+    // Bit-test c = 0 for NaN: compilers may lower `if (x > bx)` to `maxNum` (which drops a NaN in `bx`,
+    // notably for f16), whereas evaluating `sig(c = 0)` keeps `bs = NaN` and drops the anchor.
+    if ((bitcast<u32>(bx) & 0x7fffffffu) > 0x7f800000u) { return; }
+    var prev_bx = bx;
     for (var c = 1u; c < nc; c++) {
-        let s = sig(f32(CLS[cb + c * na]));
-        if (s > bs) {
+        let x = f32(CLS[cb + c * na]);
+        if (x > bx) {
+            prev_bx = bx;
             best = c;
-            bs = s;
+            bx = x;
         }
     }
+    let bs = sig(bx);
     if (!(bs > pf(4u))) { return; }
+    // Sigmoid is non-decreasing but can tie in f32 (saturation to 1.0 / 0.0 or rounding); `prev_bx` is the
+    // max non-NaN logit in `0..best`, so rescan `0..best` only if an earlier class could tie `bs`.
+    if (best > 0u && sig(prev_bx) >= bs) {
+        for (var c = 0u; c < best; c++) {
+            if (sig(f32(CLS[cb + c * na])) >= bs) {
+                best = c;
+                break;
+            }
+        }
+    }
     var d = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     for (var side = 0u; side < 4u; side++) {
         let base = (b * 4u + side) * rm * na + a;

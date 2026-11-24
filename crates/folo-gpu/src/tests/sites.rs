@@ -282,3 +282,170 @@ fn class_pass_and_decode_match_detect_candidates() {
         check_decode(&ctx, DType::F16, 2);
     }
 }
+
+/// Runs both `detect_candidates` and `class_sites` + `decode_sites` on a single-level `[1, nc, h, w]` head and
+/// asserts they produce bit-identical sorted `(anchor, class, score_bits)` triples, returning them.
+fn run_head_both(
+    ctx: &GpuContext,
+    cls_per_anchor: &[Vec<f32>],
+    h: usize,
+    w: usize,
+    conf: f32,
+    dtype: DType,
+) -> Vec<(u32, u32, u32)> {
+    let a = h * w;
+    let nc = cls_per_anchor[0].len();
+    assert_eq!(cls_per_anchor.len(), a);
+    let mut cls = vec![0f32; nc * a];
+    for (p, row) in cls_per_anchor.iter().enumerate() {
+        assert_eq!(row.len(), nc);
+        for (c, &v) in row.iter().enumerate() {
+            cls[c * a + p] = v;
+        }
+    }
+    let rm = 4;
+    let boxes = vec![0f32; 4 * rm * a];
+    let mut anc = vec![0f32; 3 * a];
+    for p in 0..a {
+        anc[p] = (p % w) as f32 + 0.5;
+        anc[a + p] = (p / w) as f32 + 0.5;
+        anc[2 * a + p] = 8.0;
+    }
+    let (gcls, gbox, ganc) =
+        (upload(ctx, &cls, dtype), upload(ctx, &boxes, dtype), upload(ctx, &anc, DType::F32));
+    let out = GpuTensor::empty(ctx, &[1 + 7 * a], DType::F32).unwrap();
+    vision::detect_candidates(ctx, gbox.raw(), gcls.raw(), ganc.raw(), out.raw(), 1, a, nc, rm, conf, dtype)
+        .unwrap();
+    let dense = bits(&out, DType::F32);
+    let mut want: Vec<[u32; 7]> = dense[1..1 + 7 * dense[0] as usize].as_chunks::<7>().0.to_vec();
+    want.sort_unstable();
+
+    let cap = a;
+    let sl = SiteLists { b: 1, h, w, nc, cap, fcap: a };
+    let t = |n| GpuTensor::empty(ctx, &[n], DType::F32).unwrap();
+    let (sites, recs, field, mark) = (t(cap + 1), t(2 * cap), t(sl.fcap + 1), t(a));
+    detect_sites::class_sites(
+        ctx,
+        gcls.raw(),
+        &sl,
+        conf,
+        dtype,
+        (sites.raw(), recs.raw(), field.raw(), mark.raw()),
+    )
+    .unwrap();
+    let raw = upload(ctx, &vec![0f32; 4 * rm * cap], dtype);
+    let dl =
+        [DecodeLevel { raw: raw.raw(), sites: sites.raw(), recs: recs.raw(), cap, w, stride: 8.0, start: 0 }];
+    let total = detect_sites::HEADER_WORDS + 7 * cap;
+    let sout = GpuTensor::empty(ctx, &[total], DType::F32).unwrap();
+    detect_sites::decode_sites(ctx, &dl, 1, rm, dtype, sout.raw()).unwrap();
+    let sbits = bits(&sout, DType::F32);
+    assert_eq!(sbits[1], 0, "{dtype:?}: unexpected overflow");
+    let mut got: Vec<[u32; 7]> = sbits[2..2 + 7 * sbits[0] as usize].as_chunks::<7>().0.to_vec();
+    got.sort_unstable();
+    assert_eq!(got, want, "{dtype:?}: sites_class+decode diverged from detect_candidates");
+    want.into_iter().map(|r| (r[0], r[1], r[2])).collect()
+}
+
+/// Edge cases for `detect.wgsl` and `sites_class.wgsl`: NaN at c=0 and c>0, ±inf, large-logit sigmoid
+/// saturation ties, distinct near-saturated rounding ties, signed-zero ties, negative conf with `-inf` ties,
+/// single-class heads, and NaN conf, in both f32 and f16.
+fn check_edge_cases(ctx: &GpuContext, dtype: DType) {
+    let inf = f32::INFINITY;
+    let ninf = f32::NEG_INFINITY;
+    let nan = f32::NAN;
+    let rows: Vec<Vec<f32>> = vec![
+        // 0: large-logit saturation tie starting at c=0 -> class 0, score 1.0
+        vec![20.0, 25.0, -5.0, -5.0, -5.0],
+        // 1: saturation tie starting at c=1, with larger logits later -> class 1, score 1.0
+        vec![-5.0, 20.0, 10.0, 25.0, 30.0],
+        // 2: duplicate saturating logits before strictly larger -> class 1, score 1.0
+        vec![-5.0, 20.0, 20.0, 25.0, -5.0],
+        // 3: saturating finite logit before +inf -> class 0, score 1.0
+        vec![20.0, inf, -5.0, -5.0, -5.0],
+        // 4: +inf tie -> class 1, score 1.0
+        vec![-5.0, inf, inf, -5.0, -5.0],
+        // 5: NaN at c=0 poisons the anchor -> dropped
+        vec![nan, 5.0, 20.0, inf, 10.0],
+        // 6: NaN at c>0 is skipped -> class 2
+        vec![-5.0, nan, 3.0, nan, 1.0],
+        // 7: NaN between saturating logits -> class 1, score 1.0
+        vec![-5.0, 20.0, nan, 25.0, -5.0],
+        // 8: -inf at c=0 followed by finite winner -> class 2
+        vec![ninf, ninf, 2.0, -5.0, -5.0],
+        // 9: all below conf=0.25 -> dropped
+        vec![ninf, -100.0, -50.0, -20.0, -10.0],
+        // 10: +0.0 vs -0.0 tie -> class 0, score 0.5
+        vec![0.0, -0.0, -1.0, -2.0, -3.0],
+        // 11: -0.0 vs +0.0 tie -> class 0, score 0.5
+        vec![-0.0, 0.0, -1.0, -2.0, -3.0],
+        // 12: exact duplicate winning logit -> class 1, score 0.5
+        vec![-5.0, 0.0, 0.0, -1.0, -2.0],
+        // 13: distinct near-saturated logits (both representable in f16) whose f32 sigmoid ties -> class 1
+        vec![-5.0, 16.0, 16.015625, -5.0, -5.0],
+        // 14: winner at last class, no tie -> class 4
+        vec![-5.0, -5.0, -5.0, -5.0, 2.0],
+        // 15: NaN after a winning c=0 must not overwrite it -> class 0
+        vec![2.0, nan, -5.0, -5.0, -5.0],
+        // 16: NaN before a saturation tie during the 0..best rescan -> class 2, score 1.0
+        vec![-5.0, nan, 20.0, 25.0, -5.0],
+    ];
+    let got = run_head_both(ctx, &rows, 1, rows.len(), 0.25, dtype);
+    let anchors_and_classes: Vec<(u32, u32)> = got.iter().map(|&(a, c, _)| (a, c)).collect();
+    assert_eq!(
+        anchors_and_classes,
+        vec![
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (3, 0),
+            (4, 1),
+            (6, 2),
+            (7, 1),
+            (8, 2),
+            (10, 0),
+            (11, 0),
+            (12, 1),
+            (13, 1),
+            (14, 4),
+            (15, 0),
+            (16, 2),
+        ],
+        "{dtype:?}: candidate (anchor, class) mismatch"
+    );
+    let score_of = |anchor: u32| f32::from_bits(got.iter().find(|r| r.0 == anchor).unwrap().2);
+    for a in [0, 1, 2, 3, 4, 7, 16] {
+        assert_eq!(score_of(a), 1.0, "{dtype:?}: anchor {a} expected 1.0");
+    }
+    for a in [10, 11, 12] {
+        assert_eq!(score_of(a), 0.5, "{dtype:?}: anchor {a} expected 0.5");
+    }
+    assert!((score_of(6) - 1.0 / (1.0 + (-3.0f32).exp())).abs() < 1e-6);
+    assert!((score_of(8) - 1.0 / (1.0 + (-2.0f32).exp())).abs() < 1e-6);
+    assert!((score_of(14) - 1.0 / (1.0 + (-2.0f32).exp())).abs() < 1e-6);
+
+    // Negative conf: -inf and large negative logits tie at sig == 0.0 -> first class wins; c=0 NaN still drops.
+    let neg_rows = vec![vec![ninf, -100.0, -90.0], vec![-100.0, ninf, -90.0], vec![nan, -100.0, 5.0]];
+    let neg_got = run_head_both(ctx, &neg_rows, 1, 3, -0.1, dtype);
+    assert_eq!(neg_got, vec![(0, 0, 0.0f32.to_bits()), (1, 0, 0.0f32.to_bits())], "{dtype:?}: neg conf");
+
+    // Single class (nc = 1) and NaN conf.
+    let one_cls = vec![vec![2.0], vec![-5.0], vec![nan], vec![inf]];
+    let one_got = run_head_both(ctx, &one_cls, 2, 2, 0.25, dtype);
+    assert_eq!(
+        one_got.iter().map(|&(a, c, _)| (a, c)).collect::<Vec<_>>(),
+        vec![(0, 0), (3, 0)],
+        "{dtype:?}: nc=1"
+    );
+    assert_eq!(one_got[1].2, 1.0f32.to_bits());
+    assert!(run_head_both(ctx, &one_cls, 2, 2, nan, dtype).is_empty(), "{dtype:?}: nan conf");
+}
+
+#[test]
+fn detect_and_class_sites_edge_cases() {
+    let ctx = gpu!();
+    check_edge_cases(&ctx, DType::F32);
+    if ctx.caps().shader_f16 {
+        check_edge_cases(&ctx, DType::F16);
+    }
+}
