@@ -638,9 +638,10 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   ```
   DFL_ot(a) = DFL(a) + λ_ot · (1/4) Σ_{side} [ Σ_{0 <= k < j} (−ln(1 − F_k)) + Σ_{j < k < R − 1} (−ln(F_k)) ]
   ```
-  evaluated stably from `log_softmax` via cumulative suffix/prefix log-sum-exp (`−lse(lp[k+1..R])` and `−lse(lp[0..=k])`,
-  clamped at `>= 0`) on CPU and fused into `det_box.wgsl` on GPU, with exact analytical backward verified by finite
-  differences (`reg_max = 16` and `reg_max = 2`) and GPU-CPU parity.
+  evaluated stably from shifted `(max, sum_exp)` prefix/suffix masses via `softplus(log Z_excl(k) − log Z_ret(k))`
+  (`f64` on CPU, exponent-split in `det_box.wgsl` / `det_combine.wgsl` on GPU to preserve tiny excluded tails without
+  cancellation), with exact analytical backward verified by finite differences (`reg_max = 16` and `reg_max = 2`) and
+  GPU-CPU parity.
 - `crates/folo-vision/tests/loss_cases.rs` checks the terms against an `f64` reference, the loss cases of §10.3, a
   finite-difference gradient check of the whole loss, CIoU against `ciou_eps`, and determinism.
 

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, Sgd, apply_group_contract, group_contract,
-    take_state,
+    is_depthwise_conv_shape, take_state,
 };
 use crate::{Error, Result};
 
@@ -199,10 +199,30 @@ impl MuSgd {
         geo: MuonGeoMode,
     ) -> Result<Self> {
         weights.validate()?;
+        if geo == MuonGeoMode::Geo {
+            Self::validate_depthwise(&groups)?;
+        }
         let muon = groups.iter().map(|g| vec![None; g.params.len()]).collect();
         let mut s = MuSgd { sgd: Sgd::new(groups)?, muon, weights, ortho, geo };
         s.ensure_buffers()?;
         Ok(s)
+    }
+
+    fn validate_depthwise(groups: &[ParamGroup]) -> Result<()> {
+        for g in groups {
+            if !is_muon_group(&g.name) {
+                continue;
+            }
+            for (pi, (name, p)) in g.params.iter().enumerate() {
+                if g.is_depthwise(pi) && !is_depthwise_conv_shape(p.dims()) {
+                    return Err(Error::Invalid(format!(
+                        "muon depthwise parameter `{name}` has shape {:?}, expected depthwise conv weight `[C > 1, 1, kH, kW]`",
+                        p.dims()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The step weights.
@@ -227,6 +247,9 @@ impl MuSgd {
 
     /// Set the geometric conditioning mode (`Conv-GeoMuon`).
     pub fn set_geo_mode(&mut self, geo: MuonGeoMode) -> Result<()> {
+        if geo == MuonGeoMode::Geo {
+            Self::validate_depthwise(self.sgd.groups())?;
+        }
         self.geo = geo;
         self.ensure_buffers()
     }

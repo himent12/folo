@@ -373,14 +373,12 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
 }
 
 /// Weighted `R-PIoU` scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_rpiou_i` directly from DFL
-/// `logits: [N, 4, R]`, reusing the tensor-decoded `probs`, `dist`, and `pd` so focal-IoU and edge terms evaluate
-/// the exact same predicted box and combine batch scaling, `box_gain`, `tss`, `t`, `(1 - lam)`, and the DFL
-/// softmax Jacobian entirely in `f64` before rounding the final logit gradient to `f32`.
+/// `logits: [N, 4, R]`, reusing the tensor-decoded `pd` so focal-IoU and edge terms evaluate the exact same
+/// predicted box, and computing the DFL softmax Jacobian centered on the dominant bin `k*` in `f64` alongside
+/// batch scaling, `box_gain`, `tss`, `t`, and `(1 - lam)` before rounding the final logit gradient to `f32`.
 #[allow(clippy::too_many_arguments)]
 fn rpiou_from_logits(
     logits: &Tensor,
-    probs_t: &Tensor,
-    dist_t: &Tensor,
     pd_t: &Tensor,
     tbox: &[f32],
     t_scores: &[f32],
@@ -398,8 +396,6 @@ fn rpiou_from_logits(
         return Tensor::zeros_with([], DType::F32, dev);
     }
     let raw_logits = logits.to_vec::<f32>()?;
-    let probs = probs_t.to_vec::<f32>()?;
-    let dists = dist_t.to_vec::<f32>()?;
     let pds = pd_t.to_vec::<f32>()?;
     let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
     let mut sum_w = 0.0f64;
@@ -424,6 +420,7 @@ fn rpiou_from_logits(
         let scale = gv * (box_gain as f64 / tss as f64);
         let mut grad = vec![0.0f32; n * 4 * r];
         if scale != 0.0 {
+            let mut p_row = vec![0.0f64; r];
             for i in 0..n {
                 let gi = scale * weights[i];
                 if gi == 0.0 {
@@ -434,23 +431,30 @@ fn rpiou_from_logits(
                     if gd == 0.0 {
                         continue;
                     }
-                    let d_s = dists[4 * i + side] as f64;
                     let row = (4 * i + side) * r..(4 * i + side + 1) * r;
-                    let prow = &probs[row.clone()];
                     let lrow = &raw_logits[row.clone()];
                     let grow = &mut grad[row];
-                    let tiny = prow.iter().any(|&pk| pk < 1e-30);
-                    let (m_side, z_side) = if tiny {
-                        let m = lrow.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                        let z: f64 = lrow.iter().map(|&x| exp_neg_f64(x, m)).sum();
-                        (m, z)
-                    } else {
-                        (0.0, 1.0)
-                    };
-                    for (k, (&pk, gk)) in prow.iter().zip(grow.iter_mut()).enumerate() {
-                        let pk64 =
-                            if pk >= 1e-30 { pk as f64 } else { exp_neg_f64(lrow[k], m_side) / z_side };
-                        *gk = (gd * pk64 * (k as f64 - d_s)) as f32;
+                    let (k_star, m_side) =
+                        lrow.iter().enumerate().fold((0usize, lrow[0]), |(bi, bm), (k, &x)| {
+                            if k > 0 && x > bm { (k, x) } else { (bi, bm) }
+                        });
+                    let mut z_side = 0.0f64;
+                    for (k, &x) in lrow.iter().enumerate() {
+                        let e = exp_neg_f64(x, m_side);
+                        p_row[k] = e;
+                        z_side += e;
+                    }
+                    let mut delta = 0.0f64;
+                    for (k, pk) in p_row.iter_mut().enumerate() {
+                        *pk /= z_side;
+                        if k != k_star {
+                            delta += *pk * (k as isize - k_star as isize) as f64;
+                        }
+                    }
+                    for (k, (&pk, gk)) in p_row.iter().zip(grow.iter_mut()).enumerate() {
+                        let k_minus_d =
+                            if k == k_star { -delta } else { (k as isize - k_star as isize) as f64 - delta };
+                        *gk = (gd * pk * k_minus_d) as f32;
                     }
                 }
             }
@@ -826,8 +830,6 @@ pub(super) fn loss_impl(
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
                     let wb_rpiou = rpiou_from_logits(
                         &logits,
-                        &probs,
-                        &dist,
                         &pd,
                         &tbox,
                         &asg.score,
@@ -850,8 +852,6 @@ pub(super) fn loss_impl(
                 } else {
                     rpiou_from_logits(
                         &logits,
-                        &probs,
-                        &dist,
                         &pd,
                         &tbox,
                         &asg.score,

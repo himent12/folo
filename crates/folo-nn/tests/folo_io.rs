@@ -739,7 +739,7 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
     {
         let mut rng = Rng::seed(26);
         let lin = Tensor::randn([8, 4], 0.0, 0.1, &mut rng).requires_grad_();
-        let g = ParamGroup::new("decay", vec![("fc.weight".into(), lin)]);
+        let g = ParamGroup::new("decay", vec![("fc.weight".into(), lin.clone())]);
         let mut opt = MuSgd::with_ortho_and_geo(
             vec![g],
             MuSgdWeights::default(),
@@ -750,6 +750,30 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
         let mut bad_c = opt.contract();
         bad_c.muon_depthwise = vec!["fc.weight".into()];
         assert!(opt.apply_contract(&bad_c).is_err(), "apply_contract must reject rank-2 linear weight");
+        let bad_dw =
+            ParamGroup::new("decay", vec![("fc.weight".into(), lin.clone())]).with_depthwise(vec![true]);
+        assert!(
+            MuSgd::with_ortho_and_geo(
+                vec![bad_dw.clone()],
+                MuSgdWeights::default(),
+                MuonOrtho::Polar4,
+                folo_nn::optim::MuonGeoMode::Geo
+            )
+            .is_err(),
+            "Geo constructor must reject depthwise-marked rank-2 weight"
+        );
+        let mut leg_opt = MuSgd::with_ortho_and_geo(
+            vec![bad_dw],
+            MuSgdWeights::default(),
+            MuonOrtho::Polar4,
+            folo_nn::optim::MuonGeoMode::Legacy,
+        )
+        .unwrap();
+        assert!(
+            leg_opt.set_geo_mode(folo_nn::optim::MuonGeoMode::Geo).is_err(),
+            "set_geo_mode must reject rank-2 depthwise weight"
+        );
+        assert_eq!(leg_opt.geo_mode(), folo_nn::optim::MuonGeoMode::Legacy);
     }
 
     // Verify `Geo` with depthwise actually diverges from both `Legacy` and dense-`Geo` (without depthwise mask).

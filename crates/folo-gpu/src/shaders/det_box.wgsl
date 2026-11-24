@@ -134,6 +134,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var lp: array<f32, 4u * R>;
     var side_m: vec4<f32>;
     var side_z: vec4<f32>;
+    var side_kstar: array<u32, 4>;
     var d: vec4<f32>;
     var dfl = 0.0;
     var ot_sum = vec2<f32>(0.0, 0.0);
@@ -141,11 +142,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var wl: vec4<f32>;
     var wr: vec4<f32>;
     for (var side = 0u; side < 4u; side++) {
-        var m = -3.402823466e+38;
+        var m = BOX[base + (side * R) * na];
+        var ks = 0u;
         for (var k = 0u; k < R; k++) {
             let x = BOX[base + (side * R + k) * na];
             p[side * R + k] = x;
-            m = max(m, x);
+            if (k > 0u && x > m) {
+                m = x;
+                ks = k;
+            }
         }
         var z = 0.0;
         for (var k = 0u; k < R; k++) {
@@ -157,6 +162,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         }
         side_m[side] = m;
         side_z[side] = z;
+        side_kstar[side] = ks;
         let lz = log_ge1(z);
         var dist = 0.0;
         for (var k = 0u; k < R; k++) {
@@ -459,6 +465,22 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 }
             }
         }
+        // Dominant-bin-centered offset `delta = d - k* = Σ_{j != k*} p_j · (j - k*)` in exponent-split form so
+        // `k* - d = -delta` never cancels to `0` when `d` rounds to `k*`, preserving shift invariance `Σ_k jac_k = 0`.
+        let k_star = side_kstar[side];
+        var delta_sp = vec2<f32>(0.0, 0.0);
+        if (box_kind == 1u) {
+            for (var j = 0u; j < R; j++) {
+                if (j == k_star) { continue; }
+                let qj_raw = p[side * R + j];
+                var qj_sp = norm_f32(qj_raw);
+                if (qj_raw < 1e-30) {
+                    let xj = BOX[base + (side * R + j) * na];
+                    qj_sp = div_split(exp_diff_split(xj, side_m[side]), norm_f32(side_z[side]));
+                }
+                delta_sp = add_split(delta_sp, mul_split(qj_sp, norm_f32(f32(i32(j) - i32(k_star)))));
+            }
+        }
         for (var k = 0u; k < R; k++) {
             let q = p[side * R + k];
             let jac = q * (f32(k) - d[side]);
@@ -469,7 +491,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                     let xk = BOX[base + (side * R + k) * na];
                     q_sp = div_split(exp_diff_split(xk, side_m[side]), norm_f32(side_z[side]));
                 }
-                let jac_sp = mul_split(q_sp, norm_f32(f32(k) - d[side]));
+                let neg_delta = vec2<f32>(-delta_sp.x, delta_sp.y);
+                let k_minus_d_sp = select(
+                    add_split(norm_f32(f32(i32(k) - i32(k_star))), neg_delta),
+                    neg_delta,
+                    k == k_star,
+                );
+                let jac_sp = mul_split(q_sp, k_minus_d_sp);
                 var rpiou_sp = vec2<f32>(0.0, 0.0);
                 if (fiou_d[side] != 0.0 && jac_sp.x != 0.0 && g_base_sp.x != 0.0) {
                     rpiou_sp = mul_split(mul_split(norm_f32(fiou_d[side]), jac_sp), g_base_sp);

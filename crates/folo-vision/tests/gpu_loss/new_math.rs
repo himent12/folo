@@ -829,4 +829,49 @@ fn new_math_extreme_edge_cases_match_host() {
         let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
         close_vec(&g_gpu, &g_cpu, 1e-3 * scale, 2e-3, "subnormal_jac_rpiou/box_raw");
     }
+
+    // 16. Dominant-bin Jacobian centering in R-PIoU (`[-89, 0, -1000, -1000]`, centered 2x2 inside 2.5x2.5 target,
+    //     `box_gain = 1e38`): decoded `d` rounds to `1.0`, so naive `1 - d = 0` drops bin 1's gradient; centering on
+    //     dominant bin `k* = 1` keeps the analytic `(g0, g1) ≈ (+0.0573, -0.0573)` pair and zero per-side sum.
+    {
+        let anchors = Anchors { points: vec![[2.5, 2.5]], strides: vec![1.0], ..Anchors::default() };
+        let mut bd_v = vec![0.0f32; 16];
+        for s in 0..4 {
+            bd_v[s * 4] = -89.0;
+            bd_v[s * 4 + 2] = -1000.0;
+            bd_v[s * 4 + 3] = -1000.0;
+        }
+        let bx = Tensor::from_slice(&bd_v, [1, 16, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(1.25, 1.25, 3.75, 3.75)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 4,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            box_gain: 1e38,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
+        assert!(want.is_finite() && got.is_finite());
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        for side in 0..4 {
+            let (c0, c1) = (g_cpu[side * 4], g_cpu[side * 4 + 1]);
+            let (u0, u1) = (g_gpu[side * 4], g_gpu[side * 4 + 1]);
+            assert!(c0 > 0.04 && c1 < -0.04, "CPU side {side} dominant-bin grad lost: ({c0}, {c1})");
+            assert!(u0 > 0.04 && u1 < -0.04, "GPU side {side} dominant-bin grad lost: ({u0}, {u1})");
+            let c_sum: f32 = (0..4).map(|k| g_cpu[side * 4 + k]).sum();
+            let u_sum: f32 = (0..4).map(|k| g_gpu[side * 4 + k]).sum();
+            assert!(c_sum.abs() < 1e-4, "CPU side {side} shift invariance violated: sum {c_sum}");
+            assert!(u_sum.abs() < 1e-4, "GPU side {side} shift invariance violated: sum {u_sum}");
+        }
+        close_vec(&g_gpu, &g_cpu, 1e-4, 1e-3, "dominant_bin_jac_rpiou/box_raw");
+    }
 }

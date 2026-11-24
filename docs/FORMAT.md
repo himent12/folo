@@ -121,7 +121,7 @@ compatible with pre-Polar checkpoints (note that trainer checkpoints' informatio
 `"musgd"` contract, omitted for legacy so existing checkpoints stay byte-for-byte identical and absent `muon_geo`
 resumes in legacy mode). `muon_depthwise` lists the Muon-group parameter names routed to the zero-GEMM per-channel
 Polar LMO under `"muon_geo": "geo"` (omitted when empty or in legacy mode; rejected on non-`"musgd"` or non-`"geo"`
-contracts, on duplicates, or on names outside Muon groups), and resuming restores each group's depthwise mask from it.
+contracts, on duplicates, on names outside Muon groups, or on shapes other than `[C > 1, 1, kH, kW]`), and resuming restores each group's depthwise mask from it.
 When `muon_ortho` is absent, resuming restores legacy `"ns5"` (5-step Newton–Schulz: bit-exact with pre-Polar `"ns5"`
 on the CPU and deterministic save/resume within the same binary; GPU `"ns5"` runs through the current 4-aligned
 symmetric `muon_gemm` kernel rather than preserving pre-Polar GPU tile reduction order or binding-limit boundaries),
