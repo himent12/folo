@@ -75,11 +75,24 @@ export class AppendLog<T> {
     this.#start = 0;
   }
 
-  /** Drops the `n` oldest items. */
-  trimFront(n: number): void {
-    if (n <= 0) return;
-    this.#items.splice(0, n);
-    this.#start += n;
+  /** Drops up to `n` oldest items and returns how many were removed. */
+  trimFront(n: number): number {
+    const drop = Math.min(n, this.#items.length);
+    if (!(drop > 0)) return 0;
+    this.#items.splice(0, drop);
+    this.#start += drop;
+    return drop;
+  }
+
+  /**
+   * Keeps the list bounded to `cap` items in chunks of `batch`, allowing temporary headroom up to `cap + batch - 1`
+   * before trimming back to `cap` (amortising the O(n) `splice` across `batch` appends). Returns how many items were
+   * dropped.
+   */
+  trimTo(cap: number, batch = 1): number {
+    const over = this.#items.length - cap;
+    if (over <= 0 || over < batch) return 0;
+    return this.trimFront(over);
   }
 
   /** What changed since `cursor` (null: everything, as a reset). */
