@@ -16,6 +16,7 @@ use crate::rng::Rng;
 use crate::simd::hsv_fused::rgb_row_to_planar_fused;
 use crate::simd::{PlanarDst, for_planar_bands};
 use crate::warp::{Plane, Tile, warp_plane, warp_plane_fused};
+use std::sync::Arc;
 
 /// A sample as the transform's `fetch` delivers it.
 #[derive(Clone, Debug)]
@@ -37,19 +38,89 @@ impl Fetched {
     }
 }
 
+/// Internal fetched sample: either owned (freshly decoded, pixel buffer recycled after use) or a shared
+/// read-only entry from [`crate::ram_cache::RamCache`] (zero-copy, never recycled).
+pub(crate) enum FetchedSample {
+    Owned(Fetched),
+    Shared { index: usize, entry: Arc<(Sample, [u32; 2])> },
+}
+
+impl FetchedSample {
+    pub(crate) fn decoded(index: usize, sample: Sample) -> Self {
+        FetchedSample::Owned(Fetched::decoded(index, sample))
+    }
+
+    fn index(&self) -> usize {
+        match self {
+            FetchedSample::Owned(f) => f.index,
+            FetchedSample::Shared { index, .. } => *index,
+        }
+    }
+
+    fn sample(&self) -> &Sample {
+        match self {
+            FetchedSample::Owned(f) => &f.sample,
+            FetchedSample::Shared { entry, .. } => &entry.0,
+        }
+    }
+
+    fn orig_size(&self) -> [u32; 2] {
+        match self {
+            FetchedSample::Owned(f) => f.orig_size,
+            FetchedSample::Shared { entry, .. } => entry.1,
+        }
+    }
+
+    /// Resizes `self` so its long side is `long` pixels without copying when already that size (the common
+    /// `--cache ram` case).
+    fn into_resized_long_side(self, long: u32) -> Self {
+        let s = self.sample();
+        let (w, h) = (s.image.width, s.image.height);
+        let r = long as f64 / w.max(h) as f64;
+        let nw = ((w as f64 * r).round() as u32).max(1);
+        let nh = ((h as f64 * r).round() as u32).max(1);
+        if (nw, nh) == (w, h) {
+            return self;
+        }
+        match self {
+            FetchedSample::Owned(f) => FetchedSample::Owned(Fetched {
+                index: f.index,
+                sample: resize_long_side(f.sample, long),
+                orig_size: f.orig_size,
+            }),
+            FetchedSample::Shared { index, entry } => {
+                let image = crate::resize::resize(&entry.0.image, nw, nh);
+                FetchedSample::Owned(Fetched {
+                    index,
+                    sample: Sample { image, boxes: entry.0.boxes.clone() },
+                    orig_size: entry.1,
+                })
+            }
+        }
+    }
+
+    /// Returns an owned pixel buffer to the thread-local scratch pool; a shared cache entry is only unreferenced.
+    fn recycle(self) {
+        if let FetchedSample::Owned(f) = self {
+            buffers::recycle(f.sample.image.data);
+        }
+    }
+}
+
 /// Letterboxes `f` to `s x s` exactly as its original image would be: the pixels of a pre-resized sample are those
 /// of its original (the resize to the same size is a copy), and its boxes (normalised, so unchanged by the resize)
 /// are mapped with the geometry of the original size, as the letterbox of the original maps them.
-fn letterbox_fetched(f: &Fetched, s: u32) -> (Sample, Letterbox) {
+fn letterbox_fetched(f: &FetchedSample, s: u32) -> (Sample, Letterbox) {
     let opts = LetterboxOptions::default();
-    let (mut sample, lb) = letterbox_sample(&f.sample, s, s, &opts);
-    if [f.sample.image.width, f.sample.image.height] == f.orig_size {
+    let src = f.sample();
+    let (mut sample, lb) = letterbox_sample(src, s, s, &opts);
+    if [src.image.width, src.image.height] == f.orig_size() {
         return (sample, lb);
     }
-    let [w, h] = f.orig_size;
+    let [w, h] = f.orig_size();
     let orig = Letterbox::compute(w, h, s, s, &opts);
     debug_assert_eq!((orig.resized, orig.out, orig.pad), (lb.resized, lb.out, lb.pad));
-    sample.boxes = f.sample.boxes.iter().map(|b| orig.map_box(b)).collect();
+    sample.boxes = src.boxes.iter().map(|b| orig.map_box(b)).collect();
     (sample, orig)
 }
 
@@ -145,15 +216,17 @@ impl TrainTransform {
     where
         F: Fn(usize) -> Result<Fetched>,
     {
+        let fetch_owned = |i| fetch(i).map(FetchedSample::Owned);
         let Some(cfg) = &self.augment else {
-            let f = fetch(index)?;
+            let f = fetch_owned(index)?;
             let (sample, letterbox) = letterbox_fetched(&f, self.imgsz);
-            buffers::recycle(f.sample.image.data);
-            return Ok(Transformed { index: f.index, sample, orig_size: f.orig_size, letterbox });
+            let (out_index, orig_size) = (f.index(), f.orig_size());
+            f.recycle();
+            return Ok(Transformed { index: out_index, sample, orig_size, letterbox });
         };
-        let mut out = self.one(cfg, index, len, fetch, rng)?;
+        let mut out = self.one(cfg, index, len, &fetch_owned, rng)?;
         if self.mosaic && rng.chance(cfg.mixup) {
-            let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
+            let other = self.one(cfg, rng.below(len), len, &fetch_owned, rng)?;
             mixup(&mut out.sample, &other.sample, rng);
             buffers::recycle(other.sample.image.data);
         }
@@ -179,26 +252,29 @@ impl TrainTransform {
         dst: &mut PlanarDst<'_>,
     ) -> Result<ProducedMeta>
     where
-        F: Fn(usize) -> Result<Fetched>,
+        F: Fn(usize) -> Result<FetchedSample>,
     {
         let s = self.imgsz;
         let Some(cfg) = &self.augment else {
             let f = fetch(index)?;
             let opts = LetterboxOptions::default();
-            let lb_img = Letterbox::compute(f.sample.image.width, f.sample.image.height, s, s, &opts);
-            lb_img.apply_planar_dst(&f.sample.image, PAD_VALUE, dst);
-            let (boxes, letterbox) = if [f.sample.image.width, f.sample.image.height] == f.orig_size {
-                (f.sample.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
+            let src = f.sample();
+            let lb_img = Letterbox::compute(src.image.width, src.image.height, s, s, &opts);
+            lb_img.apply_planar_dst(&src.image, PAD_VALUE, dst);
+            let orig_size = f.orig_size();
+            let (boxes, letterbox) = if [src.image.width, src.image.height] == orig_size {
+                (src.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
             } else {
-                let orig = Letterbox::compute(f.orig_size[0], f.orig_size[1], s, s, &opts);
+                let orig = Letterbox::compute(orig_size[0], orig_size[1], s, s, &opts);
                 debug_assert_eq!(
                     (orig.resized, orig.out, orig.pad),
                     (lb_img.resized, lb_img.out, lb_img.pad)
                 );
-                (f.sample.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
+                (src.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
             };
-            buffers::recycle(f.sample.image.data);
-            return Ok(ProducedMeta { index: f.index, orig_size: f.orig_size, letterbox, boxes });
+            let out_index = f.index();
+            f.recycle();
+            return Ok(ProducedMeta { index: out_index, orig_size, letterbox, boxes });
         };
 
         if self.mosaic && rng.chance(cfg.mosaic) {
@@ -208,11 +284,15 @@ impl TrainTransform {
             for (k, &i) in ids.iter().enumerate() {
                 let f = fetch(i)?;
                 if k == 0 {
-                    (primary, orig_size) = (f.index, f.orig_size);
+                    (primary, orig_size) = (f.index(), f.orig_size());
                 }
-                parts.push(resize_long_side(f.sample, s));
+                parts.push(f.into_resized_long_side(s));
             }
-            let (plane, raw_boxes) = mosaic_plane([&parts[0], &parts[1], &parts[2], &parts[3]], s, rng);
+            let (plane, raw_boxes) = mosaic_plane(
+                [parts[0].sample(), parts[1].sample(), parts[2].sample(), parts[3].sample()],
+                s,
+                rng,
+            );
             let m = random_affine_matrix(plane.width, plane.height, s, s, cfg, rng);
             let mut boxes = if m.is_identity() && (plane.width, plane.height) == (s, s) {
                 raw_boxes
@@ -228,7 +308,7 @@ impl TrainTransform {
                 };
                 drop(plane);
                 for p in parts {
-                    buffers::recycle(p.image.data);
+                    p.recycle();
                 }
                 let mut sample = Sample { image: img, boxes };
                 let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
@@ -249,32 +329,34 @@ impl TrainTransform {
             warp_plane_fused(&plane, &m, s, s, hsv.as_ref(), do_ud, do_lr, dst);
             drop(plane);
             for p in parts {
-                buffers::recycle(p.image.data);
+                p.recycle();
             }
             Ok(ProducedMeta { index: primary, orig_size, letterbox, boxes })
         } else {
             let f = fetch(index)?;
             let opts = LetterboxOptions::default();
-            let lb_img = Letterbox::compute(f.sample.image.width, f.sample.image.height, s, s, &opts);
-            let (lb_boxes, letterbox): (Vec<BBox>, _) =
-                if [f.sample.image.width, f.sample.image.height] == f.orig_size {
-                    (f.sample.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
-                } else {
-                    let orig = Letterbox::compute(f.orig_size[0], f.orig_size[1], s, s, &opts);
-                    debug_assert_eq!(
-                        (orig.resized, orig.out, orig.pad),
-                        (lb_img.resized, lb_img.out, lb_img.pad)
-                    );
-                    (f.sample.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
-                };
+            let src = f.sample();
+            let orig_size = f.orig_size();
+            let out_index = f.index();
+            let lb_img = Letterbox::compute(src.image.width, src.image.height, s, s, &opts);
+            let (lb_boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
+                (src.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
+            } else {
+                let orig = Letterbox::compute(orig_size[0], orig_size[1], s, s, &opts);
+                debug_assert_eq!(
+                    (orig.resized, orig.out, orig.pad),
+                    (lb_img.resized, lb_img.out, lb_img.pad)
+                );
+                (src.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
+            };
             let [rw, rh] = lb_img.resized;
             let [left, top] = lb_img.pad.map(|v| v as i64);
-            let resized_opt = if (f.sample.image.width, f.sample.image.height) == (rw, rh) {
+            let resized_opt = if (src.image.width, src.image.height) == (rw, rh) {
                 None
             } else {
-                Some(crate::resize::resize(&f.sample.image, rw, rh))
+                Some(crate::resize::resize(&src.image, rw, rh))
             };
-            let tile_img = resized_opt.as_ref().unwrap_or(&f.sample.image);
+            let tile_img = resized_opt.as_ref().unwrap_or(&src.image);
             let tile =
                 Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
             let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: vec![tile] };
@@ -290,7 +372,7 @@ impl TrainTransform {
                 if let Some(r) = resized_opt {
                     buffers::recycle(r.data);
                 }
-                buffers::recycle(f.sample.image.data);
+                f.recycle();
                 let mut sample = Sample { image: img, boxes };
                 let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
                 mixup(&mut sample, &other.sample, rng);
@@ -301,12 +383,7 @@ impl TrainTransform {
                 flip_boxes(&mut sample.boxes, do_ud, do_lr);
                 image_to_planar_fused(&sample.image, hsv.as_ref(), do_ud, do_lr, dst);
                 buffers::recycle(sample.image.data);
-                return Ok(ProducedMeta {
-                    index: f.index,
-                    orig_size: f.orig_size,
-                    letterbox,
-                    boxes: sample.boxes,
-                });
+                return Ok(ProducedMeta { index: out_index, orig_size, letterbox, boxes: sample.boxes });
             }
             let hsv = random_hsv_tables(cfg.hsv, rng);
             let do_ud = rng.chance(cfg.flipud);
@@ -317,8 +394,8 @@ impl TrainTransform {
             if let Some(r) = resized_opt {
                 buffers::recycle(r.data);
             }
-            buffers::recycle(f.sample.image.data);
-            Ok(ProducedMeta { index: f.index, orig_size: f.orig_size, letterbox, boxes })
+            f.recycle();
+            Ok(ProducedMeta { index: out_index, orig_size, letterbox, boxes })
         }
     }
 
@@ -331,7 +408,7 @@ impl TrainTransform {
         rng: &mut Rng,
     ) -> Result<Transformed>
     where
-        F: Fn(usize) -> Result<Fetched>,
+        F: Fn(usize) -> Result<FetchedSample>,
     {
         let s = self.imgsz;
         if self.mosaic && rng.chance(cfg.mosaic) {
@@ -341,23 +418,29 @@ impl TrainTransform {
             for (k, &i) in ids.iter().enumerate() {
                 let f = fetch(i)?;
                 if k == 0 {
-                    (primary, orig_size) = (f.index, f.orig_size);
+                    (primary, orig_size) = (f.index(), f.orig_size());
                 }
                 // The identity for a pre-resized sample.
-                parts.push(resize_long_side(f.sample, s));
+                parts.push(f.into_resized_long_side(s));
             }
-            let sample = mosaic_affine([&parts[0], &parts[1], &parts[2], &parts[3]], s, cfg, rng);
+            let sample = mosaic_affine(
+                [parts[0].sample(), parts[1].sample(), parts[2].sample(), parts[3].sample()],
+                s,
+                cfg,
+                rng,
+            );
             for p in parts {
-                buffers::recycle(p.image.data);
+                p.recycle();
             }
             Ok(Transformed { index: primary, sample, orig_size, letterbox: Letterbox::identity(s, s) })
         } else {
             let f = fetch(index)?;
             let (lb_sample, letterbox) = letterbox_fetched(&f, s);
             let sample = random_affine(&lb_sample, s, s, cfg, rng);
+            let (out_index, orig_size) = (f.index(), f.orig_size());
             buffers::recycle(lb_sample.image.data);
-            buffers::recycle(f.sample.image.data);
-            Ok(Transformed { index: f.index, sample, orig_size: f.orig_size, letterbox })
+            f.recycle();
+            Ok(Transformed { index: out_index, sample, orig_size, letterbox })
         }
     }
 }
