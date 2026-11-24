@@ -229,13 +229,16 @@ impl PowOp {
             // Adding +0.0 maps -0.0 to +0.0 so `sqrt` matches `(-0.0_f32).powf(0.5) == +0.0`.
             Self::Half => (x + 0.0).sqrt(),
             Self::One => x,
+            // Evaluate integer squaring chains in `f64` (53-bit significand) before rounding once to `f32`,
+            // matching libm `powf` rounding without calling `powf`.
             Self::Six => {
-                let x2 = x * x;
-                x2 * x2 * x2
+                let d = x as f64;
+                let d2 = d * d;
+                (d2 * d2 * d2) as f32
             }
             Self::Int(mut n) => {
-                let mut base = x;
-                let mut acc = 1.0f32;
+                let mut base = x as f64;
+                let mut acc = 1.0f64;
                 while n > 0 {
                     if n & 1 != 0 {
                         acc *= base;
@@ -245,7 +248,7 @@ impl PowOp {
                         base *= base;
                     }
                 }
-                acc
+                acc as f32
             }
             Self::General(e) => x.powf(e),
         }
@@ -275,6 +278,10 @@ pub(crate) fn candidate_metric(
 /// Truncate a single gt's candidate list to its `topk` highest-metric picks (ties broken by smaller anchor index).
 #[inline]
 pub(crate) fn keep_topk(cands: &mut Vec<Pick>, topk: usize) {
+    if topk == 0 {
+        cands.clear();
+        return;
+    }
     if cands.len() > topk {
         let by_rank = |x: &Pick, y: &Pick| y.m.total_cmp(&x.m).then(x.anchor.cmp(&y.anchor));
         cands.select_nth_unstable_by(topk - 1, by_rank);
@@ -338,6 +345,15 @@ pub(crate) fn validate_grid(anchors: &Anchors) -> Option<Vec<GridLevel>> {
         if !offset_x.is_finite() || !offset_y.is_finite() {
             return None;
         }
+        let max_x = ((lvl.width - 1) as f32 + offset_x) * stride;
+        let max_y = ((lvl.height - 1) as f32 + offset_y) * stride;
+        if !(offset_x * stride).is_finite()
+            || !(offset_y * stride).is_finite()
+            || !max_x.is_finite()
+            || !max_y.is_finite()
+        {
+            return None;
+        }
         for y in 0..lvl.height {
             let fy = y as f32 + offset_y;
             let row = lvl.start + y * lvl.width;
@@ -364,14 +380,31 @@ pub(crate) fn validate_grid(anchors: &Anchors) -> Option<Vec<GridLevel>> {
     Some(levels)
 }
 
+/// First index `i in 0..=len` where `pred(i)` holds, assuming `pred` is monotone false-then-true.
+#[inline]
+fn partition_index(len: usize, mut pred: impl FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0usize, len);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if pred(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
+}
+
 /// Exact index interval `[i0, i1)` in `0..len` of grid coordinates `coord(i) = (i as f32 + offset) * stride`
 /// satisfying `coord(i) - lo_edge > eps` and `hi_edge - coord(i) > eps`.
 ///
-/// Requires finite `lo_edge`, `hi_edge`, `eps`, `offset`, and `stride > 0`. Because `coord(i)` is monotonically
-/// non-decreasing in `i`, starting from the `f64` analytic estimate and tightening the two endpoints with the
-/// exact `f32` inequalities is O(1) and bit-exact with [`Xyxy::contains_point`].
+/// Requires finite `lo_edge`, `hi_edge`, `eps`, `offset`, `stride > 0`, and finite extrema `coord(0)` /
+/// `coord(len - 1)`. Because `coord(i)` is monotonically non-decreasing in `i`, starting from the `f64` analytic
+/// estimate and tightening up to 4 steps is O(1) on every normal grid, with an O(log len) binary-search fallback
+/// if extreme float32 rounding causes many indices to collapse to the same coordinate.
 #[inline]
 fn axis_range(lo_edge: f32, hi_edge: f32, eps: f32, stride: f32, offset: f32, len: usize) -> (usize, usize) {
+    const MAX_LOCAL_STEPS: usize = 4;
     if len == 0 {
         return (0, 0);
     }
@@ -381,25 +414,38 @@ fn axis_range(lo_edge: f32, hi_edge: f32, eps: f32, stride: f32, offset: f32, le
     let coord = |i: usize| (i as f32 + offset) * stride;
 
     let mut i0 = ((lo_edge as f64 + e64) / s64 - o64).floor().clamp(0.0, len as f64) as usize;
-    while i0 > 0 && coord(i0 - 1) - lo_edge > eps {
+    let mut steps = 0usize;
+    while i0 > 0 && coord(i0 - 1) - lo_edge > eps && steps < MAX_LOCAL_STEPS {
         i0 -= 1;
+        steps += 1;
     }
-    while i0 < len && coord(i0) - lo_edge <= eps {
+    while i0 < len && coord(i0) - lo_edge <= eps && steps < MAX_LOCAL_STEPS {
         i0 += 1;
+        steps += 1;
+    }
+    if (i0 > 0 && coord(i0 - 1) - lo_edge > eps) || (i0 < len && coord(i0) - lo_edge <= eps) {
+        i0 = partition_index(len, |i| coord(i) - lo_edge > eps);
     }
 
     let mut i1 = ((hi_edge as f64 - e64) / s64 - o64).ceil().clamp(0.0, len as f64) as usize;
-    while i1 < len && hi_edge - coord(i1) > eps {
+    steps = 0;
+    while i1 < len && hi_edge - coord(i1) > eps && steps < MAX_LOCAL_STEPS {
         i1 += 1;
+        steps += 1;
     }
-    while i1 > i0 && hi_edge - coord(i1 - 1) <= eps {
+    while i1 > i0 && hi_edge - coord(i1 - 1) <= eps && steps < MAX_LOCAL_STEPS {
         i1 -= 1;
+        steps += 1;
+    }
+    if (i1 < len && hi_edge - coord(i1) > eps) || (i1 > i0 && hi_edge - coord(i1 - 1) <= eps) {
+        i1 = partition_index(len, |i| hi_edge - coord(i) <= eps);
     }
 
     if i0 >= i1 { (0, 0) } else { (i0, i1) }
 }
 
-/// O(1) candidate anchor index rectangle for enlarged box `cb` on one regular FPN level.
+/// O(1) (O(log len) fallback under extreme float32 collapse) candidate anchor index rectangle for enlarged box
+/// `cb` on one regular FPN level.
 ///
 /// Caller must ensure `cb`'s coordinates and `eps` are finite.
 #[inline]
@@ -416,24 +462,19 @@ pub(crate) fn level_candidate_rect(cb: &Xyxy, eps: f32, lvl: &GridLevel) -> Leve
 }
 
 /// Resolve multi-gt anchor conflicts (step 4), apply optional `topk2` one-to-one filtering, and compute the
-/// normalised soft targets (step 5) over the sparse set of selected picks.
+/// normalised soft targets (step 5) over a flat list of `(anchor, gt, m, u)` picks.
 ///
 /// Returns positives sorted in strictly ascending anchor order, without allocating `O(A)` scratch vectors.
-pub(crate) fn resolve_picks(n_g: usize, selected: &[Vec<Pick>], cfg: &TalConfig) -> Vec<ResolvedPositive> {
-    let total_picks: usize = selected.iter().map(Vec::len).sum();
-    if total_picks == 0 {
+pub(crate) fn resolve_flat_picks(
+    n_g: usize,
+    mut flat: Vec<(u32, u32, f32, f32)>,
+    cfg: &TalConfig,
+) -> Vec<ResolvedPositive> {
+    if flat.is_empty() {
         return Vec::new();
     }
 
-    // Collect `(anchor, gt, m, u)` and sort by `(anchor, gt)` so each contested anchor's candidates form a
-    // contiguous run ordered by ascending gt index.
-    let mut flat: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(total_picks);
-    for (g, picks) in selected.iter().enumerate() {
-        let g = g as u32;
-        for &p in picks {
-            flat.push((p.anchor, g, p.m, p.u));
-        }
-    }
+    // Sort by `(anchor, gt)` so each contested anchor's candidates form a contiguous run ordered by ascending gt.
     flat.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     // Step 4: keep the strictly largest `u` per anchor (ties keep the smaller gt index).
@@ -505,6 +546,19 @@ pub(crate) fn resolve_picks(n_g: usize, selected: &[Vec<Pick>], cfg: &TalConfig)
             ResolvedPositive { anchor, gt: gi, score }
         })
         .collect()
+}
+
+/// Resolve per-gt pick lists via [`resolve_flat_picks`].
+fn resolve_picks(selected: &[Vec<Pick>], cfg: &TalConfig) -> Vec<ResolvedPositive> {
+    let total_picks: usize = selected.iter().map(Vec::len).sum();
+    let mut flat: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(total_picks);
+    for (g, picks) in selected.iter().enumerate() {
+        let g = g as u32;
+        for &p in picks {
+            flat.push((p.anchor, g, p.m, p.u));
+        }
+    }
+    resolve_flat_picks(selected.len(), flat, cfg)
 }
 
 /// Run the task-aligned assigner for one image.
@@ -580,7 +634,7 @@ pub fn assign(
         (0..n_g).map(topk_for).collect()
     };
 
-    for pos in resolve_picks(n_g, &selected, cfg) {
+    for pos in resolve_picks(&selected, cfg) {
         let a = pos.anchor as usize;
         out.fg_mask[a] = true;
         out.target_gt[a] = pos.gt;

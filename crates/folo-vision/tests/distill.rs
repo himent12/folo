@@ -64,17 +64,19 @@ fn weights_hash(t: &Trainer) -> u64 {
     h
 }
 
-/// The weights hash of one epoch of [`micro`] without a teacher, by target, with AVX2 + FMA.
+/// The weights hash of one epoch of [`micro`] without a teacher, by target, each derived on origin/main at 1436ad68
+/// (before distillation existed) on that target with AVX2 + FMA; never from this branch's own output.
 ///
 /// The hash is bit-exact, so it depends on everything the CPU path computes with, including the CPU kernels' AVX2 +
-/// FMA path (picked at run time). Measured: the same micro run gives one hash on Windows and another on Linux on the
-/// same CPU, the thread count changes neither, and the two platforms' C math libraries (UCRT, glibc 2.39) return
-/// different bits for functions the training step reaches through Rust std (`f32::atan`, `ln_1p`, `powf`, `exp`,
-/// `ln`, in the loss and the assignment metric). Updated when TAL specialised `alpha = 0.5` (`sqrt`) and `beta = 6`
-/// (squaring chain), replacing `powf` in the default assignment metric (<= 1 ULP shift in `target_scores`).
-/// The Linux reference was derived with glibc 2.39 (Ubuntu 24.04); another libm version may give other bits.
+/// FMA path (picked at run time). Measured: the same micro run on origin/main 1436ad68 gives one hash on Windows and
+/// another on Linux on the same CPU, the thread count changes neither, and the two platforms' C math libraries (UCRT,
+/// glibc 2.39) return different bits for functions the training step reaches through Rust std (`f32::atan`, `ln_1p`,
+/// `powf`, `exp`, `ln`, in the loss and the assignment metric). Inferred, likely but not proven: that the math
+/// libraries are the cause (no substitution experiment was run; an allocator-alignment effect was not ruled out).
+/// The Linux reference was derived with glibc 2.39 (Ubuntu 24.04, rustc 1.100.0); another libm version may give
+/// other bits.
 const NO_TEACHER_HASHES: &[(&str, u64)] =
-    &[("x86_64-windows-msvc", 0xcf06_87fa_16d9_c676), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
+    &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
 
 /// This build's `arch-os-env`, the key of [`NO_TEACHER_HASHES`].
 fn target() -> String {

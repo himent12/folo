@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use super::{BatchAssignment, ImageTargets, LossConfig, check_inputs, host_f32, invalid};
 use crate::assign::{
     GridLevel, LevelRect, Pick, PowOp, TalConfig, candidate_box, candidate_metric, keep_topk,
-    level_candidate_rect, nwd_lambda, resolve_picks, validate_grid,
+    level_candidate_rect, nwd_lambda, resolve_flat_picks, validate_grid,
 };
 use crate::boxes::Xyxy;
 use crate::decode::{Anchors, dist2bbox, sigmoid};
@@ -175,17 +175,18 @@ fn assign_image_grid(
     let mut pd_px = vec![Xyxy::default(); max_a - min_a];
     decode_masked_channel_major(reg, anchors, reg_max, &cand_mask[min_a..max_a], min_a, &mut pd_px);
 
-    // 3. Score only each gt's rectangle candidates, evaluating `sigmoid` lazily on the gt's class row.
+    // 3. Score only each gt's rectangle candidates, reusing one candidate buffer across gts so peak memory stays
+    //    bounded to one gt's candidates plus the `<= G * topk` retained picks.
     let alpha_op = PowOp::from_exp(tal.alpha);
     let beta_op = PowOp::from_exp(tal.beta);
-    let mut selected: Vec<Vec<Pick>> = Vec::with_capacity(n_g);
+    let mut cands: Vec<Pick> = Vec::new();
+    let mut flat_picks: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(n_g.saturating_mul(tal.topk.min(n_a)));
     for g in 0..n_g {
         let gt_box = &gt.boxes[g];
         let cls_row = &logits[gt.labels[g] as usize * n_a..(gt.labels[g] as usize + 1) * n_a];
         let lam = nwd_lambda(gt_box, tal.nwd_weight);
         let gt_rects = &rects[g * n_l..(g + 1) * n_l];
-        let cap: usize = gt_rects.iter().map(|r| r.y1.saturating_sub(r.y0) * r.x1.saturating_sub(r.x0)).sum();
-        let mut cands = Vec::with_capacity(cap);
+        cands.clear();
         for r in gt_rects {
             if r.is_empty() {
                 continue;
@@ -208,10 +209,11 @@ fn assign_image_grid(
             }
         }
         keep_topk(&mut cands, tal.topk);
-        selected.push(cands);
+        let g_u32 = g as u32;
+        flat_picks.extend(cands.iter().map(|p| (p.anchor, g_u32, p.m, p.u)));
     }
 
-    collect_image_fg(gt, &selected, tal)
+    collect_image_fg(gt, flat_picks, tal)
 }
 
 /// Fallback for non-regular / custom [`Anchors`] or non-finite GT/config parameters: scans anchor points with
@@ -254,12 +256,13 @@ fn assign_image_general(
 
     let alpha_op = PowOp::from_exp(tal.alpha);
     let beta_op = PowOp::from_exp(tal.beta);
-    let mut selected: Vec<Vec<Pick>> = Vec::with_capacity(n_g);
+    let mut cands: Vec<Pick> = Vec::new();
+    let mut flat_picks: Vec<(u32, u32, f32, f32)> = Vec::with_capacity(n_g.saturating_mul(tal.topk.min(n_a)));
     for g in 0..n_g {
         let gt_box = &gt.boxes[g];
         let cls_row = &logits[gt.labels[g] as usize * n_a..(gt.labels[g] as usize + 1) * n_a];
         let lam = nwd_lambda(gt_box, tal.nwd_weight);
-        let mut cands = Vec::with_capacity(per_gt_cands[g].len());
+        cands.clear();
         for &a_u32 in &per_gt_cands[g] {
             let a = a_u32 as usize;
             let (m, u) = candidate_metric(
@@ -274,14 +277,15 @@ fn assign_image_general(
             cands.push(Pick { anchor: a_u32, m, u });
         }
         keep_topk(&mut cands, tal.topk);
-        selected.push(cands);
+        let g_u32 = g as u32;
+        flat_picks.extend(cands.iter().map(|p| (p.anchor, g_u32, p.m, p.u)));
     }
 
-    collect_image_fg(gt, &selected, tal)
+    collect_image_fg(gt, flat_picks, tal)
 }
 
-fn collect_image_fg(gt: &ImageTargets, selected: &[Vec<Pick>], tal: &TalConfig) -> ImageFg {
-    let resolved = resolve_picks(gt.boxes.len(), selected, tal);
+fn collect_image_fg(gt: &ImageTargets, flat_picks: Vec<(u32, u32, f32, f32)>, tal: &TalConfig) -> ImageFg {
+    let resolved = resolve_flat_picks(gt.boxes.len(), flat_picks, tal);
     let mut fg = ImageFg {
         anchor: Vec::with_capacity(resolved.len()),
         label: Vec::with_capacity(resolved.len()),
@@ -345,7 +349,12 @@ pub fn assign_batch(
                         return (finite, ImageFg::default());
                     }
                     let fg = match &grid {
-                        Some(levels) if tal_finite && gt.boxes.iter().all(box_is_finite) => {
+                        Some(levels)
+                            if tal_finite
+                                && gt.boxes.iter().all(|b| {
+                                    box_is_finite(b) && box_is_finite(&candidate_box(b, cfg.tal.min_box_size))
+                                }) =>
+                        {
                             assign_image_grid(reg, logits, anchors, levels, reg_max, gt, &cfg.tal)
                         }
                         _ => assign_image_general(reg, logits, anchors, reg_max, gt, &cfg.tal),
@@ -378,12 +387,134 @@ pub fn assign_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assign::assign;
-    use crate::decode::make_anchors;
+    use crate::assign::{assign, iou_plain, nwd_box};
+    use crate::boxes::ciou_eps;
+    use crate::decode::{AnchorLevel, make_anchors};
     use folo_core::rng::Rng;
 
-    /// Brute-force full-grid reference using the exact same `fast_exp` DFL decode, full-grid `sigmoid`,
-    /// and linear-scan `assign`, for bit-exact parity checks against the grid-indexed lazy implementation.
+    /// Independent pre-change dense channel-major DFL decode (does not share `decode_masked_channel_major`).
+    fn ref_decode_channel_major(reg: &[f32], anchors: &Anchors, reg_max: usize) -> Vec<Xyxy> {
+        let n_a = anchors.len();
+        let mut ltrb = vec![[0f32; 4]; n_a];
+        let (mut m, mut z, mut e) = (vec![0f32; n_a], vec![0f32; n_a], vec![0f32; n_a]);
+        for side in 0..4 {
+            let bins = &reg[side * reg_max * n_a..(side + 1) * reg_max * n_a];
+            m.fill(f32::NEG_INFINITY);
+            for row in bins.chunks_exact(n_a) {
+                m.iter_mut().zip(row).for_each(|(m, &x)| *m = m.max(x));
+            }
+            z.fill(0.0);
+            e.fill(0.0);
+            for (i, row) in bins.chunks_exact(n_a).enumerate() {
+                let fi = i as f32;
+                for (((z, e), &m), &x) in z.iter_mut().zip(e.iter_mut()).zip(&m).zip(row) {
+                    let p = fast_exp(x - m);
+                    *z += p;
+                    *e += p * fi;
+                }
+            }
+            for ((d, &z), &e) in ltrb.iter_mut().zip(&z).zip(&e) {
+                d[side] = e / z;
+            }
+        }
+        ltrb.iter()
+            .enumerate()
+            .map(|(a, &d)| {
+                let s = anchors.strides[a];
+                dist2bbox(d, anchors.points[a]).scale(s, s)
+            })
+            .collect()
+    }
+
+    /// Independent pre-change dense TAL oracle using `powf` and `O(A)` owner array (does not share
+    /// `PowOp`, `level_candidate_rect`, or `resolve_flat_picks`).
+    fn ref_assign_dense(
+        pd_scores: &[f32],
+        num_classes: usize,
+        pd_bboxes: &[Xyxy],
+        anchor_points: &[[f32; 2]],
+        gt_bboxes: &[Xyxy],
+        gt_labels: &[u32],
+        cfg: &TalConfig,
+    ) -> (Vec<bool>, Vec<usize>, Vec<f32>) {
+        let n_a = pd_bboxes.len();
+        let n_g = gt_bboxes.len();
+        if n_g == 0 || n_a == 0 || cfg.topk == 0 {
+            return (vec![false; n_a], vec![0; n_a], vec![0.0; n_a]);
+        }
+        let mut selected: Vec<Vec<(u32, f32, f32)>> = Vec::with_capacity(n_g);
+        for g in 0..n_g {
+            let cb = candidate_box(&gt_bboxes[g], cfg.min_box_size);
+            let class = gt_labels[g] as usize;
+            let lam = nwd_lambda(&gt_bboxes[g], cfg.nwd_weight);
+            let mut cands: Vec<(u32, f32, f32)> = Vec::new();
+            for (a, p) in anchor_points.iter().enumerate() {
+                if cb.contains_point(p[0], p[1], cfg.eps) {
+                    let u = if cfg.nwd_weight > 0.0 {
+                        (1.0 - lam) * iou_plain(&gt_bboxes[g], &pd_bboxes[a])
+                            + lam * nwd_box(&gt_bboxes[g], &pd_bboxes[a], 12.8)
+                    } else {
+                        ciou_eps(&gt_bboxes[g], &pd_bboxes[a]).max(0.0)
+                    };
+                    let m = pd_scores[a * num_classes + class].powf(cfg.alpha) * u.powf(cfg.beta);
+                    cands.push((a as u32, m, u));
+                }
+            }
+            if cands.len() > cfg.topk {
+                cands.select_nth_unstable_by(cfg.topk - 1, |x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+                cands.truncate(cfg.topk);
+            }
+            selected.push(cands);
+        }
+        let mut owner: Vec<Option<(u32, f32, f32)>> = vec![None; n_a];
+        for (g, picks) in selected.iter().enumerate() {
+            for &(a, m, u) in picks {
+                let slot = &mut owner[a as usize];
+                if slot.is_none_or(|(_, _, qu)| u > qu) {
+                    *slot = Some((g as u32, m, u));
+                }
+            }
+        }
+        if let Some(k2) = cfg.topk2 {
+            let mut mine: Vec<Vec<(f32, u32)>> = vec![Vec::new(); n_g];
+            for (a, o) in owner.iter().enumerate() {
+                if let Some((g, m, _)) = o {
+                    mine[*g as usize].push((*m, a as u32));
+                }
+            }
+            for list in &mut mine {
+                if list.len() > k2 {
+                    list.sort_unstable_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
+                    for &(_, a) in &list[k2..] {
+                        owner[a as usize] = None;
+                    }
+                }
+            }
+        }
+        let mut m_max = vec![0.0f32; n_g];
+        let mut u_max = vec![0.0f32; n_g];
+        for &(g, m, u) in owner.iter().flatten() {
+            m_max[g as usize] = m_max[g as usize].max(m);
+            u_max[g as usize] = u_max[g as usize].max(u);
+        }
+        let mut fg = vec![false; n_a];
+        let mut t_gt = vec![0usize; n_a];
+        let mut t_sc = vec![0.0f32; n_a];
+        for (a, o) in owner.iter().enumerate() {
+            let Some((g, m, _)) = *o else { continue };
+            let g = g as usize;
+            fg[a] = true;
+            t_gt[a] = g;
+            t_sc[a] = if cfg.eps_free {
+                if m_max[g] > 0.0 { (m / m_max[g]) * u_max[g] } else { 0.0 }
+            } else {
+                m * u_max[g] / (m_max[g] + cfg.eps)
+            };
+        }
+        (fg, t_gt, t_sc)
+    }
+
+    /// Fully independent brute-force reference for `assign_batch`.
     fn brute_force_assign_batch(
         box_raw: &Tensor,
         cls_raw: &Tensor,
@@ -414,24 +545,21 @@ mod tests {
             }
             let reg = &boxes[i * box_len..(i + 1) * box_len];
             let logits = &cls[i * cls_len..(i + 1) * cls_len];
-            // Full-grid channel-major DFL decode.
-            let mut pd_px = vec![Xyxy::default(); n_a];
-            let all_on = vec![1u8; n_a];
-            decode_masked_channel_major(reg, anchors, reg_max, &all_on, 0, &mut pd_px);
-            // Full-grid anchor-major scores.
+            let pd_px = ref_decode_channel_major(reg, anchors, reg_max);
             let mut scores = vec![0f32; n_a * nc];
             for c in 0..nc {
                 for a in 0..n_a {
                     scores[a * nc + c] = sigmoid(logits[c * n_a + a]);
                 }
             }
-            let asg = assign(&scores, nc, &pd_px, &points_px, &gt.boxes, &gt.labels, &cfg.tal);
-            for a in (0..n_a).filter(|&a| asg.fg_mask[a]) {
+            let (fg, t_gt, t_sc) =
+                ref_assign_dense(&scores, nc, &pd_px, &points_px, &gt.boxes, &gt.labels, &cfg.tal);
+            for a in (0..n_a).filter(|&a| fg[a]) {
                 out.image.push(i as u32);
                 out.anchor.push(a as u32);
-                out.label.push(asg.target_labels[a]);
-                out.score.push(asg.target_scores[a]);
-                out.target.push(asg.target_bboxes[a]);
+                out.label.push(gt.labels[t_gt[a]]);
+                out.score.push(t_sc[a]);
+                out.target.push(gt.boxes[t_gt[a]]);
             }
         }
         out
@@ -588,12 +716,70 @@ mod tests {
             "irregular_fallback",
         );
 
-        // Non-finite input on a non-candidate anchor still marks `inputs_finite = false`.
-        let mut cls_nan = c0.to_vec::<f32>().unwrap();
-        cls_nan[a0 - 1] = f32::NAN;
-        let c_nan = Tensor::from_vec(cls_nan, [1, nc, a0]).unwrap();
-        let res = assign_batch(&b0, &c_nan, &anchors_off0, &t0, &cfg).unwrap();
-        assert!(!res.inputs_finite && res.num_fg() == 0);
+        // Mixed batch: one finite image with valid GTs and one image with a NaN on a non-candidate anchor
+        // marks `inputs_finite = false` and returns no foreground entries, matching the reference.
+        let b2 = Tensor::cat(&[&b0, &b0], 0).unwrap();
+        let mut cls_mix = c0.to_vec::<f32>().unwrap();
+        let mut cls_bad = cls_mix.clone();
+        cls_bad[a0 - 1] = f32::NAN;
+        cls_mix.extend(cls_bad);
+        let c2 = Tensor::from_vec(cls_mix, [2, nc, a0]).unwrap();
+        let t2 = vec![t0[0].clone(), t0[0].clone()];
+        assert_bit_exact(
+            &assign_batch(&b2, &c2, &anchors_off0, &t2, &cfg).unwrap(),
+            &brute_force_assign_batch(&b2, &c2, &anchors_off0, &t2, &cfg),
+            "mixed_finite_non_finite",
+        );
+
+        // Extreme `f32::MAX` overflow in pixel coords / `candidate_box` falls back cleanly to `contains_point`.
+        let max_anchors = Anchors {
+            points: vec![[f32::MAX, 0.5]],
+            strides: vec![8.0],
+            levels: vec![AnchorLevel { stride: 8, height: 1, width: 1, start: 0 }],
+        };
+        let b_max = Tensor::zeros([1, 4 * reg_max, 1]);
+        let c_max = Tensor::zeros([1, 1, 1]);
+        let t_max =
+            vec![ImageTargets { boxes: vec![Xyxy::new(f32::MAX, 0.0, f32::MAX, 16.0)], labels: vec![0] }];
+        assert_bit_exact(
+            &assign_batch(&b_max, &c_max, &max_anchors, &t_max, &cfg).unwrap(),
+            &brute_force_assign_batch(&b_max, &c_max, &max_anchors, &t_max, &cfg),
+            "f32_max_overflow_fallback",
+        );
+
+        // Extreme offset where many columns collapse to the same `f32` exercises the `axis_range` binary-search
+        // fallback in O(log len) and stays bit-exact with the linear scan.
+        let big_off = (1u64 << 40) as f32;
+        let big_w = 256usize;
+        let big_anchors = Anchors {
+            points: (0..big_w).map(|x| [x as f32 + big_off, 0.5]).collect(),
+            strides: vec![1.0; big_w],
+            levels: vec![AnchorLevel { stride: 1, height: 1, width: big_w, start: 0 }],
+        };
+        let b_big = Tensor::zeros([1, 4 * reg_max, big_w]);
+        let c_big = Tensor::zeros([1, 1, big_w]);
+        let t_big =
+            vec![ImageTargets { boxes: vec![Xyxy::new(big_off, 0.0, big_off, 16.0)], labels: vec![0] }];
+        assert_bit_exact(
+            &assign_batch(&b_big, &c_big, &big_anchors, &t_big, &cfg).unwrap(),
+            &brute_force_assign_batch(&b_big, &c_big, &big_anchors, &t_big, &cfg),
+            "large_offset_binary_fallback",
+        );
+
+        // Near-tie `o2o` case: two concentric predicted squares whose `powf(6.0)` metrics differ by 1 ULP
+        // must still select the exact same winner as `powf`.
+        let gt = Xyxy::new(0.0, 0.0, 100.0, 100.0);
+        let preds = [Xyxy::new(12.0, 12.0, 88.0, 88.0), Xyxy::new(12.5, 12.5, 87.5, 87.5)];
+        let scores = [f32::from_bits(0x3eba_49a0), 0.5];
+        let pts = [[50.0, 50.0], [50.0, 50.0]];
+        let o2o_cfg = TalConfig::o2o();
+        let got_o2o = assign(&scores, 1, &preds, &pts, &[gt], &[0], &o2o_cfg);
+        let (want_fg, want_gt, want_sc) = ref_assign_dense(&scores, 1, &preds, &pts, &[gt], &[0], &o2o_cfg);
+        assert_eq!(got_o2o.fg_mask, want_fg, "o2o_1ulp_tie: fg_mask");
+        assert_eq!(got_o2o.target_gt, want_gt, "o2o_1ulp_tie: target_gt");
+        for (g, w) in got_o2o.target_scores.iter().zip(&want_sc) {
+            assert_eq!(g.to_bits(), w.to_bits(), "o2o_1ulp_tie: score {g} != {w}");
+        }
     }
 
     #[test]
