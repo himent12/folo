@@ -14,8 +14,85 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CpuSimd {
+    avx2: bool,
+    avx_vnni: bool,
+    neon: bool,
+    int8_fast: bool,
+}
+
+fn cpu_simd() -> CpuSimd {
+    #[cfg(target_arch = "x86_64")]
+    let (avx2, avx_vnni, neon) =
+        (std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avxvnni"), false);
+    #[cfg(target_arch = "aarch64")]
+    let (avx2, avx_vnni, neon) = (false, false, std::arch::is_aarch64_feature_detected!("neon"));
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let (avx2, avx_vnni, neon) = (false, false, false);
+    CpuSimd { avx2, avx_vnni, neon, int8_fast: folo_vision::model::quant::uses_vnni() }
+}
+
+fn format_simd(simd: &CpuSimd, scalar_override: bool) -> String {
+    let mut isas = Vec::new();
+    if simd.avx2 {
+        isas.push("avx2");
+    }
+    if simd.avx_vnni {
+        isas.push("avx-vnni");
+    }
+    if simd.neon {
+        isas.push("neon");
+    }
+    let isa = if isas.is_empty() { "none".to_string() } else { isas.join(", ") };
+    let int8 = if simd.int8_fast {
+        "int8 fast"
+    } else if scalar_override && simd.avx_vnni {
+        "int8 portable; disabled by FOLO_Q8_SCALAR"
+    } else if scalar_override {
+        "int8 portable; FOLO_Q8_SCALAR set"
+    } else {
+        "int8 portable"
+    };
+    format!("{isa} ({int8})")
+}
+
+fn abs_path(p: PathBuf) -> PathBuf {
+    std::path::absolute(&p).unwrap_or(p)
+}
+
+fn non_empty_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+fn resolved_home_dir() -> PathBuf {
+    if let Some(h) = non_empty_env("FOLO_HOME") {
+        return h;
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    home.map_or_else(|| PathBuf::from(".folo"), |h| PathBuf::from(h).join(".folo"))
+}
+
+fn resolved_data_dir() -> PathBuf {
+    non_empty_env("FOLO_DATA_DIR").unwrap_or_else(resolved_home_dir)
+}
+
+fn resolved_weights_dir() -> PathBuf {
+    non_empty_env("FOLO_WEIGHTS_DIR").unwrap_or_else(|| resolved_home_dir().join("weights"))
+}
+
+fn resolved_cache_dir() -> PathBuf {
+    non_empty_env("FOLO_CACHE_DIR").unwrap_or_else(|| resolved_home_dir().join("cache"))
+}
+
 pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let host = folo_server::system::host_info();
+    let simd = cpu_simd();
+    let scalar_override = std::env::var_os("FOLO_Q8_SCALAR").is_some();
+    let data_dir = abs_path(resolved_data_dir());
+    let weights_dir = abs_path(resolved_weights_dir());
+    let cache_dir = abs_path(resolved_cache_dir());
+    let cache_disabled = std::env::var_os("FOLO_NO_CACHE").is_some_and(|v| !v.is_empty() && v != "0");
     let web_dir = args.web_dir.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_DIR));
     let web_exists = web_dir.is_dir();
     let web_ready = folo_server::web_dir_ready(&web_dir);
@@ -77,8 +154,23 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         "build_date": env!("FOLO_BUILD_DATE"),
         "os": host.os,
         "arch": host.arch,
-        "cpu": { "name": host.cpu_name, "threads": host.cpu_threads },
+        "cpu": {
+            "name": host.cpu_name,
+            "threads": host.cpu_threads,
+            "simd": {
+                "avx2": simd.avx2,
+                "avx_vnni": simd.avx_vnni,
+                "neon": simd.neon,
+                "int8_fast": simd.int8_fast,
+            },
+        },
         "memory": { "total_bytes": host.memory_total_bytes, "available_bytes": host.memory_available_bytes },
+        "paths": {
+            "data_dir": crate::output::record_path(&data_dir),
+            "weights_dir": crate::output::record_path(&weights_dir),
+            "cache_dir": crate::output::record_path(&cache_dir),
+            "cache_enabled": !cache_disabled,
+        },
         "gpus": gpus,
         "gpu_detection": "wgpu",
         "gpu_selected": selected_json,
@@ -92,11 +184,19 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     out.human(format!("folo      {VERSION}"));
     out.human(format!("os        {} ({})", host.os, host.arch));
     out.human(format!("cpu       {} ({} threads)", host.cpu_name, host.cpu_threads));
+    out.human(format!("simd      {}", format_simd(&simd, scalar_override)));
     out.human(format!(
         "memory    {} total, {} available",
         gib(host.memory_total_bytes),
         gib(host.memory_available_bytes)
     ));
+    out.human(format!("data      {}", crate::output::record_path(&data_dir)));
+    out.human(format!("weights   {}", crate::output::record_path(&weights_dir)));
+    out.human(if cache_disabled {
+        format!("cache     {} (disabled by FOLO_NO_CACHE)", crate::output::record_path(&cache_dir))
+    } else {
+        format!("cache     {}", crate::output::record_path(&cache_dir))
+    });
     if adapters.is_empty() {
         out.human("gpu       no adapters found (Vulkan / DX12 / Metal); FOLO runs on the CPU");
     }
@@ -161,4 +261,33 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     };
     out.human(format!("browser   {wasm}"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_simd_describes_isa_and_int8_status() {
+        assert_eq!(
+            format_simd(&CpuSimd { avx2: true, avx_vnni: true, neon: false, int8_fast: true }, false),
+            "avx2, avx-vnni (int8 fast)"
+        );
+        assert_eq!(
+            format_simd(&CpuSimd { avx2: true, avx_vnni: true, neon: false, int8_fast: false }, true),
+            "avx2, avx-vnni (int8 portable; disabled by FOLO_Q8_SCALAR)"
+        );
+        assert_eq!(
+            format_simd(&CpuSimd { avx2: true, avx_vnni: false, neon: false, int8_fast: false }, true),
+            "avx2 (int8 portable; FOLO_Q8_SCALAR set)"
+        );
+        assert_eq!(
+            format_simd(&CpuSimd { avx2: false, avx_vnni: false, neon: true, int8_fast: false }, false),
+            "neon (int8 portable)"
+        );
+        assert_eq!(
+            format_simd(&CpuSimd { avx2: false, avx_vnni: false, neon: false, int8_fast: false }, false),
+            "none (int8 portable)"
+        );
+    }
 }
