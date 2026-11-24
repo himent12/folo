@@ -306,6 +306,11 @@ fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
     }
 }
 
+/// Whether `shape` is structurally compatible with a depthwise `Conv2d` weight (`[C, 1, kH, kW]` with `C > 1`).
+pub(crate) fn is_depthwise_conv_shape(shape: &[usize]) -> bool {
+    matches!(shape, &[c, 1, kh, kw] if c > 1 && kh > 0 && kw > 0)
+}
+
 /// Check the type and parameter sets of `c` against `o` and adopt the group hyperparameters. A `musgd` object
 /// is an error here: only [`MuSgd`] reads it.
 fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> Result<()> {
@@ -341,19 +346,24 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
     check_param_sets(o.groups(), &c.groups)?;
     if !c.muon_depthwise.is_empty() {
         let mut seen = std::collections::HashSet::with_capacity(c.muon_depthwise.len());
-        let muon_params: std::collections::HashSet<&str> = c
-            .groups
+        let muon_shapes: std::collections::HashMap<&str, &[usize]> = o
+            .groups()
             .iter()
             .filter(|g| is_muon_group(&g.name))
-            .flat_map(|g| g.params.iter().map(String::as_str))
+            .flat_map(|g| g.params.iter().map(|(n, p)| (n.as_str(), p.dims())))
             .collect();
         for name in &c.muon_depthwise {
             if !seen.insert(name.as_str()) {
                 return Err(Error::Load(format!("folo.optim: duplicate `{name}` in `muon_depthwise`")));
             }
-            if !muon_params.contains(name.as_str()) {
+            let Some(&shape) = muon_shapes.get(name.as_str()) else {
                 return Err(Error::Load(format!(
                     "folo.optim: `muon_depthwise` names `{name}`, which is not in a Muon group"
+                )));
+            };
+            if !is_depthwise_conv_shape(shape) {
+                return Err(Error::Load(format!(
+                    "folo.optim: `muon_depthwise` names `{name}` with shape {shape:?}, expected depthwise conv weight `[C > 1, 1, kH, kW]`"
                 )));
             }
         }

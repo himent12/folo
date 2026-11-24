@@ -44,7 +44,7 @@ fn ot_softplus_split(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> vec2<f32> {
         let n = norm_f32(dm_s + dl * OT_SHIFT);
         return vec2<f32>(n.x, n.y + 24.0);
     }
-    if (dm_s < -700.0 * OT_SHIFT) {
+    if (dm_s < -710.0 * OT_SHIFT) {
         return vec2<f32>(0.0, 0.0);
     }
     let delta = (m_e - m_r) + dl;
@@ -62,7 +62,7 @@ fn ot_softplus_split(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> vec2<f32> {
 fn ot_sigmoid_split(m_e: f32, a_e: f32, m_r: f32, a_r: f32) -> vec2<f32> {
     let dm_s = m_e * OT_SHIFT - m_r * OT_SHIFT;
     if (dm_s > 100.0 * OT_SHIFT) { return vec2<f32>(1.0, 0.0); }
-    if (dm_s < -700.0 * OT_SHIFT) { return vec2<f32>(0.0, 0.0); }
+    if (dm_s < -710.0 * OT_SHIFT) { return vec2<f32>(0.0, 0.0); }
     let delta = (m_e - m_r) + (log_ge1(a_e) - log_ge1(a_r));
     if (delta >= 0.0) {
         return norm_f32(1.0 / (1.0 + safe_exp_neg(-delta)));
@@ -132,6 +132,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // Softmax per side (p) and log-softmax (lp), kept for the backward.
     var p: array<f32, 4u * R>;
     var lp: array<f32, 4u * R>;
+    var side_m: vec4<f32>;
+    var side_z: vec4<f32>;
     var d: vec4<f32>;
     var dfl = 0.0;
     var ot_sum = vec2<f32>(0.0, 0.0);
@@ -153,6 +155,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             p[side * R + k] = e;
             z = z + e;
         }
+        side_m[side] = m;
+        side_z[side] = z;
         let lz = log_ge1(z);
         var dist = 0.0;
         for (var k = 0u; k < R; k++) {
@@ -459,11 +463,21 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let q = p[side * R + k];
             let jac = q * (f32(k) - d[side]);
             var gk = g_d[side] * jac + sd * wsum * q;
-            if (fiou_d[side] != 0.0 && jac != 0.0 && g_base_sp.x != 0.0) {
-                gk = gk + split_to_f32(mul_split(mul_split(norm_f32(fiou_d[side]), norm_f32(jac)), g_base_sp));
-            }
-            if (edge_m[side] != 0.0 && jac != 0.0) {
-                gk = gk + split_to_f32(mul_split(vec2<f32>(edge_m[side], edge_e[side]), norm_f32(jac)));
+            if (box_kind == 1u) {
+                var q_sp = norm_f32(q);
+                if (q < 1e-30) {
+                    let xk = BOX[base + (side * R + k) * na];
+                    q_sp = div_split(exp_diff_split(xk, side_m[side]), norm_f32(side_z[side]));
+                }
+                let jac_sp = mul_split(q_sp, norm_f32(f32(k) - d[side]));
+                var rpiou_sp = vec2<f32>(0.0, 0.0);
+                if (fiou_d[side] != 0.0 && jac_sp.x != 0.0 && g_base_sp.x != 0.0) {
+                    rpiou_sp = mul_split(mul_split(norm_f32(fiou_d[side]), jac_sp), g_base_sp);
+                }
+                if (edge_m[side] != 0.0 && jac_sp.x != 0.0) {
+                    rpiou_sp = add_split(rpiou_sp, mul_split(vec2<f32>(edge_m[side], edge_e[side]), jac_sp));
+                }
+                gk = gk + split_to_f32(rpiou_sp);
             }
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }

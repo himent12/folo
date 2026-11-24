@@ -264,10 +264,13 @@ fn rpiou_box_f64(a: [f64; 4], b: [f64; 4], beta: f64, kappa: f64, delta0: f64) -
     let iy = ay2.min(by2) - ay1.max(by1);
     let iw = ix.max(0.0);
     let ih = iy.max(0.0);
+    let area1 = w1 * h1;
+    let area2 = w2 * h2;
     let inter = iw * ih;
-    let uni = w1 * h1 + w2 * h2 - inter + EPS;
+    let uni = area1 + area2 - inter + EPS;
     let iou = inter / uni;
-    let focal = (1.0 - iou) * (1.0 + beta * iou);
+    let one_minus_iou = ((area1 - inter).max(0.0) + (area2 - inter).max(0.0) + EPS) / uni;
+    let focal = one_minus_iou * (1.0 + beta * iou);
     let g_u = -(1.0 - beta + 2.0 * beta * iou);
     let g_inter = g_u * (1.0 / uni + inter / (uni * uni));
     let g_uni = -g_u * inter / (uni * uni);
@@ -394,6 +397,7 @@ fn rpiou_from_logits(
     if n == 0 {
         return Tensor::zeros_with([], DType::F32, dev);
     }
+    let raw_logits = logits.to_vec::<f32>()?;
     let probs = probs_t.to_vec::<f32>()?;
     let dists = dist_t.to_vec::<f32>()?;
     let pds = pd_t.to_vec::<f32>()?;
@@ -431,10 +435,22 @@ fn rpiou_from_logits(
                         continue;
                     }
                     let d_s = dists[4 * i + side] as f64;
-                    let prow = &probs[(4 * i + side) * r..(4 * i + side + 1) * r];
-                    let grow = &mut grad[(4 * i + side) * r..(4 * i + side + 1) * r];
+                    let row = (4 * i + side) * r..(4 * i + side + 1) * r;
+                    let prow = &probs[row.clone()];
+                    let lrow = &raw_logits[row.clone()];
+                    let grow = &mut grad[row];
+                    let tiny = prow.iter().any(|&pk| pk < 1e-30);
+                    let (m_side, z_side) = if tiny {
+                        let m = lrow.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let z: f64 = lrow.iter().map(|&x| exp_neg_f64(x, m)).sum();
+                        (m, z)
+                    } else {
+                        (0.0, 1.0)
+                    };
                     for (k, (&pk, gk)) in prow.iter().zip(grow.iter_mut()).enumerate() {
-                        *gk = (gd * (pk as f64) * (k as f64 - d_s)) as f32;
+                        let pk64 =
+                            if pk >= 1e-30 { pk as f64 } else { exp_neg_f64(lrow[k], m_side) / z_side };
+                        *gk = (gd * pk64 * (k as f64 - d_s)) as f32;
                     }
                 }
             }

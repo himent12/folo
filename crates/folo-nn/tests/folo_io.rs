@@ -718,6 +718,40 @@ fn musgd_polar_ortho_resumes_through_the_checkpoint() {
     train_steps(&mut bg, 3);
     assert_eq!(snapshot(&bg), want_geo, "Conv-GeoMuon checkpoint resume must be bit-identical");
 
+    // A non-depthwise weight in `muon_depthwise` (e.g. a standard conv or rank-2 linear weight) must be rejected
+    // both during checkpoint validation and direct `apply_contract`.
+    {
+        let mut bad_c = geo_run.opt.contract();
+        bad_c.muon_depthwise = vec!["head.cls.p3.tall.conv.weight".into()];
+        assert!(
+            geo_run.opt.apply_contract(&bad_c).is_err(),
+            "apply_contract must reject non-depthwise shape"
+        );
+        let mut m = gmap.clone();
+        let mut oj: serde_json::Value = serde_json::from_str(&m["folo.optim"]).unwrap();
+        oj["muon_depthwise"] = serde_json::json!(["head.cls.p3.tall.conv.weight"]);
+        m.insert("folo.optim".into(), oj.to_string());
+        assert!(
+            rewrite(&m, &gtensors).err().unwrap().to_string().contains("depthwise conv weight"),
+            "checkpoint validation must reject non-depthwise shape"
+        );
+    }
+    {
+        let mut rng = Rng::seed(26);
+        let lin = Tensor::randn([8, 4], 0.0, 0.1, &mut rng).requires_grad_();
+        let g = ParamGroup::new("decay", vec![("fc.weight".into(), lin)]);
+        let mut opt = MuSgd::with_ortho_and_geo(
+            vec![g],
+            MuSgdWeights::default(),
+            MuonOrtho::Polar4,
+            folo_nn::optim::MuonGeoMode::Geo,
+        )
+        .unwrap();
+        let mut bad_c = opt.contract();
+        bad_c.muon_depthwise = vec!["fc.weight".into()];
+        assert!(opt.apply_contract(&bad_c).is_err(), "apply_contract must reject rank-2 linear weight");
+    }
+
     // Verify `Geo` with depthwise actually diverges from both `Legacy` and dense-`Geo` (without depthwise mask).
     let mut legacy_run = build_geo_run(24, folo_nn::optim::MuonGeoMode::Legacy, false);
     train_steps(&mut legacy_run, 6);

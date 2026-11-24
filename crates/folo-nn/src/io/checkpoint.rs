@@ -209,6 +209,13 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
                 "folo.optim: `muon_depthwise` names `{p}`, which is not in a Muon group"
             )));
         }
+        let info = file.info(p.as_str()).expect("muon param is a model tensor");
+        if !crate::optim::is_depthwise_conv_shape(&info.shape) {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `muon_depthwise` names `{p}` with shape {:?}, expected depthwise conv weight `[C > 1, 1, kH, kW]`",
+                info.shape
+            )));
+        }
     }
 
     let ema_names: BTreeSet<&str> = file

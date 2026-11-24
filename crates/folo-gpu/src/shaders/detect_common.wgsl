@@ -248,10 +248,13 @@ fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) 
     let h1 = max(a.w - a.y, 0.0);
     let w2 = max(b.z - b.x, 0.0);
     let h2 = max(b.w - b.y, 0.0);
+    let area1 = w1 * h1;
+    let area2 = w2 * h2;
     let inter = max(min(a.z, b.z) - max(a.x, b.x), 0.0) * max(min(a.w, b.w) - max(a.y, b.y), 0.0);
-    let uni = w1 * h1 + w2 * h2 - inter + eps;
+    let uni = area1 + area2 - inter + eps;
     let iou = inter / uni;
-    let focal_iou = (1.0 - iou) * (1.0 + beta * iou);
+    let one_minus_iou = (max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps) / uni;
+    let focal_iou = one_minus_iou * (1.0 + beta * iou);
     let rkn = norm_f32(sqrt(kappa));
     let sx = max(w2, delta0);
     let sy = max(h2, delta0);

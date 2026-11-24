@@ -745,4 +745,88 @@ fn new_math_extreme_edge_cases_match_host() {
             close_vec(&g_gpu, &g_cpu, 1e-3 * scale, 2e-3, &format!("{tag}/box_raw"));
         }
     }
+
+    // 14. Matching 3x3 grid-unit boxes under large `box_gain = 2e38` (`beta = 0.5`): naive `1 - 9 / (9 + 1e-7)`
+    //     rounds to `0` in `f32`, whereas the non-overlapping deficit retains `~3.33e30` matching CPU `f64`.
+    {
+        let anchors = Anchors { points: vec![[3.5, 3.5]], strides: vec![1.0], ..Anchors::default() };
+        let mut bd_v = vec![0.0f32; 16];
+        for s in 0..4 {
+            bd_v[s * 4] = -1000.0;
+            bd_v[s * 4 + 3] = -1000.0;
+        }
+        let bx = Tensor::from_slice(&bd_v, [1, 16, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(2.0, 2.0, 5.0, 5.0)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 4,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            box_gain: 2e38,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) = (bx.to_device(dev).unwrap(), cx.to_device(dev).unwrap());
+        let want = detection_loss_host(&bx, &cx, &anchors, &tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
+        let t_w = want.target_score_sum as f64;
+        let uni = 9.0f64 + 1e-7f64;
+        let ref_loss = (t_w * (1e-7f64 / uni) * (1.0 + 0.5 * (9.0 / uni)) * 2e38f64) as f32;
+        assert!(ref_loss > 1e30 && want.is_finite() && got.is_finite());
+        assert!(
+            (want.total_value - ref_loss).abs() <= 1e-4 * ref_loss,
+            "CPU matching-3x3 R-PIoU {} vs ref {ref_loss}",
+            want.total_value
+        );
+        assert!(
+            (got.total_value - ref_loss).abs() <= 1e-3 * ref_loss,
+            "GPU matching-3x3 R-PIoU {} vs ref {ref_loss}",
+            got.total_value
+        );
+    }
+
+    // 15. Subnormal-range softmax Jacobian in R-PIoU (`[-89, 0, 0, -1000]`, `box_gain = 1e38`, predicted 3x3 inside
+    //     target 3.5x3.5): carrying `q` and `jac` in exponent-split form preserves bin 0's appreciable gradient even
+    //     on FTZ GPUs instead of flushing to zero before `box_gain`.
+    {
+        let anchors = Anchors { points: vec![[3.5, 3.5]], strides: vec![1.0], ..Anchors::default() };
+        let mut bd_v = vec![0.0f32; 16];
+        for s in 0..4 {
+            bd_v[s * 4] = -89.0;
+            bd_v[s * 4 + 3] = -1000.0;
+        }
+        let bx = Tensor::from_slice(&bd_v, [1, 16, 1]).unwrap();
+        let cx = Tensor::zeros([1, 1, 1]);
+        let tgts = vec![ImageTargets { boxes: vec![Xyxy::new(1.75, 1.75, 5.25, 5.25)], labels: vec![0] }];
+        let cfg = LossConfig {
+            reg_max: 4,
+            box_loss: BoxLossKind::Rpiou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            box_gain: 1e38,
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            ..LossConfig::default()
+        };
+        let (bd, cd) =
+            (bx.to_device(dev).unwrap().requires_grad_(), cx.to_device(dev).unwrap().requires_grad_());
+        let (bh, ch) = (bx.requires_grad_(), cx.requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, &tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, &tgts, &cfg).unwrap();
+        assert!(want.is_finite() && got.is_finite());
+        let g_gpu = got.total.backward().unwrap().get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let g_cpu = want.total.backward().unwrap().get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(g_cpu[0].abs() > 0.01, "expected appreciable CPU bin-0 grad, got {}", g_cpu[0]);
+        assert!(g_gpu[0].abs() > 0.01, "expected appreciable GPU bin-0 grad, got {}", g_gpu[0]);
+        assert!(
+            (g_gpu[0] - g_cpu[0]).abs() <= 1e-3 * g_cpu[0].abs(),
+            "GPU bin-0 grad {} vs CPU {}",
+            g_gpu[0],
+            g_cpu[0]
+        );
+        let scale = g_cpu.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&g_gpu, &g_cpu, 1e-3 * scale, 2e-3, "subnormal_jac_rpiou/box_raw");
+    }
 }
