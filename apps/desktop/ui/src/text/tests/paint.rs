@@ -196,6 +196,72 @@ fn background_runs_become_quads() {
 }
 
 #[test]
+fn paint_line_background_skips_metrics_when_no_run_has_background() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct MetricsCountingPlatform {
+        inner: crate::FixedTextSystem,
+        metrics_calls: AtomicUsize,
+    }
+
+    impl crate::PlatformTextSystem for MetricsCountingPlatform {
+        fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> Result<()> {
+            self.inner.add_fonts(fonts)
+        }
+        fn all_font_names(&self) -> Vec<String> {
+            self.inner.all_font_names()
+        }
+        fn font_id(&self, descriptor: &crate::Font) -> Result<FontId> {
+            self.inner.font_id(descriptor)
+        }
+        fn font_metrics(&self, font_id: FontId) -> crate::FontMetrics {
+            self.metrics_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.font_metrics(font_id)
+        }
+        fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
+            self.inner.typographic_bounds(font_id, glyph_id)
+        }
+        fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<crate::Size<f32>> {
+            self.inner.advance(font_id, glyph_id)
+        }
+        fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
+            self.inner.glyph_for_char(font_id, ch)
+        }
+        fn glyph_raster_bounds(
+            &self,
+            params: &crate::RenderGlyphParams,
+        ) -> Result<Bounds<crate::DevicePixels>> {
+            self.inner.glyph_raster_bounds(params)
+        }
+        fn rasterize_glyph(
+            &self,
+            params: &crate::RenderGlyphParams,
+            raster_bounds: Bounds<crate::DevicePixels>,
+        ) -> Result<(crate::Size<crate::DevicePixels>, Vec<u8>)> {
+            self.inner.rasterize_glyph(params, raster_bounds)
+        }
+        fn layout_line(&self, text: &str, font_size: Pixels, runs: &[crate::FontRun]) -> LineLayout {
+            self.inner.layout_line(text, font_size, runs)
+        }
+        fn glyph_blend(&self) -> crate::GlyphBlend {
+            self.inner.glyph_blend()
+        }
+    }
+
+    let platform = Arc::new(MetricsCountingPlatform::default());
+    let window = crate::WindowTextSystem::new(Arc::new(crate::TextSystem::new(platform.clone())));
+    let line = window.shape_line("abcdef".into(), px(16.), &runs(&[6]), None);
+    let mut rec = Recorder::default();
+    line.paint_background_with(point(px(0.), px(0.)), px(20.), &window, &mut rec).unwrap();
+    assert!(rec.0.is_empty());
+    assert_eq!(platform.metrics_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn emoji_glyphs_go_to_paint_emoji() {
     let window = window_text_system();
     let font_id = window.resolve_font(&super::dummy_font());

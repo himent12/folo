@@ -10,7 +10,7 @@ code's own map is [crates/README.md](../crates/README.md) and the README in each
 |---|---|
 | [QUICKSTART](QUICKSTART.md) | How do I install FOLO, train on my own YOLO or COCO folder, fine-tune, evaluate, export and run in the browser? |
 | [CLI](CLI.md) | What does each `folo` command do, with which flags, `--json` records and exit codes? |
-| [LABELING](LABELING.md) | How do I turn unlabeled images into a dataset with Claude Code or Codex, and what does it cost? |
+| [LABELING](LABELING.md) | How do I turn unlabeled images into a dataset with Claude Code, Codex or Antigravity, and what does it cost? |
 | [CLOUD](CLOUD.md) | How do I train on a rented GPU (RunPod) or another FOLO server, and how are instances never left behind? |
 | [BENCH](BENCH.md) | How do I build a vision benchmark from my own images and score any model on it? |
 
