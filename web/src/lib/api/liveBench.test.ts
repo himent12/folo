@@ -216,6 +216,18 @@ describe('LiveBench ordering', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('clears all retry timers on teardown after overlapping failed resyncs', async () => {
+    const { stop } = mount();
+    entries.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    hub.api.bench = () => Promise.reject(new Error('flaky'));
+    handlers.reconnect?.();
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('shows a first load that failed as the error, even after a bench event, never as an empty board', async () => {
     const { live, stop } = mount();
     handlers.bench?.(bench('from the stream'));

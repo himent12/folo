@@ -196,6 +196,7 @@ export class LiveBench {
             this.error = e;
             this.loading = false;
           }
+          clearTimeout(syncTimer);
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };

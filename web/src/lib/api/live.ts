@@ -319,8 +319,10 @@ export class LiveRun {
           const since = Math.min(tail.length, this.#streamedLogs - asked);
           const seen = new Set(l.lines.map((x) => `${x.t}|${x.message}`));
           const newer = tail.slice(tail.length - since).filter((x) => !seen.has(`${x.t}|${x.message}`)).length;
+          const before = this.logs.length;
           this.logs = mergeLogs(l.lines, this.logs);
           if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
+          else if (before > this.logs.length) this.logsEarlier += before - this.logs.length;
         };
         api.runLogs(runId, MAX_LOGS, view.signal).then(
           (l) => {
@@ -535,15 +537,13 @@ export class LiveRun {
             this.steps.push(s);
           }
           const prev = this.#pendingStep;
-          this.#pendingStep = prev
-            ? {
-                step: s.step,
-                epoch: s.epoch,
-                eta_s: s.eta_s,
-                steps_per_epoch: s.steps_per_epoch !== undefined && s.steps_per_epoch > 0 ? s.steps_per_epoch : prev.steps_per_epoch,
-                epochs: s.epochs !== undefined && s.epochs > 0 ? s.epochs : prev.epochs,
-              }
-            : { step: s.step, epoch: s.epoch, eta_s: s.eta_s, steps_per_epoch: s.steps_per_epoch, epochs: s.epochs };
+          this.#pendingStep = {
+            step: s.step,
+            epoch: s.epoch,
+            eta_s: s.eta_s,
+            steps_per_epoch: s.steps_per_epoch !== undefined && s.steps_per_epoch > 0 ? s.steps_per_epoch : prev?.steps_per_epoch,
+            epochs: s.epochs !== undefined && s.epochs > 0 ? s.epochs : prev?.epochs,
+          };
           // A real run reports 0 steps per epoch until its trainer has loaded the data, i.e. in the snapshot taken
           // at start. Current servers put the run's length on every step (above); for older ones, whose steps lack
           // it, ask once more (only that field is taken; progress needs it).
@@ -630,7 +630,7 @@ export class LiveRun {
         clearTimeout(syncTimer);
         clearTimeout(replayTimer);
         unsub();
-        cancelAnimationFrame(this.#raf);
+        if (this.#raf) cancelAnimationFrame(this.#raf);
         this.#raf = 0;
         this.#pendingStep = null;
       };

@@ -457,6 +457,30 @@ describe('LiveLabelJob ordering', () => {
     expect(signals.every((s) => s?.aborted)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('flushes pending SSE image updates on drop() and clears timers after overlapping failed resyncs', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 2, images: [img('1'), img('2')] });
+    await vi.advanceTimersByTimeAsync(20);
+    handlers.image?.(img('1', 'labeled'));
+    live.drop('2');
+    expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled']);
+    // Two overlapping failed resyncs must not leave an orphaned retry timer after teardown.
+    const d1 = deferred<LabelImagePage>();
+    const d2 = deferred<LabelImagePage>();
+    let n = 0;
+    hub.api.labelImages = () => (n++ === 0 ? d1.promise : d2.promise);
+    handlers.reload?.({});
+    handlers.reload?.({});
+    d1.promise.catch(() => {});
+    d2.promise.catch(() => {});
+    hub.api.labelJob = () => Promise.reject(new Error('flaky'));
+    handlers.reload?.({});
+    handlers.reload?.({});
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('LiveLabelJob with the mock', () => {

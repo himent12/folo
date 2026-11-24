@@ -259,6 +259,7 @@ export class LiveLabelJob {
         clearTimeout(syncTimer);
         load().catch((e) => {
           if (closed || gone(e)) return;
+          clearTimeout(syncTimer);
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
@@ -269,6 +270,10 @@ export class LiveLabelJob {
         this.#heard.set(id, ++this.#imageSeq);
         if (!img) this.#removals++;
         for (const f of this.#inflight) f.changes.set(id, img);
+        if (!img && !this.#imageIndex.has(id)) {
+          this.#pendingImages.delete(id);
+          return;
+        }
         this.#pendingImages.set(id, img);
         this.#bump();
       };
@@ -365,21 +370,25 @@ export class LiveLabelJob {
    * did, or what became of it while the stream was down; what the action did later, the stream tells).
    */
   put(images: readonly LabelImage[], since: number) {
-    if (this.#pendingImages.size) this.#flushImages();
-    const fresh = images.filter((img) => (this.#heard.get(img.id) ?? 0) <= since);
-    if (!fresh.length) return;
-    const changes = fresh.map((img) => [img.id, img] as const);
-    // A load sent before the action began may predate what it did: the answer goes over what that load gets.
-    for (const f of this.#inflight) if (f.sent <= since) for (const [id, img] of changes) f.changes.set(id, img);
-    if (this.#loaded <= since) this.images = applyChanges(this.images, changes);
+    batch(() => {
+      if (this.#pendingImages.size) this.#flushImages();
+      const fresh = images.filter((img) => (this.#heard.get(img.id) ?? 0) <= since);
+      if (!fresh.length) return;
+      const changes = fresh.map((img) => [img.id, img] as const);
+      // A load sent before the action began may predate what it did: the answer goes over what that load gets.
+      for (const f of this.#inflight) if (f.sent <= since) for (const [id, img] of changes) f.changes.set(id, img);
+      if (this.#loaded <= since) this.images = applyChanges(this.images, changes);
+    });
   }
 
   /** Drops a deleted image (also from a load in flight, which may still have it). */
   drop(id: string) {
-    if (this.#pendingImages.size) this.#flushImages();
-    for (const f of this.#inflight) f.changes.set(id, null);
-    if (!this.#imageIndex.has(id)) return;
-    this.images = this.images.filter((x) => x.id !== id);
+    batch(() => {
+      if (this.#pendingImages.size) this.#flushImages();
+      for (const f of this.#inflight) f.changes.set(id, null);
+      if (!this.#imageIndex.has(id)) return;
+      this.images = this.images.filter((x) => x.id !== id);
+    });
   }
 
   #setImages(v: LabelImage[]) {

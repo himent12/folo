@@ -109,6 +109,58 @@ describe('LiveRun frame batching and chunked log trimming', () => {
       handlers.log?.({ t: at(MAX_LOGS + LOG_TRIM_BATCH - 1), level: 'info', message: `stream ${LOG_TRIM_BATCH - 1}` });
       expect(live.logs.length).toBe(MAX_LOGS);
       expect(live.logsEarlier).toBe(LOG_TRIM_BATCH);
+      // A no-total history response that slices buffered lines back down to MAX_LOGS still accounts for them.
+      for (let i = 0; i < 10; i++) {
+        handlers.log?.({ t: at(MAX_LOGS + LOG_TRIM_BATCH + i), level: 'info', message: `buf ${i}` });
+      }
+      expect(live.logs.length).toBe(MAX_LOGS + 10);
+      hub.api.runLogs = () => Promise.resolve({ lines: live.logs.slice(-500) });
+      handlers.reconnect?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(live.logs.length).toBe(MAX_LOGS);
+      expect(live.logsEarlier).toBe(LOG_TRIM_BATCH + 10);
+    } finally {
+      stop();
+    }
+  });
+
+  it('preserves pending step progress when status arrives mid-frame without double-updating on the next frame', async () => {
+    let handlers: RunEventHandlers = {};
+    const fake: Partial<Api> = {
+      mock: false,
+      run: () => Promise.resolve({ ...snapshot, status: 'running', step: 2, steps_per_epoch: 10 }),
+      runMetrics: () => Promise.resolve({ steps: [step(1), step(2)], epochs: [] }),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id, h) => {
+        handlers = h;
+        return () => {};
+      },
+    };
+    hub.api = fake as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    let runUpdates = 0;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+      effect(() => {
+        void live.run;
+        runUpdates++;
+      });
+    });
+    try {
+      flushSync();
+      await vi.advanceTimersByTimeAsync(20);
+      runUpdates = 0;
+      handlers.step?.({ ...step(9), epoch: 3, eta_s: 42 });
+      handlers.status?.({ status: 'stopping', error: null });
+      flushSync();
+      expect(live.run?.status).toBe('stopping');
+      expect(live.run?.step).toBe(9);
+      expect(live.run?.epoch).toBe(3);
+      expect(runUpdates).toBe(1);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(runUpdates).toBe(1);
+      expect(live.run?.step).toBe(9);
     } finally {
       stop();
     }
