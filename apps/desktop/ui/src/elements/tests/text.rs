@@ -162,3 +162,36 @@ fn two_clamps_of_one_text_in_one_frame_wrap_independently() {
         assert_eq!((column(true), column(false)), (first, second));
     }
 }
+
+#[test]
+fn styled_text_paints_background_only_when_runs_have_one() {
+    let make_run = |len, bg| TextRun {
+        len,
+        font: font("Fixed"),
+        color: rgb(0xffffff).into(),
+        background_color: bg,
+        underline: None,
+        strikethrough: None,
+    };
+    let (mut app, window) = open(move |_, _| {
+        text_box(200.)
+            .child(StyledText::new("abcd").with_runs(vec![make_run(2, None), make_run(2, None)]))
+            .into_any_element()
+    });
+    assert!(super::quads(&draw(&mut app, window)).is_empty());
+
+    let highlight = rgb(0x336699).into();
+    let (mut app, window) = open(move |_, _| {
+        text_box(200.)
+            .child(StyledText::new("abcd").with_runs(vec![
+                make_run(1, None),
+                make_run(2, Some(highlight)),
+                make_run(1, None),
+            ]))
+            .into_any_element()
+    });
+    let quads = super::quads(&draw(&mut app, window));
+    assert_eq!(quads.len(), 1);
+    assert_eq!(super::solid(&quads[0]), highlight);
+    assert_eq!(quads[0].bounds, super::sb(6., 0., 12., 20.));
+}
