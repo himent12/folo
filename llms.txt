@@ -42,9 +42,9 @@ Fastest path for an agent:
   their JSON Schemas, the `folo://` resources (dataset images, subscribable runs and metrics, sample grids, docs),
   the prompts train_on_folder, label_folder and diagnose_run, and the errors: `isError` results whose text is
   `{code, message, hint}`
-- [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, stop, val, predict, export, bench,
-  dataset synth|stats|check|convert, weights, cloud, label, mcp), its flags and its --json records, plus the error and
-  exit-code conventions
+- [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, stop, val, predict, export, quantize,
+  bench, dataset synth|stats|check|convert, weights, cloud, label, mcp), its flags and its --json records, plus the
+  error and exit-code conventions
 
 ## Reference
 - [HTTP API](docs/API.md): the HTTP + SSE contract of `folo serve`, used by Studio, Desktop and `folo mcp --server`.
@@ -70,14 +70,18 @@ Fastest path for an agent:
   folo-wasm, folo-test-support), how they fit together, the main flows, and a "Where do I change ...?" table from a
   change to the files it touches
 - [Server internals](docs/SERVER.md): how folo-server is built: the router, the Store and the services behind the API
-- [Detector spec](docs/MODEL.md): the normative spec of folo-n/s/m/l/x. It covers the blocks, the head, the loss,
-  the task-aligned assigner, the training recipe and the inference path
-- [Vision internals](docs/VISION.md): a tour of folo-vision's code: the model, loss, assigner, trainer and predictor
-- [Core](docs/CORE.md): folo-core in depth: tensors, CPU kernels and autograd
-- [Data](docs/DATA.md): YOLO and COCO detection rules, label parsing, robustness, augmentation, the data loader,
-  dataset checks and conversion
+- [Detector spec](docs/MODEL.md): the normative spec of folo-n/s/m/l/x. It covers the blocks, the head, the loss
+  (CIoU/R-PIoU/NWD-IoU, BCE/MAL, DFL/OT-DFL), the task-aligned assigner, the training recipe (MuSGD with Polar-FOLO /
+  Conv-GeoMuon, dense/BCKD/GT-verified distillation), and the inference path (SEBF/DFL-CGR post-processing, int8 CPU)
+- [Vision internals](docs/VISION.md): a tour of folo-vision's code: `FoloModel` and `FoloV2Model` (FOLO v2-Iso), loss,
+  assigner, fusion/NMS (SEBF, ELC/DFL-CGR), trainer, predictor, int8 quantisation and ONNX export
+- [Core](docs/CORE.md): folo-core in depth: tensors, CPU kernels (BLIS GEMM, Winograd F(2×2) and F(4×4, 3×3), AVX-VNNI
+  int8 and direct u8 stem) and autograd
+- [Data](docs/DATA.md): YOLO and COCO detection rules, label parsing, robustness, augmentation, the bit-exact AVX2
+  warp/resize/HSV L1-fused planar data loader, dataset checks and conversion
 - [Metrics](docs/METRICS.md): how mAP, precision, recall and the confusion matrix are computed (pycocotools parity)
-- [NN](docs/NN.md): modules, init, optimizers (SGD, AdamW), LR schedules, EMA, and `.folo` IO
+- [NN](docs/NN.md): modules, init, optimizers (SGD, AdamW, MuSGD with Polar-FOLO and Conv-GeoMuon), LR schedules, EMA,
+  and `.folo` IO
 - [File format](docs/FORMAT.md): `.folo` weights and checkpoints (safetensors-compatible) and its metadata
 - [GPU](docs/GPU.md): the wgpu backend, buffer pool and WGSL kernels, adapter selection (`FOLO_GPU_ADAPTER`,
   `FOLO_GPU_BACKEND`) and testing
@@ -111,8 +115,9 @@ Fastest path for an agent:
 ## Examples
 - [Shapes](examples/shapes/README.md): the convergence test (folo-n on synthetic shapes at 320 px). It has the
   commands and per-epoch results on CPU (72 min) and GPU (169 s)
-- [COCO](examples/coco/README.md): folo-n and folo-s pretrained from scratch on COCO 2017 at 640 px (val2017 AP 0.317
-  and 0.416), with pycocotools parity and `folo weights`
+- [COCO](examples/coco/README.md): folo-n and folo-s pretrained from scratch on COCO 2017 at 640 px (val2017
+  `folo-n-coco-v5` AP 0.370 / AP50 0.525 — 0.373 with DFL fusion, 0.3776 with SEBF + DFL-CGR — and `folo-s-coco` AP
+  0.416 / AP50 0.580), with pycocotools parity and `folo weights`
 
 ## Apps
 - [FOLO Studio](web/README.md): the web app (TypeScript + Vite on fw, its own UI framework in web/framework). It
