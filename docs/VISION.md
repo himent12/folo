@@ -44,36 +44,40 @@ differentiable, so it works on folo-core tensors.
   downloaded), `to_device()`, and `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 
 ### FOLO v2-Iso (`model/v2/`)
-Clean-sheet, hardware-co-designed detector family (`folo2-n/s/m/l/x`) built for FOLO's custom Rust/WGSL/AVX-VNNI
-kernels while keeping standard CPU/GPU autograd and ONNX opset-17 compatibility:
+Clean-sheet, hardware-co-designed detector family (`folo2-n/s/m/l/x`) built on standard CPU/GPU autograd primitives and
+ONNX opset-17-expressible ops (`export::onnx` and `model::quant` currently target v1 `FoloModel`):
 - **Config & scaling (`config.rs`):** `FoloV2Config` and `ScalingV2` enforce `ceil16`-aligned widths at every stage
   and lock shared head widths (`c_box = 48`, `c_cls = 64`) across `n` and `s` for zero-adapter CrossKD; `plus = true`
   selects the deeper `v2-Plus` tier.
 - **Blocks (`blocks.rs`):** `StemV2` (`space_to_depth_2x2` + `Conv1×1`, or `Conv3×3 s=2` when `spd_stem = false`),
-  `WsQARepConv3x3` (sums `3×3 + 1×3 + 3×1 + 1×1 + γ_id·I` in weight space before one post-BN + SiLU during training,
-  and collapses into a single dense `3×3` conv on `fuse()`), `FoloBlock` (`ceil16`-aligned QARep-CSP / Rep-ELAN with
-  at most three zero-copy `forward_cat` parts), `HyperContext` (linear `O(N·M)` P5 hypergraph global context replacing
-  C2PSA, returning `(P5, g_scene)`), and `FullPadGate` (zero-init residual FiLM gate `feat * (1 + tanh(proj(g_scene)))`).
-- **Backbone, SPD-PAN neck & `LazyAlignHead` (`mod.rs`, `head.rs`):** `NeckV2` injects lossless `SPD-P2→P3`
-  (`p2_proj` over `space_to_depth_2x2(P2)`, keeping 8,400 anchors at 640×640) and applies `pad_p3`/`pad_p4` strictly
-  to the `P3`/`P4` head inputs *after* `neck.down3`/`neck.down4` taps so the bottom-up neck stays contiguous for int8.
-  `LazyAlignHead` pairs a depthwise-free dense `ClsBranchV2` with `BoxBranchV2` (`2 × WsQARepConv3x3` + 64-channel
-  `out` and opt-in separate `iou_out: Conv1×1(c_box → 1)`), plus optional `o2o` (`O2oClsLevel` with `PeakSuppress`
-  3×3 local-peak-preserving lateral inhibition sharing `BoxBranchV2`). `HeadOutputV2::into_head_output()` converts
-  directly to v1's `HeadOutput`.
+  `WsQARepConv3x3` (sums `3×3 + 1×3 + 3×1 + 1×1`, plus per-channel `γ_id·I` when `c_in == c_out`, in weight space
+  before one post-BN + SiLU during training, and collapses into a single dense `3×3` conv on `fuse()`), `FoloBlock`
+  (`ceil16`-aligned QARep-CSP / Rep-ELAN whose `cv2` reads at most three `forward_cat` parts, eliding concatenation on
+  fused paths), `HyperContext` (linear `O(N·M)` P5 hypergraph global context replacing C2PSA, returning `(P5, g_scene)`),
+  and `FullPadGate` (zero-init residual FiLM gate `feat * (1 + tanh(proj(g_scene)))`).
+- **Backbone, SPD-PAN neck & `LazyAlignHead` (`mod.rs`, `head.rs`):** `NeckV2` projects lossless
+  `space_to_depth_2x2(P2)` through `p2_proj` (`4·c1 → c1`) into P3 (keeping 8,400 anchors at 640×640) and applies
+  `pad_p3`/`pad_p4` strictly to the `P3`/`P4` head inputs *after* `neck.down3`/`neck.down4` taps so the bottom-up neck
+  stays free of float barriers by design. `LazyAlignHead` pairs a depthwise-free dense `ClsBranchV2` with `BoxBranchV2`
+  (`2 × WsQARepConv3x3` + `4·reg_max` `out` — `64` channels at default `reg_max = 16` — and opt-in separate
+  `iou_out: Conv1×1(c_box → 1)`), plus optional `o2o` (`O2oClsLevel` with `PeakSuppress` 3×3 local-peak-preserving
+  lateral inhibition sharing `BoxBranchV2`). `HeadOutputV2::into_head_output()` converts directly to v1's `HeadOutput`.
 
 ### int8 inference (`model/quant/`)
 Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
 A shared graph walk (`walk.rs`) drives three executors:
-- **Calibration (`calib.rs`):** `Calibrator` / `calibrate_sample` run two `f32` passes over sample images (min/max,
-  then 2048-bin per-tensor and 256-bin per-channel histograms) and write a `Calibration` (`VERSION_V2`: per-channel
-  `channel_ranges`, `u8_stem: true`, and P5-tail `default_sensitivity_f32_convs` = `neck.out5.*`; backward-compatible
-  with `VERSION_V1` per-tensor files) into `folo.quant` with a 64-bit FNV-1a weight fingerprint.
+- **Calibration (`calib.rs`):** `Calibrator` runs two `f32` passes over sample images (min/max, then 2048-bin
+  per-tensor and 256-bin per-channel histograms) and `Calibrator::finish` returns a `VERSION_V2` `Calibration` with
+  per-channel `channel_ranges` and `u8_stem: true` (`f32_convs` empty, `weights: None`). `calibrate` attaches the
+  64-bit FNV-1a weight fingerprint, `calibrate_sample` also adds the P5-tail `default_sensitivity_f32_convs`
+  (`neck.out5.*`), and `Calibration::store` serializes `folo.quant` (used by `folo quantize`). Loading remains
+  backward-compatible with `VERSION_V1` per-tensor files.
 - **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and AVX-VNNI `QConv` kernels
   (with per-part concat scale decoupling and packed weights cached on each weight tensor via `Tensor::derived_f32`).
-  When `u8_stem` is enabled, `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from
-  `Letterbox::apply_rgb0_u8` with zero `f32` image materialisation.
-- **Reference (`fake.rs`):** `FakeQuant` runs the same grids and integer accumulation order in `f32` for parity checks.
+  When `u8_stem` is enabled, the stem is eligible (`stem_int8_able`), and it is not listed in `f32_convs`,
+  `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from `Letterbox::apply_rgb0_u8`
+  without materialising an `f32` image (falling back to `f32` otherwise).
+- **Reference (`fake.rs`):** `FakeQuant` runs `f32` convolutions on the same quantisation grids for parity checks.
 
 ## The loss
 - Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,
@@ -121,11 +125,11 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
   count) → tensors → train-mode forward → loss → backward into a `GradAccumulator` (nominal batch 64) → schedule
   (warmup + linear / cosine, in optimizer steps), global-norm clipping, SGD / AdamW / MuSGD with `decay` / `bn` /
   `bias` groups (`auto` picks per §8.2), EMA.
-- **Floor Conv+BN Gauge Normalization (`train/gauge.rs`):** opt-in (`TrainConfig.gauge_norm`), applied once at
-  transfer/continuation setup via `apply_floor_gauge_norm`. For every unfused, bias-free `ConvBnAct` output channel
-  with `1e-4 < ‖W_c‖₂ < √2`, it rescales `W_c` and `running_mean` by `α_c = clamp(√2 / ‖W_c‖₂, 1.0, 4.0)` and
-  `running_var` by `α_c² · (v_c + ε) − ε` without altering `γ` or `β`, preserving forward outputs while undoing
-  coupled weight-decay filter shrinkage.
+- **Floor Conv+BN Gauge Normalization (`train/gauge.rs`):** opt-in (`TrainConfig.gauge_norm`), applied once at setup
+  when a new run starts from transferred weights (skipped on checkpoint resume) via `apply_floor_gauge_norm`. For every
+  unfused, bias-free `F32` `ConvBnAct` output channel with `1e-4 < ‖W_c‖₂ < √2`, it rescales `W_c` and `running_mean`
+  by `α_c = clamp(√2 / ‖W_c‖₂, 1.0, 4.0)` and sets `running_var` to `α_c² · (v_c + ε) − ε` without altering `γ` or `β`,
+  preserving eval-mode forward outputs while undoing coupled weight-decay filter shrinkage.
 - **Non-finite batches:** batches with a non-finite loss or BatchNorm statistic are skipped and their running
   statistics restored.
 - **After every epoch:** validation of the EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` /
