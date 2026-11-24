@@ -1404,33 +1404,60 @@ Post-training quantisation of the backbone and neck (layers 0–22); the head (�
 docs/FORMAT.md), and `folo val` / `folo predict --precision int8` (or `FoloModel::set_int8`) run it on the CPU.
 GPU forwards, training, export and the `f32` default are unchanged.
 
+- **Schema versions (`version: 1` and `version: 2`).** `folo quantize` writes `version: 2` (`VERSION_V2`): per-channel
+  C4 activation grids (`channel_ranges`), per-part concat scale decoupling, direct `u8` stem (`u8_stem: true`), and
+  sensitivity-default `f32_convs` (`neck.out5.*`). Readers accept `1..=2` (missing `version` defaults to `1`; any
+  version outside `1..=2` is rejected). In either version, `channel_ranges` is used whenever present for a boundary
+  (missing entries fall back to per-tensor `ranges`) and `u8_stem` (default `false` when absent) controls the direct
+  `u8` stem; only per-part concat scale decoupling is gated on `version >= 2`.
 - **Boundaries.** An activation is quantised where a layer writes it: each conv's output after its activation (and
   after the residual add of a bottleneck, PSA `proj` and `ffn2`, which the conv's epilogue does), the stem's output,
-  and the input of each attention `proj` (`o + pe(v)`). Each boundary has one affine u8 grid
-  `x ≈ scale · (q − zero)`, `q ∈ [0, 255]`, from its calibrated range `[lo, hi]` widened to hold 0:
-  `scale = (hi − lo) / 255`, `zero = round(−lo / scale)` clamped to `[0, 255]`. Concatenation, split
-  (channel slices), max pooling and nearest upsampling keep their input's grid (exact on codes). The attention's
-  `qkv` conv writes `f32`; the attention products, softmax and the depthwise `pe` run in `f32`. P3, P4 and P5
-  are dequantised for the head.
+  and the input of each attention `proj` (`o + pe(v)`). Each boundary has affine u8 grids
+  `x ≈ scale · (q − zero)`, `q ∈ [0, 255]`, per channel when `channel_ranges` has an entry for that boundary (else
+  uniform across channels from its required per-tensor `ranges` entry), from each calibrated range `[lo, hi]` widened
+  to hold 0: `scale = max((hi − lo) / 255, 1e-8)`, `zero = round(−lo / scale)` clamped to `[0, 255]`. Concatenation,
+  split (channel slices on 4-channel C4 groups), max pooling and nearest upsampling keep their input's grids (exact on
+  codes). The attention's `qkv` conv writes `f32`; the attention products, softmax and the depthwise `pe` run in `f32`.
+  P3, P4 and P5 are dequantised for the head.
+- **Direct `u8` stem (`q8::stem_u8`).** When `u8_stem` is `true`, `backbone.stem` is not in `f32_convs`, and its
+  geometry and inputs are eligible (`stem_int8_able`: non-empty batch, fused, dense, undilated 3-channel conv with
+  SiLU or identity, weights shaped `[out_channels, 3, k, k]` and optional bias `[out_channels]`, `out_channels` a
+  positive multiple of 4, `1 ≤ k ≤ 15`, `1 ≤ stride ≤ 64`, `padding ≤ 4096`, and a kernel fitting the padded input
+  with valid output dimensions), the stem runs directly on packed `[R, G, B, 0]` `u32` pixels (`scale = 1/255`,
+  `zero = 0`, with `1/255` folded into the per-output-channel s8 weight scales) in L1-resident row strips
+  (`folo_core::cpu::q8::stem_u8`) straight into C4 `u8` codes. `Predictor` pairs this with `Letterbox::apply_rgb0_u8`
+  and `features_rgb0_u8` to avoid materialising an `f32` image; direct `f32` tensor forwards pack into `[R, G, B, 0]`
+  via `q8::pack_f32_to_rgb0_u8`. When `u8_stem` is `false` or the stem is ineligible / listed in `f32_convs`, the stem
+  runs in `f32` and quantises its output.
 - **Weights.** Per output channel, symmetric s8: the input grids' scales are folded into the weight columns
-  first (`w'[o, c, ·] = w[o, c, ·] · scale(c)`), then `s_o = max|w'[o]| / 127` and
-  `q = round(w' / s_o)` (ties away from zero), clamped to `±127`. A conv over a concatenation folds each part's
-  scale into its columns. The input zero points become one constant per output channel,
-  `corr[o] = Σ q[o, c, ky, kx] · zero(c)`, and zero padding uses each part's zero point, so it is exact.
+  first (`w'[o, c, ·] = w[o, c, ·] · scale(c)`), then `s_o = max|w'[o]| / 127` (or `1.0` for an all-zero row) and
+  `q = round(w' / s_o)` (ties away from zero), clamped to `±127`. In `version: 2`, a conv over concatenated parts
+  whose per-part max activation scales differ by more than `1.5×` (`q8::should_decouple_parts`) quantises and
+  accumulates each part's `K`-slice independently (preserving 7-bit weight precision across mismatched branches) before
+  summing the parts in `f32`; otherwise all parts share one weight scale per output channel. Each part's input zero
+  points become one constant per output channel, `corr[o] = Σ q[o, c, ky, kx] · zero(c)`, and zero padding uses each
+  channel's zero point, so it is exact.
 - **Conv.** `acc[o] = Σ q · u` in i32 (u8 × s8; exact: no product or partial sum saturates), then
-  `y = (acc − corr) · s_o + bias`, SiLU, the residual `+ scale_r · (u_r − zero_r)` if any, and the output code
-  `clamp(round_half_even(clamp(y / scale_out, −512, 512)) + zero_out, 0, 255)` (multiplying by the `f32`
-  reciprocal of `scale_out`). Every step is `f32` arithmetic in a fixed order, so the result does not depend on
+  `y = fma(acc − corr, s_o, bias)` (or per-part FMA accumulation into `0.0` followed by `+ bias` when decoupled),
+  division-free minimax SiLU (`q8::silu_q8`, docs/CORE.md) when the conv uses SiLU (else identity), the residual via FMA
+  (`fma(u_r − zero_r(o), scale_r(o), y)`) if any, and the per-channel output code
+  `clamp(round_half_even(clamp(y / scale_out(o), −512, 512)) + zero_out(o), 0, 255)` (multiplying by the `f32`
+  reciprocal of `scale_out(o)`). Every step is `f32` arithmetic in a fixed order, so the result does not depend on
   the CPU, the kernel or the thread count.
 - **Calibration.** The `f32` model runs on sample images (default: 512 training images, letterboxed as for
-  validation) twice: the first pass records each boundary's minimum and maximum, the second a 2048-bin histogram
-  between them. The range is then the `p`, `1 − p` quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or
-  the histogram-edge range of least expected squared error (rounding `Δ²/12` inside, clipping outside).
-- **Mixed precision.** A conv named in `f32_convs`, or one the int8 kernel does not take (grouped, dilated,
-  channels not a multiple of 4, a weight shaped other than its config says, a reduction `c · k²` over 2¹⁵, stride
-  over 64, padding over 4096, a kernel larger than its padded input, buffer sizes that overflow, or a residual not
-  on the output's shape, which `f32` broadcasts), dequantises its inputs, runs in `f32` and quantises its output.
-  The fake-quant reference keeps such a conv's `f32` weights too.
+  validation) twice: the first pass records each boundary's per-tensor and per-channel minimum and maximum, the second
+  a 2048-bin per-tensor histogram and 256-bin per-channel histograms between them. Each range is then the `p`, `1 − p`
+  quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or the histogram-edge range of least expected squared error
+  (rounding `Δ²/12` inside, clipping outside).
+- **Mixed precision.** A conv named in `f32_convs` (`folo quantize` / `calibrate_sample` defaults this via
+  `default_sensitivity_f32_convs` to the P5 neck tail `neck.out5.*`, which runs at low 20×20 resolution for 640×640
+  inputs where keeping its weights in `f32` has minimal runtime cost; `calibrate` / `Calibrator::finish` leave it
+  empty), or one the int8 kernel does not take (grouped, dilated, channels not a multiple of 4, a weight shaped other
+  than its config says, a reduction `c · k²` over 2¹⁵, stride over 64, padding over 4096, a kernel larger than its
+  padded input, buffer sizes that overflow, or a residual not on the output's shape, which `f32` broadcasts),
+  dequantises its inputs, runs in `f32` and quantises its output (for `neck.out5.*`, each conv's output is still
+  quantised onto its calibrated grid before P5 is dequantised for the head). The fake-quant reference keeps such a
+  conv's `f32` weights too.
 - **CPU.** The fast kernel needs AVX-VNNI (`vpdpbusd` on 256-bit registers, with AVX2 and FMA). Without it, AVX-512
   VNNI CPUs included (that form is not used), the int8 convs run a portable kernel with the same integers that is
   several times slower than the `f32` path: one folo-n row-8 run in review took 66.3 ms against 17.0 ms in `f32`.
@@ -1438,9 +1465,10 @@ GPU forwards, training, export and the `f32` default are unchanged.
 
 FOLO's implementation: folo-core's `cpu::q8` kernels (docs/CORE.md, int8 convs) under folo-vision's
 `model::quant` (the graph walk is shared by calibration, the int8 executor and a fake-quant reference that runs the
-same grids in `f32`). On COCO val2017, with `folo quantize`'s defaults against the same weights in `f32` on the CPU
-(paired bootstrap, 95% intervals), folo-n-coco-v4 loses 0.0019 AP (0.3559 → 0.3541, −0.0028 to −0.0010) and
-folo-s-coco 0.0025 (0.4162 → 0.4137, −0.0039 to −0.0014): docs/notes/hill/r5-cpuq8.md.
+same grids in `f32`). Historical `version: 1` COCO val2017 measurement (per-tensor grids, `f32` stem, empty
+`f32_convs`, against the same weights in `f32` on the CPU; paired bootstrap, 95% intervals): folo-n-coco-v4 loses
+0.0019 AP (0.3559 → 0.3541, −0.0028 to −0.0010) and folo-s-coco 0.0025 (0.4162 → 0.4137, −0.0039 to −0.0014):
+docs/notes/hill/r5-cpuq8.md.
 
 ## 10. Verification plan
 
