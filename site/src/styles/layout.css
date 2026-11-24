@@ -533,3 +533,34 @@
     grid-template-columns: 1fr;
   }
 }
+
+@media print {
+  html.nav-open {
+    overflow: visible;
+  }
+
+  .skip,
+  .topbar,
+  .scrim,
+  .sidebar,
+  .toc,
+  .toc-inline,
+  .pager,
+  .search {
+    display: none !important;
+  }
+
+  .shell {
+    display: block;
+    max-width: none;
+  }
+
+  .doc-layout {
+    display: block;
+    padding: 0;
+  }
+
+  .doc-foot {
+    margin-top: var(--space-8);
+  }
+}

@@ -34,8 +34,13 @@ function currentTheme(): 'light' | 'dark' {
   return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 const themeBtn = $<HTMLButtonElement>('.theme-toggle');
-function labelTheme() {
+const themeColorMeta = $<HTMLMetaElement>('meta[name="theme-color"]');
+function syncTheme() {
   themeBtn?.setAttribute('aria-label', currentTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+  if (themeColorMeta) {
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg-panel').trim();
+    if (bg) themeColorMeta.content = bg;
+  }
 }
 themeBtn?.addEventListener('click', () => {
   const next = currentTheme() === 'dark' ? 'light' : 'dark';
@@ -45,10 +50,10 @@ themeBtn?.addEventListener('click', () => {
   } catch {
     // Storage can be unavailable (private windows); the choice then lasts for this page.
   }
-  labelTheme();
+  syncTheme();
 });
-matchMedia('(prefers-color-scheme: light)').addEventListener('change', labelTheme);
-labelTheme();
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', syncTheme);
+syncTheme();
 
 // Mobile navigation drawer.
 const navBtn = $<HTMLButtonElement>('.nav-toggle');
@@ -223,35 +228,57 @@ if (/Mac|iPhone|iPad/.test(navigator.platform)) {
   if (kbd) kbd.textContent = '⌘K';
 }
 
-// Table of contents: mark the section being read.
+// Table of contents: mark the section being read and keep the active TOC link visible without scrolling the page.
+const tocBox = $<HTMLElement>('.toc');
 const tocLinks = $$<HTMLAnchorElement>('.toc a');
 if (tocLinks.length) {
   const targets = tocLinks
     .map((a) => [a, document.getElementById(decodeURIComponent(a.hash.slice(1)))] as const)
     .filter((x): x is readonly [HTMLAnchorElement, HTMLElement] => !!x[1]);
+  let activeTocLink: HTMLAnchorElement | null = null;
   let queued = false;
+  const revealActiveToc = () => {
+    if (!activeTocLink || !tocBox || tocBox.scrollHeight <= tocBox.clientHeight || tocBox.offsetParent === null) return;
+    const boxRect = tocBox.getBoundingClientRect();
+    const linkRect = activeTocLink.getBoundingClientRect();
+    if (linkRect.top < boxRect.top) tocBox.scrollTop += linkRect.top - boxRect.top;
+    else if (linkRect.bottom > boxRect.bottom) tocBox.scrollTop += linkRect.bottom - boxRect.bottom;
+  };
   const update = () => {
     queued = false;
+    if (!targets.length) return;
     const line = 120;
     let cur = targets[0];
     for (const t of targets) if (t[1].getBoundingClientRect().top <= line) cur = t;
     // At the very bottom, the last heading is current even when it cannot reach the line.
     if (innerHeight + scrollY >= document.documentElement.scrollHeight - 2) cur = targets[targets.length - 1];
-    for (const [a] of targets) {
-      if (a === cur[0]) a.setAttribute('aria-current', 'true');
-      else a.removeAttribute('aria-current');
+    if (cur[0] !== activeTocLink) {
+      activeTocLink?.removeAttribute('aria-current');
+      activeTocLink = cur[0];
+      activeTocLink.setAttribute('aria-current', 'true');
+      revealActiveToc();
     }
   };
+  const scheduleUpdate = () => {
+    if (!queued) requestAnimationFrame(update);
+    queued = true;
+  };
+  addEventListener('scroll', scheduleUpdate, { passive: true });
   addEventListener(
-    'scroll',
+    'resize',
     () => {
-      if (!queued) requestAnimationFrame(update);
-      queued = true;
+      update();
+      revealActiveToc();
     },
     { passive: true },
   );
   update();
 }
+const tocInline = $<HTMLDetailsElement>('.toc-inline');
+tocInline?.addEventListener('click', (e) => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if ((e.target as Element).closest('a')) tocInline.open = false;
+});
 
 // Copy buttons on code blocks.
 const copyTimers = new WeakMap<HTMLButtonElement, number>();
