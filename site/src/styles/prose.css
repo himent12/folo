@@ -333,7 +333,7 @@ img.theme-light {
 
 .code:hover .copy,
 .copy:focus-visible,
-.copy[data-copied] {
+.copy[data-copy-state] {
   opacity: 1;
 }
 
@@ -342,12 +342,18 @@ img.theme-light {
   color: var(--text-primary);
 }
 
+.copy[data-copy-state='failed'],
+.copy[data-copy-state='failed']:hover {
+  border-color: var(--danger-solid);
+  color: var(--danger-text);
+}
+
 .copy .i-check,
-.copy[data-copied] .i-copy {
+.copy[data-copy-state='copied'] .i-copy {
   display: none;
 }
 
-.copy[data-copied] .i-check {
+.copy[data-copy-state='copied'] .i-check {
   display: block;
   color: var(--success-solid);
 }
@@ -360,7 +366,7 @@ img.theme-light {
   clip-path: inset(50%);
 }
 
-.copy[data-copied] .copy-label {
+.copy[data-copy-state] .copy-label {
   position: static;
   width: auto;
   height: auto;

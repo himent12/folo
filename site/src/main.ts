@@ -15,10 +15,16 @@ const $$ = <T extends Element>(sel: string, from: ParentNode = document) => [...
 const live = document.createElement('p');
 live.className = 'visually-hidden';
 live.setAttribute('role', 'status');
+live.setAttribute('aria-live', 'polite');
+live.setAttribute('aria-atomic', 'true');
 document.body.append(live);
+let announceRaf = 0;
 function announce(msg: string) {
+  cancelAnimationFrame(announceRaf);
   live.textContent = '';
-  requestAnimationFrame(() => (live.textContent = msg));
+  announceRaf = requestAnimationFrame(() => {
+    live.textContent = msg;
+  });
 }
 
 // Theme: a saved choice wins; otherwise the CSS follows the system.
@@ -238,34 +244,65 @@ if (tocLinks.length) {
 }
 
 // Copy buttons on code blocks.
-async function copyText(text: string) {
+const copyTimers = new WeakMap<HTMLButtonElement, number>();
+const copySeq = new WeakMap<HTMLButtonElement, number>();
+let copyOp = 0;
+
+async function copyText(text: string, isCurrent: () => boolean): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to execCommand fallback (e.g. non-secure HTTP context or denied permission).
+    }
+  }
+  if (!isCurrent()) return false;
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  ta.style.opacity = '0';
+  document.body.append(ta);
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Not a secure context (e.g. served over plain HTTP on a LAN address): the old way still works.
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.append(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
-    document.execCommand('copy');
+    ta.setSelectionRange(0, text.length);
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
     ta.remove();
+    prevFocus?.focus({ preventScroll: true });
   }
 }
+
 document.addEventListener('click', async (e) => {
   const btn = (e.target as Element).closest<HTMLButtonElement>('.copy');
   const code = btn?.closest('.code')?.querySelector('pre');
   if (!btn || !code) return;
-  await copyText(code.textContent ?? '');
-  btn.dataset.copied = '';
+  const seq = (copySeq.get(btn) ?? 0) + 1;
+  copySeq.set(btn, seq);
+  const op = ++copyOp;
+  const ok = await copyText(code.textContent ?? '', () => copyOp === op);
+  if (copySeq.get(btn) !== seq) return;
+  const prevTimer = copyTimers.get(btn);
+  if (prevTimer !== undefined) clearTimeout(prevTimer);
+  btn.dataset.copyState = ok ? 'copied' : 'failed';
   const label = btn.querySelector('.copy-label');
-  if (label) label.textContent = 'Copied';
-  announce('Copied to the clipboard');
-  setTimeout(() => {
-    delete btn.dataset.copied;
-    if (label) label.textContent = 'Copy';
-  }, 1600);
+  if (label) label.textContent = ok ? 'Copied' : 'Failed';
+  announce(ok ? 'Copied to the clipboard' : 'Could not copy to the clipboard');
+  copyTimers.set(
+    btn,
+    window.setTimeout(() => {
+      copyTimers.delete(btn);
+      delete btn.dataset.copyState;
+      if (label) label.textContent = 'Copy';
+    }, ok ? 1600 : 2400),
+  );
 });
 
 // Wide tables and code blocks scroll sideways: make those reachable by keyboard and name them for screen readers.
