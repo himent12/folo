@@ -14,8 +14,8 @@ import SunMoon from '$icons/sun-moon';
 import Tags from '$icons/tags';
 import Target from '$icons/target';
 import X from '$icons/x';
-import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw';
-import { hub } from '$lib/api/index';
+import { bindable, computed, css, Dynamic, effect, For, Index, onCleanup, signal, untrack } from 'fw';
+import { ApiError, hub } from '$lib/api/index';
 import { hasCloud } from '$lib/cloud';
 import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
 import { LABEL_FEATURE } from '$lib/label';
@@ -29,6 +29,7 @@ import Kbd from '$lib/ui/Kbd';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import { backdropClose } from '$lib/ui/backdrop';
 import Meta from '$lib/ui/Meta';
+import Spinner from '$lib/ui/Spinner';
 import { statusWord } from '$lib/ui/StatusBadge';
 import type { IconType } from '$lib/ui/types';
 import { count } from '$lib/format';
@@ -108,9 +109,63 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const cloud = signal(false);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
+  /** In-flight entity lookup keys for the active opening (so empty results say "Searching…" instead of "No matches"). */
+  const pendingSources = signal<Set<string>>(new Set());
+  /** Entity lookups that failed transiently (non-404/501) during the active opening. */
+  const failedSources = signal<Set<string>>(new Set());
+  const loadingEntities = computed(() => pendingSources.get().size > 0);
+  const failedEntityList = computed(() => [...failedSources.get()]);
+
+  const isAbort = (e: unknown) => e instanceof DOMException && e.name === 'AbortError';
+  const isUnsupported = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
   /** The hub epoch the lists above were fetched under. */
   let listed: number | null = null;
+  /** Per-opening generation token + AbortControllers so closed/superseded fetches are aborted and discarded. */
+  let openSeq = 0;
+  let activeEpoch = -1;
+  let fetchCtrl: AbortController | null = null;
+  let loopsCtrl: AbortController | null = null;
+  let loopsFetchedSeq = -1;
+  /** Pointer guard: ignore stationary pointermove coordinates triggered when keyboard ArrowDown/ArrowUp scrolls the list. */
+  let lastPointer: { x: number; y: number } | null = null;
+  let keyboardNav = false;
+
+  const cancelFetches = () => {
+    openSeq++;
+    fetchCtrl?.abort();
+    loopsCtrl?.abort();
+    fetchCtrl = null;
+    loopsCtrl = null;
+    loopsFetchedSeq = -1;
+  };
+  onCleanup(cancelFetches);
+
+  function markPending(key: string) {
+    const nextPending = new Set(pendingSources.peek());
+    nextPending.add(key);
+    pendingSources.set(nextPending);
+    const curFailed = failedSources.peek();
+    if (curFailed.has(key)) {
+      const nextFailed = new Set(curFailed);
+      nextFailed.delete(key);
+      failedSources.set(nextFailed);
+    }
+  }
+  function settlePending(key: string, failed: boolean) {
+    const curPending = pendingSources.peek();
+    if (curPending.has(key)) {
+      const nextPending = new Set(curPending);
+      nextPending.delete(key);
+      pendingSources.set(nextPending);
+    }
+    if (failed) {
+      const nextFailed = new Set(failedSources.peek());
+      nextFailed.add(key);
+      failedSources.set(nextFailed);
+    }
+  }
+
   // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
   const backdrop = backdropClose(() => el, () => el.close());
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
@@ -120,14 +175,23 @@ export default function CommandPalette(props: CommandPaletteProps) {
       restore = rememberFocus();
       el.showModal();
       backdrop.opened();
+      cancelFetches();
+      const seq = ++openSeq;
+      const ctrl = new AbortController();
+      fetchCtrl = ctrl;
+      lastPointer = null;
+      keyboardNav = false;
       query.set('');
       selected.set(null);
       recent.set(recentIds());
+      pendingSources.set(new Set());
+      failedSources.set(new Set());
       queueMicrotask(() => input.peek()?.focus());
       const api = hub.api;
       // What the lists hold came from the server in use at the last opening: another one's (a reconnect since) goes,
-      // and so does an answer that arrives after the next reconnect.
+      // and so does an answer that arrives after the next reconnect or a subsequent open/close cycle.
       const epoch = hub.epoch;
+      activeEpoch = epoch;
       if (epoch !== listed) {
         listed = epoch;
         runs.set([]);
@@ -139,26 +203,107 @@ export default function CommandPalette(props: CommandPaletteProps) {
         loops.set([]);
         cloud.set(false);
       }
+      const isCurrent = () => hub.epoch === epoch && openSeq === seq && !ctrl.signal.aborted;
       const mine =
         <A extends unknown[]>(f: (...a: A) => void) =>
         (...a: A) => {
-          if (hub.epoch === epoch) f(...a);
+          if (isCurrent()) f(...a);
         };
-      api.runs().then(mine((r) => runs.set(r)), () => {});
-      api.datasets().then(mine((d) => datasets.set(d)), () => {});
-      api.models().then(mine((m) => models.set(m)), () => {});
-      api.benches().then(
-        mine((b) => {
+      const load = <T,>(key: string, req: () => Promise<T>, onOk: (v: T) => void, onErr?: (err: unknown) => boolean) => {
+        markPending(key);
+        req().then(
+          mine((v) => {
+            onOk(v);
+            settlePending(key, false);
+          }),
+          mine((err) => {
+            if (isAbort(err)) return;
+            const failed = onErr ? onErr(err) : true;
+            settlePending(key, failed);
+          }),
+        );
+      };
+      load('runs', () => api.runs(ctrl.signal), (r) => runs.set(r));
+      load('datasets', () => api.datasets(ctrl.signal), (d) => datasets.set(d));
+      load('models', () => api.models(ctrl.signal), (m) => models.set(m));
+      load(
+        'benchmarks',
+        () => api.benches(ctrl.signal),
+        (b) => {
           benches.set(b);
           benchesOk.set(true);
-          // Loops live under their benchmark: one request each (a server has a few benchmarks).
-          Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then(mine((l) => loops.set(l.flat())));
-        }),
-        mine(() => (benches.set([]), benchesOk.set(false), loops.set([]))),
+        },
+        (err) => {
+          benches.set([]);
+          benchesOk.set(false);
+          loops.set([]);
+          return !isUnsupported(err);
+        },
       );
-      api.labelJobs().then(mine((j) => labelJobs.set(j)), mine(() => labelJobs.set([])));
-      api.system().then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
-    } else if (!open.get() && el.open) el.close();
+      if (untrack(() => hub.lacks(LABEL_FEATURE))) {
+        labelJobs.set([]);
+      } else {
+        load(
+          'labeling jobs',
+          () => api.labelJobs(ctrl.signal),
+          (j) => labelJobs.set(j),
+          (err) => {
+            labelJobs.set([]);
+            return !isUnsupported(err);
+          },
+        );
+      }
+      api.system(ctrl.signal).then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
+    } else if (!open.get()) {
+      cancelFetches();
+      pendingSources.set(new Set());
+      if (el.open) el.close();
+    }
+  });
+
+  // Defer per-benchmark loop fetches until a relevant search query (or a recent loop entry) needs them,
+  // avoiding N+1 benchLoops calls on open when a server has many benchmarks.
+  effect(() => {
+    if (!open.get() || !benchesOk.get()) return;
+    const list = benches.get();
+    if (!list.length) return;
+    const q = query.get().trim();
+    const wantsLoops = q.length >= 2 || recent.get().some((id) => id.startsWith('loop-'));
+    if (!wantsLoops) return;
+    const seq = openSeq;
+    if (loopsFetchedSeq === seq) return;
+    loopsFetchedSeq = seq;
+    const epoch = activeEpoch;
+    const api = hub.api;
+    loopsCtrl?.abort();
+    const ctrl = new AbortController();
+    loopsCtrl = ctrl;
+    untrack(() => {
+      markPending('loops');
+      const out: BenchLoop[] = [];
+      let failed = false;
+      let idx = 0;
+      const workers = Math.min(6, list.length);
+      Promise.all(
+        Array.from({ length: workers }, async () => {
+          while (idx < list.length && !ctrl.signal.aborted) {
+            const b = list[idx++]!;
+            try {
+              const res = await api.benchLoops(b.id, ctrl.signal);
+              if (ctrl.signal.aborted) return;
+              out.push(...res);
+            } catch (err) {
+              if (ctrl.signal.aborted || isAbort(err)) return;
+              if (!isUnsupported(err)) failed = true;
+            }
+          }
+        }),
+      ).then(() => {
+        if (hub.epoch !== epoch || openSeq !== seq || ctrl.signal.aborted) return;
+        loops.set(out);
+        settlePending('loops', failed);
+      });
+    });
   });
 
   const go = (path: string) => () => router.go(path);
@@ -373,8 +518,15 @@ export default function CommandPalette(props: CommandPaletteProps) {
   effect(() => {
     const q = query.get().trim();
     const n = flat.get().length;
+    const loading = loadingEntities.get();
+    const failed = failedEntityList.get();
     if (!open.get() || !q) return void said.set('');
-    const t = setTimeout(() => said.set(n === 0 ? 'No results' : n === 1 ? '1 result' : `${n} results`), ANNOUNCE_MS);
+    const t = setTimeout(() => {
+      if (n === 0) {
+        if (loading) said.set('Searching…');
+        else said.set(failed.length ? `No results; could not load ${failed.join(', ')}` : 'No results');
+      } else said.set(n === 1 ? '1 result' : `${n} results`);
+    }, ANNOUNCE_MS);
     return () => clearTimeout(t);
   });
 
@@ -405,9 +557,21 @@ export default function CommandPalette(props: CommandPaletteProps) {
     item.run();
   }
 
+  function onItemPointerMove(e: PointerEvent, id: string) {
+    if (lastPointer && e.clientX === lastPointer.x && e.clientY === lastPointer.y) return;
+    const hadPointer = lastPointer !== null;
+    lastPointer = { x: e.clientX, y: e.clientY };
+    if (!hadPointer && keyboardNav) return;
+    keyboardNav = false;
+    selected.set(id);
+  }
+
   function onkeydown(e: KeyboardEvent) {
     const all = flat.peek();
-    const to = (n: number) => selected.set(all[n]?.id ?? null);
+    const to = (n: number) => {
+      keyboardNav = true;
+      selected.set(all[n]?.id ?? null);
+    };
     if (e.key === 'ArrowDown' || (e.key === 'n' && e.ctrlKey)) {
       e.preventDefault();
       // The selection wraps at the ends, so the last item is one key from the first.
@@ -433,6 +597,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
       class="palette"
       aria-label="Command palette"
       onclose={() => {
+        cancelFetches();
+        pendingSources.set(new Set());
         open.set(false);
         restore?.();
         restore = null;
@@ -458,6 +624,19 @@ export default function CommandPalette(props: CommandPaletteProps) {
             spellcheck="false"
             autocomplete="off"
           />
+          {query.get() ? (
+            <button
+              class="clear"
+              type="button"
+              aria-label="Clear search"
+              onclick={() => {
+                query.set('');
+                input.peek()?.focus();
+              }}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          ) : null}
           {!touchOnly ? (
             <span class="esc">
               <Kbd keys="Escape" subtle />
@@ -473,7 +652,15 @@ export default function CommandPalette(props: CommandPaletteProps) {
             key={(g) => g.group}
             fallback={
               <li class="none" role="presentation">
-                {`No matches for “${query.get()}”`}
+                {loadingEntities.get() ? (
+                  <span class="loading-msg">
+                    <Spinner size={12} /> Searching…
+                  </span>
+                ) : failedEntityList.get().length ? (
+                  `No matches for “${query.get()}” — could not load ${failedEntityList.get().join(', ')}.`
+                ) : (
+                  `No matches for “${query.get()}”`
+                )}
               </li>
             }
           >
@@ -495,7 +682,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
                         class="item"
                         class:on={on()}
                         data-n={x().n}
-                        onpointermove={() => selected.set(x().item.id)}
+                        onpointermove={(e) => onItemPointerMove(e, x().item.id)}
                         onclick={() => choose(x().item)}
                       >
                         <Dynamic component={x().item.icon} size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -685,6 +872,28 @@ css`
     text-align: center;
     color: var(--text-tertiary);
   }
+  .loading-msg {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .clear {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition:
+      background-color var(--dur-fast) var(--ease-standard),
+      color var(--dur-fast) var(--ease-standard);
+  }
+  .clear:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
   footer {
     flex-shrink: 0;
     display: flex;
@@ -713,6 +922,10 @@ css`
   @media (pointer: coarse) {
     .item {
       min-height: 44px;
+    }
+    .clear {
+      width: 44px;
+      height: 44px;
     }
   }
   @media (max-width: 767px) {

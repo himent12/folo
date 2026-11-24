@@ -352,3 +352,160 @@ describe('CommandPalette after a switch to another server', () => {
     expect(runs()).toBe(0);
   });
 });
+
+describe('CommandPalette: async hardening, deferred loops, clear button, and pointer guard', () => {
+  afterEach(() => {
+    hub.features = null;
+  });
+
+  it('aborts and discards stale fetches across open/close cycles on the same server', async () => {
+    const api = hub.api as MockApi;
+    const allRuns = await api.runs();
+    const staleRun: Run = { ...allRuns[0]!, id: 'run_stale_1', name: 'stale-run-from-open-1' };
+    const freshRun: Run = { ...allRuns[0]!, id: 'run_fresh_2', name: 'fresh-run-from-open-2' };
+    let resolveFirst!: (r: Run[]) => void;
+    let firstSignal: AbortSignal | undefined;
+    let call = 0;
+    vi.spyOn(hub.api, 'runs').mockImplementation((signal?: AbortSignal) => {
+      call++;
+      if (call === 1) {
+        firstSignal = signal;
+        return new Promise<Run[]>((r) => (resolveFirst = r));
+      }
+      return Promise.resolve([freshRun]);
+    });
+
+    const open = signal(true);
+    c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+    flushSync();
+    expect(call).toBe(1);
+    expect(firstSignal?.aborted).toBe(false);
+
+    // Closing aborts the first opening's in-flight request.
+    open.set(false);
+    flushSync();
+    expect(firstSignal?.aborted).toBe(true);
+
+    // Reopening fetches fresh data; resolving the stale request late must not overwrite it.
+    open.set(true);
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    await vi.waitFor(() => {
+      input.value = 'fresh-run';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      expect(document.getElementById('pi-run-run_fresh_2')).not.toBeNull();
+    });
+    resolveFirst([staleRun]);
+    await Promise.resolve();
+    flushSync();
+    input.value = 'stale-run';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(document.getElementById('pi-run-run_stale_1')).toBeNull();
+  });
+
+  it('defers per-benchmark loop fetches until a relevant query and skips labelJobs when lacking LABEL_FEATURE', async () => {
+    hub.features = ['queue_control'];
+    const api = hub.api as MockApi;
+    const loopsSpy = vi.spyOn(api, 'benchLoops');
+    const jobsSpy = vi.spyOn(api, 'labelJobs');
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    // Wait for benches to finish loading on open.
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('[id="pi-bench-new"]')).not.toBeNull();
+    });
+    expect(loopsSpy).not.toHaveBeenCalled();
+    expect(jobsSpy).not.toHaveBeenCalled();
+
+    // Typing a 2+ character query fetches loops once.
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    input.value = 'lo';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await vi.waitFor(() => expect(loopsSpy).toHaveBeenCalled());
+  });
+
+  it('distinguishes loading and unavailable entity lookups from "No matches"', async () => {
+    const api = hub.api as MockApi;
+    let resolveRuns!: (r: Run[]) => void;
+    vi.spyOn(api, 'runs').mockImplementation(() => new Promise<Run[]>((r) => (resolveRuns = r)));
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    input.value = 'zzzz-unmatched-query';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(document.querySelector('.none')?.textContent).toContain('Searching');
+    expect(document.querySelector('.none')?.textContent).not.toContain('No matches');
+
+    resolveRuns([]);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.none')?.textContent).toContain('No matches for “zzzz-unmatched-query”');
+    });
+
+    // When runs fails with 500, the empty message reports unavailable entity lookup.
+    unmount(c);
+    c = undefined;
+    hub.api = new MockApi('normal', 0);
+    vi.spyOn(hub.api, 'runs').mockRejectedValue(new ApiError(500, 'internal', 'db down'));
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const input2 = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    input2.value = 'zzzz-unmatched-query';
+    input2.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.none')?.textContent).toContain('could not load runs');
+    });
+  });
+
+  it('provides an inline clear button in .search that resets query and refocuses input', () => {
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    expect(document.querySelector('.search button.clear')).toBeNull();
+    input.value = 'models';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const clear = document.querySelector<HTMLButtonElement>('.search button.clear')!;
+    expect(clear).not.toBeNull();
+    expect(clear.getAttribute('aria-label')).toBe('Clear search');
+    clear.click();
+    flushSync();
+    expect(input.value).toBe('');
+    expect(document.querySelector('.search button.clear')).toBeNull();
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('ignores stationary pointermove coordinates during keyboard navigation', () => {
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    const items = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(items.length).toBeGreaterThanOrEqual(3);
+
+    // Move mouse over item 0 at (120, 200).
+    items[0]!.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 200, bubbles: true }));
+    flushSync();
+    expect(input.getAttribute('aria-activedescendant')).toBe(items[0]!.id);
+
+    // Keyboard ArrowDown moves to item 1; a synthetic stationary pointermove on item 2 must NOT hijack selection.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(input.getAttribute('aria-activedescendant')).toBe(items[1]!.id);
+
+    items[2]!.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 200, bubbles: true }));
+    flushSync();
+    expect(input.getAttribute('aria-activedescendant')).toBe(items[1]!.id);
+
+    // Real pointer movement to new coordinates selects item 2.
+    items[2]!.dispatchEvent(new PointerEvent('pointermove', { clientX: 124, clientY: 240, bubbles: true }));
+    flushSync();
+    expect(input.getAttribute('aria-activedescendant')).toBe(items[2]!.id);
+  });
+});
