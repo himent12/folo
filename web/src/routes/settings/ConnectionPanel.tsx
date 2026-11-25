@@ -3,6 +3,7 @@ import Check from '$icons/check';
 import CircleAlert from '$icons/circle-alert';
 import CircleCheck from '$icons/circle-check';
 import FlaskConical from '$icons/flask-conical';
+import Plug from '$icons/plug';
 import PlugZap from '$icons/plug-zap';
 import WifiOff from '$icons/wifi-off';
 import { computed, css, effect, signal } from 'fw';
@@ -24,15 +25,32 @@ type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: fal
  * (`localhost:7915`, `127.0.0.1:7915`), as a browser's address bar does. Empty stays empty (this page's server).
  */
 export function serverAddress(typed: string): string {
-  const v = typed.trim().replace(/\/+$/, '');
-  return v && !/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? `http://${v}` : v;
+  const t = typed.trim();
+  if (!t) return '';
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return `http://${t.replace(/\/+$/, '')}`;
+  const i = t.indexOf('://') + 3;
+  return t.slice(0, i) + t.slice(i).replace(/\/+$/, '');
 }
+
+const BAD_ADDRESS = 'Use a full address like http://127.0.0.1:7878.';
 
 /** What is wrong with an address (as `serverAddress` gives it), in words for the field; null when it will do. */
 export function addressProblem(address: string): string | null {
   if (!address) return null;
   if (!/^https?:\/\//i.test(address)) return 'The server URL must start with http:// or https://.';
-  return /^https?:\/\/[^\s/]+(?:\/\S*)?$/i.test(address) ? null : 'Use a full address like http://127.0.0.1:7878.';
+  if (/\s|[?#\\]/.test(address)) return BAD_ADDRESS;
+  const afterScheme = address.slice(address.indexOf('://') + 3);
+  const slash = afterScheme.indexOf('/');
+  const authority = slash === -1 ? afterScheme : afterScheme.slice(0, slash);
+  if (!authority || authority.includes('@') || authority.endsWith(':')) return BAD_ADDRESS;
+  let parsed: URL;
+  try {
+    parsed = new URL(address);
+  } catch {
+    return BAD_ADDRESS;
+  }
+  if (!parsed.hostname || parsed.port === '0' || parsed.username || parsed.password) return BAD_ADDRESS;
+  return null;
 }
 
 export default function ConnectionPanel() {
@@ -54,7 +72,7 @@ export default function ConnectionPanel() {
     const t = test.get();
     return t?.ok === null ? t : null;
   });
-  const forced =typeof location !== 'undefined' && new URLSearchParams(location.search).get('mock') === '1';
+  const forced = typeof location !== 'undefined' && new URLSearchParams(location.search).get('mock') === '1';
 
   const normalized = computed(() => serverAddress(url.get()));
   const problem = computed(() => addressProblem(normalized.get()));
@@ -111,6 +129,14 @@ export default function ConnectionPanel() {
   function useDemo() {
     const to = new URL(location.href);
     to.searchParams.set('mock', '1');
+    location.assign(to.href);
+  }
+
+  /** Leave forced demo data (`?mock=1` and any demo `?scenario=`): reload this screen against the configured server. */
+  function leaveDemo() {
+    const to = new URL(location.href);
+    to.searchParams.delete('mock');
+    to.searchParams.delete('scenario');
     location.assign(to.href);
   }
 
@@ -273,6 +299,11 @@ export default function ConnectionPanel() {
           {hub.offline && hub.mode === 'connecting' ? (
             <Button variant="ghost" icon={FlaskConical} onclick={useDemo}>
               Use demo data
+            </Button>
+          ) : null}
+          {hub.mode === 'mock' && forced ? (
+            <Button variant="ghost" icon={Plug} onclick={leaveDemo}>
+              Leave demo data
             </Button>
           ) : null}
           {/* The primary action only once there is something to save; reconnecting as is stays secondary. */}

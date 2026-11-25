@@ -19,9 +19,37 @@ describe('serverAddress / addressProblem', () => {
     expect(addressProblem('')).toBeNull();
   });
 
-  it('names the field and the schemes it takes', () => {
+  it('names the field and the schemes it takes, and rejects malformed URLs', () => {
     expect(addressProblem(serverAddress('ftp://x'))).toBe('The server URL must start with http:// or https://.');
-    expect(addressProblem(serverAddress('http://a b'))).toBe('Use a full address like http://127.0.0.1:7878.');
+    expect(addressProblem(serverAddress('ftp://'))).toBe('The server URL must start with http:// or https://.');
+    expect(addressProblem(serverAddress('[::1]:7878'))).toBeNull();
+    expect(addressProblem(serverAddress('https://folo.example.com/studio'))).toBeNull();
+    expect(addressProblem(serverAddress('https://folo.example.com/@team'))).toBeNull();
+    for (const bad of [
+      'http://a b',
+      'http://:7878',
+      'http://',
+      'http:///studio',
+      '/studio',
+      'https:/localhost:7878',
+      'http://localhost:',
+      'http://[::1]:',
+      'http://127.0.0.1:7878\\',
+      'http://127.0.0.1:7878\\api',
+      'http://@localhost',
+      'http://:@localhost',
+      'http://localhost:99999',
+      'http://localhost:abc',
+      'http://localhost:0',
+      'http://[::1',
+      'http://127.0.0.1:7878?foo=1',
+      'http://127.0.0.1:7878?',
+      'http://127.0.0.1:7878#section',
+      'http://user:pass@127.0.0.1:7878',
+      'javascript:alert(1)',
+    ]) {
+      expect(addressProblem(serverAddress(bad)), bad).toBe('Use a full address like http://127.0.0.1:7878.');
+    }
   });
 });
 
@@ -137,5 +165,53 @@ describe('ConnectionPanel', () => {
     demo()!.click();
     expect(assign).toHaveBeenCalledWith('http://127.0.0.1:7878/?mock=1#/settings');
     c.unmount();
+  });
+
+  it('offers Leave demo data when in forced ?mock=1 mode and reloads without mock or scenario params', () => {
+    const prevMode = hub.mode;
+    const assign = vi.fn();
+    const target = document.createElement('div');
+    try {
+      vi.stubGlobal('location', {
+        ...location,
+        href: 'http://127.0.0.1:7878/?mock=1&scenario=error&keep=1#/settings',
+        search: '?mock=1&scenario=error&keep=1',
+        origin: 'http://127.0.0.1:7878',
+        assign,
+      });
+      hub.mode = 'mock';
+      const c = render(() => <ConnectionPanel />, target);
+      flush();
+      const leave = () => [...target.querySelectorAll<HTMLButtonElement>('.row-actions button')].find((b) => b.textContent?.includes('Leave demo data'));
+      expect(leave()).toBeDefined();
+      leave()!.click();
+      expect(assign).toHaveBeenCalledWith('http://127.0.0.1:7878/?keep=1#/settings');
+
+      // Hidden when live even if the URL query had ?mock=1.
+      hub.mode = 'live';
+      flush();
+      expect(leave()).toBeUndefined();
+      c.unmount();
+
+      // Common case: only ?mock=1 present -> no stray '?' left in URL.
+      assign.mockClear();
+      vi.stubGlobal('location', { ...location, href: 'http://127.0.0.1:7878/?mock=1#/settings', search: '?mock=1', origin: 'http://127.0.0.1:7878', assign });
+      hub.mode = 'mock';
+      const c2 = render(() => <ConnectionPanel />, target);
+      flush();
+      leave()!.click();
+      expect(assign).toHaveBeenCalledWith('http://127.0.0.1:7878/#/settings');
+      c2.unmount();
+
+      // Hidden when hub.mode is mock without ?mock=1 in location.search.
+      vi.stubGlobal('location', { ...location, href: 'http://127.0.0.1:7878/#/settings', search: '', origin: 'http://127.0.0.1:7878', assign });
+      hub.mode = 'mock';
+      const c3 = render(() => <ConnectionPanel />, target);
+      flush();
+      expect(leave()).toBeUndefined();
+      c3.unmount();
+    } finally {
+      hub.mode = prevMode;
+    }
   });
 });
