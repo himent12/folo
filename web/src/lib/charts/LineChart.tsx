@@ -277,6 +277,7 @@ export default function LineChart(props: LineChartProps) {
   effect(() => {
     void width.get();
     void p.height;
+    void p.highlight;
     void picked.get();
     void hasHover.get();
     void hintText.get();
@@ -335,7 +336,10 @@ export default function LineChart(props: LineChartProps) {
     if (!touchy(e)) {
       // A click on a picked line (`pick`) acts on it.
       const id = picked.peek();
-      if (id !== null && e.button === 0) p.onpick?.(id);
+      if (id !== null && e.button === 0) {
+        rectCache.clear();
+        p.onpick?.(id);
+      }
       return;
     }
     if (!gesture) return;
