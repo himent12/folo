@@ -376,6 +376,9 @@ impl WindowInner {
         let (x, y) = (lparam.signed_loword() as i32, lparam.signed_hiword() as i32);
         let (click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
+            if button == MouseButton::Left {
+                state.cancelled_nc_left = false;
+            }
             if !state.pressed_buttons.contains(&button) {
                 state.pressed_buttons.push(button);
             }
@@ -392,14 +395,25 @@ impl WindowInner {
     }
 
     fn handle_mouse_up(&self, button: MouseButton, lparam: LPARAM) -> Option<isize> {
-        let (click_count, scale_factor, still_pressed) = {
+        let (suppressed, click_count, scale_factor, still_pressed) = {
             let mut state = self.state.borrow_mut();
+            let was_pressed = state.pressed_buttons.contains(&button);
             state.pressed_buttons.retain(|b| *b != button);
-            (state.click_state.current_count, state.scale_factor, !state.pressed_buttons.is_empty())
+            let suppressed =
+                button == MouseButton::Left && !was_pressed && std::mem::take(&mut state.cancelled_nc_left);
+            (
+                suppressed,
+                state.click_state.current_count,
+                state.scale_factor,
+                !state.pressed_buttons.is_empty(),
+            )
         };
         if !still_pressed {
             // SAFETY: releasing our capture (its WM_CAPTURECHANGED finds nothing pressed).
             let _ = unsafe { ReleaseCapture() };
+        }
+        if suppressed {
+            return Some(0);
         }
         let input = PlatformInput::MouseUp(MouseUpEvent {
             button,
@@ -470,8 +484,11 @@ impl WindowInner {
             let mut state = self.state.borrow_mut();
             let nc_pressed = state.nc_button_pressed.take().is_some();
             let mut buttons = std::mem::take(&mut state.pressed_buttons);
-            if nc_pressed && !buttons.contains(&MouseButton::Left) {
-                buttons.push(MouseButton::Left);
+            if nc_pressed {
+                state.cancelled_nc_left = true;
+                if !buttons.contains(&MouseButton::Left) {
+                    buttons.push(MouseButton::Left);
+                }
             }
             (buttons, state.click_state.current_count, state.scale_factor)
         };

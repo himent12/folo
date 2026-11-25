@@ -185,6 +185,9 @@ impl WindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        if button == MouseButton::Left {
+            self.state.borrow_mut().cancelled_nc_left = false;
+        }
         let mut p = POINT { x: lparam.signed_loword() as i32, y: lparam.signed_hiword() as i32 };
         // SAFETY: a valid in/out pointer.
         let _ = unsafe { ScreenToClient(hwnd, &mut p) };
@@ -228,6 +231,13 @@ impl WindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        if button == MouseButton::Left {
+            let mut state = self.state.borrow_mut();
+            if std::mem::take(&mut state.cancelled_nc_left) {
+                state.nc_button_pressed = None;
+                return Some(0);
+            }
+        }
         if self.state.borrow().callbacks.input.is_some() {
             let scale_factor = self.state.borrow().scale_factor;
             let input = PlatformInput::MouseUp(MouseUpEvent {

@@ -857,3 +857,20 @@ fn window_hover_loss_clears_tooltip_hover_and_off_viewport_mouse_up_stays_unhove
         "off-viewport MouseUp must not re-hover an unhovered window"
     );
 }
+
+#[test]
+fn same_frame_mouse_down_and_up_does_not_stick_active_style() {
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().id("btn").w(px(60.)).h(px(30.)).bg(color(1)).active(|s| s.bg(color(3))))
+            .into_any_element()
+    });
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1);
+    // Press and immediately release (or receive a focus-loss synthetic MouseUp) before the next draw.
+    mouse_down(&mut app, window, 10., 10.);
+    mouse_up(&mut app, window, -1., -1.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "active style must not stick");
+    assert!(quads_of(&mut app, window, color(3)).is_empty());
+}

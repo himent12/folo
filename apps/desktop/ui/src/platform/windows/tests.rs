@@ -666,7 +666,8 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     pump();
     assert_eq!(close_asks.replace(0), 1, "press+release on HTCLOSE asks to close");
 
-    // Deactivating while HTCLOSE is held disarms it and emits an off-viewport release for active styles.
+    // Deactivating while HTCLOSE is held disarms it, emits one off-viewport release, and suppresses
+    // any stray WM_NCLBUTTONUP that arrives afterward.
     let mut client = RECT::default();
     // SAFETY: valid out pointer for our own window.
     unsafe { GetClientRect(hwnd, &mut client).unwrap() };
@@ -678,8 +679,9 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
     pump();
     assert_eq!(close_asks.replace(0), 0, "deactivation disarms HTCLOSE");
+    assert_eq!(cancelled_ups.replace(0), 0, "stray WM_NCLBUTTONUP does not emit a duplicate MouseUp");
 
-    // WM_CANCELMODE while HTCLOSE is held also disarms it and emits an off-viewport release.
+    // WM_CANCELMODE while HTCLOSE is held also disarms it and suppresses a stray release.
     cancelled_ups.set(0);
     send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
     send(hwnd, WM_CANCELMODE, 0, 0);
@@ -687,6 +689,7 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
     pump();
     assert_eq!(close_asks.replace(0), 0, "WM_CANCELMODE disarms HTCLOSE");
+    assert_eq!(cancelled_ups.replace(0), 0, "stray WM_NCLBUTTONUP after WM_CANCELMODE is suppressed");
 
     destroy(hwnd);
 }

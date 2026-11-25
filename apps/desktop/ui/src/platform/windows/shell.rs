@@ -21,8 +21,30 @@ fn is_verbatim_prefix(path: &Path) -> bool {
     wide.starts_with(&VERBATIM_PREFIX)
 }
 
+/// Whether a single UTF-16 path segment names a reserved DOS device (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`..=`COM9`, `LPT1`..=`LPT9`), either bare or before the first `.` (e.g. `NUL.txt`).
+fn is_dos_device_name(seg: &[u16]) -> bool {
+    let stem = seg.split(|&u| u == b'.' as u16).next().unwrap_or(seg);
+    let stem = match stem.len() {
+        3 | 4 => stem,
+        _ => return false,
+    };
+    let mut buf = [0u8; 4];
+    for (dst, &u) in buf.iter_mut().zip(stem) {
+        if u > 0x7F {
+            return false;
+        }
+        *dst = (u as u8).to_ascii_uppercase();
+    }
+    match &buf[..stem.len()] {
+        b"CON" | b"PRN" | b"AUX" | b"NUL" => true,
+        [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] => (b'1'..=b'9').contains(d),
+        _ => false,
+    }
+}
+
 /// Whether `units` contains any component whose meaning would change under Win32 DOS normalization
-/// (forward slashes, `.`/`..`, or trailing dots/spaces).
+/// (forward slashes, `.`/`..`, trailing dots/spaces, or reserved DOS device names).
 fn has_dos_unsafe_component(units: &[u16]) -> bool {
     const DOT: u16 = b'.' as u16;
     const SPACE: u16 = b' ' as u16;
@@ -31,9 +53,9 @@ fn has_dos_unsafe_component(units: &[u16]) -> bool {
     if units.contains(&SLASH) {
         return true;
     }
-    units
-        .split(|&u| u == BACKSLASH)
-        .any(|seg| !seg.is_empty() && matches!(seg.last().copied(), Some(DOT | SPACE)))
+    units.split(|&u| u == BACKSLASH).any(|seg| {
+        !seg.is_empty() && (matches!(seg.last().copied(), Some(DOT | SPACE)) || is_dos_device_name(seg))
+    })
 }
 
 /// Strips Windows' `\\?\` extended-length prefix only when the path is a DOS drive (`\\?\C:\...`)
@@ -174,23 +196,55 @@ fn open_folder(dir: &Path) -> Result<()> {
     // SAFETY: all strings outlive the call.
     let ret = unsafe { ShellExecuteW(None, w!("explore"), &HSTRING::from(dir), None, None, SW_SHOWDEFAULT) };
     if ret.0 as isize <= 32 {
-        Err(anyhow!("unable to open folder {}: {}", dir.display(), std::io::Error::last_os_error()))
+        Err(anyhow!(
+            "unable to open folder {} (ShellExecuteW code {}): {}",
+            dir.display(),
+            ret.0 as isize,
+            std::io::Error::last_os_error()
+        ))
     } else {
         Ok(())
     }
 }
 
+/// Whether `path` has a Windows drive prefix without a root slash (e.g. `C:foo`), whose target
+/// depends on per-drive ambient state rather than an explicit root or the process working directory.
+fn is_drive_relative(path: &Path) -> bool {
+    let mut has_prefix = false;
+    let mut has_root = false;
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) => has_prefix = true,
+            Component::RootDir => has_root = true,
+            _ => break,
+        }
+    }
+    has_prefix && !has_root
+}
+
+/// Production preparation path shared by `reveal_in_explorer` and tests: rejects empty,
+/// unsupported verbatim, and drive-relative paths before resolving relative paths against the
+/// process working directory.
+fn prepare_reveal(target: &Path) -> Result<RevealPlan> {
+    if target.as_os_str().is_empty() {
+        return Err(anyhow!("cannot reveal an empty path"));
+    }
+    let stripped = normalize_shell_path(target);
+    if is_verbatim_prefix(&stripped) {
+        return Err(anyhow!("cannot reveal unsupported verbatim path {}", target.display()));
+    }
+    let slashed = to_backslashes(&stripped);
+    if is_drive_relative(&slashed) {
+        return Err(anyhow!("cannot reveal drive-relative path {}", target.display()));
+    }
+    let abs = std::path::absolute(&slashed)?;
+    plan_reveal_with_cwd(&abs, None)
+}
+
 /// Opens Explorer on the file's folder with the file selected (its folder alone if that fails as
 /// GPUI's fallback does), or opens the folder directly when `target` is a filesystem root.
 pub(crate) fn reveal_in_explorer(target: &Path) -> Result<()> {
-    let stripped = normalize_shell_path(target);
-    let plan = if !stripped.as_os_str().is_empty() && !is_verbatim_prefix(&stripped) {
-        let abs = std::path::absolute(&stripped)?;
-        plan_reveal_with_cwd(&abs, None)?
-    } else {
-        plan_reveal_with_cwd(target, None)?
-    };
-    let (dir, target) = match plan {
+    let (dir, target) = match prepare_reveal(target)? {
         RevealPlan::OpenDirectly(path) => return open_folder(&path),
         RevealPlan::SelectInParent { dir, target } => (dir, target),
     };
@@ -347,6 +401,21 @@ mod tests {
             normalize_shell_path(Path::new(r"\\?\C:\dir\trailing ")),
             PathBuf::from(r"\\?\C:\dir\trailing ")
         );
+        // Reserved DOS device names (and their extension forms) keep the verbatim prefix.
+        assert_eq!(
+            normalize_shell_path(Path::new(r"\\?\C:\runs\NUL.txt")),
+            PathBuf::from(r"\\?\C:\runs\NUL.txt")
+        );
+        assert_eq!(
+            normalize_shell_path(Path::new(r"\\?\C:\runs\com1.log")),
+            PathBuf::from(r"\\?\C:\runs\com1.log")
+        );
+        assert_eq!(normalize_shell_path(Path::new(r"\\?\C:\runs\CON")), PathBuf::from(r"\\?\C:\runs\CON"));
+        // Non-device names sharing a prefix still normalize normally.
+        assert_eq!(
+            normalize_shell_path(Path::new(r"\\?\C:\runs\null.txt")),
+            PathBuf::from(r"C:\runs\null.txt")
+        );
     }
 
     #[test]
@@ -407,5 +476,9 @@ mod tests {
         assert!(plan_reveal_with_cwd(Path::new(r"C:best.folo"), Some(Path::new(r"D:\work"))).is_err());
         assert!(plan_reveal_with_cwd(Path::new("best.folo"), None).is_err());
         assert!(plan_reveal_with_cwd(Path::new(""), Some(Path::new(r"D:\work"))).is_err());
+        // Production `prepare_reveal` rejects drive-relative and DOS-device verbatim paths too.
+        assert!(prepare_reveal(Path::new(r"C:best.folo")).is_err());
+        assert!(prepare_reveal(Path::new(r"\\?\C:\runs\NUL.txt")).is_err());
+        assert!(prepare_reveal(Path::new(r"\\?\Volume{1234}\dir\file")).is_err());
     }
 }

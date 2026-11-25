@@ -177,13 +177,11 @@ impl WindowInner {
     fn mouse_button(&self, element: ElementState, button: WinitButton) {
         let Some(button) = mouse::button(button) else { return };
         let left = button == crate::MouseButton::Left;
-        let area = if left {
-            call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten()
-        } else {
-            None
-        };
         match element {
             ElementState::Pressed => {
+                let area = left
+                    .then(|| call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten())
+                    .flatten();
                 let (position, modifiers, click_count) = {
                     let mut state = self.state.borrow_mut();
                     let position = state.mouse_position;
@@ -215,6 +213,9 @@ impl WindowInner {
                 let Some((position, modifiers, click_count)) = release else {
                     return;
                 };
+                let area = left
+                    .then(|| call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten())
+                    .flatten();
                 let result = self.dispatch(PlatformInput::MouseUp(MouseUpEvent {
                     button,
                     position,
