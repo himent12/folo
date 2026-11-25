@@ -287,3 +287,73 @@ fn adding_fonts_lays_out_anew() {
         "nothing answers from last frame's records: {answered} / {computed}"
     );
 }
+
+#[test]
+fn wide_container_reuses_layout_without_recomputing() {
+    let (mut app, handle) = open(size(px(300.), px(200.)), 1.0, |_, _| {
+        let mut container = div().size_full().flex().flex_col();
+        for i in 0..16 {
+            container = container.child(div().h(px(10.)).bg(hsla((i as f32) * 0.05, 0.5, 0.5, 1.)));
+        }
+        container.into_any_element()
+    });
+    app.update(|cx| cx.update_window(handle, |_, window, _| window.refresh())).expect("window");
+    app.frame(handle);
+    let (answered, computed, styles_cleared) = app.read(|cx| match cx.windows.get(&handle.id) {
+        Some(Some(window)) => {
+            let tree = &window.layout_engine.as_ref().expect("engine").tree;
+            (tree.answered_last, tree.computed_last, window.frame_styles.is_empty())
+        }
+        _ => (0, 0, false),
+    });
+    assert_eq!((answered, computed), (1, 0), "16-child container should reuse from records");
+    assert!(styles_cleared, "Window::frame_styles must be cleared after finish_frame");
+}
+
+#[test]
+fn cached_style_preserves_hover_and_active_precedence_and_invalidates_on_mutation() {
+    use crate::{
+        InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput,
+        StatefulInteractiveElement, point,
+    };
+
+    let base = hsla(0.1, 0.6, 0.4, 1.);
+    let hover = hsla(0.4, 0.6, 0.5, 1.);
+    let active = hsla(0.8, 0.7, 0.5, 1.);
+    let (mut app, handle) = open(size(px(200.), px(100.)), 1.0, move |_, _| {
+        div()
+            .id("btn")
+            .size(px(80.))
+            .bg(base)
+            .hover(move |s| s.bg(hover))
+            .active(move |s| s.bg(active))
+            .into_any_element()
+    });
+    assert_eq!(super::quads_of(&mut app, handle, base).len(), 1);
+
+    // Hovering applies hover style on top of cached base style.
+    app.simulate_input(
+        handle,
+        PlatformInput::MouseMove(MouseMoveEvent { position: point(px(20.), px(20.)), ..Default::default() }),
+    );
+    app.frame(handle);
+    assert_eq!(super::quads_of(&mut app, handle, hover).len(), 1);
+
+    // Pressing while hovered must apply active style AFTER hover style (active wins).
+    app.simulate_input(
+        handle,
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(20.), px(20.)),
+            ..Default::default()
+        }),
+    );
+    app.frame(handle);
+    assert_eq!(super::quads_of(&mut app, handle, active).len(), 1);
+
+    // Mutating a Div's style via `Styled::style()` invalidates its cached style handle.
+    let mut el = div().bg(base);
+    el.interactivity.cached_style = Some(0);
+    let _ = el.style();
+    assert!(el.interactivity.cached_style.is_none());
+}

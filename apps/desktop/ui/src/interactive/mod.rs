@@ -226,4 +226,17 @@ pub struct Interactivity {
     pub(crate) tab_stop: bool,
     /// Its dispatch node this frame (pushed at prepaint, made current again at paint).
     pub(crate) dispatch_node: Option<DispatchNodeId>,
+    /// Index into `Window::frame_styles` holding the base+active `Style` resolved in `request_layout`,
+    /// reused by `prepaint` and `paint` when `clicked_state` and hover styles are unchanged.
+    pub(crate) cached_style: Option<u32>,
+    /// The `ElementClickedState` under which `cached_style` was computed.
+    pub(crate) cached_clicked: ElementClickedState,
+}
+
+impl Interactivity {
+    /// Clears any frame-cached resolved style (called whenever builder fields are mutated).
+    #[inline]
+    pub(crate) fn invalidate_cached_style(&mut self) {
+        self.cached_style = None;
+    }
 }

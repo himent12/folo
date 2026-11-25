@@ -184,12 +184,24 @@ impl Window {
         measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
         + 'static,
     ) -> LayoutId {
+        self.request_keyed_measured_layout_ref(&style, key, reset, measure)
+    }
+
+    /// Borrowed-style variant of [`Self::request_keyed_measured_layout`].
+    pub(crate) fn request_keyed_measured_layout_ref(
+        &mut self,
+        style: &Style,
+        key: MeasureKey,
+        reset: impl Fn() + 'static,
+        measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+        + 'static,
+    ) -> LayoutId {
         let measured = Measured { measure: Box::new(measure), key: Some(key), reset: Some(Box::new(reset)) };
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
         let font_generation = self.text_system.font_generation();
         self.layout_engine_mut().request_measured_layout(
-            &style,
+            style,
             rem_size,
             scale_factor,
             font_generation,

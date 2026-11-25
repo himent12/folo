@@ -18,14 +18,14 @@ pub fn div() -> Div {
 pub struct Div {
     /// Listeners, styles, state.
     pub(crate) interactivity: Interactivity,
-    /// The children.
-    pub(crate) children: SmallVec<[AnyElement; 2]>,
+    /// The children (4 inline avoids heap spills for typical cards, rows and toolbars).
+    pub(crate) children: SmallVec<[AnyElement; 4]>,
 }
 
 /// What `Div::request_layout` keeps: the children's layout ids.
 pub struct DivFrameState {
     /// The children's layout ids (from `request_layout`).
-    pub(crate) child_layout_ids: SmallVec<[LayoutId; 2]>,
+    pub(crate) child_layout_ids: SmallVec<[LayoutId; 4]>,
 }
 
 /// What `Div::prepaint` keeps for paint.
@@ -36,12 +36,14 @@ pub struct DivPrepaintState {
 
 impl Styled for Div {
     fn style(&mut self) -> &mut StyleRefinement {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity.base_style
     }
 }
 
 impl InteractiveElement for Div {
     fn interactivity(&mut self) -> &mut Interactivity {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity
     }
 }
@@ -73,14 +75,19 @@ impl Element for Div {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
         let children = &mut self.children;
-        let layout_id =
-            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
+        let layout_id = self.interactivity.request_layout_ref(
+            global_id,
+            inspector_id,
+            window,
+            cx,
+            |style, window, cx| {
                 window.with_text_style_ref(style.text_style(), |window| {
                     child_layout_ids
                         .extend(children.iter_mut().map(|child| child.request_layout(window, cx)));
                 });
-                window.request_layout(style, child_layout_ids.iter().copied(), cx)
-            });
+                window.request_layout_ref(style, child_layout_ids.iter().copied())
+            },
+        );
         (layout_id, DivFrameState { child_layout_ids })
     }
 

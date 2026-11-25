@@ -68,6 +68,7 @@ impl Window {
         let start = Instant::now();
         self.dirty.set(false);
         self.drawing = true;
+        self.frame_styles.clear();
         self.tooltip_bounds = None;
         self.frame_times.frame += 1;
         self.frame_times.render_us = 0;
@@ -140,6 +141,7 @@ impl Window {
 
         std::mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        self.frame_styles.clear();
         self.frame_times.primitives = self.rendered_frame.scene.len() as u32;
         self.frame_times.hitboxes = self.rendered_frame.hitboxes.len() as u32;
 

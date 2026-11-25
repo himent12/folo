@@ -113,12 +113,12 @@ struct Node {
     reusable: bool,
     /// Every request and answer (last frame's while reusable, else this frame's), in order: each distinct
     /// pair once in `answers`, and `requests` indexes them (a node is asked the same thing many times).
-    answers: Vec<(LayoutInput, LayoutOutput)>,
-    requests: Vec<u32>,
+    answers: SmallVec<[(LayoutInput, LayoutOutput); 1]>,
+    requests: SmallVec<[u32; 4]>,
     /// How many of `requests` this frame's requests matched.
     matched: u32,
     /// The measure calls (last frame's while reusable and not measured again).
-    invocations: Vec<Invocation>,
+    invocations: SmallVec<[Invocation; 1]>,
     /// The measure function ran (or replayed) this frame.
     measured_now: bool,
     /// The text system's font generation when the node was added (reuse needs it unchanged).
@@ -234,10 +234,10 @@ impl LayoutTree {
             sig,
             reused_from: None,
             reusable: false,
-            answers: Vec::new(),
-            requests: Vec::new(),
+            answers: SmallVec::new(),
+            requests: SmallVec::new(),
             matched: 0,
-            invocations: Vec::new(),
+            invocations: SmallVec::new(),
             measured_now: false,
             font_generation,
             unrounded: Layout::new(),
@@ -276,22 +276,25 @@ impl LayoutTree {
             Some(Measured { key: Some(key), .. }) => Some(key),
             None => None,
         };
-        let mut reused_children: SmallVec<[NodeId; 8]> = SmallVec::new();
-        for child in children {
+        if children.iter().any(|child| {
             let child = &self.nodes[usize::from(*child)];
-            if !child.reusable {
-                return None;
-            }
-            reused_children.push(NodeId::from(child.reused_from? as usize));
+            !child.reusable || child.reused_from.is_none()
+        }) {
+            return None;
         }
         self.by_sig.get(&sig)?.iter().copied().find(|&ix| {
             let old = &self.previous[ix as usize];
             !self.taken[ix as usize]
                 && old.font_generation == font_generation
+                && old.count as usize == children.len()
                 && old.measured.as_ref().map(|m| m.key.as_ref()) == measured.map(|_| key)
                 && old.style == *style
                 && self.previous_children[old.first as usize..(old.first + old.count) as usize]
-                    == reused_children[..]
+                    .iter()
+                    .zip(children)
+                    .all(|(&prev_child, &child)| {
+                        self.nodes[usize::from(child)].reused_from == Some(usize::from(prev_child) as u32)
+                    })
         })
     }
 
@@ -317,9 +320,22 @@ impl LayoutTree {
             nodes
                 .iter()
                 .map(|n| {
-                    n.answers.capacity() * std::mem::size_of::<(LayoutInput, LayoutOutput)>()
-                        + n.requests.capacity() * std::mem::size_of::<u32>()
-                        + n.invocations.capacity() * std::mem::size_of::<Invocation>()
+                    let answers = if n.answers.spilled() {
+                        n.answers.capacity() * std::mem::size_of::<(LayoutInput, LayoutOutput)>()
+                    } else {
+                        0
+                    };
+                    let requests = if n.requests.spilled() {
+                        n.requests.capacity() * std::mem::size_of::<u32>()
+                    } else {
+                        0
+                    };
+                    let invocations = if n.invocations.spilled() {
+                        n.invocations.capacity() * std::mem::size_of::<Invocation>()
+                    } else {
+                        0
+                    };
+                    answers + requests + invocations
                 })
                 .sum()
         };
