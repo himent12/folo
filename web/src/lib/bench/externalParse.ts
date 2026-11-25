@@ -186,16 +186,19 @@ function createWorkerSession(
 ): ExternalPredictionSession {
   let disposed = false;
   let nextReqId = 2;
+  const disposeCtl = new AbortController();
 
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    disposeCtl.abort(new Error('The predictions file session was closed.'));
     worker.terminate();
   };
 
   const fetchList = async (req: ExternalWorkerRequest, signal?: AbortSignal): Promise<BenchPrediction[]> => {
     if (disposed) throw new Error('The predictions file session was closed.');
-    const res = await sendWorkerRequest(worker, req, signal);
+    const combined = signal ? AbortSignal.any([signal, disposeCtl.signal]) : disposeCtl.signal;
+    const res = await sendWorkerRequest(worker, req, combined);
     if (res.type === 'predictions') return res.predictions;
     throw new Error(res.type === 'error' && res.message ? res.message : 'Could not read predictions from worker.');
   };

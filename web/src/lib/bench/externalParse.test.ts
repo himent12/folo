@@ -188,6 +188,47 @@ describe('parseExternalPredictionsFile', () => {
     await expect(res.session.getPart(0)).rejects.toThrow(/closed/);
   });
 
+  it('rejects an in-flight getPart request when dispose() is called so sendExternal cleans up the open entry', async () => {
+    const worker = new FakeWorker();
+    const handler = createExternalWorkerHandler();
+    // Answer only the initial parse, then hold the get-part request open to simulate unmount mid-read.
+    worker.onPost = (req, w) => {
+      if (req.type === 'parse') {
+        void dispatchExternalWorkerMessage({ postMessage: (r) => w.emitMessage(r) }, handler, req);
+      }
+    };
+
+    const res = await parseExternalPredictionsFile(new File([validJson], 'preds.json'), ctx, {
+      createWorker: () => worker,
+      maxPartBytes: 200,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const calls: string[] = [];
+    const entry = { id: 'be_unmount', status: 'running' } as BenchEntry;
+    const sender: ExternalSender = {
+      start: async () => (calls.push('start'), entry),
+      send: async () => (calls.push('send'), entry),
+      finish: async () => (calls.push('finish'), entry),
+      get: async () => entry,
+      stop: async () => (calls.push('stop'), entry),
+      remove: async () => {
+        calls.push('remove');
+      },
+    };
+
+    const sending = sendExternal(sender, { name: 'ext', scored: true, source: res.session, plan });
+    // Wait until get-part has been posted to the worker.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(worker.posted.some((r) => r.type === 'get-part')).toBe(true);
+
+    res.session.dispose();
+    await expect(sending).rejects.toThrow(/closed/);
+    expect(worker.terminated).toBe(true);
+    expect(calls).toEqual(['start', 'stop', 'remove']);
+  });
+
   it('terminates the worker immediately when validation fails', async () => {
     const worker = attachRealHandler(new FakeWorker());
     const res = await parseExternalPredictionsFile(new File([invalidJson], 'bad.json'), ctx, {
