@@ -196,15 +196,16 @@ impl FoloApp {
     }
 
     /// The dataset whose validation images the Playground offers for its model, as the server picks
-    /// one to evaluate it on: its run's dataset while that is registered, else the first dataset with
-    /// exactly the model's classes, else none (a COCO model next to a blood-cell set gets no samples).
+    /// one to evaluate it on: its run's dataset while that is registered and has validation images,
+    /// else the first dataset with exactly the model's classes and validation images, else none
+    /// (a COCO model next to a blood-cell set, or a train-only set, gets no samples).
     pub fn play_sample_dataset(&self) -> Option<String> {
         let model = self.play_shown_model()?;
         let datasets = self.store.datasets.ready()?;
         let of_run = model.run_id.as_ref().and_then(|r| self.store.run(r)).map(|r| &r.config.dataset_id);
         of_run
-            .and_then(|id| datasets.iter().find(|d| d.id == *id))
-            .or_else(|| datasets.iter().find(|d| d.classes == model.classes))
+            .and_then(|id| datasets.iter().find(|d| d.id == *id && d.splits.val > 0))
+            .or_else(|| datasets.iter().find(|d| d.classes == model.classes && d.splits.val > 0))
             .map(|d| d.id.clone())
     }
 
@@ -233,6 +234,10 @@ impl FoloApp {
     /// it is dropped when it answers, image and page model together (the newest action wins whole).
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
         self.play_open_seq += 1;
+        if self.play_model.as_deref() != Some(id.as_str()) {
+            self.play_class = None;
+            self.play_hover = None;
+        }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
         self.run_predict(cx);
@@ -296,6 +301,7 @@ impl FoloApp {
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_hover = None;
+        self.play_class = None;
     }
 
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
@@ -310,6 +316,7 @@ impl FoloApp {
     /// is local only above that floor).
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
         self.play_conf = conf;
+        self.play_hover = None;
         if conf < self.play_fetched_floor - 1e-6 {
             self.run_predict(cx);
         }
@@ -380,6 +387,7 @@ impl FoloApp {
         self.play_pred_for = Some(key);
         self.play_pred_pending = false;
         self.play_pred_dim = false;
+        self.play_hover = None;
     }
 
     /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:
@@ -524,6 +532,9 @@ impl FoloApp {
         }
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
+            if self.play_model.as_deref() != Some(id.as_str()) {
+                self.play_class = None;
+            }
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
         }

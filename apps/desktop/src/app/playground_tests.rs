@@ -578,3 +578,149 @@ fn try_in_playground_after_a_drop_still_decoding_keeps_its_model() {
         assert!(this.play_loading.is_none());
     });
 }
+
+#[test]
+fn playground_boxes_labels_class_filter_and_copy_json() {
+    use crate::api::ScoredBox;
+    let (mut app, window) = open();
+    let (_current, other) = stage_an_image(&mut app, window);
+    let pred = drive(&mut app, window, |this, _, cx| {
+        let mut pred = this.play_pred.ready().expect("staged prediction").clone();
+        pred.boxes = vec![
+            ScoredBox { class: 0, name: "rbc".into(), score: 0.92, x1: 10., y1: 10., x2: 50., y2: 50. },
+            ScoredBox { class: 1, name: "wbc".into(), score: 0.78, x1: 60., y1: 60., x2: 120., y2: 120. },
+            ScoredBox { class: 0, name: "rbc".into(), score: 0.12, x1: 2., y1: 2., x2: 8., y2: 8. },
+        ];
+        this.play_conf = 0.25;
+        this.play_pred = Load::Ready(pred.clone());
+        cx.notify();
+        pred
+    });
+    app.frame(window.into());
+    // Default: boxes + labels on, All classes, 2 detections above 0.25.
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.play_boxes && this.play_labels && this.play_class.is_none());
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        for expected in
+            ["play-boxes", "play-labels", "play-copy-json", "play-class-all", "play-class-0", "play-class-1"]
+        {
+            assert!(keys.iter().any(|k| k == expected), "missing {expected} in {keys:?}");
+        }
+        assert_eq!(this.visible_boxes(&pred, None).len(), 2);
+        // Filter to class 1 ("wbc") and copy JSON.
+        this.play_class = Some(1);
+        assert_eq!(this.visible_boxes(&pred, None).len(), 1);
+        this.copy_play_json(cx);
+        let (title, body) = last_toast(this);
+        assert_eq!(title, "Copied detection JSON");
+        assert_eq!(body, "1 detection");
+    });
+    let clip = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed: serde_json::Value = serde_json::from_str(&clip).expect("valid JSON");
+    assert_eq!(parsed["class_filter"], 1);
+    assert_eq!(parsed["detections"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["detections"][0]["name"], "wbc");
+    // End-to-end (O2o) models omit `"iou"` from copied JSON; NMS (O2m) models include it.
+    drive(&mut app, window, |this, _, cx| {
+        let id = this.play_model.clone().unwrap();
+        let m = this.store.models.ready_mut().unwrap().iter_mut().find(|m| m.id == id).unwrap();
+        m.head = crate::api::Head::O2o;
+        this.copy_play_json(cx);
+    });
+    let clip_o2o = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed_o2o: serde_json::Value = serde_json::from_str(&clip_o2o).expect("valid JSON");
+    assert!(parsed_o2o.get("iou").is_none(), "O2o models should omit iou: {parsed_o2o}");
+    drive(&mut app, window, |this, _, cx| {
+        let id = this.play_model.clone().unwrap();
+        let m = this.store.models.ready_mut().unwrap().iter_mut().find(|m| m.id == id).unwrap();
+        m.head = crate::api::Head::O2m;
+        this.copy_play_json(cx);
+    });
+    let clip_o2m = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed_o2m: serde_json::Value = serde_json::from_str(&clip_o2m).expect("valid JSON");
+    assert!(parsed_o2m.get("iou").is_some(), "O2m models should include iou: {parsed_o2m}");
+    // Out-of-bounds play_hover never dims remaining boxes, and set_play_conf clears play_hover.
+    drive(&mut app, window, |this, w, cx| {
+        this.play_class = None;
+        this.play_hover = Some(99);
+        assert_eq!(this.play_active(w, cx), None, "out-of-bounds hover is ignored");
+        let drawn = this.visible_boxes(&pred, this.play_active(w, cx));
+        assert!(drawn.iter().all(|b| !b.dim), "remaining boxes must not all be dimmed");
+        this.play_hover = Some(1);
+        this.set_play_conf(0.85, cx);
+        assert_eq!(this.play_hover, None, "confidence change clears hover");
+    });
+    // Toggling boxes off keeps detection list intact while hiding overlay; switching models resets class filter.
+    drive(&mut app, window, |this, _, cx| {
+        this.play_boxes = false;
+        this.play_labels = false;
+        this.play_class = Some(1);
+        this.play_hover = Some(0);
+        this.pick_play_model(other.clone(), cx);
+        assert_eq!(this.play_class, None, "switching model clears stale class filter");
+        assert_eq!(this.play_hover, None, "switching model clears hover");
+        // Switching backend resets boxes/labels/class/hover to defaults.
+        this.play_hover = Some(0);
+        this.set_backend(
+            Arc::new(crate::api::mock::MockBackend::new(4200, true)),
+            super::ServerMode::Local,
+            cx,
+        );
+        assert!(
+            this.play_boxes && this.play_labels && this.play_class.is_none() && this.play_hover.is_none()
+        );
+    });
+}
+
+#[test]
+fn play_sample_dataset_skips_train_only_datasets() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        let model = this.store.models.ready().unwrap()[0].clone();
+        this.play_model = Some(model.id.clone());
+        assert!(this.play_sample_dataset().is_some());
+        for ds in this.store.datasets.ready_mut().unwrap().iter_mut() {
+            ds.splits.val = 0;
+        }
+        assert_eq!(this.play_sample_dataset(), None, "datasets with 0 val images offer no samples");
+    });
+}
+
+#[test]
+fn failed_dataset_load_shows_retry_on_runs_and_toast_on_new_run() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Runs, w, cx);
+        this.store.datasets = Load::Failed(ApiError::new("io_error", "dataset catalog unreadable"));
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "runs-retry-ds"), "Runs should offer Retry datasets: {keys:?}");
+        // Ctrl+N / open_new_run explains the failure with an inline Retry action rather than saying "Loading…".
+        this.open_new_run(None, w, cx);
+        assert!(this.new_run.is_none());
+        let t = this.toasts.last().expect("error toast");
+        assert_eq!(t.title.as_ref(), "Datasets didn't load");
+        assert_eq!(t.body.as_deref(), Some("dataset catalog unreadable"));
+        let (label, retry) = t.action.as_ref().expect("Retry action");
+        assert_eq!(label.as_ref(), "Retry");
+        let retry = retry.clone();
+        retry(this, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.datasets.ready().is_some(), "Retry action reloads datasets");
+    });
+    // When both runs and datasets failed (e.g. outage), Retry reloads all core lists, not datasets alone.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.datasets = Load::Failed(ApiError::new("server_unreachable", "server unreachable"));
+        this.store.runs = Load::Failed(ApiError::new("server_unreachable", "server unreachable"));
+        this.open_new_run(None, w, cx);
+        let (_, retry) = this.toasts.last().unwrap().action.as_ref().unwrap().clone();
+        retry(this, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.datasets.ready().is_some() && this.store.runs.ready().is_some());
+    });
+}

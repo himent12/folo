@@ -55,7 +55,52 @@ impl FoloApp {
         } else {
             format!("{} · {} active · {} failed", plural(runs.len(), "run"), active, count(RunFilter::Failed))
         };
-        let new = if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+        let ds_err = self.store.datasets.error().cloned();
+        let show_retry_ds = ds_err.is_some() && self.store.runs.error().is_none();
+        let retry_ds_stop = self.passing_stop("runs-retry-ds", show_retry_ds, cx);
+        let mut header_actions = Vec::new();
+        if let Some(err) = ds_err.as_ref()
+            && self.store.runs.error().is_none()
+        {
+            header_actions.push(
+                self.button(
+                    "runs-retry-ds",
+                    "Retry datasets",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_datasets(cx)),
+                )
+                .tooltip(crate::controls::tip(format!("Datasets didn't load: {}", err.message), None))
+                .into_any_element(),
+            );
+        } else if let Some(fh) = retry_ds_stop {
+            header_actions.push(div().track_focus(&fh).into_any_element());
+        }
+        let new = if self.store.runs.error().is_some() {
+            self.button_disabled(
+                "runs-new",
+                "New run",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                "Connect to folo serve first",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else if ds_err.is_some() {
+            self.button_disabled(
+                "runs-new",
+                "New run",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                "Datasets didn't load · retry to start a run",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
             self.button_disabled(
                 "runs-new",
                 "New run",
@@ -83,7 +128,8 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
             .into_any_element()
         };
-        let header = page_header(&t, "Runs", subtitle, vec![new]);
+        header_actions.push(new);
+        let header = page_header(&t, "Runs", subtitle, header_actions);
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "runs-retry", window, cx);
             return self.page_frame(&t, header, err, cx);
@@ -391,21 +437,49 @@ impl FoloApp {
                 }),
             )
         });
+        let empty_retry_ds_stop = self.passing_stop(
+            "runs-empty-retry-ds",
+            !self.store.runs.is_loading() && total == 0 && ds_err.is_some(),
+            cx,
+        );
         let table = panel(&t).overflow_hidden().child(head).map(|d| {
             if self.store.runs.is_loading() {
                 d.child(loading_rows(&t, "runs", 6))
             } else if total == 0 {
-                // An empty server: what to do first, and the button that does it.
-                let body = match step {
-                    FirstStep::AddDataset => {
-                        "Training needs a dataset first: add a YOLO or COCO folder, or generate a synthetic one."
-                    }
-                    _ => "Start one with New run: pick a dataset, an architecture and how long to train.",
-                };
-                d.child(
-                    empty_state(&t, "icons/activity.svg", "No runs yet", body, Tone::Neutral)
-                        .children(first.take()),
-                )
+                if let Some(err) = ds_err.as_ref() {
+                    let retry = self.button(
+                        "runs-empty-retry-ds",
+                        "Retry datasets",
+                        Btn::Secondary,
+                        Some("icons/refresh-cw.svg"),
+                        window,
+                        cx,
+                        act(|this, _, cx| this.retry_datasets(cx)),
+                    );
+                    d.child(
+                        empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "Datasets didn't load",
+                            &format!("{} · retry datasets to start a run.", err.message),
+                            Tone::Danger,
+                        )
+                        .child(retry),
+                    )
+                } else {
+                    // An empty server: what to do first, and the button that does it.
+                    let body = match step {
+                        FirstStep::AddDataset => {
+                            "Training needs a dataset first: add a YOLO or COCO folder, or generate a synthetic one."
+                        }
+                        _ => "Start one with New run: pick a dataset, an architecture and how long to train.",
+                    };
+                    d.child(
+                        empty_state(&t, "icons/activity.svg", "No runs yet", body, Tone::Neutral)
+                            .when_some(empty_retry_ds_stop.clone(), |d, fh| d.child(div().track_focus(&fh)))
+                            .children(first.take()),
+                    )
+                }
             } else if rows.is_empty() {
                 d.child(
                     empty_state(

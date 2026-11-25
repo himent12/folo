@@ -90,6 +90,14 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Fetch the dataset list again after it failed.
+    pub fn retry_datasets(&mut self, cx: &mut Context<Self>) {
+        self.list_tickets.restart(List::Datasets);
+        self.store.datasets = Load::Idle;
+        self.ensure_core(cx);
+        cx.notify();
+    }
+
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
