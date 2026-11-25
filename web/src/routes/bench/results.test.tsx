@@ -10,6 +10,7 @@ import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { keyPrefs } from '$lib/ui/keyPrefs';
 import { toast } from '$lib/ui/toast';
 import { render } from '../../../framework/testing';
 import BenchCompare from '../BenchCompare';
@@ -226,6 +227,45 @@ describe('the compare page', () => {
     await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone');
     expect(document.querySelector('.cmp')).toBeNull();
     expect(document.querySelector('a[href="#/benchmarks/bn_3c90"]')).not.toBeNull();
+  });
+
+  it('pins entries with 1–4, cycles baseline with B, unpins on Escape, and fixes the no-robustness copy', async () => {
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f104');
+    await settle(40);
+    expect(text()).toContain('ran no conditions: it has no dots here.');
+    const chips = () => [...document.querySelectorAll<HTMLButtonElement>('.chips .chip button.ck')];
+    expect(chips().map((b) => b.getAttribute('aria-keyshortcuts'))).toEqual(['1', '2']);
+
+    // Press 2 to pin the second entry, then Escape to unpin it.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.body.dispatchEvent(esc);
+    flushSync();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('false');
+
+    // Press 1 twice to toggle pin on and off; singleKeys=false disables 1–4 and B.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[0]!.getAttribute('aria-pressed')).toBe('true');
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[0]!.getAttribute('aria-pressed')).toBe('false');
+
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+    expect(go).toHaveBeenCalledWith('/benchmarks/bn_3c90/compare?entries=be_f104,be_f101', { replace: true });
+
+    keyPrefs.singleKeys = false;
+    try {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(chips()[0]!.getAttribute('aria-pressed')).toBe('false');
+    } finally {
+      keyPrefs.singleKeys = true;
+    }
   });
 });
 

@@ -14,25 +14,26 @@ import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
 import Plus from '$icons/plus';
 import X from '$icons/x';
-import { computed, css, For, Index, MediaQuery } from 'fw';
+import { css, For, Index, MediaQuery, onDocument } from 'fw';
 import { ApiError } from '$lib/api/index';
-import type { BenchEntry } from '$lib/api/types';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
 import { media } from '$lib/design/tokens';
 import { conf, metric, num, pct } from '$lib/format';
+import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
-import NoValue from '$lib/ui/NoValue';
+import { keyPrefs } from '$lib/ui/keyPrefs';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import Callout from './run/Callout';
-import { diffAsPrinted, RELIABILITY_X, SLOT_PATTERN } from './bench/charts';
+import { RELIABILITY_X, SLOT_PATTERN } from './bench/charts';
 import DotRows from './bench/compare/DotRows';
-import { CLS_SHOWN, compareState, type Row } from './bench/compare/state';
+import SideBySide from './bench/compare/SideBySide';
+import { CLS_SHOWN, compareState } from './bench/compare/state';
 import IntervalPlot from './bench/IntervalPlot';
 import { along, COMPARE_MAX, stale } from './bench/leaderboard';
 import { capTicks } from '$lib/charts/domain';
@@ -40,7 +41,6 @@ import Unsupported from './bench/Unsupported';
 import { calibrationNone, intervalText, keptText, scoreText } from './bench/words';
 
 const BIN_MIDS = [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95];
-const diff = diffAsPrinted;
 const unitTick = (v: number) => (v === 0 || v === 1 ? String(v) : v.toFixed(2));
 
 export default function BenchCompare() {
@@ -89,6 +89,32 @@ export default function BenchCompare() {
   } = compareState();
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
+
+  // Single-key shortcuts: 1–4 pin/unpin an entry in front across every chart, B promotes the next entry to baseline,
+  // and Escape unpins first before global Escape returns to the leaderboard.
+  onDocument('keydown', (e) => {
+    if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    if (document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"]')) return;
+    if (e.key === 'Escape') {
+      if (pinned.peek() !== null) {
+        e.preventDefault();
+        pinned.set(null);
+      }
+      return;
+    }
+    if (!keyPrefs.singleKeys) return;
+    const list = shown.peek();
+    if (list.length < 2) return;
+    if (e.key >= '1' && e.key <= '4') {
+      const target = list[Number(e.key) - 1];
+      if (!target) return;
+      e.preventDefault();
+      pinned.set((p) => (p === target.id ? null : target.id));
+    } else if (e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      makeBaseline(list[1]!.id);
+    }
+  });
 
   const adder = () => (
     <label class="add">
@@ -144,53 +170,6 @@ export default function BenchCompare() {
     </>
   );
 
-  /** A value's difference from the baseline's, unless either is graded on an earlier version. */
-  const diffOf = (row: () => Row, v: () => number, i: number) => {
-    const o = old.get();
-    return o[i] || o[0] ? null : diff(v(), row().values[0] ?? null, row().d);
-  };
-
-  const cmpCell = (row: () => Row, b: () => Set<number>, v: () => number | null, i: number) => (
-    <td class="r num" class:top={b().has(i)}>
-      {v() === null ? (
-        <NoValue label="not measured" />
-      ) : (
-        <>
-          {b().has(i) ? <span class="best">best</span> : null}
-          {row().fmt(v()!)}{' '}
-          {i > 0 && diffOf(row, v as () => number, i) ? <span class="dd">{diffOf(row, v as () => number, i)}</span> : null}
-        </>
-      )}
-    </td>
-  );
-
-  const sbsValue = (row: () => Row, b: () => Set<number>, e: () => BenchEntry, i: () => number) => {
-    const v = () => row().values[i()] ?? null;
-    return (
-      <span class="sbs-v" class:top={b().has(i())}>
-        <span class="sbs-n">
-          {key(e().id)}
-          <span class="truncate">{e().name}</span>
-        </span>{' '}
-        <span class="num">
-          {v() === null ? (
-            <NoValue label="not measured" />
-          ) : (
-            <>
-              {row().fmt(v()!)}
-              {i() > 0 ? (
-                <>{diffOf(row, v as () => number, i()) ? <span class="dd">{diffOf(row, v as () => number, i())}</span> : null}</>
-              ) : (
-                <span class="dd">baseline</span>
-              )}
-              {b().has(i()) ? <span class="dd">best</span> : null}
-            </>
-          )}
-        </span>
-      </span>
-    );
-  };
-
   const compared = () => (
     <>
       {caveats.get().length ? (
@@ -200,69 +179,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <Panel title="Side by side" meta="against the first, the baseline" pad="none">
-        <div class="scroll">
-          <table class="table cmp" aria-label="Scores and axes side by side">
-            <thead>
-              <tr>
-                <th class="lead m-col">
-                  <span class="sr-only">Measure</span>
-                </th>
-                <For each={shown.get()} key={(e) => e.id}>
-                  {(e, i) => (
-                    <th class="r e-col">
-                      <span class="eh">
-                        {key(e().id)}
-                        <span class="eh-n">{e().name}</span>
-                      </span>{' '}
-                      <span class="role">
-                        {i() === 0 ? (
-                          'Baseline'
-                        ) : (
-                          <button type="button" class="swap" onclick={() => makeBaseline(e().id)}>
-                            Make baseline
-                          </button>
-                        )}
-                      </span>
-                    </th>
-                  )}
-                </For>
-              </tr>
-            </thead>
-            <tbody>
-              <For each={rows.get()} key={(r) => r.key}>
-                {(row) => {
-                  const b = computed(() => best(row().key, row().values, row().d));
-                  return (
-                    <tr class:total={row().key === 'score'}>
-                      <td class="lead">{row().label}</td>
-                      <Index each={row().values}>{(v, i) => cmpCell(row, () => b.get(), v, i)}</Index>
-                    </tr>
-                  );
-                }}
-              </For>
-            </tbody>
-          </table>
-        </div>
-        {/* Phones: one block per measure, each entry's value (and its difference from the baseline) in a 2 × 2 grid. */}
-        <ul class="sbs" aria-label="Scores and axes, entry by entry">
-          <For each={rows.get()} key={(r) => r.key}>
-            {(row) => {
-              const b = computed(() => best(row().key, row().values, row().d));
-              return (
-                <li>
-                  <span class="sbs-h">{row().label}</span>{' '}
-                  <span class="sbs-g">
-                    <For each={shown.get()} key={(e) => e.id}>
-                      {(e, i) => sbsValue(row, () => b.get(), e, i)}
-                    </For>
-                  </span>
-                </li>
-              );
-            }}
-          </For>
-        </ul>
-      </Panel>{' '}
+      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} best={best} makeBaseline={makeBaseline} keyMark={key} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>
@@ -334,7 +251,7 @@ export default function BenchCompare() {
               .get()
               .map((e) => e.name)
               .join(', ')}{' '}
-            {noRobust.get().length === 1 ? 'ran' : 'ran'} no condition: {noRobust.get().length === 1 ? 'it has' : 'they have'} no dots here.
+            ran no conditions: {noRobust.get().length === 1 ? 'it has' : 'they have'} no dots here.
           </p>
         ) : null}
       </Panel>{' '}
@@ -498,7 +415,7 @@ export default function BenchCompare() {
       {/* The legend: one chip per entry, its key, its score, open and remove; then Add. */}
       <div class="chips" role="group" aria-label="Entries being compared">
         <For each={shown.get()} key={(e) => e.id}>
-          {(e) => (
+          {(e, i) => (
             <span
               class="chip"
               class:pinned={pinned.get() === e().id}
@@ -512,6 +429,7 @@ export default function BenchCompare() {
                 type="button"
                 class="ck"
                 aria-pressed={pinned.get() === e().id}
+                aria-keyshortcuts={String(i() + 1)}
                 title={pinned.get() === e().id ? 'Let it fall back' : 'Keep it in front'}
                 onclick={() => pinned.set((p) => (p === e().id ? null : e().id))}
               >
@@ -743,68 +661,6 @@ css`
     gap: var(--space-1);
     margin-top: var(--space-1);
   }
-  .scroll {
-    overflow-x: auto;
-  }
-  /* The measure a fixed column, the entries sharing the rest equally (DESIGN_DIRECTION §2.7: a comparison). */
-  .cmp {
-    table-layout: fixed;
-  }
-  .m-col {
-    width: 200px;
-  }
-  .cmp thead th {
-    height: auto;
-    padding-top: var(--space-2);
-    padding-bottom: var(--space-2);
-    vertical-align: bottom;
-  }
-  .eh {
-    display: inline-flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    max-width: 100%;
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-    white-space: normal;
-  }
-  .eh-n {
-    overflow-wrap: anywhere;
-    text-align: right;
-  }
-  .role {
-    display: block;
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  .swap {
-    color: var(--text-secondary);
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .cmp tr.total td {
-    font-weight: var(--weight-semibold);
-  }
-  .top {
-    font-weight: var(--weight-semibold);
-  }
-  .best {
-    margin-right: var(--space-2);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  .dd {
-    display: inline-block;
-    min-width: 4.5em;
-    margin-left: var(--space-2);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-    text-align: right;
-  }
   .iv {
     display: grid;
   }
@@ -853,9 +709,6 @@ css`
   .verdict {
     margin-top: var(--space-3);
     max-inline-size: var(--measure-dialog);
-  }
-  .sbs {
-    display: none;
   }
   .pair {
     display: grid;
@@ -906,14 +759,6 @@ css`
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
   }
-  /* Narrower columns: the difference under its value. */
-  @media (max-width: 1279px) {
-    .cmp .dd {
-      display: block;
-      min-width: 0;
-      margin-left: 0;
-    }
-  }
   @media (max-width: 1023px) {
     .pair {
       grid-template-columns: minmax(0, 1fr);
@@ -925,45 +770,6 @@ css`
     }
     .chips > :global(*) {
       flex-basis: 100%;
-    }
-    .scroll:has(.cmp) {
-      display: none;
-    }
-    .sbs {
-      display: grid;
-    }
-    .sbs li {
-      display: grid;
-      gap: var(--space-2);
-      padding: var(--space-3) var(--space-4);
-      border-top: 1px solid var(--line-subtle);
-    }
-    .sbs li:first-child {
-      border-top: 0;
-    }
-    .sbs-h {
-      font-weight: var(--weight-medium);
-    }
-    .sbs-g {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-2) var(--space-4);
-    }
-    .sbs-v {
-      display: grid;
-      min-width: 0;
-    }
-    .sbs-n {
-      display: flex;
-      align-items: center;
-      gap: var(--space-2);
-      min-width: 0;
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-secondary);
-    }
-    .sbs-v .dd {
-      min-width: 0;
     }
     .iv li {
       grid-template-columns: minmax(0, 1fr) 48px;

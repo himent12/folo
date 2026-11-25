@@ -830,9 +830,30 @@ describe('the benchmark page', () => {
     }
     expect(boxes.filter((b) => b.checked)).toHaveLength(4);
     expect(boxes[4]!.disabled).toBe(true);
+    // Hovering a disabled checkbox's label surfaces the 4-entry cap tooltip.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const cappedLabel = boxes[4]!.closest<HTMLLabelElement>('label.hit')!;
+      cappedLabel.dispatchEvent(new Event('pointerenter'));
+      vi.advanceTimersByTime(500);
+      expect(document.getElementById('folo-tooltip')?.textContent).toBe('Compare up to 4 entries');
+      cappedLabel.dispatchEvent(new Event('pointerleave'));
+      vi.advanceTimersByTime(200);
+    } finally {
+      vi.useRealTimers();
+    }
     // In the board's order: the complete entries first, then the partial ones.
     const first4 = [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')].slice(0, 4).map((r) => r.dataset.id);
     expect(compare().getAttribute('href')).toBe(`#/benchmarks/bn_3c90/compare?entries=${first4.join(',')}`);
+    // Clear clears the selection and moves focus back to the persistent Leaderboard tab.
+    const clear = document.querySelector<HTMLButtonElement>('header button[aria-label="Clear selection"]')!;
+    clear.focus();
+    clear.click();
+    flushSync();
+    expect(boxes.filter((b) => b.checked)).toHaveLength(0);
+    expect(boxes[4]!.disabled).toBe(false);
+    expect(document.querySelector('header button[aria-label="Clear selection"]')).toBeNull();
+    expect(document.activeElement).toBe(document.getElementById('bn-tab-leaderboard'));
   });
 });
 
@@ -883,4 +904,20 @@ describe('the list', () => {
       }
     });
   }
+
+  it('opens New benchmark reactively when navigating to ?new=1 while already on /benchmarks, and strips ?new=1 from the URL', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+    router.route = parse('#/benchmarks');
+    open(Benchmarks, {});
+    await settle(10);
+    expect(formOpen()).toBe(false);
+
+    router.route = parse('#/benchmarks?new=1');
+    flushSync();
+    expect(formOpen()).toBe(true);
+    expect(go).toHaveBeenCalledWith('/benchmarks', { replace: true });
+    expect(router.route.query.get('new')).toBeNull();
+  });
 });

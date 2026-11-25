@@ -33,6 +33,9 @@ export const bandEntry = (entries: readonly BenchEntry[]) => {
 export const COMPARE_MIN = 2;
 export const COMPARE_MAX = 4;
 
+/** Tooltip on disabled row checkboxes once COMPARE_MAX entries are already selected. */
+export const COMPARE_CAP_TIP = `Compare up to ${COMPARE_MAX} entries`;
+
 /** The line beside the Compare action, for `n` entries selected. */
 export function compareHint(n: number): string {
   if (n === 0) return `Select ${COMPARE_MIN}–${COMPARE_MAX} finished entries to compare`;

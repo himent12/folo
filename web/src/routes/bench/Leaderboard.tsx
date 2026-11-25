@@ -31,7 +31,7 @@ import { rowNav } from '$lib/ui/rowNav';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { tooltip } from '$lib/ui/tooltip';
 import IntervalPlot from './IntervalPlot';
-import { along, bandEntry, boardOrder, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, stale, toggleSelection } from './leaderboard';
+import { along, bandEntry, boardOrder, COMPARE_CAP_TIP, COMPARE_MAX, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, stale, toggleSelection } from './leaderboard';
 import ScoreAxes from './ScoreAxes';
 import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words';
 
@@ -219,6 +219,7 @@ export default function Leaderboard(props: LeaderboardProps) {
                   <For each={entries.get()} key={(e) => e.id}>
                     {(e) => {
                       const on = () => selected.get().includes(e().id);
+                      const capped = () => !on() && selected.get().length >= COMPARE_MAX;
                       const done = () => finished(e());
                       const st = () => entryStatus(e());
                       const cost = computed(() => costFacts(e()));
@@ -234,11 +235,11 @@ export default function Leaderboard(props: LeaderboardProps) {
                         >
                           <td class="check" onclick={(ev) => ev.stopPropagation()}>
                             {done() ? (
-                              <label class="hit">
+                              <label class="hit" use:tooltip={capped() ? COMPARE_CAP_TIP : null}>
                                 <input
                                   type="checkbox"
                                   checked={on()}
-                                  disabled={!on() && selected.get().length >= 4}
+                                  disabled={capped()}
                                   aria-label={`Select ${e().name} for comparison`}
                                   onchange={() => toggle(e().id)}
                                 />
@@ -430,14 +431,15 @@ export default function Leaderboard(props: LeaderboardProps) {
                   const done = () => finished(e());
                   const f = computed(() => coverageFacts(e(), props.bench));
                   const on = () => selected.get().includes(e().id);
+                  const capped = () => !on() && selected.get().length >= COMPARE_MAX;
                   return (
                     <li class:faded={!done() || isStale(e())} class:on={phonePicking.get() && on()}>
                       {phonePicking.get() && done() ? (
-                        <label class="m-check">
+                        <label class="m-check" use:tooltip={capped() ? COMPARE_CAP_TIP : null}>
                           <input
                             type="checkbox"
                             checked={on()}
-                            disabled={!on() && selected.get().length >= 4}
+                            disabled={capped()}
                             aria-label={`Select ${e().name} for comparison`}
                             onchange={() => toggle(e().id)}
                           />
@@ -597,12 +599,20 @@ css`
     padding-left: var(--space-3);
     cursor: pointer;
   }
+  .hit:has(> input:disabled),
+  .m-check:has(> input:disabled) {
+    cursor: not-allowed;
+  }
   input[type='checkbox'] {
     width: 14px;
     height: 14px;
     margin: 0;
     accent-color: var(--text-primary);
     cursor: pointer;
+  }
+  input[type='checkbox']:disabled {
+    cursor: not-allowed;
+    pointer-events: none;
   }
   .board .check input {
     opacity: 0;
