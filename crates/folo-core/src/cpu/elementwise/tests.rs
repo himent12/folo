@@ -613,3 +613,202 @@ fn log_tanh_softplus_simd_accuracy_and_edges() {
     assert_eq!(simd_log_tanh::softplus_scalar(f32::INFINITY), f32::INFINITY);
     assert_eq!(simd_log_tanh::softplus_scalar(f32::NEG_INFINITY), 0.0);
 }
+
+#[test]
+fn strided_update_and_copy_into_fast_paths() {
+    let ref_update = |dst: &[f32], dl: &Layout, src: &[f32], sl: &Layout, f: fn(f32, f32) -> f32| {
+        let mut out = dst.to_vec();
+        let p = RowPlan::<2>::new(dl.dims(), [dl.strides(), sl.strides()], [dl.offset(), sl.offset()]);
+        p.for_rows(0..p.rows, |_, [od, os]| {
+            for i in 0..p.len {
+                let di = od + i * p.inner[0];
+                let si = os + i * p.inner[1];
+                out[di] = f(out[di], src[si]);
+            }
+        });
+        out
+    };
+
+    // Contiguous serial & parallel (>= PAR_MIN), (1, 1) strided rows, (1, 0) broadcast, (_, 0) strided dst +
+    // broadcast src, and general (ds, ss) strided layouts.
+    let cases = [
+        // (shape, dst_strides, dst_off, src_strides, src_off, dst_buf_len, src_buf_len)
+        (vec![5, 19], vec![19, 1], 3usize, vec![19, 1], 7usize, 120usize, 120usize),
+        (vec![2, 18_000], vec![18_000, 1], 0, vec![18_000, 1], 0, 36_000, 36_000),
+        (vec![6, 25], vec![29, 1], 2, vec![31, 1], 5, 200, 210),
+        (vec![6, 25], vec![29, 1], 1, vec![1, 0], 4, 200, 20),
+        (vec![1, 40_000], vec![1, 1], 0, vec![0, 0], 3, 40_000, 10),
+        (vec![7, 13], vec![1, 9], 2, vec![1, 0], 1, 150, 20),
+        (vec![7, 13], vec![2, 16], 1, vec![3, 25], 2, 260, 400),
+        // Empty layout with non-zero offset against an empty buffer.
+        (vec![0, 8], vec![8, 1], 5, vec![8, 1], 9, 0, 0),
+    ];
+
+    for (dims, ds, doff, ss, soff, dlen, slen) in cases {
+        let dl = Layout::new(Shape::new(&dims), ds.into(), doff);
+        let sl = Layout::new(Shape::new(&dims), ss.into(), soff);
+        let init_dst: Vec<f32> = (0..dlen).map(|i| (i as f32 * 0.13) - 2.0).collect();
+        let src: Vec<f32> = (0..slen).map(|i| (i as f32 * 0.29) + 1.5).collect();
+
+        let mut got_copy = init_dst.clone();
+        copy_into(&mut got_copy, &dl, &src, &sl);
+        let want_copy = ref_update(&init_dst, &dl, &src, &sl, |_, s| s);
+        assert_eq!(got_copy, want_copy, "copy_into mismatch for shape {dims:?}");
+
+        let mut got_add = init_dst.clone();
+        fill_rows_inplace(&mut got_add, &dl, &src, &sl, |d, s| d + s);
+        let want_add = ref_update(&init_dst, &dl, &src, &sl, |d, s| d + s);
+        assert_eq!(got_add, want_add, "strided_update mismatch for shape {dims:?}");
+    }
+}
+
+#[test]
+fn where3_contiguous_broadcast_and_strided_paths() {
+    let ref_where = |c: &[f32], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout| -> Vec<f32> {
+        let mut out = vec![0.0f32; la.numel()];
+        let p = RowPlan::<3>::new(
+            la.dims(),
+            [lc.strides(), la.strides(), lb.strides()],
+            [lc.offset(), la.offset(), lb.offset()],
+        );
+        let mut idx = 0;
+        p.for_rows(0..p.rows, |_, [oc, oa, ob]| {
+            for i in 0..p.len {
+                out[idx] = if c[oc + i * p.inner[0]] != 0.0 {
+                    a[oa + i * p.inner[1]]
+                } else {
+                    b[ob + i * p.inner[2]]
+                };
+                idx += 1;
+            }
+        });
+        out
+    };
+
+    // Test all 8 combinations of (sc, sa, sb) in {0, 1}^3 plus general non-unit strides.
+    let (rows, cols) = (5usize, 29usize);
+    let stride_row = cols + 3;
+    let mut c_buf: Vec<f32> =
+        (0..rows * stride_row + 10).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }).collect();
+    c_buf[1] = -0.0;
+    c_buf[2] = f32::NAN;
+    let mut a_buf: Vec<f32> = (0..rows * stride_row + 10).map(|i| (i as f32) + 0.25).collect();
+    a_buf[2] = f32::from_bits(0x7fc0_1111);
+    let mut b_buf: Vec<f32> = (0..rows * stride_row + 10).map(|i| -(i as f32) - 0.5).collect();
+    b_buf[1] = -0.0;
+
+    let make = |s_inner: usize, off: usize| {
+        let s_outer = if s_inner == 0 { 1 } else { stride_row };
+        Layout::new(Shape::new(&[rows, cols]), vec![s_outer, s_inner].into(), off)
+    };
+    for sc in [0, 1] {
+        for sa in [0, 1] {
+            for sb in [0, 1] {
+                let (lc, la, lb) = (make(sc, 1), make(sa, 2), make(sb, 3));
+                let got = where3(&c_buf, &lc, &a_buf, &la, &b_buf, &lb, |v| v != 0.0);
+                let want = ref_where(&c_buf, &lc, &a_buf, &la, &b_buf, &lb);
+                assert_eq!(
+                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "where3 mismatch for strides ({sc}, {sa}, {sb})"
+                );
+            }
+        }
+    }
+
+    // General non-unit stride + empty with offset + parallel contiguous (>= PAR_MIN).
+    let l_trans = Layout::new(Shape::new(&[cols, rows]), vec![1, stride_row].into(), 0);
+    let got_t = where3(&c_buf, &l_trans, &a_buf, &l_trans, &b_buf, &l_trans, |v| v != 0.0);
+    let want_t = ref_where(&c_buf, &l_trans, &a_buf, &l_trans, &b_buf, &l_trans);
+    assert_eq!(
+        got_t.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        want_t.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+
+    let l_empty = Layout::new(Shape::new(&[0, 8]), vec![8, 1].into(), 4);
+    assert!(where3::<u8>(&[], &l_empty, &[], &l_empty, &[], &l_empty, |v| v != 0).is_empty());
+
+    let n_par = PAR_MIN + 777;
+    let c_par: Vec<u8> = (0..n_par).map(|i| (i % 5 == 0) as u8).collect();
+    let a_par: Vec<f32> = (0..n_par).map(|i| i as f32).collect();
+    let b_par: Vec<f32> = (0..n_par).map(|i| -(i as f32)).collect();
+    let l_par = Layout::contiguous(Shape::new(&[n_par]));
+    let got_par = where3(&c_par, &l_par, &a_par, &l_par, &b_par, &l_par, |v| v != 0);
+    for i in 0..n_par {
+        let want = if c_par[i] != 0 { a_par[i] } else { b_par[i] };
+        assert_eq!(got_par[i].to_bits(), want.to_bits());
+    }
+}
+
+#[test]
+fn transpose_2d_and_copy_strided_f32_bitwise_exact() {
+    // 2D direct transpose across small, exact multiples of 8/32, ragged, padded strides, and parallel sizes.
+    for &(rows, cols, src_pad, dst_pad) in &[
+        (1, 1, 0, 0),
+        (7, 9, 0, 0),
+        (8, 8, 0, 0),
+        (13, 29, 3, 5),
+        (32, 32, 0, 0),
+        (37, 41, 7, 2),
+        (73, 19, 1, 4),
+        (257, 193, 5, 3),
+    ] {
+        let src_rs = cols + src_pad;
+        let dst_rs = rows + dst_pad;
+        let mut src: Vec<f32> = (0..rows * src_rs).map(|i| (i as f32) * 0.5 - 10.0).collect();
+        if src.len() > 3 {
+            src[0] = -0.0;
+            src[1] = f32::from_bits(0x7fc0_1234);
+            src[2] = f32::NEG_INFINITY;
+        }
+        let mut dst = vec![-999.0f32; cols * dst_rs];
+        transpose_f32_2d(&src, src_rs, &mut dst, dst_rs, rows, cols);
+        for j in 0..cols {
+            for i in 0..rows {
+                assert_eq!(
+                    dst[j * dst_rs + i].to_bits(),
+                    src[i * src_rs + j].to_bits(),
+                    "transpose ({rows}x{cols}) mismatch at ({j}, {i})"
+                );
+            }
+        }
+    }
+
+    // Batched transpose and NCHW <-> NHWC permutes via copy_strided_f32 (serial and parallel).
+    let layouts: Vec<(Vec<usize>, Vec<usize>, usize, usize)> = vec![
+        // [B, N, M] transpose of [B, M, N]
+        (vec![5, 37, 29], vec![37 * 29, 1, 37], 0, 5 * 37 * 29),
+        // Large single-batch transpose (>= PAR_MIN)
+        (vec![193, 211], vec![1, 193], 7, 193 * 211 + 10),
+        // Large 2-batch transpose (hits batches < 4 parallel path)
+        (vec![2, 181, 191], vec![181 * 191, 1, 181], 0, 2 * 181 * 191),
+        // Large 6-batch transpose (hits batches >= 4 parallel path)
+        (vec![6, 73, 83], vec![73 * 83, 1, 73], 0, 6 * 73 * 83),
+        // NCHW -> NHWC ([2, 17, 13, 19] from [2, 19, 17, 13])
+        (vec![2, 17, 13, 19], vec![19 * 17 * 13, 13, 1, 17 * 13], 0, 2 * 19 * 17 * 13),
+        // NHWC -> NCHW ([2, 19, 17, 13] from [2, 17, 13, 19])
+        (vec![2, 19, 17, 13], vec![17 * 13 * 19, 1, 13 * 19, 19], 0, 2 * 17 * 13 * 19),
+        // Overlapping read strides (src_rs < cols)
+        (vec![15, 11], vec![1, 3], 2, 15 + 10 * 3 + 4),
+        // Broadcast inner stride s == 0
+        (vec![4, 17], vec![1, 0], 1, 10),
+        // Empty layout with non-zero offset
+        (vec![0, 12], vec![12, 1], 5, 0),
+    ];
+
+    for (dims, strides, off, buf_len) in layouts {
+        let l = Layout::new(Shape::new(&dims), strides.into(), off);
+        let mut src: Vec<f32> = (0..buf_len).map(|i| (i as f32) * 0.25 - 3.0).collect();
+        if buf_len > 2 {
+            src[0] = -0.0;
+            src[1] = f32::from_bits(0x7fc0_beef);
+        }
+        let got = copy_strided_f32(&src, &l);
+        let want = copy_strided(&src, &l);
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "copy_strided_f32 mismatch for {dims:?}"
+        );
+    }
+}
