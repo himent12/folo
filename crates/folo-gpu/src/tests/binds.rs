@@ -400,3 +400,53 @@ fn pipeline_dedup_skips_redundant_set_pipeline_within_pass() {
     let bv = b.to_vec().unwrap();
     assert_eq!((bv[2], bv[3]), (42.0, 43.0));
 }
+
+/// Bind group creation and caching work identically above the 24-entry inline stack threshold (when the adapter
+/// allows >24 storage bindings per compute stage, e.g. multi-tensor optimizer batches).
+#[test]
+fn bind_cache_spills_cleanly_past_inline_entry_threshold() {
+    let ctx = gpu!();
+    if ctx.caps().max_storage_buffers < 26 {
+        return;
+    }
+    const N: usize = 26;
+    static STORAGE_26: [Access; N] = [Access::Read; N];
+    static WIDE: KernelDef = KernelDef {
+        name: "test_wide_26_binds",
+        storage: &STORAGE_26,
+        source: Source::Generated(|_| {
+            let mut s = String::new();
+            for i in 0..N {
+                s.push_str(&format!("@group(0) @binding({}) var<storage, read> B{i}: array<f32>;\n", i + 1));
+            }
+            s.push_str("@compute @workgroup_size(1) fn main() { _ = B0[0] + B25[0]; }\n");
+            s
+        }),
+    };
+    let dev = ctx.wgpu_device();
+    let k = Kernel::compile(dev, &WIDE, &Spec::new(), None).unwrap();
+    let uniform = buffer(dev, wgpu::BufferUsages::UNIFORM);
+    let bufs: Vec<_> = (0..N).map(|_| buffer(dev, wgpu::BufferUsages::STORAGE)).collect();
+    let refs: Vec<&wgpu::Buffer> = bufs.iter().collect();
+    let mut cache = BindCache::default();
+
+    // Uncacheable rejection on >24 bindings must not insert into the cache.
+    let mut made = false;
+    cache.get(dev, &k.layout, &uniform, &refs, |_, _| false, &mut made);
+    assert!(made && cache.len() == 0);
+    made = false;
+    cache.get(dev, &k.layout, &uniform, &refs, |_, _| false, &mut made);
+    assert!(made && cache.len() == 0);
+
+    // Cacheable path: first sighting misses, second caches, third hits.
+    let mut made = false;
+    cache.get(dev, &k.layout, &uniform, &refs, |_, _| true, &mut made);
+    assert!(made && cache.len() == 0);
+    let mut made = false;
+    cache.get(dev, &k.layout, &uniform, &refs, |_, _| true, &mut made);
+    assert!(made && cache.len() == 1);
+    let mut made = false;
+    cache.get(dev, &k.layout, &uniform, &refs, |_, _| true, &mut made);
+    assert!(!made && cache.len() == 1);
+    assert_eq!(cache.index_size(), (N, N));
+}

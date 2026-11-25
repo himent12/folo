@@ -22,7 +22,6 @@ mod readback;
 mod trace;
 mod wait;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -255,7 +254,7 @@ struct Inner {
     pool: Arc<Mutex<BufferPool>>,
     /// The pool's [`BufferPool::retired_flag`]: set when the pool let a buffer go that cached bind groups may hold.
     retired: Arc<AtomicBool>,
-    kernels: Mutex<HashMap<KernelKey, Arc<Kernel>>>,
+    kernels: Mutex<binds::FxHashMap<KernelKey, Arc<Kernel>>>,
     batch: Mutex<Batch>,
     errors: Arc<Mutex<Vec<String>>>,
     /// Set once the device is lost (by wgpu's device-lost callback, or by a poll that failed fatally).

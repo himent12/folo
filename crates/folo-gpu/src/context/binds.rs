@@ -162,10 +162,23 @@ impl BindCache {
         }
         // Forgotten either way, so a refused key pays the check below on every other miss only.
         self.seen.remove(&key);
-        let ids: Vec<u64> = buffers.iter().map(|b| id_of(*b)).collect();
-        if !cacheable(buffers, &ids) {
-            return bind;
-        }
+        let ids: Vec<u64> = if buffers.len() <= INLINE_ENTRIES {
+            let mut stack = [0u64; INLINE_ENTRIES];
+            for (slot, b) in stack.iter_mut().zip(buffers) {
+                *slot = id_of(*b);
+            }
+            let slice = &stack[..buffers.len()];
+            if !cacheable(buffers, slice) {
+                return bind;
+            }
+            slice.to_vec()
+        } else {
+            let ids: Vec<u64> = buffers.iter().map(|b| id_of(*b)).collect();
+            if !cacheable(buffers, &ids) {
+                return bind;
+            }
+            ids
+        };
         // A collision: the other entry under this key leaves first (a key is in at most one generation).
         if let Some(e) = self.cur.remove(&key).or_else(|| self.old.remove(&key)) {
             self.unindex(key, &e.ids);
@@ -272,6 +285,10 @@ fn key(layout: &wgpu::BindGroupLayout, uniform: &wgpu::Buffer, buffers: &[&wgpu:
     s.finish()
 }
 
+/// Inline bind-group entry capacity (1 uniform + up to 23 storage buffers, covering every kernel except the
+/// 64-binding multi-tensor optimizer batches, which spill to a `Vec`).
+const INLINE_ENTRIES: usize = 24;
+
 /// A new bind group of `layout` (see [`BindCache::get`]).
 pub(super) fn create(
     device: &wgpu::Device,
@@ -279,15 +296,31 @@ pub(super) fn create(
     uniform: &wgpu::Buffer,
     buffers: &[&wgpu::Buffer],
 ) -> wgpu::BindGroup {
-    let mut entries = Vec::with_capacity(buffers.len() + 1);
-    entries.push(wgpu::BindGroupEntry {
+    let uniform_entry = || wgpu::BindGroupEntry {
         binding: 0,
         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: uniform,
             offset: 0,
             size: wgpu::BufferSize::new(crate::pipeline::UNIFORM_SLOT),
         }),
-    });
+    };
+    let n = buffers.len() + 1;
+    if n <= INLINE_ENTRIES {
+        let entries: [wgpu::BindGroupEntry<'_>; INLINE_ENTRIES] = std::array::from_fn(|i| {
+            if i == 0 || i > buffers.len() {
+                uniform_entry()
+            } else {
+                wgpu::BindGroupEntry { binding: i as u32, resource: buffers[i - 1].as_entire_binding() }
+            }
+        });
+        return device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &entries[..n],
+        });
+    }
+    let mut entries = Vec::with_capacity(n);
+    entries.push(uniform_entry());
     for (i, buf) in buffers.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry { binding: i as u32 + 1, resource: buf.as_entire_binding() });
     }

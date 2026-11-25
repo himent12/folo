@@ -212,3 +212,55 @@ fn a_lost_device_is_an_error_not_a_replay() {
     assert!(again.is_err());
     assert_eq!(plans.replays(), replays);
 }
+
+#[test]
+fn plan_replays_long_keys_many_outputs_and_reuses_dynamic_binds() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    // Dedicated device ordinal 6 so bind-group counters are isolated from parallel tests.
+    let d = Device::Gpu(6);
+    crate::register(ctx.clone(), d).unwrap();
+    let _g = no_grad();
+    let (x, w, b, want) = setup(d);
+    let tensors = |f: &mut dyn FnMut(&Tensor)| {
+        f(&w);
+        f(&b);
+    };
+
+    // 1. Long key (>16 u64 signature words -> Heap spill) and 10 outputs (>8 INLINE_OUTS -> Heap spill).
+    let long_key = [11u64; 20];
+    let plans = ForwardPlans::new();
+    let many_out = |x: &Tensor| -> folo_core::Result<Vec<Tensor>> {
+        let base = x.mul(&w)?.add(&b)?.relu()?;
+        let mut outs = Vec::with_capacity(10);
+        for i in 0..10 {
+            outs.push(base.add_scalar(i as f32)?);
+        }
+        Ok(outs)
+    };
+    for _ in 0..4 {
+        let outs = plans.run(&long_key, &x, &tensors, many_out).unwrap();
+        assert_eq!(outs.len(), 10);
+        for (i, t) in outs.iter().enumerate() {
+            let expected: Vec<f32> = want.iter().map(|v| v + i as f32).collect();
+            assert_eq!(t.to_vec::<f32>().unwrap(), expected);
+        }
+    }
+    assert_eq!(plans.replays(), 2, "{:?}", plans.refusal());
+
+    // 2. Repeated replay with the same input and recycled output buffer creates zero new bind groups.
+    let simple = ForwardPlans::new();
+    for _ in 0..3 {
+        let out = simple.run(&[42], &x, &tensors, |x| call(x, &w, &b)).unwrap();
+        assert_eq!(vals(&out), want);
+    }
+    assert_eq!(simple.replays(), 1, "{:?}", simple.refusal());
+    ctx.sync().unwrap();
+    let before = ctx.work_stats().bind_groups;
+    for _ in 0..5 {
+        let out = simple.run(&[42], &x, &tensors, |x| call(x, &w, &b)).unwrap();
+        assert_eq!(vals(&out), want);
+    }
+    assert_eq!(ctx.work_stats().bind_groups - before, 0, "dynamic bind hit must not recreate bind groups");
+    assert_eq!(simple.replays(), 6);
+}
