@@ -364,6 +364,16 @@ fn cancelled_press_reports_release_outside_client_rect() {
         "cursor inside client rect is clamped just outside it"
     );
 
+    // The right/bottom boundary is inclusive in Bounds::contains, so it must be clamped too.
+    platform.set_test_client_cursor(Some(POINT { x: client.right, y: client.bottom }));
+    send(hwnd, WM_LBUTTONDOWN, 0, at);
+    send(hwnd, WM_CANCELMODE, 0, 0);
+    assert_eq!(
+        std::mem::take(&mut *ups.borrow_mut()),
+        vec![super::util::logical_point((client.left - 1) as f32, (client.top - 1) as f32, scale)],
+        "cursor on right/bottom client edge is clamped just outside it"
+    );
+
     platform.set_test_client_cursor(Some(outside));
     send(hwnd, WM_LBUTTONDOWN, 0, at);
     send(hwnd, WM_CANCELMODE, 0, 0);
@@ -629,11 +639,24 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     let window = platform.open_windows_window(hidden_params()).unwrap();
     let hwnd = window.hwnd();
     let close_asks = Rc::new(std::cell::Cell::new(0usize));
+    let cancelled_ups = Rc::new(std::cell::Cell::new(0usize));
     window.on_should_close(Box::new({
         let close_asks = close_asks.clone();
         move || {
             close_asks.set(close_asks.get() + 1);
             false
+        }
+    }));
+    window.on_input(Box::new({
+        let cancelled_ups = cancelled_ups.clone();
+        move |input| {
+            if let PlatformInput::MouseUp(e) = input
+                && e.button == MouseButton::Left
+                && e.position.x < px(0.)
+            {
+                cancelled_ups.set(cancelled_ups.get() + 1);
+            }
+            DispatchEventResult { propagate: true, default_prevented: false }
         }
     }));
 
@@ -643,16 +666,24 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     pump();
     assert_eq!(close_asks.replace(0), 1, "press+release on HTCLOSE asks to close");
 
-    // Deactivating while HTCLOSE is held disarms it.
+    // Deactivating while HTCLOSE is held disarms it and emits an off-viewport release for active styles.
+    let mut client = RECT::default();
+    // SAFETY: valid out pointer for our own window.
+    unsafe { GetClientRect(hwnd, &mut client).unwrap() };
+    platform.set_test_client_cursor(Some(POINT { x: client.right / 2, y: client.bottom / 2 }));
+    cancelled_ups.set(0);
     send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
     send(hwnd, WM_ACTIVATE, WA_INACTIVE as usize, 0);
+    assert_eq!(cancelled_ups.replace(0), 1, "deactivation emits off-viewport release");
     send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
     pump();
     assert_eq!(close_asks.replace(0), 0, "deactivation disarms HTCLOSE");
 
-    // WM_CANCELMODE while HTCLOSE is held also disarms it.
+    // WM_CANCELMODE while HTCLOSE is held also disarms it and emits an off-viewport release.
+    cancelled_ups.set(0);
     send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
     send(hwnd, WM_CANCELMODE, 0, 0);
+    assert_eq!(cancelled_ups.replace(0), 1, "WM_CANCELMODE emits off-viewport release");
     send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
     pump();
     assert_eq!(close_asks.replace(0), 0, "WM_CANCELMODE disarms HTCLOSE");

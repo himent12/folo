@@ -429,12 +429,11 @@ impl WindowInner {
     /// the capture if we hold it (whose `WM_CAPTURECHANGED` releases them), and releases any still
     /// pressed.
     fn end_presses(&self, hwnd: HWND) {
-        let empty = {
-            let mut state = self.state.borrow_mut();
-            state.nc_button_pressed = None;
-            state.pressed_buttons.is_empty()
+        let any_pressed = {
+            let state = self.state.borrow();
+            !state.pressed_buttons.is_empty() || state.nc_button_pressed.is_some()
         };
-        if empty {
+        if !any_pressed {
             return;
         }
         // SAFETY: plain capture calls for our own window.
@@ -469,8 +468,12 @@ impl WindowInner {
     fn cancel_presses(&self, hwnd: HWND) {
         let (buttons, click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
-            state.nc_button_pressed = None;
-            (std::mem::take(&mut state.pressed_buttons), state.click_state.current_count, state.scale_factor)
+            let nc_pressed = state.nc_button_pressed.take().is_some();
+            let mut buttons = std::mem::take(&mut state.pressed_buttons);
+            if nc_pressed && !buttons.contains(&MouseButton::Left) {
+                buttons.push(MouseButton::Left);
+            }
+            (buttons, state.click_state.current_count, state.scale_factor)
         };
         if buttons.is_empty() {
             return;
@@ -481,7 +484,10 @@ impl WindowInner {
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        if p.x >= client.left && p.x < client.right && p.y >= client.top && p.y < client.bottom {
+        if client.right <= client.left
+            || client.bottom <= client.top
+            || (p.x >= client.left && p.x <= client.right && p.y >= client.top && p.y <= client.bottom)
+        {
             p = POINT { x: client.left - 1, y: client.top - 1 };
         }
         let position = logical_point(p.x as f32, p.y as f32, scale_factor);
