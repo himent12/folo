@@ -7,7 +7,7 @@
 //! The `*_as` / dtype-taking entry points also read and write f16 storage (with `shader-f16`); the arithmetic
 //! is always f32, so an f16 reduction or softmax accumulates in f32 and rounds once on the store.
 
-use super::{check_buf, prod};
+use super::{check_buf, prod, use_subgroups};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
@@ -28,8 +28,118 @@ fn typed_spec(ctx: &GpuContext, xdt: DType, ydt: DType, op: &'static str) -> Res
     Ok(Spec::new().bool("XH", xh).bool("YH", yh).f16(xh || yh))
 }
 
+const REDUCE_ROWS_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> partial: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let row = wid.y * nwg.x + wid.x;
+    let rows = pu(0u);
+    let r = pu(1u);
+    let acc = reduce_rows_thread(row, rows, r, lid);
+    var r_sg: f32;
+    switch OP {
+        case 1u: {
+            let nan_v = isnan1(acc);
+            r_sg = select(subgroupMax(acc), subgroupAdd(select(0.0, acc, nan_v)), subgroupAny(nan_v));
+        }
+        case 2u: {
+            let nan_v = isnan1(acc);
+            r_sg = select(subgroupMin(acc), subgroupAdd(select(0.0, acc, nan_v)), subgroupAny(nan_v));
+        }
+        default: { r_sg = subgroupAdd(acc); }
+    }
+    let sg = min(sgid, 7u);
+    if (lane == 0u) { partial[sg] = r_sg; }
+    workgroupBarrier();
+    if (lid == 0u && row < rows) {
+        let total = combine(
+            combine(combine(partial[0], partial[1]), combine(partial[2], partial[3])),
+            combine(combine(partial[4], partial[5]), combine(partial[6], partial[7])),
+        );
+        Y[row] = YT(total * pf(2u));
+    }
+}
+"#;
+
+const REDUCE_ROWS_MAIN_PORTABLE: &str = r#"
+var<workgroup> partial: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let row = wid.y * nwg.x + wid.x;
+    let rows = pu(0u);
+    let r = pu(1u);
+    partial[lid] = reduce_rows_thread(row, rows, r, lid);
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            partial[lid] = combine(partial[lid], partial[lid + s]);
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u && row < rows) {
+        Y[row] = YT(partial[0] * pf(2u));
+    }
+}
+"#;
+
+const SOFTMAX_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> partial: array<vec2<f32>, 8>;
+
+fn reduce_online(lid: u32, sgid: u32, lane: u32, v: vec2<f32>) -> vec2<f32> {
+    var st = v;
+    for (var off = 16u; off > 0u; off >>= 1u) {
+        let om = subgroupShuffleDown(st.x, off);
+        let od = subgroupShuffleDown(st.y, off);
+        if (lane < off) { st = online_merge(st, vec2<f32>(om, od)); }
+    }
+    let sg = min(sgid, 7u);
+    if (lane == 0u) { partial[sg] = st; }
+    workgroupBarrier();
+    // Butterfly-reduce the 8 subgroup partials across every subgroup so all 256 threads receive the final
+    // `(m, d)` with a single workgroupBarrier().
+    var r = partial[lane & 7u];
+    r = online_merge(r, vec2<f32>(subgroupShuffleXor(r.x, 4u), subgroupShuffleXor(r.y, 4u)));
+    r = online_merge(r, vec2<f32>(subgroupShuffleXor(r.x, 2u), subgroupShuffleXor(r.y, 2u)));
+    r = online_merge(r, vec2<f32>(subgroupShuffleXor(r.x, 1u), subgroupShuffleXor(r.y, 1u)));
+    return r;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    softmax_run(wid, nwg, lid, sgid, lane);
+}
+"#;
+
+const SOFTMAX_MAIN_PORTABLE: &str = r#"
+var<workgroup> partial: array<vec2<f32>, 256>;
+
+fn reduce_online(lid: u32, sgid: u32, lane: u32, v: vec2<f32>) -> vec2<f32> {
+    partial[lid] = v;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) { partial[lid] = online_merge(partial[lid], partial[lid + s]); }
+        workgroupBarrier();
+    }
+    return partial[0];
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    softmax_run(wid, nwg, lid, 0u, 0u);
+}
+"#;
+
 fn gen_rows(s: &Spec) -> String {
-    typed(s, include_str!("../shaders/reduce_rows.wgsl"))
+    let main = if s.is_subgroups() { REDUCE_ROWS_MAIN_SUBGROUPS } else { REDUCE_ROWS_MAIN_PORTABLE };
+    typed(s, &format!("{}{main}", include_str!("../shaders/reduce_rows.wgsl")))
 }
 fn gen_cols(s: &Spec) -> String {
     typed(s, include_str!("../shaders/reduce_cols.wgsl"))
@@ -41,7 +151,11 @@ const SOFTMAX_COL_SMALL_MAX: usize = 32;
 
 fn gen_softmax(s: &Spec) -> String {
     let cache = s.get_bool("CACHE");
-    typed(s, &format!("const CACHE_ROW: bool = {cache};\n{}", include_str!("../shaders/softmax.wgsl")))
+    let main = if s.is_subgroups() { SOFTMAX_MAIN_SUBGROUPS } else { SOFTMAX_MAIN_PORTABLE };
+    typed(
+        s,
+        &format!("const CACHE_ROW: bool = {cache};\n{main}\n{}", include_str!("../shaders/softmax.wgsl")),
+    )
 }
 fn gen_softmax_cols(s: &Spec) -> String {
     let small = s.get_bool("SMALL");
@@ -126,7 +240,7 @@ pub fn reduce_as(
     let scale = if op == ReduceOp::Mean { 1.0 / r as f32 } else { 1.0 };
     let spec = typed_spec(ctx, xdt, ydt, "reduce")?.u32("OP", op.code());
     if inner == 1 {
-        let k = ctx.kernel(&ROWS, spec)?;
+        let k = ctx.kernel(&ROWS, spec.subgroups(use_subgroups(ctx)))?;
         let p = Params::new().uz(outer)?.uz(r)?.f(scale).f(op.identity());
         ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(outer as u64 * 256, 256)?)
     } else {
@@ -174,7 +288,10 @@ pub fn softmax_rows(
     }
     let k = ctx.kernel(
         &SOFTMAX,
-        typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log).bool("CACHE", n <= SOFTMAX_ROW_CACHE_MAX),
+        typed_spec(ctx, dtype, dtype, "softmax")?
+            .bool("LOG", log)
+            .bool("CACHE", n <= SOFTMAX_ROW_CACHE_MAX)
+            .subgroups(use_subgroups(ctx)),
     )?;
     let p = Params::new().uz(rows)?.uz(n)?.f(f32::NEG_INFINITY);
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(rows as u64 * 256, 256)?)

@@ -93,3 +93,86 @@ fn softmax_and_log_softmax() {
         assert_close(&got, &cpu_softmax(&x, n, true), 1e-4, 1e-5, &format!("log_softmax {rows}x{n}"));
     }
 }
+
+#[test]
+fn optim_norm_partials_and_unscale_subgroups_match_portable() {
+    use crate::kernels::optim::{
+        NormPartial, norm_partials_len, norm_partials_many, unscale_check, unscale_check_many,
+    };
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let ctx = gpu!();
+    let mut rng = Rng::new(42);
+    let t0 = rng.vec(300, -3.0, 3.0);
+    let mut t1 = rng.vec(600, -5.0, 5.0);
+    t1[513] = f32::NAN;
+    let t2 = rng.vec(17, -2.0, 2.0);
+    let b0 = ctx.upload(bytemuck::cast_slice(&t0)).unwrap();
+    let b1 = ctx.upload(bytemuck::cast_slice(&t1)).unwrap();
+    let b2 = ctx.upload(bytemuck::cast_slice(&t2)).unwrap();
+    let h_buf = ctx.upload(bytemuck::cast_slice(&[0.5f32])).unwrap();
+    let xs = [(b0.raw(), t0.len()), (b1.raw(), t1.len()), (b2.raw(), t2.len())];
+    let plen = norm_partials_len(&[t0.len(), t1.len(), t2.len()]);
+
+    let run_norm = |op: NormPartial, portable: bool| -> Vec<f32> {
+        let _g = ForceGuard::set(portable);
+        let part = ctx.alloc((plen * 4) as u64).unwrap();
+        norm_partials_many(
+            &ctx,
+            op,
+            &xs,
+            (op == NormPartial::ScaledSquares).then_some(h_buf.raw()),
+            part.raw(),
+        )
+        .unwrap();
+        bytemuck::pod_collect_to_vec(&ctx.read(part.raw(), 0, (plen * 4) as u64).unwrap())
+    };
+
+    for op in [NormPartial::AbsMax, NormPartial::ScaledSquares] {
+        let sg = run_norm(op, false);
+        let fb = run_norm(op, true);
+        assert_eq!(sg.len(), fb.len());
+        for (i, (&a, &b)) in sg.iter().zip(&fb).enumerate() {
+            if a.is_nan() && b.is_nan() {
+                continue;
+            }
+            let err = (a - b).abs();
+            let lim = 1e-4 + 1e-5 * b.abs();
+            assert!(err <= lim, "{op:?} partial[{i}]: sg={a} fb={b} err={err}");
+        }
+        // Workgroup containing t1[513] = NaN (index 2 + 2 = 4) must produce NaN on both paths.
+        assert!(sg[4].is_nan() && fb[4].is_nan(), "{op:?} must propagate NaN in partial[4]");
+    }
+
+    // unscale_check and unscale_check_many: finite case (flag stays 0) and overflow/NaN case (flag becomes 1).
+    for portable in [false, true] {
+        let _g = ForceGuard::set(portable);
+        for (vals, factor, expect_flag) in
+            [(vec![1.0f32; 300], 0.5f32, 0u32), (vec![1e38f32; 300], 10.0f32, 1u32)]
+        {
+            let x = ctx.upload(bytemuck::cast_slice(&vals)).unwrap();
+            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check(&ctx, x.raw(), vals.len(), factor, flag.raw()).unwrap();
+            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
+            assert_eq!(got_flag[0], expect_flag, "unscale_check portable={portable} factor={factor}");
+
+            let x0 = ctx.upload(bytemuck::cast_slice(&vals)).unwrap();
+            let x1 = ctx.upload(bytemuck::cast_slice(&[2.0f32; 19])).unwrap();
+            let flag2 = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check_many(&ctx, &[(x0.raw(), vals.len()), (x1.raw(), 19)], factor, flag2.raw()).unwrap();
+            let got_flag2: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag2.raw(), 0, 4).unwrap());
+            assert_eq!(got_flag2[0], expect_flag, "unscale_check_many portable={portable} factor={factor}");
+        }
+    }
+}

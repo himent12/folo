@@ -1,13 +1,12 @@
 // Softmax / log-softmax over the contiguous last axis, one workgroup per row.
 // Single-pass online softmax (Milakov-Gimelshein) caches up to 4 elements per thread in registers when
 // `CACHE_ROW` is true (n <= 1024, 1 global read of X); longer rows use 2-pass online softmax (2 global reads
-// instead of 3) with a single workgroup reduction.
+// instead of 3). `reduce.rs` appends either the 1-barrier 32-wide subgroupShuffle reduction or the portable
+// 8-barrier shared-memory tree fallback (`reduce_online` + `@compute fn main`).
 // Spec: LOG (log_softmax), CACHE (n <= 1024). Params: 0 = rows, 1 = row length, 2 = -inf.
 // XT / YT are the storage types of X and Y (f32 or f16); the arithmetic is f32.
 @group(0) @binding(1) var<storage, read> X: array<XT>;
 @group(0) @binding(2) var<storage, read_write> Y: array<YT>;
-
-var<workgroup> partial: array<vec2<f32>, 256>;
 
 fn online_step(st: vec2<f32>, x: f32, neg_inf: f32) -> vec2<f32> {
     let m = st.x;
@@ -38,19 +37,7 @@ fn online_merge(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x, a.y + b.y);
 }
 
-fn reduce_online(lid: u32, v: vec2<f32>) -> vec2<f32> {
-    partial[lid] = v;
-    workgroupBarrier();
-    for (var s = 128u; s > 0u; s >>= 1u) {
-        if (lid < s) { partial[lid] = online_merge(partial[lid], partial[lid + s]); }
-        workgroupBarrier();
-    }
-    return partial[0];
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
-        @builtin(local_invocation_index) lid: u32) {
+fn softmax_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
     let row = wid.y * nwg.x + wid.x;
     let rows = pu(0u);
     let n = pu(1u);
@@ -74,7 +61,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             if (i2 < n) { v2 = f32(X[base + i2]); st = online_step(st, v2, neg_inf); }
             if (i3 < n) { v3 = f32(X[base + i3]); st = online_step(st, v3, neg_inf); }
         }
-        st = reduce_online(lid, st);
+        st = reduce_online(lid, sgid, lane, st);
         if (!valid) { return; }
         var m = st.x;
         var s = st.y;
@@ -104,7 +91,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             st = online_step(st, f32(X[base + i]), neg_inf);
         }
     }
-    st = reduce_online(lid, st);
+    st = reduce_online(lid, sgid, lane, st);
     if (!valid) { return; }
     var m = st.x;
     var s = st.y;

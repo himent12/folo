@@ -100,6 +100,33 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
     .copied()
 }
 
+// Tests set this thread-locally to exercise the portable shared-memory fallback even on hardware with 32-wide
+// subgroups, without racing concurrent test threads or leaking across panics.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FORCE_NO_SUBGROUPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `ctx` should dispatch 32-wide subgroup reduction variants (always `false` on wasm32/browser WebGPU,
+/// and overridable via [`FORCE_NO_SUBGROUPS`] in tests).
+pub(crate) fn use_subgroups(ctx: &crate::context::GpuContext) -> bool {
+    // Keep browser WebGPU explicitly on the portable path until wgpu exposes both `SUBGROUP` and WGSL `subgroup_id`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = ctx;
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        #[cfg(test)]
+        if FORCE_NO_SUBGROUPS.with(std::cell::Cell::get) {
+            return false;
+        }
+        let caps = ctx.caps();
+        caps.subgroups && caps.subgroup_size == (32, 32)
+    }
+}
+
 /// `E` / `V4` / `OUT` aliases: element type of a storage array and conversions to and from `vec4<f32>`.
 pub(crate) fn vec_prelude(vec: bool) -> &'static str {
     if vec {

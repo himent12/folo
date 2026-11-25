@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
 
-use super::check_buf;
+use super::{check_buf, use_subgroups};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::Result;
@@ -17,10 +17,24 @@ static OPTIM: KernelDef = KernelDef {
     source: Source::Static(include_str!("../shaders/optim.wgsl")),
 };
 
-static UNSCALE: KernelDef = KernelDef {
-    name: "unscale_check",
-    storage: &[Access::ReadWrite, Access::ReadWrite],
-    source: Source::Static(
+fn gen_unscale(spec: &Spec) -> String {
+    if spec.is_subgroups() {
+        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
+         @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 var bad = false;\n\
+         \x20 if (i < pu(0u)) {\n\
+         \x20   let v = X[i] * pf(1u);\n\
+         \x20   X[i] = v;\n\
+         \x20   bad = (bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u;\n\
+         \x20 }\n\
+         \x20 if (subgroupAny(bad) && lane == 0u) { atomicOr(&FLAG[0], 1u); }\n\
+         }\n"
+            .into()
+    } else {
         "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
          @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
          @compute @workgroup_size(256)\n\
@@ -32,8 +46,15 @@ static UNSCALE: KernelDef = KernelDef {
          \x20 X[i] = v;\n\
          \x20 // Not finite: all exponent bits set (inf or NaN).\n\
          \x20 if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) { atomicOr(&FLAG[0], 1u); }\n\
-         }\n",
-    ),
+         }\n"
+        .into()
+    }
+}
+
+static UNSCALE: KernelDef = KernelDef {
+    name: "unscale_check",
+    storage: &[Access::ReadWrite, Access::ReadWrite],
+    source: Source::Generated(gen_unscale),
 };
 
 /// The loss scaler's unscale and overflow check: `x *= factor` over `n` f32 elements in place, and
@@ -50,7 +71,7 @@ pub fn unscale_check(
     if n == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&UNSCALE, Spec::new())?;
+    let k = ctx.kernel(&UNSCALE, Spec::new().subgroups(use_subgroups(ctx)))?;
     let p = Params::new().uz(n)?.f(factor);
     ctx.dispatch(&k, &[x, flag], &p, ctx.grid_1d(n as u64, 256)?)
 }
@@ -138,18 +159,32 @@ fn many_params(mut p: Params, ns: &[usize]) -> Result<(Params, u64)> {
 
 /// The multi-tensor kernels' prologue: tensor `j` of this workgroup (the last whose first workgroup is at or
 /// before it) and the element `i` of it this invocation takes.
-fn many_prologue(s: &mut String, j: usize) {
-    s.push_str(
-        "@compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20 var j = 0u;\n",
-    );
+fn many_prologue(s: &mut String, j: usize, with_lane: bool) {
+    if with_lane {
+        s.push_str(
+            "@compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
+             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 var j = 0u;\n",
+        );
+    } else {
+        s.push_str(
+            "@compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32) {\n\
+             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 var j = 0u;\n",
+        );
+    }
     for t in 1..j {
         let _ = writeln!(s, "  if (w >= pu({}u)) {{ j = {t}u; }}", 16 + t);
     }
-    s.push_str("  let i = (w - pu(16u + j)) * 256u + lid;\n  switch j {\n");
+    if with_lane {
+        s.push_str("  let i = (w - pu(16u + j)) * 256u + lid;\n  var bad = false;\n  switch j {\n");
+    } else {
+        s.push_str("  let i = (w - pu(16u + j)) * 256u + lid;\n  switch j {\n");
+    }
 }
 
 fn gen_optim_many(spec: &Spec) -> String {
@@ -165,7 +200,7 @@ fn gen_optim_many(spec: &Spec) -> String {
             b += 1;
         }
     }
-    many_prologue(&mut s, j);
+    many_prologue(&mut s, j, false);
     // The update of `shaders/optim.wgsl`, op for op.
     let body = match mode {
         0 => {
@@ -237,21 +272,37 @@ fn gen_optim_many(spec: &Spec) -> String {
 
 fn gen_unscale_many(spec: &Spec) -> String {
     let j = spec.get_u32("J", 1) as usize;
+    let sg = spec.is_subgroups();
     let mut s = String::new();
     for t in 0..j {
         let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<f32>;", t + 1);
     }
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> FLAG: array<atomic<u32>>;", j + 1);
-    many_prologue(&mut s, j);
+    many_prologue(&mut s, j, sg);
     for t in 0..j {
-        let _ = writeln!(
-            s,
-            "  case {t}u: {{\n    if (i < pu({}u)) {{\n      let v = X{t}[i] * pf(1u);\n      X{t}[i] = v;\n\
-             \x20     if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) {{ atomicOr(&FLAG[0], 1u); }}\n    }}\n  }}",
-            32 + t
-        );
+        if sg {
+            let _ = writeln!(
+                s,
+                "  case {t}u: {{\n    if (i < pu({}u)) {{\n      let v = X{t}[i] * pf(1u);\n      X{t}[i] = v;\n\
+                 \x20     bad = (bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u;\n    }}\n  }}",
+                32 + t
+            );
+        } else {
+            let _ = writeln!(
+                s,
+                "  case {t}u: {{\n    if (i < pu({}u)) {{\n      let v = X{t}[i] * pf(1u);\n      X{t}[i] = v;\n\
+                 \x20     if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) {{ atomicOr(&FLAG[0], 1u); }}\n    }}\n  }}",
+                32 + t
+            );
+        }
     }
-    s.push_str("  default: {}\n  }\n}\n");
+    if sg {
+        s.push_str(
+            "  default: {}\n  }\n  if (subgroupAny(bad) && lane == 0u) { atomicOr(&FLAG[0], 1u); }\n}\n",
+        );
+    } else {
+        s.push_str("  default: {}\n  }\n}\n");
+    }
     s
 }
 
@@ -337,16 +388,29 @@ pub enum NormPartial {
 
 /// The multi-tensor reductions' prologue: this workgroup's index `w` (none past the last), its tensor `j` and
 /// element `i` (as [`many_prologue`]). Params: 1 = the first partial of this dispatch, 2 = its workgroups.
-fn norm_prologue(s: &mut String, j: usize) {
-    s.push_str(
-        "var<workgroup> red: array<f32, 256>;\n\
-         @compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-         \x20 if (w >= pu(2u)) { return; }\n\
-         \x20 var j = 0u;\n",
-    );
+fn norm_prologue(s: &mut String, j: usize, sg: bool) {
+    if sg {
+        s.push_str(
+            "var<workgroup> red: array<f32, 8>;\n\
+             @compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32,\n\
+             \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
+             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 if (w >= pu(2u)) { return; }\n\
+             \x20 var j = 0u;\n",
+        );
+    } else {
+        s.push_str(
+            "var<workgroup> red: array<f32, 256>;\n\
+             @compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32) {\n\
+             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 if (w >= pu(2u)) { return; }\n\
+             \x20 var j = 0u;\n",
+        );
+    }
     for t in 1..j {
         let _ = writeln!(s, "  if (w >= pu({}u)) {{ j = {t}u; }}", 16 + t);
     }
@@ -354,7 +418,7 @@ fn norm_prologue(s: &mut String, j: usize) {
 }
 
 fn gen_norm_partials_many(spec: &Spec) -> String {
-    let (j, squares) = (spec.get_u32("J", 1) as usize, spec.get_u32("OP", 0) == 1);
+    let (j, squares, sg) = (spec.get_u32("J", 1) as usize, spec.get_u32("OP", 0) == 1, spec.is_subgroups());
     let mut s = String::new();
     for t in 0..j {
         let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{t}: array<f32>;", t + 1);
@@ -372,20 +436,50 @@ fn gen_norm_partials_many(spec: &Spec) -> String {
          \x20 if ((bitcast<u32>(b) & 0x7fffffffu) > 0x7f800000u) { return b; }\n\
          \x20 return max(a, b);\n}\n",
     );
-    norm_prologue(&mut s, j);
+    norm_prologue(&mut s, j, sg);
     let term = if squares { "let t = (x * H[0]) * H[0]; v = t * t;" } else { "v = abs(x);" };
     for t in 0..j {
         let _ = writeln!(s, "  case {t}u: {{ if (i < pu({}u)) {{ let x = X{t}[i]; {term} }} }}", 32 + t);
     }
-    let op = if squares { "red[lid] + red[lid + s]" } else { "nmax(red[lid], red[lid + s])" };
-    let _ = writeln!(
-        s,
-        "  default: {{}}\n  }}\n  red[lid] = v;\n  workgroupBarrier();\n\
-         \x20 for (var s = 128u; s > 0u; s >>= 1u) {{\n\
-         \x20   if (lid < s) {{ red[lid] = {op}; }}\n\
-         \x20   workgroupBarrier();\n  }}\n\
-         \x20 if (lid == 0u) {{ PART[pu(1u) + w] = red[0]; }}\n}}"
-    );
+    if sg {
+        if squares {
+            s.push_str(
+                "  default: {}\n  }\n\
+                 \x20 let r = subgroupAdd(v);\n\
+                 \x20 let sg = min(sgid, 7u);\n\
+                 \x20 if (lane == 0u) { red[sg] = r; }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (lid == 0u) {\n\
+                 \x20   PART[pu(1u) + w] = ((red[0] + red[1]) + (red[2] + red[3])) + ((red[4] + red[5]) + (red[6] + red[7]));\n\
+                 \x20 }\n}\n",
+            );
+        } else {
+            s.push_str(
+                "  default: {}\n  }\n\
+                 \x20 let nan_v = (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;\n\
+                 \x20 let r = select(subgroupMax(v), subgroupAdd(select(0.0, v, nan_v)), subgroupAny(nan_v));\n\
+                 \x20 let sg = min(sgid, 7u);\n\
+                 \x20 if (lane == 0u) { red[sg] = r; }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (lid == 0u) {\n\
+                 \x20   PART[pu(1u) + w] = nmax(\n\
+                 \x20     nmax(nmax(red[0], red[1]), nmax(red[2], red[3])),\n\
+                 \x20     nmax(nmax(red[4], red[5]), nmax(red[6], red[7])),\n\
+                 \x20   );\n\
+                 \x20 }\n}\n",
+            );
+        }
+    } else {
+        let op = if squares { "red[lid] + red[lid + s]" } else { "nmax(red[lid], red[lid + s])" };
+        let _ = writeln!(
+            s,
+            "  default: {{}}\n  }}\n  red[lid] = v;\n  workgroupBarrier();\n\
+             \x20 for (var s = 128u; s > 0u; s >>= 1u) {{\n\
+             \x20   if (lid < s) {{ red[lid] = {op}; }}\n\
+             \x20   workgroupBarrier();\n  }}\n\
+             \x20 if (lid == 0u) {{ PART[pu(1u) + w] = red[0]; }}\n}}"
+        );
+    }
     s
 }
 
@@ -397,7 +491,7 @@ fn gen_scale_many(spec: &Spec) -> String {
     }
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F1: array<f32>;", j + 1);
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F2: array<f32>;", j + 2);
-    many_prologue(&mut s, j);
+    many_prologue(&mut s, j, false);
     for t in 0..j {
         // Two roundings, as `x *= f1` then `x *= f2`.
         let _ = writeln!(
@@ -444,8 +538,9 @@ pub fn norm_partials_many(
     let j_max = MANY.min((ctx.caps().max_storage_buffers as usize).saturating_sub(extra)).max(1);
     let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
     let mut first = 0usize;
+    let sg = use_subgroups(ctx);
     for chunk in live.chunks(j_max) {
-        let spec = Spec::new().u32("J", chunk.len() as u32).u32("OP", u32::from(squares));
+        let spec = Spec::new().u32("J", chunk.len() as u32).u32("OP", u32::from(squares)).subgroups(sg);
         let k = ctx.kernel(many_def(if squares { 5 } else { 4 }, chunk.len()), spec)?;
         let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
         let groups = norm_partials_len(&ns);
@@ -505,8 +600,10 @@ pub fn unscale_check_many(
         check_buf(x, n, DType::F32, "unscale_check input")?;
     }
     let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
+    let sg = use_subgroups(ctx);
     for chunk in live.chunks(j_max) {
-        let k = ctx.kernel(many_def(3, chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
+        let k =
+            ctx.kernel(many_def(3, chunk.len()), Spec::new().u32("J", chunk.len() as u32).subgroups(sg))?;
         let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
         let (p, groups) = many_params(Params::new().u(0).f(factor), &ns)?;
         let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
