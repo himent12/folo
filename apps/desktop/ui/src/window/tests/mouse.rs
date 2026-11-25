@@ -785,3 +785,92 @@ fn signed_zero_hitbox_intersection_remains_hittable() {
     let hits = with_window(&mut app, window, |w, _| w.rendered_frame.hit_test(point(px(0.0), px(5.0))).ids);
     assert!(hits.contains(&expected), "signed-zero width intersection must remain hittable at x = 0");
 }
+
+struct SizedTip(f32, f32);
+
+impl crate::Render for SizedTip {
+    fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+        div().w(px(self.0)).h(px(self.1)).bg(color(9))
+    }
+}
+
+#[test]
+fn tooltip_clamps_to_viewport_right_and_bottom_edges() {
+    // 1. Tooltip larger than either side of the cursor clamps flush to the right/bottom edge
+    //    instead of collapsing to origin (0, 0).
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| {
+        div()
+            .id("target")
+            .size_full()
+            .tooltip(|_, cx| cx.new(|_| SizedTip(120., 70.)).into())
+            .into_any_element()
+    });
+    mouse_move(&mut app, window, 100., 50.);
+    app.advance_clock(Duration::from_millis(500));
+    app.frame(window);
+    assert_bounds(quad_of(&mut app, window, color(9)), device(80., 30., 120., 70., 1.0));
+
+    // 2. Tooltip larger than the viewport itself clamps to (0, 0).
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| {
+        div()
+            .id("target")
+            .size_full()
+            .tooltip(|_, cx| cx.new(|_| SizedTip(260., 140.)).into())
+            .into_any_element()
+    });
+    mouse_move(&mut app, window, 100., 50.);
+    app.advance_clock(Duration::from_millis(500));
+    app.frame(window);
+    assert_bounds(quad_of(&mut app, window, color(9)), device(0., 0., 260., 140., 1.0));
+}
+
+#[test]
+fn window_hover_loss_clears_tooltip_hover_and_off_viewport_mouse_up_stays_unhovered() {
+    let (mut app, window) = tipped_window(Rc::new(true.into()), Rc::default());
+    show_tip(&mut app, window);
+    // Tooltip placed at (11, 11) with size (30, 10); moving to (15, 15) stays over both target and tooltip.
+    mouse_move(&mut app, window, 15., 15.);
+    app.frame(window);
+    let tip_id = with_window(&mut app, window, |w, _| {
+        let (id, _) = w.tooltip_bounds.expect("tooltip is visible");
+        assert!(id.is_hovered(w), "tooltip reports hovered while cursor is inside window and tooltip");
+        id
+    });
+
+    // Losing window hover makes `TooltipId::is_hovered` false immediately and hides the tooltip on redraw,
+    // even while `mouse_position` retains the last in-window coordinate.
+    with_window(&mut app, window, |w, _| w.hovered.set(false));
+    with_window(&mut app, window, |w, _| {
+        assert!(!tip_id.is_hovered(w), "tooltip must not report hovered after window hover loss");
+        w.refresh();
+    });
+    app.frame(window);
+    assert!(
+        quads_of(&mut app, window, color(9)).is_empty(),
+        "prepaint hides tooltip when window is unhovered"
+    );
+
+    // A cancelled-press release reported outside the viewport must not falsely mark the window hovered.
+    mouse_up(&mut app, window, -1., -1.);
+    assert!(
+        with_window(&mut app, window, |w, _| !w.hovered.get()),
+        "off-viewport MouseUp must not re-hover an unhovered window"
+    );
+}
+
+#[test]
+fn same_frame_mouse_down_and_up_does_not_stick_active_style() {
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().id("btn").w(px(60.)).h(px(30.)).bg(color(1)).active(|s| s.bg(color(3))))
+            .into_any_element()
+    });
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1);
+    // Press and immediately release (or receive a focus-loss synthetic MouseUp) before the next draw.
+    mouse_down(&mut app, window, 10., 10.);
+    mouse_up(&mut app, window, -1., -1.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "active style must not stick");
+    assert!(quads_of(&mut app, window, color(3)).is_empty());
+}

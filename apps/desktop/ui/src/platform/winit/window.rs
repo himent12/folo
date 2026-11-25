@@ -52,6 +52,8 @@ pub(crate) struct WindowState {
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     pub pressed_buttons: Vec<MouseButton>,
+    /// Buttons already synthetically released on focus loss; their late native release is ignored.
+    pub cancelled_buttons: Vec<MouseButton>,
     pub clicks: ClickState,
     pub chrome: Chrome,
     pub file_drops: FileDropTracker,
@@ -178,6 +180,7 @@ impl WindowInner {
                 modifiers: Modifiers::default(),
                 capslock: Capslock::default(),
                 pressed_buttons: Vec::new(),
+                cancelled_buttons: Vec::new(),
                 clicks: ClickState::default(),
                 chrome: Chrome::default(),
                 file_drops: FileDropTracker::default(),

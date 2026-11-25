@@ -72,6 +72,10 @@ impl WindowInner {
             WM_MOUSEWHEEL => self.handle_mouse_wheel(hwnd, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel(hwnd, wparam, lparam),
             WM_CAPTURECHANGED => self.handle_capture_changed(hwnd, lparam),
+            WM_CANCELMODE => {
+                self.end_presses(hwnd);
+                None
+            }
             WM_SYSKEYDOWN => self.handle_syskeydown(hwnd, wparam, lparam),
             WM_SYSKEYUP => self.handle_syskeyup(hwnd, wparam, lparam),
             WM_SYSCOMMAND => self.handle_system_command(wparam),
@@ -372,6 +376,9 @@ impl WindowInner {
         let (x, y) = (lparam.signed_loword() as i32, lparam.signed_hiword() as i32);
         let (click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
+            if button == MouseButton::Left {
+                state.cancelled_nc_left = false;
+            }
             if !state.pressed_buttons.contains(&button) {
                 state.pressed_buttons.push(button);
             }
@@ -388,14 +395,25 @@ impl WindowInner {
     }
 
     fn handle_mouse_up(&self, button: MouseButton, lparam: LPARAM) -> Option<isize> {
-        let (click_count, scale_factor, still_pressed) = {
+        let (suppressed, click_count, scale_factor, still_pressed) = {
             let mut state = self.state.borrow_mut();
+            let was_pressed = state.pressed_buttons.contains(&button);
             state.pressed_buttons.retain(|b| *b != button);
-            (state.click_state.current_count, state.scale_factor, !state.pressed_buttons.is_empty())
+            let suppressed =
+                button == MouseButton::Left && !was_pressed && std::mem::take(&mut state.cancelled_nc_left);
+            (
+                suppressed,
+                state.click_state.current_count,
+                state.scale_factor,
+                !state.pressed_buttons.is_empty(),
+            )
         };
         if !still_pressed {
             // SAFETY: releasing our capture (its WM_CAPTURECHANGED finds nothing pressed).
             let _ = unsafe { ReleaseCapture() };
+        }
+        if suppressed {
+            return Some(0);
         }
         let input = PlatformInput::MouseUp(MouseUpEvent {
             button,
@@ -421,10 +439,15 @@ impl WindowInner {
         Some(0)
     }
 
-    /// Ends the buttons pressed in the window: lets go of the capture if we hold it (whose
-    /// `WM_CAPTURECHANGED` releases them), and releases any still pressed.
+    /// Ends the buttons pressed in the window: clears any armed non-client caption button, lets go of
+    /// the capture if we hold it (whose `WM_CAPTURECHANGED` releases them), and releases any still
+    /// pressed.
     fn end_presses(&self, hwnd: HWND) {
-        if self.state.borrow().pressed_buttons.is_empty() {
+        let any_pressed = {
+            let state = self.state.borrow();
+            !state.pressed_buttons.is_empty() || state.nc_button_pressed.is_some()
+        };
+        if !any_pressed {
             return;
         }
         // SAFETY: plain capture calls for our own window.
@@ -459,7 +482,15 @@ impl WindowInner {
     fn cancel_presses(&self, hwnd: HWND) {
         let (buttons, click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
-            (std::mem::take(&mut state.pressed_buttons), state.click_state.current_count, state.scale_factor)
+            let nc_pressed = state.nc_button_pressed.take().is_some();
+            let mut buttons = std::mem::take(&mut state.pressed_buttons);
+            if nc_pressed {
+                state.cancelled_nc_left = true;
+                if !buttons.contains(&MouseButton::Left) {
+                    buttons.push(MouseButton::Left);
+                }
+            }
+            (buttons, state.click_state.current_count, state.scale_factor)
         };
         if buttons.is_empty() {
             return;
@@ -470,7 +501,10 @@ impl WindowInner {
         unsafe {
             let _ = GetClientRect(hwnd, &mut client);
         }
-        if p.x >= client.left && p.x < client.right && p.y >= client.top && p.y < client.bottom {
+        if client.right <= client.left
+            || client.bottom <= client.top
+            || (p.x >= client.left && p.x <= client.right && p.y >= client.top && p.y <= client.bottom)
+        {
             p = POINT { x: client.left - 1, y: client.top - 1 };
         }
         let position = logical_point(p.x as f32, p.y as f32, scale_factor);

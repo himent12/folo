@@ -62,6 +62,9 @@ pub(crate) struct WindowState {
     pub(crate) hovered: bool,
     pub(crate) click_state: ClickState,
     pub(crate) nc_button_pressed: Option<u32>,
+    /// Set when a non-client caption button press was synthetically released on cancellation, so a
+    /// stray matching `WM_NCLBUTTONUP`/`WM_LBUTTONUP` does not dispatch a duplicate `MouseUp`.
+    pub(crate) cancelled_nc_left: bool,
     /// The buttons pressed in the client area and not yet released (the capture is held while any is).
     pub(crate) pressed_buttons: Vec<MouseButton>,
     pub(crate) display: WindowsDisplay,
@@ -624,6 +627,7 @@ fn new_inner(context: &CreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<
         hovered: false,
         click_state: ClickState::new(),
         nc_button_pressed: None,
+        cancelled_nc_left: false,
         pressed_buttons: Vec::new(),
         display: context.display,
         fullscreen: None,

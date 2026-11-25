@@ -58,16 +58,20 @@ impl Window {
             PlatformInput::FileDrop(event) => self.translate_file_drop(event, cx),
             event @ (PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_)) => event,
         };
-        // A pointer event means the mouse is over the window (Windows sends no `MouseExited`, and the
-        // hover callback may lag the first move). Checked after translation: a file dragged in from
-        // outside reaches the window only as file-drop events, which became moves and an up above.
-        if matches!(
-            event,
-            PlatformInput::MouseMove(_)
-                | PlatformInput::MouseDown(_)
-                | PlatformInput::MouseUp(_)
-                | PlatformInput::ScrollWheel(_)
-        ) {
+        // A pointer event inside the viewport means the mouse is over the window (Windows sends no
+        // `MouseExited`, and the hover callback may lag the first move). Checked after translation: a
+        // file dragged in from outside reaches the window only as file-drop events, which became moves
+        // and an up above. Releases or moves reported outside the viewport (such as a cancelled press
+        // clamped to `(-1, -1)`) must not falsely mark the window as hovered.
+        let viewport = crate::Bounds { origin: crate::Point::default(), size: self.viewport_size };
+        let pointer_in_viewport = match &event {
+            PlatformInput::MouseMove(e) => viewport.contains(&e.position),
+            PlatformInput::MouseDown(e) => viewport.contains(&e.position),
+            PlatformInput::MouseUp(e) => viewport.contains(&e.position),
+            PlatformInput::ScrollWheel(e) => viewport.contains(&e.position),
+            _ => false,
+        };
+        if pointer_in_viewport {
             self.hovered.set(true);
         }
 
@@ -401,7 +405,9 @@ impl Window {
     /// rendered frame's mouse-move listeners run once with it, so hover styles redraw, `on_hover(false)`
     /// fires and pending tooltips cancel (the platforms send no `MouseExited` for this).
     pub(crate) fn on_hover_status_change(&mut self, hovered: bool, cx: &mut App) {
-        self.hovered.set(hovered);
+        if self.hovered.replace(hovered) == hovered {
+            return;
+        }
         if !hovered {
             let event = MouseMoveEvent {
                 position: self.mouse_position,

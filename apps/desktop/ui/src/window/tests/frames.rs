@@ -474,3 +474,34 @@ fn compute_style_preserves_existing_interactive_state_across_frame_swap() {
         );
     });
 }
+
+#[test]
+fn noop_blur_hover_and_active_callbacks_do_not_schedule_frames() {
+    let (mut app, window) =
+        open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());
+    let clear = |app: &mut HeadlessApp| {
+        app.frame(window);
+        app.platform().windows.borrow()[0].frame_requested.set(false);
+    };
+
+    // Blurring when nothing is focused is a no-op.
+    clear(&mut app);
+    with_window(&mut app, window, |window, _| window.blur());
+    assert!(!app.is_dirty(window) && !frame_requested(&app), "noop blur must not redraw");
+
+    // Duplicate hover status with the same value does not redraw; flipping it does.
+    let initial_hovered = with_window(&mut app, window, |window, _| window.hovered.get());
+    clear(&mut app);
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(initial_hovered, cx));
+    assert!(!app.is_dirty(window) && !frame_requested(&app), "duplicate hover status must not redraw");
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(!initial_hovered, cx));
+    assert!(app.is_dirty(window), "changed hover status must redraw");
+
+    // Duplicate active status with unchanged modifiers does not redraw; flipping active does.
+    let initial_active = with_window(&mut app, window, |window, _| window.active.get());
+    clear(&mut app);
+    app.platform().set_active(initial_active);
+    assert!(!app.is_dirty(window) && !frame_requested(&app), "duplicate active status must not redraw");
+    app.platform().set_active(!initial_active);
+    assert!(app.is_dirty(window), "changed active status must redraw");
+}

@@ -54,6 +54,9 @@ impl WindowInner {
             WindowEvent::CloseRequested => self.request_close(),
             WindowEvent::Focused(active) => {
                 self.state.borrow_mut().active = active;
+                if !active {
+                    self.cancel_presses();
+                }
                 call(&self.callbacks.active_status_change, |callback| callback(active));
             }
             WindowEvent::ThemeChanged(_) => {
@@ -152,24 +155,40 @@ impl WindowInner {
         }
     }
 
+    /// Releases any buttons still pressed when the window loses focus, outside the client area so a
+    /// cancelled press clears pressed state without firing a click or drop.
+    fn cancel_presses(&self) {
+        let (buttons, position, modifiers, click_count) = {
+            let mut state = self.state.borrow_mut();
+            state.chrome.cancel();
+            let s = &mut *state;
+            let buttons = take_cancelled_buttons(&mut s.pressed_buttons, &mut s.cancelled_buttons);
+            (buttons, s.mouse_position, s.modifiers, s.clicks.count())
+        };
+        if buttons.is_empty() {
+            return;
+        }
+        let position = cancelled_release_position(position, self.content_size());
+        for button in buttons {
+            self.dispatch(PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count }));
+        }
+    }
+
     fn mouse_button(&self, element: ElementState, button: WinitButton) {
         let Some(button) = mouse::button(button) else { return };
         let left = button == crate::MouseButton::Left;
-        let area = if left {
-            call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten()
-        } else {
-            None
-        };
         match element {
             ElementState::Pressed => {
+                let area = left
+                    .then(|| call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten())
+                    .flatten();
                 let (position, modifiers, click_count) = {
                     let mut state = self.state.borrow_mut();
                     let position = state.mouse_position;
                     let count = state.clicks.press(button, position, Instant::now());
-                    if !state.pressed_buttons.contains(&button) {
-                        state.pressed_buttons.push(button);
-                    }
-                    (position, state.modifiers, count)
+                    let s = &mut *state;
+                    record_press(&mut s.pressed_buttons, &mut s.cancelled_buttons, button);
+                    (position, s.modifiers, count)
                 };
                 let result = self.dispatch(PlatformInput::MouseDown(MouseDownEvent {
                     button,
@@ -185,11 +204,18 @@ impl WindowInner {
                 }
             }
             ElementState::Released => {
-                let (position, modifiers, click_count) = {
+                let release = {
                     let mut state = self.state.borrow_mut();
-                    state.pressed_buttons.retain(|b| *b != button);
-                    (state.mouse_position, state.modifiers, state.clicks.count())
+                    let s = &mut *state;
+                    consume_release(&mut s.pressed_buttons, &mut s.cancelled_buttons, button)
+                        .then(|| (s.mouse_position, s.modifiers, s.clicks.count()))
                 };
+                let Some((position, modifiers, click_count)) = release else {
+                    return;
+                };
+                let area = left
+                    .then(|| call(&self.callbacks.hit_test_window_control, |callback| callback()).flatten())
+                    .flatten();
                 let result = self.dispatch(PlatformInput::MouseUp(MouseUpEvent {
                     button,
                     position,
@@ -321,6 +347,69 @@ pub(crate) fn utf16_range(text: &str, bytes: Range<usize>) -> Range<usize> {
     units(bytes.start)..units(bytes.end)
 }
 
+/// Records a native button press, clearing any pending cancelled-release suppression for it.
+fn record_press(
+    pressed: &mut Vec<crate::MouseButton>,
+    cancelled: &mut Vec<crate::MouseButton>,
+    button: crate::MouseButton,
+) {
+    cancelled.retain(|b| *b != button);
+    if !pressed.contains(&button) {
+        pressed.push(button);
+    }
+}
+
+/// Drains currently pressed buttons on focus loss and marks them cancelled so a late native release
+/// (e.g. under X11's implicit pointer grab) is suppressed rather than dispatching a second `MouseUp`.
+fn take_cancelled_buttons(
+    pressed: &mut Vec<crate::MouseButton>,
+    cancelled: &mut Vec<crate::MouseButton>,
+) -> Vec<crate::MouseButton> {
+    let buttons = std::mem::take(pressed);
+    for &button in &buttons {
+        if !cancelled.contains(&button) {
+            cancelled.push(button);
+        }
+    }
+    buttons
+}
+
+/// Handles a native button release. Returns `false` if the button was already synthetically released
+/// on focus loss (consuming that cancellation marker), or `true` when the release should dispatch.
+fn consume_release(
+    pressed: &mut Vec<crate::MouseButton>,
+    cancelled: &mut Vec<crate::MouseButton>,
+    button: crate::MouseButton,
+) -> bool {
+    pressed.retain(|b| *b != button);
+    if let Some(ix) = cancelled.iter().position(|b| *b == button) {
+        cancelled.remove(ix);
+        false
+    } else {
+        true
+    }
+}
+
+/// Keeps a cancelled press's release outside `[0..=width, 0..=height]` (and outside a `0x0`
+/// minimized viewport whose prior `rendered_frame` may still hold hitboxes) so it clears pressed
+/// state without landing on an in-window click or drop target.
+fn cancelled_release_position(
+    position: crate::Point<crate::Pixels>,
+    size: crate::Size<crate::Pixels>,
+) -> crate::Point<crate::Pixels> {
+    if size.width <= px(0.)
+        || size.height <= px(0.)
+        || (position.x >= px(0.)
+            && position.x <= size.width
+            && position.y >= px(0.)
+            && position.y <= size.height)
+    {
+        point(px(-1.), px(-1.))
+    } else {
+        position
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +481,40 @@ mod tests {
         // With no composition it changes nothing.
         cancel_composition(&mut field);
         assert_eq!((field.text.as_str(), field.selection.clone()), ("ab", 2..2));
+    }
+
+    #[test]
+    fn cancelled_release_position_moves_in_client_coordinates_outside() {
+        let viewport = crate::size(px(200.), px(100.));
+        assert_eq!(cancelled_release_position(point(px(50.), px(50.)), viewport), point(px(-1.), px(-1.)));
+        assert_eq!(cancelled_release_position(point(px(0.), px(0.)), viewport), point(px(-1.), px(-1.)));
+        assert_eq!(cancelled_release_position(point(px(200.), px(100.)), viewport), point(px(-1.), px(-1.)));
+        let outside = point(px(240.), px(40.));
+        assert_eq!(cancelled_release_position(outside, viewport), outside);
+        // Minimized 0x0 viewport: always clamp to (-1, -1) so stale hitboxes cannot match.
+        assert_eq!(
+            cancelled_release_position(point(px(50.), px(50.)), crate::size(px(0.), px(0.))),
+            point(px(-1.), px(-1.))
+        );
+    }
+
+    #[test]
+    fn cancelled_buttons_suppress_late_native_release_until_next_press() {
+        use crate::MouseButton;
+        let (mut pressed, mut cancelled) = (Vec::new(), Vec::new());
+
+        record_press(&mut pressed, &mut cancelled, MouseButton::Left);
+        assert_eq!(take_cancelled_buttons(&mut pressed, &mut cancelled), vec![MouseButton::Left]);
+        assert!(pressed.is_empty());
+        // Late physical release after focus-loss synthetic MouseUp is suppressed.
+        assert!(!consume_release(&mut pressed, &mut cancelled, MouseButton::Left));
+        // A subsequent press + release dispatches normally.
+        record_press(&mut pressed, &mut cancelled, MouseButton::Left);
+        assert!(consume_release(&mut pressed, &mut cancelled, MouseButton::Left));
+        // A new press before any late release clears the cancellation marker.
+        record_press(&mut pressed, &mut cancelled, MouseButton::Right);
+        assert_eq!(take_cancelled_buttons(&mut pressed, &mut cancelled), vec![MouseButton::Right]);
+        record_press(&mut pressed, &mut cancelled, MouseButton::Right);
+        assert!(consume_release(&mut pressed, &mut cancelled, MouseButton::Right));
     }
 }

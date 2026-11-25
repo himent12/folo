@@ -423,12 +423,16 @@ fn wire_callbacks(platform_window: &dyn PlatformWindow, app: Weak<AppCell>, hand
         let app = app.clone();
         move |active| {
             update_window(&app, handle, |window, _| {
-                if active && !window.active.replace(active) {
+                let was_active = window.active.replace(active);
+                if active && !was_active {
                     window.activations += 1;
                 }
-                window.active.set(active);
-                window.modifiers = window.platform_window.modifiers();
-                window.refresh();
+                let modifiers = window.platform_window.modifiers();
+                let modifiers_changed = window.modifiers != modifiers;
+                window.modifiers = modifiers;
+                if was_active != active || modifiers_changed {
+                    window.refresh();
+                }
             });
         }
     }));
