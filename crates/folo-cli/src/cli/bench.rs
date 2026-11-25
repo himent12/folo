@@ -104,7 +104,7 @@ pub struct BenchCreateArgs {
     /// At most this many images (1 to 5000), sampled with --seed when the source has more [default: 500].
     #[arg(long)]
     pub max_images: Option<u32>,
-    /// Seed of the sample and of the conditions' noise.
+    /// Seed of the sample and of the conditions' noise [0..=9007199254740991].
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
     /// The plan as JSON (`{"conditions":[{"condition":"haze","severities":[1,3],"weight":1}]}`), or a file that

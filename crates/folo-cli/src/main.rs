@@ -697,6 +697,15 @@ mod tests {
         );
         assert_eq!(arg(&quantize, "images")["bounds"], json!({ "minimum": 1 }));
         assert_eq!(arg(&quantize, "batch")["bounds"], json!({ "minimum": 1 }));
+
+        let bench_create =
+            describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();
+        assert_eq!(arg(&bench_create, "max_images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
+        assert_eq!(
+            arg(&bench_create, "seed")["bounds"],
+            json!({ "minimum": 0, "maximum": 9_007_199_254_740_991u64 })
+        );
+        assert!(arg(&bench_create, "seed")["help"].as_str().unwrap().contains("[0..=9007199254740991]"));
     }
 
     /// Every entry in `cli::bounds::ARG_BOUNDS` matches a real numeric argument in the clap tree, has no
@@ -740,6 +749,17 @@ mod tests {
             assert!(!a_scoped["bounds"].as_object().unwrap().is_empty(), "{cmd_path} {arg_id}");
             let ty = a_scoped["type"].as_str().unwrap();
             assert!(matches!(ty, "integer" | "number"), "{cmd_path} {arg_id}: unexpected type {ty}");
+            // Integer args must use Int bounds and float args must use Float bounds (no silent type mismatch).
+            for bound in [b.min, b.max].into_iter().flatten() {
+                match (ty, bound) {
+                    ("integer", cli::bounds::BoundValue::Int(_))
+                    | ("number", cli::bounds::BoundValue::Float(_)) => {}
+                    _ => panic!("{cmd_path} {arg_id}: bound {bound:?} does not match clap type {ty}"),
+                }
+            }
+            if ty == "number" {
+                assert!(b.multiple_of.is_none(), "{cmd_path} {arg_id}: float arg should not set multiple_of");
+            }
             // Verify every configured default value lies inside the declared bounds.
             let defaults: Vec<&str> = match &a_scoped["default"] {
                 serde_json::Value::String(s) => vec![s.as_str()],

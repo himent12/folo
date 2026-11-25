@@ -107,14 +107,62 @@ impl NumericBounds {
 
     /// Whether an unsigned integer value satisfies these bounds.
     pub fn contains_u64(self, v: u64) -> bool {
-        if let Some(BoundValue::Int(min)) = self.min {
-            let ok = if self.min_inclusive { v >= min } else { v > min };
+        if let Some(min) = self.min {
+            let ok = match min {
+                BoundValue::Int(lo) => {
+                    if self.min_inclusive {
+                        v >= lo
+                    } else {
+                        v > lo
+                    }
+                }
+                BoundValue::Float(lo) => {
+                    if !lo.is_finite() {
+                        false
+                    } else if lo < 0.0 {
+                        true
+                    } else if lo == 0.0 {
+                        self.min_inclusive || v > 0
+                    } else {
+                        let floor = lo.floor();
+                        if floor >= (u64::MAX as f64) {
+                            false
+                        } else {
+                            let k = floor as u64;
+                            if lo == floor && self.min_inclusive { v >= k } else { v > k }
+                        }
+                    }
+                }
+            };
             if !ok {
                 return false;
             }
         }
-        if let Some(BoundValue::Int(max)) = self.max {
-            let ok = if self.max_inclusive { v <= max } else { v < max };
+        if let Some(max) = self.max {
+            let ok = match max {
+                BoundValue::Int(hi) => {
+                    if self.max_inclusive {
+                        v <= hi
+                    } else {
+                        v < hi
+                    }
+                }
+                BoundValue::Float(hi) => {
+                    if !hi.is_finite() || hi < 0.0 {
+                        false
+                    } else if hi == 0.0 {
+                        self.max_inclusive && v == 0
+                    } else {
+                        let floor = hi.floor();
+                        if floor >= (u64::MAX as f64) {
+                            true
+                        } else {
+                            let k = floor as u64;
+                            if hi == floor && !self.max_inclusive { v < k } else { v <= k }
+                        }
+                    }
+                }
+            };
             if !ok {
                 return false;
             }
@@ -137,6 +185,9 @@ impl NumericBounds {
                 BoundValue::Int(n) => n as f64,
                 BoundValue::Float(f) => f,
             };
+            if !lo.is_finite() {
+                return false;
+            }
             let ok = if self.min_inclusive { v >= lo } else { v > lo };
             if !ok {
                 return false;
@@ -147,10 +198,18 @@ impl NumericBounds {
                 BoundValue::Int(n) => n as f64,
                 BoundValue::Float(f) => f,
             };
+            if !hi.is_finite() {
+                return false;
+            }
             let ok = if self.max_inclusive { v <= hi } else { v < hi };
             if !ok {
                 return false;
             }
+        }
+        if let Some(step) = self.multiple_of
+            && (step == 0 || (v % (step as f64)) != 0.0)
+        {
+            return false;
         }
         true
     }
@@ -228,6 +287,8 @@ pub const LABEL_VAL_FRACTION: NumericBounds = NumericBounds::float_range(0.0, tr
 
 /// `folo bench create --max-images`.
 pub const BENCH_MAX_IMAGES: NumericBounds = NumericBounds::int_range(1, 5000);
+/// `folo bench create --seed` (exact JS safe integer limit `2^53 - 1`, matching `folo_server::bench::MAX_SEED`).
+pub const BENCH_SEED: NumericBounds = NumericBounds::int_range(0, (1u64 << 53) - 1);
 
 /// Validated numeric bounds for CLI arguments, keyed by `(command_path, arg_id)`.
 pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
@@ -277,13 +338,104 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo label images", "limit", LABEL_LIMIT),
     ("folo label view", "size", LABEL_VIEW_SIZE),
     ("folo label view", "from", POSITIVE_INT),
+    ("folo label set", "remove", POSITIVE_INT),
     ("folo label export", "val_fraction", LABEL_VAL_FRACTION),
     // `folo bench`
     ("folo bench create", "max_images", BENCH_MAX_IMAGES),
+    ("folo bench create", "seed", BENCH_SEED),
     ("folo bench run", "max_images", POSITIVE_INT),
 ];
 
 /// Looks up the validated numeric bounds for `(cmd_path, arg_id)`, if any.
 pub fn for_arg(cmd_path: &str, arg_id: &str) -> Option<NumericBounds> {
     ARG_BOUNDS.iter().find(|&&(p, a, _)| p == cmd_path && a == arg_id).map(|&(_, _, b)| b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_f64_handles_inclusive_exclusive_nonfinite_and_multiple_of() {
+        // Inclusive [0..=1]
+        assert!(UNIT_INTERVAL.contains_f64(0.0));
+        assert!(UNIT_INTERVAL.contains_f64(0.5));
+        assert!(UNIT_INTERVAL.contains_f64(1.0));
+        assert!(!UNIT_INTERVAL.contains_f64(-0.001));
+        assert!(!UNIT_INTERVAL.contains_f64(1.001));
+        assert!(!UNIT_INTERVAL.contains_f64(f64::NAN));
+        assert!(!UNIT_INTERVAL.contains_f64(f64::INFINITY));
+        assert!(!UNIT_INTERVAL.contains_f64(f64::NEG_INFINITY));
+
+        // Open (0, 0.5) and (0, 10)
+        assert!(!QUANTIZE_TAIL.contains_f64(0.0));
+        assert!(QUANTIZE_TAIL.contains_f64(1e-4));
+        assert!(!QUANTIZE_TAIL.contains_f64(0.5));
+        assert!(!QUANTIZE_TAIL.contains_f64(f64::NAN));
+        assert!(!TRAIN_LR0.contains_f64(0.0));
+        assert!(TRAIN_LR0.contains_f64(0.01));
+        assert!(!TRAIN_LR0.contains_f64(10.0));
+
+        // Half-open (0, 1] and [0, 1)
+        assert!(!TRAIN_LRF.contains_f64(0.0));
+        assert!(TRAIN_LRF.contains_f64(1.0));
+        assert!(TRAIN_SCALE.contains_f64(0.0));
+        assert!(!TRAIN_SCALE.contains_f64(1.0));
+
+        // Lower-bounded >= 0
+        assert!(NON_NEGATIVE_FLOAT.contains_f64(0.0));
+        assert!(NON_NEGATIVE_FLOAT.contains_f64(100.0));
+        assert!(!NON_NEGATIVE_FLOAT.contains_f64(-1e-9));
+        assert!(!NON_NEGATIVE_FLOAT.contains_f64(f64::INFINITY));
+        assert!(!NON_NEGATIVE_FLOAT.contains_f64(f64::NAN));
+
+        // Integer multiple_of enforced for floats too (and step 0 rejected)
+        assert!(INFER_IMGSZ.contains_f64(32.0));
+        assert!(INFER_IMGSZ.contains_f64(640.0));
+        assert!(!INFER_IMGSZ.contains_f64(33.0));
+        assert!(!INFER_IMGSZ.contains_f64(32.5));
+        assert!(!NumericBounds::int_min_multiple(1, 0).contains_f64(32.0));
+    }
+
+    #[test]
+    fn contains_u64_enforces_int_float_and_multiple_of_bounds() {
+        assert!(!POSITIVE_INT.contains_u64(0));
+        assert!(POSITIVE_INT.contains_u64(1));
+        assert!(INFER_IMGSZ.contains_u64(32));
+        assert!(INFER_IMGSZ.contains_u64(8192));
+        assert!(!INFER_IMGSZ.contains_u64(0));
+        assert!(!INFER_IMGSZ.contains_u64(33));
+        assert!(!INFER_IMGSZ.contains_u64(8224));
+        assert!(!NumericBounds::int_min_multiple(1, 0).contains_u64(32));
+
+        assert!(BENCH_SEED.contains_u64(0));
+        assert!(BENCH_SEED.contains_u64((1u64 << 53) - 1));
+        assert!(!BENCH_SEED.contains_u64(1u64 << 53));
+
+        // Float bounds are enforced on u64 rather than silently bypassed
+        assert!(UNIT_INTERVAL.contains_u64(0));
+        assert!(UNIT_INTERVAL.contains_u64(1));
+        assert!(!UNIT_INTERVAL.contains_u64(2));
+        assert!(!UNIT_INTERVAL.contains_u64(42));
+        assert!(!QUANTIZE_TAIL.contains_u64(0));
+        assert!(!QUANTIZE_TAIL.contains_u64(1));
+        assert!(TRAIN_SCALE.contains_u64(0));
+        assert!(!TRAIN_SCALE.contains_u64(1));
+        assert!(!TRAIN_LR0.contains_u64(0));
+        assert!(TRAIN_LR0.contains_u64(1));
+        assert!(TRAIN_LR0.contains_u64(9));
+        assert!(!TRAIN_LR0.contains_u64(10));
+        assert!(!NumericBounds::float_range(f64::NAN, true, 1.0, true).contains_u64(0));
+    }
+
+    #[test]
+    fn to_json_serializes_active_keys_only() {
+        assert_eq!(UNIT_INTERVAL.to_json(), json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(POSITIVE_INT.to_json(), json!({ "minimum": 1 }));
+        assert_eq!(INFER_IMGSZ.to_json(), json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 }));
+        assert_eq!(VAL_IMGSZ.to_json(), json!({ "minimum": 32, "multiple_of": 32 }));
+        assert_eq!(TRAIN_LR0.to_json(), json!({ "exclusive_minimum": 0.0, "exclusive_maximum": 10.0 }));
+        assert_eq!(TRAIN_LRF.to_json(), json!({ "exclusive_minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(TRAIN_SCALE.to_json(), json!({ "minimum": 0.0, "exclusive_maximum": 1.0 }));
+    }
 }

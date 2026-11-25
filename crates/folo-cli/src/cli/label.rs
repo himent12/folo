@@ -237,7 +237,7 @@ pub struct LabelSetArgs {
     /// Remove every box (a background image).
     #[arg(long, conflicts_with = "boxes")]
     pub clear: bool,
-    /// Remove box N (as `folo label view` numbers them), repeatable.
+    /// Remove box N [>= 1] (as `folo label view` numbers them), repeatable.
     #[arg(long, value_name = "N")]
     pub remove: Vec<u32>,
     /// Give box N another class, as N=CLASS, repeatable.
