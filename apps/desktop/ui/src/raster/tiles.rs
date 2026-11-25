@@ -107,8 +107,8 @@ impl Tiles {
         self.counts.clear();
         self.counts.resize(parts * n, 0);
         // Pass 1: each part counts its items per tile.
-        let tasks: Vec<_> = self.counts.chunks_mut(n).zip(items.chunks(chunk)).collect();
-        for_each(pool, tasks, &|(counts, items): (&mut [u32], &[Item])| {
+        if parts == 1 {
+            let counts = &mut self.counts[..n];
             for it in items {
                 let [x0, y0, x1, y1] = it.tiles.map(|v| v as usize);
                 for ty in y0..y1 {
@@ -117,7 +117,19 @@ impl Tiles {
                     }
                 }
             }
-        });
+        } else {
+            let tasks: Vec<_> = self.counts.chunks_mut(n).zip(items.chunks(chunk)).collect();
+            for_each(pool, tasks, &|(counts, items): (&mut [u32], &[Item])| {
+                for it in items {
+                    let [x0, y0, x1, y1] = it.tiles.map(|v| v as usize);
+                    for ty in y0..y1 {
+                        for c in &mut counts[ty * cols + x0..ty * cols + x1] {
+                            *c += 1;
+                        }
+                    }
+                }
+            });
+        }
         // Each (tile, part) range starts after the earlier parts' entries of the same tile.
         self.offsets.clear();
         self.offsets.resize(n + 1, 0);
@@ -142,30 +154,43 @@ impl Tiles {
         self.list.clear();
         self.list.resize(run as usize, 0);
         // Pass 2: each part writes its items into its own ranges.
-        let list = ListPtr(self.list.as_mut_ptr());
-        let tasks: Vec<_> = self
-            .cursor
-            .chunks_mut(n)
-            .zip(items.chunks(chunk))
-            .enumerate()
-            .map(|(p, (c, it))| (p * chunk, c, it))
-            .collect();
-        for_each(pool, tasks, &|(base, cursor, items): (usize, &mut [u32], &[Item])| {
-            let list = &list;
+        if parts == 1 {
+            let cursor = &mut self.cursor[..n];
             for (i, it) in items.iter().enumerate() {
                 let [x0, y0, x1, y1] = it.tiles.map(|v| v as usize);
                 for ty in y0..y1 {
                     for c in &mut cursor[ty * cols + x0..ty * cols + x1] {
-                        // SAFETY: `*c` stays inside this part's range of this tile (pass 1 counted
-                        // exactly these entries, and their total fits `u32` and is the list's length),
-                        // and ranges of different (tile, part) pairs are disjoint, so no other thread
-                        // writes this slot; the list outlives the job.
-                        unsafe { list.0.add(*c as usize).write((base + i) as u32) };
+                        self.list[*c as usize] = i as u32;
                         *c += 1;
                     }
                 }
             }
-        });
+        } else {
+            let list = ListPtr(self.list.as_mut_ptr());
+            let tasks: Vec<_> = self
+                .cursor
+                .chunks_mut(n)
+                .zip(items.chunks(chunk))
+                .enumerate()
+                .map(|(p, (c, it))| (p * chunk, c, it))
+                .collect();
+            for_each(pool, tasks, &|(base, cursor, items): (usize, &mut [u32], &[Item])| {
+                let list = &list;
+                for (i, it) in items.iter().enumerate() {
+                    let [x0, y0, x1, y1] = it.tiles.map(|v| v as usize);
+                    for ty in y0..y1 {
+                        for c in &mut cursor[ty * cols + x0..ty * cols + x1] {
+                            // SAFETY: `*c` stays inside this part's range of this tile (pass 1 counted
+                            // exactly these entries, and their total fits `u32` and is the list's length),
+                            // and ranges of different (tile, part) pairs are disjoint, so no other thread
+                            // writes this slot; the list outlives the job.
+                            unsafe { list.0.add(*c as usize).write((base + i) as u32) };
+                            *c += 1;
+                        }
+                    }
+                }
+            });
+        }
         items.len()
     }
 
@@ -180,10 +205,31 @@ impl Tiles {
         pool: Option<&Pool>,
     ) {
         let n = self.len();
-        let chunk = n.div_ceil(parts.max(1)).max(1);
-        let found = Mutex::new(Vec::new());
         let (cols, width, height) = (self.cols, self.width, self.height);
         let (offsets, list) = (&self.offsets, &self.list);
+        if parts <= 1 || pool.is_none() {
+            dirty.clear();
+            for t in 0..n {
+                if diff_tile(
+                    t,
+                    cols,
+                    width,
+                    height,
+                    offsets,
+                    list,
+                    items,
+                    salt,
+                    &mut self.hashes[t],
+                    &mut self.start[t],
+                    &mut self.occluded[t],
+                ) {
+                    dirty.push(t as u32);
+                }
+            }
+            return;
+        }
+        let chunk = n.div_ceil(parts.max(1)).max(1);
+        let found = Mutex::new(Vec::new());
         let tasks: Vec<_> = self
             .hashes
             .chunks_mut(chunk)
@@ -203,26 +249,7 @@ impl Tiles {
                 hashes.iter_mut().zip(start.iter_mut()).zip(occluded.iter_mut()).enumerate()
             {
                 let t = first + j;
-                let rect = tile_rect(t, cols, width, height);
-                let (b, e) = (offsets[t] as usize, offsets[t + 1] as usize);
-                let mut s = b;
-                let mut covered = false;
-                for k in (b..e).rev() {
-                    if items[list[k] as usize].opaque.contains(&rect) {
-                        s = k;
-                        covered = true;
-                        break;
-                    }
-                }
-                let mut h = mix(salt, covered as u64);
-                for &i in &list[s..e] {
-                    h = mix(h, items[i as usize].sig);
-                }
-                let h = finish(h);
-                *start = s as u32;
-                *occ = covered;
-                if *hash != Some(h) {
-                    *hash = Some(h);
+                if diff_tile(t, cols, width, height, offsets, list, items, salt, hash, start, occ) {
                     mine.push(t as u32);
                 }
             }
@@ -294,6 +321,49 @@ impl Tiles {
                 )
             })
             .collect()
+    }
+}
+
+/// Cuts tile `t`'s list at its topmost occluder, hashes what remains with `salt`, and returns
+/// whether the hash changed.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn diff_tile(
+    t: usize,
+    cols: i32,
+    width: i32,
+    height: i32,
+    offsets: &[u32],
+    list: &[u32],
+    items: &[Item],
+    salt: u64,
+    hash: &mut Option<u64>,
+    start: &mut u32,
+    occ: &mut bool,
+) -> bool {
+    let rect = tile_rect(t, cols, width, height);
+    let (b, e) = (offsets[t] as usize, offsets[t + 1] as usize);
+    let mut s = b;
+    let mut covered = false;
+    for k in (b..e).rev() {
+        if items[list[k] as usize].opaque.contains(&rect) {
+            s = k;
+            covered = true;
+            break;
+        }
+    }
+    let mut h = mix(salt, covered as u64);
+    for &i in &list[s..e] {
+        h = mix(h, items[i as usize].sig);
+    }
+    let h = finish(h);
+    *start = s as u32;
+    *occ = covered;
+    if *hash != Some(h) {
+        *hash = Some(h);
+        true
+    } else {
+        false
     }
 }
 
@@ -371,5 +441,45 @@ mod tests {
         // Non-adjacent rows do not merge.
         let d = t.damage(&[0, 8]);
         assert_eq!(d.len(), 2);
+    }
+
+    #[test]
+    fn diff_single_thread_matches_parallel_pool() {
+        let pool = Pool::new(2);
+        let items = [
+            Item { tiles: [0, 0, 3, 2], opaque: IRect::new(0, 0, 64, 64), sig: 11, ..Item::default() },
+            Item { tiles: [1, 0, 3, 2], opaque: IRect::EMPTY, sig: 29, ..Item::default() },
+            Item { tiles: [2, 1, 3, 2], opaque: IRect::new(128, 64, 192, 128), sig: 47, ..Item::default() },
+        ];
+        let mut single = Tiles::default();
+        let mut parallel = Tiles::default();
+        single.resize(192, 128);
+        parallel.resize(192, 128);
+        single.bin(&items, 1, None);
+        parallel.bin(&items, 2, Some(&pool));
+
+        let mut d_single = vec![99];
+        let mut d_parallel = vec![99];
+        single.diff(&items, 7, &mut d_single, 1, None);
+        parallel.diff(&items, 7, &mut d_parallel, 2, Some(&pool));
+        assert_eq!(d_single, d_parallel);
+        assert_eq!(d_single, vec![0, 1, 2, 3, 4, 5]);
+        for t in 0..single.len() {
+            assert_eq!(single.entries(t), parallel.entries(t));
+        }
+
+        // Unchanged second frame produces empty dirty lists on both paths.
+        single.diff(&items, 7, &mut d_single, 1, None);
+        parallel.diff(&items, 7, &mut d_parallel, 2, Some(&pool));
+        assert!(d_single.is_empty());
+        assert!(d_parallel.is_empty());
+
+        // Changing one item's sig dirties only the tiles containing it, in ascending order.
+        let mut changed = items;
+        changed[2].sig = 999;
+        single.diff(&changed, 7, &mut d_single, 1, None);
+        parallel.diff(&changed, 7, &mut d_parallel, 2, Some(&pool));
+        assert_eq!(d_single, vec![5]);
+        assert_eq!(d_single, d_parallel);
     }
 }

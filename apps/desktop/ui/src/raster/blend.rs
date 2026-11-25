@@ -95,9 +95,77 @@ pub(crate) fn fill_span(span: &mut [u32], src: &Src) {
     if src.inv == 0 {
         span.fill(src.packed);
     } else if !src.is_noop() {
+        #[cfg(target_arch = "x86_64")]
+        if span.len() >= 4
+            && src.inv < ONE
+            && src.r.max(src.g).max(src.b).saturating_add(255 * src.inv).saturating_add(ONE / 2) < (256 << 16)
+        {
+            let (chunks, tail) = span.as_chunks_mut::<4>();
+            // SAFETY: SSE2 is guaranteed on all x86_64 targets; the guard above guarantees
+            // `src.inv <= u16::MAX` and every blended channel stays in `0..=255` so `_mm_packus_epi16`
+            // never saturates and matches `Src::over` bit-for-bit.
+            unsafe { fill_span_sse2(chunks, src) };
+            for p in tail {
+                *p = src.over(*p);
+            }
+            return;
+        }
         for p in span {
             *p = src.over(*p);
         }
+    }
+}
+
+/// Blends `src` over 4 `0x00RRGGBB` pixels per iteration using baseline x86_64 SSE2.
+///
+/// Caller must ensure `1 <= src.inv < ONE` and `max(r, g, b) + 255 * inv + ONE / 2 < 256 << 16`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn fill_span_sse2(chunks: &mut [[u32; 4]], src: &Src) {
+    use std::arch::x86_64::*;
+
+    let h = ONE / 2;
+    let (rb, gb, bb) = (src.r + h, src.g + h, src.b + h);
+    let zero = _mm_setzero_si128();
+    let rgb_mask = _mm_set1_epi32(0x00ff_ffff);
+    let inv16 = _mm_set1_epi16(src.inv as i16);
+    let sign_bit = _mm_set1_epi16(i16::MIN);
+    // Little-endian `0x00RRGGBB` unpacks to `[B, G, R, 0]` per pixel.
+    let src_lo = _mm_setr_epi16(bb as i16, gb as i16, rb as i16, 0, bb as i16, gb as i16, rb as i16, 0);
+    let src_hi = _mm_setr_epi16(
+        (bb >> 16) as i16,
+        (gb >> 16) as i16,
+        (rb >> 16) as i16,
+        0,
+        (bb >> 16) as i16,
+        (gb >> 16) as i16,
+        (rb >> 16) as i16,
+        0,
+    );
+    let src_lo_bias = _mm_xor_si128(src_lo, sign_bit);
+
+    for chunk in chunks {
+        let ptr = chunk.as_mut_ptr().cast::<__m128i>();
+        // SAFETY: `chunk` is `&mut [u32; 4]` (16 bytes), valid for unaligned 128-bit load/store.
+        let px = _mm_and_si128(unsafe { _mm_loadu_si128(ptr) }, rgb_mask);
+
+        let d01 = _mm_unpacklo_epi8(px, zero);
+        let lo01 = _mm_mullo_epi16(d01, inv16);
+        let hi01 = _mm_mulhi_epu16(d01, inv16);
+        let sum01 = _mm_add_epi16(lo01, src_lo);
+        // Unsigned carry (`sum01 < src_lo`): -1 (0xffff) when carried, 0 otherwise; subtract to add 1.
+        let carry01 = _mm_cmplt_epi16(_mm_xor_si128(sum01, sign_bit), src_lo_bias);
+        let out01 = _mm_sub_epi16(_mm_add_epi16(hi01, src_hi), carry01);
+
+        let d23 = _mm_unpackhi_epi8(px, zero);
+        let lo23 = _mm_mullo_epi16(d23, inv16);
+        let hi23 = _mm_mulhi_epu16(d23, inv16);
+        let sum23 = _mm_add_epi16(lo23, src_lo);
+        let carry23 = _mm_cmplt_epi16(_mm_xor_si128(sum23, sign_bit), src_lo_bias);
+        let out23 = _mm_sub_epi16(_mm_add_epi16(hi23, src_hi), carry23);
+
+        // SAFETY: `ptr` points to 16 writable bytes of `chunk`.
+        unsafe { _mm_storeu_si128(ptr, _mm_packus_epi16(out01, out23)) };
     }
 }
 
@@ -184,5 +252,57 @@ mod tests {
         assert_eq!(Src::new([200. / 255., 0., 0., 0.25]).over(pack(100, 0, 0)), pack(125, 0, 0));
         assert_eq!(Src::new([0.2, 0.4, 0.6, 1.]).packed, pack(51, 102, 153));
         assert!(Src::new([1., 1., 1., 0.]).is_noop());
+    }
+
+    #[test]
+    fn fill_span_matches_scalar_over_bit_for_bit() {
+        let mut srcs = vec![
+            Src::NOOP,
+            Src::new([0., 0., 0., 0.]),
+            Src::new([1., 1., 1., 1.]),
+            Src::new([0.2, 0.4, 0.6, 1.]),
+            Src::new([1., 0.5, 0.25, 0.5]),
+            Src::new([0., 1., 0.75, 1. / 65536.]),
+            Src::new([1., 1., 1., 65535. / 65536.]),
+            Src::new([0.99, 0.01, 0.5, 0.37]),
+        ];
+        // Synthetic boundary `Src` values stressing 16-bit carry transitions (0x0000, 0x7fff, 0x8000, 0xffff).
+        for inv in [1u32, 2, 0x7fff, 0x8000, 0x8001, 0xffff] {
+            for lo in [0x0000u16, 0x7fff, 0x8000, 0xffff] {
+                let r = (10 << 16) | u32::from(lo);
+                let g = (20 << 16) | u32::from(lo.wrapping_sub(0x8000));
+                let b = u32::from(lo);
+                if r.max(g).max(b) + 255 * inv + (ONE / 2) < (256 << 16) {
+                    srcs.push(Src { r, g, b, inv, packed: 0 });
+                }
+            }
+        }
+        // Span lengths covering 0, sub-vector tails, aligned multiples of 4, and unaligned tails.
+        let dst_pattern = [
+            0x0000_0000u32,
+            0x00ff_ffff,
+            0xff12_3456, // non-zero high byte must be cleared just like `pack(r, g, b)`
+            0xab80_7f01,
+            0x00fe_017f,
+            0x7f00_ff80,
+            0x0001_0203,
+            0xdead_beef,
+        ];
+        for src in srcs {
+            for len in 0..=19 {
+                let initial: Vec<u32> = (0..len)
+                    .map(|i| dst_pattern[(i + len) % dst_pattern.len()].wrapping_add(i as u32 * 0x0003_070b))
+                    .collect();
+                let mut got = initial.clone();
+                fill_span(&mut got, &src);
+                let mut want = initial;
+                if !src.is_noop() {
+                    for p in &mut want {
+                        *p = src.over(*p);
+                    }
+                }
+                assert_eq!(got, want, "mismatch for src={src:?} len={len}");
+            }
+        }
     }
 }
