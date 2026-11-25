@@ -19,7 +19,7 @@
 //! long it went unused. A workload whose cycle is longer than [`FORGET_LIMITS`] limits of traffic can still churn.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use rayon::prelude::*;
@@ -104,13 +104,26 @@ impl Pool {
 
     /// Keep `v` if it fits under `limit` bytes, after evicting stale lengths if needed. Returns the buffers that
     /// leave the cache (evicted, or `v` itself when it does not fit), for the caller to free outside the lock.
+    #[cfg(test)]
     fn put(&mut self, v: Vec<f32>, limit: usize) -> Vec<Vec<f32>> {
+        self.put_with_budget(v, limit, None)
+    }
+
+    /// Like [`Pool::put`], optionally reserving admitted bytes against a shared `total_bytes` atomic budget
+    /// shared with the per-thread magazines so concurrent returns across both levels can never exceed `limit`.
+    fn put_with_budget(
+        &mut self,
+        v: Vec<f32>,
+        limit: usize,
+        total_bytes: Option<&AtomicUsize>,
+    ) -> Vec<Vec<f32>> {
         let n = v.len();
-        if n * 4 > limit {
+        let bytes = n * 4;
+        if bytes > limit {
             // Never fits: not traffic, or a length that never fits would age the ones the workload reuses.
             return vec![v];
         }
-        self.traffic += n as u64 * 4;
+        self.traffic += bytes as u64;
         let traffic = self.traffic;
         // A refused return is a use too: a length the workload keeps returning is not stale.
         self.free
@@ -121,14 +134,32 @@ impl Pool {
             self.forget(limit);
         }
         let mut out = Vec::new();
-        if self.bytes + n * 4 > limit {
-            self.evict_stale(limit, &mut out);
-        }
-        if self.bytes + n * 4 > limit {
+        let reserved = match total_bytes {
+            Some(tb) => {
+                if try_reserve_atomic(tb, bytes, limit) {
+                    true
+                } else {
+                    let before = self.bytes;
+                    self.evict_stale(limit, &mut out);
+                    let evicted = before - self.bytes;
+                    if evicted > 0 {
+                        tb.fetch_sub(evicted, Ordering::AcqRel);
+                    }
+                    try_reserve_atomic(tb, bytes, limit)
+                }
+            }
+            None => {
+                if self.bytes + bytes > limit {
+                    self.evict_stale(limit, &mut out);
+                }
+                self.bytes + bytes <= limit
+            }
+        };
+        if !reserved {
             out.push(v);
             return out;
         }
-        self.bytes += n * 4;
+        self.bytes += bytes;
         self.free.get_mut(&n).expect("touched above").bufs.push(v);
         out
     }
@@ -173,13 +204,22 @@ impl Pool {
 
     /// The limit changed to `bytes`: drop everything if it no longer fits, and rescan on the next full return,
     /// since `next_stale` was set from the old limit.
+    #[cfg(test)]
     fn set_limit(&mut self, bytes: usize) {
-        if self.bytes > bytes {
-            self.free.clear();
+        drop(self.set_limit_evict(bytes));
+    }
+
+    /// Like [`Pool::set_limit`], returning any dropped map entries so the caller can free them outside the lock.
+    fn set_limit_evict(&mut self, bytes: usize) -> HashMap<usize, Class> {
+        let evicted = if self.bytes > bytes {
             self.bytes = 0;
-        }
+            std::mem::take(&mut self.free)
+        } else {
+            HashMap::new()
+        };
         self.next_stale = 0;
         self.next_forget = 0;
+        evicted
     }
 }
 
@@ -196,12 +236,31 @@ fn limits(k: u64, limit: usize) -> u64 {
 struct Slot {
     bufs: Vec<Vec<f32>>,
     bytes: usize,
+    /// Clear-epoch this slot last synchronized with (`Cache::epoch`).
+    epoch: u64,
+    /// Limit under which buffers currently in `bufs` were admitted (so `set_limit` drains on any reduction).
+    last_limit: usize,
     tls_bytes: &'static AtomicUsize,
+    total_bytes: &'static AtomicUsize,
 }
 
 impl Slot {
-    fn new(tls_bytes: &'static AtomicUsize) -> Self {
-        Slot { bufs: Vec::new(), bytes: 0, tls_bytes }
+    fn new(tls_bytes: &'static AtomicUsize, total_bytes: &'static AtomicUsize) -> Self {
+        Slot { bufs: Vec::new(), bytes: 0, epoch: 0, last_limit: 0, tls_bytes, total_bytes }
+    }
+
+    fn release_accounting(&self, bytes: usize) {
+        if bytes > 0 {
+            self.tls_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            self.total_bytes.fetch_sub(bytes, Ordering::AcqRel);
+        }
+    }
+
+    fn sync_epoch(&mut self, cur_epoch: u64, out: &mut Vec<Vec<f32>>) {
+        if self.epoch < cur_epoch {
+            self.drain_into(out);
+            self.epoch = cur_epoch;
+        }
     }
 
     fn take(&mut self, n: usize) -> Option<Vec<f32>> {
@@ -209,28 +268,21 @@ impl Slot {
         let v = self.bufs.remove(idx);
         let bytes = n * 4;
         self.bytes -= bytes;
-        self.tls_bytes.fetch_sub(bytes, Ordering::Release);
+        self.release_accounting(bytes);
         Some(v)
     }
 
     fn drain_into(&mut self, out: &mut Vec<Vec<f32>>) {
-        if self.bytes > 0 {
-            self.tls_bytes.fetch_sub(self.bytes, Ordering::Release);
-            self.bytes = 0;
-        }
+        let freed = self.bytes;
+        self.bytes = 0;
+        self.release_accounting(freed);
         out.append(&mut self.bufs);
     }
 
-    /// Try to keep `v` in this slot without exceeding per-thread or global TLS caps; returns any spilled oldest
-    /// buffers (plus `v` itself if it could not be kept in TLS) for the caller to hand to the shared pool outside
-    /// this lock.
-    fn put(
-        &mut self,
-        v: Vec<f32>,
-        limit: usize,
-        pool_bytes: &AtomicUsize,
-        spill: &mut Vec<Vec<f32>>,
-    ) -> Option<Vec<f32>> {
+    /// Try to keep `v` in this slot without exceeding per-thread, global TLS, or total cache caps; returns any
+    /// spilled oldest buffers (plus `v` itself if it could not be kept in TLS) for the caller to hand to the
+    /// shared pool outside this lock.
+    fn put(&mut self, v: Vec<f32>, limit: usize, spill: &mut Vec<Vec<f32>>) -> Option<Vec<f32>> {
         let bytes = v.len() * 4;
         let tls_global_cap = limit / 2;
         let per_thread_cap = TLS_MAX_BYTES.min(tls_global_cap);
@@ -248,14 +300,18 @@ impl Slot {
             freed += old_bytes;
             spill.push(old);
         }
-        if freed > 0 {
-            self.tls_bytes.fetch_sub(freed, Ordering::Release);
+        self.release_accounting(freed);
+        // Reserve from the TLS sub-budget first, then the shared total budget, so `total_bytes` never spikes on
+        // a rejected TLS admission and concurrent TLS + Pool returns can never exceed `limit`.
+        if !try_reserve_atomic(self.tls_bytes, bytes, tls_global_cap) {
+            return Some(v);
         }
-        let budget = tls_global_cap.min(limit.saturating_sub(pool_bytes.load(Ordering::Acquire)));
-        if !try_reserve_atomic(self.tls_bytes, bytes, budget) {
+        if !try_reserve_atomic(self.total_bytes, bytes, limit) {
+            self.tls_bytes.fetch_sub(bytes, Ordering::AcqRel);
             return Some(v);
         }
         self.bytes += bytes;
+        self.last_limit = self.last_limit.max(limit);
         self.bufs.push(v);
         None
     }
@@ -263,10 +319,9 @@ impl Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        if self.bytes > 0 {
-            self.tls_bytes.fetch_sub(self.bytes, Ordering::Release);
-            self.bytes = 0;
-        }
+        let freed = self.bytes;
+        self.bytes = 0;
+        self.release_accounting(freed);
     }
 }
 
@@ -286,96 +341,165 @@ fn try_reserve_atomic(counter: &AtomicUsize, add: usize, cap: usize) -> bool {
     }
 }
 
+struct PoolState {
+    pool: Option<Pool>,
+    epoch: u64,
+}
+
+impl PoolState {
+    const fn new() -> Self {
+        PoolState { pool: None, epoch: 0 }
+    }
+
+    fn sync_epoch(&mut self, cur_epoch: u64, total_bytes: &AtomicUsize) -> Option<Pool> {
+        if self.epoch < cur_epoch {
+            self.epoch = cur_epoch;
+            if let Some(p) = self.pool.take() {
+                if p.bytes > 0 {
+                    total_bytes.fetch_sub(p.bytes, Ordering::AcqRel);
+                }
+                return Some(p);
+            }
+        }
+        None
+    }
+}
+
 /// Two-level buffer cache: per-thread [`Slot`] magazines in front of a shared [`Pool`].
 ///
-/// No method holds more than one lock at a time (`slots`, an individual `Slot`, and `pool` are always acquired
-/// and released separately), so deadlock is impossible and freed buffers are always dropped outside every lock.
+/// Both levels reserve bytes against the same `total_bytes` atomic budget and honor the same `epoch` clear epoch,
+/// so concurrent returns can never exceed `limit` and `clear()` / `set_limit(0)` invalidates both levels at one
+/// atomic point. No method holds more than one lock at a time (`slots`, an individual `Slot`, and `pool` are
+/// always acquired and released separately), so deadlock is impossible and freed buffers drop outside all locks.
 struct Cache {
     limit: AtomicUsize,
-    pool: Mutex<Option<Pool>>,
-    pool_bytes: AtomicUsize,
+    epoch: AtomicU64,
+    pool: Mutex<PoolState>,
     slots: Mutex<Vec<Weak<Mutex<Slot>>>>,
     tls_bytes: AtomicUsize,
+    total_bytes: AtomicUsize,
 }
 
 impl Cache {
     const fn new(limit: usize) -> Self {
         Cache {
             limit: AtomicUsize::new(limit),
-            pool: Mutex::new(None),
-            pool_bytes: AtomicUsize::new(0),
+            epoch: AtomicU64::new(1),
+            pool: Mutex::new(PoolState::new()),
             slots: Mutex::new(Vec::new()),
             tls_bytes: AtomicUsize::new(0),
+            total_bytes: AtomicUsize::new(0),
         }
     }
 
     fn register_slot(&'static self) -> Arc<Mutex<Slot>> {
-        let slot = Arc::new(Mutex::new(Slot::new(&self.tls_bytes)));
+        let slot = Arc::new(Mutex::new(Slot::new(&self.tls_bytes, &self.total_bytes)));
         let mut g = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         g.retain(|w| w.strong_count() > 0);
         g.push(Arc::downgrade(&slot));
         slot
     }
 
+    fn live_slots(&self) -> Vec<Arc<Mutex<Slot>>> {
+        let mut g = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::with_capacity(g.len());
+        g.retain(|w| match w.upgrade() {
+            Some(arc) => {
+                out.push(arc);
+                true
+            }
+            None => false,
+        });
+        out
+    }
+
     fn drain_all_slots(&self) -> Vec<Vec<f32>> {
-        let live: Vec<Arc<Mutex<Slot>>> = {
-            let mut g = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::with_capacity(g.len());
-            g.retain(|w| match w.upgrade() {
-                Some(arc) => {
-                    out.push(arc);
-                    true
-                }
-                None => false,
-            });
-            out
-        };
         let mut gone = Vec::new();
-        for slot in live {
+        for slot in self.live_slots() {
             let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
             s.drain_into(&mut gone);
         }
         gone
     }
 
+    fn drain_all_slots_before(&self, new_epoch: u64) -> Vec<Vec<f32>> {
+        let mut gone = Vec::new();
+        for slot in self.live_slots() {
+            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+            s.sync_epoch(new_epoch, &mut gone);
+        }
+        gone
+    }
+
     fn set_limit(&self, bytes: usize) {
         self.limit.store(bytes, Ordering::Release);
+        let clear_epoch = if bytes == 0 { Some(self.epoch.fetch_add(1, Ordering::AcqRel) + 1) } else { None };
+        // Acquire every registered slot lock so any in-flight `Slot::put` that read an older limit either
+        // finishes before we inspect/drain its slot or observes the updated limit after we unlock.
         let mut gone = Vec::new();
-        if bytes == 0 || self.bytes() > bytes || self.tls_bytes.load(Ordering::Acquire) > bytes / 2 {
-            gone = self.drain_all_slots();
-        }
-        let pool_limit = bytes.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
-        {
-            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(p) = g.as_mut() {
-                p.set_limit(pool_limit);
-                self.pool_bytes.store(p.bytes, Ordering::Release);
+        for slot in self.live_slots() {
+            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ne) = clear_epoch {
+                s.sync_epoch(ne, &mut gone);
+            } else if s.bytes > 0
+                && (bytes < s.last_limit
+                    || self.total_bytes.load(Ordering::Acquire) > bytes
+                    || self.tls_bytes.load(Ordering::Acquire) > bytes / 2)
+            {
+                s.drain_into(&mut gone);
+                s.last_limit = bytes;
             }
         }
+        let (stale_pool, evicted_map) = {
+            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let stale = g.sync_epoch(self.epoch.load(Ordering::Acquire), &self.total_bytes);
+            let effective = self.limit.load(Ordering::Acquire);
+            let evicted = if let Some(p) = g.pool.as_mut() {
+                let before = p.bytes;
+                let map = p.set_limit_evict(effective);
+                let freed = before - p.bytes;
+                if freed > 0 {
+                    self.total_bytes.fetch_sub(freed, Ordering::AcqRel);
+                }
+                map
+            } else {
+                HashMap::new()
+            };
+            (stale, evicted)
+        };
         drop(gone);
+        drop(stale_pool);
+        drop(evicted_map);
     }
 
     fn clear(&self) {
-        let gone = self.drain_all_slots();
+        // Single atomic linearization point: bumping `epoch` immediately invalidates both levels on every lookup.
+        let new_epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let gone = self.drain_all_slots_before(new_epoch);
         let old_pool = {
             let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-            self.pool_bytes.store(0, Ordering::Release);
-            g.take()
+            g.sync_epoch(new_epoch, &self.total_bytes)
         };
         drop(gone);
         drop(old_pool);
     }
 
     fn bytes(&self) -> usize {
-        self.pool_bytes.load(Ordering::Acquire) + self.tls_bytes.load(Ordering::Acquire)
+        self.total_bytes.load(Ordering::Acquire)
     }
 
     fn take_from_pool(&self, n: usize) -> Option<Vec<f32>> {
-        let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        let p = g.as_mut()?;
-        let v = p.take(n)?;
-        self.pool_bytes.store(p.bytes, Ordering::Release);
-        Some(v)
+        let (found, stale_pool) = {
+            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let stale = g.sync_epoch(self.epoch.load(Ordering::Acquire), &self.total_bytes);
+            let found = g.pool.as_mut().and_then(|p| p.take(n));
+            if found.is_some() {
+                self.total_bytes.fetch_sub(n * 4, Ordering::AcqRel);
+            }
+            (found, stale)
+        };
+        drop(stale_pool);
+        found
     }
 
     fn take_with_slot(&self, slot: Option<&Mutex<Slot>>, n: usize) -> Option<Vec<f32>> {
@@ -385,44 +509,57 @@ impl Cache {
         if n.checked_mul(4).is_some_and(|b| b <= TLS_MAX_BUF_BYTES)
             && let Some(slot) = slot
         {
-            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(v) = s.take(n) {
+            let mut stale = Vec::new();
+            let found = {
+                let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+                s.sync_epoch(self.epoch.load(Ordering::Acquire), &mut stale);
+                s.take(n)
+            };
+            drop(stale);
+            if let Some(v) = found {
                 return Some(v);
             }
         }
         self.take_from_pool(n)
     }
 
-    fn put_global(&self, bufs: impl IntoIterator<Item = Vec<f32>>) {
-        let limit = self.limit.load(Ordering::Acquire);
-        if limit == 0 {
-            return;
-        }
+    fn put_global(&self, bufs: impl IntoIterator<Item = Vec<f32>>, expected_epoch: Option<u64>) {
         let mut pending: Vec<Vec<f32>> = bufs.into_iter().collect();
         if pending.is_empty() {
+            return;
+        }
+        let limit = self.limit.load(Ordering::Acquire);
+        if limit == 0 {
             return;
         }
         // If a single buffer fits under `limit` only when TLS gives up space (e.g. a small custom limit and a
         // buffer larger than `limit / 2`), drain TLS once so the shared pool sees the full limit.
         let max_bytes = pending.iter().map(|v| v.len() * 4).max().unwrap_or(0);
-        let mut pool_limit = limit.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
         let mut drained = Vec::new();
-        if max_bytes <= limit && max_bytes > pool_limit {
+        if max_bytes <= limit && self.tls_bytes.load(Ordering::Acquire) > limit - max_bytes {
             drained = self.drain_all_slots();
-            pool_limit = limit.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
         }
-        let gone = {
+        let (stale_pool, gone) = {
             let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-            let p = g.get_or_insert_with(Pool::new);
-            let mut evicted = Vec::new();
-            for v in pending.drain(..) {
-                evicted.extend(p.put(v, pool_limit));
+            let cur_epoch = self.epoch.load(Ordering::Acquire);
+            let stale = g.sync_epoch(cur_epoch, &self.total_bytes);
+            let cur_limit = self.limit.load(Ordering::Acquire);
+            // Re-check both epoch and limit inside the pool lock so a concurrent `clear()` or `set_limit()`
+            // cannot be bypassed by pre-clear spilled buffers or a stale pre-lock limit.
+            if cur_limit == 0 || expected_epoch.is_some_and(|ee| ee != cur_epoch) {
+                (stale, pending)
+            } else {
+                let p = g.pool.get_or_insert_with(Pool::new);
+                let mut evicted = Vec::new();
+                for v in pending.drain(..) {
+                    evicted.extend(p.put_with_budget(v, cur_limit, Some(&self.total_bytes)));
+                }
+                (stale, evicted)
             }
-            self.pool_bytes.store(p.bytes, Ordering::Release);
-            evicted
         };
         // Freed outside the lock: returning large buffers to the OS takes a while.
         drop(drained);
+        drop(stale_pool);
         drop(gone);
     }
 
@@ -431,27 +568,31 @@ impl Cache {
         if n < MIN_POOLED || v.capacity() != n {
             return;
         }
-        let limit = self.limit.load(Ordering::Acquire);
-        if limit == 0 {
+        if self.limit.load(Ordering::Acquire) == 0 {
             return;
         }
         let mut spill = Vec::new();
-        let leftover = if let Some(slot) = slot {
+        let mut stale = Vec::new();
+        let (leftover, expected_epoch) = if let Some(slot) = slot {
             let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
-            // Re-read `limit` under the slot lock so `set_limit(0)` / `clear()` is linearizable with `recycle`.
+            let cur_epoch = self.epoch.load(Ordering::Acquire);
+            s.sync_epoch(cur_epoch, &mut stale);
+            // Re-read `limit` under the slot lock so `set_limit` is serialized with every TLS admission.
             let cur_limit = self.limit.load(Ordering::Acquire);
             if cur_limit == 0 {
-                return;
+                (None, Some(cur_epoch))
+            } else {
+                (s.put(v, cur_limit, &mut spill), Some(cur_epoch))
             }
-            s.put(v, cur_limit, &self.pool_bytes, &mut spill)
         } else {
-            Some(v)
+            (Some(v), None)
         };
+        drop(stale);
         if let Some(v) = leftover {
             spill.push(v);
         }
         if !spill.is_empty() {
-            self.put_global(spill);
+            self.put_global(spill, expected_epoch);
         }
     }
 }
@@ -714,7 +855,6 @@ mod tests {
         let ptr = v.as_ptr();
         TEST_CACHE.recycle_with_slot(Some(&slot), v);
         assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), N * 4);
-        assert_eq!(TEST_CACHE.pool_bytes.load(Ordering::Acquire), 0);
         assert_eq!(TEST_CACHE.bytes(), N * 4);
         v = TEST_CACHE.take_with_slot(Some(&slot), N).expect("TLS hit");
         assert_eq!(v.as_ptr(), ptr, "reused exact buffer from TLS magazine");
@@ -725,11 +865,10 @@ mod tests {
         for i in 0..TLS_MAX_BUFS + 3 {
             TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N + i]);
         }
-        assert_eq!(
-            TEST_CACHE.tls_bytes.load(Ordering::Acquire),
-            (3..TLS_MAX_BUFS + 3).map(|i| (N + i) * 4).sum::<usize>()
-        );
-        assert_eq!(TEST_CACHE.pool_bytes.load(Ordering::Acquire), (0..3).map(|i| (N + i) * 4).sum::<usize>());
+        let expected_tls: usize = (3..TLS_MAX_BUFS + 3).map(|i| (N + i) * 4).sum();
+        let expected_pool: usize = (0..3).map(|i| (N + i) * 4).sum();
+        assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), expected_tls);
+        assert_eq!(TEST_CACHE.bytes() - expected_tls, expected_pool);
         assert!(TEST_CACHE.take_with_slot(None, N).is_some(), "spilled oldest length found in shared pool");
         assert!(
             TEST_CACHE.take_with_slot(Some(&slot), N + TLS_MAX_BUFS + 2).is_some(),
@@ -783,5 +922,71 @@ mod tests {
         assert_eq!(TEST_CACHE.bytes(), 3 * N * 4);
         assert!(TEST_CACHE.take_with_slot(Some(&slot), 3 * N).is_some());
         TEST_CACHE.clear();
+    }
+
+    /// Concurrent TLS + pool returns never exceed `limit`, `set_limit` reductions drain in-flight admissions,
+    /// and `clear()`'s generation bump invalidates both levels atomically.
+    #[test]
+    fn cache_budget_limit_reduction_and_clear_are_atomic_across_levels() {
+        // 1. Atomic clear across levels: bumping `epoch` before draining must miss BOTH TLS and Pool lookups.
+        static CLEAR_CACHE: Cache = Cache::new(8 * N * 4);
+        let slot = CLEAR_CACHE.register_slot();
+        CLEAR_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N]);
+        CLEAR_CACHE.recycle_with_slot(Some(&slot), vec![0.0; 5 * N]);
+        assert_eq!((CLEAR_CACHE.tls_bytes.load(Ordering::Acquire), CLEAR_CACHE.bytes()), (N * 4, 6 * N * 4));
+        CLEAR_CACHE.epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(CLEAR_CACHE.take_with_slot(Some(&slot), N).is_none());
+        assert!(CLEAR_CACHE.take_with_slot(Some(&slot), 5 * N).is_none());
+        assert_eq!(CLEAR_CACHE.bytes(), 0);
+
+        // 2. Concurrent TLS (`4 * N`) + Pool (`6 * N`) returns never exceed `limit = 8 * N`.
+        const LIMIT: usize = 8 * N * 4;
+        static RACE_CACHE: Cache = Cache::new(LIMIT);
+        let threads: Vec<_> = (0..4)
+            .map(|tid| {
+                std::thread::spawn(move || {
+                    let s = RACE_CACHE.register_slot();
+                    for step in 0..200 {
+                        let len = if (tid + step) % 2 == 0 { 4 * N } else { 6 * N };
+                        RACE_CACHE.recycle_with_slot(Some(&s), vec![0.0; len]);
+                        assert!(RACE_CACHE.bytes() <= LIMIT, "{} > {LIMIT}", RACE_CACHE.bytes());
+                        let _ = RACE_CACHE.take_with_slot(Some(&s), len);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        RACE_CACHE.clear();
+        assert_eq!(RACE_CACHE.bytes(), 0);
+
+        // 3. `set_limit` reduction serializes on every slot lock and drains an in-flight old-limit admission.
+        static LIMIT_CACHE: Cache = Cache::new(8 * N * 4);
+        let wslot = LIMIT_CACHE.register_slot();
+        let wslot_bg = wslot.clone();
+        let (tx_locked, rx_locked) = std::sync::mpsc::channel();
+        let (tx_go, rx_go) = std::sync::mpsc::channel();
+        let t_in_flight = std::thread::spawn(move || {
+            let mut s = wslot_bg.lock().unwrap();
+            let (cur_epoch, old_limit) =
+                (LIMIT_CACHE.epoch.load(Ordering::Acquire), LIMIT_CACHE.limit.load(Ordering::Acquire));
+            tx_locked.send(()).unwrap();
+            rx_go.recv().unwrap();
+            let (mut spill, mut stale) = (Vec::new(), Vec::new());
+            s.sync_epoch(cur_epoch, &mut stale);
+            assert!(s.put(vec![0.0; 3 * N], old_limit, &mut spill).is_none());
+        });
+        rx_locked.recv().unwrap();
+        let t_shrink = std::thread::spawn(|| LIMIT_CACHE.set_limit(2 * N * 4));
+        while LIMIT_CACHE.limit.load(Ordering::Acquire) != 2 * N * 4 {
+            std::thread::yield_now();
+        }
+        tx_go.send(()).unwrap();
+        t_in_flight.join().unwrap();
+        t_shrink.join().unwrap();
+        assert!(LIMIT_CACHE.bytes() <= 2 * N * 4, "survived shrink: {}", LIMIT_CACHE.bytes());
+        LIMIT_CACHE.clear();
+        drop(wslot);
     }
 }
