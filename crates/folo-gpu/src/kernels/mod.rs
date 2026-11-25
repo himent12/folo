@@ -10,13 +10,13 @@
 //! and gets their WGSL one of two ways: `include_str!` of a file in `src/shaders/`, often prefixed by shared
 //! snippets (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, the `E` / `V4` / `OUT`
 //! aliases of `vec_prelude`), or a generator in Rust that writes the source from the spec with no `.wgsl` file
-//! (the GEMM and implicit-GEMM convs, tensor cores, `ew.rs`, `strided.rs`, `pool_grad.rs`, Muon, the
+//! (the GEMM and implicit-GEMM convs, tensor cores, `ew.rs`, `strided/`, `pool_grad.rs`, Muon, the
 //! multi-tensor optimizer kernels). At compile time `pipeline::render` puts the specialisation constants and the
 //! shared prelude in front of either.
 //!
 //! Modules used by the folo-core backend:
 //! - `ew.rs`: strided elementwise ops (unary and their gradients, binary, comparisons, `where`).
-//! - `strided.rs`: strided gathers and scatters, fills, casts and index ops for every dtype.
+//! - `strided/`: strided gathers and scatters, fills, casts, tiled transpose and index ops for every dtype.
 //! - `reduce.rs`: reductions, arg-reductions, softmax and top-k (also the tensor wrapper's reduce and softmax).
 //! - `gemm.rs`: the tiled GEMM generator; `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
 //! - `conv/`: conv2d forward, gradients, split-K, depthwise and per-site convs.

@@ -51,7 +51,13 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "binary" => rank && u("BCAST", 0) < 4,
         "permute" => rank,
         "move" => rank && eb_fits(spec) && u("MODE", 0) <= 2,
+        "move_vec4" => rank && u("MODE", 0) <= 1,
         "scatter" => rank && eb_fits(spec),
+        "scatter_vec4" => rank,
+        "strided_transpose" => {
+            let eb = spec.get_u32("EB", 4);
+            eb == 4 || eb == 8 || (eb == 2 && spec.is_f16())
+        }
         "tal_topk" => {
             (1..=MAX_TOPK).contains(&u("K", 0)) && [1, 2, 4, 8, 16, 32, 64, 128].contains(&u("WG", 0))
         }
@@ -100,6 +106,11 @@ mod tests {
             ("coop_gemm", Spec::new().u32("BM", 16).u32("BN", 256).u32("BK", 32).u32("WGM", 1).u32("WGN", 8)),
             ("ew2", Spec::new().u32("KIND", 3).u32("RANK", 8)),
             ("move", Spec::new().u32("EB", 2).u32("MODE", 1).u32("RANK", 0)),
+            ("move_vec4", Spec::new().u32("MODE", 1).u32("RANK", 0)),
+            ("scatter_vec4", Spec::new().u32("RANK", 8)),
+            ("strided_transpose", Spec::new().u32("EB", 4)),
+            ("strided_transpose", Spec::new().u32("EB", 2).f16(true)),
+            ("cast_f16_vec4", Spec::new().bool("TO_F16", true)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
             (
@@ -176,7 +187,12 @@ mod tests {
             ("coop_gemm", Spec::new().u32("BK", 65536)),
             ("ew1", Spec::new().u32("RANK", 9)),
             ("move", Spec::new().u32("EB", 0)),
+            ("move_vec4", Spec::new().u32("MODE", 2)),
+            ("move_vec4", Spec::new().u32("RANK", 9)),
             ("scatter", Spec::new().u32("RANK", 65536)),
+            ("scatter_vec4", Spec::new().u32("RANK", 9)),
+            ("strided_transpose", Spec::new().u32("EB", 1)),
+            ("strided_transpose", Spec::new().u32("EB", 2)),
             ("tal_topk", Spec::new().u32("K", 65)),
             ("tal_targets", Spec::new().u32("K", 10).u32("K2", 65536)),
             ("det_box", Spec::new().u32("R", 33)),

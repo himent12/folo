@@ -2,10 +2,14 @@
 //! strided scatters (`copy_into`), fills, casts between all element types, and atomic scatter-adds.
 //!
 //! Buffers are untyped here: elements are 1, 2, 4 or 8 bytes ([`Elem::bytes`]) packed little-endian into
-//! 32-bit words, so `u8` and `f16` elements share words and `i64` elements span two. Gathers compute one output
-//! word per thread (assembling sub-word elements), so they never race. Scatters of sub-word elements touch
-//! shared words and use `atomicAnd` / `atomicOr` on just their own bits. Strided views are `(offset, dims,
-//! strides)` in elements and may broadcast (stride 0); they are coalesced before dispatch.
+//! 32-bit words, so `u8` and `f16` elements share words and `i64` elements span two. Fast paths in
+//! [`fast`] accelerate 16-byte `vec4<u32>` gathers/scatters/fills, shared-memory padded 32×32 batched 2-D
+//! transposes, and branchless integer `vec4` `f16` <-> `f32` casts when alignment and capabilities allow. General gathers
+//! compute one output word per thread (assembling sub-word elements), so they never race. General scatters of
+//! sub-word elements touch shared words and use `atomicAnd` / `atomicOr` on just their own bits. Strided views
+//! are `(offset, dims, strides)` in elements and may broadcast (stride 0); they are coalesced before dispatch.
+
+mod fast;
 
 use std::fmt::Write as _;
 
@@ -180,7 +184,7 @@ fn rd_fn(eb: u32) -> &'static str {
 
 /// Code that adds `coord * stride` for each of the `rank` dims (params at `dims_at`, strides at each of
 /// `strides_at`) of element `e` to the variables `vars`.
-fn coords(rank: u32, dims_at: u32, strides_at: &[u32], vars: &[&str], e: &str) -> String {
+pub(super) fn coords(rank: u32, dims_at: u32, strides_at: &[u32], vars: &[&str], e: &str) -> String {
     let mut s = format!("    var rem = {e};\n");
     for d in 0..rank {
         let k = rank - 1 - d;
@@ -199,7 +203,7 @@ fn coords(rank: u32, dims_at: u32, strides_at: &[u32], vars: &[&str], e: &str) -
 
 const IDX_FNS: &str = "const BAD: u32 = 0xffffffffu;\n";
 
-fn index_at_fn(idx64: bool) -> &'static str {
+pub(super) fn index_at_fn(idx64: bool) -> &'static str {
     if idx64 {
         "fn index_at(e: u32, size: u32) -> u32 {\n\
          \x20 let lo = IDX[2u * e]; let hi = IDX[2u * e + 1u];\n\
@@ -367,13 +371,23 @@ fn f16bits(v: f32) -> u32 {
   if (rem > half || (rem == half && (out & 1u) == 1u)) { out += 1u; }
   return sgn | out;
 }
-// binary16 bits to f32; NaNs keep sign and payload with the quiet bit set (as the `half` crate does).
-fn f16tof32(h: u32) -> f32 {
-  if ((h & 0x7c00u) == 0x7c00u && (h & 0x3ffu) != 0u) {
-    return bitcast<f32>(((h & 0x8000u) << 16u) | 0x7fc00000u | ((h & 0x3ffu) << 13u));
+// binary16 bits to f32 bits in pure integer arithmetic (exact on all backends for subnormals, ±inf, and NaN
+// payloads with the quiet bit set, matching `half::f16::to_f32`).
+fn f16tof32_bits(h: u32) -> u32 {
+  let sgn = (h & 0x8000u) << 16u;
+  let a = h & 0x7fffu;
+  if (a == 0u) { return sgn; }
+  if (a >= 0x7c00u) {
+    if (a == 0x7c00u) { return sgn | 0x7f800000u; }
+    return sgn | 0x7fc00000u | ((a & 0x3ffu) << 13u);
   }
-  return unpack2x16float(h).x;
+  if (a < 0x0400u) {
+    let sh = countLeadingZeros(a) - 21u;
+    return sgn | ((113u - sh) << 23u) | (((a << sh) & 0x3ffu) << 13u);
+  }
+  return sgn | ((a << 13u) + 0x38000000u);
 }
+fn f16tof32(h: u32) -> f32 { return bitcast<f32>(f16tof32_bits(h)); }
 // 64-bit unsigned helpers on (lo, hi) pairs; shift amounts are 0..63.
 fn shl64(v: vec2<u32>, s: u32) -> vec2<u32> {
   if (s == 0u) { return v; }
@@ -467,17 +481,20 @@ fn gen_cast(spec: &Spec) -> String {
     let _ = writeln!(s, "fn load_f(e: u32) -> f32 {{ return {load_f}; }}");
     let _ = writeln!(s, "fn load_i(e: u32) -> vec2<u32> {{ return {load_i}; }}");
     // `conv(e)` returns the destination bits of source element `e` in the low bits (two words for i64).
-    let conv = match (dst, src.is_float()) {
-        (Elem::F32, true) => "vec2<u32>(bitcast<u32>(load_f(e)), 0u)",
-        (Elem::F32, false) => "vec2<u32>(bitcast<u32>(int2f(load_i(e), 24u)), 0u)",
-        (Elem::F16, true) => "vec2<u32>(f16bits(load_f(e)), 0u)",
-        (Elem::F16, false) => "vec2<u32>(f16bits(int2f(load_i(e), 11u)), 0u)",
-        (Elem::U8, true) => "vec2<u32>(f2u8(load_f(e)), 0u)",
-        (Elem::U8, false) => "vec2<u32>(i2u8(load_i(e)), 0u)",
-        (Elem::U32, true) => "vec2<u32>(f2u32(load_f(e)), 0u)",
-        (Elem::U32, false) => "vec2<u32>(i2u32(load_i(e)), 0u)",
-        (Elem::I64, true) => "f2i64(load_f(e))",
-        (Elem::I64, false) => "load_i(e)",
+    let conv = match (dst, src, src.is_float()) {
+        (Elem::F32, Elem::F16, _) => {
+            "vec2<u32>(f16tof32_bits((X[e >> 1u] >> ((e & 1u) * 16u)) & 0xffffu), 0u)"
+        }
+        (Elem::F32, _, true) => "vec2<u32>(bitcast<u32>(load_f(e)), 0u)",
+        (Elem::F32, _, false) => "vec2<u32>(bitcast<u32>(int2f(load_i(e), 24u)), 0u)",
+        (Elem::F16, _, true) => "vec2<u32>(f16bits(load_f(e)), 0u)",
+        (Elem::F16, _, false) => "vec2<u32>(f16bits(int2f(load_i(e), 11u)), 0u)",
+        (Elem::U8, _, true) => "vec2<u32>(f2u8(load_f(e)), 0u)",
+        (Elem::U8, _, false) => "vec2<u32>(i2u8(load_i(e)), 0u)",
+        (Elem::U32, _, true) => "vec2<u32>(f2u32(load_f(e)), 0u)",
+        (Elem::U32, _, false) => "vec2<u32>(i2u32(load_i(e)), 0u)",
+        (Elem::I64, _, true) => "f2i64(load_f(e))",
+        (Elem::I64, _, false) => "load_i(e)",
     };
     let _ = writeln!(s, "fn conv(e: u32) -> vec2<u32> {{ return {conv}; }}");
     s.push_str(
@@ -580,7 +597,7 @@ fn threads(e: Elem, n: usize) -> u64 {
     }
 }
 
-fn push_dims(mut p: Params, at: usize, v: &[usize], fill: usize) -> Result<Params> {
+pub(super) fn push_dims(mut p: Params, at: usize, v: &[usize], fill: usize) -> Result<Params> {
     p = p.at(at);
     for i in 0..MAX_RANK {
         p = p.uz(v.get(i).copied().unwrap_or(fill))?;
@@ -588,7 +605,7 @@ fn push_dims(mut p: Params, at: usize, v: &[usize], fill: usize) -> Result<Param
     Ok(p)
 }
 
-fn check_rank(op: &str, rank: usize) -> Result<()> {
+pub(super) fn check_rank(op: &str, rank: usize) -> Result<()> {
     if rank > MAX_RANK {
         return Err(shape_err(format!("{op}: rank {rank} after coalescing exceeds {MAX_RANK}")));
     }
@@ -618,6 +635,12 @@ pub fn gather_strided(
             ctx.copy(src, off as u64, dst, 0, (len as u64).next_multiple_of(4));
             return Ok(());
         }
+    }
+    if fast::try_gather_vec4(ctx, elem, src, &dims, st, view.offset, dst, n)? {
+        return Ok(());
+    }
+    if fast::try_tiled_transpose(ctx, elem, src, view, &dims, st, dst, n)? {
+        return Ok(());
     }
     if let Some(w) = as_words(elem, &dims, &[st.as_slice()], &[view.offset]) {
         return gather_strided(ctx, Elem::U32, src, &w[0], dst);
@@ -661,6 +684,9 @@ pub fn scatter_strided(
             return Ok(());
         }
     }
+    if fast::try_scatter_vec4(ctx, elem, src, &dims, ss, ds, src_view.offset, dst, dst_view.offset, n)? {
+        return Ok(());
+    }
     if let Some(w) =
         as_words(elem, &dims, &[ss.as_slice(), ds.as_slice()], &[src_view.offset, dst_view.offset])
     {
@@ -684,6 +710,9 @@ pub fn fill_words(ctx: &GpuContext, dst: &wgpu::Buffer, words: usize, p0: u32, p
     }
     if p0 == 0 && p1 == 0 {
         ctx.clear(dst, words as u64 * 4);
+        return Ok(());
+    }
+    if fast::try_fill_vec4(ctx, dst, words, p0, p1)? {
         return Ok(());
     }
     let k = ctx.kernel(&FILL, Spec::new())?;
@@ -711,6 +740,9 @@ pub fn cast(
     )?;
     check_buf_elems(dst, n, to, "cast output")?;
     if n == 0 {
+        return Ok(());
+    }
+    if fast::try_cast_f16_vec4(ctx, src, from, offset, dst, to, n)? {
         return Ok(());
     }
     let k = ctx.kernel(&CAST, Spec::new().u32("SRC", from.code()).u32("DST", to.code()))?;
@@ -749,6 +781,9 @@ pub fn index_select(
     check_buf_elems(out, n, elem, "index_select output")?;
     idx.check("index_select indices")?;
     if n == 0 {
+        return Ok(());
+    }
+    if fast::try_index_select_vec4(ctx, elem, x, (outer, d, inner), idx, out, n)? {
         return Ok(());
     }
     let spec = Spec::new().u32("EB", eb_of(elem)).u32("MODE", 1).u32("RANK", 0).bool("IDX64", idx.i64);
@@ -846,7 +881,18 @@ fn check_buf_elems(buf: &wgpu::Buffer, elems: usize, elem: Elem, what: &str) -> 
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&MOVE, &SCATTER, &FILL, &CAST, &SCATTER_ADD];
+pub(crate) static DEFS: &[&KernelDef] = &[
+    &MOVE,
+    &SCATTER,
+    &FILL,
+    &CAST,
+    &SCATTER_ADD,
+    fast::FAST_DEFS[0],
+    fast::FAST_DEFS[1],
+    fast::FAST_DEFS[2],
+    fast::FAST_DEFS[3],
+    fast::FAST_DEFS[4],
+];
 
 #[cfg(test)]
 mod tests {
