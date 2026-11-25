@@ -20,7 +20,7 @@
 //! `tests/coco_full.rs` checks all twelve numbers against pycocotools.
 
 use crate::boxes::Xyxy;
-use crate::metrics::{NUM_IOU_THRESHOLDS, NUM_RECALL_POINTS, iou_thresholds, recall_points};
+use crate::metrics::{NUM_IOU_THRESHOLDS, NUM_RECALL_POINTS, desc_f32_key, iou_thresholds, recall_points};
 use crate::nms::Detection;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -93,6 +93,13 @@ pub struct CocoEval {
     recs: Vec<Vec<Rec>>,
     /// Per class and area range: regular (not ignored) truths.
     npig: Vec<[u64; NA]>,
+    // Scratch buffers reused across images and classes.
+    d_order: Vec<(u64, u32)>,
+    g_order: Vec<(u32, u32)>,
+    ious: Vec<f64>,
+    gt_order: Vec<usize>,
+    gt_ignored: Vec<bool>,
+    gt_matched: Vec<bool>,
 }
 
 /// Per-class AP (area "all", `maxDets = 100`).
@@ -205,6 +212,12 @@ impl CocoEval {
             num_crowd: 0,
             recs: vec![Vec::new(); num_classes],
             npig: vec![[0; NA]; num_classes],
+            d_order: Vec::new(),
+            g_order: Vec::new(),
+            ious: Vec::new(),
+            gt_order: Vec::new(),
+            gt_ignored: Vec::new(),
+            gt_matched: Vec::new(),
         }
     }
 
@@ -228,105 +241,157 @@ impl CocoEval {
             assert!((t.class as usize) < nc, "CocoEval: truth class {} >= num_classes {nc}", t.class);
         }
         self.num_images += 1;
-        self.num_crowd += truths.iter().filter(|t| t.iscrowd).count() as u64;
-        for t in truths.iter().filter(|t| !t.iscrowd) {
-            for (a, n) in self.npig[t.class as usize].iter_mut().enumerate() {
-                if in_range(t.area, a) {
-                    *n += 1;
+        for t in truths {
+            if t.iscrowd {
+                self.num_crowd += 1;
+            } else {
+                for (a, n) in self.npig[t.class as usize].iter_mut().enumerate() {
+                    if in_range(t.area, a) {
+                        *n += 1;
+                    }
                 }
             }
         }
-        // Detections by (class, score desc), stable; truths by class, stable.
-        let mut d_order: Vec<u32> =
-            (0..dets.len() as u32).filter(|&i| !dets[i as usize].score.is_nan()).collect();
-        d_order.sort_by(|&a, &b| {
-            let (x, y) = (&dets[a as usize], &dets[b as usize]);
-            x.class.cmp(&y.class).then(y.score.total_cmp(&x.score))
-        });
-        let mut g_order: Vec<u32> = (0..truths.len() as u32).collect();
-        g_order.sort_by_key(|&i| truths[i as usize].class);
+        // Detections by (class, score desc, input order) and truths by (class, input order) over packed keys:
+        // zero indirection and zero allocation.
+        self.d_order.clear();
+        for (i, d) in dets.iter().enumerate() {
+            if !d.score.is_nan() {
+                let key = ((d.class as u64) << 32) | desc_f32_key(d.score) as u64;
+                self.d_order.push((key, i as u32));
+            }
+        }
+        self.d_order.sort_unstable();
+        self.g_order.clear();
+        for (i, t) in truths.iter().enumerate() {
+            self.g_order.push((t.class, i as u32));
+        }
+        self.g_order.sort_unstable();
 
         let (mut di, mut gi) = (0, 0);
-        let mut ious = Vec::new();
-        while di < d_order.len() {
-            let class = dets[d_order[di] as usize].class;
-            let d_end = di + d_order[di..].partition_point(|&i| dets[i as usize].class == class);
-            while gi < g_order.len() && truths[g_order[gi] as usize].class < class {
+        while di < self.d_order.len() {
+            let class = (self.d_order[di].0 >> 32) as u32;
+            let d_end = di + self.d_order[di..].partition_point(|&(k, _)| (k >> 32) as u32 == class);
+            while gi < self.g_order.len() && self.g_order[gi].0 < class {
                 gi += 1;
             }
-            let g_end = gi + g_order[gi..].partition_point(|&i| truths[i as usize].class == class);
+            let g_end = gi + self.g_order[gi..].partition_point(|&(c, _)| c == class);
             let n_d = (d_end - di).min(self.max_dets);
-            let ds: Vec<&Detection> = d_order[di..di + n_d].iter().map(|&i| &dets[i as usize]).collect();
-            let gs: Vec<&CocoTruth> = g_order[gi..g_end].iter().map(|&i| &truths[i as usize]).collect();
-            self.match_class(image, &ds, &gs, &mut ious);
+            self.match_class(image, dets, truths, di, di + n_d, gi, g_end, class as usize);
             self.num_dets += n_d as u64;
             di = d_end;
             gi = g_end;
         }
     }
 
-    /// `evaluateImg` for one (image, class) and every area range.
-    fn match_class(&mut self, image: u64, ds: &[&Detection], gs: &[&CocoTruth], ious: &mut Vec<f64>) {
-        let ng = gs.len();
-        ious.clear();
-        for d in ds {
-            for g in gs {
-                ious.push(iou_crowd(&d.bbox, &g.xywh, g.iscrowd));
+    /// `evaluateImg` for one (image, class) and every area range, writing directly into `self.recs[class]`.
+    #[allow(clippy::too_many_arguments)]
+    fn match_class(
+        &mut self,
+        image: u64,
+        dets: &[Detection],
+        truths: &[CocoTruth],
+        d0: usize,
+        d1: usize,
+        g0: usize,
+        g1: usize,
+        class: usize,
+    ) {
+        let nd = d1 - d0;
+        let ng = g1 - g0;
+        let d_idx = &self.d_order[d0..d1];
+        let g_idx = &self.g_order[g0..g1];
+        let base = self.recs[class].len();
+        self.recs[class].reserve(nd);
+        if ng == 0 {
+            for (k, &(_, di)) in d_idx.iter().enumerate() {
+                let d = &dets[di as usize];
+                let area = box_area(&d.bbox);
+                let ig = std::array::from_fn(|a| if in_range(area, a) { 0 } else { ALL_BITS });
+                self.recs[class].push(Rec { score: d.score, rank: k as u16, image, tp: [0; NA], ig });
+            }
+            return;
+        }
+        self.ious.clear();
+        let mut max_iou = 0.0f64;
+        let mut has_nan = false;
+        for &(_, di) in d_idx {
+            let db = &dets[di as usize].bbox;
+            for &(_, gi) in g_idx {
+                let g = &truths[gi as usize];
+                let v = iou_crowd(db, &g.xywh, g.iscrowd);
+                if v.is_nan() {
+                    has_nan = true;
+                } else if v > max_iou {
+                    max_iou = v;
+                }
+                self.ious.push(v);
             }
         }
-        let mut recs: Vec<Rec> = ds
-            .iter()
-            .enumerate()
-            .map(|(k, d)| Rec { score: d.score, rank: k as u16, image, tp: [0; NA], ig: [0; NA] })
-            .collect();
-        let mut order: Vec<usize> = Vec::with_capacity(ng);
-        let mut ignored = vec![false; ng];
-        let mut matched = vec![false; ng];
+        for (k, &(_, di)) in d_idx.iter().enumerate() {
+            self.recs[class].push(Rec {
+                score: dets[di as usize].score,
+                rank: k as u16,
+                image,
+                tp: [0; NA],
+                ig: [0; NA],
+            });
+        }
+        let recs = &mut self.recs[class][base..base + nd];
+        self.gt_ignored.resize(ng, false);
+        self.gt_matched.resize(ng, false);
+        let can_match_any = has_nan || max_iou >= self.thresholds[0].min(1.0 - 1e-10);
         for a in 0..NA {
-            for (g, t) in gs.iter().enumerate() {
-                ignored[g] = t.iscrowd || !in_range(t.area, a);
-            }
-            // Regular truths first, each group in input order (pycocotools' mergesort on `_ignore`).
-            order.clear();
-            order.extend((0..ng).filter(|&g| !ignored[g]));
-            order.extend((0..ng).filter(|&g| ignored[g]));
-            for (t, &thr) in self.thresholds.iter().enumerate() {
-                matched.iter_mut().for_each(|m| *m = false);
-                for (d, rec) in recs.iter_mut().enumerate() {
-                    let mut best = thr.min(1.0 - 1e-10);
-                    let mut m = usize::MAX;
-                    for &g in &order {
-                        if matched[g] && !gs[g].iscrowd {
-                            continue;
-                        }
-                        if m != usize::MAX && !ignored[m] && ignored[g] {
-                            break;
-                        }
-                        let v = ious[d * ng + g];
-                        if v < best {
-                            continue;
-                        }
-                        best = v;
-                        m = g;
+            if can_match_any {
+                for (g, &(_, gi)) in g_idx.iter().enumerate() {
+                    let t = &truths[gi as usize];
+                    self.gt_ignored[g] = t.iscrowd || !in_range(t.area, a);
+                }
+                // Regular truths first, each group in input order (pycocotools' mergesort on `_ignore`).
+                self.gt_order.clear();
+                self.gt_order.extend((0..ng).filter(|&g| !self.gt_ignored[g]));
+                self.gt_order.extend((0..ng).filter(|&g| self.gt_ignored[g]));
+                for (t, &thr) in self.thresholds.iter().enumerate() {
+                    let thr_cap = thr.min(1.0 - 1e-10);
+                    if !has_nan && max_iou < thr_cap {
+                        break;
                     }
-                    if m != usize::MAX {
-                        matched[m] = true;
-                        if ignored[m] {
-                            rec.ig[a] |= 1 << t;
-                        } else {
-                            rec.tp[a] |= 1 << t;
+                    self.gt_matched.fill(false);
+                    for (d, rec) in recs.iter_mut().enumerate() {
+                        let row = &self.ious[d * ng..(d + 1) * ng];
+                        let mut best = thr_cap;
+                        let mut m = usize::MAX;
+                        for &g in &self.gt_order {
+                            if self.gt_matched[g] && !truths[g_idx[g].1 as usize].iscrowd {
+                                continue;
+                            }
+                            if m != usize::MAX && !self.gt_ignored[m] && self.gt_ignored[g] {
+                                break;
+                            }
+                            let v = row[g];
+                            if v < best {
+                                continue;
+                            }
+                            best = v;
+                            m = g;
+                        }
+                        if m != usize::MAX {
+                            self.gt_matched[m] = true;
+                            if self.gt_ignored[m] {
+                                rec.ig[a] |= 1 << t;
+                            } else {
+                                rec.tp[a] |= 1 << t;
+                            }
                         }
                     }
                 }
             }
-            for (d, rec) in recs.iter_mut().enumerate() {
-                if !in_range(box_area(&ds[d].bbox), a) {
+            for (rec, &(_, di)) in recs.iter_mut().zip(d_idx) {
+                if !in_range(box_area(&dets[di as usize].bbox), a) {
                     rec.ig[a] |= !(rec.tp[a] | rec.ig[a]) & ALL_BITS;
                 }
             }
         }
-        let class = ds.first().map(|d| d.class as usize).expect("match_class needs a detection");
-        self.recs[class].extend(recs);
     }
 
     /// Fold another evaluator's images into this one.
@@ -352,6 +417,7 @@ impl CocoEval {
     pub fn compute(&self) -> CocoStats {
         let recall_pts = recall_points();
         // Per class: [area][maxDet] -> Some((mean precision per threshold, recall per threshold)) or None (-1).
+        // Only `(a = 0, m = 0..3)` and `(a = 1..4, m = 2)` are reported by `CocoStats`.
         type Cell = Option<([f64; NUM_IOU_THRESHOLDS], [f64; NUM_IOU_THRESHOLDS])>;
         let per: Vec<[[Cell; MAX_DETS.len()]; NA]> = (0..self.num_classes)
             .into_par_iter()
@@ -362,15 +428,16 @@ impl CocoEval {
                 });
                 std::array::from_fn(|a| {
                     std::array::from_fn(|m| {
+                        let used = a == 0 || m == MAX_DETS.len() - 1;
                         let npig = self.npig[c][a];
-                        (npig > 0).then(|| accumulate(&sorted, a, MAX_DETS[m], npig, &recall_pts))
+                        (used && npig > 0).then(|| accumulate(&sorted, a, MAX_DETS[m], npig, &recall_pts))
                     })
                 })
             })
             .collect();
         let mean = |f: &dyn Fn(&[[Cell; 3]; NA]) -> Option<f64>| -> f64 {
-            let v: Vec<f64> = per.iter().filter_map(f).collect();
-            if v.is_empty() { -1.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
+            let (sum, count) = per.iter().filter_map(f).fold((0.0f64, 0usize), |(s, n), v| (s + v, n + 1));
+            if count == 0 { -1.0 } else { sum / count as f64 }
         };
         let avg = |x: &[f64; NUM_IOU_THRESHOLDS]| x.iter().sum::<f64>() / NUM_IOU_THRESHOLDS as f64;
         let ap = |a: usize| mean(&|p| p[a][2].as_ref().map(|(pr, _)| avg(pr)));
@@ -412,6 +479,10 @@ impl CocoEval {
 
 /// AP per threshold (mean of the 101-point interpolated precision) and the final recall per threshold, for one
 /// class and area range, over the detections ranked below `max_det` in their image.
+///
+/// Single pass over `sorted` across all 10 IoU thresholds with zero heap allocations: precision can only peak on
+/// a TP, and `{ i : i >= j_m } == { i : bucket(i) >= m }`, so a 101-point suffix max over per-bucket maxima is
+/// bit-for-bit identical to pycocotools' envelope + left-sided recall search.
 fn accumulate(
     sorted: &[Rec],
     a: usize,
@@ -419,44 +490,57 @@ fn accumulate(
     npig: u64,
     recall_pts: &[f64; NUM_RECALL_POINTS],
 ) -> ([f64; NUM_IOU_THRESHOLDS], [f64; NUM_IOU_THRESHOLDS]) {
-    let recs: Vec<&Rec> = sorted.iter().filter(|r| (r.rank as usize) < max_det).collect();
-    let nd = recs.len();
     let n = npig as f64;
-    let mut ap = [0.0; NUM_IOU_THRESHOLDS];
-    let mut recall = [0.0; NUM_IOU_THRESHOLDS];
-    let mut rc = vec![0.0f64; nd];
-    let mut pr = vec![0.0f64; nd];
-    for t in 0..NUM_IOU_THRESHOLDS {
-        let (mut tp, mut fp) = (0u64, 0u64);
-        for (i, r) in recs.iter().enumerate() {
-            if r.ig[a] >> t & 1 == 0 {
-                if r.tp[a] >> t & 1 == 1 {
-                    tp += 1;
+    let mut tp = [0u64; NUM_IOU_THRESHOLDS];
+    let mut fp = [0u64; NUM_IOU_THRESHOLDS];
+    let mut cur_b = [0usize; NUM_IOU_THRESHOLDS];
+    let mut bucket_max = [[0.0f64; NUM_RECALL_POINTS]; NUM_IOU_THRESHOLDS];
+    for r in sorted {
+        if (r.rank as usize) >= max_det {
+            continue;
+        }
+        let (tp_bits, ig_bits) = (r.tp[a], r.ig[a]);
+        if tp_bits == 0 && ig_bits == 0 {
+            for f in &mut fp {
+                *f += 1;
+            }
+            continue;
+        }
+        for t in 0..NUM_IOU_THRESHOLDS {
+            if (ig_bits >> t) & 1 == 0 {
+                if (tp_bits >> t) & 1 == 1 {
+                    tp[t] += 1;
+                    let tp_f = tp[t] as f64;
+                    let rc = tp_f / n;
+                    let mut b = cur_b[t];
+                    while b + 1 < NUM_RECALL_POINTS && rc >= recall_pts[b + 1] {
+                        b += 1;
+                    }
+                    cur_b[t] = b;
+                    let p = tp_f / (fp[t] as f64 + tp_f + f64::EPSILON);
+                    if p > bucket_max[t][b] {
+                        bucket_max[t][b] = p;
+                    }
                 } else {
-                    fp += 1;
+                    fp[t] += 1;
                 }
             }
-            rc[i] = tp as f64 / n;
-            pr[i] = tp as f64 / (fp as f64 + tp as f64 + f64::EPSILON);
         }
-        recall[t] = if nd > 0 { rc[nd - 1] } else { 0.0 };
-        for i in (1..nd).rev() {
-            if pr[i] > pr[i - 1] {
-                pr[i - 1] = pr[i];
+    }
+    let mut ap = [0.0; NUM_IOU_THRESHOLDS];
+    let mut recall = [0.0; NUM_IOU_THRESHOLDS];
+    for t in 0..NUM_IOU_THRESHOLDS {
+        recall[t] = tp[t] as f64 / n;
+        let bm = &mut bucket_max[t];
+        let mut running = 0.0f64;
+        for v in bm.iter_mut().rev() {
+            if *v > running {
+                running = *v;
+            } else {
+                *v = running;
             }
         }
-        let mut q = 0.0;
-        let mut j = 0;
-        for &r in recall_pts {
-            while j < nd && rc[j] < r {
-                j += 1;
-            }
-            if j == nd {
-                break;
-            }
-            q += pr[j];
-        }
-        ap[t] = q / NUM_RECALL_POINTS as f64;
+        ap[t] = bm.iter().sum::<f64>() / NUM_RECALL_POINTS as f64;
     }
     (ap, recall)
 }

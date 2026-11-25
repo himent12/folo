@@ -11,6 +11,7 @@ mod common;
 
 use common::Rng;
 use folo_vision::assign::{TalConfig, assign};
+use folo_vision::cocoeval::{CocoEval, CocoTruth};
 use folo_vision::decode::{decode_head, make_anchors};
 use folo_vision::nms::{batched_nms, non_max_suppression, topk_detections};
 use folo_vision::{Detection, EvalConfig, Evaluator, NmsConfig, Truth, Xyxy};
@@ -163,4 +164,23 @@ fn main() {
     bench("evaluator compute (5000 images)", 10, || ev.compute());
     let r = ev.compute();
     println!("  map50 {:.4}  map50_95 {:.4}  P {:.4}  R {:.4}", r.map50, r.map50_95, r.precision, r.recall);
+
+    let coco_truths: Vec<Vec<CocoTruth>> = images
+        .iter()
+        .map(|(_, ts)| ts.iter().map(|t| CocoTruth::from_box(t.bbox, t.class)).collect())
+        .collect();
+    bench("cocoeval add_image x 5000", 10, || {
+        let mut cev = CocoEval::new(nc);
+        for (i, ((p, _), t)) in images.iter().zip(&coco_truths).enumerate() {
+            cev.add_image(i as u64 + 1, p, t);
+        }
+        cev
+    });
+    let mut cev = CocoEval::new(nc);
+    for (i, ((p, _), t)) in images.iter().zip(&coco_truths).enumerate() {
+        cev.add_image(i as u64 + 1, p, t);
+    }
+    bench("cocoeval compute (5000 images)", 10, || cev.compute());
+    let cs = cev.compute();
+    println!("  coco ap {:.4}  ap50 {:.4}  ar100 {:.4}", cs.ap, cs.ap50, cs.ar100);
 }
