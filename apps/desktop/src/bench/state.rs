@@ -180,4 +180,12 @@ pub struct BenchState {
     pub busy: HashSet<String>,
     /// The list is shown again: refresh it in place.
     pub list_stale: bool,
+    /// Active leaderboard sort `(column_key, descending)`; `None` keeps server rank order.
+    pub leaderboard_sort: Option<(&'static str, bool)>,
+    /// The benchmark whose `leaderboard_sort` is active (reset when switching benchmarks).
+    pub sort_bench: Option<String>,
+    /// Baseline entry pinned for `+/-` delta comparison: `(benchmark_id, entry_id)`.
+    pub pinned_entry: Option<(String, String)>,
+    /// Failed entries whose full error details are expanded: `(benchmark_id, entry_id)`.
+    pub expanded_errors: HashSet<(String, String)>,
 }

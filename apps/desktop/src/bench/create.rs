@@ -206,8 +206,10 @@ impl FoloApp {
         let src = match choice {
             SourceChoice::At(i) => &sources[i],
             SourceChoice::Missing => {
-                f.error =
-                    Some(ApiError::new("invalid_body", "Add a dataset first: a benchmark copies its images"));
+                f.error = Some(ApiError::new(
+                    "invalid_body",
+                    "Add a dataset or labeling job first: a benchmark copies its images",
+                ));
                 cx.notify();
                 return;
             }

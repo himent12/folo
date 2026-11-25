@@ -25,7 +25,7 @@ impl FoloApp {
     ) -> AnyElement {
         let label: SharedString = match choice {
             SourceChoice::At(i) => sources[i].name().to_string().into(),
-            SourceChoice::Missing => "No datasets".into(),
+            SourceChoice::Missing => "No datasets or labeling jobs".into(),
             SourceChoice::Deleted => "Pick a source".into(),
         };
         let ids: Vec<SourceId> = sources.iter().map(SourcePick::id).collect();
@@ -138,7 +138,8 @@ impl FoloApp {
             Some((_, 0)) => "This split has no images: pick another.".to_string(),
             Some((_, n)) => format!("{}, copied and frozen with their boxes.", counted(n, "image", "images")),
             None if deleted => "That source was deleted. Pick another.".to_string(),
-            None => "Add a dataset first: a benchmark copies its images.".to_string(),
+            None => "Add a dataset or label images in a labeling job first: a benchmark copies its images."
+                .to_string(),
         };
         let create = if submitting {
             self.button_disabled(
@@ -159,7 +160,7 @@ impl FoloApp {
                 if deleted {
                     "Pick another source"
                 } else if picked.is_none() {
-                    "Add a dataset first"
+                    "Add a dataset or labeling job first"
                 } else {
                     "This split has no images: pick another"
                 },

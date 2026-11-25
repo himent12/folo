@@ -193,4 +193,185 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn leaderboard_draws_sort_headers_pin_and_expandable_failed_error() {
+        use crate::api::mock::MockBackend;
+        use crate::api::{BenchEntry, BenchEntryStatus};
+        use crate::app::FoloApp;
+        use crate::app::tests::drive;
+        use folo_ui::{
+            AppContext, Bounds, HeadlessApp, HeadlessOptions, Modifiers, MouseButton, MouseDownEvent,
+            MouseUpEvent, PlatformInput, Primitive, SpriteKind, WindowBounds, WindowOptions, point, px, size,
+        };
+        let click_at = |app: &mut HeadlessApp, window: folo_ui::WindowHandle<FoloApp>, x: f32, y: f32| {
+            let pos = point(px(x), px(y));
+            app.simulate_input(
+                window.into(),
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: pos,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+            );
+            app.simulate_input(
+                window.into(),
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: pos,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                }),
+            );
+            app.run_until_idle();
+        };
+        use std::sync::Arc;
+
+        let mut app = HeadlessApp::new(HeadlessOptions::default()).with_assets(crate::Assets);
+        let api = Arc::new(MockBackend::new(4200, true));
+        let window = app.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(800.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+                .expect("open window")
+        });
+        drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+        let bid = "bn_3c90";
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Bench(bid.into()), w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+
+        // Inject a failed entry with a detailed error alongside the done entries.
+        let (done_id, failed_id) = drive(&mut app, window, |this, _, cx| {
+            let list = this.bench.entries.get_mut(bid).and_then(|l| l.ready_mut()).expect("entries loaded");
+            let done_id = list.iter().find(|e| e.status == BenchEntryStatus::Done).unwrap().id.clone();
+            let mut fail: BenchEntry = list[0].clone();
+            fail.id = "be_fail_1".into();
+            fail.name = "broken-model".into();
+            fail.status = BenchEntryStatus::Failed;
+            fail.score = None;
+            fail.error = Some("CUDA out of memory while evaluating severity 3".into());
+            list.push(fail);
+            this.focus.borrow_mut().clear();
+            cx.notify();
+            (done_id, "be_fail_1".to_string())
+        });
+        app.frame(window.into());
+
+        // Collect action icon pairs `[left_action, delete]` in the right-hand actions column:
+        // each finished/failed row paints two 15–16 px icons inside 28 px buttons 4 px apart (dx ≈ 32 px),
+        // independent of titlebar height or header wrapping across platforms.
+        let sp = |v: folo_ui::ScaledPixels| f64::from(v) as f32;
+        let row_left_actions = |app: &mut folo_ui::HeadlessApp| -> Vec<(f32, f32)> {
+            let mut pts: Vec<(f32, f32)> = app
+                .scene(window.into())
+                .primitives
+                .iter()
+                .filter_map(|p| match p {
+                    Primitive::MonoSprite(s)
+                        if s.kind == SpriteKind::Svg
+                            && sp(s.bounds.origin.x) >= 1100.
+                            && sp(s.bounds.size.width) >= 14. =>
+                    {
+                        Some((
+                            sp(s.bounds.origin.x) + sp(s.bounds.size.width) / 2.,
+                            sp(s.bounds.origin.y) + sp(s.bounds.size.height) / 2.,
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect();
+            pts.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.total_cmp(&b.0)));
+            let mut rows: Vec<(f32, f32)> = Vec::new();
+            let mut i = 0;
+            while i < pts.len() {
+                let mut band = vec![pts[i]];
+                let y0 = pts[i].1;
+                i += 1;
+                while i < pts.len() && (pts[i].1 - y0).abs() < 8. {
+                    band.push(pts[i]);
+                    i += 1;
+                }
+                band.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some(pair) = band.windows(2).find(|w| (24.0..=40.0).contains(&(w[1].0 - w[0].0))) {
+                    rows.push(pair[0]);
+                }
+            }
+            rows
+        };
+        let row_actions = row_left_actions(&mut app);
+        assert!(row_actions.len() >= 2, "expected done + failed action pairs: {row_actions:?}");
+        // First row is the first Done entry (Pin); last row is the injected Failed entry (Chevron).
+        let pin_pt = *row_actions.first().expect("pin icon painted");
+        let chevron_pt = *row_actions.last().expect("chevron icon painted");
+
+        drive(&mut app, window, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            for k in [
+                "bench-sort-score",
+                "bench-sort-accuracy",
+                "bench-sort-robustness",
+                "bench-sort-self_labeling",
+                "bench-sort-calibration",
+                "bench-sort-localization",
+            ] {
+                assert!(keys.iter().any(|x| x == k), "missing sort header {k}: {keys:?}");
+            }
+            assert!(keys.iter().any(|x| x == &format!("bench-entry-{done_id}-pin")), "pin button rendered");
+            assert!(
+                keys.iter().any(|x| x == &format!("bench-entry-{failed_id}-err-toggle")),
+                "failed entry has error expand toggle"
+            );
+            assert!(
+                !keys.iter().any(|x| x == &format!("bench-entry-{failed_id}-err-copy")),
+                "error panel collapsed by default"
+            );
+        });
+
+        // Pointer click on Pin must pin the entry AND stay on the leaderboard (no row navigation!).
+        click_at(&mut app, window, pin_pt.0, pin_pt.1);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.route, Route::Bench(bid.into()), "clicking Pin must not open the entry");
+            assert_eq!(this.bench.pinned_entry, Some((bid.into(), done_id.clone())));
+        });
+
+        // Pointer click on failed-entry chevron expands once (no double-toggle); second click collapses.
+        click_at(&mut app, window, chevron_pt.0, chevron_pt.1);
+        drive(&mut app, window, |this, _, _| {
+            assert!(
+                this.bench.expanded_errors.contains(&(bid.into(), failed_id.clone())),
+                "one chevron click expands error details"
+            );
+            this.bench.leaderboard_sort = Some(("accuracy", true));
+            this.focus.borrow_mut().clear();
+        });
+        app.frame(window.into());
+
+        drive(&mut app, window, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(keys.iter().any(|x| x == "bench-pin-clear"), "Clear baseline button shown");
+            assert!(keys.iter().any(|x| x == "bench-sort-reset"), "Reset order button shown");
+            assert!(
+                keys.iter().any(|x| x == &format!("bench-entry-{failed_id}-err-copy")),
+                "expanded error panel shows Copy error button"
+            );
+        });
+
+        // Second chevron click collapses the error panel again.
+        click_at(&mut app, window, chevron_pt.0, chevron_pt.1);
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                !this.bench.expanded_errors.contains(&(bid.into(), failed_id.clone())),
+                "second chevron click collapses error details"
+            );
+            // Navigating back to the Benchmarks list resets leaderboard_sort.
+            this.navigate(Route::Benches, w, cx);
+            assert_eq!(this.bench.leaderboard_sort, None);
+        });
+    }
 }
