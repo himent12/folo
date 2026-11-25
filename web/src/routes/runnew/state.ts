@@ -23,7 +23,7 @@ import { CloudPick } from './cloudPick';
 import { trainConfig } from './config';
 import { canonicalDevice, deviceLabelOf, deviceMessage, missingDevice } from './device';
 import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './estimate';
-import { copiedSeed, firstError, formErrors, isInt, landOn, type Jump } from './jump';
+import { copiedSeed, errorCount, firstError, formErrors, isInt, landOn, type Jump } from './jump';
 import { clipName, MAX_RUN_NAME, runName, uniqueName } from './name';
 import { initialDraftState, useDraftPersistence } from './newDraft';
 import { DEFAULT_AUGMENT, parseInitialQuery, useRunPrefill } from './newPrefill';
@@ -372,7 +372,7 @@ export function runNewState() {
       ),
     ),
   );
-  const valid = computed(() => prefilled.get() && !pendingWeights.get() && Object.values(errors.get()).every((e) => e === null));
+  const valid = computed(() => prefilled.get() && !pendingWeights.get() && errorCount(errors.get()) === 0);
   /**
    * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
    * out of range. The Summary shows dashes (never "0 optimizer steps", "under 1 min" or "24–55 h" for 99,999 epochs),

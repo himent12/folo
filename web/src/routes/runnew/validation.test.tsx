@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 // Validation helpers, multi-error WhyLine indicator, and Summary reviewRows warning flags for New run.
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import type { CloudPick } from './cloudPick';
-import { errorCount, firstError, type FormErrors } from './jump';
+import { errorCount, firstError, jumpTarget, type FormErrors, type Jump } from './jump';
 import { reviewRows } from './summary';
 import WhyLine from './WhyLine';
 
@@ -41,24 +41,28 @@ describe('New run validation summary & WhyLine', () => {
     expect(firstError(three)).toEqual({ text: 'Run name: Give the run a name.', key: 'name', more: 2 });
   });
 
-  it('renders (+N more) in WhyLine only when multiple fields are invalid and jumps to the first error', () => {
+  it('reactively updates (+N more) in WhyLine and jumps to the first error', () => {
     const host = document.body.appendChild(document.createElement('div'));
     const jump = vi.fn();
-    const view1 = render(() => <WhyLine id="start-why" why={{ text: 'Epochs: bad', key: 'epochs', more: 0 }} jump={jump} />, host);
-    flushSync();
-    expect(host.querySelector('#start-why')?.textContent).toBe('Epochs: bad');
-    view1.unmount();
-
-    const view2 = render(() => <WhyLine id="start-why" why={{ text: 'Run name: empty', key: 'name', more: 2 }} jump={jump} />, host);
+    const why = signal<{ text: string; key: Jump; more?: number } | null>({ text: 'Run name: empty', key: 'name', more: 2 });
+    const view = render(() => <WhyLine id="start-why" why={why.get()} jump={jump} />, host);
     flushSync();
     expect(host.querySelector('#start-why')?.textContent).toBe('Run name: empty (+2 more)');
     host.querySelector<HTMLButtonElement>('#start-why button')!.click();
     expect(jump).toHaveBeenCalledWith('name');
-    view2.unmount();
+
+    why.set({ text: 'Epochs: bad', key: 'epochs', more: 0 });
+    flushSync();
+    expect(host.querySelector('#start-why')?.textContent).toBe('Epochs: bad');
+
+    why.set(null);
+    flushSync();
+    expect(host.querySelector('#start-why')).toBeNull();
+    view.unmount();
     host.remove();
   });
 
-  it('flags amp, cloud hours, lr0, seed, and close_mosaic errors in reviewRows so every invalid field is jumpable', () => {
+  it('flags amp, cloud hours (as its own Stop after row), lr0, seed, and close_mosaic errors in reviewRows', () => {
     const errs: FormErrors = {
       ...cleanErrors(),
       amp: 'Not available on this server now.',
@@ -70,10 +74,21 @@ describe('New run validation summary & WhyLine', () => {
     const fakeCloud = { provider: 'RunPod', offer: { gpu: 'RTX 4090' } } as unknown as CloudPick;
     const rows = reviewRows(undefined, errs, 'folo-s', 50, 16, 640, true, fakeCloud, 'Auto', null, undefined, true, 'none', undefined, 'auto', false);
     const byKey = new Map(rows.map((r) => [r.key, r]));
-    expect(byKey.get('runon')?.warn).toBe(true);
+    expect(byKey.get('runon')?.warn).toBe(false);
+    expect(byKey.get('hours')).toEqual({ key: 'hours', label: 'Stop after', value: 'Invalid', warn: true });
     expect(byKey.get('amp')?.warn).toBe(true);
     expect(byKey.get('lr0')).toEqual({ key: 'lr0', label: 'Learning rate', value: 'Invalid', warn: true });
     expect(byKey.get('seed')).toEqual({ key: 'seed', label: 'Seed', value: 'Invalid', warn: true });
     expect(byKey.get('close')).toEqual({ key: 'close', label: 'Close mosaic', value: 'Invalid', warn: true });
+  });
+
+  it('jumpTarget("data") falls back to the first enabled dataset radio when none is checked', () => {
+    const host = document.body.appendChild(document.createElement('div'));
+    host.innerHTML = '<input type="radio" name="dataset" disabled /><input type="radio" name="dataset" id="ds-first" />';
+    try {
+      expect(jumpTarget('data')?.id).toBe('ds-first');
+    } finally {
+      host.remove();
+    }
   });
 });

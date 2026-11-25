@@ -30,7 +30,7 @@ export default function WhyLine(p: WhyLineProps) {
             }}
           >
             {p.why?.text}
-            {p.why && p.why.more ? <span class="why-more"> (+{p.why.more} more)</span> : null}
+            {(p.why?.more ?? 0) > 0 ? <span class="why-more"> (+{p.why?.more} more)</span> : null}
             <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
           </button>
         </p>

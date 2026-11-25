@@ -48,7 +48,11 @@ export function jumpTarget(key: Jump): HTMLElement | null {
   const visible = (el: HTMLElement | null) => (el && el.getClientRects().length ? el : null);
   switch (key) {
     case 'data':
-      return visible(document.getElementById('dataset-pick')) ?? document.querySelector<HTMLElement>('input[name="dataset"]:checked');
+      return (
+        visible(document.getElementById('dataset-pick')) ??
+        document.querySelector<HTMLElement>('input[name="dataset"]:checked') ??
+        document.querySelector<HTMLElement>('input[name="dataset"]:not(:disabled)')
+      );
     case 'model':
       return visible(document.querySelector<HTMLElement>('#arch-pick [aria-checked="true"]')) ?? document.querySelector<HTMLElement>('input[name="arch"]:checked');
     case 'batch':
