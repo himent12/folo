@@ -187,3 +187,125 @@ fn detection_serialises_flat() {
     );
     assert_eq!(serde_json::from_value::<Detection>(v).unwrap(), d);
 }
+
+#[test]
+fn diou_nms_preserves_distinct_centers_and_suppresses_coincident() {
+    // Two heavily overlapping boxes (IoU = 6/10 = 0.6 > 0.55) with shifted centres:
+    // a = [0, 0, 8, 10], b = [2, 0, 10, 10] -> inter = 60, union = 100, IoU = 0.6.
+    // Enclosing [0, 0, 10, 10]: c² = 200; centres (4,5) and (6,5) -> rho² = 4; DIoU = 0.6 - 4/200 = 0.58.
+    // With thr = 0.59: standard NMS suppresses b (0.6 > 0.59), DIoU-NMS keeps BOTH (0.58 <= 0.59)!
+    let boxes = [b(0., 0., 8., 10.), b(2., 0., 10., 10.), b(0., 0., 8., 10.)];
+    assert_eq!(nms_sorted(&boxes, 0.59, 10), vec![0]);
+    assert_eq!(diou_nms_sorted(&boxes, 0.59, 10), vec![0, 1]);
+    // Coincident box 2 (DIoU = 1.0 > 0.59) is still suppressed by box 0.
+    let (kept, own) = diou_nms_sorted_with_owner(&boxes, 0.59, 10);
+    assert_eq!(kept, vec![0, 1]);
+    assert_eq!(own, vec![0, 1, 0]);
+    // Through NmsConfig::nms_kind = NmsKind::Diou.
+    let dets = [
+        Detection { bbox: boxes[0], score: 0.9, class: 0 },
+        Detection { bbox: boxes[1], score: 0.8, class: 0 },
+        Detection { bbox: boxes[2], score: 0.7, class: 0 },
+    ];
+    let cfg = NmsConfig { conf: 0.25, iou: 0.59, nms_kind: NmsKind::Diou, ..NmsConfig::default() };
+    let out = nms_detections(&dets, &cfg);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].score, 0.9);
+    assert_eq!(out[1].score, 0.8);
+}
+
+#[test]
+fn soft_nms_linear_and_gaussian_decay_and_reorder() {
+    // Box 0 and box 1 overlap with IoU = 0.5 (a=[0,0,10,10], b=[0,0,10,5] -> inter=50, union=100).
+    // Box 2 is disjoint with score 0.6.
+    let boxes = [b(0., 0., 10., 10.), b(0., 0., 10., 5.), b(50., 50., 60., 60.)];
+    let scores = [0.9, 0.8, 0.6];
+
+    // Linear Soft-NMS with iou_thr = 0.4: box 1 decays to 0.8 * (1 - 0.5) = 0.4, so box 2 (0.6) moves ahead!
+    let lin = soft_nms_sorted(&boxes, &scores, 0.4, 0.25, None, 10);
+    assert_eq!(lin.len(), 3);
+    assert_eq!(lin[0], (0, 0.9));
+    assert_eq!(lin[1], (2, 0.6));
+    assert_eq!(lin[2].0, 1);
+    assert!((lin[2].1 - 0.4).abs() < 1e-6);
+
+    // Higher score_thr = 0.45 drops decayed box 1.
+    let lin_pruned = soft_nms_sorted(&boxes, &scores, 0.4, 0.45, None, 10);
+    assert_eq!(lin_pruned, vec![(0, 0.9), (2, 0.6)]);
+
+    // Gaussian Soft-NMS with sigma = 0.5: box 1 decays by exp(-0.25 / 0.5) = exp(-0.5) ≈ 0.6065307 -> ~0.4852245.
+    let gauss = soft_nms_sorted(&boxes, &scores, 0.7, 0.25, Some(0.5), 10);
+    assert_eq!(gauss.len(), 3);
+    assert_eq!(gauss[0], (0, 0.9));
+    assert_eq!(gauss[1], (2, 0.6));
+    assert_eq!(gauss[2].0, 1);
+    let want = 0.8 * (-0.5f32).exp();
+    assert!((gauss[2].1 - want).abs() < 1e-6);
+
+    // Through NmsConfig pipeline and JSON round-trip.
+    let dets = [
+        Detection { bbox: boxes[0], score: 0.9, class: 0 },
+        Detection { bbox: boxes[1], score: 0.8, class: 0 },
+        Detection { bbox: boxes[2], score: 0.6, class: 0 },
+    ];
+    let cfg = NmsConfig {
+        conf: 0.25,
+        iou: 0.4,
+        nms_kind: NmsKind::SoftGaussian { sigma: 0.5 },
+        ..NmsConfig::default()
+    };
+    let out = nms_detections(&dets, &cfg);
+    assert_eq!(out.len(), 3);
+    assert!((out[2].score - want).abs() < 1e-6);
+
+    // Default NmsConfig omits nms_kind from JSON; non-default kinds round-trip cleanly.
+    let def_json = serde_json::to_string(&NmsConfig::default()).unwrap();
+    assert!(!def_json.contains("nms_kind"));
+    let cfg_json = serde_json::to_string(&cfg).unwrap();
+    assert!(cfg_json.contains("soft_gaussian"));
+    assert_eq!(serde_json::from_str::<NmsConfig>(&cfg_json).unwrap(), cfg);
+}
+
+#[test]
+fn nms_sorted_avx2_matches_naive_across_vector_lengths() {
+    // Exercise non-multiple-of-8 and multi-vector lengths, both with and without owner tracking.
+    for n in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 65] {
+        let mut s = 0x1234_5678u64 ^ n as u64;
+        let mut next = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 33) as f32) / (u32::MAX as f32 * 0.5)
+        };
+        let boxes: Vec<Xyxy> = (0..n)
+            .map(|_| {
+                let x = next() * 40.0;
+                let y = next() * 40.0;
+                let w = 2.0 + next() * 20.0;
+                let h = 2.0 + next() * 20.0;
+                Xyxy::new(x, y, x + w, y + h)
+            })
+            .collect();
+        let thr = 0.45f32;
+        let (kept, own) = nms_sorted_with_owner(&boxes, thr, n);
+        // Naive scalar reference.
+        let mut ref_sup = vec![false; n];
+        let mut ref_kept = Vec::new();
+        let mut ref_own = vec![u32::MAX; n];
+        for i in 0..n {
+            if ref_sup[i] {
+                continue;
+            }
+            let kp = ref_kept.len() as u32;
+            ref_kept.push(i);
+            ref_own[i] = kp;
+            for j in i + 1..n {
+                if !ref_sup[j] && crate::boxes::box_iou(&boxes[i], &boxes[j]) > thr {
+                    ref_sup[j] = true;
+                    ref_own[j] = kp;
+                }
+            }
+        }
+        assert_eq!(kept, ref_kept, "n={n} kept mismatch");
+        assert_eq!(own, ref_own, "n={n} owner mismatch");
+        assert_eq!(nms_sorted(&boxes, thr, n), ref_kept, "n={n} nms_sorted mismatch");
+    }
+}

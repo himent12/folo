@@ -30,8 +30,48 @@ use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+mod kernel;
 mod topk;
+pub use kernel::{
+    batched_nms, batched_nms_with_kind, diou_nms_sorted, diou_nms_sorted_with_owner, nms_sorted,
+    nms_sorted_with_owner, soft_nms_sorted,
+};
 pub use topk::{topk_candidates, topk_detections};
+
+/// Default Gaussian bandwidth `sigma` for [`NmsKind::SoftGaussian`] (Bodla et al. 2017).
+pub const DEFAULT_SOFT_NMS_SIGMA: f32 = 0.5;
+
+fn default_soft_nms_sigma() -> f32 {
+    DEFAULT_SOFT_NMS_SIGMA
+}
+
+/// Suppression rule used by NMS (default: [`NmsKind::Standard`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NmsKind {
+    /// Standard greedy IoU NMS: suppress when `IoU > iou`.
+    #[default]
+    Standard,
+    /// DIoU-NMS (Zheng et al. 2020): suppress when `IoU − rho² / c² > iou`, keeping overlapping boxes whose
+    /// centres are distinct.
+    Diou,
+    /// Linear Soft-NMS (Bodla et al. 2017): when `IoU > iou`, decay `score *= (1 − IoU)` instead of
+    /// hard-dropping; drop once `score <= conf`.
+    SoftLinear,
+    /// Gaussian Soft-NMS (Bodla et al. 2017): when `IoU > 0`, decay `score *= exp(−IoU² / sigma)`; drop once
+    /// `score <= conf`.
+    SoftGaussian {
+        /// Gaussian decay bandwidth `sigma > 0` (default [`DEFAULT_SOFT_NMS_SIGMA`]).
+        #[serde(default = "default_soft_nms_sigma")]
+        sigma: f32,
+    },
+}
+
+impl NmsKind {
+    fn is_standard(&self) -> bool {
+        matches!(self, NmsKind::Standard)
+    }
+}
 
 /// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse` /
 /// `DflCgr`) when `conf > 0.10`: nearby supporting anchors down to `0.10` join the cluster before final scores are
@@ -39,10 +79,6 @@ pub use topk::{topk_candidates, topk_detections};
 /// calibrated scores below `conf` are kept without post-filtering.
 pub const CALIBRATED_PRE_CONF: f32 = 0.10;
 
-/// Remaining-box count above which one suppression pass is split across threads.
-const PAR_SUPPRESS: usize = 1 << 14;
-/// Total candidate count above which class buckets are processed in parallel.
-const PAR_BUCKETS: usize = 2048;
 /// Anchor-row count above which candidate extraction runs in parallel.
 const PAR_ROWS: usize = 4096;
 
@@ -89,6 +125,9 @@ pub struct NmsConfig {
     /// How the kept boxes are scored ([`ScoreRule`], docs/MODEL.md §9.4). Off by default: the consensus score
     /// changes the score scale. Not used by the NMS-free `o2o` selection, which has no clusters.
     pub score: ScoreRule,
+    /// Suppression rule ([`NmsKind::Standard`] by default; opt-in DIoU-NMS or Soft-NMS).
+    #[serde(default, skip_serializing_if = "NmsKind::is_standard")]
+    pub nms_kind: NmsKind,
 }
 
 impl Default for NmsConfig {
@@ -104,6 +143,7 @@ impl Default for NmsConfig {
             fusion: BoxFusion::None,
             fusion_iou: FUSION_IOU,
             score: ScoreRule::None,
+            nms_kind: NmsKind::Standard,
         }
     }
 }
@@ -136,244 +176,6 @@ impl NmsConfig {
     pub(crate) fn post_filter_calibrated(&self) -> bool {
         !self.multi_label && self.score.is_calibrated() && self.conf > CALIBRATED_PRE_CONF
     }
-}
-
-/// Greedy NMS over `boxes` sorted by descending score. Returns the kept positions in order, stopping after `limit`
-/// survivors. A box is suppressed when its IoU with a kept box is `> iou_thr`.
-pub fn nms_sorted(boxes: &[Xyxy], iou_thr: f32, limit: usize) -> Vec<usize> {
-    nms_sorted_inner(boxes, iou_thr, limit, false).0
-}
-
-/// [`nms_sorted`] also returning, for every input position `i`, the position in `keep` of the kept box that first
-/// suppressed `i` (or `i`'s own position in `keep` when kept; `u32::MAX` if unsuppressed past `limit`).
-pub fn nms_sorted_with_owner(boxes: &[Xyxy], iou_thr: f32, limit: usize) -> (Vec<usize>, Vec<u32>) {
-    nms_sorted_inner(boxes, iou_thr, limit, true)
-}
-
-fn nms_sorted_inner(boxes: &[Xyxy], iou_thr: f32, limit: usize, track_owner: bool) -> (Vec<usize>, Vec<u32>) {
-    let n = boxes.len();
-    let mut keep = Vec::new();
-    let mut owner = if track_owner { vec![u32::MAX; n] } else { Vec::new() };
-    if n == 0 || limit == 0 {
-        return (keep, owner);
-    }
-    // Structure-of-arrays so the suppression pass vectorises.
-    let x1: Vec<f32> = boxes.iter().map(|b| b.x1).collect();
-    let y1: Vec<f32> = boxes.iter().map(|b| b.y1).collect();
-    let x2: Vec<f32> = boxes.iter().map(|b| b.x2).collect();
-    let y2: Vec<f32> = boxes.iter().map(|b| b.y2).collect();
-    let area: Vec<f32> = boxes.iter().map(Xyxy::area).collect();
-    let mut suppressed = vec![false; n];
-
-    for i in 0..n {
-        if suppressed[i] {
-            continue;
-        }
-        let kp = keep.len() as u32;
-        keep.push(i);
-        if track_owner {
-            owner[i] = kp;
-        } else if keep.len() == limit {
-            break;
-        }
-        let (bx1, by1, bx2, by2, ba) = (x1[i], y1[i], x2[i], y2[i], area[i]);
-        let start = i + 1;
-        let pass = |off: usize, sup: &mut [bool], own: Option<&mut [u32]>| {
-            let lo = start + off;
-            let hi = lo + sup.len();
-            let (cx1, cy1, cx2, cy2, ca) =
-                (&x1[lo..hi], &y1[lo..hi], &x2[lo..hi], &y2[lo..hi], &area[lo..hi]);
-            if let Some(own) = own {
-                for k in 0..sup.len() {
-                    if sup[k] {
-                        continue;
-                    }
-                    let w = (bx2.min(cx2[k]) - bx1.max(cx1[k])).max(0.0);
-                    let h = (by2.min(cy2[k]) - by1.max(cy1[k])).max(0.0);
-                    let inter = w * h;
-                    let union = ba + ca[k] - inter;
-                    let iou = if union > 0.0 { inter / union } else { 0.0 };
-                    if iou > iou_thr {
-                        sup[k] = true;
-                        own[k] = kp;
-                    }
-                }
-            } else {
-                for k in 0..sup.len() {
-                    // Same arithmetic as `box_iou`, so results match it bit for bit.
-                    let w = (bx2.min(cx2[k]) - bx1.max(cx1[k])).max(0.0);
-                    let h = (by2.min(cy2[k]) - by1.max(cy1[k])).max(0.0);
-                    let inter = w * h;
-                    let union = ba + ca[k] - inter;
-                    let iou = if union > 0.0 { inter / union } else { 0.0 };
-                    sup[k] |= iou > iou_thr;
-                }
-            }
-        };
-        let rest_sup = &mut suppressed[start..];
-        if track_owner {
-            let rest_own = &mut owner[start..];
-            if rest_sup.len() >= PAR_SUPPRESS {
-                const CHUNK: usize = 4096;
-                rest_sup
-                    .par_chunks_mut(CHUNK)
-                    .zip(rest_own.par_chunks_mut(CHUNK))
-                    .enumerate()
-                    .for_each(|(c, (sup, own))| pass(c * CHUNK, sup, Some(own)));
-            } else {
-                pass(0, rest_sup, Some(rest_own));
-            }
-            if keep.len() == limit {
-                break;
-            }
-        } else if rest_sup.len() >= PAR_SUPPRESS {
-            const CHUNK: usize = 4096;
-            rest_sup.par_chunks_mut(CHUNK).enumerate().for_each(|(c, sup)| pass(c * CHUNK, sup, None));
-        } else {
-            pass(0, rest_sup, None);
-        }
-    }
-    (keep, owner)
-}
-
-/// Order of indices by descending score, ties by ascending index. NaN scores sort last.
-fn score_order(scores: &[f32], idx: &mut [u32]) {
-    let key = |i: &u32| {
-        let s = scores[*i as usize];
-        if s.is_nan() { f32::NEG_INFINITY } else { s }
-    };
-    idx.sort_unstable_by(|a, b| key(b).total_cmp(&key(a)).then(a.cmp(b)));
-}
-
-/// Class-aware NMS. Returns indices into the inputs of the kept boxes, sorted by descending score (ties: lower
-/// index first), at most `max_det` of them. No confidence filter is applied here.
-///
-/// # Panics
-/// If the three slices differ in length.
-pub fn batched_nms(
-    boxes: &[Xyxy],
-    scores: &[f32],
-    classes: &[u32],
-    iou_thr: f32,
-    max_det: usize,
-    agnostic: bool,
-) -> Vec<usize> {
-    batched_nms_inner(boxes, scores, classes, iou_thr, max_det, agnostic, false).0
-}
-
-fn batched_nms_inner(
-    boxes: &[Xyxy],
-    scores: &[f32],
-    classes: &[u32],
-    iou_thr: f32,
-    max_det: usize,
-    agnostic: bool,
-    track_owner: bool,
-) -> (Vec<usize>, Option<Vec<u32>>) {
-    assert_eq!(boxes.len(), scores.len(), "batched_nms: boxes/scores length mismatch");
-    assert_eq!(boxes.len(), classes.len(), "batched_nms: boxes/classes length mismatch");
-    let n = boxes.len();
-    if n == 0 || max_det == 0 {
-        return (Vec::new(), None);
-    }
-    assert!(n <= u32::MAX as usize, "batched_nms: too many boxes");
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    score_order(scores, &mut order);
-
-    if agnostic {
-        let sorted: Vec<Xyxy> = order.iter().map(|&i| boxes[i as usize]).collect();
-        if track_owner {
-            let (kept_s, own_s) = nms_sorted_inner(&sorted, iou_thr, max_det, true);
-            let kept: Vec<usize> = kept_s.into_iter().map(|k| order[k] as usize).collect();
-            let mut own = vec![u32::MAX; n];
-            for (pos, &o) in own_s.iter().enumerate() {
-                if o != u32::MAX {
-                    own[order[pos] as usize] = o;
-                }
-            }
-            return (kept, Some(own));
-        }
-        let kept = nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| order[k] as usize).collect();
-        return (kept, None);
-    }
-
-    // Group the score-ordered indices into per-class buckets, keeping score order inside each bucket: a stable
-    // counting sort for dense class ids, a stable comparison sort when the ids are sparse (huge max id).
-    let max_class = classes.iter().copied().max().unwrap_or(0) as usize;
-    let (bucketed, ranges): (Vec<u32>, Vec<(usize, usize)>) = if max_class <= n.max(1024) {
-        let mut starts = vec![0usize; max_class + 2];
-        for &c in classes {
-            starts[c as usize + 1] += 1;
-        }
-        for c in 0..=max_class {
-            starts[c + 1] += starts[c];
-        }
-        let mut fill = starts.clone();
-        let mut bucketed = vec![0u32; n];
-        for &i in &order {
-            let c = classes[i as usize] as usize;
-            bucketed[fill[c]] = i;
-            fill[c] += 1;
-        }
-        let ranges = starts.windows(2).map(|w| (w[0], w[1])).filter(|r| r.0 < r.1).collect();
-        (bucketed, ranges)
-    } else {
-        let mut bucketed = order.clone();
-        bucketed.sort_by_key(|&i| classes[i as usize]);
-        let mut ranges = Vec::new();
-        let mut lo = 0;
-        for hi in 1..=n {
-            if hi == n || classes[bucketed[hi] as usize] != classes[bucketed[lo] as usize] {
-                ranges.push((lo, hi));
-                lo = hi;
-            }
-        }
-        (bucketed, ranges)
-    };
-    if !track_owner {
-        let run_bucket = |&(lo, hi): &(usize, usize)| -> Vec<u32> {
-            let ids = &bucketed[lo..hi];
-            let sorted: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
-            nms_sorted(&sorted, iou_thr, max_det).into_iter().map(|k| ids[k]).collect()
-        };
-        let mut kept: Vec<u32> = if n >= PAR_BUCKETS {
-            ranges.par_iter().flat_map_iter(run_bucket).collect()
-        } else {
-            ranges.iter().flat_map(run_bucket).collect()
-        };
-        score_order(scores, &mut kept);
-        kept.truncate(max_det);
-        return (kept.into_iter().map(|i| i as usize).collect(), None);
-    }
-    let run_bucket = |&(lo, hi): &(usize, usize)| -> (Vec<u32>, Vec<u32>) {
-        let ids = &bucketed[lo..hi];
-        let sorted: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
-        let (k, own) = nms_sorted_with_owner(&sorted, iou_thr, max_det);
-        (k.into_iter().map(|m| ids[m]).collect(), own)
-    };
-    let parts: Vec<(Vec<u32>, Vec<u32>)> = if n >= PAR_BUCKETS {
-        ranges.par_iter().map(run_bucket).collect()
-    } else {
-        ranges.iter().map(run_bucket).collect()
-    };
-    let mut kept: Vec<u32> = parts.iter().flat_map(|(k, _)| k.iter().copied()).collect();
-    score_order(scores, &mut kept);
-    kept.truncate(max_det);
-    let mut global_pos = vec![u32::MAX; n];
-    for (kp, &cand_id) in kept.iter().enumerate() {
-        global_pos[cand_id as usize] = kp as u32;
-    }
-    let mut owner = vec![u32::MAX; n];
-    for (&(lo, hi), (bk_kept, bk_own)) in ranges.iter().zip(&parts) {
-        let ids = &bucketed[lo..hi];
-        for (&cand_id, &loc_kp) in ids.iter().zip(bk_own) {
-            if loc_kp != u32::MAX {
-                let win = bk_kept[loc_kp as usize] as usize;
-                owner[cand_id as usize] = global_pos[win];
-            }
-        }
-    }
-    (kept.into_iter().map(|i| i as usize).collect(), Some(owner))
 }
 
 /// A compact NMS candidate: score, source index (anchor or input detection) and class.
@@ -459,15 +261,41 @@ fn finish(
     };
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();
-    let (kept, owner) = batched_nms_inner(
-        &boxes,
-        &scores,
-        &classes,
-        cfg.iou,
-        cfg.max_det,
-        cfg.agnostic,
-        cfg.fusion.wants_owner() || (!cfg.agnostic && cfg.score.is_calibrated()),
-    );
+    let want_owner = cfg.fusion.wants_owner() || (!cfg.agnostic && cfg.score.is_calibrated());
+    let (kept, kept_scores, owner) = match cfg.nms_kind {
+        NmsKind::Standard | NmsKind::Diou => {
+            let (kept, owner) = kernel::batched_nms_inner(
+                &boxes,
+                &scores,
+                &classes,
+                cfg.iou,
+                cfg.max_det,
+                cfg.agnostic,
+                want_owner,
+                cfg.nms_kind == NmsKind::Diou,
+            );
+            let ks: Vec<f32> = kept.iter().map(|&k| scores[k]).collect();
+            (kept, ks, owner)
+        }
+        NmsKind::SoftLinear | NmsKind::SoftGaussian { .. } => {
+            let sigma = match cfg.nms_kind {
+                NmsKind::SoftGaussian { sigma } => Some(sigma),
+                _ => None,
+            };
+            let pairs = kernel::batched_soft_nms(
+                &boxes,
+                &scores,
+                &classes,
+                cfg.iou,
+                cfg.candidate_conf(),
+                sigma,
+                cfg.max_det,
+                cfg.agnostic,
+            );
+            let (kept, ks): (Vec<usize>, Vec<f32>) = pairs.into_iter().unzip();
+            (kept, ks, None)
+        }
+    };
     let cands_slice = cands.as_slice();
     let fused = match cfg.fusion {
         BoxFusion::None => None,
@@ -500,7 +328,7 @@ fn finish(
         .enumerate()
         .map(|(i, &k)| Detection {
             bbox: fused.as_ref().map_or(boxes[k], |f| f[i]),
-            score: scores[k],
+            score: kept_scores[i],
             class: classes[k],
         })
         .collect();
