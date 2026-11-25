@@ -12,12 +12,13 @@
 //! before its font was added stayed on its fallback.)
 
 use super::fx_hash::FxHashMap;
+use super::types::{AsFontKeyRef, FontKeyRef};
 use crate::{
     Bounds, DevicePixels, Font, FontId, FontMetrics, GlyphBlend, LineWrapper, Pixels, PlatformTextSystem,
     RenderGlyphParams, Size, font, px,
 };
 use anyhow::{Context as _, Result, anyhow};
-use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+use parking_lot::{Mutex, RwLock};
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
@@ -32,7 +33,6 @@ pub struct TextSystem {
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
-    pub(crate) font_runs_pool: Mutex<Vec<Vec<crate::FontRun>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
     glyph_blend: OnceLock<GlyphBlend>,
     /// How many times fonts were added (see the module docs).
@@ -48,7 +48,6 @@ impl TextSystem {
             raster_bounds: RwLock::default(),
             font_ids_by_font: RwLock::default(),
             wrapper_pool: Mutex::default(),
-            font_runs_pool: Mutex::default(),
             // GPUI's stack, in GPUI's order.
             fallback_font_stack: smallvec![
                 font(".ZedMono"),
@@ -99,6 +98,10 @@ impl TextSystem {
 
     /// The id of `font`, cached (also when the backend fails, as GPUI).
     pub fn font_id(&self, font: &Font) -> Result<FontId> {
+        self.font_id_by_key(font.as_key_ref(), || font.clone())
+    }
+
+    fn font_id_by_key(&self, key: FontKeyRef<'_>, to_owned: impl FnOnce() -> Font) -> Result<FontId> {
         fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
             match font_id {
                 Ok(font_id) => Ok(*font_id),
@@ -106,16 +109,18 @@ impl TextSystem {
             }
         }
 
-        let font_id = self.font_ids_by_font.read().get(font).map(clone_font_id_result);
+        let lookup: &dyn AsFontKeyRef = &key;
+        let font_id = self.font_ids_by_font.read().get(lookup).map(clone_font_id_result);
         if let Some(font_id) = font_id {
             font_id
         } else {
             let generation = self.font_generation();
-            let font_id = self.platform_text_system.font_id(font);
+            let owned = to_owned();
+            let font_id = self.platform_text_system.font_id(&owned);
             // Not cached if fonts were added meanwhile (on another thread): the answer may be the old one.
             let mut font_ids = self.font_ids_by_font.write();
             if self.font_generation() == generation {
-                font_ids.insert(font.clone(), clone_font_id_result(&font_id));
+                font_ids.insert(owned, clone_font_id_result(&font_id));
             }
             font_id
         }
@@ -138,7 +143,15 @@ impl TextSystem {
     ///
     /// Panics if the font and none of the fallbacks can be resolved (as GPUI).
     pub fn resolve_font(&self, font: &Font) -> FontId {
-        if let Ok(font_id) = self.font_id(font) {
+        self.resolve_font_by_key(font.as_key_ref(), || font.clone())
+    }
+
+    pub(crate) fn resolve_font_key(&self, key: FontKeyRef<'_>) -> FontId {
+        self.resolve_font_by_key(key, || key.to_owned_font())
+    }
+
+    fn resolve_font_by_key(&self, key: FontKeyRef<'_>, to_owned: impl FnOnce() -> Font) -> FontId {
+        if let Ok(font_id) = self.font_id_by_key(key, to_owned) {
             return font_id;
         }
         for fallback in &self.fallback_font_stack {
@@ -147,7 +160,7 @@ impl TextSystem {
             }
         }
         let stack: Vec<&str> = self.fallback_font_stack.iter().map(|f| f.family.as_ref()).collect();
-        panic!("failed to resolve font '{}' or any of the fallbacks: {}", font.family, stack.join(", "));
+        panic!("failed to resolve font '{}' or any of the fallbacks: {}", key.family, stack.join(", "));
     }
 
     /// The font's bounding box (every glyph superimposed) at `font_size`.
@@ -229,29 +242,36 @@ impl TextSystem {
     /// The baseline's distance from the top of a line of `line_height` (GPUI's formula, with its signed
     /// descent).
     pub fn baseline_offset(&self, font_id: FontId, font_size: Pixels, line_height: Pixels) -> Pixels {
-        let ascent = self.ascent(font_id, font_size);
-        let descent = self.descent(font_id, font_size);
-        let padding_top = (line_height - ascent - descent) / 2.;
-        padding_top + ascent
+        self.read_metrics(font_id, |metrics| {
+            let ascent = metrics.ascent(font_size);
+            let descent = metrics.descent(font_size);
+            let padding_top = (line_height - ascent - descent) / 2.;
+            padding_top + ascent
+        })
     }
 
     fn read_metrics<T>(&self, font_id: FontId, read: impl FnOnce(&FontMetrics) -> T) -> T {
-        let lock = self.font_metrics.upgradable_read();
-        if let Some(metrics) = lock.get(&font_id) {
-            read(metrics)
-        } else {
-            let mut lock = RwLockUpgradableReadGuard::upgrade(lock);
-            let metrics =
-                lock.entry(font_id).or_insert_with(|| self.platform_text_system.font_metrics(font_id));
-            read(metrics)
+        if let Some(metrics) = self.font_metrics.read().get(&font_id) {
+            return read(metrics);
         }
+        let mut lock = self.font_metrics.write();
+        let metrics = lock.entry(font_id).or_insert_with(|| self.platform_text_system.font_metrics(font_id));
+        read(metrics)
     }
 
     /// A line wrapper for `font` at `font_size`, from the pool (it returns to the pool when dropped).
     pub fn line_wrapper(self: &Arc<Self>, font: Font, font_size: Pixels) -> LineWrapperHandle {
+        self.line_wrapper_for_key(font.as_key_ref(), font_size)
+    }
+
+    pub(crate) fn line_wrapper_for_key(
+        self: &Arc<Self>,
+        font: FontKeyRef<'_>,
+        font_size: Pixels,
+    ) -> LineWrapperHandle {
         let lock = &mut self.wrapper_pool.lock();
         let font_generation = self.font_generation();
-        let font_id = self.resolve_font(&font);
+        let font_id = self.resolve_font_key(font);
         let wrappers = lock.entry(FontIdWithSize { font_id, font_size }).or_default();
         let wrapper = wrappers
             .pop()
@@ -261,15 +281,12 @@ impl TextSystem {
 
     /// The device-pixel bounds of a glyph's raster, relative to its (floored) origin; cached.
     pub fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let raster_bounds = self.raster_bounds.upgradable_read();
-        if let Some(bounds) = raster_bounds.get(params) {
-            Ok(*bounds)
-        } else {
-            let mut raster_bounds = RwLockUpgradableReadGuard::upgrade(raster_bounds);
-            let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
-            raster_bounds.insert(params.clone(), bounds);
-            Ok(bounds)
+        if let Some(bounds) = self.raster_bounds.read().get(params) {
+            return Ok(*bounds);
         }
+        let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
+        self.raster_bounds.write().insert(params.clone(), bounds);
+        Ok(bounds)
     }
 
     /// Rasterizes a glyph into its raster bounds: an alpha mask, or BGRA premultiplied for an emoji.

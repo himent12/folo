@@ -6,7 +6,7 @@
 
 use crate::{Bounds, DevicePixels, GlyphBlend, Hsla, Pixels, Point, SharedString, Size, px};
 use anyhow::Result;
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, Sub};
@@ -185,7 +185,7 @@ impl FontFallbacks {
 }
 
 /// The configuration details for identifying a specific font.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Font {
     /// The font family name.
     pub family: SharedString,
@@ -197,6 +197,77 @@ pub struct Font {
     pub weight: FontWeight,
     /// The font style.
     pub style: FontStyle,
+}
+
+/// Borrowed lookup key for `Font` (avoids cloning `SharedString` and `Arc` fields on cache hits).
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FontKeyRef<'a> {
+    pub(crate) family: &'a str,
+    pub(crate) features: &'a FontFeatures,
+    pub(crate) fallbacks: Option<&'a FontFallbacks>,
+    pub(crate) weight: FontWeight,
+    pub(crate) style: FontStyle,
+}
+
+impl FontKeyRef<'_> {
+    pub(crate) fn to_owned_font(self) -> Font {
+        Font {
+            family: SharedString::new(self.family),
+            features: self.features.clone(),
+            fallbacks: self.fallbacks.cloned(),
+            weight: self.weight,
+            style: self.style,
+        }
+    }
+}
+
+/// Trait object bridge allowing `HashMap::get` on `FxHashMap<Font, _>` with [`FontKeyRef`].
+pub(crate) trait AsFontKeyRef {
+    fn as_font_key_ref(&self) -> FontKeyRef<'_>;
+}
+
+impl PartialEq for dyn AsFontKeyRef + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_font_key_ref() == other.as_font_key_ref()
+    }
+}
+
+impl Eq for dyn AsFontKeyRef + '_ {}
+
+impl Hash for dyn AsFontKeyRef + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_font_key_ref().hash(state);
+    }
+}
+
+impl AsFontKeyRef for Font {
+    fn as_font_key_ref(&self) -> FontKeyRef<'_> {
+        self.as_key_ref()
+    }
+}
+
+impl AsFontKeyRef for FontKeyRef<'_> {
+    fn as_font_key_ref(&self) -> FontKeyRef<'_> {
+        *self
+    }
+}
+
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_key_ref() == other.as_key_ref()
+    }
+}
+
+impl Hash for Font {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_key_ref().hash(state);
+    }
+}
+
+impl<'a> Borrow<dyn AsFontKeyRef + 'a> for Font {
+    fn borrow(&self) -> &(dyn AsFontKeyRef + 'a) {
+        self
+    }
 }
 
 /// Get a [`Font`] for a given name.
@@ -211,6 +282,17 @@ pub fn font(family: impl Into<SharedString>) -> Font {
 }
 
 impl Font {
+    /// Borrowed key view matching `Font`'s `Eq` and `Hash` implementations.
+    pub(crate) fn as_key_ref(&self) -> FontKeyRef<'_> {
+        FontKeyRef {
+            family: self.family.as_str(),
+            features: &self.features,
+            fallbacks: self.fallbacks.as_ref(),
+            weight: self.weight,
+            style: self.style,
+        }
+    }
+
     /// Set this Font to be bold.
     pub fn bold(mut self) -> Self {
         self.weight = FontWeight::BOLD;

@@ -60,6 +60,9 @@ pub fn paint_line(
     content_mask: Bounds<Pixels>,
     painter: &mut dyn GlyphPainter,
 ) -> Result<()> {
+    if layout.runs.is_empty() {
+        return Ok(());
+    }
     let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
     let baseline_offset = point(px(0.), padding_top + layout.ascent);
     let mut decoration_runs = decoration_runs.iter();
@@ -74,9 +77,13 @@ pub fn paint_line(
     );
     let mut prev_glyph_position = Point::default();
     let mut max_glyph_size = size(px(0.), px(0.));
+    let mut last_font_id: Option<FontId> = None;
     let mut first_glyph_x = origin.x;
     for (run_ix, run) in layout.runs.iter().enumerate() {
-        max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+        if last_font_id != Some(run.font_id) {
+            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            last_font_id = Some(run.font_id);
+        }
 
         for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
             glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -269,7 +276,7 @@ pub fn paint_line_background(
     text_system: &TextSystem,
     painter: &mut dyn GlyphPainter,
 ) -> Result<()> {
-    if !decoration_runs.iter().any(|run| run.background_color.is_some()) {
+    if layout.runs.is_empty() || !decoration_runs.iter().any(|run| run.background_color.is_some()) {
         return Ok(());
     }
     let mut decoration_runs = decoration_runs.iter();
@@ -282,8 +289,12 @@ pub fn paint_line_background(
     );
     let mut prev_glyph_position = Point::default();
     let mut max_glyph_size = size(px(0.), px(0.));
+    let mut last_font_id: Option<FontId> = None;
     for (run_ix, run) in layout.runs.iter().enumerate() {
-        max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+        if last_font_id != Some(run.font_id) {
+            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            last_font_id = Some(run.font_id);
+        }
 
         for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
             glyph_origin.x += glyph.position.x - prev_glyph_position.x;

@@ -2,8 +2,9 @@
 //! `LineWrapper`: GPUI's wrapping and truncation rules over per-character widths, which decide where
 //! every line of the UI breaks. Copied rule for rule, quirks included.
 
+use super::fx_hash::FxHashMap;
 use crate::{FontId, FontRun, Pixels, PlatformTextSystem, SharedString, TextRun, px};
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::iter;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ pub struct LineWrapper {
     pub(crate) font_id: FontId,
     pub(crate) font_size: Pixels,
     cached_ascii_char_widths: [Option<Pixels>; 128],
-    cached_other_char_widths: HashMap<char, Pixels>,
+    cached_other_char_widths: FxHashMap<char, Pixels>,
 }
 
 impl LineWrapper {
@@ -26,7 +27,7 @@ impl LineWrapper {
             font_id,
             font_size,
             cached_ascii_char_widths: [None; 128],
-            cached_other_char_widths: HashMap::default(),
+            cached_other_char_widths: FxHashMap::default(),
         }
     }
 
@@ -135,6 +136,40 @@ impl LineWrapper {
         truncation_suffix: &str,
         runs: &[TextRun],
     ) -> (SharedString, Vec<TextRun>) {
+        let (result, truncated) = self.truncate_line_text(line, truncate_width, truncation_suffix);
+        if truncated {
+            let runs = runs_after_truncation(&result, truncation_suffix, runs);
+            (result, runs)
+        } else {
+            (result, runs.to_vec())
+        }
+    }
+
+    /// Truncates `line` when it overflows `truncate_width`, borrowing `runs` without allocating when
+    /// the line already fits.
+    pub(crate) fn truncate_line_cow<'a>(
+        &mut self,
+        line: SharedString,
+        truncate_width: Pixels,
+        truncation_suffix: &str,
+        runs: &'a [TextRun],
+    ) -> (SharedString, Cow<'a, [TextRun]>) {
+        let (result, truncated) = self.truncate_line_text(line, truncate_width, truncation_suffix);
+        if truncated {
+            let runs = runs_after_truncation(&result, truncation_suffix, runs);
+            (result, Cow::Owned(runs))
+        } else {
+            (result, Cow::Borrowed(runs))
+        }
+    }
+
+    /// Truncates only the text string, returning `(text, was_truncated)` without touching runs.
+    pub(crate) fn truncate_line_text(
+        &mut self,
+        line: SharedString,
+        truncate_width: Pixels,
+        truncation_suffix: &str,
+    ) -> (SharedString, bool) {
         let mut width = px(0.);
         let suffix_width =
             truncation_suffix.chars().map(|c| self.width_for_char(c)).fold(px(0.0), |a, x| a + x);
@@ -148,13 +183,14 @@ impl LineWrapper {
             width += char_width;
 
             if width.floor() > truncate_width {
-                let result = SharedString::from(format!("{}{}", &line[..truncate_ix], truncation_suffix));
-                let runs = runs_after_truncation(&result, truncation_suffix, runs);
-                return (result, runs);
+                let mut result = String::with_capacity(truncate_ix + truncation_suffix.len());
+                result.push_str(&line[..truncate_ix]);
+                result.push_str(truncation_suffix);
+                return (SharedString::from(result), true);
             }
         }
 
-        (line, runs.to_vec())
+        (line, false)
     }
 
     /// Whether `c` is part of a word that should not be broken: ASCII alphanumerics, Latin-1

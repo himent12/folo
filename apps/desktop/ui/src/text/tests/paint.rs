@@ -304,3 +304,31 @@ fn emoji_glyphs_go_to_paint_emoji() {
     let Op::Emoji { x, y } = rec.0[1] else { panic!("{:?}", rec.0) };
     assert!(near(x, 10.) && near(y, BASELINE));
 }
+
+#[test]
+fn paint_line_handles_empty_runs_and_caches_font_bounds_across_same_font_runs() {
+    let window = window_text_system();
+    let empty_layout = LineLayout { font_size: px(16.), ..Default::default() };
+    let mut rec = Recorder::default();
+    paint_line(
+        point(px(0.), px(0.)),
+        &empty_layout,
+        px(20.),
+        TextAlign::Left,
+        None,
+        &[],
+        &[],
+        &window,
+        everywhere(),
+        &mut rec,
+    )
+    .unwrap();
+    assert!(rec.0.is_empty());
+
+    // Consecutive runs sharing one font id paint identically to single-run layout.
+    let red = crate::red();
+    let blue = crate::blue();
+    let line = window.shape_line("abcdef".into(), px(16.), &[run(2, red), run(2, blue), run(2, red)], None);
+    line.paint_with(point(px(0.), px(0.)), px(20.), &window, everywhere(), &mut rec).unwrap();
+    assert_eq!(rec.glyphs().len(), 6);
+}

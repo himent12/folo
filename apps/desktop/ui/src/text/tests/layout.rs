@@ -144,3 +144,49 @@ fn wrapped_positions_round_trip() {
     assert_eq!(layout.index_for_position(point(px(500.), px(5.)), lh), Err(7));
     assert_eq!(layout.index_for_position(point(px(5.), px(500.)), lh), Err(0));
 }
+
+#[test]
+fn shape_text_with_style_matches_shape_text_and_handles_empty_runs() {
+    let window = window_text_system();
+    let style = crate::TextStyle {
+        font_family: "Dummy".into(),
+        color: crate::red(),
+        background_color: Some(crate::blue()),
+        ..Default::default()
+    };
+    for (text, wrap_width, clamp) in [
+        ("", None, None),
+        ("\n\n", None, None),
+        ("ab\ncd\n\nef", None, None),
+        ("aa bbb cccc ddddd eeee", Some(px(72.)), None),
+        ("aa bbb cccc ddddd eeee", Some(px(72.)), Some(1)),
+        ("aa bbb cccc ddddd eeee", Some(px(72.)), Some(0)),
+        ("aa bbb cccc ddddd eeee", Some(px(72.)), Some(2)),
+    ] {
+        let single_run = [style.to_run(text.len())];
+        let expected = window.shape_text(text.into(), px(16.), &single_run, wrap_width, clamp).unwrap();
+        let actual = window.shape_text_with_style(text.into(), px(16.), &style, wrap_width, clamp).unwrap();
+        assert_eq!(actual.len(), expected.len(), "text={text:?} clamp={clamp:?}");
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.text, e.text);
+            assert_eq!(a.wrap_boundaries(), e.wrap_boundaries());
+            assert_eq!(a.width(), e.width());
+            assert_eq!(a.decoration_runs().len(), e.decoration_runs().len());
+            for (ad, ed) in a.decoration_runs().iter().zip(e.decoration_runs().iter()) {
+                assert_eq!(ad.len, ed.len);
+                assert_eq!(ad.color, ed.color);
+                assert_eq!(ad.background_color, ed.background_color);
+                assert_eq!(ad.underline, ed.underline);
+                assert_eq!(ad.strikethrough, ed.strikethrough);
+            }
+        }
+    }
+
+    // Zero-length runs interleaved with multi-line runs must be skipped identically.
+    let runs_with_zeros =
+        [run(0, Hsla::default()), run(4, Hsla::default()), run(0, crate::red()), run(5, crate::red())];
+    let lines = window.shape_text("ab\ncd\n\nef".into(), px(16.), &runs_with_zeros, None, None).unwrap();
+    let decoration_lens: Vec<Vec<u32>> =
+        lines.iter().map(|l| l.decoration_runs().iter().map(|r| r.len).collect()).collect();
+    assert_eq!(decoration_lens, [vec![2], vec![1, 1], vec![], vec![2]]);
+}
