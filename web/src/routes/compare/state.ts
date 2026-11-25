@@ -526,8 +526,8 @@ export function compareState() {
   const allRuns = signal(false);
   const otherAt = signal(0);
   const baselineId = signal<string | null>(null);
-  // A baseline or pinned run removed from the comparison is forgotten, not latent: adding that run again later must not
-  // quietly restore it as baseline or pinned.
+  // A baseline, pinned, or hovered run removed from the comparison is forgotten, not latent: adding that run again
+  // later must not quietly restore its old emphasis or baseline state.
   effect(() => {
     const cur = ids.get();
     untrack(() => {
@@ -535,6 +535,8 @@ export function compareState() {
       if (b !== null && !cur.includes(b)) baselineId.set(null);
       const p = pinned.get();
       if (p !== null && !cur.includes(p)) pinned.set(null);
+      const h = hovered.get();
+      if (h !== null && !cur.includes(h)) hovered.set(null);
     });
   });
 

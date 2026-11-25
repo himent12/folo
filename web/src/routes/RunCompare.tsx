@@ -50,9 +50,16 @@ export default function RunCompare() {
   });
 
   // Escape unpins an active chip before global Escape returns to Runs (but never intercepts a G-chord cancel or popover).
+  const hasOpenPopover = () => {
+    try {
+      return !!document.querySelector('[popover]:popover-open');
+    } catch {
+      return false;
+    }
+  };
   onDocument('keydown', (e) => {
-    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || gChord.peek() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open, [popover]:popover-open')) return;
+    if (e.key !== 'Escape' || e.repeat || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    if (!keyPrefs.singleKeys || gChord.peek() || hasOpenPopover() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
     const p = s.pinned.peek();
     if (p !== null && s.chosen.peek().some((x) => x.id === p)) {
       e.preventDefault();
