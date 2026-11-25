@@ -87,7 +87,7 @@ server shows that offline state: start `folo serve`, or open `http://localhost:5
 | `src/lib/charts/` | SVG/canvas charts (`LineChart`, `Sparkline`, `Histogram`, `ConfusionMatrix`, `XYChart`) and their geometry |
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
-| `src/lib/bench/` | Vision benchmarks' rules and score functions, shared by the screens and the mock |
+| `src/lib/bench/` | Vision benchmarks' rules, score functions, and external prediction validation (`external.ts`, `externalParse.ts`, `externalWorker.ts`), shared by the screens and the mock |
 | `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand: every built-in theme's palette too), `themes.ts` (custom theme files checked, themes resolved and listed), `applyTheme.ts` (a theme onto `<html>`), `base.css`, `classInk.ts` |
 | `src/lib/*.ts` | Shared rules and wording: `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
 | `framework/` | fw, the UI framework: [framework/README.md](framework/README.md) |

@@ -19,8 +19,9 @@ import FileJson from '$icons/file-json';
 import Plus from '$icons/plus';
 import { bindable, computed, createUniqueId, css, effect, For, onCleanup, signal, tick, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Bench, BenchCatalog, BenchEntry, BenchPrediction, LabelAgent, Model, StartBenchEntry } from '$lib/api/types';
-import { checkPredictions, estimateBytes, ExternalSendError, PART_BYTES, parsePredictions, partsOf, sendExternal, type PredictionSummary } from '$lib/bench/external';
+import type { Bench, BenchCatalog, BenchEntry, LabelAgent, Model, StartBenchEntry } from '$lib/api/types';
+import { ExternalSendError, sendExternal, type PredictionSummary } from '$lib/bench/external';
+import { parseExternalPredictionsFile, raceAbort, type ExternalParseResult } from '$lib/bench/externalParse';
 import { planPasses } from '$lib/bench/plan';
 import { AGENT_IMAGES, IMAGES_PAGE_MAX, isEntryActive, BENCH_NAME_MAX } from '$lib/bench/rules';
 import { classColor } from '$lib/design/tokens';
@@ -62,7 +63,7 @@ export interface AddEntryDialogProps {
   onstarted: (entry: BenchEntry) => void;
 }
 
-type Check = { ok: true; predictions: BenchPrediction[]; summary: PredictionSummary } | { ok: false; error: string };
+type Check = ExternalParseResult;
 
 const PER_CALL: Record<string, number> = { claude: 4, codex: 8, antigravity: 8 };
 
@@ -91,6 +92,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   let fileInput: HTMLInputElement | undefined;
   /** Monotonic token for each file pick / dialog reset so stale reads never overwrite a newer selection. */
   let pickSeq = 0;
+  /** Abort controller for the active external file parse worker / fallback read. */
+  let parseAbort: AbortController | null = null;
   /** Whether the user manually typed a non-empty leaderboard name (kept across file replacements). */
   let nameEdited = false;
   /** The benchmark's image ids, for the predictions' check (loaded once the external kind is shown). */
@@ -102,20 +105,37 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   const confirmStop = signal(false);
   let abort: AbortController | null = null;
 
-  onCleanup(() => {
+  function disposeCheck() {
+    const prev = check.peek();
+    if (prev?.ok) prev.session.dispose();
+  }
+
+  function cancelParse() {
     pickSeq++;
+    parseAbort?.abort(new DOMException('Cancelled', 'AbortError'));
+    parseAbort = null;
+  }
+
+  onCleanup(() => {
+    cancelParse();
+    disposeCheck();
   });
 
   // Every opening starts fresh on the kind it was opened with; the first model that shares classes is picked.
   effect(() => {
     if (!open.get()) {
-      pickSeq++;
-      untrack(() => reading.set(false));
+      cancelParse();
+      untrack(() => {
+        disposeCheck();
+        check.set(null);
+        reading.set(false);
+      });
       return;
     }
-    pickSeq++;
+    cancelParse();
     nameEdited = false;
     untrack(() => {
+      disposeCheck();
       error.set(undefined);
       touched.set(false);
       busy.set(false);
@@ -179,10 +199,17 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   });
 
   // ---------- external: the file, read and checked as it is picked ----------
-  effect(() => {
-    if (!open.get() || kind.get() !== 'external' || imageIds.get()) return;
+  let imageIdsTask: Promise<string[] | null> | null = null;
+  let imageIdsBenchId: string | null = null;
+
+  function loadImageIds(): Promise<string[] | null> {
     const id = props.bench.id;
-    untrack(async () => {
+    const loaded = imageIds.peek();
+    if (loaded && imageIdsBenchId === id) return Promise.resolve(loaded);
+    if (imageIdsTask && imageIdsBenchId === id) return imageIdsTask;
+    imageIdsBenchId = id;
+    let task: Promise<string[] | null> | null = null;
+    task = (async () => {
       const ids: string[] = [];
       try {
         for (let off = 0; off < props.bench.images; off += IMAGES_PAGE_MAX) {
@@ -190,10 +217,23 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
           ids.push(...p.images.map((i) => i.id));
           if (!p.images.length) break;
         }
-        imageIds.set(ids);
+        if (imageIdsBenchId === id) imageIds.set(ids);
+        return ids;
       } catch {
         // The server checks them anyway; the rest of the file is still checked here.
+        return null;
+      } finally {
+        if (imageIdsTask === task) imageIdsTask = null;
       }
+    })();
+    imageIdsTask = task;
+    return task;
+  }
+
+  effect(() => {
+    if (!open.get() || kind.get() !== 'external') return;
+    untrack(() => {
+      void loadImageIds();
     });
   });
   const suggestedName = (name: string) => name.replace(/\.json$/i, '').replace(/[-_ ]?predictions?$/i, '') || 'external';
@@ -203,44 +243,60 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     const f = input.files?.[0];
     input.value = '';
     if (!f || busy.peek() || sending.peek()) return;
-    const seq = ++pickSeq;
-    const stale = () => seq !== pickSeq || !open.peek();
+    cancelParse();
+    disposeCheck();
+    const seq = pickSeq;
+    const ctl = new AbortController();
+    parseAbort = ctl;
+    const stale = () => seq !== pickSeq || !open.peek() || ctl.signal.aborted;
     file.set(f);
     reading.set(true);
     check.set(null);
     try {
-      // "Reading the file…" paints before the parse holds the page (seconds for a 200 MB file); the text is let go
-      // as soon as it is parsed, and the records are checked where they are, never copied.
+      // Let "Reading the file…" paint, wait for any in-flight benchmark image ID fetch so full
+      // membership/completeness checks run, then parse/validate off the UI thread in a Web Worker.
       await tick();
       if (stale()) return;
-      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+      const resolvedImageIds =
+        imageIds.peek() && imageIdsBenchId === props.bench.id
+          ? imageIds.peek()
+          : await raceAbort(loadImageIds(), ctl.signal);
       if (stale()) return;
-      const text = await f.text();
-      if (stale()) return;
-      const parsed = parsePredictions(text);
-      if ('error' in parsed) check.set({ ok: false, error: parsed.error });
-      else {
-        const catalog = props.catalog;
-        const c = checkPredictions(parsed.records, {
-          imageIds: imageIds.peek(),
+      const catalog = props.catalog;
+      const c = await parseExternalPredictionsFile(
+        f,
+        {
+          imageIds: resolvedImageIds,
           classes: props.bench.classes.length,
-          plan: props.bench.plan,
+          plan: {
+            conditions: props.bench.plan.conditions.map((x) => ({
+              condition: x.condition,
+              severities: [...x.severities],
+              weight: x.weight,
+            })),
+          },
           catalog: catalog?.conditions.map((x) => x.id) ?? props.bench.plan.conditions.map((x) => x.condition),
           names: Object.fromEntries((catalog?.conditions ?? []).map((x) => [x.id, x.name])),
-        });
-        check.set(c);
-        if (c.ok) {
-          scored.set(c.summary.scores);
-          if (!nameEdited || !extName.peek().trim()) {
-            extName.set(suggestedName(f.name));
-            nameEdited = false;
-          }
+        },
+        { signal: ctl.signal },
+      );
+      if (stale()) {
+        if (c.ok) c.session.dispose();
+        return;
+      }
+      check.set(c);
+      if (c.ok) {
+        scored.set(c.session.summary.scores);
+        if (!nameEdited || !extName.peek().trim()) {
+          extName.set(suggestedName(f.name));
+          nameEdited = false;
         }
       }
     } catch {
       if (stale()) return;
       check.set({ ok: false, error: 'The file could not be read.' });
     } finally {
+      if (parseAbort === ctl) parseAbort = null;
       if (seq === pickSeq) reading.set(false);
     }
   }
@@ -248,7 +304,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   /** How a checked file goes: in one request, or (over PART_BYTES of JSON) as an open entry in this many parts. */
   const parts = computed(() => {
     const c = check.get();
-    return c?.ok && estimateBytes(c.predictions) > PART_BYTES ? partsOf(c.predictions, props.bench.plan).length : 0;
+    return c?.ok ? c.session.partsCount : 0;
   });
   const api = computed(() => `${hub.serverUrl.replace(/\/$/, '')}/api/bench/benchmarks/${props.bench.id}`);
 
@@ -314,7 +370,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     if (!c?.ok) return;
     abort = new AbortController();
     left.set(null);
-    sending.set({ sent: 0, total: c.predictions.length });
+    sending.set({ sent: 0, total: c.session.total });
     const benchId = props.bench.id;
     try {
       const entry = await sendExternal(
@@ -326,7 +382,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
           stop: (id) => hub.api.stopBenchEntry(benchId, id),
           remove: (id) => hub.api.deleteBenchEntry(benchId, id),
         },
-        { name: extName.peek().trim(), scored: scored.peek(), predictions: c.predictions, plan: props.bench.plan },
+        { name: extName.peek().trim(), scored: scored.peek(), source: c.session, plan: props.bench.plan },
         (p) => sending.set({ sent: p.sent, total: p.total }),
         abort.signal,
       );
@@ -675,7 +731,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   /** The checked file's summary (only rendered while the check is ok; empty otherwise, never read then). */
   function okSummary(): PredictionSummary {
     const c = check.get();
-    return c?.ok ? c.summary : { images: 0, conditions: [], missing: [], boxes: 0, scores: false };
+    return c?.ok ? c.session.summary : { images: 0, conditions: [], missing: [], boxes: 0, scores: false };
   }
   function okText() {
     const s = okSummary();
