@@ -70,9 +70,13 @@ The result is `/api/predict`'s response plus `backend`:
 
 Boxes are in image pixels, highest score first, with the same letterbox, decode and NMS as the native predictor.
 Timings use `performance.now()` (coarsened by browsers to 0.1 ms, or 5 µs on cross-origin isolated pages).
-`preprocess_ms` is RGBA → RGB, letterbox and upload; on WebGPU `inference_ms` is the forward pass, the on-GPU decode
-and the awaited readback (the forward pass is queued work, the readback is where the GPU time shows), and
-`postprocess_ms` is NMS and rescaling. On the CPU the split is the server's: decode counts as postprocessing.
+`preprocess_ms` is RGBA → RGB (SIMD128 `rgba_to_rgb`), letterbox and upload on WebGPU, or direct zero-intermediate-RGB
+SIMD128 RGBA → planar-`f32` letterboxing on the CPU; on WebGPU `inference_ms` is the forward pass, device-side candidate
+extraction (`Tensor::detect_candidates`, or dense decode fallback) and the awaited compact readback (the forward pass is
+queued work, the readback is where the GPU time shows), and `postprocess_ms` is NMS and rescaling. On the CPU the split
+matches the native predictor: on the candidate-first path (`predict_candidates`), forward, candidate selection, and
+sparse box decode count in `inference_ms` while `finish_candidates` (NMS / top-k) and rescaling count in
+`postprocess_ms`; on the dense fallback path (`out.detections`), decode counts in `postprocess_ms`.
 Several `detect` calls may be in flight on one detector; each awaits its own readback.
 
 ### `detector.info() → FoloDetectorInfo`
@@ -105,17 +109,29 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
   folo-gpu has async entry points used on every target: `GpuContext::new_async` / `shared_async`,
   `folo_gpu::init_async()` and `folo_gpu::download_async(ctx, tensor)` (a readback that resolves when WebGPU has
   mapped the staging buffer). The blocking ones (`GpuContext::new`, `sync`'s wait, `Tensor::to_vec` of a GPU
-  tensor) return a "use the async variant" error in the browser instead of hanging. Shader compile errors are
+  tensor) return a "use the async variant" error in the browser instead of hanging. To avoid downloading the full
+  `~2.8 MiB` decoded head on every frame, `Detector::detect` runs device-side candidate extraction
+  (`Tensor::detect_candidates`, reusing a cached `[3, A]` device anchors tensor per canvas shape) and awaits a compact
+  async readback (`download_candidate_records`: `~28 KiB` for the count plus up to `CANDIDATE_READBACK` = 1,024 7-word
+  records, issuing a second readback only on overflow and falling back to dense `decoded_on_device()` when candidate
+  extraction is unavailable). Shader compile errors are
   reported through the device's error sink at the next readback (natively they still come from an error scope at
   pipeline creation). The kernels are the native WGSL unchanged; Chrome's compiler (Tint) is stricter than Naga in
   places (it rejects `-3.4028235e38` as out of `f32` range, so `softmax` spells `-f32::MAX` by its bits).
 - **CPU.** rayon runs on the calling thread on wasm (no threads without the `atomics` target feature), so the
   parallel paths need no separate code. `.cargo/config.toml` (and the build script, and CI) enable `+simd128` for
-  wasm32, which every current browser supports: LLVM vectorises the GEMM micro-kernel and the elementwise loops to
-  it, which makes folo-n 3.6x faster than a scalar build (491 vs 1758 ms at 640). A hand-written SIMD128 6×16 GEMM
-  kernel (two 6×8 halves to fit 16 vector registers, multiply + add since base SIMD128 has no FMA) measured the same
-  as the vectorised portable one (about 20 GFLOP/s on one thread, `cargo bench -p folo-core --bench gemm` built for
-  `wasm32-wasip1` and run under Node's WASI), so it was not kept.
+  wasm32, which every current browser supports:
+  - `folo-wasm/src/simd.rs` provides explicit Wasm SIMD128 RGBA→RGB stripping (`rgba_to_rgb`, used before WebGPU
+    uploads) and direct RGBA→planar-`f32` letterboxing (`letterbox_rgba_planar_f32`, zero intermediate RGB allocation,
+    bit-exact with `folo_data::Letterbox::apply_planar_f32`), paired with candidate-first / sparse CPU decode.
+  - `folo-core` adds explicit Wasm SIMD128 kernels for 4-lane non-FMA elementwise transcendentals and binary ops
+    (`cpu/elementwise/wasm_simd.rs`), stride-1 depthwise convs with register-fused bias/SiLU/ReLU (`cpu/conv/depthwise.rs`),
+    and 4-tile Winograd F(2×2, 3×3) (`cpu/conv/winograd_wasm.rs`) and F(4×4, 3×3) (`cpu/conv/winograd4/wasm.rs`)
+    input/output transforms — all bit-exact with their scalar paths.
+  - LLVM also vectorises the portable GEMM micro-kernel to SIMD128 (which originally took folo-n from 1758 ms scalar to
+    491 ms at 640). A hand-written SIMD128 6×16 GEMM kernel (two 6×8 halves to fit 16 vector registers, multiply + add
+    since base SIMD128 has no FMA) measured the same as the vectorised portable one (about 20 GFLOP/s on one thread,
+    `cargo bench -p folo-core --bench gemm` built for `wasm32-wasip1` and run under Node's WASI), so it was not kept.
 - **Timing.** `std::time::Instant` panics on `wasm32-unknown-unknown`; folo-vision and folo-wasm use `web-time`
   there.
 - **Memory.** `ModelFile::from_bytes` parses in place (no mmap in the browser); the wasm heap holds the file once

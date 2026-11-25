@@ -220,11 +220,12 @@ Paths are under `crates/` unless they start with `web/`, `apps/` or `site/`. Eac
 ### folo-core
 The tensor engine: `Tensor` is a cheap `Arc` handle over shared storage plus a `Layout`; views do not copy; ops return
 `Result` with errors that name the op and both shapes. Kernels sit behind the `Backend` trait, and the CPU backend
-(BLIS-style GEMM, im2col-free convolution, Winograd F(2×2, 3×3) and F(4×4, 3×3) for 3×3 inference convs, int8 `q8/`
-inference convs, AVX2 elementwise / softmax / pooling / upsampling / reduction / transpose and F16C cast kernels, a
-buffer cache, a dedicated rayon pool)
-is built in. Autograd is define-by-run with `Grads` keyed by tensor id; `autocast` adds f16 mixed precision on
-backends that compute in f16.
+(BLIS-style GEMM with 4× K-unrolled `2×16`/`4×16`/`6×16` AVX2/FMA micro-kernels and fused epilogues, im2col-free
+convolution, AVX2 + Wasm SIMD128 Winograd F(2×2, 3×3) and F(4×4, 3×3) for 3×3 inference convs, int8 `q8/` inference
+convs, AVX2 and Wasm SIMD128 elementwise / depthwise plus AVX2 softmax / pooling / upsampling / reduction / transpose
+and F16C cast kernels, a two-level TLS + shared buffer cache, a dedicated rayon pool)
+is built in. Autograd is define-by-run with dense slot-indexed reverse traversal and `Grads` keyed by tensor id;
+`autocast` adds f16 mixed precision on backends that compute in f16.
 - **Backend integration contract, in short:** implement `Backend` and register it with `register_backend`; only
   `name` and the memory methods are required, every compute op and fused hook defaults to `NotSupported` so a
   backend grows op by op, and the CPU backend is the reference each GPU kernel is tested against. Full text:
@@ -233,19 +234,21 @@ backends that compute in f16.
 
 ### folo-gpu
 The wgpu backend ([GPU.md](GPU.md)).
-- One `GpuContext` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm), with a buffer
-  pool in size classes to avoid allocation churn and command batching, so a forward pass is a few submissions, not
-  hundreds. Forward plans (`folo_gpu::ForwardPlans`) record an inference call once (a forward, or the whole device
-  side of candidate-first prediction) and replay it as a flat list of dispatches over buffers the plan owns,
-  bit-identically, retired when a listed tensor changes; `Predictor` turns them on for its model.
+- One `GpuContext` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm), with an
+  `FxHash`-indexed size-class buffer pool to avoid allocation churn and command batching with compute-pass pipeline
+  deduplication, so a forward pass is a few submissions, not hundreds. Forward plans (`folo_gpu::ForwardPlans`) record
+  an inference call once (a forward, or the whole device side of candidate-first prediction) and replay it as a flat list
+  of dispatches over buffers the plan owns, bit-identically, retired when a listed tensor changes; `Predictor` turns
+  them on for its model.
 - Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads) and native 16×16×16 f16 tensor-core cooperative
-  matrices, convolution as implicit GEMM (no im2col buffer) with direct depthwise and candidate-first site kernels,
-  elementwise + fused activations, ceiling-division split-K reductions, online softmax (single global read for rows
-  `≤ 1024`, register-cached small-`D` columns; 1-barrier 32-wide subgroup reductions natively with a portable
-  shared-memory fallback), workgroup-parallel bitonic/selection top-k, value-only inference max pooling,
-  upsample, concat, fused detection/distillation losses, and grouped Muon / multi-tensor optimizer updates. Each kernel
-  is tested against the CPU reference. f16 storage and compute when the adapter supports `shader-f16`, with f32
-  accumulation.
+  matrices, convolution as implicit GEMM (no im2col buffer) with direct depthwise forward/backward and candidate-first
+  site kernels, pruned `vec4` contiguous/broadcast elementwise + fused activations, `vec4` strided copies / 32×32
+  tiled transpose / branchless `vec4` `f16 ↔ f32` cast, ceiling-division split-K reductions, online softmax (single
+  global read for rows `≤ 1024`, register-cached small-`D` columns; 1-barrier 32-wide subgroup reductions natively with
+  a portable shared-memory fallback), workgroup-parallel bitonic/selection top-k, value-only inference max pooling,
+  native f16 `avg_pool2d` and backward, `2×2` `vec4` upsample, concat, fused detection/distillation losses, and grouped
+  Muon / multi-tensor optimizer updates. Each kernel is tested against the CPU reference. f16 storage and compute when
+  the adapter supports `shader-f16`, with f32 accumulation.
 - `folo_gpu::GpuBackend` implements folo-core's `Backend`: `folo_gpu::init()` registers the default adapter as
   `Device::Gpu(0)`, after which `tensor.to_device(Device::Gpu(0))` keeps data and every op (forward and the gradient
   ops autograd records) on the GPU. It also implements the fused hooks: Conv + bias + activation in the conv epilogue,
