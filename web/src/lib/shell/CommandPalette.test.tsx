@@ -580,4 +580,47 @@ describe('CommandPalette: async hardening, deferred loops, clear button, and poi
     await vi.waitFor(() => expect(inFlight).toBe(0));
     expect(maxInFlight).toBe(6);
   });
+
+  it('restores opener focus on close and in-place commands, but does not steal focus from a dialog opened by a command', () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Trigger';
+    document.body.appendChild(opener);
+    opener.focus();
+    const otherDialog = document.createElement('dialog');
+    const otherBtn = document.createElement('button');
+    otherDialog.appendChild(otherBtn);
+    document.body.appendChild(otherDialog);
+    try {
+      const open = signal(true);
+      c = render(
+        () => (
+          <CommandPalette
+            bind:open={open}
+            onshortcuts={() => {
+              otherDialog.open = true;
+              otherBtn.focus();
+            }}
+          />
+        ),
+        target,
+      );
+      flushSync();
+      // Choosing an in-place toggle (Switch theme) closes the palette and restores focus to opener.
+      const themeOpt = document.getElementById('pi-theme')!;
+      themeOpt.click();
+      flushSync();
+      expect(document.activeElement).toBe(opener);
+
+      // Reopen and choose Keyboard shortcuts: focus stays in the newly opened dialog, never stolen back to opener.
+      open.set(true);
+      flushSync();
+      const shortcutsOpt = document.getElementById('pi-shortcuts')!;
+      shortcutsOpt.click();
+      flushSync();
+      expect(document.activeElement).toBe(otherBtn);
+    } finally {
+      otherDialog.remove();
+      opener.remove();
+    }
+  });
 });

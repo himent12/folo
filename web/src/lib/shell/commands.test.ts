@@ -78,5 +78,22 @@ describe('rank', () => {
     expect(marked('shapes s', 'shapes-small')).toEqual(['shapes', 's']);
     expect(marked('small', 'shapes-small')).toEqual(['small']);
     expect(marked('cloud', 'Open shapes in Playground')).toEqual([]);
+    expect(highlight('', 'shapes-small')).toEqual([{ s: 'shapes-small', m: false }]);
+    expect(highlight('shapes', '')).toEqual([]);
+  });
+
+  it('re-scores cleanly across repeated keystrokes and mutated items without stale cache hits', () => {
+    const dynamic: (Rankable & { id: string })[] = [
+      { id: 'a', group: 'Runs', label: 'alpha-baseline', entityId: 'run_1111', scoped: true },
+      { id: 'b', group: 'Runs', label: 'beta-baseline', entityId: 'run_2222', scoped: true },
+    ];
+    expect(rank(dynamic, 'alpha').map((x) => x.id)).toEqual(['a']);
+    expect(rank(dynamic, 'beta').map((x) => x.id)).toEqual(['b']);
+    // Mutating label/match invalidates the WeakMap entry automatically.
+    dynamic[0]!.label = 'gamma-tuned';
+    dynamic[0]!.match = ['special-alias'];
+    expect(rank(dynamic, 'alpha').map((x) => x.id)).toEqual([]);
+    expect(rank(dynamic, 'gamma').map((x) => x.id)).toEqual(['a']);
+    expect(rank(dynamic, 'special').map((x) => x.id)).toEqual(['a']);
   });
 });
