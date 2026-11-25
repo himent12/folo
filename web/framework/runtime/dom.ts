@@ -223,16 +223,28 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
   return [node];
 }
 
+type Focusable = Element & { focus?: (options?: FocusOptions) => void };
+
+/** The active element if it is a focusable descendant inside `parent`, computed once per reconcile before moving nodes. */
+function findFocused(parent: Node): Focusable | null {
+  if (typeof document === 'undefined') return null;
+  const active = document.activeElement;
+  return active != null && active !== document.body && active !== parent && parent.contains(active)
+    ? (active as Focusable)
+    : null;
+}
+
 /**
  * Moves a node that is already in `parent`, keeping focus where it was. With `insertBefore`, as Svelte moves rows:
  * Chrome's `moveBefore` would keep focus by itself, but a node moved with it stops restyling its descendants when
  * its own attributes change afterwards (a chip moved first, then pressed, kept its unpressed key).
  */
-function move(parent: Node, node: Node, ref: Node | null): void {
-  const active = typeof document !== 'undefined' ? document.activeElement : null;
-  const hadFocus = active !== null && active !== document.body && node.contains(active);
+function move(parent: Node, node: Node, ref: Node | null, active: Focusable | null): Focusable | null {
+  const hadFocus = active !== null && node.contains(active);
   parent.insertBefore(node, ref);
-  if (hadFocus && document.activeElement !== active) (active as HTMLElement).focus({ preventScroll: true });
+  if (!hadFocus) return active;
+  if (document.activeElement !== active) active.focus?.({ preventScroll: true });
+  return document.activeElement === active ? null : findFocused(parent);
 }
 
 /**
@@ -244,6 +256,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   let bStart = 0;
   let aEnd = a.length;
   let bEnd = b.length;
+  let active: Focusable | null | undefined;
   const after = a[aEnd - 1]!.nextSibling;
   for (;;) {
     while (aStart < aEnd && bStart < bEnd && a[aStart] === b[bStart]) {
@@ -256,9 +269,10 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     }
     // Two rows swapped end for end (udomdiff's swap): two moves, no map.
     if (aEnd - aStart > 1 && bEnd - bStart > 1 && a[aStart] === b[bEnd - 1] && a[aEnd - 1] === b[bStart]) {
+      if (active === undefined) active = findFocused(parent);
       const next = a[aEnd - 1]!.nextSibling;
-      move(parent, b[bStart]!, a[aStart]!.nextSibling);
-      move(parent, b[bEnd - 1]!, next);
+      active = move(parent, b[bStart]!, a[aStart]!.nextSibling, active);
+      active = move(parent, b[bEnd - 1]!, next, active);
       a[aEnd - 1] = b[bEnd - 1]!;
       a[aStart] = b[bStart]!;
       continue;
@@ -297,16 +311,23 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     appendNodes(parent, b, null);
     return;
   }
-  if (reused < aEnd - aStart) for (let i = aStart; i < aEnd; i++) if (!index.has(a[i]!)) removeNode(a[i]!);
+  if (reused < aEnd - aStart) {
+    for (let i = aStart; i < aEnd; i++) if (!index.has(a[i]!)) removeNode(a[i]!);
+    active = undefined;
+  }
   if (moved) {
     const seq = lis(sources);
     let k = seq.length - 1;
     for (let i = n - 1; i >= 0; i--) {
       const node = b[bStart + i]!;
       const ref = bStart + i + 1 < b.length ? b[bStart + i + 1]! : after;
-      if (sources[i] === -1) parent.insertBefore(node, ref);
-      else if (k < 0 || seq[k] !== i) move(parent, node, ref);
-      else k--;
+      if (sources[i] === -1) {
+        parent.insertBefore(node, ref);
+        active = undefined;
+      } else if (k < 0 || seq[k] !== i) {
+        if (active === undefined) active = findFocused(parent);
+        active = move(parent, node, ref, active);
+      } else k--;
     }
   } else if (reused !== n) {
     for (let i = n - 1; i >= 0; i--) {
