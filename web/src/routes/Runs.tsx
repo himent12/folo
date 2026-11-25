@@ -55,7 +55,7 @@ import DeleteRun from './run/DeleteRun';
 import StopRun from './run/StopRun';
 import { followNewDatasets } from './overview/newDatasets';
 import RunRows from './runs/RunRows';
-import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
+import { emptyFilterSummary, groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
 import FirstStepAction, { firstStepHref, firstStepLabel, noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
@@ -220,6 +220,29 @@ export default function Runs() {
   const picking = signal(false);
   const choosing = computed(() => picking.get() || selected.get().length > 0);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = filter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  function clearFilters() {
+    filter.set('all');
+    query.set('');
+    announce('Cleared run filters.');
+    queueMicrotask(() => {
+      const input = searchEl.peek();
+      if (input && !input.disabled) input.focus();
+    });
+  }
   function clearSelection() {
     picking.set(false);
     selected.set([]);
@@ -241,6 +264,16 @@ export default function Runs() {
       now.get(),
     ),
   );
+
+  const emptySummary = computed(() => emptyFilterSummary({ filter: filter.get(), q: query.get() }));
+  const filterStatus = computed(() => {
+    const all = runs.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shown.get().length;
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'run' : 'runs'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'run' : 'runs'}.`;
+  });
 
   /** Compare needs two runs: until then New run stays the page's one primary (DESIGN_DIRECTION 6). */
   const comparing = computed(() => selected.get().length >= 2);
@@ -484,9 +517,9 @@ export default function Runs() {
                     <EmptyState
                       icon={Search}
                       title="No runs match"
-                      description="Try another status filter or search term."
+                      description={emptySummary.get()}
                       actions={() => (
-                        <Button size="sm" onclick={() => (filter.set('all'), query.set(''))}>
+                        <Button size="sm" onclick={clearFilters}>
                           Clear filters
                         </Button>
                       )}
@@ -587,6 +620,12 @@ export default function Runs() {
             {shown.get().length} of {runs.data.length} {runs.data.length === 1 ? 'run' : 'runs'}
           </p>
         ) : null}
+        <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+          {filterStatus.get()}
+        </p>
+        <p class="sr-only" role="status" aria-live="polite" data-live-note>
+          {liveNote.get()}
+        </p>
       </Page>{' '}
       <Dialog
         open={!!removing.get()}

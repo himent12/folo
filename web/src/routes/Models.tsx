@@ -5,7 +5,7 @@ import Box from '$icons/box';
 import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, effect, For, MediaQuery, signal } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
@@ -27,6 +27,7 @@ import Input from '$lib/ui/Input';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
 import { modelsExport } from './models/export';
+import { emptyFilterSummary, leftForModel, readState, returnQuery, writeState, type ModelSortKey as Key } from './models/listState';
 import Versus from './models/Versus';
 import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
@@ -42,7 +43,6 @@ import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, t
 import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
-type Key = 'name' | 'arch' | 'classes' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
 interface Col {
   key: Key;
   label: string;
@@ -145,11 +145,37 @@ export default function Models() {
     { key: 'created', label: 'Created', num: true, get: (m) => finite(Date.parse(m.created)), w: '112px' },
   ]);
 
-  // Default: best first within each dataset.
-  const sortKey = signal<Key>('map50_95');
-  const sortDir = signal<'asc' | 'desc'>('desc');
-  const query = signal('');
-  const dsFilter = signal('all');
+  // Filter, sort and search live in the URL query (./models/listState), replaced as they change so typing never
+  // pollutes browser history while Back, reload and shared links restore the list as it was left.
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/models?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
+  const sortKey = signal<Key>(start.sort);
+  const sortDir = signal<'asc' | 'desc'>(start.dir);
+  const query = signal(start.q);
+  const dsFilter = signal(start.group);
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = norm(startQuery);
+  onCleanup(() => {
+    if (router.location.name === 'model') leftForModel(router.entry, written);
+  });
+  effect(() => {
+    const next = writeState({ group: dsFilter.get(), sort: sortKey.get(), dir: sortDir.get(), q: query.get() });
+    if (next === written || untrack(() => router.route.name) !== 'models') return;
+    written = next;
+    router.go(`/models${next ? `?${next}` : ''}`, { replace: true });
+  });
+  effect(() => {
+    const r = router.route;
+    if (r.name !== 'models' || norm(r.query) === written) return;
+    const st = readState(r.query);
+    written = norm(r.query);
+    dsFilter.set(st.group);
+    sortKey.set(st.sort);
+    sortDir.set(st.dir);
+    query.set(st.q);
+  });
 
   function sortBy(c: Col) {
     if (sortKey.peek() === c.key) sortDir.set(sortDir.peek() === 'asc' ? 'desc' : 'asc');
@@ -234,7 +260,20 @@ export default function Models() {
       ...[...keys.values()].sort(groupOrder).map((k) => ({ value: k.key, label: k.filter, meta: String(k.n) })),
     ];
   });
-  const pickOptions = computed(() => dsOptions.get().map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` })));
+  const pickOptions = computed(() => {
+    const opts = dsOptions.get().map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }));
+    const cur = dsFilter.get();
+    if (cur !== 'all' && !opts.some((o) => o.value === cur)) {
+      opts.push({ value: cur, label: 'Unknown group · 0' });
+    }
+    return opts;
+  });
+  const activeGroupLabel = computed(() => {
+    const cur = dsFilter.get();
+    if (cur === 'all') return null;
+    return dsOptions.get().find((o) => o.value === cur)?.label ?? null;
+  });
+  const emptySummary = computed(() => emptyFilterSummary({ group: dsFilter.get(), q: query.get() }, activeGroupLabel.get()));
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "7 models · 2 datasets ·
   // 52.4 MiB", whatever the filter; a narrowed list says what it shows under it.
   const facts = computed(() => {
@@ -505,7 +544,7 @@ export default function Models() {
                   <EmptyState
                     icon={Search}
                     title="No models match"
-                    description="Try another dataset or search term."
+                    description={emptySummary.get()}
                     actions={() => (
                       <Button size="sm" onclick={clearFilters}>
                         Clear filters

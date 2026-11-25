@@ -26,7 +26,22 @@ export interface ListState {
 }
 
 const SORTS: SortKey[] = ['created', 'map', 'progress', 'duration'];
+const FILTER_LABELS: Record<Exclude<Filter, 'all'>, string> = {
+  active: 'active',
+  completed: 'finished',
+  failed: 'failed',
+};
 export const DEFAULT_STATE: ListState = { filter: 'all', q: '', sort: 'created', dir: 'desc', sel: [] };
+
+/** Describes the active filters when 0 runs match, so empty-state recovery explains what narrowed the list. */
+export function emptyFilterSummary(s: Pick<ListState, 'filter' | 'q'>): string {
+  const term = s.q.trim();
+  const status = s.filter === 'all' ? null : FILTER_LABELS[s.filter];
+  if (status && term) return `No ${status} runs match "${term}".`;
+  if (status) return `No ${status} runs right now.`;
+  if (term) return `No runs match "${term}".`;
+  return 'Try another status filter or search term.';
+}
 
 /** The state a query holds; anything it does not name (or names wrongly, `?status=stopped`) is the default. */
 export function readState(query: URLSearchParams): ListState {

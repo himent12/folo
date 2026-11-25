@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Run } from '$lib/api/types';
-import { DEFAULT_STATE, leftForRun, readState, returnQuery, sortRuns, writeState } from './listState';
+import { DEFAULT_STATE, emptyFilterSummary, leftForRun, readState, returnQuery, sortRuns, writeState } from './listState';
 
 const run = (id: string, o: Partial<Run> = {}) =>
   ({ id, status: 'completed', created: '2026-11-11T10:00:00Z', started: null, finished: null, best: null, epoch: 0, epochs: 5, step: 0, steps_per_epoch: 0, ...o }) as Run;
@@ -16,6 +16,13 @@ describe('the Runs list state in the URL', () => {
 
   it('reads what it does not know as the default, and keeps at most four ticked runs', () => {
     expect(readState(new URLSearchParams('status=stopped&sort=name&dir=up&sel=a,b,c,d,e'))).toEqual({ ...DEFAULT_STATE, sel: ['a', 'b', 'c', 'd'] });
+  });
+
+  it('summarizes active status and search filters for empty-state recovery', () => {
+    expect(emptyFilterSummary({ filter: 'failed', q: 'bccd' })).toBe('No failed runs match "bccd".');
+    expect(emptyFilterSummary({ filter: 'active', q: '  ' })).toBe('No active runs right now.');
+    expect(emptyFilterSummary({ filter: 'all', q: 'bccd' })).toBe('No runs match "bccd".');
+    expect(emptyFilterSummary({ filter: 'all', q: '' })).toBe('Try another status filter or search term.');
   });
 });
 

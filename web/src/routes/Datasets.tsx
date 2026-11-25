@@ -33,10 +33,9 @@ import AddDatasetDialog from './datasets/AddDatasetDialog';
 import DatasetCard, { cardFacts, DatasetCardSkeleton } from './datasets/DatasetCard';
 import { imageCount } from './dataset/health';
 import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
+import { emptyFilterSummary, leftForDataset, readState, returnQuery, writeState, type Format, type SortKey } from './datasets/listState';
 import { datasetProblem, missingError, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
-type Format = 'all' | 'yolo' | 'coco';
-type SortKey = 'name' | 'images' | 'boxes' | 'classes';
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'name', label: 'Name' },
   { value: 'images', label: 'Most images' },
@@ -253,10 +252,60 @@ export default function Datasets() {
     untrack(() => router.go(`/datasets${rest.toString() ? `?${rest}` : ''}`, { replace: true }));
   });
 
-  const query = signal('');
+  // Filter, sort and search live in the URL query (./datasets/listState), replaced as they change so typing never
+  // pollutes browser history while Back, reload and shared links restore the list as it was left.
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/datasets?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
+  const query = signal(start.q);
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.
-  const format = signal<Format>('all');
-  const sort = signal<SortKey>('name');
+  const format = signal<Format>(start.format);
+  const sort = signal<SortKey>(start.sort);
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = norm(startQuery);
+  onCleanup(() => {
+    if (router.location.name === 'dataset') leftForDataset(router.entry, written);
+  });
+  effect(() => {
+    const next = writeState({ format: format.get(), sort: sort.get(), q: query.get() });
+    if (next === written || untrack(() => router.route.name) !== 'datasets') return;
+    written = next;
+    const full = writeState({ format: format.peek(), sort: sort.peek(), q: query.peek() }, untrack(() => router.route.query));
+    router.go(`/datasets${full ? `?${full}` : ''}`, { replace: true });
+  });
+  effect(() => {
+    const r = router.route;
+    if (r.name !== 'datasets' || norm(r.query) === written) return;
+    const st = readState(r.query);
+    written = norm(r.query);
+    format.set(st.format);
+    sort.set(st.sort);
+    query.set(st.q);
+  });
+
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = format.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  function clearFilters() {
+    query.set('');
+    format.set('all');
+    announce('Cleared dataset filters.');
+    queueMicrotask(() => searchEl.peek()?.focus());
+  }
+
   const formatCount = (f: Format) => (listed.data ?? []).filter((d) => f === 'all' || d.format === f).length;
   const shown = computed(() => {
     const q = query.get().trim().toLowerCase();
@@ -280,6 +329,16 @@ export default function Datasets() {
     const boxes = list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0);
     const images = list.reduce((a, d) => a + (d.problem ? 0 : imageCount(d)), 0);
     return [count(list.length, 'dataset'), count(images, 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean);
+  });
+
+  const emptySummary = computed(() => emptyFilterSummary({ format: format.get(), q: query.get() }));
+  const filterStatus = computed(() => {
+    const all = listed.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shown.get().length;
+    return n < all.length
+      ? `Showing ${n} of ${count(all.length, 'dataset')}.`
+      : `Showing all ${count(all.length, 'dataset')}.`;
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
@@ -333,7 +392,7 @@ export default function Datasets() {
             <Select id="datasets-sort" label="Sort datasets" bind:value={sort} disabled={!hasData.get()} options={SORT_OPTIONS} />
           </div>{' '}
           <div class="lt-search">
-            <Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" disabled={!hasData.get()} />
+            <Input bind:el={searchEl} bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" disabled={!hasData.get()} />
           </div>
         </div>{' '}
         {hasRows.get() ? (
@@ -450,15 +509,9 @@ export default function Datasets() {
                 <EmptyState
                   icon={Search}
                   title="No datasets match"
-                  description="Try another format or search term."
+                  description={emptySummary.get()}
                   actions={() => (
-                    <Button
-                      size="sm"
-                      onclick={() => {
-                        query.set('');
-                        format.set('all');
-                      }}
-                    >
+                    <Button size="sm" onclick={clearFilters}>
                       Clear filters
                     </Button>
                   )}
@@ -486,6 +539,12 @@ export default function Datasets() {
             </Meta>
           </p>
         ) : null}
+        <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+          {filterStatus.get()}
+        </p>
+        <p class="sr-only" role="status" aria-live="polite" data-live-note>
+          {liveNote.get()}
+        </p>
       </Page>{' '}
       <AddDatasetDialog bind:open={adding} bind:mode={addMode} known={listed.data} />
     </>
