@@ -23,8 +23,8 @@ mod uploads;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, OriginalUri};
+use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post, put};
 use serde::Deserialize;
 
@@ -143,20 +143,16 @@ where
         .map_err(|e| Error::internal(format!("task failed: {e}")))?
 }
 
-async fn api_not_found(req: Request) -> Error {
-    Error::new(
-        StatusCode::NOT_FOUND,
-        "route_not_found",
-        format!("no route for {} {}", req.method(), req.uri().path()),
-    )
-    .hint("see docs/API.md for the endpoints")
+async fn api_not_found(OriginalUri(uri): OriginalUri, method: Method) -> Error {
+    Error::new(StatusCode::NOT_FOUND, "route_not_found", format!("no route for {method} {}", uri.path()))
+        .hint("see docs/API.md for the endpoints")
 }
 
-async fn method_not_allowed(req: Request) -> Error {
+async fn method_not_allowed(OriginalUri(uri): OriginalUri, method: Method) -> Error {
     Error::new(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        format!("{} is not allowed on {}", req.method(), req.uri().path()),
+        format!("{method} is not allowed on {}", uri.path()),
     )
 }
 

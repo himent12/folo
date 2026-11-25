@@ -9,6 +9,7 @@ use folo_api::{
     LabelReviewResult, LabelSource, RemovedImage, ReviewLabelImages, SkippedImage, UpdateLabelImage,
     label_box_revision,
 };
+use rayon::prelude::*;
 
 use crate::error::Result;
 use crate::index::{read_image_with, write_atomic};
@@ -26,29 +27,42 @@ impl Labeler {
         let job = self.job(id)?;
         let dir = job.images_dir();
         std::fs::create_dir_all(&dir).map_err(|e| io_error("creating", &dir, e))?;
-        // Written and probed before the lock is taken; named for good under it.
-        let (mut staged, mut skipped) = (Vec::new(), Vec::new());
-        for upload in uploads {
-            let skip = |reason: &str| SkippedImage { file: upload.name.clone(), reason: reason.into() };
-            if !folo_data::is_image_path(Path::new(&upload.name)) {
-                skipped.push(skip("not a JPEG, PNG, BMP or WebP file"));
-                continue;
-            }
-            let tmp =
-                dir.join(format!(".upload-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-            let probed = std::fs::write(&tmp, &upload.bytes)
-                .map_err(|e| format!("could not be stored: {e}"))
-                .and_then(|()| folo_data::probe_size(&tmp).map_err(|_| "not a readable image".to_string()));
-            match probed {
-                Ok(size) => staged.push(Candidate {
-                    name: upload.name,
-                    source: Source::Upload { tmp, hash: fnv1a(&upload.bytes) },
-                    size,
-                }),
-                Err(reason) => {
-                    let _ = std::fs::remove_file(&tmp);
-                    skipped.push(skip(&reason));
+        // Written and probed in parallel before the lock is taken (rayon preserves input order); named for good
+        // under the lock.
+        let pid = std::process::id();
+        let results: Vec<std::result::Result<Candidate, SkippedImage>> = uploads
+            .into_par_iter()
+            .map(|upload| {
+                if !folo_data::is_image_path(Path::new(&upload.name)) {
+                    return Err(SkippedImage {
+                        file: upload.name,
+                        reason: "not a JPEG, PNG, BMP or WebP file".into(),
+                    });
                 }
+                let tmp = dir.join(format!(".upload-{pid}-{}", N.fetch_add(1, Ordering::Relaxed)));
+                let probed = std::fs::write(&tmp, &upload.bytes)
+                    .map_err(|e| format!("could not be stored: {e}"))
+                    .and_then(|()| {
+                        folo_data::probe_size(&tmp).map_err(|_| "not a readable image".to_string())
+                    });
+                match probed {
+                    Ok(size) => Ok(Candidate {
+                        name: upload.name,
+                        source: Source::Upload { tmp, hash: fnv1a(&upload.bytes) },
+                        size,
+                    }),
+                    Err(reason) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        Err(SkippedImage { file: upload.name, reason })
+                    }
+                }
+            })
+            .collect();
+        let (mut staged, mut skipped) = (Vec::new(), Vec::new());
+        for res in results {
+            match res {
+                Ok(c) => staged.push(c),
+                Err(s) => skipped.push(s),
             }
         }
         self.insert(&job, staged, skipped)
@@ -77,7 +91,7 @@ impl Labeler {
         };
         // The other files' extensions, a few, say why a folder without images added nothing.
         let mut others = std::collections::BTreeSet::new();
-        let files = walkdir::WalkDir::new(folder)
+        let walked: Vec<PathBuf> = walkdir::WalkDir::new(folder)
             .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
@@ -91,25 +105,10 @@ impl Labeler {
                 }
                 image
             })
-            .map(|e| e.into_path());
-        let (mut staged, mut skipped, mut over) = (Vec::new(), Vec::new(), 0usize);
-        let mut found = 0usize;
-        for path in files {
-            found += 1;
-            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            if known.contains(&path) {
-                skipped.push(SkippedImage { file: name, reason: "the job already has this file".into() });
-            } else if staged.len() >= room {
-                over += 1;
-            } else {
-                match folo_data::probe_size(&path) {
-                    Ok(size) => staged.push(Candidate { name, source: Source::Folder(path), size }),
-                    Err(_) => {
-                        skipped.push(SkippedImage { file: name, reason: "not a readable image".into() })
-                    }
-                }
-            }
-        }
+            .map(|e| e.into_path())
+            .collect();
+        let found = walked.len();
+        let (staged, mut skipped, over) = probe_folder_files(walked, &known, room);
         if over > 0 {
             skipped.push(SkippedImage {
                 file: folder.display().to_string(),
@@ -498,4 +497,122 @@ fn nothing_found(path: &Path, others: &std::collections::BTreeSet<String>) -> Sk
         reason.push_str(&format!(" (it has {} files)", kinds.join(", ")));
     }
     SkippedImage { file: path.display().to_string(), reason }
+}
+
+/// Probes unknown image paths in bounded parallel waves of size `room - staged.len()`, preserving exact input
+/// order for both `staged` and `skipped` (including interleaved `known` files) while never probing files past
+/// `room`.
+fn probe_folder_files(
+    walked: Vec<PathBuf>,
+    known: &HashSet<PathBuf>,
+    room: usize,
+) -> (Vec<Candidate>, Vec<SkippedImage>, usize) {
+    let mut staged = Vec::new();
+    let mut skipped = Vec::new();
+    let mut over = 0usize;
+    let mut iter = walked.into_iter().peekable();
+
+    while iter.peek().is_some() {
+        let need = room.saturating_sub(staged.len());
+        if need == 0 {
+            for path in iter {
+                if known.contains(&path) {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    skipped.push(SkippedImage { file: name, reason: "the job already has this file".into() });
+                } else {
+                    over += 1;
+                }
+            }
+            break;
+        }
+        // Collect a wave containing at most `need` unknown paths (preserving any interleaved known files).
+        enum Slot {
+            Known(String),
+            Probe(usize),
+        }
+        let mut wave_slots = Vec::new();
+        let mut to_probe: Vec<(PathBuf, String)> = Vec::with_capacity(need.min(1024));
+        while to_probe.len() < need {
+            let Some(path) = iter.next() else { break };
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if known.contains(&path) {
+                wave_slots.push(Slot::Known(name));
+            } else {
+                let idx = to_probe.len();
+                to_probe.push((path, name));
+                wave_slots.push(Slot::Probe(idx));
+            }
+        }
+        let probed: Vec<Option<(u32, u32)>> =
+            to_probe.par_iter().map(|(p, _)| folo_data::probe_size(p).ok()).collect();
+        let mut to_probe: Vec<Option<(PathBuf, String)>> = to_probe.into_iter().map(Some).collect();
+        for slot in wave_slots {
+            match slot {
+                Slot::Known(name) => {
+                    skipped.push(SkippedImage { file: name, reason: "the job already has this file".into() });
+                }
+                Slot::Probe(i) => {
+                    let (path, name) = to_probe[i].take().expect("unique probe index");
+                    match probed[i] {
+                        Some(size) => staged.push(Candidate { name, source: Source::Folder(path), size }),
+                        None => {
+                            skipped.push(SkippedImage { file: name, reason: "not a readable image".into() })
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (staged, skipped, over)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_test_support::TestDir;
+
+    /// Bounded parallel folder probing matches sequential order across interleaved known, corrupt, valid, and
+    /// over-limit images, and pulls in extra waves when corrupt files leave room open.
+    #[test]
+    fn parallel_folder_probe_preserves_order_and_room_semantics() {
+        let dir = TestDir::new("label-probe-order");
+        let img = folo_data::Image { width: 8, height: 6, data: vec![128u8; 8 * 6 * 3] };
+        let jpeg = folo_data::encode(&img, folo_data::ImageFormat::Jpeg(85)).unwrap();
+
+        let p = |name: &str| dir.join(name);
+        std::fs::write(p("01-known.jpg"), &jpeg).unwrap();
+        std::fs::write(p("02-bad.jpg"), b"not an image").unwrap();
+        std::fs::write(p("03-good1.jpg"), &jpeg).unwrap();
+        std::fs::write(p("04-known2.jpg"), &jpeg).unwrap();
+        std::fs::write(p("05-good2.jpg"), &jpeg).unwrap();
+        std::fs::write(p("06-over.jpg"), &jpeg).unwrap();
+        std::fs::write(p("07-known-after-full.jpg"), &jpeg).unwrap();
+
+        let walked = vec![
+            p("01-known.jpg"),
+            p("02-bad.jpg"),
+            p("03-good1.jpg"),
+            p("04-known2.jpg"),
+            p("05-good2.jpg"),
+            p("06-over.jpg"),
+            p("07-known-after-full.jpg"),
+        ];
+        let known = HashSet::from([p("01-known.jpg"), p("04-known2.jpg"), p("07-known-after-full.jpg")]);
+
+        let (staged, skipped, over) = probe_folder_files(walked, &known, 2);
+        assert_eq!(
+            staged.iter().map(|c| (c.name.as_str(), c.size)).collect::<Vec<_>>(),
+            [("03-good1.jpg", (8, 6)), ("05-good2.jpg", (8, 6))]
+        );
+        assert_eq!(
+            skipped.iter().map(|s| (s.file.as_str(), s.reason.as_str())).collect::<Vec<_>>(),
+            [
+                ("01-known.jpg", "the job already has this file"),
+                ("02-bad.jpg", "not a readable image"),
+                ("04-known2.jpg", "the job already has this file"),
+                ("07-known-after-full.jpg", "the job already has this file"),
+            ]
+        );
+        assert_eq!(over, 1);
+    }
 }

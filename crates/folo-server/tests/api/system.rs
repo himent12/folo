@@ -60,12 +60,14 @@ async fn system_endpoints() {
     assert!(s.cpu.threads >= 1);
     assert!(s.memory.total_bytes > 0);
     assert_eq!(s.gpus.len(), 1);
-    err(&app, get("/api/nope"), StatusCode::NOT_FOUND, "route_not_found").await;
-    err(
+    let e404 = err(&app, get("/api/nope"), StatusCode::NOT_FOUND, "route_not_found").await;
+    assert_eq!(e404.message, "no route for GET /api/nope");
+    let e405 = err(
         &app,
         Request::put("/api/health").body(Body::empty()).unwrap(),
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
     )
     .await;
+    assert_eq!(e405.message, "PUT is not allowed on /api/health");
 }
