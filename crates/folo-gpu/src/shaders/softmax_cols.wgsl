@@ -11,6 +11,7 @@ fn online_step(st: vec2<f32>, x: f32, neg_inf: f32) -> vec2<f32> {
     let m = st.x;
     var d = st.y;
     if (x > m) {
+        if (d == 0.0) { return vec2<f32>(x, 1.0); }
         return vec2<f32>(x, d * exp(m - x) + 1.0);
     }
     if (x == m) {

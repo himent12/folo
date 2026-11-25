@@ -13,6 +13,9 @@ fn online_step(st: vec2<f32>, x: f32, neg_inf: f32) -> vec2<f32> {
     let m = st.x;
     var d = st.y;
     if (x > m) {
+        // Empty (or all -inf) accumulator: initialize directly without `neg_inf - x` or `exp(-inf)`.
+        // `NaN == 0.0` is false, so an earlier NaN still propagates through the else path.
+        if (d == 0.0) { return vec2<f32>(x, 1.0); }
         return vec2<f32>(x, d * exp(m - x) + 1.0);
     }
     if (x == m) {
@@ -24,6 +27,8 @@ fn online_step(st: vec2<f32>, x: f32, neg_inf: f32) -> vec2<f32> {
 }
 
 fn online_merge(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    if (a.y == 0.0) { return b; }
+    if (b.y == 0.0) { return a; }
     if (a.x > b.x) {
         return vec2<f32>(a.x, a.y + b.y * exp(b.x - a.x));
     }
