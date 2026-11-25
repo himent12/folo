@@ -109,7 +109,7 @@ impl Interactivity {
                     }
                 }
 
-                let result = window.with_text_style(style.text_style().cloned(), |window| {
+                let result = window.with_text_style_ref(style.text_style(), |window| {
                     window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
                         let hitbox = self
                             .should_insert_hitbox(&style)
@@ -213,7 +213,7 @@ impl Interactivity {
                 window.with_element_opacity(style.opacity, |window| {
                     let paint = window.style_paint();
                     style.paint_before_children(bounds, &paint, &mut window.next_frame.scene);
-                    window.with_text_style(style.text_style().cloned(), |window| {
+                    window.with_text_style_ref(style.text_style(), |window| {
                         window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
                             if let Some(hitbox) = hitbox {
                                 if let Some(cursor) = style.mouse_cursor

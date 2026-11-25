@@ -52,9 +52,8 @@ use smallvec::SmallVec;
 use crate::raster;
 use crate::{
     AnyDrag, AnyView, App, AppCell, Bounds, DisplayId, Framebuffer, GlyphBlend, GroupHitboxes, Modifiers,
-    Pixels, PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer,
-    TextStyleRefinement, WindowBounds, WindowOptions, WindowParams, WindowTextSystem,
-    element::ElementIdStack, px,
+    Pixels, PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer, TextStyle,
+    WindowBounds, WindowOptions, WindowParams, WindowTextSystem, element::ElementIdStack, px,
 };
 
 /// The `on_window_should_close` handler.
@@ -92,8 +91,8 @@ pub struct Window {
     pub(crate) layout_engine: Option<TaffyLayoutEngine>,
     /// The element id path while walking the tree.
     pub(crate) element_id_stack: ElementIdStack,
-    /// Text style refinements pushed by `with_text_style`.
-    pub(crate) text_style_stack: Vec<TextStyleRefinement>,
+    /// Resolved text styles pushed by `with_text_style` (each already refined on its parent).
+    pub(crate) text_style_stack: SmallVec<[TextStyle; 8]>,
     /// Element offsets pushed by scroll containers and `prepaint_at`.
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     /// Content masks pushed by `with_content_mask` (each already intersected with its parent).
@@ -231,7 +230,7 @@ impl Window {
             scale_factor,
             layout_engine: Some(TaffyLayoutEngine::new()),
             element_id_stack: SmallVec::new(),
-            text_style_stack: Vec::new(),
+            text_style_stack: SmallVec::new(),
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,

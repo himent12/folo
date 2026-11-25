@@ -150,8 +150,8 @@ pub(crate) struct DeferredDraw {
     pub(crate) parent_node: crate::window::dispatch::DispatchNodeId,
     /// The element id path at the point it was deferred.
     pub(crate) element_id_stack: crate::element::ElementIdStack,
-    /// The text style stack at that point.
-    pub(crate) text_style_stack: Vec<crate::TextStyleRefinement>,
+    /// The resolved text style at the point it was deferred (`None` when the default applies).
+    pub(crate) text_style: Option<crate::TextStyle>,
     /// The element.
     pub(crate) element: Option<crate::AnyElement>,
     /// Its absolute offset.

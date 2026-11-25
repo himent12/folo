@@ -26,7 +26,11 @@ impl Window {
 
     /// The text style's line height at the current font size.
     pub fn line_height(&self) -> Pixels {
-        self.text_style().line_height_in_pixels(self.rem_size())
+        let rem_size = self.rem_size();
+        match self.text_style_ref() {
+            Some(style) => style.line_height_in_pixels(rem_size),
+            None => crate::phi().to_pixels(crate::rems(1.).into(), rem_size).round(),
+        }
     }
 
     /// The per-window text system (shaping, line layout cache).

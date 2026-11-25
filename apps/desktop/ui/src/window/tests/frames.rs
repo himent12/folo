@@ -249,3 +249,116 @@ fn a_system_appearance_change_reaches_the_window_handler() {
     assert_eq!(*seen.borrow(), [WindowAppearance::Light, WindowAppearance::Dark]);
     assert_eq!(app.platform().frame_appearances(), [Some(WindowAppearance::Dark)]);
 }
+
+#[test]
+fn text_style_stack_cascades_and_restores_across_nesting() {
+    use std::sync::Arc;
+
+    use crate::{FontFeatures, FontWeight, TextAlign, TextStyle, TextStyleRefinement};
+
+    assert!(
+        Arc::ptr_eq(&FontFeatures::default().0, &FontFeatures::default().0),
+        "default FontFeatures should share a static empty Arc"
+    );
+    assert!(
+        Arc::ptr_eq(&FontFeatures::disable_ligatures().0, &FontFeatures::disable_ligatures().0),
+        "disable_ligatures should share a static Arc"
+    );
+
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().into_any_element());
+    with_window(&mut app, window, |window, _| {
+        let default_style = TextStyle::default();
+        assert!(window.text_style_ref().is_none());
+        assert_eq!(window.text_style(), default_style);
+        assert_eq!(window.line_height(), default_style.line_height_in_pixels(window.rem_size()));
+
+        // `None` leaves the stack untouched.
+        window.with_text_style(None, |window| {
+            assert!(window.text_style_ref().is_none());
+        });
+
+        let outer = TextStyleRefinement {
+            color: Some(color(2)),
+            font_size: Some(px(20.).into()),
+            text_align: Some(TextAlign::Center),
+            ..Default::default()
+        };
+        let inner = TextStyleRefinement {
+            font_weight: Some(FontWeight::BOLD),
+            line_height: Some(px(30.).into()),
+            ..Default::default()
+        };
+        window.with_text_style_ref(Some(&outer), |window| {
+            let outer_resolved = window.text_style_ref().expect("outer pushed").clone();
+            assert_eq!(outer_resolved.color, color(2));
+            assert_eq!(outer_resolved.font_size, px(20.).into());
+            assert_eq!(outer_resolved.text_align, TextAlign::Center);
+            assert_eq!(outer_resolved.font_weight, FontWeight::NORMAL);
+            assert_eq!(window.line_height(), outer_resolved.line_height_in_pixels(window.rem_size()));
+
+            window.with_text_style(Some(inner.clone()), |window| {
+                let inner_resolved = window.text_style();
+                assert_eq!(inner_resolved.color, color(2));
+                assert_eq!(inner_resolved.font_size, px(20.).into());
+                assert_eq!(inner_resolved.text_align, TextAlign::Center);
+                assert_eq!(inner_resolved.font_weight, FontWeight::BOLD);
+                assert_eq!(window.line_height(), px(30.));
+            });
+
+            // Popping restores the outer resolved style.
+            assert_eq!(window.text_style(), outer_resolved);
+            assert_eq!(window.line_height(), outer_resolved.line_height_in_pixels(window.rem_size()));
+        });
+
+        // Deep nesting beyond SmallVec<[TextStyle; 8]> inline capacity cascades and unwinds cleanly.
+        fn nest(window: &mut Window, depth: usize) {
+            if depth == 0 {
+                assert_eq!(window.text_style().font_size, px(24.).into());
+                assert_eq!(window.text_style().color, color(9));
+                return;
+            }
+            let r = TextStyleRefinement {
+                color: (depth == 1).then_some(color(9)),
+                font_size: (depth == 10).then_some(px(24.).into()),
+                ..Default::default()
+            };
+            window.with_text_style_ref(Some(&r), |window| nest(window, depth - 1));
+        }
+        nest(window, 10);
+        assert!(window.text_style_ref().is_none());
+        assert_eq!(window.text_style(), default_style);
+    });
+}
+
+#[test]
+fn deferred_draw_inherits_enclosing_text_style_in_prepaint() {
+    use crate::{TextAlign, TextStyle, canvas, deferred};
+
+    let observed: Rc<RefCell<Option<TextStyle>>> = Rc::default();
+    let observed_in_canvas = observed.clone();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, move |_, _| {
+        let observed = observed_in_canvas.clone();
+        div()
+            .size_full()
+            .text_color(color(4))
+            .text_size(px(19.))
+            .text_right()
+            .child(deferred(
+                canvas(
+                    move |_bounds, window, _cx| {
+                        *observed.borrow_mut() = Some(window.text_style());
+                    },
+                    |_bounds, (), _window, _cx| {},
+                )
+                .size_full(),
+            ))
+            .into_any_element()
+    });
+    let seen = observed.borrow().clone().expect("deferred canvas prepainted");
+    assert_eq!(seen.color, color(4));
+    assert_eq!(seen.font_size, px(19.).into());
+    assert_eq!(seen.text_align, TextAlign::Right);
+    with_window(&mut app, window, |window, _| {
+        assert!(window.text_style_ref().is_none(), "stack cleared after deferred prepaint");
+    });
+}

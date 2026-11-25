@@ -48,8 +48,18 @@ impl Window {
     where
         F: FnOnce(&mut Self) -> R,
     {
+        self.with_text_style_ref(style.as_ref(), f)
+    }
+
+    /// Runs `f` with a borrowed `TextStyleRefinement` refining the current resolved text style.
+    pub(crate) fn with_text_style_ref<F, R>(&mut self, style: Option<&TextStyleRefinement>, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
         let Some(style) = style else { return f(self) };
-        self.text_style_stack.push(style);
+        let mut resolved = self.text_style();
+        resolved.refine(style);
+        self.text_style_stack.push(resolved);
         let result = f(self);
         self.text_style_stack.pop();
         result
@@ -57,11 +67,12 @@ impl Window {
 
     /// The text style in effect (the default refined by every pushed refinement).
     pub fn text_style(&self) -> TextStyle {
-        let mut style = TextStyle::default();
-        for refinement in &self.text_style_stack {
-            style.refine(refinement);
-        }
-        style
+        self.text_style_stack.last().cloned().unwrap_or_default()
+    }
+
+    /// Borrows the resolved text style on top of the stack, or `None` when the default applies.
+    pub(crate) fn text_style_ref(&self) -> Option<&TextStyle> {
+        self.text_style_stack.last()
     }
 
     /// Runs `f` with colours painted at `opacity` times the current element opacity. Inside an opacity group
@@ -259,7 +270,7 @@ impl Window {
             priority,
             parent_node,
             element_id_stack: self.element_id_stack.clone(),
-            text_style_stack: self.text_style_stack.clone(),
+            text_style: self.text_style_stack.last().cloned(),
             element: Some(element),
             absolute_offset,
         });
