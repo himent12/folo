@@ -440,6 +440,7 @@ impl GpuContext {
                 cache_dir: options.pipeline_cache_dir.clone(),
                 precompile: Default::default(),
                 plans: Mutex::default(),
+                anchors: Mutex::default(),
                 plan_epoch: AtomicU64::new(0),
                 plans_on: AtomicBool::new(
                     !std::env::var(super::ENV_NO_PLAN).is_ok_and(|v| v != "0" && !v.is_empty()),

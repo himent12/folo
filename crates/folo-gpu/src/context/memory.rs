@@ -1,7 +1,10 @@
 //! Device memory: allocation from the buffer pool, uploads (direct, staged on another thread, or written into
 //! reused staging buffers) and giving cached memory back to the driver.
 
-use super::{GpuContext, STAGING_KEEP, Staged};
+use std::hash::Hasher as _;
+
+use super::binds::Fx;
+use super::{AnchorEntry, GpuContext, MAX_ANCHOR_CACHE, STAGING_KEEP, Staged};
 use crate::error::{GpuError, Result};
 use crate::pool::{GpuBuffer, PoolStats, size_class};
 
@@ -51,6 +54,7 @@ impl GpuContext {
         self.drop_finished_precompiles();
         self.bump_plan_epoch();
         let planned = self.plans().clear();
+        let anchors = self.clear_anchors();
         let released = {
             // The batch lock first (the order `alloc` inside an encode takes them in), so nothing encodes between
             // the trim and the submission below.
@@ -75,10 +79,103 @@ impl GpuContext {
             b.chunks.clear();
             b.binds.clear();
             self.inner.pool.lock().expect("pool lock").take_retired();
-            released + staged + planned
+            released + staged + planned + anchors
         };
         self.wait_idle()?;
         Ok(released)
+    }
+
+    /// Drops every cached anchor table and returns the device bytes freed.
+    fn clear_anchors(&self) -> u64 {
+        let mut cache = self.inner.anchors.lock().unwrap_or_else(|p| p.into_inner());
+        cache.entries.drain(..).map(|e| e.buf.size()).sum()
+    }
+
+    /// Cached device-resident anchor tables currently held (for tests).
+    #[cfg(test)]
+    pub(crate) fn anchor_cache_len(&self) -> usize {
+        self.inner.anchors.lock().unwrap_or_else(|p| p.into_inner()).entries.len()
+    }
+
+    /// Returns a device buffer holding the packed `(x, y, stride)` anchor words (`3 * points.len()` `u32`s),
+    /// reusing a cached copy across training steps so static anchor tables are uploaded once per image size.
+    pub(crate) fn cached_anchors(&self, points: &[[f32; 2]], strides: &[f32]) -> Result<wgpu::Buffer> {
+        if points.len() != strides.len() {
+            return Err(GpuError::Shape(format!(
+                "cached_anchors: {} points vs {} strides",
+                points.len(),
+                strides.len()
+            )));
+        }
+        let n_words = points
+            .len()
+            .checked_mul(3)
+            .ok_or_else(|| GpuError::Limit("cached_anchors: anchor table size overflow".into()))?;
+        let bytes = (n_words as u64)
+            .checked_mul(4)
+            .ok_or_else(|| GpuError::Limit("cached_anchors: anchor table byte overflow".into()))?
+            .max(wgpu::COPY_BUFFER_ALIGNMENT);
+        if bytes > self.inner.caps.max_buffer_size {
+            return Err(GpuError::Limit(format!(
+                "anchor table of {bytes} bytes exceeds the device limit ({} bytes)",
+                self.inner.caps.max_buffer_size
+            )));
+        }
+        let mut hasher = Fx::default();
+        hasher.write_usize(points.len());
+        for (p, s) in points.iter().zip(strides) {
+            hasher.write_u32(p[0].to_bits());
+            hasher.write_u32(p[1].to_bits());
+            hasher.write_u32(s.to_bits());
+        }
+        let key = hasher.finish();
+        let matches = |words: &[u32]| {
+            words.len() == n_words
+                && points.iter().zip(strides).enumerate().all(|(i, (p, s))| {
+                    words[3 * i] == p[0].to_bits()
+                        && words[3 * i + 1] == p[1].to_bits()
+                        && words[3 * i + 2] == s.to_bits()
+                })
+        };
+        {
+            let mut cache = self.inner.anchors.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(pos) = cache.entries.iter().position(|e| e.key == key && matches(&e.words)) {
+                cache.tick += 1;
+                let tick = cache.tick;
+                cache.entries[pos].used = tick;
+                return Ok(cache.entries[pos].buf.clone());
+            }
+        }
+        let mut words = Vec::with_capacity(n_words);
+        for (p, s) in points.iter().zip(strides) {
+            words.push(p[0].to_bits());
+            words.push(p[1].to_bits());
+            words.push(s.to_bits());
+        }
+        let buf = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("folo-gpu cached anchors"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !words.is_empty() {
+            self.inner.queue.write_buffer(&buf, 0, bytemuck::cast_slice(&words));
+        }
+        let mut cache = self.inner.anchors.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(pos) = cache.entries.iter().position(|e| e.key == key && matches(&e.words)) {
+            cache.tick += 1;
+            let tick = cache.tick;
+            cache.entries[pos].used = tick;
+            return Ok(cache.entries[pos].buf.clone());
+        }
+        if cache.entries.len() >= MAX_ANCHOR_CACHE {
+            let lru = (0..cache.entries.len()).min_by_key(|&i| cache.entries[i].used).expect("not empty");
+            cache.entries.swap_remove(lru);
+        }
+        cache.tick += 1;
+        let tick = cache.tick;
+        cache.entries.push(AnchorEntry { key, words, buf: buf.clone(), used: tick });
+        Ok(buf)
     }
 
     /// Sets the pool's [`crate::pool::BufferPool::max_cached_bytes`] (for tests).

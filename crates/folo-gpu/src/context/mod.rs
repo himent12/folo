@@ -103,6 +103,8 @@ pub const DEFAULT_WAIT_SPIN: std::time::Duration = std::time::Duration::from_mil
 const FIRST_DISPATCHES_PER_BATCH: u32 = 16;
 /// Idle staging buffers [`GpuContext::upload_with`] keeps mapped for reuse.
 const STAGING_KEEP: usize = 4;
+/// Cached device-resident anchor tables kept for [`crate::detect`] (least recently used evicted first).
+const MAX_ANCHOR_CACHE: usize = 8;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
 
@@ -292,6 +294,8 @@ struct Inner {
     precompile: precompile::Precompile,
     /// Recorded forward plans ([`crate::ForwardPlans`]).
     plans: Mutex<plan::PlanStore>,
+    /// Device-resident anchor tables cached across training steps (`detect.rs`), cleared on `release_memory`.
+    anchors: Mutex<AnchorCache>,
     /// Bumped by changes that retire every plan (see `context/plan.rs`).
     plan_epoch: AtomicU64,
     /// Forward plans are on ([`GpuContext::set_forward_plans`]).
@@ -308,6 +312,21 @@ struct StagingFree {
     /// Bumped by [`GpuContext::release_memory`]: a buffer whose re-map was requested before the bump is dropped
     /// when the map completes instead of joining `bufs`.
     generation: u64,
+}
+
+/// One cached device-resident anchor table (`3 * A` packed `(x, y, stride)` words).
+struct AnchorEntry {
+    key: u64,
+    words: Vec<u32>,
+    buf: wgpu::Buffer,
+    used: u64,
+}
+
+/// Small LRU cache of static anchor tables on the device (cleared by [`GpuContext::release_memory`]).
+#[derive(Default)]
+struct AnchorCache {
+    entries: Vec<AnchorEntry>,
+    tick: u64,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
