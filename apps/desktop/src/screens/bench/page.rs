@@ -374,4 +374,144 @@ mod tests {
             assert_eq!(this.bench.leaderboard_sort, None);
         });
     }
+
+    #[test]
+    fn bench_list_filter_plan_severity_chips_and_entry_image_inspector() {
+        use crate::app::tests::{drive, open};
+        use crate::bench::BenchTab;
+        let (mut app, window) = open();
+        let send_enter = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<crate::app::FoloApp>| {
+            let keystroke = folo_ui::Keystroke::parse("enter").unwrap();
+            app.simulate_input(
+                w.into(),
+                folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent { keystroke, is_held: false }),
+            );
+            app.run_until_idle();
+            app.frame(w.into());
+        };
+        // 1. Benchmarks list toolbar, sort headers, search filter, and Reset.
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Benches, w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            for k in [
+                "bench-filter",
+                "bench-list-sort-images",
+                "bench-list-sort-entries",
+                "bench-list-sort-leader",
+            ] {
+                assert!(keys.iter().any(|x| x == k), "missing {k}: {keys:?}");
+            }
+        });
+        drive(&mut app, window, |this, _, cx| {
+            this.bench_search.update(cx, |i, cx| i.set_text("zz-no-match-zz", cx));
+            this.focus.borrow_mut().clear();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(keys.iter().any(|x| x == "bench-empty-reset"), "empty reset shown: {keys:?}");
+            this.focus_key("bench-empty-reset", w, cx);
+        });
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, cx| {
+            assert!(this.bench_search.read(cx).text().is_empty(), "empty reset cleared search");
+        });
+
+        // 2. Plan tab interactive severity preview chips.
+        let bid = "bn_5e12";
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Bench(bid.into()), w, cx);
+            this.ensure_bench(bid, cx);
+            this.bench.tab = BenchTab::Plan;
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        let (cond_id, sev) = drive(&mut app, window, |this, _, _| {
+            let b = this.bench.list.ready().unwrap().iter().find(|b| b.id == bid).unwrap();
+            let c = b.plan.conditions.first().expect("demo benchmark has conditions");
+            let s = *c.severities.first().unwrap();
+            (c.condition.clone(), s)
+        });
+        let sev_key = format!("plan-sev-{cond_id}-{sev}");
+        drive(&mut app, window, |this, w, cx| this.focus_key(&sev_key, w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(
+                this.bench.plan_preview_sev.get(&(bid.to_string(), cond_id.clone())),
+                Some(&sev),
+                "activating severity chip updates preview severity"
+            );
+        });
+
+        // 3. Entry image inline inspector: open, toggle Truth/Detections, step Next, and Close.
+        let (eid, first_img, second_img) = drive(&mut app, window, |this, w, cx| {
+            let eid = this
+                .bench
+                .entries
+                .get(bid)
+                .and_then(|l| l.ready())
+                .unwrap()
+                .iter()
+                .find(|e| e.status == crate::api::BenchEntryStatus::Done)
+                .unwrap()
+                .id
+                .clone();
+            this.navigate(Route::BenchEntry(bid.into(), eid.clone()), w, cx);
+            (eid, String::new(), String::new())
+        });
+        let _ = (first_img, second_img);
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        let (first_img, second_img) = drive(&mut app, window, |this, _, _| {
+            let page = this
+                .bench
+                .entry_images
+                .get(&(bid.into(), eid.clone()))
+                .and_then(|x| x.page.ready())
+                .expect("entry images loaded");
+            assert!(page.images.len() >= 2, "demo entry has at least 2 images");
+            (page.images[0].image.id.clone(), page.images[1].image.id.clone())
+        });
+        drive(&mut app, window, |this, w, cx| this.focus_key(&format!("eimg-open-{first_img}"), w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(
+                this.bench.selected_entry_image,
+                Some((bid.into(), eid.clone(), first_img.clone())),
+                "activating tile opens inline inspector"
+            );
+        });
+        drive(&mut app, window, |this, w, cx| this.focus_key("eimg-toggle-truth", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.bench.entry_inspect_hide_truth, "Truth chip toggles ground truth off");
+        });
+        drive(&mut app, window, |this, w, cx| this.focus_key("eimg-next", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(
+                this.bench.selected_entry_image,
+                Some((bid.into(), eid.clone(), second_img.clone())),
+                "Next steps to the second image"
+            );
+        });
+        drive(&mut app, window, |this, w, cx| this.focus_key("eimg-close", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.bench.selected_entry_image, None, "Close dismisses inline inspector");
+        });
+    }
 }

@@ -253,6 +253,11 @@ impl FoloApp {
         if !matches!(self.route, Route::Bench(_)) {
             self.bench.new_loop = None;
         }
+        if let Some((b, e, _)) = self.bench.selected_entry_image.as_ref()
+            && self.route != Route::BenchEntry(b.clone(), e.clone())
+        {
+            self.bench.selected_entry_image = None;
+        }
         if matches!(self.route, Route::Benches) {
             self.bench.list_stale = true;
         }

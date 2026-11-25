@@ -18,6 +18,6 @@ pub use images::preview_severity;
 pub use keys::BenchForm;
 pub use run::model_fits;
 pub use state::{
-    BENCH_SPLITS, BenchState, BenchTab, Contender, ENTRY_IMAGES_PAGE, EntryImages, ImageSort, LOOP_EPOCHS,
-    LOOP_GENERATIONS,
+    BENCH_SPLITS, BenchListFilter, BenchState, BenchTab, Contender, ENTRY_IMAGES_PAGE, EntryImages,
+    ImageSort, LOOP_EPOCHS, LOOP_GENERATIONS,
 };

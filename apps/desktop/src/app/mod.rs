@@ -473,6 +473,8 @@ pub struct FoloApp {
     pub models_arch_filter: Option<Arch>,
     /// Live search input on the Models list (matches name, class, dataset, source run, arch, or id).
     pub model_search: Entity<TextInput>,
+    /// Live search input on the Benchmarks list (matches name, source, leader, or id).
+    pub bench_search: Entity<TextInput>,
     /// Models whose full class list is expanded in the Details panel.
     pub model_classes_expanded: std::collections::HashSet<String>,
     pub export_open: bool,
@@ -732,6 +734,9 @@ impl FoloApp {
         let model_search = cx.new(|cx| TextInput::new("Filter by name, class or arch", cx));
         let model_search_sub =
             cx.subscribe(&model_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let bench_search = cx.new(|cx| TextInput::new("Search benchmarks", cx));
+        let bench_search_sub =
+            cx.subscribe(&bench_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let log_search = cx.new(|cx| TextInput::new("Search logs", cx));
         let log_search_sub = cx.subscribe(&log_search, |this, _, _: &crate::input::InputEvent, cx| {
             this.log_follow = true;
@@ -820,6 +825,7 @@ impl FoloApp {
             sample_epoch: None,
             models_arch_filter: None,
             model_search,
+            bench_search,
             model_classes_expanded: Default::default(),
             export_open: false,
             pr_hover: None,
@@ -937,7 +943,14 @@ impl FoloApp {
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),
-            _subs: vec![ds_search_sub, ds_img_search_sub, run_search_sub, model_search_sub, log_search_sub],
+            _subs: vec![
+                ds_search_sub,
+                ds_img_search_sub,
+                run_search_sub,
+                model_search_sub,
+                bench_search_sub,
+                log_search_sub,
+            ],
         };
         if !frozen {
             this.start_pump(cx);
