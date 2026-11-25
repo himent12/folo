@@ -360,4 +360,34 @@ fn vertically_culled_lines_skip_glyphs_but_preserve_decorations() {
     ul.paint_with(point(px(0.), px(100.)), px(20.), &window, mask_above, &mut rec).unwrap();
     assert!(rec.glyphs().is_empty());
     assert!(rec.0.iter().any(|op| matches!(op, Op::Underline { .. })));
+
+    // Wrapped line accumulation rounding: repeated `+= 20.3` from y = 50 across 2 wraps reaches
+    // 106.600006 (above mask top 106.6), whereas `20.3 * 2.0` would round down to 106.599998.
+    let two_wrap_text = "aa bb cc";
+    let two_wrap = window
+        .shape_text(two_wrap_text.into(), px(16.), &runs(&[two_wrap_text.len()]), Some(px(30.)), None)
+        .unwrap();
+    assert_eq!(two_wrap[0].wrap_boundaries().len(), 2);
+    let mut wrap_rec = Recorder::default();
+    let edge_mask = Bounds::new(point(px(0.), px(106.6)), size(px(200.), px(50.)));
+    two_wrap[0]
+        .paint_with(
+            point(px(0.), px(50.)),
+            px(20.3),
+            TextAlign::Left,
+            None,
+            &window,
+            edge_mask,
+            &mut wrap_rec,
+        )
+        .unwrap();
+    assert!(!wrap_rec.glyphs().is_empty(), "last wrapped row reaching past mask.top must still paint");
+
+    // Non-finite `line_height` (+Inf) on an unwrapped line must not cull via `Inf * 0.0 = NaN`.
+    let single = window.shape_line("abcd".into(), px(16.), &runs(&[4]), None);
+    let mut inf_rec = Recorder::default();
+    single
+        .paint_with(point(px(0.), px(10.)), px(f32::INFINITY), &window, everywhere(), &mut inf_rec)
+        .unwrap();
+    assert_eq!(inf_rec.glyphs().len(), 4);
 }

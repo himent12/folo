@@ -152,7 +152,7 @@ impl Style {
                 background: background.opacity(cx.opacity),
                 border_color: border_color.opacity(cx.opacity),
                 corner_radii: corner_radii.scale(sf),
-                border_widths: Edges::default(),
+                border_widths: Edges::default().scale(sf),
                 border_style: self.border_style,
             });
         }
@@ -167,9 +167,35 @@ impl Style {
         }
         let sf = cx.scale_factor;
         let scaled_bounds = bounds.scale(sf);
-        let scaled_mask = cx.content_mask.scale(sf).bounds;
-        if scaled_bounds.intersect(&scaled_mask).is_empty() {
-            return;
+        if sf > 0.0 && sf.is_finite() {
+            let mask = cx.content_mask.bounds;
+            let mask_left = mask.left().0 * sf;
+            let mask_right = mask.right().0 * sf;
+            let mask_top = mask.top().0 * sf;
+            let mask_bottom = mask.bottom().0 * sf;
+            if mask_left.is_finite()
+                && mask_right.is_finite()
+                && mask_top.is_finite()
+                && mask_bottom.is_finite()
+            {
+                // For any band, `clip = side.intersect(&mask).scale(sf)` satisfies
+                // `clip.left() >= mask.left() * sf` and `clip.top() >= mask.top() * sf` by
+                // IEEE-754 monotonicity, while `clip.right()` and `clip.bottom()` can exceed
+                // `mask.right() * sf` / `mask.bottom() * sf` by a few ULPs of `max(|left|, |right|)`.
+                // Pad the upper comparisons conservatively so this early reject never drops a
+                // band whose per-band intersection draws a pixel.
+                let x_mag = mask_left.abs().max(mask_right.abs());
+                let y_mag = mask_top.abs().max(mask_bottom.abs());
+                let right_guard = mask_right + x_mag * 1e-5 + 1e-3;
+                let bottom_guard = mask_bottom + y_mag * 1e-5 + 1e-3;
+                if scaled_bounds.right().0 <= mask_left
+                    || scaled_bounds.bottom().0 <= mask_top
+                    || scaled_bounds.left().0 > right_guard
+                    || scaled_bounds.top().0 > bottom_guard
+                {
+                    return;
+                }
+            }
         }
 
         let corner_radii = self.corner_radii_for(&bounds, cx.rem_size);

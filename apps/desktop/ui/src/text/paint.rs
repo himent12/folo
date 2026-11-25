@@ -67,15 +67,31 @@ pub fn paint_line(
     let mut last_font_id: Option<FontId> = None;
     let has_line_decorations =
         decoration_runs.iter().any(|run| run.underline.is_some() || run.strikethrough.is_some());
-    if !has_line_decorations && line_height >= Pixels::ZERO {
+    if !has_line_decorations
+        && line_height.0.is_finite()
+        && line_height.0 >= 0.0
+        && origin.y.0.is_finite()
+        && content_mask.origin.y.0.is_finite()
+        && content_mask.size.height.0.is_finite()
+    {
         let first_font = layout.runs[0].font_id;
         if layout.runs.iter().all(|run| run.font_id == first_font) {
             max_glyph_size = text_system.bounding_box(first_font, layout.font_size).size;
             last_font_id = Some(first_font);
-            let min_y = origin.y;
-            let max_bottom = origin.y + line_height * (wrap_boundaries.len() as f32) + max_glyph_size.height;
-            if !(min_y < content_mask.bottom() && max_bottom > content_mask.top()) {
-                return Ok(());
+            if max_glyph_size.height.0.is_finite() {
+                // Accumulate `line_height` with the exact same rounded additions as the glyph loop
+                // so wrapped lines near the top of `content_mask` cannot drift below the loop's y.
+                let mut last_line_y = origin.y;
+                for _ in wrap_boundaries {
+                    last_line_y += line_height;
+                }
+                let min_y = origin.y;
+                let max_bottom = last_line_y + max_glyph_size.height;
+                if max_bottom.0.is_finite()
+                    && !(min_y < content_mask.bottom() && max_bottom > content_mask.top())
+                {
+                    return Ok(());
+                }
             }
         }
     }

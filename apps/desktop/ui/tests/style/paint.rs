@@ -199,3 +199,14 @@ fn offscreen_element_keeps_offset_shadow_but_culls_background_and_borders() {
     assert_eq!(scene.len(), 1, "only the shadow reaches into the mask");
     assert!(matches!(scene.primitives[0], Primitive::Shadow(_)));
 }
+
+#[test]
+fn fractional_scale_border_band_touching_mask_is_not_dropped() {
+    // At scale 1.25, scaling the mask before intersecting rounds its right edge down to the
+    // element's left edge, while the per-band logical intersection stays non-empty after scaling.
+    let style = Style::default().refined(StyleRefinement::default().border_1().border_color(blue()));
+    let mut clipped = cx(1.25, 1.);
+    clipped.content_mask = ContentMask { bounds: lbounds(0.23456796, 0., 0.9669945, 20.) };
+    let scene = paint(&style, lbounds(1.2015624, 0., 20., 20.), &clipped);
+    assert!(!scene.is_empty(), "per-band scaled intersection must not be culled early");
+}

@@ -764,3 +764,24 @@ fn clipped_offscreen_hitboxes_are_dropped_while_edge_touching_remains_hittable()
     mouse_up(&mut app, window, 50., 15.);
     assert_eq!(*clicks.borrow(), ["edge"], "edge-touching zero-width intersection remains clickable");
 }
+
+#[test]
+fn signed_zero_hitbox_intersection_remains_hittable() {
+    let mask_bounds = Bounds::new(point(px(-0.0), px(0.0)), size(px(-0.0), px(20.0)));
+    let box_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(10.0), px(20.0)));
+    let clipped = box_bounds.intersect(&mask_bounds);
+    assert!(clipped.size.width.0.is_sign_negative() && clipped.size.width.0 == 0.0);
+
+    let recorded = std::rc::Rc::new(std::cell::Cell::new(None));
+    let recorded_in_view = recorded.clone();
+    let (mut app, window) = open(size(px(100.), px(100.)), 1.0, move |w, _| {
+        let id = w.with_content_mask(Some(crate::ContentMask { bounds: mask_bounds }), |w| {
+            w.insert_hitbox(box_bounds, crate::HitboxBehavior::Normal).id
+        });
+        recorded_in_view.set(Some(id));
+        div().into_any_element()
+    });
+    let expected = recorded.get().unwrap();
+    let hits = with_window(&mut app, window, |w, _| w.rendered_frame.hit_test(point(px(0.0), px(5.0))).ids);
+    assert!(hits.contains(&expected), "signed-zero width intersection must remain hittable at x = 0");
+}
