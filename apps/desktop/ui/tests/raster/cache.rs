@@ -170,33 +170,38 @@ fn mask_cache_throttles_long_idle_sweeps_and_reclaims_under_budget() {
     assert!(cache.is_empty(), "idle entry must be evicted once the periodic sweep runs");
 
     // 2. Under budget pressure on a non-sweep frame, expired idle entries are reclaimed immediately.
-    let mut tight: MaskCache<u32> = MaskCache::with_budget(200, 64);
-    tight
-        .get_or_insert_with(&1, || {
-            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(8, 8), vec![1u8; 64])))))
-        })
-        .unwrap();
+    //    Two 132-byte expired entries (64 px + 4 key + 64 overhead) + one 168-byte fresh entry
+    //    exceed the 310-byte budget (432 > 310). Ordinary LRU eviction alone would drop only one
+    //    expired entry (leaving 300 <= 310 and len == 2); asserting len == 1 proves the idle sweep
+    //    dropped both expired entries.
+    let mut tight: MaskCache<u32> = MaskCache::with_budget(310, 64);
+    for key in [1u32, 2u32] {
+        tight
+            .get_or_insert_with(&key, || {
+                Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(8, 8), vec![key as u8; 64])))))
+            })
+            .unwrap();
+    }
     // Advance to frame 66 (past max_idle=64, not a multiple of 64).
     for _ in 0..66 {
         tight.end_frame();
     }
-    assert_eq!(tight.len(), 1);
+    assert_eq!(tight.len(), 2);
     tight
-        .get_or_insert_with(&2, || {
-            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(10, 10), vec![2u8; 100])))))
+        .get_or_insert_with(&3, || {
+            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(10, 10), vec![3u8; 100])))))
         })
         .unwrap();
-    // Total bytes now exceed the 200-byte budget; end_frame on frame 66 drops idle key 1 immediately.
     tight.end_frame();
-    assert_eq!(tight.len(), 1);
+    assert_eq!(tight.len(), 1, "over-budget idle sweep must drop both expired entries");
     let mut rebuilt = false;
     tight
-        .get_or_insert_with(&2, || {
+        .get_or_insert_with(&3, || {
             rebuilt = true;
             Ok(None)
         })
         .unwrap();
-    assert!(!rebuilt, "fresh key 2 should remain cached after idle key 1 is reclaimed");
+    assert!(!rebuilt, "fresh key 3 should remain cached after expired entries are reclaimed");
 }
 
 #[test]

@@ -21,7 +21,7 @@ const LOW_WATER: usize = BUDGET / 4 * 3;
 /// A path whose entry alone is bigger is never kept.
 const MAX_ENTRY: usize = BUDGET / 8;
 /// Maximum scratch key capacity kept across `PathBuilder::build` calls on a thread (64 KB).
-const MAX_SCRATCH_WORDS: usize = 16_384;
+pub(crate) const MAX_SCRATCH_WORDS: usize = 16_384;
 
 /// One slot of the table: the hash and the entry, and the slot's control byte.
 const SLOT: usize = std::mem::size_of::<(u64, Entry)>() + 1;
@@ -274,6 +274,7 @@ pub(crate) fn cached<E>(
         return build();
     };
     let mut guard = ScratchGuard(scratch);
+    guard.0.clear();
     write_key(&mut guard.0);
     if let Some(hit) = CACHE.try_with(|c| c.borrow_mut().cache.get(&guard.0)).ok().flatten() {
         return Ok(hit);
@@ -730,5 +731,25 @@ mod tests {
         let _ = chart_line(6000, 0., 1.5, false).build().unwrap();
         let cap = CACHE.with_borrow(|c| c.key_scratch.capacity());
         assert_eq!(cap, 0, "oversized scratch buffer should not stay resident in TLS (cap {cap})");
+    }
+
+    #[test]
+    fn alternating_large_keys_within_cap_allocate_zero_bytes() {
+        clear();
+        // ~10,000 words and ~12,000 words: both fit under `MAX_SCRATCH_WORDS` (16_384), so
+        // growing from the smaller to the larger must not overshoot the cap and discard scratch.
+        let small = chart_line(3_330, 0., 1.5, false);
+        let large = chart_line(4_000, 0., 1.5, false);
+        let _ = small.clone().build().unwrap();
+        let _ = large.clone().build().unwrap();
+        let cap = CACHE.with_borrow(|c| c.key_scratch.capacity());
+        assert!(cap > 0 && cap <= MAX_SCRATCH_WORDS, "cap {cap} should stay within MAX_SCRATCH_WORDS");
+
+        let before = counting::live();
+        counting::reset_peak();
+        let _ = small.build().unwrap();
+        let _ = large.build().unwrap();
+        let peak = (counting::peak() - before) as usize;
+        assert_eq!(peak, 0, "alternating hits under MAX_SCRATCH_WORDS must allocate nothing (peak {peak})");
     }
 }

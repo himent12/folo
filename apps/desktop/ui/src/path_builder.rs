@@ -342,7 +342,15 @@ impl PathBuilder {
             .sum();
         let len = style + transform + dashes + subpaths;
         k.clear();
-        k.reserve(len);
+        if k.capacity() < len {
+            if len <= crate::path_cache::MAX_SCRATCH_WORDS
+                && k.capacity().saturating_mul(2) > crate::path_cache::MAX_SCRATCH_WORDS
+            {
+                k.reserve_exact(len);
+            } else {
+                k.reserve(len);
+            }
+        }
         match self.style {
             PathStyle::Stroke(o) => k.extend([
                 0,
