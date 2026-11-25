@@ -332,7 +332,7 @@ fn malformed_mirror_url_fails_immediately_without_retries() {
     let root = TestDir::new("weights-bad-url");
     let cache = root.join("cache");
 
-    // Human mode prints retry notices to stderr; a malformed URL must emit none.
+    // In human mode, `Out::human` prints progress/retry notices to stdout (and errors to stderr).
     let out = folo_cmd()
         .args(["weights", "pull", NAME])
         .env("FOLO_WEIGHTS_DIR", &cache)
@@ -341,9 +341,18 @@ fn malformed_mirror_url_fails_immediately_without_retries() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!stderr.contains("retrying"), "unexpected retry notice: {stderr}");
+    assert!(stdout.contains("downloading"), "expected download banner on stdout: {stdout}");
+    assert!(!stdout.contains("retrying"), "unexpected retry notice on stdout: {stdout}");
+    assert!(!stderr.contains("retrying"), "unexpected retry notice on stderr: {stderr}");
     assert_eq!(cached(&cache), Vec::<String>::new());
+
+    // In `--json` mode, `Out::human` routes notices to stderr and the error record to stdout.
+    let (code, lines, json_stderr) = pull(&cache, "http://127.0.0.1/bad mirror", NO_GH, &[]);
+    assert!(!json_stderr.contains("retrying"), "unexpected retry notice in --json mode: {json_stderr}");
+    let e = failed(&cache, (code, lines, json_stderr));
+    assert_eq!(e["code"], "download_failed", "{e}");
 }
 
 #[test]

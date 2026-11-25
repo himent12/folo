@@ -125,15 +125,34 @@ fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500..=599)
 }
 
-fn is_retryable_transport(err: &ureq::Error) -> bool {
+fn is_retryable_io(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::*;
     matches!(
-        err,
-        ureq::Error::Io(_)
-            | ureq::Error::Timeout(_)
-            | ureq::Error::HostNotFound
-            | ureq::Error::ConnectionFailed
-            | ureq::Error::BodyStalled
+        kind,
+        ConnectionReset
+            | ConnectionAborted
+            | ConnectionRefused
+            | NotConnected
+            | BrokenPipe
+            | TimedOut
+            | Interrupted
+            | UnexpectedEof
+            | WouldBlock
+            | HostUnreachable
+            | NetworkUnreachable
+            | NetworkDown
     )
+}
+
+fn is_retryable_transport(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Io(io) => is_retryable_io(io.kind()),
+        ureq::Error::Timeout(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::BodyStalled => true,
+        _ => false,
+    }
 }
 
 fn parse_retry_after(raw: Option<&str>, now: SystemTime) -> Option<Duration> {
@@ -141,29 +160,39 @@ fn parse_retry_after(raw: Option<&str>, now: SystemTime) -> Option<Duration> {
     if let Ok(secs) = raw.parse::<u64>() {
         return Some(Duration::from_secs(secs));
     }
-    let at = parse_http_date(raw)?;
+    let at = parse_http_date(raw, now)?;
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
+fn parse_fixed_digits(s: &str, len: usize) -> Option<i64> {
+    if s.len() == len && s.bytes().all(|b| b.is_ascii_digit()) { s.parse().ok() } else { None }
+}
+
 /// Parses RFC 9110 §5.6.7 HTTP-date formats (IMF-fixdate, RFC 850, and asctime) as UTC `SystemTime`.
-fn parse_http_date(raw: &str) -> Option<SystemTime> {
+fn parse_http_date(raw: &str, now: SystemTime) -> Option<SystemTime> {
     let (day, month, year, hms) = if let Some((_, rest)) = raw.split_once(", ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
         match parts.as_slice() {
             // IMF-fixdate: "06 Nov 1994 08:49:37 GMT"
             [d, mon, y, hms, "GMT"] => {
-                (d.parse::<u32>().ok()?, parse_month(mon)?, y.parse::<i64>().ok()?, *hms)
+                (d.parse::<u32>().ok()?, parse_month(mon)?, parse_fixed_digits(y, 4)?, *hms)
             }
-            // RFC 850: "06-Nov-94 08:49:37 GMT"
+            // RFC 850: "06-Nov-94 08:49:37 GMT" (two-digit year resolved via RFC 9110 §5.6.7 50-year rule)
             [dmy, hms, "GMT"] => {
                 let mut segs = dmy.split('-');
                 let d = segs.next()?.parse::<u32>().ok()?;
                 let mon = parse_month(segs.next()?)?;
-                let y2 = segs.next()?.parse::<i64>().ok()?;
-                if segs.next().is_some() || !(0..=99).contains(&y2) {
+                let y2 = parse_fixed_digits(segs.next()?, 2)?;
+                if segs.next().is_some() {
                     return None;
                 }
-                let y = if y2 >= 70 { 1900 + y2 } else { 2000 + y2 };
+                let cur_year = civil_year_from_time(now);
+                let mut y = (cur_year / 100) * 100 + y2;
+                if y > cur_year + 50 {
+                    y -= 100;
+                } else if y <= cur_year - 50 {
+                    y += 100;
+                }
                 (d, mon, y, *hms)
             }
             _ => return None,
@@ -172,7 +201,9 @@ fn parse_http_date(raw: &str) -> Option<SystemTime> {
         // asctime: "Sun Nov  6 08:49:37 1994"
         let parts: Vec<&str> = raw.split_whitespace().collect();
         match parts.as_slice() {
-            [_, mon, d, hms, y] => (d.parse::<u32>().ok()?, parse_month(mon)?, y.parse::<i64>().ok()?, *hms),
+            [_, mon, d, hms, y] => {
+                (d.parse::<u32>().ok()?, parse_month(mon)?, parse_fixed_digits(y, 4)?, *hms)
+            }
             _ => return None,
         }
     };
@@ -195,6 +226,20 @@ fn parse_http_date(raw: &str) -> Option<SystemTime> {
         .checked_mul(86_400)?
         .checked_add(u64::from(hour) * 3600 + u64::from(min) * 60 + u64::from(sec.min(59)))?;
     UNIX_EPOCH.checked_add(Duration::from_secs(total_secs))
+}
+
+/// UTC calendar year of `time` (Howard Hinnant's civil-from-days algorithm).
+fn civil_year_from_time(time: SystemTime) -> i64 {
+    let days = time.duration_since(UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    y + i64::from(m <= 2)
 }
 
 fn parse_month(s: &str) -> Option<u32> {
@@ -599,6 +644,15 @@ mod tests {
             std::io::ErrorKind::UnexpectedEof,
             "eof"
         ))));
+        assert!(is_retryable_transport(&ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset"
+        ))));
+        // Rustls surfaces certificate verification errors as io::ErrorKind::InvalidData.
+        assert!(!is_retryable_transport(&ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid peer certificate"
+        ))));
         assert!(!is_retryable_transport(&ureq::Error::BadUri("bad".into())));
         assert!(!is_retryable_transport(&ureq::Error::TooManyRedirects));
         assert!(!is_retryable_transport(&ureq::Error::InvalidProxyUrl));
@@ -640,9 +694,22 @@ mod tests {
         // Past dates clamp to zero rather than failing.
         let later_ts = UNIX_EPOCH + Duration::from_secs(784_111_800);
         assert_eq!(parse_retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), later_ts), Some(Duration::ZERO));
-        // Invalid values return None.
+        // RFC 850 50-year rule: in 2040, "94" resolves to 1994 (past -> 0s), while "41" resolves to 2041.
+        let year_2040 = UNIX_EPOCH + Duration::from_secs(days_from_civil(2040, 1, 1) as u64 * 86_400);
+        assert_eq!(
+            parse_retry_after(Some("Sunday, 06-Nov-94 08:49:37 GMT"), year_2040),
+            Some(Duration::ZERO)
+        );
+        assert!(
+            parse_retry_after(Some("Tuesday, 01-Jan-41 00:00:00 GMT"), year_2040)
+                .is_some_and(|d| d > Duration::from_secs(86_400 * 300))
+        );
+        // Invalid or out-of-range values return None without panicking.
         assert_eq!(parse_retry_after(Some("not-a-date"), base_ts), None);
         assert_eq!(parse_retry_after(Some("Sun, 31 Feb 1994 08:49:37 GMT"), base_ts), None);
+        assert_eq!(parse_retry_after(Some("Sun, 06 Nov 9223372036854775807 08:49:37 GMT"), base_ts), None);
+        assert_eq!(parse_retry_after(Some("Sun, 06 Nov -1994 08:49:37 GMT"), base_ts), None);
+        assert_eq!(parse_retry_after(Some("Sun Nov  6 08:49:37 999999999999999999"), base_ts), None);
         assert_eq!(parse_retry_after(Some("-1"), base_ts), None);
         assert_eq!(parse_retry_after(None, base_ts), None);
     }
