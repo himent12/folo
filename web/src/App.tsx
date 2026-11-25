@@ -11,7 +11,7 @@ import { applyTheme } from '$lib/design/applyTheme';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { router, type Route } from '$lib/router';
-import CommandPalette from '$lib/shell/CommandPalette';
+import type { CommandPaletteProps } from '$lib/shell/CommandPalette';
 import ConnectionStatus from '$lib/shell/ConnectionStatus';
 import { installEntryMemory } from '$lib/shell/entryMemory';
 import GChordIndicator from '$lib/shell/GChordIndicator';
@@ -30,6 +30,7 @@ import NotFound from './routes/NotFound';
 import ScreenError, { ScreenCrash } from './ScreenError';
 
 type Screen = { path: string | null; comp: Component<Record<string, never>> | null };
+type CommandPaletteModule = { default: Component<CommandPaletteProps> };
 type ShortcutsDialogModule = { default: Component<{ open?: boolean }> };
 
 const NONE: Screen = { path: null, comp: null };
@@ -39,6 +40,8 @@ const IDLE_PRELOAD_MS = 1000;
 export interface AppProps {
   /** The screens' chunks (tests pass their own); default: the app's (./routes.ts). */
   screens?: Screens;
+  /** Lazy loader for CommandPalette (tests may override); default: dynamic import. */
+  loadPalette?: () => Promise<CommandPaletteModule>;
   /** Lazy loader for ShortcutsDialog (tests may override); default: dynamic import. */
   loadShortcuts?: () => Promise<ShortcutsDialogModule>;
 }
@@ -46,12 +49,25 @@ export interface AppProps {
 export default function App(props: AppProps) {
   const screens = untrack(() => props.screens) ?? appScreens;
   const paletteOpen = signal(false);
+  const paletteComp = signal<Component<CommandPaletteProps> | null>(null);
   const shortcutsOpen = signal(false);
   const shortcutsComp = signal<Component<{ open?: boolean }> | null>(null);
+  /** Keystrokes typed after Ctrl/Cmd+K while the CommandPalette chunk is still loading. */
+  let pendingQuery = '';
+  const takePendingQuery = () => {
+    const q = pendingQuery;
+    pendingQuery = '';
+    return q;
+  };
   let mounted = true;
   onCleanup(() => {
     mounted = false;
   });
+
+  const openPalette = () => {
+    if (shortcutsOpen.peek() && !shortcutsComp.peek()) shortcutsOpen.set(false);
+    paletteOpen.set(true);
+  };
 
   // The theme (design/THEMES.md): `data-theme` the mode, `data-theme-id` the built-in palette's block in tokens.css,
   // and a custom theme's own colours as inline properties over it, the last theme's cleared first.
@@ -64,13 +80,25 @@ export default function App(props: AppProps) {
       palette: () => {
         const opening = !paletteOpen.peek();
         if (opening && shortcutsOpen.peek() && !shortcutsComp.peek()) shortcutsOpen.set(false);
+        if (!opening) pendingQuery = '';
         paletteOpen.set(opening);
       },
-      shortcuts: () => shortcutsOpen.set(true),
+      shortcuts: () => {
+        if (paletteOpen.peek() && !paletteComp.peek()) {
+          pendingQuery = '';
+          paletteOpen.set(false);
+        }
+        shortcutsOpen.set(true);
+      },
       // Only preload on a real G-chord (guarded in installShortcuts against typing, modifiers, open dialogs, and singleKeys off).
       gChord: () => screens.preloadAll(),
-      // Escape cancels a pending lazy ShortcutsDialog load instead of navigating back on a detail page.
+      // Escape cancels a pending lazy dialog load instead of navigating back on a detail page.
       escape: () => {
+        if (paletteOpen.peek() && !paletteComp.peek()) {
+          pendingQuery = '';
+          paletteOpen.set(false);
+          return true;
+        }
         if (shortcutsOpen.peek() && !shortcutsComp.peek()) {
           shortcutsOpen.set(false);
           return true;
@@ -90,6 +118,62 @@ export default function App(props: AppProps) {
       document.removeEventListener('focusin', intent);
       document.removeEventListener('touchstart', intent);
     };
+  });
+
+  // Lazy-load CommandPalette (and its search/command registry) on first open so it stays out of the initial entry bundle.
+  let paletteLoad: Promise<void> | null = null;
+  effect(() => {
+    if (!paletteOpen.get()) {
+      pendingQuery = '';
+      return;
+    }
+    if (paletteComp.peek() || paletteLoad) return;
+    const load = untrack(() => props.loadPalette) ?? (() => (void retryFailedStyles(), import('$lib/shell/CommandPalette')));
+    paletteLoad = load().then(
+      (m) => {
+        paletteLoad = null;
+        if (!mounted) return;
+        toast.clear('palette');
+        paletteComp.set(() => m.default);
+      },
+      (e: unknown) => {
+        paletteLoad = null;
+        if (!mounted || !paletteOpen.peek()) return;
+        pendingQuery = '';
+        paletteOpen.set(false);
+        toast.error(e, 'Could not load command palette', { key: 'palette' });
+      },
+    );
+  });
+
+  // While the CommandPalette chunk is loading on first open, buffer typed characters (and suppress single-key
+  // shortcuts / background input typing) so fast Ctrl+K typing lands directly in the palette search box.
+  effect(() => {
+    if (!paletteOpen.get() || paletteComp.get()) return;
+    const capture = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        pendingQuery = '';
+        paletteOpen.set(false);
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          e.stopPropagation();
+          pendingQuery = pendingQuery.slice(0, -1);
+        } else if (e.key.length === 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          pendingQuery += e.key;
+        }
+      }
+    };
+    window.addEventListener('keydown', capture, true);
+    return () => window.removeEventListener('keydown', capture, true);
   });
 
   // Lazy-load ShortcutsDialog on first open so it stays out of the initial entry bundle.
@@ -213,14 +297,14 @@ export default function App(props: AppProps) {
       <div class="app">
         <Sidebar live={(collapsed) => <SidebarLive collapsed={collapsed()} />} footer={(collapsed) => <ConnectionStatus collapsed={collapsed()} />} />
         <div class="main">
-          <Topbar onsearch={() => paletteOpen.set(true)} />
+          <Topbar onsearch={openPalette} />
           <main id="content" tabindex={-1} ref={(e) => (mainEl = e)}>
             <Key when={screen.get()}>{() => show(untrack(() => screen.get().comp))}</Key>
           </main>
         </div>
         <TabBar />
       </div>
-      <CommandPalette bind:open={paletteOpen} onshortcuts={() => shortcutsOpen.set(true)} />
+      {paletteComp.get() ? <Dynamic component={paletteComp.get()!} bind:open={paletteOpen} onshortcuts={() => shortcutsOpen.set(true)} takeInitialQuery={takePendingQuery} /> : null}
       {shortcutsComp.get() ? <Dynamic component={shortcutsComp.get()!} bind:open={shortcutsOpen} /> : null}
       <GChordIndicator />
       <Toaster />

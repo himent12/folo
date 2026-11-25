@@ -80,6 +80,8 @@ const SETTINGS_SECTIONS: { id: string; label: string; match: string[] }[] = [
 export interface CommandPaletteProps {
   open?: boolean;
   onshortcuts: () => void;
+  /** Consumes any query text typed while the palette chunk was lazy-loading on first open. */
+  takeInitialQuery?: () => string;
 }
 
 export default function CommandPalette(props: CommandPaletteProps) {
@@ -190,10 +192,16 @@ export default function CommandPalette(props: CommandPaletteProps) {
         backdrop.opened();
         lastPointer = null;
         keyboardNav = false;
-        query.set('');
+        const seed = props.takeInitialQuery?.() ?? '';
+        query.set(seed);
         selected.set(null);
         recent.set(recentIds());
-        queueMicrotask(() => input.peek()?.focus());
+        queueMicrotask(() => {
+          const inp = input.peek();
+          if (!inp || !el.open) return;
+          inp.focus();
+          if (inp.value.length) inp.setSelectionRange(inp.value.length, inp.value.length);
+        });
       }
       cancelFetches();
       const seq = ++openSeq;
