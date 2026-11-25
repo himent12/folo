@@ -358,6 +358,7 @@ export default function Benchmark() {
     if (s.kind === 'dataset') return datasets.data ? datasets.data.some((d) => d.id === s.dataset_id) : null;
     return jobs.data ? jobs.data.some((j) => j.id === s.job_id) : jobs.error ? false : null;
   });
+  const hasEntries = computed(() => live.entries.length > 0);
   function exportBoard(format: 'csv' | 'json') {
     const b = bench.peek();
     const entries = board.peek();
@@ -367,13 +368,14 @@ export default function Benchmark() {
       format === 'csv'
         ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
         : exportTableJson(payload.filenameBase, payload.json);
+    // page-level: triggered from the header overflow menu or command palette, outside any dialog.
     if (ok) toast.success(`Exported ${format.toUpperCase()}`, `${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} from ${b.name}.`);
   }
 
   const menu = computed<MenuItem[]>(() => [
     { label: 'Edit name and description', icon: Pencil, onclick: () => editOpen.set(true) },
     { label: 'Copy fingerprint', icon: Copy, onclick: () => void copyFingerprint() },
-    ...(board.get().length
+    ...(hasEntries.get()
       ? [
           { label: 'Export leaderboard CSV', icon: Download, onclick: () => exportBoard('csv') },
           { label: 'Export leaderboard JSON', icon: Download, onclick: () => exportBoard('json') },
@@ -395,7 +397,7 @@ export default function Benchmark() {
       out.push({ id: `bench-stop-${e.id}`, label: `Stop entry ${e.name}`, icon: Square, run: () => stopping.set(e) });
     if (!offline.get())
       out.push({ id: 'bench-loop-new', label: 'New self-improvement loop', match: ['New loop'], icon: Repeat, run: () => (setQuery({ tab: 'loops' }), loopOpen.set(true)) });
-    if (board.get().length) {
+    if (hasEntries.get()) {
       out.push({ id: 'bench-export-csv', label: 'Export leaderboard CSV', icon: Download, run: () => exportBoard('csv') });
       out.push({ id: 'bench-export-json', label: 'Export leaderboard JSON', icon: Download, run: () => exportBoard('json') });
     }

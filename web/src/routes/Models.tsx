@@ -5,7 +5,7 @@ import Box from '$icons/box';
 import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, For, MediaQuery, signal } from 'fw';
+import { computed, css, effect, For, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
@@ -277,6 +277,27 @@ export default function Models() {
   const canExport = computed(() => !!models.data && shownCount.get() > 0);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = dsFilter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    const all = models.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shownCount.get();
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'model' : 'models'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'model' : 'models'}.`;
+  });
   function exportList(format: 'csv' | 'json') {
     const list = groups.peek();
     const total = list.reduce((a, g) => a + g.rows.length, 0);
@@ -286,7 +307,7 @@ export default function Models() {
       format === 'csv'
         ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
         : exportTableJson(payload.filenameBase, payload.json);
-    if (ok) liveNote.set(`Exported ${total} ${total === 1 ? 'model' : 'models'} as ${format.toUpperCase()}.`);
+    if (ok) announce(`Exported ${total} ${total === 1 ? 'model' : 'models'} as ${format.toUpperCase()}.`);
   }
   const exportItems: MenuItem[] = [
     { label: 'Export CSV', icon: Download, onclick: () => exportList('csv') },
@@ -295,7 +316,7 @@ export default function Models() {
   function clearFilters() {
     dsFilter.set('all');
     query.set('');
-    liveNote.set('Cleared model filters.');
+    announce('Cleared model filters.');
     queueMicrotask(() => searchEl.peek()?.focus());
   }
 
@@ -306,13 +327,7 @@ export default function Models() {
       sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
       // Phones: one line, so the list starts 16 px under it.
       subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
-      actions={() => (
-        <>
-          {canExport.get() ? (
-            <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export models" items={exportItems} />
-          ) : null}
-        </>
-      )}
+      actions={canExport.get() ? () => <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export models" items={exportItems} /> : undefined}
     >
       {/* The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
           own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or
@@ -586,11 +601,14 @@ export default function Models() {
       </Panel>{' '}
       {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
       {models.data && shownCount.get() < models.data.length ? (
-        <p class="list-foot num" role="status" aria-live="polite">
+        <p class="list-foot num">
           {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>
       ) : null}{' '}
-      <p class="sr-only" role="status" aria-live="polite">
+      <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+        {filterStatus.get()}
+      </p>{' '}
+      <p class="sr-only" role="status" aria-live="polite" data-live-note>
         {liveNote.get()}
       </p>{' '}
       {/* Only with models to look at. The engine comparison is reference: one line until it is asked for. */}

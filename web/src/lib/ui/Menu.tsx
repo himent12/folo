@@ -153,6 +153,28 @@ export default function Menu(props: MenuProps) {
     if (p.disabled && open.peek()) open.set(false);
   });
 
+  // If items change dynamically while the menu is open (e.g., live updates removing an export item), keep focus inside
+  // the menu or close back to the trigger if no items remain.
+  effect(() => {
+    const isOpen = open.get();
+    const items = shown.get();
+    if (!isOpen) return;
+    if (items.length === 0) {
+      hide(true);
+      return;
+    }
+    const clamped = Math.min(active.peek(), items.length - 1);
+    if (clamped !== active.peek()) active.set(clamped);
+    void tick().then(() => {
+      if (!open.peek()) return;
+      const menuEl = list.peek();
+      if (!menuEl) return;
+      if (document.activeElement && menuEl.contains(document.activeElement)) return;
+      const all = entries();
+      all[Math.min(active.peek(), all.length - 1)]?.focus();
+    });
+  });
+
   effect(() => {
     if (!open.get() || phone.current) return;
     const away = (e: PointerEvent) => {
@@ -251,12 +273,15 @@ export default function Menu(props: MenuProps) {
           </div>
         ) : null}
       </div>
-      {/* Phones: the shared bottom sheet. Dialog returns focus to the button when it closes. */}
+      {/* Phones: the shared bottom sheet. Dialog returns focus to the button when it closes. Mount `[role="menu"]` only
+          while open so closed menus never interfere with page keyboard shortcut checks. */}
       {phone.current ? (
         <Dialog bind:open={open} title={p.label} size="sm">
-          <div class="sheet" id={`${uid}-list`} role="menu" aria-label={p.label} ref={list} onkeydown={onkeydown} onfocusin={onfocusin}>
-            {entriesList()}
-          </div>
+          {open.get() ? (
+            <div class="sheet" id={`${uid}-list`} role="menu" aria-label={p.label} ref={list} onkeydown={onkeydown} onfocusin={onfocusin}>
+              {entriesList()}
+            </div>
+          ) : null}
         </Dialog>
       ) : null}
     </>

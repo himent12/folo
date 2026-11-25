@@ -95,7 +95,9 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
     const rank = isStale ? null : (rankMap.get(e.id) ?? null);
     const who = contestantFacts(e, agents);
     const contestant = [who.arch, ...who.facts].filter(Boolean).join(' · ');
-    const axes = Object.fromEntries(AXES.map((a, i) => [a, e.score?.axes[i]?.value ?? null])) as Record<(typeof AXES)[number], number | null>;
+    const axes = Object.fromEntries(
+      AXES.map((a) => [a, e.score?.axes.find((x) => x.axis === a)?.value ?? null]),
+    ) as Record<(typeof AXES)[number], number | null>;
     return {
       rank,
       id: e.id,
@@ -107,7 +109,7 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
       earlier_version: isStale,
       axes,
       map50_95: e.map50_95 ?? null,
-      ci95: e.ci95 ? { low: e.ci95[0], high: e.ci95[1] } : null,
+      ci95: e.ci95 ?? null,
       images: e.images,
       total_images: bench.images,
       created: e.created,
@@ -124,8 +126,8 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
     r.earlier_version,
     ...AXES.map((a) => r.axes[a]),
     r.map50_95,
-    r.ci95?.low ?? null,
-    r.ci95?.high ?? null,
+    r.ci95?.[0] ?? null,
+    r.ci95?.[1] ?? null,
     r.images,
     r.total_images,
     r.created,
@@ -168,11 +170,14 @@ export function compareExport(
     const winners = best(row.key, row.values, row.d);
     const csvRow: CsvCell[] = [row.label];
     const baseVal = row.values[0] ?? null;
+    const scale = 10 ** row.d;
     const entryCells = shown.map((e, i) => {
       const v = row.values[i] ?? null;
-      const comparable = !old[i] && !old[0] && v !== null && baseVal !== null;
-      const delta = i > 0 && comparable ? Number((v - baseVal).toFixed(row.d)) : null;
-      const deltaPrinted = i > 0 && !old[i] && !old[0] && v !== null ? diffAsPrinted(v, baseVal, row.d) : null;
+      const comparable = !old[i] && !old[0] && v !== null && baseVal !== null && Number.isFinite(v) && Number.isFinite(baseVal);
+      // Match the table's `diffAsPrinted`: difference of rounded printed values so CSV/JSON never disagree with the UI.
+      const rawRounded = i > 0 && comparable ? (Math.round(v * scale) - Math.round(baseVal * scale)) / scale : null;
+      const delta = rawRounded === null ? null : Object.is(rawRounded, -0) ? 0 : rawRounded;
+      const deltaPrinted = i > 0 && comparable ? diffAsPrinted(v, baseVal, row.d) : null;
       csvRow.push(v);
       if (i > 0) csvRow.push(delta);
       return {

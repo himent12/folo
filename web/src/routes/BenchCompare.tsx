@@ -95,25 +95,33 @@ export default function BenchCompare() {
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
   const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
   let chipsEl: HTMLDivElement | undefined;
 
   function setBaseline(eid: string) {
     const entry = shown.peek().find((x) => x.id === eid);
     makeBaseline(eid);
-    if (entry) liveNote.set(`Baseline set to ${entry.name}.`);
+    if (entry) announce(`Baseline set to ${entry.name}.`);
   }
 
   function togglePin(eid: string) {
     const entry = shown.peek().find((x) => x.id === eid);
     const next = pinned.peek() === eid ? null : eid;
     pinned.set(next);
-    if (entry) liveNote.set(next ? `Pinned ${entry.name} to front.` : `Unpinned ${entry.name}.`);
+    if (entry) announce(next ? `Pinned ${entry.name} to front.` : `Unpinned ${entry.name}.`);
   }
 
   function removeEntry(eid: string, index: number) {
     const entry = shown.peek().find((x) => x.id === eid);
     setIds(ids.peek().filter((x) => x !== eid));
-    if (entry) liveNote.set(`Removed ${entry.name} from comparison.`);
+    if (entry) announce(`Removed ${entry.name} from comparison.`);
     // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
     queueMicrotask(() => {
       const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
@@ -131,7 +139,7 @@ export default function BenchCompare() {
       format === 'csv'
         ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
         : exportTableJson(payload.filenameBase, payload.json);
-    if (ok) liveNote.set(`Exported comparison of ${list.length} entries as ${format.toUpperCase()}.`);
+    if (ok) announce(`Exported comparison of ${list.length} entries as ${format.toUpperCase()}.`);
   }
 
   const exportItems: MenuItem[] = [
@@ -156,7 +164,7 @@ export default function BenchCompare() {
       const extra = ids.peek().filter((x) => !shownIds.includes(x));
       setIds([...shownIds.slice(1), shownIds[0]!, ...extra]);
       const nextBase = list[1];
-      if (nextBase) liveNote.set(`Baseline set to ${nextBase.name}.`);
+      if (nextBase) announce(`Baseline set to ${nextBase.name}.`);
       return true;
     }
     return false;

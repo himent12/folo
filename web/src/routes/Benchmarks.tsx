@@ -154,6 +154,27 @@ export default function Benchmarks() {
   const phone = new MediaQuery(media.phone, false);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = filter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    const all = benches.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shown.get().length;
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'benchmark' : 'benchmarks'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'benchmark' : 'benchmarks'}.`;
+  });
   const open = (b: Bench) => router.go(`/benchmarks/${b.id}`);
 
   function exportList(format: 'csv' | 'json') {
@@ -164,7 +185,7 @@ export default function Benchmarks() {
       format === 'csv'
         ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
         : exportTableJson(payload.filenameBase, payload.json);
-    if (ok) liveNote.set(`Exported ${list.length} ${list.length === 1 ? 'benchmark' : 'benchmarks'} as ${format.toUpperCase()}.`);
+    if (ok) announce(`Exported ${list.length} ${list.length === 1 ? 'benchmark' : 'benchmarks'} as ${format.toUpperCase()}.`);
   }
   const exportItems: MenuItem[] = [
     { label: 'Export CSV', icon: Download, onclick: () => exportList('csv') },
@@ -173,7 +194,7 @@ export default function Benchmarks() {
   function clearFilters() {
     query.set('');
     filter.set('all');
-    liveNote.set('Cleared benchmark filters.');
+    announce('Cleared benchmark filters.');
     queueMicrotask(() => searchEl.peek()?.focus());
   }
 
@@ -425,11 +446,14 @@ export default function Benchmarks() {
             </Panel>{' '}
             {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
             {benches.data && shown.get().length < benches.data.length ? (
-              <p class="list-foot num" role="status" aria-live="polite">
+              <p class="list-foot num">
                 {shown.get().length} of {benches.data.length} {benches.data.length === 1 ? 'benchmark' : 'benchmarks'}
               </p>
             ) : null}
-            <p class="sr-only" role="status" aria-live="polite">
+            <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+              {filterStatus.get()}
+            </p>
+            <p class="sr-only" role="status" aria-live="polite" data-live-note>
               {liveNote.get()}
             </p>
           </>

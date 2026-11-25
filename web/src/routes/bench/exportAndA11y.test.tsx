@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import type { Bench, BenchEntry } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import Benchmark from '../Benchmark';
 import BenchCompare from '../BenchCompare';
 import Benchmarks from '../Benchmarks';
 import Models from '../Models';
+import { diffAsPrinted } from './charts';
+import { compareExport, leaderboardExport } from './export';
 
 let target: HTMLElement;
 let view: Rendered | undefined;
@@ -75,20 +78,22 @@ async function clickMenuItem(triggerLabel: string, itemLabel: string) {
 }
 
 describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
-  it('exports filtered Benchmarks as CSV and JSON, announces status, and restores focus on Clear filters', async () => {
+  it('exports filtered Benchmarks as CSV and JSON, keeps filter live region mounted before narrowing, and restores focus on Clear filters', async () => {
     mountRoute(Benchmarks, '#/benchmarks');
     await settle();
+
+    // Persistently mounted polite live region exists BEFORE filtering so the first narrowing is announced.
+    const status = target.querySelector<HTMLElement>('[data-filter-status]')!;
+    expect(status).not.toBeNull();
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toBe('');
 
     const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter benchmarks"]')!;
     search.value = 'Fasteners';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-
-    // Narrowed footer has polite live status.
-    const foot = target.querySelector('.list-foot');
-    expect(foot?.getAttribute('role')).toBe('status');
-    expect(foot?.getAttribute('aria-live')).toBe('polite');
-    expect(foot?.textContent).toContain('1 of 4 benchmarks');
+    expect(status.textContent).toBe('Showing 1 of 4 benchmarks.');
 
     await clickMenuItem('Export benchmarks', 'Export CSV');
     await clickMenuItem('Export benchmarks', 'Export JSON');
@@ -100,16 +105,18 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(parsed.count).toBe(1);
     expect(parsed.benchmarks[0].name).toBe('Fasteners val');
 
-    // Empty search -> Clear filters resets and restores focus to the search input.
+    // Empty search -> Clear filters resets, updates status, and restores focus to the search input.
     search.value = 'no-such-benchmark-xyz';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
+    expect(status.textContent).toBe('Showing 0 of 4 benchmarks.');
     const clear = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Clear filters')!;
     clear.focus();
     clear.click();
     flushSync();
     await Promise.resolve();
     expect(search.value).toBe('');
+    expect(status.textContent).toBe('Showing all 4 benchmarks.');
     expect(document.activeElement).toBe(search);
   });
 
@@ -127,7 +134,7 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(parsed.count).toBeGreaterThan(0);
   });
 
-  it('exports BenchCompare, exposes semantic table headers and accessible swap labels, and restores focus on baseline swap & chip remove', async () => {
+  it('exports BenchCompare, uses WCAG 2.5.3 baseline labels and semantic headers, keeps phone shortcuts working, and restores focus on swap & chip remove', async () => {
     vi.spyOn(router, 'go').mockImplementation((path) => {
       router.route = parse(`#${path}`);
     });
@@ -142,14 +149,13 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(colHeaders.length).toBe(4);
     expect(rowHeaders.length).toBeGreaterThanOrEqual(6);
 
-    // Accessible baseline button label names the specific entry
-    const swapBtn = target.querySelector<HTMLButtonElement>(`button.swap[aria-label="Make ${e1!.name} baseline"]`)!;
+    // WCAG 2.5.3 Label in Name: accessible name starts with visible "Make baseline"
+    const swapBtn = target.querySelector<HTMLButtonElement>(`button.swap[aria-label="Make baseline: ${e1!.name}"]`)!;
     expect(swapBtn).not.toBeNull();
     swapBtn.focus();
     swapBtn.click();
     flushSync();
     await Promise.resolve();
-    // Focus stays inside the comparison table instead of falling to document.body
     expect(target.querySelector('table.cmp')?.contains(document.activeElement)).toBe(true);
     expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Baseline set to ${e1!.name}`);
 
@@ -173,18 +179,41 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Removed ${e2!.name}`);
   });
 
-  it('exports filtered Models as CSV and JSON and restores focus on Clear filters', async () => {
+  it('keeps BenchCompare keyboard shortcuts working at phone widths when the Export menu is closed', async () => {
+    const win = window as unknown as { happyDOM?: { setViewport(v: { width: number }): void } };
+    const prevWidth = window.innerWidth;
+    win.happyDOM?.setViewport({ width: 390 });
+    try {
+      const entries = (await hub.api.benchEntries('bn_3c90')).filter((e) => e.status === 'done' && e.score);
+      const [e0, e1] = entries;
+      mountRoute(BenchCompare, `#/benchmarks/bn_3c90/compare?entries=${e0!.id},${e1!.id}`);
+      await settle(18);
+      expect(target.querySelector('[role="menu"]')).toBeNull();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+      flushSync();
+      const firstPin = target.querySelector<HTMLButtonElement>('button.ck')!;
+      expect(firstPin.getAttribute('aria-pressed')).toBe('true');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      flushSync();
+      expect(firstPin.getAttribute('aria-pressed')).toBe('false');
+    } finally {
+      win.happyDOM?.setViewport({ width: prevWidth });
+    }
+  });
+
+  it('exports filtered Models as CSV and JSON, omits empty header actions on empty lists, and restores focus on Clear filters', async () => {
     mountRoute(Models, '#/models');
     await settle(18);
+
+    const status = target.querySelector<HTMLElement>('[data-filter-status]')!;
+    expect(status).not.toBeNull();
+    expect(status.textContent).toBe('');
 
     const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter models"]')!;
     search.value = 'folo-n';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-
-    const foot = target.querySelector('.list-foot');
-    expect(foot?.getAttribute('role')).toBe('status');
-    expect(foot?.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toMatch(/^Showing \d+ of \d+ models\.$/);
 
     await clickMenuItem('Export models', 'Export CSV');
     await clickMenuItem('Export models', 'Export JSON');
@@ -199,6 +228,7 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     search.value = 'no-such-model-xyz';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
+    expect(target.querySelector('button[aria-label="Export models"]')).toBeNull();
     const clear = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Clear filters')!;
     clear.focus();
     clear.click();
@@ -206,5 +236,64 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     await Promise.resolve();
     expect(search.value).toBe('');
     expect(document.activeElement).toBe(search);
+  });
+
+  it('matches printed rounding boundaries and suppresses stale deltas in compareExport & leaderboardExport', async () => {
+    const bench = await hub.api.bench('bn_3c90');
+    const entries = await hub.api.benchEntries('bn_3c90');
+    const staleEntry = entries.find((e) => e.fingerprint !== bench.fingerprint);
+    const done = entries.filter((e) => e.status === 'done' && e.score && e.fingerprint === bench.fingerprint);
+    const [a, b] = done;
+
+    // Leaderboard export keeps rank: null for stale/earlier-version entries and maps axes by axis id even if reordered.
+    if (staleEntry && a) {
+      const reordered: BenchEntry = {
+        ...a,
+        score: a.score ? { ...a.score, axes: [...a.score.axes].reverse() } : a.score,
+      };
+      const lb = leaderboardExport(bench, [reordered, staleEntry]);
+      const json = lb.json as { entries: Array<{ id: string; rank: number | null; earlier_version: boolean; axes: Record<string, number | null> }> };
+      expect(json.entries[0]!.rank).toBe(1);
+      expect(json.entries[0]!.axes.accuracy).toBe(a.score!.axes.find((x) => x.axis === 'accuracy')!.value);
+      expect(json.entries[1]!.earlier_version).toBe(true);
+      expect(json.entries[1]!.rank).toBeNull();
+    }
+
+    // Compare export matches diffAsPrinted at rounding boundaries and omits deltas for earlier-version entries.
+    if (a && b) {
+      const cmp = compareExport(
+        bench as Bench,
+        [a, b],
+        [
+          { key: 'robustness', label: 'Robustness', values: [0.684, 0.676], fmt: (v) => v.toFixed(2), d: 2 },
+          { key: 'calibration', label: 'Calibration', values: [0.686, 0.684], fmt: (v) => v.toFixed(2), d: 2 },
+        ],
+        [false, false],
+        () => new Set<number>(),
+        [],
+        [undefined, undefined],
+      );
+      const json = cmp.json as { measures: Array<{ values: Array<{ delta: number | null; delta_printed: string | null }> }> };
+      // 0.684 rounds to 0.68 and 0.676 rounds to 0.68 -> delta = 0, delta_printed = '±0'
+      expect(json.measures[0]!.values[1]!.delta).toBe(0);
+      expect(json.measures[0]!.values[1]!.delta_printed).toBe(diffAsPrinted(0.676, 0.684, 2));
+      // 0.686 rounds to 0.69 and 0.684 rounds to 0.68 -> delta = -0.01, delta_printed = '−0.01'
+      expect(json.measures[1]!.values[1]!.delta).toBe(-0.01);
+      expect(json.measures[1]!.values[1]!.delta_printed).toBe(diffAsPrinted(0.684, 0.686, 2));
+
+      // Stale entry -> delta and delta_printed are both null.
+      const cmpStale = compareExport(
+        bench as Bench,
+        [a, b],
+        [{ key: 'robustness', label: 'Robustness', values: [0.8, 0.7], fmt: (v) => v.toFixed(2), d: 2 }],
+        [false, true],
+        () => new Set<number>(),
+        [],
+        [undefined, undefined],
+      );
+      const staleJson = cmpStale.json as { measures: Array<{ values: Array<{ delta: number | null; delta_printed: string | null }> }> };
+      expect(staleJson.measures[0]!.values[1]!.delta).toBeNull();
+      expect(staleJson.measures[0]!.values[1]!.delta_printed).toBeNull();
+    }
   });
 });

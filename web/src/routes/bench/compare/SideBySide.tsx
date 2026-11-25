@@ -96,7 +96,7 @@ export default function SideBySide(props: SideBySideProps) {
                       {i() === 0 ? (
                         'Baseline'
                       ) : (
-                        <button type="button" class="swap" aria-label={`Make ${e().name} baseline`} onclick={() => swapBaseline(e().id)}>
+                        <button type="button" class="swap" aria-label={`Make baseline: ${e().name}`} onclick={() => swapBaseline(e().id)}>
                           Make baseline
                         </button>
                       )}
@@ -191,6 +191,9 @@ css`
     font-size: var(--type-base-size);
     line-height: var(--type-base-line);
     color: var(--text-primary);
+  }
+  .cmp tbody tr:last-child th {
+    border-bottom: 0;
   }
   .cmp tr.total :is(th, td) {
     font-weight: var(--weight-semibold);
