@@ -240,7 +240,7 @@ fn pooling_upsample_and_concat() {
     let x = randn(&[2, 5, 13, 11], 16);
     check16(dev, std::slice::from_ref(&x), 0.0, 0.0, "max_pool2d k5 s1 p2", |t| t[0].max_pool2d(5, 1, 2));
     check16(dev, std::slice::from_ref(&x), 0.0, 0.0, "max_pool2d k2 s2", |t| t[0].max_pool2d(2, 2, 0));
-    check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "avg_pool2d (f32 copy)", |t| t[0].avg_pool2d(3, 2, 1));
+    check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "avg_pool2d", |t| t[0].avg_pool2d(3, 2, 1));
     check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "adaptive_avg_pool2d", |t| {
         t[0].adaptive_avg_pool2d([3, 2])
     });
@@ -307,8 +307,8 @@ fn model_conversion_in_place() {
     assert!(y.to_dtype_(DType::F16).is_err());
 }
 
-/// The f16 gradients mixed-precision training uses run (the conv's here, tested for accuracy in `amp.rs` and
-/// `coop.rs`); the ones it does not use still refuse f16 (average pooling's).
+/// The f16 gradients mixed-precision training uses run (conv and average pooling here, tested for accuracy in
+/// `amp.rs` and `coop.rs`); the ones it does not use still refuse f16 (adaptive average pooling's).
 #[test]
 fn gradients_in_f16() {
     let dev = dev16!();
@@ -318,7 +318,10 @@ fn gradients_in_f16() {
     let g = y.backward().unwrap();
     assert_eq!((g.get(&x).unwrap().dtype(), g.get(&w).unwrap().dtype()), (DType::F16, DType::F16));
     let y = x.avg_pool2d(2, 2, 0).unwrap().sum_all().unwrap();
-    let Err(e) = y.backward() else { panic!("f16 average-pooling backward is refused") };
+    let g = y.backward().unwrap();
+    assert_eq!(g.get(&x).unwrap().dtype(), DType::F16);
+    let y = x.adaptive_avg_pool2d([3, 3]).unwrap().sum_all().unwrap();
+    let Err(e) = y.backward() else { panic!("f16 adaptive average-pooling backward is refused") };
     assert!(matches!(e, Error::UnsupportedDType { dtype: DType::F16, .. }), "{e}");
 }
 

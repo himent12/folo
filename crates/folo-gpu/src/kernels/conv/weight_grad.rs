@@ -420,20 +420,35 @@ pub fn conv2d_backward_weight_as(
         finish_wgrad(ctx, tmp.raw(), parts, wn, gw, out)
     };
     if d.is_depthwise() && khkw <= MAX_DEPTHWISE_TAPS {
+        let vec4 = d.win.stride.1 == 1 && d.win.dilation.1 == 1 && ow.is_multiple_of(4) && d.h > 0 && d.w > 0;
+        let sg = crate::kernels::use_subgroups(ctx);
+        let (ow_u, ohow_u, np_u) = if vec4 { (ow / 4, oh * (ow / 4), np / 4) } else { (ow, ohow, np) };
         // Enough workgroups to fill the GPU, at least 4096 pixels each.
-        let chunks =
-            1024usize.div_ceil(d.c_out).clamp(1, np.div_ceil(4096)).min(MAX_PARTIAL_ELEMS / wn).max(1);
-        let ps = np.div_ceil(chunks);
-        let chunks = np.div_ceil(ps);
+        let chunks = 1024usize
+            .div_ceil(d.c_out)
+            .clamp(1, np.div_ceil(4096))
+            .min(MAX_PARTIAL_ELEMS / wn)
+            .min(np_u)
+            .max(1);
+        let ps = np_u.div_ceil(chunks);
+        let chunks = np_u.div_ceil(ps);
         let tmp = if chunks > 1 || out != DType::F32 {
             Some(ctx.alloc(DType::F32.bytes(prod(&[chunks, wn])?))?)
         } else {
             None
         };
         let target = tmp.as_ref().map_or(gw, |t| t.raw());
-        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 1).f16(dt == DType::F16);
+        let spec = d
+            .win
+            .spec()
+            .u32("MULT", (d.c_out / d.c_in) as u32)
+            .u32("MODE", 1)
+            .bool("VEC4", vec4)
+            .f16(dt == DType::F16)
+            .subgroups(sg);
         let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
-        let p = Params::new().uz(d.c_out)?.uz(chunks)?.uz(ps)?.uz(np)?.uz(ohow)?.uz(ow)?.uz(d.h)?.uz(d.w)?;
+        let p =
+            Params::new().uz(d.c_out)?.uz(chunks)?.uz(ps)?.uz(np_u)?.uz(ohow_u)?.uz(ow_u)?.uz(d.h)?.uz(d.w)?;
         ctx.dispatch(&k, &[grad, x, target], &p, ctx.grid_1d((d.c_out * chunks) as u64 * 256, 256)?)?;
         if let Some(t) = &tmp {
             finish(t, chunks)?;

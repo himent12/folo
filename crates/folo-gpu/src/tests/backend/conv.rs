@@ -316,3 +316,84 @@ fn conv2d_many_groups_run_one_image_at_a_time() {
         }
     }
 }
+
+#[test]
+fn depthwise_grad_vx4_and_subgroup_vec4_parity() {
+    use crate::kernels::FORCE_NO_SUBGROUPS;
+
+    let dev = dev!();
+    let has_f16 = folo_core::backend::computes_f16(dev);
+    let q = |t: &Tensor| t.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+
+    // Covers VX4 dX (stride 1, dilation 1, odd/even/tail widths w = 1, 2, 3, 5, 16, 20), general fallback dX
+    // (stride 2, dilation 2), VEC4 dW (ow % 4 == 0, SW == 1, DW == 1), scalar dW (odd ow, stride 2, dilation 2),
+    // kernel sizes 1x1 / 3x3 / 5x5 / 7x7, and depthwise multiplier MULT = 2.
+    let cases = [
+        ([2, 8, 9, 16], [8, 1, 3, 3], 1, 1, 1, 8),
+        ([2, 6, 7, 5], [6, 1, 3, 3], 1, 1, 1, 6),
+        ([1, 4, 3, 1], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([1, 4, 4, 2], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([1, 4, 4, 3], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([2, 4, 12, 20], [4, 1, 5, 5], 1, 2, 1, 4),
+        ([2, 3, 10, 12], [3, 1, 7, 7], 1, 3, 1, 3),
+        ([2, 4, 8, 8], [8, 1, 3, 3], 1, 1, 1, 4), // MULT = 2, VEC4 dW + VX4 dX
+        ([2, 4, 8, 8], [4, 1, 1, 1], 1, 0, 1, 4), // 1x1 depthwise
+        ([2, 4, 11, 16], [4, 1, 3, 3], 2, 1, 1, 4), // stride 2 fallback
+        ([2, 4, 9, 12], [4, 1, 3, 3], 1, 2, 2, 4), // dilation 2 fallback
+    ];
+
+    struct ResetSg;
+    impl Drop for ResetSg {
+        fn drop(&mut self) {
+            FORCE_NO_SUBGROUPS.with(|f| f.set(false));
+        }
+    }
+
+    for (idx, &(xs, ws, s, p, dil, g)) in cases.iter().enumerate() {
+        let seed = 200 + idx as u64 * 4;
+        let x = randn(&xs, seed);
+        let w = randn(&ws, seed + 1).mul_scalar(0.3).unwrap();
+        // Run both native (subgroups when supported) and forced-portable fallback.
+        for force_portable in [false, true] {
+            let _guard = ResetSg;
+            FORCE_NO_SUBGROUPS.with(|f| f.set(force_portable));
+            check(
+                dev,
+                &[x.clone(), w.clone()],
+                5e-4,
+                2e-4,
+                &format!("dw f32 {xs:?} {ws:?} s{s} p{p} d{dil} g{g} portable={force_portable}"),
+                move |v| v[0].conv2d(&v[1], None, s, p, dil, g),
+            );
+            if has_f16 {
+                let xq = q(&x);
+                let wq = q(&w);
+                let xc = xq.detach().requires_grad_();
+                let wc = wq.detach().requires_grad_();
+                let yc = xc.conv2d(&wc, None, s, p, dil, g).unwrap();
+                let gy = q(&randn(yc.dims(), seed + 2));
+                let gc = yc.backward_with(&gy).unwrap();
+
+                let xg = xq.to_device(dev).unwrap().to_dtype(DType::F16).unwrap().detach().requires_grad_();
+                let wg = wq.to_device(dev).unwrap().to_dtype(DType::F16).unwrap().detach().requires_grad_();
+                let yg = xg.conv2d(&wg, None, s, p, dil, g).unwrap();
+                let gg = yg.backward_with(&gy.to_device(dev).unwrap().to_dtype(DType::F16).unwrap()).unwrap();
+                let label = format!("dw f16 {xs:?} {ws:?} s{s} p{p} d{dil} g{g} portable={force_portable}");
+                assert_close_t(
+                    &gg.get(&xg).unwrap().to_dtype(DType::F32).unwrap(),
+                    gc.get(&xc).unwrap(),
+                    3e-3,
+                    3e-3,
+                    &format!("{label} dX"),
+                );
+                assert_close_t(
+                    &gg.get(&wg).unwrap().to_dtype(DType::F32).unwrap(),
+                    gc.get(&wc).unwrap(),
+                    5e-3,
+                    5e-3,
+                    &format!("{label} dW"),
+                );
+            }
+        }
+    }
+}

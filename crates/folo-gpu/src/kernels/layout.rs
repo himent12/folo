@@ -25,6 +25,28 @@ static UPSAMPLE: KernelDef = KernelDef {
     storage: RW,
     source: Source::Static(include_str!("../shaders/upsample.wgsl")),
 };
+/// 2×2 nearest-neighbour upsample for even input widths: each thread reads one `vec2<T>` (2 input pixels)
+/// and writes two `vec4<T>`s (8 output pixels across consecutive rows `2·iy` and `2·iy + 1`).
+/// Params: 0 = input `vec2<T>` units (`planes * H * (W / 2)`), 1 = `W / 2`.
+const UPSAMPLE_2X_VEC4_SRC: &str = "\
+@group(0) @binding(1) var<storage, read> X: array<vec2<T>>;\n\
+@group(0) @binding(2) var<storage, read_write> Y: array<vec4<T>>;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+        @builtin(local_invocation_index) lid: u32) {\n\
+    let i = linear_id(wid, nwg, lid, 256u);\n\
+    if (i >= pu(0u)) { return; }\n\
+    let w2 = pu(1u);\n\
+    let x2 = i % w2;\n\
+    let t = i / w2;\n\
+    let v = X[i];\n\
+    let v4 = vec4<T>(v.x, v.x, v.y, v.y);\n\
+    let out0 = t * (2u * w2) + x2;\n\
+    Y[out0] = v4;\n\
+    Y[out0 + w2] = v4;\n\
+}\n";
+static UPSAMPLE_2X_VEC4: KernelDef =
+    KernelDef { name: "upsample_2x_vec4", storage: RW, source: Source::Static(UPSAMPLE_2X_VEC4_SRC) };
 static CAST: KernelDef =
     KernelDef { name: "cast", storage: RW, source: Source::Static(include_str!("../shaders/cast.wgsl")) };
 
@@ -184,6 +206,13 @@ pub fn upsample_nearest2d(
     if h == 0 || w == 0 {
         return Err(shape_err("upsample: empty input plane"));
     }
+    if h.checked_mul(2) == Some(oh) && w.checked_mul(2) == Some(ow) && w.is_multiple_of(2) {
+        let w2 = w / 2;
+        let units = planes * h * w2;
+        let k = ctx.kernel(&UPSAMPLE_2X_VEC4, Spec::new().f16(dtype == DType::F16))?;
+        let p = Params::new().uz(units)?.uz(w2)?;
+        return ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(units as u64, 256)?);
+    }
     // The shader computes `dst * in` in u32.
     if (oh as u64) * (h as u64) > u32::MAX as u64 || (ow as u64) * (w as u64) > u32::MAX as u64 {
         return Err(shape_err(format!("upsample {h}x{w} -> {oh}x{ow} is too large")));
@@ -207,7 +236,8 @@ pub fn cast(ctx: &GpuContext, x: &wgpu::Buffer, y: &wgpu::Buffer, n: usize, to_f
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&PERMUTE, &TRANSPOSE, &UPSAMPLE, &CAST, &COPY_ROWS];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&PERMUTE, &TRANSPOSE, &UPSAMPLE, &UPSAMPLE_2X_VEC4, &CAST, &COPY_ROWS];
 
 #[cfg(test)]
 mod tests {

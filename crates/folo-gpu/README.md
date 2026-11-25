@@ -45,7 +45,8 @@ function that returns WGSL for a `Spec`. Generators either concatenate files wit
 subgroup built-ins are enabled via `wgpu::Features::SUBGROUP` alone, while `Spec::subgroups(true)` selects the subgroup
 WGSL variant and tags the pipeline cache key. When `kernels::use_subgroups(ctx)` is true (native adapters with
 `SUBGROUP` and subgroup width `(32, 32)`; always `false` on `wasm32` / browser WebGPU), reductions (`reduce_rows`,
-`softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`) and gradient-norm partials
+`softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`), depthwise weight gradients
+(`conv2d_depthwise_grad`), and gradient-norm partials
 (`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants (and `topk` selection passes for `d > 512`
 dispatch a 2-barrier 32-wide subgroup reduction per pass, skipping the second barrier on the final pass) with a
 portable shared-memory tree fallback otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with
@@ -72,7 +73,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv.rs` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
 | max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only), `kernels::pool_grad::*` | `maxpool.wgsl`; generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
-| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d`, `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
+| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d` (`upsample_2x_vec4` fast path for 2×2 even widths), `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
 | index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/index.rs` |
 | copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/transfer.rs` |
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |

@@ -77,26 +77,40 @@ fn pooling_and_upsampling_gradients_in_f16() {
     let dev = dev16!();
     let x = q(&randn(&[2, 3, 9, 10], 5)).to_device(dev).unwrap();
     let g_pool = q(&randn(&[2, 3, 9, 10], 6)).to_device(dev).unwrap();
+    let g_avg = q(&randn(&[2, 3, 5, 5], 60)).to_device(dev).unwrap();
     let g_up = q(&randn(&[2, 3, 18, 30], 7)).to_device(dev).unwrap();
-    // SPPF's 5×5 stride-1 max pooling and the neck's 2× upsampling, f16 against f32.
+    let g_up2 = q(&randn(&[2, 3, 18, 20], 61)).to_device(dev).unwrap();
+    // SPPF's 5×5 stride-1 max pooling, native f16 avg_pool2d, and the neck's 2×/2×3 upsampling, f16 vs f32.
     let grads = |dtype: DType| {
         let xl = x.to_dtype(dtype).unwrap().detach().requires_grad_();
         let pooled = xl.max_pool2d(5, 1, 2).unwrap();
+        let avg = xl.avg_pool2d(3, 2, 1).unwrap();
         let up = xl.upsample_nearest2d_hw([2, 3]).unwrap();
+        let up2 = xl.upsample_nearest2d(2).unwrap();
+        assert_eq!((avg.dtype(), up2.dtype()), (dtype, dtype));
         let loss = pooled
             .mul(&g_pool.to_dtype(dtype).unwrap())
             .unwrap()
             .sum_all()
             .unwrap()
+            .add(&avg.mul(&g_avg.to_dtype(dtype).unwrap()).unwrap().sum_all().unwrap())
+            .unwrap()
             .add(&up.mul(&g_up.to_dtype(dtype).unwrap()).unwrap().sum_all().unwrap())
+            .unwrap()
+            .add(&up2.mul(&g_up2.to_dtype(dtype).unwrap()).unwrap().sum_all().unwrap())
             .unwrap();
         let gr = loss.backward().unwrap();
         let gx = gr.get(&xl).unwrap().clone();
         assert_eq!(gx.dtype(), dtype);
         gx.to_dtype(DType::F32).unwrap()
     };
-    // Each input gradient sums at most 25 + 6 f16 terms in f32 and rounds once.
-    assert_close_t(&grads(DType::F16), &grads(DType::F32), 2e-3, 2e-3, "max_pool2d + upsample gradient");
+    assert_close_t(
+        &grads(DType::F16),
+        &grads(DType::F32),
+        2e-3,
+        2e-3,
+        "max_pool2d + avg_pool2d + upsample grad",
+    );
 }
 
 /// folo-core's autocast conv on the GPU: f16 compute against the f32 conv of the same f16-rounded operands; the

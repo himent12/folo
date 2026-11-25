@@ -398,26 +398,28 @@ impl Backend for GpuBackend {
     }
 
     fn avg_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
-        self.via_f32(x, |x| {
-            let (n, c, h, w) = nchw(x.shape());
-            let win = pool2d(p);
-            let (oh, ow) = win.output(h, w).core()?;
-            let len = n * c * oh * ow;
-            let out = self.alloc(CoreDType::F32, len)?;
-            let xd = self.dense(&x)?;
-            pool_grad::avg_pool2d(&self.ctx, xd.raw(), out.raw(), (n * c, h, w), &win).core()?;
-            Ok(self.wrap(CoreDType::F32, len, out))
-        })
+        let dtype = x.storage.dtype();
+        let _p = profile::scope(|| format!("avg_pool {:?}", x.shape().dims()));
+        let (n, c, h, w) = nchw(x.shape());
+        let win = pool2d(p);
+        let (oh, ow) = win.output(h, w).core()?;
+        let len = crate::kernels::prod(&[n, c, oh, ow]).core()?;
+        let out = self.alloc(dtype, len)?;
+        let xd = self.dense(&x)?;
+        pool_grad::avg_pool2d(&self.ctx, xd.raw(), out.raw(), (n * c, h, w), &win, kdt(dtype)).core()?;
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn avg_pool2d_backward(&self, grad: View<'_>, input_shape: &Shape, p: &Pool2dParams) -> Result<Storage> {
-        f32_only(&grad, "avg_pool2d_backward")?;
+        let dtype = grad.storage.dtype();
+        let _p = profile::scope(|| format!("avg_pool_bwd {:?}", input_shape.dims()));
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let gd = self.dense(&grad)?;
-        pool_grad::avg_pool2d_backward(&self.ctx, gd.raw(), out.raw(), (n * c, h, w), &pool2d(p)).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        pool_grad::avg_pool2d_backward(&self.ctx, gd.raw(), out.raw(), (n * c, h, w), &pool2d(p), kdt(dtype))
+            .core()?;
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn adaptive_avg_pool2d(&self, x: View<'_>, out_hw: [usize; 2]) -> Result<Storage> {
