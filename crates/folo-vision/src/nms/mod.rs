@@ -71,6 +71,12 @@ impl NmsKind {
     fn is_standard(&self) -> bool {
         matches!(self, NmsKind::Standard)
     }
+
+    /// True for Soft-NMS variants (`SoftLinear` / `SoftGaussian`), which decay scores instead of hard-dropping.
+    #[inline]
+    pub fn is_soft(&self) -> bool {
+        matches!(self, NmsKind::SoftLinear | NmsKind::SoftGaussian { .. })
+    }
 }
 
 /// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse` /
@@ -117,13 +123,15 @@ pub struct NmsConfig {
     /// One candidate per (anchor, class) pair above `conf` instead of one per anchor (its best class).
     pub multi_label: bool,
     /// Refine each kept box from its NMS cluster ([`crate::fusion`], docs/MODEL.md §9.4). Off by default. Not used
-    /// by the NMS-free `o2o` selection, which has no clusters.
+    /// by the NMS-free `o2o` selection, which has no clusters. Under Soft-NMS (`SoftLinear` / `SoftGaussian`),
+    /// `BoxFusion::Sebf` has no hard suppression clusters and keeps each survivor's own box (validation rejects it).
     pub fusion: BoxFusion,
     /// The cluster of a kept box for [`NmsConfig::fusion`]: the candidates of its class (any class with
     /// `agnostic`) whose IoU with it is `>=` this.
     pub fusion_iou: f32,
     /// How the kept boxes are scored ([`ScoreRule`], docs/MODEL.md §9.4). Off by default: the consensus score
-    /// changes the score scale. Not used by the NMS-free `o2o` selection, which has no clusters.
+    /// changes the score scale. Not used by the NMS-free `o2o` selection or Soft-NMS, which have no hard
+    /// suppression clusters.
     pub score: ScoreRule,
     /// Suppression rule ([`NmsKind::Standard`] by default; opt-in DIoU-NMS or Soft-NMS).
     #[serde(default, skip_serializing_if = "NmsKind::is_standard")]
@@ -170,11 +178,14 @@ impl NmsConfig {
     }
 
     /// Whether final detections are filtered by `score > self.conf` after calibrated re-scoring (active for
-    /// single-label calibrated scoring with `self.conf > CALIBRATED_PRE_CONF`; when `self.conf <= 0.10` or
-    /// `multi_label` is set, all re-scored detections are retained).
+    /// single-label calibrated scoring with `self.conf > CALIBRATED_PRE_CONF` under hard NMS; when `self.conf <= 0.10`,
+    /// `multi_label` is set, or `nms_kind` is Soft-NMS, all surviving detections are retained).
     #[inline]
     pub(crate) fn post_filter_calibrated(&self) -> bool {
-        !self.multi_label && self.score.is_calibrated() && self.conf > CALIBRATED_PRE_CONF
+        !self.multi_label
+            && !self.nms_kind.is_soft()
+            && self.score.is_calibrated()
+            && self.conf > CALIBRATED_PRE_CONF
     }
 }
 
@@ -207,6 +218,43 @@ pub struct DflInputs<'a> {
     pub strides: Option<&'a [f32]>,
 }
 
+/// Reconstruct class-local DIoU suppressor ownership for calibrated score rules when agnostic DIoU-NMS ran.
+/// Matches `fusion::reconstruct_owners` semantics (same class, lower-ranked candidate, finite boxes, first owner
+/// wins) using `iou(..., IouKind::Diou) > diou_thr`.
+fn class_local_diou_owners(
+    kept: &[usize],
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    diou_thr: f32,
+) -> Vec<u32> {
+    let finite = |x: &Xyxy| x.to_array().iter().all(|v| v.is_finite());
+    let score_key = |s: f32| if s.is_nan() { f32::NEG_INFINITY } else { s };
+    let mut own = vec![u32::MAX; boxes.len()];
+    for (kp, &k) in kept.iter().enumerate() {
+        own[k] = kp as u32;
+    }
+    for (kp, &k) in kept.iter().enumerate() {
+        let bk = boxes[k];
+        if !finite(&bk) {
+            continue;
+        }
+        let sk = score_key(scores[k]);
+        let ck = classes[k];
+        for j in 0..boxes.len() {
+            if own[j] != u32::MAX || classes[j] != ck || !finite(&boxes[j]) {
+                continue;
+            }
+            let sj = score_key(scores[j]);
+            let lower_ranked = sj.total_cmp(&sk).is_lt() || (sj.total_cmp(&sk).is_eq() && j > k);
+            if lower_ranked && crate::boxes::iou(&bk, &boxes[j], crate::boxes::IouKind::Diou) > diou_thr {
+                own[j] = kp as u32;
+            }
+        }
+    }
+    own
+}
+
 /// Cap the candidates (given in `(idx, class)` order) at the `cap` best by score, ties to the earlier candidate,
 /// then run batched NMS, fuse the kept boxes when [`NmsConfig::fusion`] asks for it (with `dfl.precision`, indexed
 /// by source index, for [`BoxFusion::Dfl`]), re-score them when [`NmsConfig::score`] does (sorted by the new score,
@@ -217,7 +265,9 @@ fn finish(
     bbox_of: impl Fn(u32) -> Xyxy,
     dfl: DflInputs<'_>,
 ) -> Vec<Detection> {
-    let (cands, boxes): (Vec<Cand>, Vec<Xyxy>) = if cfg.score.is_calibrated() {
+    let use_score_rule = cfg.score != ScoreRule::None && !cfg.nms_kind.is_soft();
+    let calibrated = use_score_rule && cfg.score.is_calibrated();
+    let (cands, boxes): (Vec<Cand>, Vec<Xyxy>) = if calibrated {
         // Filter non-finite scores (+Inf / NaN) and non-finite boxes before `max_candidates` truncation so
         // malformed high-scoring entries cannot evict valid candidates or survive calibrated NMS.
         let mut valid: Vec<(Cand, Xyxy)> = cands
@@ -261,7 +311,7 @@ fn finish(
     };
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();
-    let want_owner = cfg.fusion.wants_owner() || (!cfg.agnostic && cfg.score.is_calibrated());
+    let want_owner = cfg.fusion.wants_owner() || (!cfg.agnostic && calibrated);
     let (kept, kept_scores, owner) = match cfg.nms_kind {
         NmsKind::Standard | NmsKind::Diou => {
             let (kept, owner) = kernel::batched_nms_inner(
@@ -287,13 +337,22 @@ fn finish(
                 &scores,
                 &classes,
                 cfg.iou,
-                cfg.candidate_conf(),
+                cfg.conf,
                 sigma,
                 cfg.max_det,
                 cfg.agnostic,
             );
             let (kept, ks): (Vec<usize>, Vec<f32>) = pairs.into_iter().unzip();
-            (kept, ks, None)
+            // Soft-NMS has no hard suppressor clusters; assign self-only owners when SEBF is requested so
+            // `BoxFusion::Sebf` never reconstructs hard-IoU owners from `cfg.iou`.
+            let self_own = cfg.fusion.wants_owner().then(|| {
+                let mut own = vec![u32::MAX; boxes.len()];
+                for (kp, &k) in kept.iter().enumerate() {
+                    own[k] = kp as u32;
+                }
+                own
+            });
+            (kept, ks, self_own)
         }
     };
     let cands_slice = cands.as_slice();
@@ -333,25 +392,32 @@ fn finish(
         })
         .collect();
     // Calibrated score rules always use class-local ownership (docs/MODEL.md §9.4), so under `agnostic` NMS
-    // pass `None` to derive class-local owners while `BoxFusion::Sebf` above receives the actual agnostic NMS owners.
-    let score_owner = if cfg.agnostic { None } else { owner.as_deref() };
-    let new_scores = match cfg.score {
-        ScoreRule::None => None,
-        ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes)),
-        ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou)),
-        ScoreRule::DflConsensus => {
-            let bp = dfl.bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
-            let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
-            Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou, bp))
-        }
-        ScoreRule::DflRepulse | ScoreRule::DflCgr => {
-            let repulse_boxes: Vec<Xyxy> = dets.iter().map(|d| d.bbox).collect();
-            let ent = dfl.entropy.map(|e| move |k: usize| e[cands_slice[k].idx as usize]);
-            let ent = ent.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
-            let st = dfl.strides.map(|s| move |k: usize| s[cands_slice[k].idx as usize]);
-            let st = st.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
-            let scorer = if cfg.score == ScoreRule::DflCgr { dfl_cgr_scores } else { dfl_repulse_scores };
-            Some(scorer(&kept, &boxes, &repulse_boxes, &scores, &classes, score_owner, cfg.iou, ent, st))
+    // reconstruct class-local owners matching the active hard-NMS metric (plain IoU inside `fusion`, or DIoU
+    // here). Soft-NMS has no hard suppression clusters and already decays/reorders scores, so skip `ScoreRule`.
+    let diou_local_owner = (cfg.agnostic && calibrated && cfg.nms_kind == NmsKind::Diou)
+        .then(|| class_local_diou_owners(&kept, &boxes, &scores, &classes, cfg.iou));
+    let score_owner = if cfg.agnostic { diou_local_owner.as_deref() } else { owner.as_deref() };
+    let new_scores = if !use_score_rule {
+        None
+    } else {
+        match cfg.score {
+            ScoreRule::None => None,
+            ScoreRule::Consensus => Some(consensus_scores(&kept, &boxes, &scores, &classes)),
+            ScoreRule::Elc => Some(elc_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou)),
+            ScoreRule::DflConsensus => {
+                let bp = dfl.bin_precision.map(|p| move |k: usize| p[cands_slice[k].idx as usize]);
+                let bp = bp.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
+                Some(dfl_consensus_scores(&kept, &boxes, &scores, &classes, score_owner, cfg.iou, bp))
+            }
+            ScoreRule::DflRepulse | ScoreRule::DflCgr => {
+                let repulse_boxes: Vec<Xyxy> = dets.iter().map(|d| d.bbox).collect();
+                let ent = dfl.entropy.map(|e| move |k: usize| e[cands_slice[k].idx as usize]);
+                let ent = ent.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
+                let st = dfl.strides.map(|s| move |k: usize| s[cands_slice[k].idx as usize]);
+                let st = st.as_ref().map(|f| f as &dyn Fn(usize) -> f32);
+                let scorer = if cfg.score == ScoreRule::DflCgr { dfl_cgr_scores } else { dfl_repulse_scores };
+                Some(scorer(&kept, &boxes, &repulse_boxes, &scores, &classes, score_owner, cfg.iou, ent, st))
+            }
         }
     };
     if let Some(new_scores) = new_scores {

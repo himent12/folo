@@ -37,9 +37,12 @@ pub fn diou_nms_sorted_with_owner(boxes: &[Xyxy], iou_thr: f32, limit: usize) ->
 
 /// Soft-NMS (Bodla et al. 2017) over `boxes` and `scores` (not required to be pre-sorted).
 ///
-/// Decays overlapping boxes' scores instead of hard-dropping them:
-/// - `sigma == None`: Linear Soft-NMS — when `IoU > iou_thr`, `score *= 1 - IoU`.
-/// - `sigma == Some(s)`: Gaussian Soft-NMS — when `IoU > 0`, `score *= exp(-IoU² / s)`.
+/// Decays overlapping boxes' positive scores instead of hard-dropping them:
+/// - `sigma == None`: Linear Soft-NMS — when `IoU > iou_thr` and `score > 0`, `score *= 1 - IoU`.
+/// - `sigma == Some(s)`: Gaussian Soft-NMS — when `IoU > 0` and `score > 0`, `score *= exp(-IoU² / s)`.
+///
+/// Non-positive scores are never multiplied (so decay can never increase a score), preserving descending
+/// output order for every finite `score_thr`.
 ///
 /// Returns `(input_index, decayed_score)` pairs sorted by descending decayed score (ties: lower input index),
 /// keeping only boxes whose final score is `> score_thr` and stopping at `limit`.
@@ -92,20 +95,24 @@ pub fn soft_nms_sorted(
         while pos > 0 {
             pos -= 1;
             let idx = active[pos];
+            let cur = work_scores[idx];
+            if cur <= 0.0 {
+                continue;
+            }
             let ov = box_iou(best_box, &boxes[idx]);
             let decayed = match sigma {
                 Some(s) => {
                     if ov > 0.0 {
-                        work_scores[idx] * (-(ov * ov) / s).exp()
+                        cur * (-(ov * ov) / s).exp()
                     } else {
-                        work_scores[idx]
+                        cur
                     }
                 }
                 None => {
                     if ov > iou_thr {
-                        work_scores[idx] * (1.0 - ov)
+                        cur * (1.0 - ov)
                     } else {
-                        work_scores[idx]
+                        cur
                     }
                 }
             };

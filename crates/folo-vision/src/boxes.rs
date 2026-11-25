@@ -317,12 +317,19 @@ pub fn iou_matrix_into(a: &[Xyxy], b: &[Xyxy], kind: IouKind, out: &mut [f32]) {
     }
     let row = |(ra, orow): (&Xyxy, &mut [f32])| {
         if kind == IouKind::Iou {
-            // Hoist the area of `ra`; the hot inner loop is branch-light and vectorises.
-            let area_a = ra.area();
+            // Hoist collapsed f64 corners and area of `ra`; stays branch-light while matching `iou()` on extreme boxes.
+            let (ax1, ay1) = (ra.x1 as f64, ra.y1 as f64);
+            let (ax2, ay2) = (ra.x2.max(ra.x1) as f64, ra.y2.max(ra.y1) as f64);
+            let area_a = (ax2 - ax1).max(0.0) * (ay2 - ay1).max(0.0);
             for (o, rb) in orow.iter_mut().zip(b) {
-                let inter = ra.intersection(rb);
-                let union = area_a + rb.area() - inter;
-                *o = if union > 0.0 { inter / union } else { 0.0 };
+                let (bx1, by1) = (rb.x1 as f64, rb.y1 as f64);
+                let (bx2, by2) = (rb.x2.max(rb.x1) as f64, rb.y2.max(rb.y1) as f64);
+                let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+                let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+                let inter = iw * ih;
+                let area_b = (bx2 - bx1).max(0.0) * (by2 - by1).max(0.0);
+                let union = area_a + area_b - inter;
+                *o = if union > 0.0 { (inter / union) as f32 } else { 0.0 };
             }
         } else {
             for (o, rb) in orow.iter_mut().zip(b) {
@@ -521,6 +528,10 @@ mod tests {
         for (x, y) in &cases[..cases.len() - 1] {
             assert_eq!(box_iou(x, y), 0.0);
         }
+        // Matrix path must agree with scalar `iou` even on extreme huge boxes (no f32 overflow).
+        let huge = Xyxy::new(0.0, 0.0, 1e25, 1e25);
+        assert_eq!(iou(&huge, &huge, IouKind::Iou), 1.0);
+        assert_eq!(iou_matrix(&[huge], &[huge], IouKind::Iou), vec![1.0]);
     }
 
     #[test]

@@ -264,6 +264,58 @@ fn soft_nms_linear_and_gaussian_decay_and_reorder() {
     let cfg_json = serde_json::to_string(&cfg).unwrap();
     assert!(cfg_json.contains("soft_gaussian"));
     assert_eq!(serde_json::from_str::<NmsConfig>(&cfg_json).unwrap(), cfg);
+
+    // Negative scores with negative score_thr never increase under decay, preserving descending order.
+    let same = [b(0., 0., 10., 10.), b(0., 0., 10., 10.)];
+    let neg_lin = soft_nms_sorted(&same, &[-0.1, -0.2], 0.5, -1.0, None, 10);
+    assert_eq!(neg_lin, vec![(0, -0.1), (1, -0.2)]);
+    let neg_gauss = soft_nms_sorted(&same, &[-0.1, -0.2], 0.5, -1.0, Some(0.5), 10);
+    assert_eq!(neg_gauss, vec![(0, -0.1), (1, -0.2)]);
+
+    // Soft-NMS preserves decayed scores even if ScoreRule/Sebf are set, and Gaussian Soft-NMS is invariant to cfg.iou.
+    let mut cfg_sebf_a = NmsConfig {
+        conf: 0.25,
+        iou: 0.2,
+        nms_kind: NmsKind::SoftGaussian { sigma: 0.5 },
+        fusion: crate::fusion::BoxFusion::Sebf,
+        score: crate::fusion::ScoreRule::Elc,
+        ..NmsConfig::default()
+    };
+    let out_a = nms_detections(&dets, &cfg_sebf_a);
+    cfg_sebf_a.iou = 0.9;
+    let out_b = nms_detections(&dets, &cfg_sebf_a);
+    assert_eq!(out_a, out_b, "Gaussian Soft-NMS must not depend on cfg.iou");
+    assert!((out_a[2].score - want).abs() < 1e-6, "Soft-NMS decayed score must not be overwritten");
+}
+
+#[test]
+fn agnostic_diou_calibrated_score_uses_diou_class_local_ownership() {
+    // Class 0 boxes A=[0,0,10,10] and B=[1.2,0,11.2,10] have IoU = 8.8/11.2 = 0.785714,
+    // enclosing diag^2 = 11.2^2 + 10^2 = 225.44, center dist^2 = 1.2^2 = 1.44 -> DIoU = 0.779327.
+    // Threshold 0.782 lies strictly between DIoU (0.7793) and IoU (0.7857).
+    // Class 1 box C=[1.2,0,11.2,10] (score 0.95) suppresses B via agnostic DIoU (DIoU=1.0 > 0.782),
+    // while A (score 0.90) survives. A must NOT credit B in class-local ELC because DIoU(A, B) <= 0.782.
+    let dets = [
+        Detection { bbox: b(1.2, 0.0, 11.2, 10.0), score: 0.95, class: 1 },
+        Detection { bbox: b(0.0, 0.0, 10.0, 10.0), score: 0.90, class: 0 },
+        Detection { bbox: b(1.2, 0.0, 11.2, 10.0), score: 0.80, class: 0 },
+    ];
+    let cfg = NmsConfig {
+        conf: 0.01,
+        iou: 0.782,
+        agnostic: true,
+        nms_kind: NmsKind::Diou,
+        score: crate::fusion::ScoreRule::Elc,
+        ..NmsConfig::default()
+    };
+    let out = nms_detections(&dets, &cfg);
+    let a_det = out.iter().find(|d| d.class == 0).expect("A kept");
+    let solo = crate::fusion::elc_scores(&[0], &[b(0.0, 0.0, 10.0, 10.0)], &[0.90], &[0], None, 0.782)[0];
+    assert!(
+        (a_det.score - solo).abs() < 1e-6,
+        "agnostic DIoU-NMS ELC must not credit B (DIoU <= thr): got {} vs solo {solo}",
+        a_det.score
+    );
 }
 
 #[test]
