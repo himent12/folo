@@ -166,19 +166,23 @@ impl Route {
     /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
     /// `bench-entry:ID/ENTRY`, `playground`, `settings`.
     pub fn parse(s: &str) -> Option<Route> {
-        let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i.to_string())));
+        let valid_id = |v: &str| !v.trim().is_empty();
+        let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i)));
         Some(match (kind, id) {
             ("overview", None) => Route::Overview,
             ("datasets", None) => Route::Datasets,
-            ("dataset", Some(id)) => Route::Dataset(id),
+            ("dataset", Some(id)) if valid_id(id) => Route::Dataset(id.to_string()),
             ("runs", None) => Route::Runs,
-            ("run", Some(id)) => Route::Run(id),
+            ("run", Some(id)) if valid_id(id) => Route::Run(id.to_string()),
             ("models", None) => Route::Models,
-            ("model", Some(id)) => Route::Model(id),
+            ("model", Some(id)) if valid_id(id) => Route::Model(id.to_string()),
             ("benchmarks" | "benches", None) => Route::Benches,
-            ("bench", Some(id)) => Route::Bench(id),
+            ("bench", Some(id)) if valid_id(id) => Route::Bench(id.to_string()),
             ("bench-entry", Some(id)) => {
                 let (b, e) = id.split_once('/')?;
+                if !valid_id(b) || !valid_id(e) || e.contains('/') {
+                    return None;
+                }
                 Route::BenchEntry(b.to_string(), e.to_string())
             }
             ("playground", None) => Route::Playground,

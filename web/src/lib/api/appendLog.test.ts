@@ -34,5 +34,24 @@ describe('AppendLog', () => {
     log.push(6, 7, 8, 9);
     log.trimFront(5);
     expect(log.read(behind)).toMatchObject({ reset: true, added: [8, 9] });
+    // Trimming more than held clamps the advance to what was actually removed.
+    log.trimFront(10);
+    expect(log.items).toEqual([]);
+    expect(log.read(null).cursor.start).toBe(9);
+  });
+
+  it('batches trimming in chunks with trimTo(cap, batch)', () => {
+    const log = new AppendLog<number>();
+    for (let i = 0; i < 10; i++) log.push(i);
+    const c = log.read(null).cursor;
+    for (let i = 10; i < 14; i++) {
+      log.push(i);
+      expect(log.trimTo(10, 5)).toBe(0);
+    }
+    expect(log.length).toBe(14);
+    log.push(14);
+    expect(log.trimTo(10, 5)).toBe(5);
+    expect(log.items).toEqual([5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(log.read(c)).toMatchObject({ reset: false, added: [10, 11, 12, 13, 14], dropped: 5 });
   });
 });

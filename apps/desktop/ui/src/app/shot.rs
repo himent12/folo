@@ -37,15 +37,40 @@ pub(crate) struct ShotArgs {
     pub(crate) settle_time: Duration,
 }
 
+/// Reads a flag's value from `args` (program name first): `Ok(None)` when the flag is absent,
+/// `Err` when any occurrence lacks a value (trailing, empty, or followed by another `--` flag).
+pub(crate) fn flag_value<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
+    let rest = args.get(1..).unwrap_or(&[]);
+    let mut found = None;
+    for (i, arg) in rest.iter().enumerate() {
+        if arg != name {
+            continue;
+        }
+        match rest.get(i + 1).map(String::as_str) {
+            None => return Err(anyhow!("{name}: missing its value")),
+            Some("") => return Err(anyhow!("{name}: value cannot be empty")),
+            Some(v) if v.starts_with("--") => return Err(anyhow!("{name}: missing its value (got `{v}`)")),
+            Some(v) => {
+                if found.is_none() {
+                    found = Some(v);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 impl ShotArgs {
     /// The request in `args` (the process arguments, program name first), if `--shot` is there.
     pub(crate) fn parse(args: &[String]) -> Result<Option<Self>> {
-        let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
-        let Some(path) = value("--shot") else { return Ok(None) };
+        let Some(path) = flag_value(args, "--shot")? else { return Ok(None) };
         let number = |name: &str, default: f32| -> Result<f32> {
-            value(name).map_or(Ok(default), |v| v.parse().with_context(|| format!("{name} {v}")))
+            match flag_value(args, name)? {
+                None => Ok(default),
+                Some(v) => v.parse().with_context(|| format!("{name} {v}")),
+            }
         };
-        let text = match value("--text").map(String::as_str) {
+        let text = match flag_value(args, "--text")? {
             None | Some("native") => TextBackend::Native,
             Some("portable") => TextBackend::Portable,
             Some(other) => return Err(anyhow!("--text {other}: expected `native` or `portable`")),
@@ -200,5 +225,28 @@ mod tests {
         ] {
             assert!(shot(good).unwrap().is_some(), "{good:?}");
         }
+    }
+
+    #[test]
+    fn fails_closed_when_shot_or_its_options_lack_a_value() {
+        for bad in [
+            &["--shot"][..],
+            &["--scenario", "runs", "--shot"],
+            &["--shot", ""],
+            &["--shot", "--width", "960"],
+            &["--shot", "a.png", "--width"],
+            &["--shot", "a.png", "--height", "--scale", "2"],
+            &["--shot", "a.png", "--scale"],
+            &["--shot", "a.png", "--text"],
+            &["--shot", "a.png", "--shot-time"],
+            &["--shot", "a.png", "--shot"],
+            &["--shot", "a.png", "--width", "960", "--width"],
+        ] {
+            assert!(ShotArgs::parse(&args(bad)).is_err(), "{bad:?}");
+        }
+        // Repeated valid flags keep first-value precedence while still validating every occurrence.
+        let repeated =
+            ShotArgs::parse(&args(&["--shot", "first.png", "--shot", "second.png"])).unwrap().unwrap();
+        assert_eq!(repeated.path, PathBuf::from("first.png"));
     }
 }

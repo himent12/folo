@@ -84,6 +84,8 @@ export interface ImagePanelProps {
   engine: BrowserEngine;
   sheetShown: boolean;
   tablet: boolean;
+  /** True when the selected model uses an end-to-end (o2o) head without NMS. */
+  o2o?: boolean;
   /** Beside the rail (from 1024 px): the count and the time in the header, no footer. */
   rail: boolean;
   conf?: number;
@@ -330,11 +332,11 @@ export default function ImagePanel(props: ImagePanelProps) {
           ) : null}
         </div>
         {/* Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. Tablets:
-            Confidence and Overlap side by side, the less-used settings one tap away. */}
+            Confidence and Overlap side by side (Confidence alone for end-to-end o2o models), the less-used settings one tap away. */}
         {props.source ? (
-          <div class="qconf" class:covered={props.sheetShown && !props.tablet}>
+          <div class="qconf" class:covered={props.sheetShown && !props.tablet} class:single={props.tablet && !!props.o2o}>
             <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-            {props.tablet ? (
+            {props.tablet && !props.o2o ? (
               <div class="qiou" title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
                 <Slider inline label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
               </div>
@@ -368,9 +370,11 @@ export default function ImagePanel(props: ImagePanelProps) {
                     <b>{props.rows.length}</b> shown <span class="wide">of {num(props.pred?.boxes.length)}{props.cut ? '+' : ''} candidates</span>
                   </span>
                   <span class="fi wide">conf ≥ {conf.get().toFixed(2)}</span>
-                  <span class="fi" class:wide={iou.get() === DEFAULTS.iou}>
-                    IoU {iou.get().toFixed(2)}
-                  </span>
+                  {!props.o2o ? (
+                    <span class="fi" class:wide={iou.get() === DEFAULTS.iou}>
+                      IoU {iou.get().toFixed(2)}
+                    </span>
+                  ) : null}
                   {props.maxDet < DEFAULTS.maxDet ? <span class="fi">max {Math.round(props.maxDet)}</span> : null}
                   {props.hidden.size ? (
                     <span class="fi">
@@ -764,6 +768,9 @@ css`
       min-height: 48px;
       padding: 0 var(--space-4);
       border-top: 1px solid var(--line-subtle);
+    }
+    .qconf.single {
+      grid-template-columns: minmax(0, 1fr);
     }
     .qconf :global(.slider.inline) {
       grid-template-columns: auto minmax(0, 1fr) 40px;

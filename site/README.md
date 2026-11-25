@@ -10,7 +10,7 @@ npm ci
 npm run dev        # http://localhost:5173, regenerates and reloads when a source Markdown file changes
 npm run build      # the static site in site/dist
 npm run preview    # serves site/dist on http://localhost:4173
-npm run check      # TypeScript, plus every link, anchor and image in the Markdown (generates in memory)
+npm run check      # TypeScript, every link/anchor/image in Markdown & llms.txt, and orphaned docs (in memory)
 npm run shoot      # screenshots of the built site into site/shots (installed Chrome via playwright-core)
 ```
 
@@ -36,13 +36,14 @@ npm run shoot      # screenshots of the built site into site/shots (installed Ch
 - **Search.** A prebuilt index (`search.json`, one entry per H2/H3 section) is fetched on first use and searched in
   the browser; no service. Open it with `/` or Ctrl+K (⌘K), move with ↑ ↓, open with Enter.
 - **Reading aids.** A per-page table of contents that tracks the section being read (inline and collapsible below
-  1200 px), copy buttons on code blocks, build-time highlighting (shiki), previous / next links, a link to the
-  source file, and roadmap status markers for `- [x]` / `- [~]` / `- [ ]`.
+  1200 px), copy buttons on code blocks, build-time highlighting (shiki), previous / next links, links to the GitHub
+  source file and raw Markdown copy, and roadmap status markers for `- [x]` / `- [~]` / `- [ ]`.
 - **For agents.** `llms.txt` (the repository's llms.txt with its links pointed at the site), `llms-full.txt` (every
   page's Markdown in one file) and the raw Markdown of each page at `md/<repository path>`.
 - **Theme.** Colours, type, spacing, radii and motion come from `design/tokens.json`, the tokens Studio and Desktop
   use, generated into CSS variables at build time (`scripts/tokens.ts`; the same variable names as Studio). With no
-  saved choice the site follows the system's light or dark setting; the top-bar button switches and remembers it.
+  saved choice the site follows the system's light or dark setting; the top-bar button cycles between system, light and
+  dark and remembers it.
   Fonts are the self-hosted Geist and Geist Mono from `design/fonts`. Highlighting colours are the tokens' status
   `text` colours, which meet AA on every surface.
 - **Layout.** Three columns from 1200 px, no side table of contents below that, and below 960 px the sidebar becomes

@@ -9,11 +9,12 @@
  * the same at length), so a user who never opens Settings learns of it.
  */
 import ArrowRight from '$icons/arrow-right';
-import { computed, css, For } from 'fw';
-import { hub } from '$lib/api/index';
+import { computed, css, For, untrack } from 'fw';
+import { ApiError, hub } from '$lib/api/index';
 import { hasFeature } from '$lib/api/queue';
 import { Resource } from '$lib/api/resource';
-import type { Bench, BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
+import { abortError } from '$lib/api/share';
+import type { BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
 import { hasCloud } from '$lib/cloud';
 import { count, num } from '$lib/format';
@@ -32,8 +33,22 @@ interface Item {
   state?: OwnStatus;
   name: string;
   detail: string;
+  /** Non-truncating refresh failure notice shown beside `detail` when the latest poll failed. */
+  refreshNote?: string;
   path: string;
 }
+
+interface BenchWork {
+  entries: BenchEntry[];
+  loops: BenchLoop[];
+  entriesFailed: boolean;
+  loopsFailed: boolean;
+}
+
+const isMissingOrUnsupported = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
+const resourceFailed = (r: { stale: unknown; error: unknown }) =>
+  (r.stale !== undefined && !isMissingOrUnsupported(r.stale)) || (r.error !== undefined && !isMissingOrUnsupported(r.error));
+const joinNames = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
 
 export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   // Polled with the run list (the same period, so one timer): a job or entry that starts shows within seconds.
@@ -43,84 +58,169 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
   const instances = new Resource((s) => (hasCloud(props.system) ? hub.api.cloudInstances(s) : Promise.resolve([] as CloudInstance[])), { poll: 5000 });
   // The entries and loops of the benchmarks at work (seldom more than one), polled with them, for how far each is.
   const activeIds = computed(() => (benches.data ?? []).filter((b) => b.active).map((b) => b.id).join(' '));
-  const work = new Resource(
+  const work = new Resource<Map<string, BenchWork>>(
     async (s) => {
       const ids = activeIds.get().split(' ').filter(Boolean);
+      if (!ids.length) return new Map();
+      const prev = untrack(() => work.data);
       const lists = await Promise.all(
-        ids.map((id) =>
-          Promise.all([hub.api.benchEntries(id, s).catch((): BenchEntry[] => []), hub.api.benchLoops(id, s).catch((): BenchLoop[] => [])]),
-        ),
+        ids.map((id) => Promise.allSettled([hub.api.benchEntries(id, s), hub.api.benchLoops(id, s)])),
       );
-      return new Map(ids.map((id, i) => [id, { entries: lists[i]![0], loops: lists[i]![1] }]));
+      if (s.aborted) throw abortError();
+      const next = new Map<string, BenchWork>();
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const prior = prev?.get(id);
+        const [entriesRes, loopsRes] = lists[i]!;
+        let entries: BenchEntry[];
+        let entriesFailed = false;
+        if (entriesRes.status === 'fulfilled') {
+          entries = entriesRes.value;
+        } else if (isMissingOrUnsupported(entriesRes.reason)) {
+          entries = [];
+        } else {
+          entries = prior?.entries ?? [];
+          entriesFailed = true;
+        }
+        let loops: BenchLoop[];
+        let loopsFailed = false;
+        if (loopsRes.status === 'fulfilled') {
+          loops = loopsRes.value;
+        } else if (isMissingOrUnsupported(loopsRes.reason)) {
+          loops = [];
+        } else {
+          loops = prior?.loops ?? [];
+          loopsFailed = true;
+        }
+        next.set(id, { entries, loops, entriesFailed, loopsFailed });
+      }
+      return next;
     },
     { poll: 5000 },
   );
-  const atWorkEntry = (b: Bench) => {
-    const list = work.data?.get(b.id)?.entries ?? [];
+  const atWorkEntry = (w: BenchWork | undefined) => {
+    const list = w?.entries ?? [];
     return list.find((x) => x.status === 'running' || x.status === 'stopping') ?? list.find((x) => x.status === 'queued');
   };
-  const loopsAtWork = (b: Bench) => (work.data?.get(b.id)?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
-  /** A benchmark's line: its entry at work and how far it is, else what its flag says (until its lists are in). */
-  const benchDetail = (b: Bench) => {
-    const e = atWorkEntry(b);
-    if (!e) return 'An entry or a loop is running';
-    const p = progressFacts(e);
-    return `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
+  const loopsAtWork = (w: BenchWork | undefined) => (w?.loops ?? []).filter((l) => l.status === 'running' || l.status === 'stopping');
+  /** A benchmark's line: its entry at work and how far it is, preserving last known detail and noting refresh failures. */
+  const benchDetail = (w: BenchWork | undefined, e: BenchEntry | undefined, loops: BenchLoop[]): { detail: string; refreshNote?: string } => {
+    const listFailed = resourceFailed(benches);
+    if (e) {
+      const p = progressFacts(e);
+      const base = `${e.name} · ${e.status === 'running' && p.pct ? p.pct : p.where}`;
+      if (w?.entriesFailed || listFailed) return { detail: base, refreshNote: 'Refresh failed' };
+      if (w?.loopsFailed && !loops.length) return { detail: base, refreshNote: 'Could not refresh loops' };
+      return { detail: base };
+    }
+    if (w?.entriesFailed && w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark activity' };
+    if (w?.entriesFailed) return { detail: '', refreshNote: 'Could not refresh benchmark entries' };
+    if (w?.loopsFailed && !loops.length) return { detail: '', refreshNote: 'Could not refresh benchmark loops' };
+    if (listFailed) return { detail: 'An entry or a loop is running', refreshNote: 'Refresh failed' };
+    return { detail: 'An entry or a loop is running' };
   };
 
-  const items = computed<Item[]>(() => [
-    ...(instances.data ?? [])
-      .filter((i) => i.status === 'terminating' && i.error)
-      .map((i) => ({
-        id: i.id,
-        kind: 'Cloud',
-        state: { status: 'failed' as const, label: 'Cloud' },
-        name: i.name,
-        detail: 'Termination not confirmed: it may still be billed',
-        path: '/settings?section=cloud',
-      })),
-    ...(jobs.data ?? [])
-      .filter((j) => j.status !== 'idle')
-      .map((j) => ({
-        id: j.id,
-        kind: 'Labeling',
-        name: j.name,
-        detail: j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`,
-        path: `/datasets/label/${j.id}`,
-      })),
-    ...(benches.data ?? [])
-      .filter((b) => b.active)
-      .flatMap((b) => [
-        // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row.
-        ...(atWorkEntry(b) || !loopsAtWork(b).length ? [{ id: b.id, kind: 'Benchmark', name: b.name, detail: benchDetail(b), path: `/benchmarks/${b.id}` }] : []),
-        ...loopsAtWork(b).map((l) => ({
-          id: l.id,
-          kind: 'Loop',
-          name: l.name,
-          detail: `${loopStatus(l).label} · ${b.name}`,
-          path: `/benchmarks/${b.id}/loops/${l.id}`,
+  const items = computed<Item[]>(() => {
+    const instancesFailed = resourceFailed(instances);
+    const jobsFailed = resourceFailed(jobs);
+    const benchesFailed = resourceFailed(benches);
+    return [
+      ...(instances.data ?? [])
+        .filter((i) => i.status === 'terminating' && i.error)
+        .map((i) => ({
+          id: i.id,
+          kind: 'Cloud',
+          state: { status: 'failed' as const, label: 'Cloud' },
+          name: i.name,
+          detail: 'Termination not confirmed: it may still be billed',
+          refreshNote: instancesFailed ? 'Refresh failed' : undefined,
+          path: '/settings?section=cloud',
         })),
-      ]),
-  ]);
+      ...(jobs.data ?? [])
+        .filter((j) => j.status !== 'idle')
+        .map((j) => {
+          const base = j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`;
+          return {
+            id: j.id,
+            kind: 'Labeling',
+            name: j.name,
+            detail: base,
+            refreshNote: jobsFailed ? 'Refresh failed' : undefined,
+            path: `/datasets/label/${j.id}`,
+          };
+        }),
+      ...(benches.data ?? [])
+        .filter((b) => b.active)
+        .flatMap((b) => {
+          const w = work.data?.get(b.id);
+          const entry = atWorkEntry(w);
+          const loops = loopsAtWork(w);
+          const showBenchRow = !!entry || !loops.length || !!w?.entriesFailed;
+          const loopFailed = !!w?.loopsFailed || benchesFailed;
+          return [
+            // A benchmark whose only work is a loop between its entries (labeling, training) is said by the loop's row,
+            // unless refreshing entries failed and needs to be surfaced.
+            ...(showBenchRow ? [{ id: b.id, kind: 'Benchmark', name: b.name, ...benchDetail(w, entry, loops), path: `/benchmarks/${b.id}` }] : []),
+            ...loops.map((l) => ({
+              id: l.id,
+              kind: 'Loop',
+              name: l.name,
+              detail: `${loopStatus(l).label} · ${b.name}`,
+              refreshNote: loopFailed ? 'Refresh failed' : undefined,
+              path: `/benchmarks/${b.id}/loops/${l.id}`,
+            })),
+          ];
+        }),
+    ];
+  });
+
+  // Top-level load or poll failures whose resource has no visible row to carry the failure note.
+  const hiddenStale = computed(() => {
+    if (hub.offline) return [] as string[];
+    const list = items.get();
+    const out: string[] = [];
+    if (resourceFailed(instances) && !list.some((i) => i.kind === 'Cloud')) out.push('cloud instances');
+    if (resourceFailed(jobs) && !list.some((i) => i.kind === 'Labeling')) out.push('labeling jobs');
+    if (resourceFailed(benches) && !list.some((i) => i.kind === 'Benchmark' || i.kind === 'Loop')) out.push('benchmarks');
+    return out;
+  });
 
   return (
     <>
-      {items.get().length ? (
+      {items.get().length || hiddenStale.get().length ? (
         <section class="activity" aria-label="Also running">
-          <ul>
-            <For each={items.get()} key={(i) => i.id}>
-              {(i) => (
-                <li>
-                  <a href={href(i().path)}>
-                    <StatusBadge plain state={i().state ?? atWork(i().kind)} />{' '}
-                    <span class="name truncate">{i().name}</span>{' '}
-                    <span class="detail num truncate">{i().detail}</span>{' '}
-                    <ArrowRight size={14} strokeWidth={1.75} />
-                  </a>
-                </li>
-              )}
-            </For>
-          </ul>
+          {items.get().length ? (
+            <ul>
+              <For each={items.get()} key={(i) => i.id}>
+                {(i) => (
+                  <li>
+                    <a href={href(i().path)}>
+                      <StatusBadge plain state={i().state ?? atWork(i().kind)} />{' '}
+                      <span class="name truncate">{i().name}</span>{' '}
+                      <span class="detail-cell">
+                        {i().detail ? (
+                          <span class="detail num truncate" title={i().detail}>
+                            {i().detail}
+                          </span>
+                        ) : null}
+                        {i().refreshNote ? (
+                          <span class="refresh-note" data-fact data-refresh-failed="true">
+                            {i().refreshNote}
+                          </span>
+                        ) : null}
+                      </span>{' '}
+                      <ArrowRight size={14} strokeWidth={1.75} />
+                    </a>
+                  </li>
+                )}
+              </For>
+            </ul>
+          ) : null}
+          {hiddenStale.get().length ? (
+            <p class="stale-notice" data-fact data-refresh-failed="true">
+              Could not refresh {joinNames(hiddenStale.get())}
+            </p>
+          ) : null}
         </section>
       ) : null}
     </>
@@ -136,11 +236,11 @@ css`
   }
   a {
     display: grid;
-    grid-template-columns: 112px minmax(0, auto) minmax(0, 1fr) auto;
+    grid-template-columns: 112px fit-content(45%) minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-3);
     min-height: var(--size-row);
-    padding: 0 var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     color: var(--text-tertiary);
     transition: background-color var(--dur-fast) var(--ease-standard);
@@ -152,17 +252,40 @@ css`
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
+  .detail-cell {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+  }
   .detail {
     font-size: var(--type-sm-size);
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
   }
-  /* Phones: the kind and the name on one line, what it is doing under the name. */
+  .refresh-note {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    white-space: normal;
+    max-width: 100%;
+  }
+  .stale-notice {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  /* Phones: the kind and the name on one line, what it is doing under the name; a refresh failure wraps intact below
+     the detail rather than clipping behind an ellipsis. */
   @media (max-width: 767px) {
     a {
       grid-template-columns: 104px minmax(0, 1fr) auto;
       row-gap: 0;
-      padding: var(--space-2) var(--space-3);
     }
-    .detail {
+    .detail-cell {
       grid-column: 2;
       grid-row: 2;
     }
