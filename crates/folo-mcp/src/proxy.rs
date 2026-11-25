@@ -3,6 +3,8 @@
 //! methods as in embedded mode; only the transport differs: [`folo_client::Client`] (blocking, `http://` or
 //! `https://`, the server's `--token` when it has one). The MCP layer runs the calls on tokio's blocking pool.
 
+use std::sync::{Arc, Mutex};
+
 use folo_api::{
     CloudConnection, CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, CloudProvider,
     CloudProviderList, ConnectCloud, Dataset, DatasetList, ExportResult, ExportSpec,
@@ -22,12 +24,17 @@ use serde::de::DeserializeOwned;
 
 use crate::errors::{Error, not_implemented};
 
+/// Cached remote capability probe shared across an [`HttpStore`] and its [`HttpStore::until`] clones.
+#[derive(Default)]
+struct ProbeCache {
+    mock: Option<bool>,
+    features: Option<Vec<String>>,
+}
+
 /// A [`Store`] backed by a `folo serve` HTTP API.
 pub struct HttpStore {
     client: Client,
-    mock: std::sync::OnceLock<bool>,
-    /// `/api/system`'s `features`, read once.
-    features: std::sync::OnceLock<Vec<String>>,
+    probe: Arc<Mutex<ProbeCache>>,
 }
 
 fn action(a: QueueAction) -> QueueRequest {
@@ -49,7 +56,7 @@ impl HttpStore {
     /// `--token`.
     pub fn new(base: &str, token: Option<&str>) -> HttpStore {
         let client = Client::new(base).token(token.unwrap_or_default());
-        HttpStore { client, mock: std::sync::OnceLock::new(), features: std::sync::OnceLock::new() }
+        HttpStore { client, probe: Arc::new(Mutex::new(ProbeCache::default())) }
     }
 
     /// The server's base URL.
@@ -58,12 +65,9 @@ impl HttpStore {
     }
 
     /// This store with every request ending by `deadline` (`bench_entry`'s wait promises an answer by then).
+    /// Shares the cached `/api/health` and feature probe with the parent store.
     pub fn until(&self, deadline: std::time::Instant) -> HttpStore {
-        HttpStore {
-            client: self.client.until(deadline),
-            mock: self.mock.clone(),
-            features: self.features.clone(),
-        }
+        HttpStore { client: self.client.until(deadline), probe: Arc::clone(&self.probe) }
     }
 
     /// The client (the labeling tools call `/api/label` through it, `crate::label`).
@@ -71,23 +75,55 @@ impl HttpStore {
         &self.client
     }
 
+    /// Clears the cached `/api/health` and feature probe so the next capability check queries the server again.
+    pub fn clear_probe_cache(&self) {
+        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
+        cache.mock = None;
+        cache.features = None;
+    }
+
     /// This store, taking `features` as the server's (tests: a server of an earlier version).
     #[cfg(test)]
     pub(crate) fn assume_features(self, features: Vec<String>) -> HttpStore {
-        let _ = self.features.set(features);
+        self.probe.lock().unwrap_or_else(|e| e.into_inner()).features = Some(features);
         self
     }
 
-    /// Whether the server lists `feature` (asked once per session). `/api/health` answers without a hardware
-    /// probe; only a server that predates its `features` is asked `/api/system`, whose CPU sample once stalled a
-    /// labeling call for 20 s on a loaded machine.
-    pub fn has_feature(&self, feature: &str) -> Result<bool, Error> {
-        if let Some(f) = self.features.get() {
-            return Ok(f.iter().any(|f| f == feature));
+    /// Calls `GET /api/health` and updates the shared cache on success (never caching transient errors).
+    fn probe_health(&self) -> Result<Health, Error> {
+        let health: Health = self.get("/health")?;
+        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
+        cache.mock = Some(health.mock);
+        if !health.features.is_empty() && cache.features.is_none() {
+            cache.features = Some(health.features.clone());
         }
-        let health: folo_api::Health = self.get("/health")?;
-        let features = if health.features.is_empty() { self.system()?.features } else { health.features };
-        Ok(self.features.get_or_init(|| features).iter().any(|f| f == feature))
+        Ok(health)
+    }
+
+    fn cached_feature(&self, feature: &str) -> Option<bool> {
+        self.probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .features
+            .as_ref()
+            .map(|f| f.iter().any(|x| x == feature))
+    }
+
+    /// Whether the server lists `feature` (cached once per session and shared across [`Self::until`] clones).
+    /// `/api/health` answers without a hardware probe; only a server that predates its `features` is asked
+    /// `/api/system`, whose CPU sample once stalled a labeling call for 20 s on a loaded machine.
+    pub fn has_feature(&self, feature: &str) -> Result<bool, Error> {
+        if let Some(has) = self.cached_feature(feature) {
+            return Ok(has);
+        }
+        let health = self.probe_health()?;
+        if !health.features.is_empty() {
+            return Ok(health.features.iter().any(|f| f == feature));
+        }
+        let features = self.system()?.features;
+        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
+        let stored = cache.features.get_or_insert(features);
+        Ok(stored.iter().any(|f| f == feature))
     }
 
     /// `GET /api/system` of the server.
@@ -145,7 +181,10 @@ fn multipart(fields: &[(&str, String)], image: &[u8]) -> (String, Vec<u8>) {
 
 impl Store for HttpStore {
     fn is_mock(&self) -> bool {
-        *self.mock.get_or_init(|| self.get::<Health>("/health").map(|h| h.mock).unwrap_or(false))
+        if let Some(mock) = self.probe.lock().unwrap_or_else(|e| e.into_inner()).mock {
+            return mock;
+        }
+        self.probe_health().map(|h| h.mock).unwrap_or(false)
     }
 
     fn gpus(&self) -> Vec<GpuInfo> {
@@ -221,7 +260,7 @@ impl Store for HttpStore {
     fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
         folo_server::store::check_export(&spec)?;
         // An older server accepts the switches and ignores them, which would export the defaults silently.
-        if spec.onnx.any() && !self.system()?.features.iter().any(|f| f == FEATURE_EXPORT_ONNX_SWITCHES) {
+        if spec.onnx.any() && !self.has_feature(FEATURE_EXPORT_ONNX_SWITCHES)? {
             return Err(Error::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "not_implemented",
@@ -382,13 +421,59 @@ impl Store for HttpStore {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    use folo_api::{ExportFormat, OnnxSwitches};
+
     use super::*;
+
+    fn start_mock_api(
+        handler: impl Fn(&str, usize) -> (&'static str, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for (idx, stream) in listener.incoming().enumerate() {
+                let Ok(mut s) = stream else { continue };
+                let req = read_request_line(&mut s);
+                recorded.lock().unwrap().push(req.clone());
+                let (status, body) = handler(&req, idx);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: \
+                     close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.flush();
+            }
+        });
+        (base, log)
+    }
+
+    fn read_request_line(s: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut b = [0u8; 1];
+        while !buf.ends_with(b"\r\n\r\n") {
+            match s.read(&mut b) {
+                Ok(1) => buf.push(b[0]),
+                _ => break,
+            }
+        }
+        let head = String::from_utf8_lossy(&buf);
+        let first = head.lines().next().unwrap_or("");
+        let mut parts = first.split_whitespace();
+        format!("{} {}", parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+    }
 
     #[test]
     fn unreachable_server_is_a_tool_error() {
         // A server that hangs up without an answer. (A closed port would do too, but on Windows a refused
         // loopback connection takes 2 s.)
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {
             for conn in listener.incoming() {
@@ -400,5 +485,128 @@ mod tests {
         assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_GATEWAY, "server_unreachable"));
         assert!(e.body.hint.unwrap().contains("folo serve"));
         assert!(!e.body.message.contains("s3cret"));
+    }
+
+    #[test]
+    fn feature_and_mock_probes_share_cache_across_until_and_export() {
+        let (base, log) = start_mock_api(|req, _| match req {
+            "GET /api/health" => (
+                "200 OK",
+                serde_json::json!({
+                    "status": "ok",
+                    "version": "0.1.0",
+                    "mock": true,
+                    "features": [FEATURE_EXPORT_ONNX_SWITCHES, folo_api::FEATURE_VISION_BENCH],
+                })
+                .to_string(),
+            ),
+            "POST /api/models/m1/export" => (
+                "200 OK",
+                serde_json::json!({
+                    "path": "/tmp/m1-f16.onnx",
+                    "bytes": 1024,
+                })
+                .to_string(),
+            ),
+            other => panic!("unexpected request: {other}"),
+        });
+
+        let store = HttpStore::new(&base, None);
+        // `is_mock` probes `/api/health` once and populates both `mock` and `features`.
+        assert!(store.is_mock());
+        assert!(store.has_feature(FEATURE_EXPORT_ONNX_SWITCHES).unwrap());
+        // `until` shares the cache with its parent store.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(store.until(deadline).has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        // ONNX-switch export reuses the cached features without hitting `/api/system`.
+        let exported = store
+            .export_model(
+                "m1",
+                ExportSpec {
+                    format: ExportFormat::Onnx,
+                    onnx: OnnxSwitches { half: true, ..OnnxSwitches::default() },
+                },
+            )
+            .unwrap();
+        assert_eq!(exported.path, "/tmp/m1-f16.onnx");
+
+        // Clearing the cache forces a fresh probe, and probing through `until` populates the parent cache too.
+        store.clear_probe_cache();
+        assert!(store.until(deadline).has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        assert!(store.is_mock());
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["GET /api/health", "POST /api/models/m1/export", "GET /api/health"]
+        );
+    }
+
+    #[test]
+    fn legacy_server_falls_back_to_system_once_and_caches_missing_export_feature() {
+        let (base, log) = start_mock_api(|req, _| match req {
+            "GET /api/health" => (
+                "200 OK",
+                serde_json::json!({ "status": "ok", "version": "0.1.0", "mock": false, "features": [] })
+                    .to_string(),
+            ),
+            "GET /api/system" => (
+                "200 OK",
+                serde_json::to_string(&SystemResponse {
+                    system: SystemInfo {
+                        cpu: folo_api::CpuInfo { name: "test".into(), threads: 4, util: 0.1 },
+                        memory: folo_api::MemoryInfo { used_bytes: 512, total_bytes: 1024 },
+                        gpus: vec![],
+                    },
+                    data_dir: None,
+                    features: vec![folo_api::FEATURE_VISION_BENCH.into()],
+                    capabilities: None,
+                    gpu_pool: None,
+                })
+                .unwrap(),
+            ),
+            other => panic!("unexpected request: {other}"),
+        });
+
+        let store = HttpStore::new(&base, None);
+        assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        assert!(!store.is_mock());
+        let err = store
+            .export_model(
+                "m1",
+                ExportSpec {
+                    format: ExportFormat::Onnx,
+                    onnx: OnnxSwitches { decode: true, ..OnnxSwitches::default() },
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(*log.lock().unwrap(), vec!["GET /api/health", "GET /api/system"]);
+    }
+
+    #[test]
+    fn transient_health_error_is_not_cached() {
+        let (base, log) = start_mock_api(|req, idx| match (req, idx) {
+            ("GET /api/health", 0) => (
+                "503 Service Unavailable",
+                serde_json::json!({ "error": { "code": "internal", "message": "starting up" } }).to_string(),
+            ),
+            ("GET /api/health", _) => (
+                "200 OK",
+                serde_json::json!({
+                    "status": "ok",
+                    "version": "0.1.0",
+                    "mock": true,
+                    "features": [folo_api::FEATURE_VISION_BENCH],
+                })
+                .to_string(),
+            ),
+            other => panic!("unexpected request: {other:?}"),
+        });
+
+        let store = HttpStore::new(&base, None);
+        assert!(!store.is_mock(), "transient 503 returns false without poisoning the cache");
+        assert!(store.is_mock(), "next probe succeeds once the server recovers");
+        assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        assert_eq!(*log.lock().unwrap(), vec!["GET /api/health", "GET /api/health"]);
     }
 }
