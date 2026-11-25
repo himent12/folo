@@ -32,12 +32,14 @@ impl Svg {
 
 impl Styled for Svg {
     fn style(&mut self) -> &mut StyleRefinement {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity.base_style
     }
 }
 
 impl InteractiveElement for Svg {
     fn interactivity(&mut self) -> &mut Interactivity {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity
     }
 }
@@ -62,8 +64,8 @@ impl Element for Svg {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let layout_id =
-            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
-                window.request_layout(style, None, cx)
+            self.interactivity.request_layout_ref(global_id, inspector_id, window, cx, |style, window, _| {
+                window.request_layout_ref(style, None)
             });
         (layout_id, ())
     }

@@ -10,7 +10,9 @@ use smallvec::SmallVec;
 use crate::{
     App, Bounds, Display, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
     InteractiveElementState, Interactivity, LayoutId, Overflow, Pixels, Point, Refineable, SharedString,
-    Size, Style, Visibility, Window, interactive::tooltip, px, size,
+    Size, Style, Visibility, Window,
+    interactive::{ElementClickedState, tooltip},
+    px, size,
 };
 
 impl Interactivity {
@@ -18,10 +20,25 @@ impl Interactivity {
     pub fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
+        inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
         f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
+    ) -> LayoutId {
+        self.request_layout_ref(global_id, inspector_id, window, cx, |style, window, cx| {
+            f(style.clone(), window, cx)
+        })
+    }
+
+    /// Borrowed-style variant of [`Self::request_layout`]: computes the base+active style once and
+    /// caches it in `Window::frame_styles` for `prepaint` and `paint` while drawing.
+    pub(crate) fn request_layout_ref(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+        f: impl FnOnce(&Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
         window.with_sparse_element_state::<InteractiveElementState, _>(
             global_id,
@@ -64,9 +81,46 @@ impl Interactivity {
                     self.scroll_offset = Some(state.scroll_offset.get_or_insert_with(Rc::default).clone());
                 }
 
+                let clicked = element_clicked_state(element_state.as_ref());
                 let style = self.compute_style_internal(None, element_state.as_ref(), window);
-                let layout_id = f(style, window, cx);
+                let layout_id = f(&style, window, cx);
+                if window.drawing
+                    && let Ok(index) = u32::try_from(window.frame_styles.len())
+                {
+                    window.frame_styles.push(style);
+                    self.cached_style = Some(index);
+                    self.cached_clicked = clicked;
+                } else {
+                    self.cached_style = None;
+                }
                 (layout_id, element_state)
+            },
+        )
+    }
+
+    /// Runs `f` with the prepaint `Style` (reusing the cached style from `request_layout` when unchanged).
+    pub(crate) fn with_prepaint_style<R>(
+        &self,
+        global_id: Option<&GlobalElementId>,
+        window: &mut Window,
+        f: impl FnOnce(&Style, &Window) -> R,
+    ) -> R {
+        window.with_sparse_element_state::<InteractiveElementState, _>(
+            global_id,
+            InteractiveElementState::is_empty,
+            |element_state, window| {
+                let clicked = element_clicked_state(element_state.as_ref());
+                let result = if let Some(index) = self.cached_style
+                    && window.drawing
+                    && clicked == self.cached_clicked
+                    && let Some(style) = window.frame_styles.get(index as usize)
+                {
+                    f(style, window)
+                } else {
+                    let style = self.compute_style_internal(None, element_state.as_ref(), window);
+                    f(&style, window)
+                };
+                (result, element_state)
             },
         )
     }
@@ -93,11 +147,20 @@ impl Interactivity {
             global_id,
             InteractiveElementState::is_empty,
             |mut element_state, window| {
-                let style = self.compute_style_internal(None, element_state.as_ref(), window);
+                let clicked = element_clicked_state(element_state.as_ref());
+                let reused_index = self.cached_style.take().filter(|&index| {
+                    window.drawing
+                        && clicked == self.cached_clicked
+                        && (index as usize) < window.frame_styles.len()
+                });
+                let style = match reused_index {
+                    Some(index) => std::mem::take(&mut window.frame_styles[index as usize]),
+                    None => self.compute_style_internal(None, element_state.as_ref(), window),
+                };
 
                 if let Some(state) = element_state.as_mut() {
-                    if let Some(clicked) = state.clicked_state.as_ref() {
-                        self.active = Some(clicked.borrow().element);
+                    if state.clicked_state.is_some() {
+                        self.active = Some(clicked.element);
                     }
                     if let Some(active_tooltip) = state.active_tooltip.as_ref() {
                         if self.tooltip_builder.is_some() {
@@ -108,10 +171,7 @@ impl Interactivity {
                     }
                 }
 
-                let has_active_click = element_state
-                    .as_ref()
-                    .and_then(|state| state.clicked_state.as_ref())
-                    .is_some_and(|clicked| clicked.borrow().is_clicked());
+                let has_active_click = clicked.is_clicked();
                 let result = window.with_text_style_ref(style.text_style(), |window| {
                     window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
                         let hitbox = (self.should_insert_hitbox(&style) || has_active_click)
@@ -120,6 +180,12 @@ impl Interactivity {
                         f(&style, scroll_offset, hitbox, window, cx)
                     })
                 });
+                if let Some(index) = reused_index
+                    && (index as usize) < window.frame_styles.len()
+                {
+                    window.frame_styles[index as usize] = style;
+                    self.cached_style = Some(index);
+                }
                 (result, element_state)
             },
         );
@@ -206,7 +272,14 @@ impl Interactivity {
             global_id,
             InteractiveElementState::is_empty,
             |mut element_state, window| {
-                let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
+                let clicked = element_clicked_state(element_state.as_ref());
+                let reused_index = self.cached_style.take().filter(|&index| {
+                    window.drawing
+                        && clicked == self.cached_clicked
+                        && (index as usize) < window.frame_styles.len()
+                });
+                let style =
+                    self.resolve_paint_style(reused_index, clicked, hitbox, element_state.as_ref(), window);
                 self.paint_hover_group_handler(window);
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
@@ -267,6 +340,53 @@ impl Interactivity {
                 (style, element_state)
             },
         )
+    }
+
+    /// Resolves the paint style, reusing `window.frame_styles[reused_index]` without re-refining
+    /// `base_style` when neither hover nor active precedence invalidates it.
+    fn resolve_paint_style(
+        &self,
+        reused_index: Option<u32>,
+        clicked: ElementClickedState,
+        hitbox: Option<&Hitbox>,
+        element_state: Option<&InteractiveElementState>,
+        window: &mut Window,
+    ) -> Style {
+        let mut group_hover = None;
+        let mut self_hover = None;
+        if let Some(hitbox) = hitbox
+            && window.active_drag.is_none()
+        {
+            if let Some(group_hover_style) = self.group_hover_style.as_ref()
+                && let Some(group_hitbox) = window.group_hitboxes.get(&group_hover_style.group)
+                && group_hitbox.is_hovered(window)
+            {
+                group_hover = Some(&group_hover_style.style);
+            }
+            if let Some(hover_style) = self.hover_style.as_ref()
+                && hitbox.is_hovered(window)
+            {
+                self_hover = Some(hover_style.as_ref());
+            }
+        }
+        if let Some(index) = reused_index {
+            if group_hover.is_none() && self_hover.is_none() {
+                return std::mem::take(&mut window.frame_styles[index as usize]);
+            }
+            // Active styles refine after hover styles; only apply hover deltas on top of the cached
+            // style when no active style was already merged into it.
+            if !clicked.is_clicked() {
+                let mut style = std::mem::take(&mut window.frame_styles[index as usize]);
+                if let Some(group_hover_style) = group_hover {
+                    style.refine(group_hover_style);
+                }
+                if let Some(hover_style) = self_hover {
+                    style.refine(hover_style);
+                }
+                return style;
+            }
+        }
+        self.compute_style_internal(hitbox, element_state, window)
     }
 
     /// GPUI's `compute_style_internal`: hover styles need a hitbox (so only paint sees them) and no drag;
@@ -340,4 +460,12 @@ impl GroupHitboxes {
 /// Whether a `Display::None` style skips its children (Div's phases ask).
 pub(crate) fn skips_children(style: &Style) -> bool {
     style.display == Display::None
+}
+
+/// Reads the current pressed state from `element_state`, or defaults to unpressed.
+#[inline]
+fn element_clicked_state(element_state: Option<&InteractiveElementState>) -> ElementClickedState {
+    element_state
+        .and_then(|state| state.clicked_state.as_ref())
+        .map_or_else(ElementClickedState::default, |clicked| *clicked.borrow())
 }

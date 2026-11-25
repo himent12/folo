@@ -163,6 +163,9 @@ pub struct Window {
     pub(crate) frame_times: FrameTimes,
     /// Scratch for the deferred draw order (reused).
     pub(crate) scratch_order: SmallVec<[usize; 8]>,
+    /// Resolved base+active styles computed during the current draw, reused by `Interactivity` across
+    /// `request_layout` -> `prepaint` -> `paint` to skip redundant `Style::refine` work.
+    pub(crate) frame_styles: Vec<crate::Style>,
 }
 
 impl Window {
@@ -265,6 +268,7 @@ impl Window {
             damage: Vec::new(),
             frame_times: FrameTimes::default(),
             scratch_order: SmallVec::new(),
+            frame_styles: Vec::new(),
             platform_window,
         };
         window.resize_framebuffer();

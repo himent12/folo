@@ -109,12 +109,14 @@ impl UniformList {
 
 impl Styled for UniformList {
     fn style(&mut self) -> &mut StyleRefinement {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity.base_style
     }
 }
 
 impl InteractiveElement for UniformList {
     fn interactivity(&mut self) -> &mut Interactivity {
+        self.interactivity.invalidate_cached_style();
         &mut self.interactivity
     }
 }
@@ -161,8 +163,8 @@ impl Element for UniformList {
         let key = measure_key(max_items, item_size);
         // GPUI's `ListSizingBehavior::Infer`: as tall as all rows, capped by the space available.
         let layout_id =
-            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, _| {
-                window.request_keyed_measured_layout(
+            self.interactivity.request_layout_ref(global_id, inspector_id, window, cx, |style, window, _| {
+                window.request_keyed_measured_layout_ref(
                     style,
                     key,
                     || {},
@@ -192,9 +194,12 @@ impl Element for UniformList {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        let style = self.interactivity.compute_style(global_id, None, window, cx);
-        let border = style.border_widths.to_pixels(window.rem_size());
-        let padding = style.padding.to_pixels(bounds.size.into(), window.rem_size());
+        let (border, padding) = self.interactivity.with_prepaint_style(global_id, window, |style, window| {
+            (
+                style.border_widths.to_pixels(window.rem_size()),
+                style.padding.to_pixels(bounds.size.into(), window.rem_size()),
+            )
+        });
         let padded_bounds = Bounds::from_corners(
             bounds.origin + point(border.left + padding.left, border.top + padding.top),
             bounds.bottom_right() - point(border.right + padding.right, border.bottom + padding.bottom),
