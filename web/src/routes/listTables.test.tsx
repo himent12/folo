@@ -15,6 +15,7 @@ import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Datasets from './Datasets';
 import Models from './Models';
+import Benchmarks from './Benchmarks';
 
 // Each side of the .hide-lg (< 1280) and .hide-md (< 1024) boundaries, and a tablet (820).
 const WIDTHS = [1280, 1279, 1024, 1023, 820];
@@ -365,5 +366,84 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
   it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
     await loaded('train-split');
     expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');
+  });
+
+  it('keeps missing mAP50-95, mAP50, and Source run values last in both ascending and descending sort', async () => {
+    const api = new MockApi('normal', 0);
+    const base = (await api.models()).find((m) => m.id === 'm_fast_n')!;
+    const mk = (id: string, name: string, map95: number | null, map50: number | null, runId: string | null) => ({
+      ...base,
+      id,
+      name,
+      run_id: runId,
+      metrics: map95 === null || map50 === null ? null : { ...base.metrics!, map50_95: map95, map50 },
+    });
+    api.runs = async () => [
+      { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_a', name: 'run-alpha', dataset_id: 'ds_fasteners' },
+      { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_z', name: 'run-zebra', dataset_id: 'ds_fasteners' },
+    ];
+    // Put all four in the same group (imported files) so they sort together (including NaN and 0 scores).
+    api.models = async () => [
+      { ...mk('m_none', 'alpha-missing', null, null, null), dataset_id: null, source: 'file' as const },
+      { ...mk('m_nan', 'bravo-nan', Number.NaN, Number.NaN, null), dataset_id: null, source: 'file' as const },
+      { ...mk('m_zero', 'charlie-zero', 0, 0, 'run_z'), dataset_id: null, source: 'file' as const },
+      { ...mk('m_high', 'delta-high', 0.9, 0.95, 'run_a'), dataset_id: null, source: 'file' as const },
+    ];
+    await open(Models, '/models', api);
+    await table('table.models', (t) => t.querySelectorAll('tbody tr[data-row]').length === 4, 'four models');
+
+    const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table.models tbody tr[data-row] a.name')].map((a) => a.textContent!);
+    const clickCol = (label: string) => {
+      const th = [...target.querySelectorAll('table.models thead th')].find((x) => x.textContent?.trim() === label)!;
+      th.querySelector('button')!.click();
+      flushSync();
+    };
+
+    // Default sort is mAP50-95 desc -> missing/NaN last (0 kept finite); clicking toggles asc -> missing/NaN STILL last.
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
+    clickCol('mAP50-95');
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
+
+    // mAP50 desc -> asc -> missing/NaN last in both directions.
+    clickCol('mAP50');
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
+    clickCol('mAP50');
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
+
+    // Source run asc -> desc -> missing last in both directions.
+    clickCol('Source run');
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
+    clickCol('Source run');
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
+  });
+});
+
+describe('Benchmarks sort missing values last', () => {
+  it('keeps benchmarks without a finite leader score last in both descending and ascending Leader sort', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.benches();
+    const base = list[0]!;
+    api.benches = async () => [
+      { ...base, id: 'bn_none', name: 'alpha-no-leader', best: null },
+      { ...base, id: 'bn_nan', name: 'bravo-nan', best: { entry_id: 'e0', name: 'nan', score: Number.NaN, partial: false } },
+      { ...base, id: 'bn_zero', name: 'charlie-zero', best: { entry_id: 'e1', name: 'zero', score: 0, partial: false } },
+      { ...base, id: 'bn_high', name: 'delta-high', best: { entry_id: 'e2', name: 'high', score: 0.91, partial: false } },
+    ];
+    await open(Benchmarks, '/benchmarks', api);
+    await table('table', (t) => t.querySelectorAll('tbody tr[data-row]').length === 4, 'four benchmarks');
+
+    const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table tbody tr[data-row] a.name')].map((a) => a.textContent!);
+    const clickLeader = () => {
+      const th = [...target.querySelectorAll('table thead th')].find((x) => x.textContent?.trim() === 'Leader')!;
+      th.querySelector('button')!.click();
+      flushSync();
+    };
+
+    // First click: Leader desc -> missing/NaN last, 0 kept finite.
+    clickLeader();
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-no-leader', 'bravo-nan']);
+    // Second click: Leader asc -> missing/NaN STILL last.
+    clickLeader();
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-no-leader', 'bravo-nan']);
   });
 });

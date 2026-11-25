@@ -130,8 +130,10 @@ export default function BenchCompare() {
       <select
         aria-label="Add an entry to the comparison"
         onchange={(ev) => {
-          const v = (ev.currentTarget as HTMLSelectElement).value;
+          const el = ev.currentTarget as HTMLSelectElement;
+          const v = el.value;
           if (v) setIds([...ids.peek(), v]);
+          el.value = '';
         }}
       >
         <option value="">Add entry…</option>

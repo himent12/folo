@@ -296,6 +296,21 @@ describe('the compare page', () => {
       offShortcuts();
     }
   });
+
+  it('resets the native Add entry select back to its placeholder after adding an entry', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102');
+    await settle(40);
+    const sel = document.querySelector<HTMLSelectElement>('select[aria-label="Add an entry to the comparison"]')!;
+    const opt = [...sel.options].find((o) => o.value !== '')!;
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(go).toHaveBeenCalledWith(`/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,${opt.value}`, { replace: true });
+    expect(sel.value).toBe('');
+  });
 });
 
 describe('New loop', () => {

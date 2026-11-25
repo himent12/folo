@@ -24,7 +24,7 @@ import Copy from '$icons/copy';
 import Search from '$icons/search';
 import Volume2 from '$icons/volume-2';
 import VolumeOff from '$icons/volume-off';
-import { computed, css, effect, For, signal, untrack } from 'fw';
+import { batch, computed, css, effect, For, signal, untrack } from 'fw';
 import type { AppendLog, LogCursor } from '$lib/api/appendLog';
 import type { LogLevel, LogLine } from '$lib/api/types';
 import { clock } from '$lib/format';
@@ -126,6 +126,19 @@ export default function Logs(props: LogsProps) {
   const cap = signal(SHOWN);
   const follow = signal(true);
   const box = signal<HTMLDivElement>();
+  // Preserve keyboard focus onto the log container if the empty-state "Clear filters" button unmounts while focused
+  // (either on click or when a matching live log line arrives).
+  let emptyFocused = false;
+  const preserveEmptyFocus = (el: HTMLElement) => ({
+    destroy() {
+      const hadFocus = emptyFocused || el.contains(document.activeElement);
+      emptyFocused = false;
+      const logEl = box.peek();
+      if (hadFocus && logEl?.isConnected && (!document.activeElement || document.activeElement === document.body || el.contains(document.activeElement))) {
+        logEl.focus({ preventScroll: true });
+      }
+    },
+  });
 
   // Scoped span templates cloned per immutable log token so rendering 500+ lines creates zero per-token effects.
   const wordTpl = (<span class="w" />) as HTMLSpanElement;
@@ -448,15 +461,38 @@ export default function Logs(props: LogsProps) {
                 each={shown.get()}
                 key={(l) => l}
                 fallback={
-                  <p class="empty">
-                    {needle.get()
-                      ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
-                          counts.get().earlier
-                            ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
-                            : ''
-                        }.`
-                      : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
-                  </p>
+                  <div
+                    class="empty"
+                    use:preserveEmptyFocus
+                    onfocusin={() => (emptyFocused = true)}
+                    onfocusout={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) emptyFocused = false;
+                    }}
+                  >
+                    <p>
+                      {needle.get()
+                        ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
+                            counts.get().earlier
+                              ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
+                              : ''
+                          }.`
+                        : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
+                    </p>
+                    {needle.get() || level.get() !== 'all' ? (
+                      <Button
+                        size="sm"
+                        onclick={() => {
+                          batch(() => {
+                            query.set('');
+                            level.set('all');
+                          });
+                          box.peek()?.focus({ preventScroll: true });
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    ) : null}
+                  </div>
                 }
               >
                 {(l) => {
@@ -624,6 +660,10 @@ css`
     color: var(--text-tertiary);
   }
   .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
     padding: var(--space-4);
     color: var(--text-tertiary);
     font-family: var(--font-sans);

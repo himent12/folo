@@ -11,7 +11,7 @@ import Minus from '$icons/minus';
 import Plus from '$icons/plus';
 import Scan from '$icons/scan';
 import X from '$icons/x';
-import { computed, css, cubicOut, effect, fly, Key, signal, untrack } from 'fw';
+import { computed, css, cubicOut, effect, fly, Key, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Box, DatasetImage as ImageInfo } from '$lib/api/types';
 import { createRectCache } from '$lib/charts/rectCache';
@@ -137,14 +137,55 @@ export default function Inspector(props: InspectorProps) {
 
   /** The last step's direction: the next image slides in from that side (120 ms, none under reduced motion). */
   const stepDir = signal(0);
+  /** Target index queued by rapid J/K presses while an uncached page is still fetching; null when settled. */
+  let pendingIdx: number | null = null;
+  /** Generation token for in-flight `step()` fetches so stale, closed, or superseded resolutions are discarded. */
+  let stepToken = 0;
+  let unmounted = false;
+
+  function clearPendingStep() {
+    pendingIdx = null;
+    stepToken++;
+  }
+
+  onCleanup(() => {
+    unmounted = true;
+    clearPendingStep();
+  });
+
+  // Changing image, closing the inspector (`id` -> null), or swapping/reloading the pager invalidates any pending step.
+  effect(() => {
+    void id.get();
+    void props.pager;
+    void props.pager.revision;
+    clearPendingStep();
+  });
+
   async function step(d: number) {
-    const at = idx.peek();
-    if (at < 0) return;
-    stepDir.set(d);
-    const j = at + d;
-    if (j < 0 || j >= total.peek()) return;
-    const n = await props.pager.at(j);
-    if (n) props.onnavigate(n.id);
+    const pager = props.pager;
+    const openId = id.peek();
+    const base = pendingIdx !== null ? pendingIdx : idx.peek();
+    if (!openId || !dialog?.open || base < 0) return;
+    const count = total.peek();
+    const j = base + d;
+    if (j < 0 || j >= count) return;
+    pendingIdx = j;
+    stepDir.set(Math.sign(j - idx.peek()) || d);
+    const token = ++stepToken;
+    const rev = pager.revision;
+    // Stepping back to the already-open image cancels the pending fetch immediately instead of round-tripping.
+    if (j === idx.peek()) {
+      pendingIdx = null;
+      return;
+    }
+    try {
+      const n = await pager.at(j);
+      if (unmounted || !dialog?.open || token !== stepToken || props.pager !== pager || pager.revision !== rev || id.peek() !== openId) return;
+      pendingIdx = null;
+      if (n) props.onnavigate(n.id);
+    } catch {
+      if (token === stepToken) pendingIdx = null;
+    }
   }
 
   // ---------- zoom & pan ----------
@@ -468,7 +509,10 @@ export default function Inspector(props: InspectorProps) {
       class="insp"
       style={{ '--ar': img.get() ? im().width / im().height : undefined }}
       aria-label={img.get() ? `Image ${stem(im().file)}` : 'Image'}
-      onclose={() => id.peek() && props.onclose()}
+      onclose={() => {
+        clearPendingStep();
+        if (id.peek()) props.onclose();
+      }}
       onkeydown={onkeydown}
     >
       <header>
