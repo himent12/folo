@@ -7,7 +7,7 @@
 //! - [`init`]: seeded Kaiming / Xavier and the head priors.
 //! - [`optim`]: [`optim::Sgd`], [`optim::AdamW`], [`optim::MuSgd`], parameter groups, gradient accumulation and
 //!   clipping.
-//! - [`LrSchedule`] (warmup + linear / cosine) and [`ModelEma`].
+//! - [`LrSchedule`] (warmup + linear / cosine / WSD / cosine-restarts) and [`ModelEma`].
 //! - [`amp`]: [`GradScaler`], the dynamic loss scaling of mixed-precision training.
 //! - [`io`]: `.folo` read / write, strict and partial loading, checkpoints, export with Conv+BN fusion.
 //!
@@ -69,5 +69,6 @@ pub use layers::{
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use sched::{
-    DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR, warmup_iters, warmup_iters_floor,
+    DEFAULT_RESTART_CYCLES, DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit,
+    WARMUP_FLOOR, WSD_DEFAULT_DECAY_FRACTION, WsdTail, warmup_iters, warmup_iters_floor,
 };
