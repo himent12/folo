@@ -15,14 +15,14 @@ use crate::loss::{
 };
 use crate::val::batch_tensor;
 
-/// RAII guard that re-enables `requires_grad` on frozen backbone parameters when `train_epoch` exits
-/// (on completion, stop, or error).
-struct RestoreGrad(Vec<folo_core::Tensor>);
+/// RAII guard that restores each backbone parameter's prior `requires_grad` flag when `train_epoch` exits
+/// (on completion, stop, or error), preserving any parameter a caller already froze.
+struct RestoreGrad(Vec<(folo_core::Tensor, bool)>);
 
 impl Drop for RestoreGrad {
     fn drop(&mut self) {
-        for p in &self.0 {
-            p.set_requires_grad(true);
+        for (p, prev) in &self.0 {
+            p.set_requires_grad(*prev);
         }
     }
 }
@@ -34,11 +34,18 @@ impl Trainer {
         self.model.train();
         let _backbone_grad_guard = if e < self.cfg.freeze_backbone_epochs {
             self.model.backbone.eval();
-            let params = self.model.backbone.parameters();
-            for p in &params {
-                p.set_requires_grad(false);
-            }
-            Some(RestoreGrad(params))
+            let saved = self
+                .model
+                .backbone
+                .parameters()
+                .into_iter()
+                .map(|p| {
+                    let prev = p.requires_grad();
+                    p.set_requires_grad(false);
+                    (p, prev)
+                })
+                .collect();
+            Some(RestoreGrad(saved))
         } else {
             None
         };

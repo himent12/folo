@@ -452,8 +452,10 @@ impl FoloModel {
     /// Return an independent eval-mode clone of `self` with every `ConvBnAct` BatchNorm pre-folded into its
     /// convolution (MODEL.md §9.1), leaving `self` (its weights, fused state and train/eval mode) untouched.
     ///
-    /// Used by the trainer to pre-fold EMA or live weights once per validation pass instead of re-folding on
-    /// every validation batch, and to enable fused kernels / GPU [`folo_gpu::ForwardPlans`] during validation.
+    /// Reconstructs the layer graph from `self.config` and copies every tensor, `classes`, `imgsz`,
+    /// `head_mode`, and any active `int8` calibration plan. Used by the trainer to pre-fold EMA or live
+    /// weights once per validation pass instead of re-folding on every validation batch, and to enable fused
+    /// kernels / GPU [`folo_gpu::ForwardPlans`] during validation.
     pub fn fused_eval_clone(&self) -> Result<Self> {
         let mut clone = Self::new(self.config.clone())?;
         clone.set_classes(self.classes.clone())?;
@@ -498,6 +500,7 @@ impl FoloModel {
         if !self.fused {
             clone.fuse()?;
         }
+        clone.int8 = self.int8.clone();
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);

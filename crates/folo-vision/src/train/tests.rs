@@ -356,11 +356,16 @@ fn freeze_backbone_epochs_freezes_unfreezes_and_resumes() {
     .unwrap();
     let bb_before = snap(t.model(), "backbone.");
     let head_before = snap(t.model(), "head.");
+    // A caller-frozen parameter must stay frozen even after `freeze_backbone_epochs` exits.
+    t.model().backbone.stem.conv.weight.set_requires_grad(false);
     assert_eq!(t.run().unwrap().epochs_completed, 1);
     assert_eq!(snap(t.model(), "backbone."), bb_before, "backbone must stay bit-frozen during epoch 1");
     assert_ne!(snap(t.model(), "head."), head_before, "head must train while backbone is frozen");
-    // Every backbone parameter must have requires_grad restored after the frozen epoch ends, and EMA stays unfused.
-    assert!(t.model().backbone.parameters().iter().all(|p| p.requires_grad()));
+    assert!(!t.model().backbone.stem.conv.weight.requires_grad(), "caller-frozen flag must be preserved");
+    assert!(
+        t.model().backbone.parameters().iter().skip(1).all(|p| p.requires_grad()),
+        "other backbone params must have requires_grad restored"
+    );
     assert!(!t.ema_model().unwrap().is_fused());
 
     // Now run a 2-epoch continuous run vs stop-after-1 + resume (unfreezing on epoch 2).
@@ -497,4 +502,70 @@ fn backbone_lr_scale_splits_groups_scales_warmup_and_resumes() {
             .collect()
     };
     assert_eq!(bytes(cont.model()), bytes(resumed.model()));
+}
+
+/// GPU AMP (`amp: true`) with `freeze_backbone_epochs > 0` runs frozen backbone convs in `F16` under autocast
+/// (matching `Attention`'s `F16` matmul and active `neck` skips), keeps `backbone.*` frozen during epoch 1,
+/// and trains `backbone.*` on epoch 2 without dtype mismatches.
+#[test]
+fn freeze_backbone_epochs_works_with_gpu_amp() {
+    let ctx = match folo_gpu::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping GPU AMP test, no adapter: {e}"),
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        return eprintln!("note: skipping GPU AMP test on software adapter {}", ctx.summary().name);
+    }
+    let dev = folo_gpu::init().unwrap();
+    if amp_support(dev).is_err() {
+        return eprintln!("note: skipping GPU AMP test, no F16 tensor cores");
+    }
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    let shapes = SyntheticConfig {
+        images: 6,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 19,
+        val_fraction: 0.34,
+        ..SyntheticConfig::default()
+    };
+    let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+    let data = TrainData {
+        train: split(folo_data::Split::Train),
+        val: split(folo_data::Split::Val),
+        classes: shapes.classes.clone(),
+    };
+    let snap = |m: &crate::model::FoloModel, prefix: &str| -> Vec<(String, Vec<u8>)> {
+        m.named_tensors()
+            .into_iter()
+            .filter(|nt| nt.name.starts_with(prefix))
+            .map(|nt| (nt.name, nt.tensor.to_cpu_storage().unwrap().as_bytes().to_vec()))
+            .collect()
+    };
+    let cfg = TrainConfig {
+        epochs: 1,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "gpu:0".into(),
+        optimizer: OptimizerChoice::Musgd,
+        lr0: 0.01,
+        warmup_epochs: 0.0,
+        amp: true,
+        workers: 0,
+        freeze_backbone_epochs: 1,
+        backbone_lr_scale: 0.1,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let mut t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
+    let bb_before = snap(t.model(), "backbone.");
+    let head_before = snap(t.model(), "head.");
+    assert_eq!(t.run().unwrap().epochs_completed, 1);
+    assert_eq!(snap(t.model(), "backbone."), bb_before, "backbone must stay frozen under GPU AMP");
+    assert_ne!(
+        snap(t.model(), "head."),
+        head_before,
+        "head must train under GPU AMP while backbone is frozen"
+    );
 }

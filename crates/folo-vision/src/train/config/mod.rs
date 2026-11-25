@@ -1,4 +1,4 @@
-//! The training configuration: docs/API.md's `TrainConfig` plus docs/MODEL.md Â§8.1's recipe keys.
+//! The training configuration: docs/API.md's `TrainConfig` plus docs/MODEL.md §8.1's recipe keys.
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
@@ -9,11 +9,11 @@ use crate::error::{Error, Result};
 use crate::loss::LossConfig;
 use crate::model::HeadMode;
 
-/// `optimizer`: `auto`, `sgd`, `adamw` or `musgd` (docs/MODEL.md Â§8.2).
+/// `optimizer`: `auto`, `sgd`, `adamw` or `musgd` (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptimizerChoice {
-    /// MuSGD at lr0 0.01 for every run (`auto_rule` 5 and 4; rules 1 to 3 picked AdamW for short runs), Â§8.2.
+    /// MuSGD at lr0 0.01 for every run (`auto_rule` 5 and 4; rules 1 to 3 picked AdamW for short runs), §8.2.
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
@@ -26,7 +26,7 @@ pub enum OptimizerChoice {
 
 /// A training run's settings. The JSON shape is docs/API.md's `TrainConfig` (`dataset_id` and `weights` are the
 /// caller's business: [`super::Trainer`] takes the data and the starting weights directly) extended with the
-/// recipe keys of docs/MODEL.md Â§8.1, every one optional with the default listed there. The resolved value
+/// recipe keys of docs/MODEL.md §8.1, every one optional with the default listed there. The resolved value
 /// (every default filled in) is stored in checkpoints as `folo.train` and in a run's `config.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,19 +39,19 @@ pub struct TrainConfig {
     /// How `dataset` is read (informational, like `dataset`: `folo train --resume` reopens it so, and a folder that
     /// holds both YOLO and COCO labels reads the same). Missing in configs from before it: `auto`.
     pub data_format: folo_data::Format,
-    /// Architecture, `folo-n` â€¦ `folo-x`.
+    /// Architecture, `folo-n` … `folo-x`.
     pub arch: String,
     /// Epochs, `1..=10000`.
     pub epochs: u32,
     /// Images per forward / backward, `1..=1024`.
     pub batch: usize,
-    /// Square training and validation size: a multiple of 32, at least 64 (MODEL.md Â§8.1).
+    /// Square training and validation size: a multiple of 32, at least 64 (MODEL.md §8.1).
     pub imgsz: u32,
     /// `auto`, `cpu` or `gpu:<n>` ([`resolve_device`]).
     pub device: String,
     /// Optimizer.
     pub optimizer: OptimizerChoice,
-    /// Version of the `auto` rule (MODEL.md Â§8.2): 5, the current one, is 4 (MuSGD for every run, momentum 0.937,
+    /// Version of the `auto` rule (MODEL.md §8.2): 5, the current one, is 4 (MuSGD for every run, momentum 0.937,
     /// bias warmup from 0.1) with MuSGD step weights 0.5 / 0.5 from scratch; 3 picks MuSGD for long runs and AdamW
     /// (`lr0` floored at 0.001) for short ones; 2 picks SGD for long runs; 1 is the reference fit without the floor,
     /// with SGD. Missing in configs from before it: 1, so a run resumes with the rule it started with.
@@ -59,19 +59,19 @@ pub struct TrainConfig {
     pub auto_rule: u32,
     /// Base LR (ignored by `auto`).
     pub lr0: f64,
-    /// Final LR fraction: the last iteration runs at `lr0 Â· lrf`.
+    /// Final LR fraction: the last iteration runs at `lr0 · lrf`.
     pub lrf: f64,
-    /// SGD momentum / AdamW Î²1 (ignored by `auto`, which uses 0.937 under rule 4 and 0.9 before).
+    /// SGD momentum / AdamW β1 (ignored by `auto`, which uses 0.937 under rule 4 and 0.9 before).
     pub momentum: f64,
-    /// Weight decay before the batch scaling of Â§8.2.
+    /// Weight decay before the batch scaling of §8.2.
     pub weight_decay: f64,
-    /// Warmup length in epochs (converted to iterations by Â§8.4: at least `warmup_floor`, or 30% of a short run).
+    /// Warmup length in epochs (converted to iterations by §8.4: at least `warmup_floor`, or 30% of a short run).
     pub warmup_epochs: f64,
-    /// The Â§8.4 warmup floor in iterations (still capped to 30% of the run); `0` (the default): `warmup_epochs`
+    /// The §8.4 warmup floor in iterations (still capped to 30% of the run); `0` (the default): `warmup_epochs`
     /// alone, as Ultralytics 8.4 counts it. Missing in configs from before it: 100, the floor those runs had.
     #[serde(default = "legacy_warmup_floor")]
     pub warmup_floor: u64,
-    /// Momentum / Î²1 at the start of warmup.
+    /// Momentum / β1 at the start of warmup.
     pub warmup_momentum: f64,
     /// `bias`-group LR at the start of warmup (0 under `auto`).
     pub warmup_bias_lr: f64,
@@ -79,30 +79,30 @@ pub struct TrainConfig {
     pub cos_lr: bool,
     /// Nominal batch: gradients accumulate over `max(round(nbs / batch), 1)` batches.
     pub nbs: usize,
-    /// Keep an EMA of the weights for validation, checkpoints and export (Â§8.5).
+    /// Keep an EMA of the weights for validation, checkpoints and export (§8.5).
     pub ema: bool,
-    /// A fine-tune's EMA window as a fraction of its optimizer steps (Â§8.5): a run from pretrained weights
-    /// (`transfer`) averages over `ema_run_fraction Â· T` steps, at most the default window of 10,000, which runs of
+    /// A fine-tune's EMA window as a fraction of its optimizer steps (§8.5): a run from pretrained weights
+    /// (`transfer`) averages over `ema_run_fraction · T` steps, at most the default window of 10,000, which runs of
     /// `10000 / ema_run_fraction` steps or more and every run from scratch keep; `0`: the default window for every
     /// run. Missing in configs from before it: 0, the window those runs had.
     #[serde(default = "legacy_ema_run_fraction")]
     pub ema_run_fraction: f64,
     /// Global gradient-norm clip; `0` disables it.
     pub clip_grad_norm: f64,
-    /// Mixed-precision training (docs/MODEL.md Â§8.8): `F16` activations and convolutions / matrix products on the
+    /// Mixed-precision training (docs/MODEL.md §8.8): `F16` activations and convolutions / matrix products on the
     /// GPU's tensor cores with `F32` master weights, optimizer state, BatchNorm statistics, loss and EMA, and
     /// dynamic loss scaling. Needs a GPU whose context has tensor cores (folo-gpu's cooperative matrices); anything
     /// else fails with `not_supported`.
     pub amp: bool,
-    /// Detection head (docs/MODEL.md Â§6.6): `o2m`, or `o2o` for a model with the NMS-free one-to-one branch too,
-    /// trained with dual assignment (`L = w_m Â· L_o2m + w_o Â· L_o2o`) and predicting without NMS.
+    /// Detection head (docs/MODEL.md §6.6): `o2m`, or `o2o` for a model with the NMS-free one-to-one branch too,
+    /// trained with dual assignment (`L = w_m · L_o2m + w_o · L_o2o`) and predicting without NMS.
     pub head: HeadMode,
     /// `head = "o2o"` only: for the first this many epochs the one-to-one branch's inputs are not detached, so its
-    /// loss trains the backbone and neck as well (MODEL.md Â§6.6); `0` (the default) detaches them throughout.
+    /// loss trains the backbone and neck as well (MODEL.md §6.6); `0` (the default) detaches them throughout.
     pub o2o_attached_epochs: u32,
     /// `head = "o2o"` only: the one-to-one branch's assigner takes `loss.tal`'s `alpha`, `beta`, `eps` and
-    /// `min_box_size` (its `topk = 7` and `topk2 = 1` are fixed, MODEL.md Â§6.6). Missing in configs from before it:
-    /// `false`, the Â§7.3 defaults those runs trained that branch with, so they resume bit-exactly. Like the other
+    /// `min_box_size` (its `topk = 7` and `topk2 = 1` are fixed, MODEL.md §6.6). Missing in configs from before it:
+    /// `false`, the §7.3 defaults those runs trained that branch with, so they resume bit-exactly. Like the other
     /// versioned keys, a partial JSON decoded straight into this type reads as such a config; new runs of the CLI, of
     /// the API (`from_api`) and from `TrainConfig::default()` default to `true`.
     #[serde(default = "legacy_o2o_keeps_tal")]
@@ -115,14 +115,14 @@ pub struct TrainConfig {
     pub workers: usize,
     /// Augmentation (docs/DATA.md; `close_mosaic` is here too).
     pub augment: AugmentConfig,
-    /// Validation batch size; `0` means `2 Â· batch` (Â§8.7).
+    /// Validation batch size; `0` means `2 · batch` (§8.7).
     pub val_batch: usize,
-    /// Loss gains and assigner settings (docs/MODEL.md Â§7; `reg_max` is the model's, whatever is given here).
-    /// Missing in configs from before it: the Â§7 defaults.
+    /// Loss gains and assigner settings (docs/MODEL.md §7; `reg_max` is the model's, whatever is given here).
+    /// Missing in configs from before it: the §7 defaults.
     pub loss: LossConfig,
-    /// MuSGD's step weights, class-branch LR factor and orthogonalisation schedule (docs/MODEL.md Â§8.2); used only
+    /// MuSGD's step weights, class-branch LR factor and orthogonalisation schedule (docs/MODEL.md §8.2); used only
     /// when the run resolves to MuSGD (under `auto` rule 5 the step weights are `auto`'s, see
-    /// [`TrainConfig::resolve_optimizer`]). Missing in configs from before it: the Â§8.2 defaults with legacy `ns5`
+    /// [`TrainConfig::resolve_optimizer`]). Missing in configs from before it: the §8.2 defaults with legacy `ns5`
     /// orthogonalisation so older runs resume with legacy `ns5`.
     #[serde(default = "legacy_musgd_config")]
     pub musgd: MuSgdConfig,
@@ -130,14 +130,14 @@ pub struct TrainConfig {
     /// [`super::TrainOptions::weights`], whatever is given here, and stored with the run, so a resume resolves `auto`
     /// as the run started. Missing in configs from before it: `false`.
     pub transfer: bool,
-    /// Dense distillation from a frozen teacher (docs/MODEL.md Â§8.9; `folo train --teacher`). `None`, the
+    /// Dense distillation from a frozen teacher (docs/MODEL.md §8.9; `folo train --teacher`). `None`, the
     /// default, trains without one and is not written, so such a run's `folo.train` and `config.json` are those
     /// of a build without the key. Stored with the run, so a resume loads the same teacher.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distill: Option<crate::loss::DistillConfig>,
     /// Decouple weight decay from SGD/MuSGD Nesterov momentum (P3; default `false` keeps v1 bit-identical).
     pub decoupled_wd: bool,
-    /// Cautious decoupled weight decay (`u Â· p > 0` mask) on SGD/MuSGD (P3; default `false`).
+    /// Cautious decoupled weight decay (`u · p > 0` mask) on SGD/MuSGD (P3; default `false`).
     pub cautious_wd: bool,
     /// Optional explicit effective weight decay overriding `effective_weight_decay(weight_decay, ...)` (P3 sweep
     /// `{2e-3, 4e-3, 6e-3}` for decoupled/cautious WD). Default `None`.
@@ -158,8 +158,8 @@ pub struct TrainConfig {
     pub freeze_backbone_epochs: u32,
 }
 
-/// `musgd.*` (docs/MODEL.md Â§8.2): `p âˆ’= muon Â· lr Â· O`, the SGD half of a conv weight at `sgd Â· lr`, the
-/// head's class branches at `cls_lr Â· lr0`, and the orthogonalisation schedule `ortho` (`polar4` default for new
+/// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, the
+/// head's class branches at `cls_lr · lr0`, and the orthogonalisation schedule `ortho` (`polar4` default for new
 /// runs, `polar5`, or legacy `ns5`). Missing `ortho` in configs written before the key reads as `ns5` so older
 /// runs resume with legacy `ns5`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -243,7 +243,7 @@ impl Default for TrainConfig {
     }
 }
 
-/// An `f32` as the `f64` of its shortest decimal form (`0.01f32` â†’ `0.01`, not `0.009999999776482582`).
+/// An `f32` as the `f64` of its shortest decimal form (`0.01f32` → `0.01`, not `0.009999999776482582`).
 pub fn f32_decimal(v: f32) -> f64 {
     v.to_string().parse().unwrap_or(v as f64)
 }
@@ -268,7 +268,7 @@ fn legacy_auto_rule() -> u32 {
     1
 }
 
-/// The `musgd.ortho` of settings written before Polar-FOLO existed: legacy 5-step Newtonâ€“Schulz (`ns5`).
+/// The `musgd.ortho` of settings written before Polar-FOLO existed: legacy 5-step Newton–Schulz (`ns5`).
 fn legacy_muon_ortho() -> folo_nn::optim::MuonOrtho {
     folo_nn::optim::MuonOrtho::Ns5
 }
@@ -285,14 +285,14 @@ pub fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get().min(16))
 }
 
-/// What the optimizer settings resolve to for a given training set (docs/MODEL.md Â§8.2).
+/// What the optimizer settings resolve to for a given training set (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedOptim {
     /// SGD, AdamW or MuSGD.
     pub kind: OptimKind,
     /// Base LR of every group.
     pub lr0: f64,
-    /// SGD Î¼ / AdamW Î²1 after warmup.
+    /// SGD μ / AdamW β1 after warmup.
     pub momentum: f64,
     /// `bias`-group LR at iteration 0.
     pub warmup_bias_lr: f64,
@@ -346,7 +346,7 @@ impl TrainConfig {
         })
     }
 
-    /// The scale letter of `arch` (`folo-n` â†’ `n`).
+    /// The scale letter of `arch` (`folo-n` → `n`).
     pub fn scale(&self) -> Result<&str> {
         let s = self.arch.strip_prefix("folo-").unwrap_or(&self.arch);
         match s {
@@ -358,7 +358,7 @@ impl TrainConfig {
         }
     }
 
-    /// Check every field against docs/API.md's limits and MODEL.md Â§8.1.
+    /// Check every field against docs/API.md's limits and MODEL.md §8.1.
     pub fn validate(&self) -> Result<()> {
         let bad = |m: String| Err(Error::Config(m));
         self.scale()?;
@@ -471,7 +471,7 @@ impl TrainConfig {
         folo_nn::optim::accumulate_steps(self.nbs, self.batch)
     }
 
-    /// The validation batch: `val_batch`, or `2 Â· batch` when it is 0.
+    /// The validation batch: `val_batch`, or `2 · batch` when it is 0.
     pub fn val_batch(&self) -> usize {
         if self.val_batch == 0 { 2 * self.batch } else { self.val_batch }
     }
@@ -485,7 +485,7 @@ impl TrainConfig {
         self.resolve_optimizer(n_train, num_classes).to_api(self, accumulate, spe as u64)
     }
 
-    /// The optimizer this config trains with on `n_train` images of `num_classes` classes (Â§8.2 `auto`). MuSGD's
+    /// The optimizer this config trains with on `n_train` images of `num_classes` classes (§8.2 `auto`). MuSGD's
     /// step weights are `musgd.muon` / `musgd.sgd`, except under `auto` rule 5 for a run from scratch
     /// (`transfer = false`): [`folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS`].
     pub fn resolve_optimizer(&self, n_train: usize, num_classes: usize) -> ResolvedOptim {
@@ -525,7 +525,7 @@ impl TrainConfig {
 }
 
 impl TrainConfig {
-    /// The warmup length `W` of docs/MODEL.md Â§8.4 in iterations, for `steps_per_epoch` optimizer steps per epoch.
+    /// The warmup length `W` of docs/MODEL.md §8.4 in iterations, for `steps_per_epoch` optimizer steps per epoch.
     pub fn warmup_iters(&self, steps_per_epoch: u64) -> u64 {
         folo_nn::warmup_iters_floor(
             self.warmup_epochs,
@@ -544,7 +544,7 @@ impl TrainConfig {
             .unwrap_or_else(|| effective_weight_decay(self.weight_decay, self.batch, accumulate, self.nbs))
     }
 
-    /// The EMA's `(decay, tau)` in a run of `total_iters` optimizer steps (docs/MODEL.md Â§8.5): a run from
+    /// The EMA's `(decay, tau)` in a run of `total_iters` optimizer steps (docs/MODEL.md §8.5): a run from
     /// pretrained weights (`transfer`) takes [`folo_nn::ema_for_run`] with `ema_run_fraction`, a run from scratch
     /// the default (0.9999, 2000).
     pub fn ema_params(&self, total_iters: u64) -> (f64, f64) {

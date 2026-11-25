@@ -82,7 +82,7 @@ fn auto_rule_5_musgd_weights() {
 }
 
 /// `warmup_floor`: 0 by default, so `warmup_epochs` alone sets the warmup (a 205-image fine-tune, 4 steps per
-/// epoch: 12 warmup steps); configs from before the key keep Â§8.4's 100-iteration floor.
+/// epoch: 12 warmup steps); configs from before the key keep §8.4's 100-iteration floor.
 #[test]
 fn warmup_floor_versions() {
     let cfg = TrainConfig::default();
@@ -94,7 +94,7 @@ fn warmup_floor_versions() {
     assert_eq!(old.warmup_floor, 100);
 }
 
-/// `o2o_keeps_tal`: on for a new run; a config from before the key trained the one-to-one branch with the Â§7.3
+/// `o2o_keeps_tal`: on for a new run; a config from before the key trained the one-to-one branch with the §7.3
 /// defaults and keeps doing so when it resumes.
 #[test]
 fn o2o_keeps_tal_versions() {
@@ -170,7 +170,7 @@ fn ema_run_fraction_versions() {
     }
 }
 
-/// `loss.tal.eps` divides the soft targets (`m Â· u_max / (m_max + eps)`): at 0 an anchor whose prediction
+/// `loss.tal.eps` divides the soft targets (`m · u_max / (m_max + eps)`): at 0 an anchor whose prediction
 /// misses its box gets a NaN target score, so validation takes only a finite, strictly positive value.
 #[test]
 fn tal_eps_must_be_finite_and_positive() {
@@ -196,11 +196,11 @@ fn resolved_train_and_run_config() {
     // Rule 3 and the 100-step warmup floor, the settings of runs made before rule 4.
     let cfg = TrainConfig { epochs: 30, batch: 8, auto_rule: 3, warmup_floor: 100, ..TrainConfig::default() };
     let r = cfg.resolved_train(1000, 3);
-    // 125 batches Â· 30 epochs over max(batch, nbs) = 64 is 480 iterations: a short run, so AdamW at
-    // 0.002 Â· 5 / (4 + 3), its Î²1 0.9 and Î²2 0.999, no warmup bias LR.
+    // 125 batches · 30 epochs over max(batch, nbs) = 64 is 480 iterations: a short run, so AdamW at
+    // 0.002 · 5 / (4 + 3), its β1 0.9 and β2 0.999, no warmup bias LR.
     assert_eq!(r.optimizer, folo_api::ResolvedOptimizer::Adamw);
     assert_eq!((r.lr0, r.momentum, r.betas, r.warmup_bias_lr), (0.001429, 0.9, Some([0.9, 0.999]), 0.0));
-    // accumulate round(64 / 8) = 8; 125 batches â†’ 16 optimizer steps; weight decay 0.0005 Â· 8 Â· 8 / 64.
+    // accumulate round(64 / 8) = 8; 125 batches → 16 optimizer steps; weight decay 0.0005 · 8 · 8 / 64.
     assert_eq!((r.batch, r.accumulate, r.nbs, r.optimizer_steps_per_epoch), (8, 8, 64, 16));
     assert!((r.weight_decay - 0.0005).abs() < 1e-12, "{}", r.weight_decay);
     // 3 warmup epochs of 16 steps = 48 < the 100-step floor (30% of 480 = 144 allows it).
