@@ -96,21 +96,23 @@ export default function JsonView(props: { value: unknown; label?: string; filena
 
   function download() {
     let url: string | undefined;
+    let a: HTMLAnchorElement | undefined;
     try {
       const blob = new Blob([jsonText(p.value)], { type: 'application/json' });
       url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      a = document.createElement('a');
       a.href = url;
       a.download = p.filename;
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
-      a.remove();
       const revoke = url;
       setTimeout(() => URL.revokeObjectURL(revoke), 1000);
     } catch {
       if (url) URL.revokeObjectURL(url);
       toast.info('Download failed', 'Your browser blocked the file download.');
+    } finally {
+      a?.remove();
     }
   }
 
@@ -187,8 +189,6 @@ css`
   }
   pre:global([data-more-y]) {
     --fade-b: 32px;
-  }
-  pre:global([data-more-y]) {
     mask-image: linear-gradient(#000 calc(100% - var(--fade-b)), transparent);
   }
   pre:global([data-more-x]),

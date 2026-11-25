@@ -6,8 +6,20 @@ const MAX_CACHE = 512;
 
 let sharedCtx: CanvasRenderingContext2D | null | undefined;
 let cachedTheme: string | undefined;
+let fontsBound = false;
 const fontByWeight: Partial<Record<'semibold' | 'regular', string>> = {};
 const widthsByFont = new Map<string, Map<string, number>>();
+
+const clearWidths = () => widthsByFont.clear();
+
+function bindFontLoad() {
+  if (fontsBound || typeof document === 'undefined') return;
+  fontsBound = true;
+  const fonts = document.fonts;
+  if (!fonts) return;
+  fonts.addEventListener?.('loadingdone', clearWidths);
+  void fonts.ready?.then(clearWidths, () => {});
+}
 
 function getCtx(): CanvasRenderingContext2D | null {
   if (sharedCtx === undefined) {
@@ -40,6 +52,8 @@ function resolveFont(weight: 'semibold' | 'regular'): string {
 
 /** Resets shared canvas/font/width caches (tests). */
 export function resetTextMeasurerCache() {
+  if (fontsBound && typeof document !== 'undefined') document.fonts?.removeEventListener?.('loadingdone', clearWidths);
+  fontsBound = false;
   sharedCtx = undefined;
   cachedTheme = undefined;
   fontByWeight.semibold = undefined;
@@ -56,16 +70,18 @@ export function textMeasurer(weight: 'semibold' | 'regular' = 'semibold'): (t: s
   function textWidth(t: string): number {
     const ctx = getCtx();
     if (!ctx) return labelWidth(t);
+    bindFontLoad();
     let font: string;
     try {
       font = resolveFont(weight);
     } catch {
       return labelWidth(t);
     }
-    let cache = widthsByFont.get(font);
+    const key = `${weight}|${font}`;
+    let cache = widthsByFont.get(key);
     if (!cache) {
       cache = new Map();
-      widthsByFont.set(font, cache);
+      widthsByFont.set(key, cache);
     }
     const hit = cache.get(t);
     if (hit !== undefined) return hit;

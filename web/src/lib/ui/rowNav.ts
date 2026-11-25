@@ -12,17 +12,54 @@ export interface RowNavOptions {
   toggle?: (row: HTMLElement) => void;
 }
 
-/** Rows that take part: any `[data-row]` inside a visible container (phones hide the desktop table).
- *  Checks container visibility once instead of calling `checkVisibility()` per row to avoid O(N) layout thrash. */
+function isRowVisible(r: HTMLElement): boolean {
+  if (r.hidden || r.style.display === 'none') return false;
+  return !r.checkVisibility || r.checkVisibility();
+}
+
+/** Rows that take part: any visible `[data-row]` inside a visible container (phones hide the desktop table).
+ *  Checks container visibility once up front so hidden tables skip querying and inspecting every row. */
 export function navRows(root: HTMLElement): HTMLElement[] {
   if (root.checkVisibility && !root.checkVisibility()) return [];
   const list = root.querySelectorAll<HTMLElement>('[data-row]');
   const out: HTMLElement[] = [];
   for (let i = 0; i < list.length; i++) {
     const r = list[i]!;
-    if (!r.hidden && r.style.display !== 'none') out.push(r);
+    if (isRowVisible(r)) out.push(r);
   }
   return out;
+}
+
+/** Steps from `from` to the next visible `[data-row]` without calling `checkVisibility()` on every row in the table. */
+function stepVisibleRow(root: HTMLElement, from: HTMLElement, move: number | 'first' | 'last'): HTMLElement | undefined {
+  if (root.checkVisibility && !root.checkVisibility()) return undefined;
+  const list = root.querySelectorAll<HTMLElement>('[data-row]');
+  const n = list.length;
+  if (!n) return undefined;
+  if (move === 'first') {
+    for (let i = 0; i < n; i++) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  if (move === 'last') {
+    for (let i = n - 1; i >= 0; i--) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  let idx = -1;
+  for (let i = 0; i < n; i++) {
+    if (list[i] === from) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    for (let i = 0; i < n; i++) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  const dir = move > 0 ? 1 : -1;
+  for (let i = idx + dir; i >= 0 && i < n; i += dir) {
+    if (isRowVisible(list[i]!)) return list[i];
+  }
+  return isRowVisible(from) ? from : undefined;
 }
 
 function hasRowNode(nodes: NodeList): boolean {
@@ -124,8 +161,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const move = MOVES[key];
     if (move !== undefined) {
       e.preventDefault();
-      const rows = navRows(root);
-      focusRow(stepRow(rows, row, move), rows);
+      focusRow(stepVisibleRow(root, row, move));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       row.click();

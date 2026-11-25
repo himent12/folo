@@ -150,29 +150,46 @@ describe('rowNav', () => {
     nav.destroy();
   });
 
-  it('checks container visibility once in navRows instead of calling checkVisibility per row', () => {
+  it('short-circuits hidden containers in navRows and skips CSS-hidden rows on step', () => {
     const { t, rows } = table(4);
-    const rootVis = vi.fn().mockReturnValue(true);
-    const rowVis = vi.fn().mockReturnValue(true);
+    const rootVis = vi.fn().mockReturnValue(false);
+    const rowVis = rows.map(() => vi.fn().mockReturnValue(true));
     Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
-    for (const r of rows) Object.defineProperty(r, 'checkVisibility', { value: rowVis, configurable: true });
-    rows[2]!.hidden = true;
-    rows[3]!.style.display = 'none';
+    rows.forEach((r, i) => Object.defineProperty(r, 'checkVisibility', { value: rowVis[i], configurable: true }));
 
-    expect(navRows(t)).toEqual([rows[0], rows[1]]);
-    expect(rootVis).toHaveBeenCalledTimes(1);
-    expect(rowVis).not.toHaveBeenCalled();
-
-    rootVis.mockReturnValue(false);
+    // Hidden table (e.g., desktop table hidden on phone): 1 container check, 0 per-row checks.
     expect(navRows(t)).toEqual([]);
-    expect(rootVis).toHaveBeenCalledTimes(2);
-    expect(rowVis).not.toHaveBeenCalled();
+    expect(rootVis).toHaveBeenCalledTimes(1);
+    for (const spy of rowVis) expect(spy).not.toHaveBeenCalled();
+
+    // Visible table with a CSS-hidden middle row (checkVisibility() returns false without inline display:none):
+    // navRows and ArrowDown/J skip it and land on the next visible row.
+    rootVis.mockReturnValue(true);
+    rowVis[1]!.mockReturnValue(false);
+    rows[3]!.hidden = true;
+    expect(navRows(t)).toEqual([rows[0], rows[2]]);
+
+    const nav = rowNav(t);
+    rows[0]!.focus();
+    for (const spy of rowVis) spy.mockClear();
+    key(rows[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(rows[2]);
+    expect(rows[0]!.tabIndex).toBe(-1);
+    expect(rows[1]!.tabIndex).toBe(-1);
+    expect(rows[2]!.tabIndex).toBe(0);
+    // Stepping checked only the candidate rows it visited (row 1 and row 2), never scanning the whole table.
+    expect(rowVis[0]).not.toHaveBeenCalled();
+    expect(rowVis[1]).toHaveBeenCalledTimes(1);
+    expect(rowVis[2]).toHaveBeenCalledTimes(1);
+    nav.destroy();
   });
 
-  it('skips settle when mutations only update cell contents and queries rows once per keypress', async () => {
-    const { t, rows } = table(3);
+  it('skips settle when mutations only update cell contents and checks only the next row on keypress', async () => {
+    const { t, rows } = table(4);
     const rootVis = vi.fn().mockReturnValue(true);
+    const rowVis = rows.map(() => vi.fn().mockReturnValue(true));
     Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
+    rows.forEach((r, i) => Object.defineProperty(r, 'checkVisibility', { value: rowVis[i], configurable: true }));
 
     const nav = rowNav(t);
     expect(rootVis).toHaveBeenCalledTimes(1);
@@ -185,17 +202,21 @@ describe('rowNav', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(rootVis).toHaveBeenCalledTimes(1);
 
-    // Moving with J queries navRows once (passes rows into focusRow instead of re-querying).
+    // Moving with J checks container once and only the target row (O(1) per keypress).
     rows[0]!.focus();
     rootVis.mockClear();
+    for (const spy of rowVis) spy.mockClear();
     key(rows[0]!, 'j');
     expect(document.activeElement).toBe(rows[1]);
     expect(rootVis).toHaveBeenCalledTimes(1);
+    expect(rowVis[1]).toHaveBeenCalledTimes(1);
+    expect(rowVis[2]).not.toHaveBeenCalled();
+    expect(rowVis[3]).not.toHaveBeenCalled();
 
     // Adding an actual [data-row] still triggers settle.
     const extra = document.createElement('tr');
     extra.setAttribute('data-row', '');
-    extra.dataset.id = 'r3';
+    extra.dataset.id = 'r4';
     t.querySelector('tbody')!.appendChild(extra);
     await new Promise((r) => setTimeout(r, 0));
     expect(rootVis).toHaveBeenCalledTimes(2);

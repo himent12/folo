@@ -87,4 +87,49 @@ describe('textMeasurer', () => {
     expect(m('box')).toBe(40);
     expect(getCS).toHaveBeenCalledTimes(2);
   });
+
+  it('invalidates cached widths when web fonts finish loading', async () => {
+    let loaded = false;
+    const measureText = vi.fn(() => ({ width: loaded ? 40 : 30 }) as TextMetrics);
+    const fakeCtx = { font: '', measureText } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(fakeCtx);
+    vi.spyOn(window, 'getComputedStyle').mockReturnValue({
+      getPropertyValue: (prop: string) => (prop === '--weight-regular' ? '400' : prop === '--type-sm-size' ? '12px' : prop === '--font-sans' ? 'Geist' : ''),
+    } as CSSStyleDeclaration);
+
+    const listeners = new Set<() => void>();
+    let resolveReady!: () => void;
+    const ready = new Promise<void>((r) => (resolveReady = r));
+    const origFonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+    Object.defineProperty(document, 'fonts', {
+      configurable: true,
+      value: {
+        ready,
+        addEventListener: (_type: string, fn: () => void) => listeners.add(fn),
+        removeEventListener: (_type: string, fn: () => void) => listeners.delete(fn),
+      },
+    });
+    try {
+      const m = textMeasurer('regular');
+      expect(m('mAP@50')).toBe(30);
+      expect(measureText).toHaveBeenCalledTimes(1);
+
+      // Font finishes loading and fires loadingdone: cache clears and remeasures.
+      loaded = true;
+      for (const fn of listeners) fn();
+      expect(m('mAP@50')).toBe(40);
+      expect(measureText).toHaveBeenCalledTimes(2);
+
+      // Resolving document.fonts.ready also invalidates stale fallback measurements.
+      loaded = false;
+      resolveReady();
+      await ready;
+      expect(m('mAP@50')).toBe(30);
+      expect(measureText).toHaveBeenCalledTimes(3);
+    } finally {
+      resetTextMeasurerCache();
+      if (origFonts) Object.defineProperty(document, 'fonts', origFonts);
+      else delete (document as unknown as Record<string, unknown>).fonts;
+    }
+  });
 });
