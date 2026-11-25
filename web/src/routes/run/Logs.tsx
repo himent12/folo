@@ -212,8 +212,10 @@ export default function Logs(props: LogsProps) {
     };
   });
 
-  // Polite live status for search results: updates only when the user edits the query or level filter (never on
-  // streaming log appends, so the log stays silent during live training).
+  // Polite live status for search results: updates when the user edits the query or level filter, or when search state
+  // flips between empty/non-empty matches or truncated/untruncated (never on every streaming count tick).
+  const hasMatches = computed(() => filtered.get().matched > 0);
+  const hasEarlier = computed(() => counts.get().earlier > 0);
   const searchStatus = signal('');
   effect(() => {
     const q = needle.get();
@@ -222,6 +224,8 @@ export default function Logs(props: LogsProps) {
       searchStatus.set('');
       return;
     }
+    void hasMatches.get();
+    void hasEarlier.get();
     untrack(() => {
       const m = filtered.get().matched;
       const ct = counts.get();

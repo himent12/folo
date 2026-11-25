@@ -291,6 +291,26 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     expect(target.querySelector('.empty')?.textContent).toContain('350 lines earlier are in the run folder\'s log.jsonl');
   });
 
+  it('updates polite search status if a matching line streams in after zero matches', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(line(1));
+    const version = signal(0);
+    c = render(() => <Logs log={log} version={version.get()} live />, target);
+    flushSync();
+
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    search.value = 'oom';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const liveStatus = target.querySelector<HTMLElement>('p[aria-live="polite"]')!;
+    expect(liveStatus.textContent).toBe('No log lines match "oom".');
+
+    log.push({ t: '2026-11-12T10:00:05Z', level: 'error', message: 'CUDA OOM on step 4' });
+    version.set(1);
+    flushSync();
+    expect(liveStatus.textContent).toBe('1 line matches "oom".');
+  });
+
   it('copies only the currently visible filtered lines via Copy visible', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
