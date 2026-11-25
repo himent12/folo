@@ -1,13 +1,15 @@
 //! Detector pre- and post-processing: letterboxing `u8` RGB images into the network input (f32, or f16 for
-//! half-precision inference), and decoding the detection head (f32 or f16, decoded in f32) into a compact list
-//! of above-threshold candidates, so that a prediction uploads raw pixels and downloads only what NMS needs.
+//! half-precision inference), fused packed-`u32` `u8 -> f32/f16` scaling and RGB HWC -> CHW normalization, and
+//! decoding the detection head (f32 or f16, decoded in f32) into a compact list of above-threshold candidates, so
+//! that prediction and training upload raw `u8` pixels and download only what NMS needs.
 
-use super::check_buf;
+use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+use crate::pool::GpuBuffer;
 
 static LETTERBOX: KernelDef = KernelDef {
     name: "letterbox",
@@ -19,6 +21,158 @@ static DETECT: KernelDef = KernelDef {
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Static(include_str!("../shaders/detect.wgsl")),
 };
+static U8_SCALE: KernelDef = KernelDef {
+    name: "u8_to_float_scale",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_u8_scale),
+};
+static RGB8_CHW_NORM: KernelDef = KernelDef {
+    name: "rgb8_hwc_to_chw_norm",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_rgb8_chw_norm),
+};
+
+/// Fused packed-`u32` `u8 -> T` (`f32` or `f16`) scaling: `Y[out_off + i] = T(f32(src_byte[src_off + i]) * scale)`.
+///
+/// Three modes controlled by `Spec`:
+/// - `VEC4=true`: 4-aligned source, output, and length (`SRC: array<u32>`, `Y: array<vec4<T>>`), 1 packed load +
+///   1 vector store per 4 elements.
+/// - `VEC4=false, ALIGNED_SRC=true`: 4-aligned source with odd length or output offset; still unpacks 1 `u32`
+///   word per 4 elements and bounds-checks scalar writes so buffer slack is never touched.
+/// - `VEC4=false, ALIGNED_SRC=false`: arbitrary byte source offset and length, 1 element per thread.
+fn gen_u8_scale(spec: &Spec) -> String {
+    if spec.get_bool("VEC4") {
+        "@group(0) @binding(1) var<storage, read> SRC: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec4<T>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let w = SRC[pu(2u) + i];\n\
+         \x20 let v = vec4<f32>(\n\
+         \x20   f32(w & 0xffu),\n\
+         \x20   f32((w >> 8u) & 0xffu),\n\
+         \x20   f32((w >> 16u) & 0xffu),\n\
+         \x20   f32(w >> 24u),\n\
+         \x20 ) * pf(1u);\n\
+         \x20 Y[pu(3u) + i] = vec4<T>(v);\n\
+         }\n"
+        .into()
+    } else if spec.get_bool("ALIGNED_SRC") {
+        "@group(0) @binding(1) var<storage, read> SRC: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<T>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(4u)) { return; }\n\
+         \x20 let base = i * 4u;\n\
+         \x20 let rem = pu(0u) - base;\n\
+         \x20 let w = SRC[pu(2u) + i];\n\
+         \x20 let scale = pf(1u);\n\
+         \x20 let o = pu(3u) + base;\n\
+         \x20 Y[o] = T(f32(w & 0xffu) * scale);\n\
+         \x20 if (rem > 1u) { Y[o + 1u] = T(f32((w >> 8u) & 0xffu) * scale); }\n\
+         \x20 if (rem > 2u) { Y[o + 2u] = T(f32((w >> 16u) & 0xffu) * scale); }\n\
+         \x20 if (rem > 3u) { Y[o + 3u] = T(f32(w >> 24u) * scale); }\n\
+         }\n"
+        .into()
+    } else {
+        "@group(0) @binding(1) var<storage, read> SRC: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<T>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let byte_off = pu(2u) + i;\n\
+         \x20 let b = (SRC[byte_off >> 2u] >> ((byte_off & 3u) * 8u)) & 0xffu;\n\
+         \x20 Y[pu(3u) + i] = T(f32(b) * pf(1u));\n\
+         }\n"
+        .into()
+    }
+}
+
+/// Fused packed-`u32` interleaved RGB `u8` `[B, H, W, 3]` -> planar NCHW `[B, 3, H, W]` `T` (`f32` or `f16`)
+/// multiplied by `scale` (`1 / 255` for network input).
+///
+/// - `VEC4=true` (`(H * W) % 4 == 0`, 4-aligned source and output offsets): reads 3 packed `u32` words (4 RGB
+///   pixels = 12 bytes) per thread and writes 3 coalesced `vec4<T>` planes (R, G, B).
+/// - `VEC4=false`: arbitrary `H * W` and byte/element offsets, 1 pixel per thread touching only the 1 or 2
+///   source words containing its 3 RGB bytes.
+fn gen_rgb8_chw_norm(spec: &Spec) -> String {
+    if spec.get_bool("VEC4") {
+        "@group(0) @binding(1) var<storage, read> SRC: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec4<T>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let plane4 = pu(1u);\n\
+         \x20 let img = i / plane4;\n\
+         \x20 let p4 = i - img * plane4;\n\
+         \x20 let sw = pu(3u) + i * 3u;\n\
+         \x20 let w0 = SRC[sw];\n\
+         \x20 let w1 = SRC[sw + 1u];\n\
+         \x20 let w2 = SRC[sw + 2u];\n\
+         \x20 let scale = pf(2u);\n\
+         \x20 let r = vec4<f32>(\n\
+         \x20   f32(w0 & 0xffu),\n\
+         \x20   f32(w0 >> 24u),\n\
+         \x20   f32((w1 >> 16u) & 0xffu),\n\
+         \x20   f32((w2 >> 8u) & 0xffu),\n\
+         \x20 ) * scale;\n\
+         \x20 let g = vec4<f32>(\n\
+         \x20   f32((w0 >> 8u) & 0xffu),\n\
+         \x20   f32(w1 & 0xffu),\n\
+         \x20   f32(w1 >> 24u),\n\
+         \x20   f32((w2 >> 16u) & 0xffu),\n\
+         \x20 ) * scale;\n\
+         \x20 let b = vec4<f32>(\n\
+         \x20   f32((w0 >> 16u) & 0xffu),\n\
+         \x20   f32((w1 >> 8u) & 0xffu),\n\
+         \x20   f32(w2 & 0xffu),\n\
+         \x20   f32(w2 >> 24u),\n\
+         \x20 ) * scale;\n\
+         \x20 let ob = pu(4u) + img * 3u * plane4 + p4;\n\
+         \x20 Y[ob] = vec4<T>(r);\n\
+         \x20 Y[ob + plane4] = vec4<T>(g);\n\
+         \x20 Y[ob + 2u * plane4] = vec4<T>(b);\n\
+         }\n"
+        .into()
+    } else {
+        "@group(0) @binding(1) var<storage, read> SRC: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<T>;\n\
+         fn rgb_at(i: u32) -> vec3<u32> {\n\
+         \x20 let wi = i >> 2u;\n\
+         \x20 let w0 = SRC[wi];\n\
+         \x20 let s = (i & 3u) * 8u;\n\
+         \x20 if (s == 0u) { return vec3<u32>(w0 & 0xffu, (w0 >> 8u) & 0xffu, (w0 >> 16u) & 0xffu); }\n\
+         \x20 if (s == 8u) { return vec3<u32>((w0 >> 8u) & 0xffu, (w0 >> 16u) & 0xffu, w0 >> 24u); }\n\
+         \x20 let w1 = SRC[wi + 1u];\n\
+         \x20 if (s == 16u) { return vec3<u32>((w0 >> 16u) & 0xffu, w0 >> 24u, w1 & 0xffu); }\n\
+         \x20 return vec3<u32>(w0 >> 24u, w1 & 0xffu, (w1 >> 8u) & 0xffu);\n\
+         }\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let hw = pu(1u);\n\
+         \x20 let img = i / hw;\n\
+         \x20 let p = i - img * hw;\n\
+         \x20 let rgb = rgb_at(pu(3u) + i * 3u);\n\
+         \x20 let scale = pf(2u);\n\
+         \x20 let ob = pu(4u) + img * 3u * hw + p;\n\
+         \x20 Y[ob] = T(f32(rgb.x) * scale);\n\
+         \x20 Y[ob + hw] = T(f32(rgb.y) * scale);\n\
+         \x20 Y[ob + 2u * hw] = T(f32(rgb.z) * scale);\n\
+         }\n"
+        .into()
+    }
+}
 
 /// One image of [`letterbox_rgb8`]: where it goes on the canvas and how it is sampled (folo-data's
 /// `ResizePlan`: box prefilter `prefilter`, then the bilinear taps at word `taps` of the taps buffer: `x0, x1,
@@ -75,7 +229,8 @@ pub fn letterbox_rgb8(
     check_buf(taps, d.taps + 3 * (rw + rh), DType::F32, "letterbox taps")?;
     let n = ow.checked_mul(oh).ok_or_else(|| shape_err("letterbox: canvas too large"))?;
     check_buf(y, d.out_offset + 3 * n, dtype, "letterbox output")?;
-    let k = ctx.kernel(&LETTERBOX, Spec::new().f16(dtype == DType::F16))?;
+    let k =
+        ctx.kernel(&LETTERBOX, Spec::new().bool("PREFILTER", fx > 1 || fy > 1).f16(dtype == DType::F16))?;
     let p = Params::new()
         .uz(ow)?
         .uz(oh)?
@@ -148,8 +303,146 @@ pub fn detect_candidates(
     ctx.dispatch(&k, &[box_raw, cls_raw, anchors, out], &p, ctx.grid_1d(ba as u64, 256)?)
 }
 
+/// Converts `n` packed `u8` bytes from `src` (starting at byte `src_offset`) into `y` (starting at element
+/// `out_offset`) as `dtype` (`F32` or `F16`), multiplying each value by `scale` (`1.0 / 255.0` for image
+/// normalization). In f32 bit-exact with `byte as f32 * scale`; in f16 that value rounded once.
+#[allow(clippy::too_many_arguments)]
+pub fn u8_to_float_scale(
+    ctx: &GpuContext,
+    src: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    n: usize,
+    src_offset: usize,
+    out_offset: usize,
+    scale: f32,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "u8_to_float_scale")?;
+    let src_end = src_offset
+        .checked_add(n)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("u8_to_float_scale: source range exceeds u32".into()))?;
+    let out_end = out_offset
+        .checked_add(n)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("u8_to_float_scale: output range exceeds u32".into()))?;
+    check_buf(src, src_end.div_ceil(4), DType::F32, "u8_to_float_scale source")?;
+    check_buf(y, out_end, dtype, "u8_to_float_scale output")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let half = dtype == DType::F16;
+    if src_offset.is_multiple_of(4) && out_offset.is_multiple_of(4) && n.is_multiple_of(4) {
+        let units = n / 4;
+        let k = ctx.kernel(&U8_SCALE, Spec::new().bool("VEC4", true).f16(half))?;
+        let p = Params::new().uz(units)?.f(scale).uz(src_offset / 4)?.uz(out_offset / 4)?;
+        ctx.dispatch(&k, &[src, y], &p, ctx.grid_1d(units as u64, 256)?)
+    } else if src_offset.is_multiple_of(4) {
+        let words = n.div_ceil(4);
+        let k = ctx.kernel(&U8_SCALE, Spec::new().bool("VEC4", false).bool("ALIGNED_SRC", true).f16(half))?;
+        let p = Params::new().uz(n)?.f(scale).uz(src_offset / 4)?.uz(out_offset)?.uz(words)?;
+        ctx.dispatch(&k, &[src, y], &p, ctx.grid_1d(words as u64, 256)?)
+    } else {
+        let k =
+            ctx.kernel(&U8_SCALE, Spec::new().bool("VEC4", false).bool("ALIGNED_SRC", false).f16(half))?;
+        let p = Params::new().uz(n)?.f(scale).uz(src_offset)?.uz(out_offset)?;
+        ctx.dispatch(&k, &[src, y], &p, ctx.grid_1d(n as u64, 256)?)
+    }
+}
+
+/// Converts `batch` interleaved RGB `u8` images (`[batch, height, width, 3]` at byte `src_offset` in `src`)
+/// into planar `[batch, 3, height, width]` of `dtype` (`F32` or `F16`) at element `out_offset` in `y`,
+/// multiplying each value by `scale`. Uses a 3-word / 4-pixel packed `vec4` path when `(height * width) % 4 == 0`
+/// and both offsets are 4-aligned.
+#[allow(clippy::too_many_arguments)]
+pub fn rgb8_hwc_to_chw_norm(
+    ctx: &GpuContext,
+    src: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    batch: usize,
+    height: usize,
+    width: usize,
+    src_offset: usize,
+    out_offset: usize,
+    scale: f32,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "rgb8_hwc_to_chw_norm")?;
+    let hw = prod(&[height, width])?;
+    let pixels = prod(&[batch, hw])?;
+    let total = prod(&[pixels, 3])?;
+    let src_end = src_offset
+        .checked_add(total)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("rgb8_hwc_to_chw_norm: source range exceeds u32".into()))?;
+    let out_end = out_offset
+        .checked_add(total)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("rgb8_hwc_to_chw_norm: output range exceeds u32".into()))?;
+    check_buf(src, src_end.div_ceil(4), DType::F32, "rgb8_hwc_to_chw_norm source")?;
+    check_buf(y, out_end, dtype, "rgb8_hwc_to_chw_norm output")?;
+    if pixels == 0 {
+        return Ok(());
+    }
+    let half = dtype == DType::F16;
+    if hw.is_multiple_of(4) && src_offset.is_multiple_of(4) && out_offset.is_multiple_of(4) {
+        let plane4 = hw / 4;
+        let total4 = batch * plane4;
+        let k = ctx.kernel(&RGB8_CHW_NORM, Spec::new().bool("VEC4", true).f16(half))?;
+        let p = Params::new().uz(total4)?.uz(plane4)?.f(scale).uz(src_offset / 4)?.uz(out_offset / 4)?;
+        ctx.dispatch(&k, &[src, y], &p, ctx.grid_1d(total4 as u64, 256)?)
+    } else {
+        let k = ctx.kernel(&RGB8_CHW_NORM, Spec::new().bool("VEC4", false).f16(half))?;
+        let p = Params::new().uz(pixels)?.uz(hw)?.f(scale).uz(src_offset)?.uz(out_offset)?;
+        ctx.dispatch(&k, &[src, y], &p, ctx.grid_1d(pixels as u64, 256)?)
+    }
+}
+
+/// Uploads `bytes` via a reused host-visible staging buffer (4× smaller transfer than uploading `f32`) and
+/// converts them on the GPU with [`u8_to_float_scale`] into a new pooled `dtype` (`F32` or `F16`) buffer.
+pub fn upload_u8_scaled(ctx: &GpuContext, bytes: &[u8], scale: f32, dtype: DType) -> Result<GpuBuffer> {
+    check_dtype(ctx, dtype, "upload_u8_scaled")?;
+    let n = bytes.len();
+    let out = ctx.alloc(dtype.bytes(n).max(4))?;
+    if n == 0 {
+        return Ok(out);
+    }
+    let (raw_u8, ()) = ctx.upload_with(n as u64, |mut dst| dst.copy_from_slice(bytes))?;
+    u8_to_float_scale(ctx, raw_u8.raw(), out.raw(), n, 0, 0, scale, dtype)?;
+    Ok(out)
+}
+
+/// Uploads `batch` interleaved RGB `u8` images (`rgb.len() == batch * height * width * 3`) via a reused staging
+/// buffer and converts them on the GPU with [`rgb8_hwc_to_chw_norm`] into a pooled `[batch, 3, height, width]`
+/// `dtype` (`F32` or `F16`) buffer.
+pub fn upload_rgb8_hwc_to_chw_norm(
+    ctx: &GpuContext,
+    rgb: &[u8],
+    batch: usize,
+    height: usize,
+    width: usize,
+    scale: f32,
+    dtype: DType,
+) -> Result<GpuBuffer> {
+    check_dtype(ctx, dtype, "upload_rgb8_hwc_to_chw_norm")?;
+    let expected = prod(&[batch, height, width, 3])?;
+    if rgb.len() != expected {
+        return Err(shape_err(format!(
+            "upload_rgb8_hwc_to_chw_norm: got {} bytes for [{batch}, {height}, {width}, 3] (expected {expected})",
+            rgb.len()
+        )));
+    }
+    let out = ctx.alloc(dtype.bytes(expected).max(4))?;
+    if expected == 0 {
+        return Ok(out);
+    }
+    let (raw_u8, ()) = ctx.upload_with(expected as u64, |mut dst| dst.copy_from_slice(rgb))?;
+    rgb8_hwc_to_chw_norm(ctx, raw_u8.raw(), out.raw(), batch, height, width, 0, 0, scale, dtype)?;
+    Ok(out)
+}
+
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&LETTERBOX, &DETECT];
+pub(crate) static DEFS: &[&KernelDef] = &[&LETTERBOX, &DETECT, &U8_SCALE, &RGB8_CHW_NORM];
 
 #[cfg(test)]
 mod tests {

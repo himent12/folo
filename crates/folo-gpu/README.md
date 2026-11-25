@@ -79,7 +79,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
 | optimizer updates, clipping, loss-scaler unscale | `optimizer_step(_many)`, `norm_partials_many`, `scale_many`, `unscale_check(_many)` | `kernels::optim::*` | `optim.wgsl`; generated `_many` kernels | folo-nn `tests/gpu/main.rs` |
 | Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` | generated in `muon/shader.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
-| letterbox | `letterbox_rgb8` | `kernels::vision::letterbox_rgb8` | `letterbox.wgsl` | folo-vision `tests/gpu.rs` |
+| letterbox, packed `u8` upload/normalize | `letterbox_rgb8` | `kernels::vision::{letterbox_rgb8, u8_to_float_scale, rgb8_hwc_to_chw_norm, upload_u8_scaled, upload_rgb8_hwc_to_chw_norm}` | `letterbox.wgsl`; generated in `vision.rs` | `src/tests/vision.rs`; folo-vision `tests/gpu.rs` |
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
 | assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss/` |

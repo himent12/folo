@@ -116,6 +116,10 @@ mod tests {
             ("strided_transpose", Spec::new().u32("EB", 4)),
             ("strided_transpose", Spec::new().u32("EB", 2).f16(true)),
             ("cast_f16_vec4", Spec::new().bool("TO_F16", true)),
+            ("cast_u8_vec4", Spec::new().bool("TO_F16", true)),
+            ("u8_to_float_scale", Spec::new().bool("VEC4", true).f16(true)),
+            ("rgb8_hwc_to_chw_norm", Spec::new().bool("VEC4", true)),
+            ("letterbox", Spec::new().bool("PREFILTER", false)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
             (

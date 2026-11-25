@@ -1,5 +1,6 @@
-//! Fast paths for [`super`]: branchless integer `vec4` `f16` <-> `f32` cast, 16-byte `vec4<u32>` strided
-//! gather / `index_select` / scatter / fill, and shared-memory padded 32×32 batched 2-D transpose.
+//! Fast paths for [`super`]: branchless integer `vec4` `f16` <-> `f32` cast, packed-`u32` `u8 -> f32/f16`
+//! cast, 16-byte `vec4<u32>` strided gather / `index_select` / scatter / fill, and shared-memory padded 32×32
+//! batched 2-D transpose.
 
 use std::fmt::Write as _;
 
@@ -209,8 +210,43 @@ fn gen_strided_transpose(spec: &Spec) -> String {
     s
 }
 
+/// Packed-`u32` `vec4` `u8 -> f32` or `u8 -> f16` cast: reads 1 `u32` (4 packed bytes) per thread and writes
+/// `vec4<f32>` (16 B) or packed `vec2<u32>` of 4 IEEE binary16 lanes (8 B, via `pack2x16float`, exact for every
+/// integer `0..=255` without requiring `shader-f16`).
+/// Spec: `TO_F16` (bool). Params: 0 = vec4 units (`n / 4`), 1 = source word offset (`offset / 4`).
+fn gen_cast_u8_vec4(spec: &Spec) -> String {
+    if spec.get_bool("TO_F16") {
+        "@group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec2<u32>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let w = X[pu(1u) + i];\n\
+         \x20 let v = vec4<f32>(f32(w & 0xffu), f32((w >> 8u) & 0xffu), f32((w >> 16u) & 0xffu), f32(w >> 24u));\n\
+         \x20 Y[i] = vec2<u32>(pack2x16float(v.xy), pack2x16float(v.zw));\n\
+         }\n"
+            .into()
+    } else {
+        "@group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec4<f32>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let w = X[pu(1u) + i];\n\
+         \x20 Y[i] = vec4<f32>(f32(w & 0xffu), f32((w >> 8u) & 0xffu), f32((w >> 16u) & 0xffu), f32(w >> 24u));\n\
+         }\n"
+            .into()
+    }
+}
+
 static CAST_F16_VEC4: KernelDef =
     KernelDef { name: "cast_f16_vec4", storage: RW, source: Source::Generated(gen_cast_f16_vec4) };
+static CAST_U8_VEC4: KernelDef =
+    KernelDef { name: "cast_u8_vec4", storage: RW, source: Source::Generated(gen_cast_u8_vec4) };
 static FILL_VEC4: KernelDef =
     KernelDef { name: "fill_vec4", storage: &[Access::ReadWrite], source: Source::Static(FILL_VEC4_SRC) };
 static MOVE_VEC4: KernelDef = KernelDef {
@@ -224,7 +260,7 @@ static STRIDED_TRANSPOSE: KernelDef =
     KernelDef { name: "strided_transpose", storage: RW, source: Source::Generated(gen_strided_transpose) };
 
 pub(super) static FAST_DEFS: &[&KernelDef] =
-    &[&CAST_F16_VEC4, &FILL_VEC4, &MOVE_VEC4, &SCATTER_VEC4, &STRIDED_TRANSPOSE];
+    &[&CAST_F16_VEC4, &FILL_VEC4, &MOVE_VEC4, &SCATTER_VEC4, &STRIDED_TRANSPOSE, &CAST_U8_VEC4];
 
 /// Elements per 16-byte `vec4<u32>`.
 pub(super) const fn elems_per_vec4(elem: Elem) -> usize {
@@ -287,6 +323,31 @@ pub(super) fn try_cast_f16_vec4(
     }
     let units = n / 4;
     let k = ctx.kernel(&CAST_F16_VEC4, Spec::new().bool("TO_F16", to_f16))?;
+    let p = Params::new().uz(units)?.uz(offset / 4)?;
+    ctx.dispatch(&k, &[src, dst], &p, ctx.grid_1d(units as u64, 256)?)?;
+    Ok(true)
+}
+
+/// Attempts the packed-`u32` `vec4` `u8 -> f32/f16` cast fast path; returns `Ok(true)` if dispatched.
+pub(super) fn try_cast_u8_to_float_vec4(
+    ctx: &GpuContext,
+    src: &wgpu::Buffer,
+    from: Elem,
+    offset: usize,
+    dst: &wgpu::Buffer,
+    to: Elem,
+    n: usize,
+) -> Result<bool> {
+    let to_f16 = match (from, to) {
+        (Elem::U8, Elem::F32) => false,
+        (Elem::U8, Elem::F16) => true,
+        _ => return Ok(false),
+    };
+    if !n.is_multiple_of(4) || !offset.is_multiple_of(4) {
+        return Ok(false);
+    }
+    let units = n / 4;
+    let k = ctx.kernel(&CAST_U8_VEC4, Spec::new().bool("TO_F16", to_f16))?;
     let p = Params::new().uz(units)?.uz(offset / 4)?;
     ctx.dispatch(&k, &[src, dst], &p, ctx.grid_1d(units as u64, 256)?)?;
     Ok(true)
