@@ -5,9 +5,10 @@
 //! change), as in PyTorch.
 //!
 //! - `sgd.rs`: [`Sgd`]. `adamw.rs`: [`AdamW`].
-//! - `musgd.rs`: [`MuSgd`], SGD plus the Muon update, and its Newton–Schulz [`orthogonalize`].
+//! - `musgd.rs`: [`MuSgd`], SGD plus the Muon update. `ortho.rs`: Newton–Schulz / Polar-FOLO [`orthogonalize`].
 //! - `grads.rs`: [`GradAccumulator`] (accumulation over several backward passes, clipping) and
 //!   [`global_grad_norm`].
+//! - `simd/`: AVX2 / scalar CPU kernels shared by the optimizers, clipping and AMP unscaling.
 //! - This file: the [`Optimizer`] trait, [`OptimKind`], [`ParamGroup`], [`StandardGroups`],
 //!   [`effective_weight_decay`] and the `auto` optimizer rule ([`auto_optimizer_rule`]).
 //!
@@ -34,7 +35,9 @@
 mod adamw;
 mod grads;
 mod musgd;
+mod ortho;
 mod sgd;
+pub(crate) mod simd;
 
 use std::collections::HashMap;
 
@@ -43,10 +46,11 @@ use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
 pub use grads::{GradAccumulator, global_grad_norm};
-pub use musgd::{
-    MUON_SCALE, MuSgd, MuSgdWeights, MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE,
-    POLAR4_COEFFS, POLAR5_COEFFS, is_muon_group, muon_scale, muon_scale_geo, orthogonalize,
-    orthogonalize_many, orthogonalize_many_with, orthogonalize_with,
+pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
+pub use ortho::{
+    MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR4_COEFFS, POLAR5_COEFFS,
+    muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
+    orthogonalize_with,
 };
 pub use sgd::Sgd;
 
@@ -775,14 +779,24 @@ where
     F: Fn(usize, usize) -> Result<()> + Sync,
 {
     use rayon::prelude::*;
+    let total: usize = groups.iter().flat_map(|g| &g.params).map(|(_, t)| t.numel()).sum();
+    if total < PAR_THRESHOLD {
+        let _g = folo_core::no_grad();
+        for (gi, g) in groups.iter().enumerate() {
+            for pi in 0..g.params.len() {
+                f(gi, pi)?;
+            }
+        }
+        return Ok(());
+    }
     let items: Vec<(usize, usize)> =
         groups.iter().enumerate().flat_map(|(gi, g)| (0..g.params.len()).map(move |pi| (gi, pi))).collect();
-    let total: usize = groups.iter().flat_map(|g| &g.params).map(|(_, t)| t.numel()).sum();
-    let run = |&(gi, pi): &(usize, usize)| {
-        let _g = folo_core::no_grad();
-        f(gi, pi)
-    };
-    if total >= PAR_THRESHOLD { items.par_iter().try_for_each(run) } else { items.iter().try_for_each(run) }
+    folo_core::cpu::in_pool(|| {
+        items.par_iter().try_for_each(|&(gi, pi)| {
+            let _g = folo_core::no_grad();
+            f(gi, pi)
+        })
+    })
 }
 
 /// The multi-tensor device path of an optimizer step: per group with parameters off the CPU, every parameter that

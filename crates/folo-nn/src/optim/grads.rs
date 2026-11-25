@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 use folo_core::backend::{NormReduce, OptimStep};
 use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
+use rayon::prelude::*;
 
-use super::GradSource;
+use super::simd::{
+    axpby_slice, scale_slice, sum_sq_f64_slice, unscale_check_slice, unscale_check_sum_sq_slice,
+};
+use super::{GradSource, PAR_THRESHOLD, cpu_fast};
 use crate::Result;
 
 struct Slot {
@@ -68,7 +72,16 @@ impl GradAccumulator {
                 let fused = !buf.device().is_cpu()
                     && buf.optimizer_step_(g, &[], &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
                 if !fused {
-                    buf.add_assign(g)?;
+                    if cpu_fast(&[buf])
+                        && g.device().is_cpu()
+                        && g.dtype() == DType::F32
+                        && buf.shape() == g.shape()
+                        && !buf.same_storage(g)
+                    {
+                        g.with_f32_slice(|gs| buf.update_f32(|bs| axpby_slice(bs, gs, 1.0, 1.0)))??;
+                    } else {
+                        buf.add_assign(g)?;
+                    }
                 }
             } else {
                 let buf = match &s.buf {
@@ -119,6 +132,18 @@ impl GradAccumulator {
 
     /// The global L2 norm `sqrt(Σ g²)` over every accumulated gradient, summed in `f64`.
     pub fn global_norm(&self) -> Result<f64> {
+        let total: usize =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid").numel()).sum();
+        if total >= PAR_THRESHOLD && !self.on_device() {
+            let partials: Vec<f64> = folo_core::cpu::in_pool(|| {
+                self.slots
+                    .par_iter()
+                    .filter(|s| s.valid)
+                    .map(|s| sum_sq(s.buf.as_ref().expect("valid")))
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            return Ok(partials.into_iter().sum::<f64>().sqrt());
+        }
         let mut sq = 0f64;
         for s in self.slots.iter().filter(|s| s.valid) {
             sq += sum_sq(s.buf.as_ref().expect("valid"))?;
@@ -140,12 +165,37 @@ impl GradAccumulator {
         let n = self.global_norm()?;
         if max_norm > 0.0 && n > max_norm {
             let c = (max_norm / (n + 1e-6)) as f32;
-            let _g = no_grad();
-            for s in self.slots.iter().filter(|s| s.valid) {
-                s.buf.as_ref().expect("valid").mul_scalar_assign(c)?;
-            }
+            self.scale_cpu_valid(c)?;
         }
         Ok(n)
+    }
+
+    /// Scale every valid CPU buffer by `c` in place (AVX2, parallelized when large).
+    fn scale_cpu_valid(&self, c: f32) -> Result<()> {
+        let _g = no_grad();
+        let total: usize =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid").numel()).sum();
+        let scale_one = |b: &Tensor| -> Result<()> {
+            if cpu_fast(&[b]) {
+                b.update_f32(|s| scale_slice(s, c))?;
+            } else {
+                b.mul_scalar_assign(c)?;
+            }
+            Ok(())
+        };
+        if total >= PAR_THRESHOLD {
+            folo_core::cpu::in_pool(|| {
+                self.slots.par_iter().filter(|s| s.valid).try_for_each(|s| {
+                    let _g = no_grad();
+                    scale_one(s.buf.as_ref().expect("valid"))
+                })
+            })
+        } else {
+            for s in self.slots.iter().filter(|s| s.valid) {
+                scale_one(s.buf.as_ref().expect("valid"))?;
+            }
+            Ok(())
+        }
     }
 
     /// Mixed precision (docs/MODEL.md §8.8): the accumulated gradients came from a loss multiplied by a loss scale
@@ -160,11 +210,83 @@ impl GradAccumulator {
     /// [`crate::amp::unscale_`]: one fused unscale-and-check kernel per buffer and a shared flag.
     pub fn unscale_clip(&mut self, inv_scale: f32, max_norm: f64) -> Result<bool> {
         let _g = no_grad();
-        let bufs: Vec<&Tensor> =
-            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
-        if bufs.is_empty() {
+        if !self.slots.iter().any(|s| s.valid) {
             return Ok(true);
         }
+        if !self.on_device()
+            && self.slots.iter().filter(|s| s.valid).all(|s| cpu_fast(&[s.buf.as_ref().expect("valid")]))
+        {
+            let total: usize =
+                self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid").numel()).sum();
+            if max_norm <= 0.0 {
+                if total >= PAR_THRESHOLD {
+                    return folo_core::cpu::in_pool(|| {
+                        let flags: Vec<bool> = self
+                            .slots
+                            .par_iter()
+                            .filter(|s| s.valid)
+                            .map(|s| {
+                                let _g = no_grad();
+                                Ok(s.buf
+                                    .as_ref()
+                                    .expect("valid")
+                                    .update_f32(|buf| unscale_check_slice(buf, inv_scale))?)
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(flags.into_iter().all(|ok| ok))
+                    });
+                }
+                let mut finite = true;
+                for s in self.slots.iter().filter(|s| s.valid) {
+                    finite &= s
+                        .buf
+                        .as_ref()
+                        .expect("valid")
+                        .update_f32(|buf| unscale_check_slice(buf, inv_scale))?;
+                }
+                return Ok(finite);
+            }
+            let (finite, sq) = if total >= PAR_THRESHOLD {
+                let res: Vec<(bool, f64)> = folo_core::cpu::in_pool(|| {
+                    self.slots
+                        .par_iter()
+                        .filter(|s| s.valid)
+                        .map(|s| {
+                            let _g = no_grad();
+                            Ok(s.buf
+                                .as_ref()
+                                .expect("valid")
+                                .update_f32(|buf| unscale_check_sum_sq_slice(buf, inv_scale))?)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })?;
+                res.into_iter().fold((true, 0.0f64), |(ok, acc), (f, q)| (ok & f, acc + q))
+            } else {
+                let mut finite = true;
+                let mut sq = 0.0f64;
+                for s in self.slots.iter().filter(|s| s.valid) {
+                    let (f, q) = s
+                        .buf
+                        .as_ref()
+                        .expect("valid")
+                        .update_f32(|buf| unscale_check_sum_sq_slice(buf, inv_scale))?;
+                    finite &= f;
+                    sq += q;
+                }
+                (finite, sq)
+            };
+            if !finite {
+                return Ok(false);
+            }
+            let n = sq.sqrt();
+            if n > max_norm {
+                let c = (max_norm / (n + 1e-6)) as f32;
+                self.scale_cpu_valid(c)?;
+            }
+            return Ok(true);
+        }
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
         if self.on_device() && max_norm > 0.0 {
             let r = self.clip_grad_norm_device(max_norm, inv_scale)?;
             return Ok(r.item::<f32>()?.is_finite());
@@ -265,9 +387,8 @@ pub fn global_grad_norm(params: &[Tensor], grads: &dyn GradSource) -> Result<f64
 }
 
 fn sum_sq(g: &Tensor) -> Result<f64> {
-    let f = |s: &[f32]| s.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>();
     if g.device().is_cpu() && g.dtype() == DType::F32 {
-        return Ok(g.with_f32_slice(f)?);
+        return Ok(g.with_f32_slice(sum_sq_f64_slice)?);
     }
-    Ok(f(&g.to_dtype(DType::F32)?.to_vec::<f32>()?))
+    Ok(sum_sq_f64_slice(&g.to_dtype(DType::F32)?.to_vec::<f32>()?))
 }

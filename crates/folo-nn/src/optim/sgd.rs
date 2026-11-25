@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor};
 
+use super::simd::{sgd_coupled_slice, sgd_decoupled_slice};
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
     validate_groups,
@@ -136,30 +137,20 @@ fn update_decoupled(
     nesterov: bool,
     cautious: bool,
 ) -> Result<()> {
-    if cpu_fast(&[p]) && buf.is_none_or(|b| cpu_fast(&[b])) && g.device().is_cpu() && g.dtype() == DType::F32
+    if cpu_fast(&[p])
+        && buf.is_none_or(|b| cpu_fast(&[b]) && !b.same_storage(p) && !b.same_storage(g))
+        && g.device().is_cpu()
+        && g.dtype() == DType::F32
+        && !p.same_storage(g)
     {
         return g.with_f32_slice(|g| -> Result<()> {
-            let step = |p: &mut [f32], b: Option<&mut [f32]>| match b {
-                Some(b) if mu != 0.0 => {
-                    for ((p, &g), b) in p.iter_mut().zip(g).zip(b) {
-                        *b = mu * *b + g;
-                        let u = if nesterov { g + mu * *b } else { *b };
-                        let decay =
-                            if wd_step != 0.0 && (!cautious || u * *p > 0.0) { wd_step * *p } else { 0.0 };
-                        *p = *p - lr * u - decay;
-                    }
-                }
-                _ => {
-                    for (p, &g) in p.iter_mut().zip(g) {
-                        let decay =
-                            if wd_step != 0.0 && (!cautious || g * *p > 0.0) { wd_step * *p } else { 0.0 };
-                        *p = *p - lr * g - decay;
-                    }
-                }
-            };
             match buf {
-                Some(b) => b.update_f32(|b| p.update_f32(|p| step(p, Some(b))))??,
-                None => p.update_f32(|p| step(p, None))?,
+                Some(b) => b.update_f32(|b| {
+                    p.update_f32(|p| sgd_decoupled_slice(p, g, Some(b), lr, mu, wd_step, nesterov, cautious))
+                })??,
+                None => {
+                    p.update_f32(|p| sgd_decoupled_slice(p, g, None, lr, mu, wd_step, nesterov, cautious))?
+                }
             }
             Ok(())
         })?;
@@ -207,28 +198,18 @@ fn update(
     wd: f32,
     nesterov: bool,
 ) -> Result<()> {
-    if cpu_fast(&[p]) && buf.is_none_or(|b| cpu_fast(&[b])) && g.device().is_cpu() && g.dtype() == DType::F32
+    if cpu_fast(&[p])
+        && buf.is_none_or(|b| cpu_fast(&[b]) && !b.same_storage(p) && !b.same_storage(g))
+        && g.device().is_cpu()
+        && g.dtype() == DType::F32
+        && !p.same_storage(g)
     {
         return g.with_f32_slice(|g| -> Result<()> {
-            let step = |p: &mut [f32], b: Option<&mut [f32]>| match b {
-                Some(b) if mu != 0.0 => {
-                    for ((p, &g), b) in p.iter_mut().zip(g).zip(b) {
-                        let d = if wd != 0.0 { g + wd * *p } else { g };
-                        *b = mu * *b + d;
-                        let d = if nesterov { d + mu * *b } else { *b };
-                        *p += -lr * d;
-                    }
-                }
-                _ => {
-                    for (p, &g) in p.iter_mut().zip(g) {
-                        let d = if wd != 0.0 { g + wd * *p } else { g };
-                        *p += -lr * d;
-                    }
-                }
-            };
             match buf {
-                Some(b) => b.update_f32(|b| p.update_f32(|p| step(p, Some(b))))??,
-                None => p.update_f32(|p| step(p, None))?,
+                Some(b) => b.update_f32(|b| {
+                    p.update_f32(|p| sgd_coupled_slice(p, g, Some(b), lr, mu, wd, nesterov))
+                })??,
+                None => p.update_f32(|p| sgd_coupled_slice(p, g, None, lr, mu, wd, nesterov))?,
             }
             Ok(())
         })?;

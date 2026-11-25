@@ -794,3 +794,139 @@ fn ema_mismatches_non_contiguous_aliasing_and_thread_determinism() {
     assert_eq!(ema_b.ema_tensors().len(), 1);
     ema_b.update(&live_b).unwrap();
 }
+
+#[test]
+fn unscale_clip_and_global_norm_large_cpu_parity() {
+    let mut rng = Rng::seed(123);
+    // Exceeds PAR_THRESHOLD (65,536) across multiple uneven tensors to exercise parallel AVX2 paths
+    // (9,216 + 18,432 + 41,472 + 37 = 69,157 > 65,536).
+    let shapes: [&[usize]; 4] = [&[32, 32, 3, 3], &[64, 32, 3, 3], &[144, 32, 3, 3], &[37]];
+    let params: Vec<Tensor> =
+        shapes.iter().map(|s| Tensor::randn(s.to_vec(), 0.0, 1.0, &mut rng).requires_grad_()).collect();
+    let total_numel: usize = params.iter().map(Tensor::numel).sum();
+    assert!(total_numel > 65_536, "fixture must exercise parallel path: {total_numel}");
+    let mut grads = Grads::default();
+    let mut ref_vecs = Vec::new();
+    for p in &params {
+        let g = Tensor::randn(p.shape().clone(), 0.0, 4.0, &mut rng);
+        ref_vecs.push(g.to_vec::<f32>().unwrap());
+        grads.insert(p, g);
+    }
+    let mut acc = GradAccumulator::new(&params);
+    acc.add(&grads).unwrap();
+
+    // Thread-count determinism (1 vs 4 workers) for both global_norm and unscale_clip.
+    let mut acc1 = GradAccumulator::new(&params);
+    let mut acc4 = GradAccumulator::new(&params);
+    acc1.add(&grads).unwrap();
+    acc4.add(&grads).unwrap();
+    let n1 = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(|| acc1.global_norm().unwrap());
+    let n4 = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(|| acc4.global_norm().unwrap());
+    assert_eq!(n1.to_bits(), n4.to_bits(), "global_norm must be thread-count deterministic");
+
+    // Unscale by 0.25 and clip to max_norm = 5.0.
+    let inv_scale = 0.25f32;
+    let max_norm = 5.0f64;
+    let ok1 = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(|| acc1.unscale_clip(inv_scale, max_norm).unwrap());
+    let ok4 = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(|| acc4.unscale_clip(inv_scale, max_norm).unwrap());
+    assert!(ok1 && ok4);
+    for p in &params {
+        let b1: Vec<u32> =
+            acc1.grad(p).unwrap().to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+        let b4: Vec<u32> =
+            acc4.grad(p).unwrap().to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+        assert_eq!(b1, b4, "unscale_clip must be bitwise thread-count deterministic");
+    }
+
+    assert!(acc.unscale_clip(inv_scale, max_norm).unwrap());
+    let mut ref_sq = 0.0f64;
+    for v in &mut ref_vecs {
+        for x in v.iter_mut() {
+            *x *= inv_scale;
+            ref_sq += (*x as f64) * (*x as f64);
+        }
+    }
+    let ref_n = ref_sq.sqrt();
+    assert!(ref_n > max_norm);
+    let c = (max_norm / (ref_n + 1e-6)) as f32;
+    for (p, want) in params.iter().zip(&mut ref_vecs) {
+        for x in want.iter_mut() {
+            *x *= c;
+        }
+        let got = acc.grad(p).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(got.len(), want.len());
+        for (a, b) in got.iter().zip(want.iter()) {
+            assert!((a - b).abs() <= 1e-5 * (1.0 + b.abs()), "{a} vs {b}");
+        }
+    }
+    assert!((acc.global_norm().unwrap() - max_norm).abs() < 1e-3);
+
+    // Broadcastable (scalar) gradient on a multi-element parameter must work across multiple add() passes.
+    let v = param(&[1.0, 2.0, 3.0]);
+    let mut bacc = GradAccumulator::new(std::slice::from_ref(&v));
+    let mut sg = Grads::default();
+    sg.insert(&v, Tensor::from_slice(&[2.5f32], [1]).unwrap());
+    bacc.add(&sg).unwrap();
+    bacc.add(&sg).unwrap();
+    assert_eq!(bacc.grad(&v).unwrap().to_vec::<f32>().unwrap(), [5.0, 5.0, 5.0]);
+
+    // Non-finite gradient causes unscale_clip to return false (both with and without clipping).
+    for clip in [0.0, 10.0] {
+        acc.zero();
+        let mut bad_grads = Grads::default();
+        for (i, p) in params.iter().enumerate() {
+            let mut v = vec![1.0f32; p.numel()];
+            if i == 2 {
+                v[1234] = f32::INFINITY;
+            }
+            bad_grads.insert(p, Tensor::from_vec(v, p.shape().clone()).unwrap());
+        }
+        acc.add(&bad_grads).unwrap();
+        assert!(!acc.unscale_clip(0.5, clip).unwrap(), "clip={clip}");
+    }
+
+    // `orthogonalize_with` must never mutate its input tensor in place.
+    let m = Tensor::randn([8, 12], 0.0, 1.0, &mut rng);
+    let before: Vec<u32> = m.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+    let _ = orthogonalize_with(&m, MuonOrtho::Polar4).unwrap();
+    let after: Vec<u32> = m.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+    assert_eq!(before, after, "orthogonalize_with mutated its input");
+
+    // Cross-parameter gradient aliasing in MuSgd (parameter A's gradient aliases parameter B's muon_buffer)
+    // must not deadlock and must match non-aliased execution.
+    let pa = Tensor::from_slice(&[0.5f32, -0.3, 0.2, 0.4], [2, 2]).unwrap().requires_grad_();
+    let pb = Tensor::from_slice(&[-0.1f32, 0.6, -0.4, 0.2], [2, 2]).unwrap().requires_grad_();
+    let mut mopt = MuSgd::new(vec![
+        ParamGroup::new("decay", vec![("a".into(), pa.clone()), ("b".into(), pb.clone())])
+            .lr(0.05)
+            .momentum(0.9),
+    ])
+    .unwrap();
+    let ba = mopt.muon_buffer(0, 0).unwrap().clone();
+    let bb = mopt.muon_buffer(0, 1).unwrap().clone();
+    {
+        let _g = no_grad();
+        ba.copy_from(&Tensor::from_slice(&[0.1f32, 0.2, -0.1, 0.3], [2, 2]).unwrap()).unwrap();
+        bb.copy_from(&Tensor::from_slice(&[-0.2f32, 0.1, 0.4, -0.1], [2, 2]).unwrap()).unwrap();
+    }
+    let mut aliased = Grads::default();
+    aliased.insert(&pa, bb);
+    aliased.insert(&pb, ba);
+    mopt.step(&aliased).unwrap();
+}
