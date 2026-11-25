@@ -695,8 +695,8 @@ images, 1,400 optimizer steps). Same protocol, three seeds, `main` 71284767, val
 
 On brain-tumor the longer-trained file of each lineage is the worse start: v3 is below v2, with the seed ranges
 apart, and v5 is below v4. v5 would have failed the 0.010 bar against v4 there (−0.022). BCCD does not show the
-pattern: v2 0.6207, v3 0.6160, v5 0.6245, all inside the seed spread. v5 stays the documented start, and QUICKSTART
-says to try v2 when a fine-tune falls short.
+pattern: v2 0.6207, v3 0.6160, v5 0.6245, all inside the seed spread. v5 stays the documented start, and
+[QUICKSTART](../../docs/QUICKSTART.md#fine-tune-from-pretrained-weights) says to try v2 when a fine-tune falls short.
 
 **The starting-point check of the next weights release** runs all four sets of bench/finetune, brain-tumor
 included, with three seeds a side. The bar: on every set, the new file's mean AP is not more than 0.010 below the

@@ -1,6 +1,6 @@
 # Shapes: the convergence smoke test
 
-The shapes gate (docs/MODEL.md §10.6) is FOLO's convergence test: a synthetic shapes dataset that a correct trainer
+The shapes gate ([docs/MODEL.md §10.6](../../docs/MODEL.md#106-convergence-smoke-test-m2-gate)) is FOLO's convergence test: a synthetic shapes dataset that a correct trainer
 must learn to a fixed mAP bar. Train folo-n from scratch on folo-data's synthetic shapes, 4 classes, 2000 train and
 200 val images at 320×320, and reach **mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30** (EMA model) with no
 non-finite loss.
@@ -13,10 +13,11 @@ cargo run --release -p folo-data --example shapes -- datasets/shapes-smoke
 #    `cargo folo dataset synth datasets/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 \
 #      --classes circle,square,triangle,star` is close, but its generator defaults keep 5 % empty images.
 
-# 2. Train (MODEL.md's run; `auto` picks MuSGD at lr0 0.01, 125 batches = 32 optimizer steps per epoch,
-#    96 warmup steps (3 epochs), mosaic off for the last 5 epochs).
+# 2. Train on CPU (MODEL.md's run; `auto` picks MuSGD at lr0 0.01, 125 batches = 32 optimizer steps per epoch,
+#    96 warmup steps (3 epochs), mosaic off for the last 5 epochs). Drop `--device cpu` to let `--device auto`
+#    pick a GPU when available (see Result (GPU) below). `--arch` is a visible alias for `--model`.
 cargo folo train --data datasets/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
-  --close-mosaic 5 --seed 0 --project runs --name smoke-cpu
+  --close-mosaic 5 --seed 0 --device cpu --project runs --name smoke-cpu
 #    add --json for one JSON record per event on stdout (metrics.jsonl in the run folder has every step).
 #    Interrupted? continue bit-exactly with:  cargo folo train --resume runs/smoke-cpu/weights/last.folo
 
