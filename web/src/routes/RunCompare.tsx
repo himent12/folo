@@ -2,7 +2,7 @@
 // The parts are in ./compare/.
 import GitCompare from '$icons/git-compare-arrows';
 import ChevronRight from '$icons/chevron-right';
-import { computed, css, effect, fade, Key, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, fade, For, Key, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { origin } from '$lib/lineage';
 import { motion } from '$lib/ui/motion';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
@@ -20,6 +20,7 @@ import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
+import Ident from '$lib/ui/Ident';
 import InfoButton from '$lib/ui/InfoButton';
 import InfoRegion from '$lib/ui/InfoRegion';
 import { provideInfoSlot } from '$lib/ui/infoSlot';
@@ -46,8 +47,10 @@ export function startFrom(weights: string | null, models: readonly { id: string;
 }
 
 type Axis = 'epoch' | 'progress';
-type MetricId = 'm95' | 'm50' | 'loss' | 'rec';
+type MetricId = 'm95' | 'm50' | 'loss' | 'prec' | 'rec';
 type YAxis = 'fit' | 'zero';
+
+const isActiveStatus = (s: Run['status']) => s === 'running' || s === 'stopping' || s === 'queued';
 
 const MAX = 4;
 const X_OPTIONS: { value: Axis; label: string }[] = [
@@ -70,6 +73,7 @@ const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; unit?: bo
   { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, unit: true },
   { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, unit: true },
   { id: 'loss', label: 'Train loss', f: (e) => e.train_loss.total },
+  { id: 'prec', label: 'Precision', f: (e) => e.val.precision, unit: true },
   { id: 'rec', label: 'Recall', f: (e) => e.val.recall, unit: true },
 ];
 const METRIC_OPTIONS = METRICS.map((m) => ({ value: m.id, label: m.label }));
@@ -92,73 +96,314 @@ export default function RunCompare() {
   const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
   /** Where the compared runs are: each one's status and epoch ("run_a:running:3,run_b:completed:30"). */
   const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
+  const runStamp = (r: Run) => `${r.status}:${r.epoch}`;
+
+  /** Missing run IDs removed from `?ids=` after the run list loaded, announced to the user. */
+  const dropped = signal<string[]>([]);
+  /** Per-run metrics fetch errors so one failed read never hides healthy runs' curves. */
+  const metricErrors = signal<Record<string, unknown>>({});
+  const retryingMetric = signal<Record<string, boolean>>({});
+  /** Set when a confirmed 404 run_not_found arrives while a runs list refresh is already in flight. */
+  const needRunsRefresh = signal(false);
+  const retryCtrls = new Map<string, AbortController>();
+  let metricsGen = 0;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+    for (const c of retryCtrls.values()) c.abort();
+    retryCtrls.clear();
+  });
+
+  // Reset per-comparison transient notices/errors and abort in-flight per-run retries when switching servers.
+  let prevEpoch = untrack(() => hub.epoch);
+  effect(() => {
+    const epoch = hub.epoch;
+    if (epoch === prevEpoch) return;
+    prevEpoch = epoch;
+    for (const c of retryCtrls.values()) c.abort();
+    retryCtrls.clear();
+    untrack(() => {
+      dropped.set([]);
+      metricErrors.set({});
+      retryingMetric.set({});
+      needRunsRefresh.set(false);
+    });
+  });
+
+  // Reconcile `?ids=` against the loaded run list so deleted run IDs never hold slots or trap the page in an empty dead-end.
+  effect(() => {
+    const list = runs.data;
+    if (!list) return;
+    const cur = ids.get();
+    if (!cur.length) return;
+    const known = new Set(list.map((r) => r.id));
+    const missing = cur.filter((id) => !known.has(id));
+    if (!missing.length) return;
+    untrack(() => {
+      if (router.route.path !== '/runs/compare') return;
+      const keep = cur.filter((id) => known.has(id));
+      dropped.set([...new Set([...dropped.peek(), ...missing])]);
+      setIds(keep);
+    });
+  });
+
+  // Drop stale per-run error/retry state and abort retries for runs removed from the comparison.
+  effect(() => {
+    const cur = new Set(ids.get());
+    for (const [id, ctrl] of retryCtrls) {
+      if (!cur.has(id)) {
+        ctrl.abort();
+        retryCtrls.delete(id);
+      }
+    }
+    untrack(() => {
+      const errs = metricErrors.peek();
+      const errKeys = Object.keys(errs);
+      if (errKeys.some((id) => !cur.has(id))) {
+        const next: Record<string, unknown> = {};
+        for (const id of errKeys) if (cur.has(id)) next[id] = errs[id];
+        metricErrors.set(next);
+      }
+      const retrying = retryingMetric.peek();
+      const retryKeys = Object.keys(retrying);
+      if (retryKeys.some((id) => !cur.has(id))) {
+        const next: Record<string, boolean> = {};
+        for (const id of retryKeys) if (cur.has(id)) next[id] = retrying[id]!;
+        retryingMetric.set(next);
+      }
+    });
+  });
+
+  /** Schedules a fresh runs list read after a confirmed 404 run_not_found, even if one is already in flight. */
+  function refreshRunsAfter404() {
+    if (!alive) return;
+    if (runs.loading || runs.refreshing) needRunsRefresh.set(true);
+    else void runs.refresh();
+  }
+  effect(() => {
+    if (!needRunsRefresh.get() || hub.mode === 'connecting' || runs.loading || runs.refreshing) return;
+    untrack(() => {
+      needRunsRefresh.set(false);
+      void runs.refresh();
+    });
+  });
+
   /**
-   * Each metrics answer's `ids` (joined) and what `moved` was when it was asked for (`at`: null when asked before the
-   * runs list came).
+   * Each metrics map's `ids` (joined) and per-run `status:epoch` stamp captured when that run's metrics were asked for
+   * (`null` when asked before the runs list came).
    */
-  const readAt = new WeakMap<object, { ids: string; at: string | null }>();
+  const readAt = new WeakMap<object, { ids: string; byRun: Map<string, string | null> }>();
   const metrics = new Resource(async (s) => {
     const list = ids.get();
-    const at = untrack(() => (runs.data ? moved.get() : null));
-    // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
-    const gone = (e: unknown) => {
-      if (e instanceof ApiError && e.code === 'run_not_found') return null;
-      throw e;
-    };
-    const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const, gone)));
-    const read = new Map<string, RunMetrics>(out.filter((x) => x !== null));
-    readAt.set(read, { ids: list.join(','), at });
+    const gen = ++metricsGen;
+    for (const c of retryCtrls.values()) c.abort();
+    retryCtrls.clear();
+    untrack(() => retryingMetric.set({}));
+    const snapByRun = untrack(() => (runs.data ? new Map(chosen.get().map((r) => [r.id, runStamp(r)])) : null));
+    const prev = untrack(() => metrics.data);
+    const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
+    if (!list.length) {
+      if (!s.aborted) untrack(() => metricErrors.set({}));
+      const empty = new Map<string, RunMetrics>();
+      readAt.set(empty, { ids: '', byRun: new Map() });
+      return empty;
+    }
+    const settled = await Promise.allSettled(list.map((id) => hub.api.runMetrics(id, s)));
+    if (s.aborted) throw new DOMException('Aborted', 'AbortError');
+    const read = new Map<string, RunMetrics>();
+    const byRun = new Map<string, string | null>();
+    const errs: Record<string, unknown> = {};
+    let firstErr: unknown = undefined;
+    let failedCount = 0;
+    let saw404 = false;
+    for (let i = 0; i < list.length; i++) {
+      const id = list[i]!;
+      const res = settled[i]!;
+      if (res.status === 'fulfilled') {
+        read.set(id, res.value);
+        byRun.set(id, snapByRun ? (snapByRun.get(id) ?? null) : null);
+      } else {
+        const err = res.reason;
+        // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
+        if (err instanceof ApiError && err.code === 'run_not_found') {
+          if (snapByRun?.has(id)) {
+            byRun.set(id, snapByRun.get(id)!);
+            saw404 = true;
+          }
+          continue;
+        }
+        failedCount++;
+        if (firstErr === undefined) firstErr = err;
+        errs[id] = err;
+        const cached = prev?.get(id);
+        if (cached) {
+          read.set(id, cached);
+          byRun.set(id, prevByRun?.get(id) ?? null);
+        }
+      }
+    }
+    if (gen !== metricsGen) throw new DOMException('Aborted', 'AbortError');
+    if (saw404) untrack(() => refreshRunsAfter404());
+    // If every non-deleted run failed and no cached curve can be shown, hand off cleanly to `metrics.error` / ErrorState.
+    if (failedCount > 0 && read.size === 0) {
+      untrack(() => metricErrors.set({}));
+      throw firstErr;
+    }
+    untrack(() => metricErrors.set(errs));
+    readAt.set(read, { ids: list.join(','), byRun });
     return read;
   });
+
+  const failedRuns = computed(() => chosen.get().filter((r) => metricErrors.get()[r.id] !== undefined));
+  const hasMetricErrors = computed(() => failedRuns.get().length > 0);
+  const failedWithCache = computed(() => failedRuns.get().some((r) => !!metrics.data?.has(r.id)));
+
+  /** Fetches a single run's metrics without disturbing other runs' curves or read stamps. */
+  async function fetchRunMetrics(id: string) {
+    if (!alive || retryingMetric.peek()[id] || metrics.loading || metrics.refreshing) return;
+    const epoch = hub.epoch;
+    const gen = metricsGen;
+    const stamp = untrack(() => {
+      const r = runs.data?.find((x) => x.id === id);
+      return r ? runStamp(r) : null;
+    });
+    retryCtrls.get(id)?.abort();
+    const ctrl = new AbortController();
+    retryCtrls.set(id, ctrl);
+    retryingMetric.set({ ...retryingMetric.peek(), [id]: true });
+    try {
+      const m = await hub.api.runMetrics(id, ctrl.signal);
+      if (!alive || ctrl.signal.aborted || hub.epoch !== epoch || gen !== metricsGen || !ids.peek().includes(id)) return;
+      const prev = metrics.data;
+      const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
+      const next = new Map(prev ?? []);
+      next.set(id, m);
+      const nextByRun = new Map(prevByRun ?? []);
+      nextByRun.set(id, stamp);
+      const nextErrs = { ...metricErrors.peek() };
+      delete nextErrs[id];
+      const curIds = ids.peek().join(',');
+      readAt.set(next, { ids: curIds, byRun: nextByRun });
+      metricErrors.set(nextErrs);
+      metrics.error = undefined;
+      if (Object.keys(nextErrs).length === 0) metrics.stale = undefined;
+      metrics.set(next);
+    } catch (err) {
+      if (!alive || ctrl.signal.aborted || hub.epoch !== epoch || gen !== metricsGen || !ids.peek().includes(id)) return;
+      if (err instanceof ApiError && err.code === 'run_not_found') {
+        if (stamp !== null && metrics.data) readAt.get(metrics.data)?.byRun.set(id, stamp);
+        const curErrs = metricErrors.peek();
+        if (id in curErrs) {
+          const nextErrs = { ...curErrs };
+          delete nextErrs[id];
+          metricErrors.set(nextErrs);
+        }
+        refreshRunsAfter404();
+        return;
+      }
+      metricErrors.set({ ...metricErrors.peek(), [id]: err });
+    } finally {
+      if (retryCtrls.get(id) === ctrl) {
+        retryCtrls.delete(id);
+        if (alive) {
+          const nextRetrying = { ...retryingMetric.peek() };
+          delete nextRetrying[id];
+          retryingMetric.set(nextRetrying);
+        }
+      }
+    }
+  }
 
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = () => phoneQuery.current;
   const cursor = signal<number | null>(null);
 
-  // A compared run changes under the page: it trains, ends, is resumed or deleted in another tab. The runs are read
-  // again every COMPARE_POLL_MS, and the metrics whenever a compared run's status or epoch has moved since the metrics
-  // shown were asked for, so a line grows and its end mark says how it ended (stress s3-live-5: a live run stayed
-  // "— · live", no curve, long after it had completed). A move seen while a read is out is acted on once it settles,
-  // never lost; metrics read before the runs list came are read again only when they are behind it. A refresh that
-  // fails keeps the curves, says so over the chart, and is tried again every COMPARE_POLL_MS.
-  effect(() =>
-    pollTogether(COMPARE_POLL_MS, () => {
-      if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
-    }),
-  );
   /**
-   * Every compared run's metrics hold every epoch its list entry may have finished. A failed run's `epoch` is the one it
+   * Whether `r`'s metrics hold every epoch its list entry may have finished. A failed run's `epoch` is the one it
    * failed in, or its last finished one when it failed before the next epoch's first step (docs/API.md `Run.epoch`):
-   * the list cannot tell them apart, so a failed run counts as finished through `epoch`, and one read again when it was
-   * not costs a single read (review round 3: an empty answer asked before epoch 1's checkpoint landed stood for good).
+   * the list cannot tell them apart, so a pre-list read (`stamp === null`) counts as caught up only through `epoch`,
+   * while a read started after observing `failed:<epoch>` counts as synced once it finishes.
    */
-  const caughtUp = (read: Map<string, RunMetrics>) =>
-    chosen.get().every((r) => (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= (r.status === 'failed' ? r.epoch : epochsDone(r.status, r.epoch)));
-  // A failed refresh is tried again COMPARE_POLL_MS after it failed (its own effect: the runs polled meanwhile never
-  // put it off).
+  const runCaughtUp = (r: Run, read: Map<string, RunMetrics>) =>
+    (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= (r.status === 'failed' ? r.epoch : epochsDone(r.status, r.epoch));
+  const runSynced = (r: Run, read: Map<string, RunMetrics>, byRun: Map<string, string | null> | undefined) => {
+    if (metricErrors.get()[r.id] !== undefined || isActiveStatus(r.status)) return false;
+    const stamp = byRun?.get(r.id);
+    if (stamp === runStamp(r)) return true;
+    return stamp === null && runCaughtUp(r, read);
+  };
+
+  // Poll runs every COMPARE_POLL_MS only while at least one compared run is active or not yet synced;
+  // once every compared run is terminal and synced, stop the timer to avoid idle background polling.
+  const needsPoll = computed(() => {
+    if (!runs.data) return false;
+    if (runs.stale !== undefined) return true;
+    const cur = chosen.get();
+    if (!cur.length) return false;
+    if (cur.some((r) => isActiveStatus(r.status))) return true;
+    if (metrics.loading || metrics.error !== undefined) return false;
+    if (metrics.stale !== undefined || hasMetricErrors.get()) return true;
+    const read = metrics.data;
+    const asked = read ? readAt.get(read) : undefined;
+    if (!read || !asked || asked.ids !== ids.get().join(',')) return false;
+    return !cur.every((r) => runSynced(r, read, asked.byRun));
+  });
+
+  // A compared run changes under the page: it trains, ends, is resumed or deleted in another tab. While any compared run
+  // is active (or metrics are catching up), runs are read again every COMPARE_POLL_MS; once all runs are terminal and
+  // synced, polling stops and a single refresh runs if the user returns to this tab.
   effect(() => {
-    if (metrics.stale === undefined || metrics.loading || metrics.refreshing) return;
-    const t = setTimeout(() => void metrics.refresh(), COMPARE_POLL_MS);
+    if (!needsPoll.get()) return;
+    return pollTogether(COMPARE_POLL_MS, () => {
+      if (document.visibilityState === 'visible' && hub.mode !== 'connecting' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
+    });
+  });
+  effect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (hub.mode === 'connecting' || !ids.peek().length || untrack(() => !runs.data || runs.loading || runs.refreshing || needsPoll.peek())) return;
+      void runs.refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  });
+
+  // A failed refresh or per-run metrics read is tried again COMPARE_POLL_MS after it failed (its own effect: the runs
+  // polled meanwhile never put it off).
+  effect(() => {
+    const stale = metrics.stale !== undefined;
+    const failed = Object.keys(metricErrors.get());
+    if ((!stale && !failed.length) || hub.mode === 'connecting' || metrics.loading || metrics.refreshing || metrics.error !== undefined) return;
+    const t = setTimeout(() => {
+      if (stale) void metrics.refresh();
+      else for (const id of Object.keys(metricErrors.peek())) void fetchRunMetrics(id);
+    }, COMPARE_POLL_MS);
     return () => clearTimeout(t);
   });
   effect(() => {
     const read = metrics.data;
-    if (!read || !runs.data || metrics.loading || metrics.refreshing || metrics.stale !== undefined) return;
+    if (!read || !runs.data || metrics.loading || metrics.refreshing || metrics.stale !== undefined || metrics.error !== undefined) return;
     const asked = readAt.get(read);
     // The link names other runs: the metrics follow `ids` by themselves.
     if (!asked || asked.ids !== ids.get().join(',')) return;
-    const { at } = asked;
-    const now = moved.get();
-    if (at === now) return;
-    if (at === null) {
-      if (caughtUp(read)) return;
-    } else {
-      // Only a run that moved, or one the list holds now and did not then, needs a read: a run deleted elsewhere drops
-      // out of `moved` and leaves the others' metrics as they are, and never freezes them (review round 2).
-      const then = new Set(at.split(','));
-      if (now.split(',').every((e) => !e || then.has(e))) return;
+    // Track per-run movement independently of any other run's failure, so healthy runs keep advancing while a broken one retries.
+    const errs = metricErrors.get();
+    const cur = chosen.get();
+    void moved.get();
+    const behind: string[] = [];
+    for (const r of cur) {
+      if (errs[r.id] !== undefined) continue;
+      const stamp = asked.byRun.get(r.id);
+      const nowStamp = runStamp(r);
+      if (stamp === nowStamp) continue;
+      if (stamp === null && runCaughtUp(r, read)) continue;
+      behind.push(r.id);
     }
-    untrack(() => void metrics.refresh());
+    if (!behind.length) return;
+    untrack(() => {
+      if (!Object.keys(errs).length && behind.length === cur.length) void metrics.refresh();
+      else for (const id of behind) void fetchRunMetrics(id);
+    });
   });
   // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
   // other, would crush the short ones into the start of an epoch axis: then the axis defaults to "By progress" (each run
@@ -282,10 +527,11 @@ export default function RunCompare() {
     const [only] = lastEps.get();
     return lastEps.get().size === 1 && only !== null && only !== undefined ? `Latest · ep ${only}` : "Latest · each run's last epoch";
   });
-  // Recall is read at each epoch's own best-F1 confidence (docs/API.md, Operating point): the readout says so.
+  // Precision and recall are read at each epoch's own best-F1 confidence (docs/API.md, Operating point): the readout says so.
   const readoutAt = computed(() => {
     const c = cursor.get();
-    return (c === null ? latestNote.get() : x.get() === 'epoch' ? `Epoch ${Math.round(c)}` : `${Math.round(c)}% through`) + (metricId.get() === 'rec' ? ' · at best-F1 conf' : '');
+    const m = metricId.get();
+    return (c === null ? latestNote.get() : x.get() === 'epoch' ? `Epoch ${Math.round(c)}` : `${Math.round(c)}% through`) + (m === 'prec' || m === 'rec' ? ' · at best-F1 conf' : '');
   });
   const xDomain = computed<[number, number]>(() => (x.get() === 'epoch' ? [0, Math.max(1, ...chosen.get().map((r) => r.epochs))] : [0, 100]), {
     equals: (a, b) => a[0] === b[0] && a[1] === b[1],
@@ -340,8 +586,32 @@ export default function RunCompare() {
       MAX={MAX}
       candidates={candidates.get()}
       adder={adder}
+      metricErrorOf={(id) => metricErrors.get()[id]}
+      retryingOf={(id) => !!retryingMetric.get()[id]}
+      onRetryMetric={(id) => void fetchRunMetrics(id)}
     />
   );
+
+  const missingNotice = () =>
+    dropped.get().length ? (
+      <p class="caveat stale-note" role="status" data-missing-runs>
+        <span>
+          {dropped.get().length === 1 ? 'Removed missing run from this comparison: ' : `Removed ${dropped.get().length} missing runs from this comparison: `}
+          <For each={dropped.get()} key={(id) => id}>
+            {(id, i) => (
+              <>
+                {i() > 0 ? ', ' : null}
+                <Ident value={id()} />
+              </>
+            )}
+          </For>
+          .
+        </span>{' '}
+        <Button size="sm" variant="ghost" onclick={() => dropped.set([])}>
+          Dismiss
+        </Button>
+      </p>
+    ) : null;
 
   const plot = () => (
     <>
@@ -351,6 +621,21 @@ export default function RunCompare() {
           <Button size="sm" variant="ghost" onclick={() => void metrics.refresh()}>
             Retry
           </Button>
+        </p>
+      ) : failedRuns.get().length && metrics.data ? (
+        <p class="caveat stale-note" role="status">
+          <span>
+            {failedWithCache.get()
+              ? `Could not refresh these runs' metrics (${failedRuns.get().map((r) => r.name).join(', ')}): the curves may be behind. Trying again…`
+              : `Could not load metrics for ${failedRuns.get().map((r) => r.name).join(', ')}. Other runs are shown.`}
+          </span>{' '}
+          <For each={failedRuns.get()} key={(r) => r.id}>
+            {(r) => (
+              <Button size="sm" variant="ghost" loading={!!retryingMetric.get()[r().id]} onclick={() => void fetchRunMetrics(r().id)}>
+                {failedRuns.get().length === 1 ? 'Retry' : `Retry ${r().name}`}
+              </Button>
+            )}
+          </For>
         </p>
       ) : null}
       {metrics.error ? (
@@ -400,6 +685,7 @@ export default function RunCompare() {
         </section>
       ) : ids.get().length === 0 ? (
         <section class="compare c-state" aria-label="Curves" style:min-height={`${height.get()}px`}>
+          {missingNotice()}
           <EmptyState
             icon={GitCompare}
             title="Pick runs to compare"
@@ -411,6 +697,7 @@ export default function RunCompare() {
       ) : (
         <>
           <section class="compare" aria-label="Curves">
+            {missingNotice()}
             {narrow() ? (
               // Phones: one control row, the runs, the one caveat that changes how to read it right above the plot,
               // then the plot. Opening, removing and adding runs sit in a sheet (Edit); the longer explanation sits in

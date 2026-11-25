@@ -109,10 +109,6 @@
   border-radius: var(--radius-md);
 }
 
-.search-result a:hover {
-  background: var(--bg-hover);
-}
-
 .search-result[aria-selected='true'] a {
   background: var(--bg-active);
   box-shadow: inset 2px 0 0 var(--accent-line);
@@ -125,8 +121,7 @@
   line-height: var(--type-xs-line);
 }
 
-/* On the hover and active overlays tertiary text drops below AA, so the breadcrumb steps up to secondary. */
-.search-result a:hover .sr-path,
+/* On the active overlay tertiary text drops below AA, so the breadcrumb steps up to secondary. */
 .search-result[aria-selected='true'] .sr-path {
   color: var(--text-secondary);
 }
@@ -157,16 +152,75 @@
   font-weight: var(--weight-medium);
 }
 
-.search-status {
+.search-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   border-top: var(--size-hairline) solid var(--line-subtle);
+}
+
+.search-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--text-tertiary);
   font-size: var(--type-sm-size);
   line-height: var(--type-sm-line);
 }
 
-.search-status:empty {
+.search[data-loading] .search-status::before {
+  content: '';
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--line-strong);
+  border-top-color: var(--text-secondary);
+  border-radius: var(--radius-full);
+  animation: search-spin 700ms var(--ease-linear) infinite;
+}
+
+.search[data-error] .search-status {
+  color: var(--danger-text);
+}
+
+.search-retry {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border: var(--size-hairline) solid var(--line-control);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-size: var(--type-sm-size);
+  font-weight: var(--weight-medium);
+  transition:
+    background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+
+.search-retry[hidden] {
   display: none;
+}
+
+.search-retry:hover {
+  border-color: var(--text-tertiary);
+  background: var(--bg-hover);
+}
+
+@keyframes search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search[data-loading] .search-status::before {
+    animation: none;
+  }
 }
 
 @media (max-width: 639px), (hover: none) {
@@ -187,6 +241,11 @@
   .search-close:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .search-retry {
+    height: var(--control-lg);
+    padding: 0 var(--space-3);
   }
 }
 

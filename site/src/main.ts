@@ -5,7 +5,7 @@ import './styles/layout.css';
 import './styles/prose.css';
 import './styles/landing.css';
 import './styles/search.css';
-import { escapeHtml, highlight, loadIndex, search, type Hit } from './search.ts';
+import { escapeHtml, highlight, isIndexLoaded, loadIndex, search, type Hit } from './search.ts';
 
 const root = document.body.dataset.root ?? './';
 const $ = <T extends Element>(sel: string, from: ParentNode = document) => from.querySelector<T>(sel);
@@ -15,59 +15,102 @@ const $$ = <T extends Element>(sel: string, from: ParentNode = document) => [...
 const live = document.createElement('p');
 live.className = 'visually-hidden';
 live.setAttribute('role', 'status');
+live.setAttribute('aria-live', 'polite');
+live.setAttribute('aria-atomic', 'true');
 document.body.append(live);
+let announceRaf = 0;
 function announce(msg: string) {
+  cancelAnimationFrame(announceRaf);
   live.textContent = '';
-  requestAnimationFrame(() => (live.textContent = msg));
+  announceRaf = requestAnimationFrame(() => {
+    live.textContent = msg;
+  });
 }
 
-// Theme: a saved choice wins; otherwise the CSS follows the system.
-function currentTheme(): 'light' | 'dark' {
+// Theme: cycle between system (no override), light and dark; start by flipping away from the system theme.
+type ThemePref = 'system' | 'light' | 'dark';
+const lightMq = matchMedia('(prefers-color-scheme: light)');
+const systemTheme = (): 'light' | 'dark' => (lightMq.matches ? 'light' : 'dark');
+function themePref(): ThemePref {
   const set = document.documentElement.dataset.theme;
-  if (set === 'light' || set === 'dark') return set;
-  return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return set === 'light' || set === 'dark' ? set : 'system';
+}
+function nextThemePref(pref: ThemePref, sys: 'light' | 'dark'): ThemePref {
+  const order: readonly ThemePref[] = sys === 'dark' ? ['system', 'light', 'dark'] : ['system', 'dark', 'light'];
+  return order[(order.indexOf(pref) + 1) % order.length];
 }
 const themeBtn = $<HTMLButtonElement>('.theme-toggle');
-function labelTheme() {
-  themeBtn?.setAttribute('aria-label', currentTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+const themeColorMeta = $<HTMLMetaElement>('meta[name="theme-color"]');
+function syncTheme() {
+  const pref = themePref();
+  const sys = systemTheme();
+  const next = nextThemePref(pref, sys);
+  const currentLabel = pref === 'system' ? `System (${sys})` : pref === 'light' ? 'Light' : 'Dark';
+  const label = `Theme: ${currentLabel}. Switch to ${next} theme`;
+  themeBtn?.setAttribute('aria-label', label);
+  themeBtn?.setAttribute('title', label);
+  if (themeColorMeta) {
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg-panel').trim();
+    if (bg) themeColorMeta.content = bg;
+  }
 }
 themeBtn?.addEventListener('click', () => {
-  const next = currentTheme() === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next;
+  const sys = systemTheme();
+  const next = nextThemePref(themePref(), sys);
+  if (next === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = next;
   try {
-    localStorage.setItem('folo.docs.theme', next);
+    if (next === 'system') localStorage.removeItem('folo.docs.theme');
+    else localStorage.setItem('folo.docs.theme', next);
   } catch {
     // Storage can be unavailable (private windows); the choice then lasts for this page.
   }
-  labelTheme();
+  syncTheme();
+  announce(next === 'system' ? `Theme set to system (${sys})` : `Theme set to ${next}`);
 });
-matchMedia('(prefers-color-scheme: light)').addEventListener('change', labelTheme);
-labelTheme();
+lightMq.addEventListener('change', syncTheme);
+addEventListener('storage', (e) => {
+  if (e.key !== 'folo.docs.theme' && e.key !== null) return;
+  if (e.newValue === 'light' || e.newValue === 'dark') document.documentElement.dataset.theme = e.newValue;
+  else delete document.documentElement.dataset.theme;
+  syncTheme();
+});
+syncTheme();
 
 // Mobile navigation drawer.
 const navBtn = $<HTMLButtonElement>('.nav-toggle');
 const scrim = $<HTMLElement>('.scrim');
 const sidebar = $<HTMLElement>('#sidebar');
+const desktopNav = matchMedia('(min-width: 960px)');
+const navInertTargets = $$<HTMLElement>('.skip, #main, .topbar > :not(.nav-toggle)');
+const isNavOpen = () => document.documentElement.classList.contains('nav-open');
+
 function setNav(open: boolean, restoreFocus = true) {
-  document.body.classList.toggle('nav-open', open);
+  if (open && desktopNav.matches) return;
+  if (open === isNavOpen()) return;
+  document.documentElement.classList.toggle('nav-open', open);
+  for (const el of navInertTargets) el.inert = open;
   navBtn?.setAttribute('aria-expanded', String(open));
   navBtn?.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
   if (scrim) scrim.hidden = !open;
-  if (open) ($<HTMLElement>('a[aria-current="page"]', sidebar ?? document) ?? $<HTMLElement>('a', sidebar ?? document))?.focus();
-  else if (restoreFocus) navBtn?.focus();
+  if (open && sidebar) ($<HTMLElement>('a[aria-current="page"]', sidebar) ?? $<HTMLElement>('a', sidebar))?.focus();
+  else if (!open && restoreFocus) navBtn?.focus();
 }
-navBtn?.addEventListener('click', () => setNav(!document.body.classList.contains('nav-open')));
+navBtn?.addEventListener('click', () => setNav(!isNavOpen()));
 scrim?.addEventListener('click', () => setNav(false));
-sidebar?.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.body.classList.contains('nav-open')) setNav(false);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isNavOpen() && !dialog?.open) {
+    e.preventDefault();
+    setNav(false);
+  }
 });
-// Keep Tab inside the open drawer.
+// Close the drawer if focus somehow leaves both the drawer and its toggle button.
 sidebar?.addEventListener('focusout', (e) => {
-  if (!document.body.classList.contains('nav-open')) return;
+  if (!isNavOpen()) return;
   const to = e.relatedTarget as Node | null;
   if (to && !sidebar.contains(to) && to !== navBtn) setNav(false, false);
 });
-matchMedia('(min-width: 960px)').addEventListener('change', (e) => {
+desktopNav.addEventListener('change', (e) => {
   if (e.matches) setNav(false, false);
 });
 $<HTMLElement>('a[aria-current="page"]', sidebar ?? document)?.scrollIntoView({ block: 'center' });
@@ -77,17 +120,34 @@ const dialog = $<HTMLDialogElement>('#search');
 const input = $<HTMLInputElement>('#search-input');
 const results = $<HTMLUListElement>('#search-results');
 const status = $<HTMLElement>('.search-status', dialog ?? document);
+const retryBtn = $<HTMLButtonElement>('.search-retry', dialog ?? document);
 let hits: Hit[] = [];
 let active = -1;
+let searchSeq = 0;
+let indexError = false;
+let lastPointerX = Number.NaN;
+let lastPointerY = Number.NaN;
+
+document.addEventListener(
+  'pointermove',
+  (e) => {
+    if (e.pointerType === 'touch' || dialog?.open) return;
+    lastPointerX = e.clientX;
+    lastPointerY = e.clientY;
+  },
+  { passive: true },
+);
 
 function renderHits(query: string) {
   if (!results || !status || !input) return;
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
   results.innerHTML = hits
     .map(
       (h, i) =>
-        `<li class="search-result" id="sr-${i}" role="option" aria-selected="${i === active}"><a href="${h.href}" tabindex="-1"><span class="sr-path">${escapeHtml(h.path)}</span><span class="sr-title">${highlight(h.title, query.toLowerCase().split(/\s+/).filter(Boolean))}</span><span class="sr-snippet">${h.snippet}</span></a></li>`,
+        `<li class="search-result" id="sr-${i}" data-index="${i}" role="option" aria-selected="${i === active}"><a href="${h.href}" tabindex="-1"><span class="sr-path">${escapeHtml(h.path)}</span><span class="sr-title">${highlight(h.title, terms)}</span><span class="sr-snippet">${h.snippet}</span></a></li>`,
     )
     .join('');
+  results.scrollTop = 0;
   input.setAttribute('aria-expanded', String(hits.length > 0));
   if (active >= 0) input.setAttribute('aria-activedescendant', `sr-${active}`);
   else input.removeAttribute('aria-activedescendant');
@@ -98,43 +158,96 @@ function renderHits(query: string) {
       : `No results for “${query.trim()}”.`;
 }
 
-async function runSearch() {
-  if (!input || !status) return;
-  const q = input.value;
+async function runSearch(fromRetry = false) {
+  if (!input || !status || !results) return;
+  if (indexError && !fromRetry) return;
+  const seq = ++searchSeq;
+  if (!isIndexLoaded()) {
+    indexError = false;
+    if (dialog) {
+      delete dialog.dataset.error;
+      dialog.dataset.loading = '';
+    }
+    results.setAttribute('aria-busy', 'true');
+    if (retryBtn) {
+      if (document.activeElement === retryBtn && dialog?.open) input.focus();
+      retryBtn.hidden = true;
+    }
+    if (status.textContent !== 'Loading search index…') status.textContent = 'Loading search index…';
+  }
   try {
-    const all = await loadIndex(root);
-    if (q !== input.value) return;
+    const all = await loadIndex(root, fromRetry);
+    if (seq !== searchSeq) return;
+    indexError = false;
+    if (dialog) {
+      delete dialog.dataset.loading;
+      delete dialog.dataset.error;
+    }
+    results.removeAttribute('aria-busy');
+    if (retryBtn) retryBtn.hidden = true;
+    const q = input.value;
     hits = search(all, q, root);
     active = hits.length ? 0 : -1;
     renderHits(q);
   } catch {
+    if (seq !== searchSeq) return;
+    indexError = true;
+    hits = [];
+    active = -1;
+    results.innerHTML = '';
+    results.scrollTop = 0;
+    results.removeAttribute('aria-busy');
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    if (dialog) {
+      delete dialog.dataset.loading;
+      dialog.dataset.error = '';
+    }
     status.textContent = 'Search is unavailable: the index did not load.';
+    if (retryBtn) retryBtn.hidden = false;
   }
 }
 
 function openSearch() {
   if (!dialog || !input || dialog.open) return;
-  setNav(false, false);
+  setNav(false, true);
+  indexError = false;
   dialog.showModal();
   input.select();
   void runSearch();
 }
 
+function setActive(next: number, scroll: boolean) {
+  if (!hits.length || !input || !results) return;
+  const clamped = Math.max(0, Math.min(hits.length - 1, next));
+  if (clamped !== active) {
+    if (active >= 0) $(`#sr-${active}`, results)?.setAttribute('aria-selected', 'false');
+    active = clamped;
+    $(`#sr-${active}`, results)?.setAttribute('aria-selected', 'true');
+    input.setAttribute('aria-activedescendant', `sr-${active}`);
+  }
+  if (scroll) $(`#sr-${active}`, results)?.scrollIntoView({ block: 'nearest' });
+}
+
 function moveActive(by: number) {
-  if (!hits.length || !input) return;
-  active = (active + by + hits.length) % hits.length;
-  for (const [i, li] of $$<HTMLElement>('.search-result', results ?? document).entries()) li.setAttribute('aria-selected', String(i === active));
-  input.setAttribute('aria-activedescendant', `sr-${active}`);
-  $(`#sr-${active}`)?.scrollIntoView({ block: 'nearest' });
+  if (!hits.length) return;
+  const next = active < 0 ? (by > 0 ? 0 : hits.length - 1) : (active + by + hits.length) % hits.length;
+  setActive(next, true);
 }
 
 $('.search-trigger')?.addEventListener('click', openSearch);
 $('.search-close')?.addEventListener('click', () => dialog?.close());
+retryBtn?.addEventListener('click', () => void runSearch(true));
 input?.addEventListener('input', () => void runSearch());
 input?.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  if (e.isComposing) return;
+  const modified = e.altKey || e.ctrlKey || e.metaKey;
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !modified && !e.shiftKey && hits.length) {
     e.preventDefault();
     moveActive(e.key === 'ArrowDown' ? 1 : -1);
+  } else if ((e.key === 'Home' || e.key === 'End') && !modified && !e.shiftKey && hits.length) {
+    e.preventDefault();
+    setActive(e.key === 'Home' ? 0 : hits.length - 1, true);
   } else if (e.key === 'Enter' && hits[active]) {
     e.preventDefault();
     dialog?.close();
@@ -144,6 +257,18 @@ input?.addEventListener('keydown', (e) => {
     e.preventDefault();
     dialog?.close();
   }
+});
+dialog?.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch') return;
+  const initial = Number.isNaN(lastPointerX);
+  const stationary = e.clientX === lastPointerX && e.clientY === lastPointerY;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  if (initial || stationary) return;
+  const item = (e.target as Element).closest<HTMLElement>('.search-result');
+  if (!item) return;
+  const idx = Number(item.dataset.index);
+  if (Number.isInteger(idx) && idx >= 0 && idx < hits.length) setActive(idx, false);
 });
 // Back to the button that opened it (the native dialog restores focus to whatever had it, which may be <body>).
 dialog?.addEventListener('close', () => {
@@ -167,65 +292,118 @@ if (/Mac|iPhone|iPad/.test(navigator.platform)) {
   if (kbd) kbd.textContent = '⌘K';
 }
 
-// Table of contents: mark the section being read.
+// Table of contents: mark the section being read and keep the active TOC link visible without scrolling the page.
+const tocBox = $<HTMLElement>('.toc');
 const tocLinks = $$<HTMLAnchorElement>('.toc a');
 if (tocLinks.length) {
   const targets = tocLinks
     .map((a) => [a, document.getElementById(decodeURIComponent(a.hash.slice(1)))] as const)
     .filter((x): x is readonly [HTMLAnchorElement, HTMLElement] => !!x[1]);
+  let activeTocLink: HTMLAnchorElement | null = null;
   let queued = false;
+  const revealActiveToc = () => {
+    if (!activeTocLink || !tocBox || tocBox.scrollHeight <= tocBox.clientHeight || tocBox.offsetParent === null) return;
+    const boxRect = tocBox.getBoundingClientRect();
+    const linkRect = activeTocLink.getBoundingClientRect();
+    if (linkRect.top < boxRect.top) tocBox.scrollTop += linkRect.top - boxRect.top;
+    else if (linkRect.bottom > boxRect.bottom) tocBox.scrollTop += linkRect.bottom - boxRect.bottom;
+  };
   const update = () => {
     queued = false;
+    if (!targets.length) return;
     const line = 120;
     let cur = targets[0];
     for (const t of targets) if (t[1].getBoundingClientRect().top <= line) cur = t;
     // At the very bottom, the last heading is current even when it cannot reach the line.
     if (innerHeight + scrollY >= document.documentElement.scrollHeight - 2) cur = targets[targets.length - 1];
-    for (const [a] of targets) {
-      if (a === cur[0]) a.setAttribute('aria-current', 'true');
-      else a.removeAttribute('aria-current');
+    if (cur[0] !== activeTocLink) {
+      activeTocLink?.removeAttribute('aria-current');
+      activeTocLink = cur[0];
+      activeTocLink.setAttribute('aria-current', 'true');
+      revealActiveToc();
     }
   };
+  const scheduleUpdate = () => {
+    if (!queued) requestAnimationFrame(update);
+    queued = true;
+  };
+  addEventListener('scroll', scheduleUpdate, { passive: true });
   addEventListener(
-    'scroll',
+    'resize',
     () => {
-      if (!queued) requestAnimationFrame(update);
-      queued = true;
+      update();
+      revealActiveToc();
     },
     { passive: true },
   );
   update();
 }
+const tocInline = $<HTMLDetailsElement>('.toc-inline');
+tocInline?.addEventListener('click', (e) => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if ((e.target as Element).closest('a')) tocInline.open = false;
+});
 
 // Copy buttons on code blocks.
-async function copyText(text: string) {
+const copyTimers = new WeakMap<HTMLButtonElement, number>();
+const copySeq = new WeakMap<HTMLButtonElement, number>();
+let copyOp = 0;
+
+async function copyText(text: string, isCurrent: () => boolean): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to execCommand fallback (e.g. non-secure HTTP context or denied permission).
+    }
+  }
+  if (!isCurrent()) return false;
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  ta.style.opacity = '0';
+  document.body.append(ta);
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Not a secure context (e.g. served over plain HTTP on a LAN address): the old way still works.
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.append(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
-    document.execCommand('copy');
+    ta.setSelectionRange(0, text.length);
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
     ta.remove();
+    prevFocus?.focus({ preventScroll: true });
   }
 }
+
 document.addEventListener('click', async (e) => {
   const btn = (e.target as Element).closest<HTMLButtonElement>('.copy');
   const code = btn?.closest('.code')?.querySelector('pre');
   if (!btn || !code) return;
-  await copyText(code.textContent ?? '');
-  btn.dataset.copied = '';
+  const seq = (copySeq.get(btn) ?? 0) + 1;
+  copySeq.set(btn, seq);
+  const op = ++copyOp;
+  const ok = await copyText(code.textContent ?? '', () => copyOp === op);
+  if (copySeq.get(btn) !== seq) return;
+  const prevTimer = copyTimers.get(btn);
+  if (prevTimer !== undefined) clearTimeout(prevTimer);
+  btn.dataset.copyState = ok ? 'copied' : 'failed';
   const label = btn.querySelector('.copy-label');
-  if (label) label.textContent = 'Copied';
-  announce('Copied to the clipboard');
-  setTimeout(() => {
-    delete btn.dataset.copied;
-    if (label) label.textContent = 'Copy';
-  }, 1600);
+  if (label) label.textContent = ok ? 'Copied' : 'Failed';
+  announce(ok ? 'Copied to the clipboard' : 'Could not copy to the clipboard');
+  copyTimers.set(
+    btn,
+    window.setTimeout(() => {
+      copyTimers.delete(btn);
+      delete btn.dataset.copyState;
+      if (label) label.textContent = 'Copy';
+    }, ok ? 1600 : 2400),
+  );
 });
 
 // Wide tables and code blocks scroll sideways: make those reachable by keyboard and name them for screen readers.

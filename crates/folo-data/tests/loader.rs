@@ -228,7 +228,13 @@ fn ram_cache_gives_the_uncached_batches() {
     });
     let configs = [
         cfg(3),
+        LoaderConfig { imgsz: 192, u8_images: true, ..cfg(3) },
         LoaderConfig { augment: Some(AugmentConfig { mosaic: 0.0, ..AugmentConfig::default() }), ..cfg(2) },
+        LoaderConfig {
+            epochs: 0,
+            augment: Some(AugmentConfig { mosaic: 0.0, mixup: 1.0, ..AugmentConfig::default() }),
+            ..cfg(2)
+        },
         LoaderConfig { augment: None, shuffle: false, ..cfg(2) },
     ];
     for c in configs {

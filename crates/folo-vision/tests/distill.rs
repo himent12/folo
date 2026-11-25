@@ -76,7 +76,7 @@ fn weights_hash(t: &Trainer) -> u64 {
 /// The Linux reference was derived with glibc 2.39 (Ubuntu 24.04, rustc 1.100.0); another libm version may give
 /// other bits.
 const NO_TEACHER_HASHES: &[(&str, u64)] =
-    &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
+    &[("x86_64-windows-msvc", 0x350c_83fc_7129_2041), ("x86_64-linux-gnu", 0x2128_e27a_015f_8e8e)];
 
 /// This build's `arch-os-env`, the key of [`NO_TEACHER_HASHES`].
 fn target() -> String {

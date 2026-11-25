@@ -684,8 +684,10 @@ describe('the labeling editor: boxes changed elsewhere while a click was on its 
     const negZero = { ...zero, boxes: zero.boxes.map((b, i) => (i ? b : { ...b, x1: -0 })) };
     expect(boxRevision(negZero.boxes)).not.toBe(boxRevision(zero.boxes));
     events.send(zero);
+    await new Promise((r) => requestAnimationFrame(r));
     flushSync();
     events.send(negZero);
+    await new Promise((r) => requestAnimationFrame(r));
     flushSync();
     // The server has the -0 boxes now and takes a mark made on their revision only.
     const review = vi.spyOn(hub.api, 'reviewLabelImage').mockImplementation(async (_job, _id, reviewed, expect) => {

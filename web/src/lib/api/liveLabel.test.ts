@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createRoot, flush as flushSync } from 'fw';
+import { createRoot, effect, flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type Api, type LabelEventHandlers } from './client';
 import { hub } from './index';
@@ -388,6 +388,98 @@ describe('LiveLabelJob ordering', () => {
     expect(asked).toHaveBeenCalledOnce();
     expect(live.job).toBeUndefined();
     stop();
+  });
+
+  it('rAF-batches bursts of image and log events into a single reactive flush', async () => {
+    let live!: LiveLabelJob;
+    let imageUpdates = 0;
+    let versionUpdates = 0;
+    const stop = root(() => {
+      live = new LiveLabelJob(() => 'lb_1');
+      effect(() => {
+        void live.images;
+        imageUpdates++;
+      });
+      effect(() => {
+        void live.version;
+        versionUpdates++;
+      });
+    });
+    try {
+      flushSync();
+      page.resolve({ total: 3, images: [img('1'), img('2'), img('3')] });
+      await vi.advanceTimersByTimeAsync(20);
+      imageUpdates = 0;
+      versionUpdates = 0;
+      // Burst of in-place updates, an append, and log lines in one frame.
+      handlers.image?.(img('1', 'labeling'));
+      handlers.image?.(img('1', 'labeled'));
+      handlers.image?.(img('2', 'labeled'));
+      handlers.image?.(img('4', 'pending'));
+      handlers.log?.({ t: '2026-11-09T10:00:05Z', level: 'info', message: 'l1' });
+      handlers.log?.({ t: '2026-11-09T10:00:06Z', level: 'info', message: 'l2' });
+      flushSync();
+      expect(imageUpdates).toBe(0);
+      expect(versionUpdates).toBe(0);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(imageUpdates).toBe(1);
+      expect(versionUpdates).toBe(1);
+      expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled', '2 labeled', '3 pending', '4 pending']);
+      expect(live.logs.slice(-2).map((l) => l.message)).toEqual(['l1', 'l2']);
+      // A burst including a removal rebuilds the index and applies in one flush too.
+      imageUpdates = 0;
+      handlers.removed?.({ id: '2' });
+      handlers.image?.(img('3', 'labeled'));
+      handlers.image?.(img('5', 'pending'));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(imageUpdates).toBe(1);
+      expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled', '3 labeled', '4 pending', '5 pending']);
+    } finally {
+      stop();
+    }
+  });
+
+  it('aborts in-flight requests and cancels pending frames on unmount', async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    hub.api = {
+      ...hub.api,
+      labelJob: (_id, s) => (signals.push(s), new Promise(() => {})),
+      labelImages: (_id, _q, s) => (signals.push(s), new Promise(() => {})),
+      labelLogs: (_id, _limit, s) => (signals.push(s), new Promise(() => {})),
+    } as Api;
+    const { stop } = mount();
+    handlers.image?.(img('1', 'labeling'));
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals).toHaveLength(4);
+    expect(signals.every((s) => s && !s.aborted)).toBe(true);
+    stop();
+    expect(signals.every((s) => s?.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('flushes pending SSE image updates on drop() and clears timers after overlapping failed resyncs', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 2, images: [img('1'), img('2')] });
+    await vi.advanceTimersByTimeAsync(20);
+    handlers.image?.(img('1', 'labeled'));
+    live.drop('2');
+    expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled']);
+    // Two overlapping failed resyncs must not leave an orphaned retry timer after teardown.
+    const d1 = deferred<LabelImagePage>();
+    const d2 = deferred<LabelImagePage>();
+    let n = 0;
+    hub.api.labelImages = () => (n++ === 0 ? d1.promise : d2.promise);
+    handlers.reload?.({});
+    handlers.reload?.({});
+    d1.promise.catch(() => {});
+    d2.promise.catch(() => {});
+    hub.api.labelJob = () => Promise.reject(new Error('flaky'));
+    handlers.reload?.({});
+    handlers.reload?.({});
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

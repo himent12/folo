@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The benchmark screens' behaviour against the in-browser mock: what the dialogs ask for and refuse, the plan that is
 // fixed once there are entries (and the edits that are not lost), and the leaderboard's Compare selection.
-import { createRoot, flush as flushSync, type Component } from 'fw';
+import { createRoot, flush as flushSync, signal, type Component } from 'fw';
 import { render, type Rendered } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -320,6 +320,148 @@ describe('Add entry', () => {
     expect(stop).toHaveBeenCalledTimes(1);
     expect((await hub.api.benchEntries('bn_9f03')).length).toBe(0);
     expect((await hub.api.bench('bn_9f03')).active).toBe(false);
+  });
+
+  /** Triggers a file selection without waiting for its async check to complete. */
+  function selectFile(f: File) {
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: [f] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+  }
+
+  /** Creates a File whose `.text()` settles only when the returned resolver/rejecter is called. */
+  function deferredFile(name: string) {
+    let resolve!: (text: string) => void;
+    let reject!: (err: unknown) => void;
+    const promise = new Promise<string>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    let reading = false;
+    const f = new File(['{}'], name, { type: 'application/json' });
+    vi.spyOn(f, 'text').mockImplementation(() => {
+      reading = true;
+      return promise;
+    });
+    return { file: f, resolve, reject, isReading: () => reading };
+  }
+
+  it('ignores slow out-of-order file reads and keeps reading state bound to the latest selection', async () => {
+    await dialog('external', 'bn_9f03');
+    const images = (await hub.api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const valid = JSON.stringify(images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.8 })) })));
+    const invalid = '{"predictions": [{"image": "1", "boxes": [{"class": 9, "x1": 0, "y1": 0, "x2": 4, "y2": 4}]}]}';
+
+    // Case 1: slow valid file A is superseded by fast invalid file B; when A resolves later, B's error stays.
+    const slowA = deferredFile('baseline-predictions.json');
+    selectFile(slowA.file);
+    await until(() => slowA.isReading() && document.querySelector('.f-state.busy'), 'reading slow file A');
+
+    const bad = await pickFile(invalid, 'broken-predictions.json');
+    expect(bad.className).toContain('bad');
+    expect(document.querySelector('.f-name')?.textContent).toContain('broken-predictions.json');
+
+    slowA.resolve(valid);
+    await settle();
+    expect(document.querySelector('.f-state.bad')?.textContent).toMatch(/^Record 1: box 1/);
+    expect(document.querySelector('.f-state.ok')).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('');
+
+    // Case 2: slow file C rejects while file D is still reading; C's catch/finally must NOT clear D's reading state.
+    const slowC = deferredFile('old-predictions.json');
+    const slowD = deferredFile('candidate-predictions.json');
+    selectFile(slowC.file);
+    await until(() => slowC.isReading() && document.querySelector('.f-state.busy'), 'reading slow file C');
+    selectFile(slowD.file);
+    await until(() => slowD.isReading(), 'reading slow file D');
+    slowC.reject(new Error('read aborted'));
+    await settle();
+    expect(document.querySelector('.f-state.busy')).not.toBeNull();
+    expect(document.querySelector('.f-state.bad')).toBeNull();
+    expect(why(submit())).toBe('Reading the file');
+
+    slowD.resolve(valid);
+    const ok = await until(() => document.querySelector('.f-state.ok'), 'file D validated');
+    expect(ok.className).toContain('ok');
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('candidate');
+  });
+
+  it('discards an in-flight file read when the dialog closes and reopens', async () => {
+    const bench: Bench = await hub.api.bench('bn_9f03');
+    const models = await hub.api.models();
+    const agents = await hub.api.labelAgents();
+    const entries = await hub.api.benchEntries('bn_9f03');
+    const catalog = await hub.api.benchCatalog();
+    const images = (await hub.api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const valid = JSON.stringify(images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.8 })) })));
+    let choice!: AgentChoice;
+    stopRoot = createRoot((dispose) => {
+      choice = new AgentChoice(() => agents);
+      return dispose;
+    });
+    const isOpen = signal(true);
+    const kind = signal<'model' | 'agent' | 'external'>('external');
+    c = render(
+      () => (
+        <AddEntryDialog
+          bind:open={isOpen}
+          bind:kind={kind}
+          bench={bench}
+          catalog={catalog}
+          entries={entries}
+          models={models}
+          modelsError={undefined}
+          agents={agents}
+          agentsError={undefined}
+          retryAgents={() => {}}
+          choice={choice}
+          onstarted={() => {}}
+        />
+      ),
+      target,
+    );
+    flushSync();
+    await settle();
+
+    const slow = deferredFile('stale-predictions.json');
+    selectFile(slow.file);
+    await until(() => slow.isReading() && document.querySelector('.f-state.busy'), 'reading stale file');
+
+    isOpen.set(false);
+    flushSync();
+    isOpen.set(true);
+    flushSync();
+    expect(document.querySelector('.f-state.busy')).toBeNull();
+
+    slow.resolve(valid);
+    await settle();
+    expect(document.querySelector('.f-state.ok')).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('');
+  });
+
+  it('updates untouched auto-suggested names on file replacement, but preserves manually edited names', async () => {
+    await dialog('external', 'bn_9f03');
+    const images = (await hub.api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const valid = JSON.stringify(images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.8 })) })));
+    const nameInput = () => document.querySelector<HTMLInputElement>('input[id$="-name"]')!;
+
+    await pickFile(valid, 'baseline-predictions.json');
+    expect(nameInput().value).toBe('baseline');
+
+    // Untouched auto-suggested name updates when choosing another file.
+    await pickFile(valid, 'candidate-predictions.json');
+    expect(nameInput().value).toBe('candidate');
+
+    // Manually edited name is preserved across subsequent file replacements.
+    type(nameInput(), 'my-custom-detector');
+    await pickFile(valid, 'other-predictions.json');
+    expect(nameInput().value).toBe('my-custom-detector');
+
+    // Clearing the manual name back to empty re-enables auto-suggestion on the next file pick.
+    type(nameInput(), '');
+    await pickFile(valid, 'recovered-predictions.json');
+    expect(nameInput().value).toBe('recovered');
   });
 
   it('asks before closing mid-send, then stops the entry', async () => {
