@@ -190,7 +190,7 @@ impl Trainer {
                 };
                 drop(loss);
                 drop(out);
-                self.acc.add(&grads)?;
+                self.acc.add_owned(grads)?;
                 window_finite = true;
                 self.consecutive_bad = 0;
                 finite_batches += 1;

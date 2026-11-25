@@ -5,15 +5,19 @@
 //! add/subtract instructions, matching the scalar reference bit-for-bit on all non-NaN IEEE-754 inputs
 //! (same contract as `crate::ema`).
 
+mod norm;
 mod vec_ops;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use norm::{
+    ScaledSumSq, check_finite_slice, check_sum_sq_f64_slice, scale_slice, scale2_slice, sum_sq_f64_slice,
+    unscale_check_slice, unscale_check_sum_sq_slice,
+};
 pub(crate) use vec_ops::{
     axpby_slice, muon_dw_polar_fused_slice, muon_dw_polar_step_slice, muon_momentum_nesterov_slice,
-    ortho_normalize_batch, scale_slice, sum_sq_f32_slice, sum_sq_f64_slice, unscale_check_slice,
-    unscale_check_sum_sq_slice,
+    ortho_normalize_batch, sum_sq_f32_slice,
 };
 
 /// Coupled SGD update on contiguous CPU slices:

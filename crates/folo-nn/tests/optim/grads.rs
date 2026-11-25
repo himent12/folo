@@ -154,3 +154,131 @@ fn unscale_clip_and_global_norm_large_cpu_parity() {
         assert!(!acc.unscale_clip(0.5, clip).unwrap(), "clip={clip}");
     }
 }
+
+#[test]
+fn add_owned_adopts_unaliased_and_falls_back_safely() {
+    let (p, q) = (param(&[1.0, 2.0, 3.0]), param(&[4.0, 5.0, 6.0]));
+    let mut acc = GradAccumulator::new(&[p.clone(), q.clone()]);
+
+    // 1. Fresh unaliased gradient is adopted zero-copy (same underlying storage).
+    let gp = Tensor::from_slice(&[1.5f32, -2.5, 3.5], [3]).unwrap();
+    let gq = Tensor::from_slice(&[0.5f32, 1.0, -1.5], [3]).unwrap();
+    let mut grads = Grads::default();
+    grads.insert(&p, gp.clone());
+    grads.insert(&q, gq.clone());
+    acc.add_owned(grads).unwrap();
+    assert!(acc.grad(&p).unwrap().same_storage(&gp), "fresh contiguous grad should be adopted");
+    assert!(acc.grad(&q).unwrap().same_storage(&gq));
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [1.5, -2.5, 3.5]);
+
+    // 2. Second pass accumulates in place and matches `add(&Grads)` bit-for-bit.
+    let mut acc_ref = GradAccumulator::new(&[p.clone(), q.clone()]);
+    let mut g1 = Grads::default();
+    g1.insert(&p, Tensor::from_slice(&[1.5f32, -2.5, 3.5], [3]).unwrap());
+    g1.insert(&q, Tensor::from_slice(&[0.5f32, 1.0, -1.5], [3]).unwrap());
+    let mut g2 = Grads::default();
+    g2.insert(&p, Tensor::from_slice(&[2.0f32, 4.0, -1.0], [3]).unwrap());
+    g2.insert(&q, Tensor::from_slice(&[-0.5f32, 3.0, 2.5], [3]).unwrap());
+    acc_ref.add(&g1).unwrap();
+    acc_ref.add(&g2).unwrap();
+    acc.add_owned(g2).unwrap();
+    assert_eq!(acc.passes(), 2);
+    assert_eq!(
+        acc.grad(&p).unwrap().to_vec::<f32>().unwrap(),
+        acc_ref.grad(&p).unwrap().to_vec::<f32>().unwrap()
+    );
+    assert_eq!(
+        acc.grad(&q).unwrap().to_vec::<f32>().unwrap(),
+        acc_ref.grad(&q).unwrap().to_vec::<f32>().unwrap()
+    );
+
+    // 3. Shared storage between two parameters falls back to private copies (no aliasing).
+    acc.zero();
+    let shared = Tensor::from_slice(&[1.0f32, 2.0, 3.0], [3]).unwrap();
+    let mut sg = Grads::default();
+    sg.insert(&p, shared.clone());
+    sg.insert(&q, shared.clone());
+    acc.add_owned(sg).unwrap();
+    assert!(!acc.grad(&p).unwrap().same_storage(&shared));
+    assert!(!acc.grad(&q).unwrap().same_storage(&shared));
+    assert!(!acc.grad(&p).unwrap().same_storage(acc.grad(&q).unwrap()));
+    acc.add_owned(grads_for(&p, &[10.0, 20.0, 30.0])).unwrap();
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [11.0, 22.0, 33.0]);
+    assert_eq!(acc.grad(&q).unwrap().to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0]);
+
+    // 4. Parameter-aliased grad, offset slice view, and broadcast scalar fall back to private copies.
+    acc.zero();
+    let big = Tensor::from_slice(&[0.0f32, 7.0, 8.0, 9.0], [4]).unwrap();
+    let slice_view = big.narrow(0, 1, 3).unwrap();
+    let mut edge = Grads::default();
+    edge.insert(&p, p.detach()); // shares storage with parameter `p`!
+    edge.insert(&q, slice_view); // non-zero offset view into `big`
+    acc.add_owned(edge).unwrap();
+    assert!(!acc.grad(&p).unwrap().same_storage(&p), "must never adopt parameter storage");
+    assert!(!acc.grad(&q).unwrap().same_storage(&big), "must not pin larger parent storage");
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0]);
+    assert_eq!(acc.grad(&q).unwrap().to_vec::<f32>().unwrap(), [7.0, 8.0, 9.0]);
+
+    // 5. Broadcast scalar grad works with add_owned across multiple passes.
+    acc.zero();
+    let mut b1 = Grads::default();
+    b1.insert(&p, Tensor::from_slice(&[2.5f32], [1]).unwrap());
+    let mut b2 = Grads::default();
+    b2.insert(&p, Tensor::from_slice(&[1.5f32], [1]).unwrap());
+    acc.add_owned(b1).unwrap();
+    acc.add_owned(b2).unwrap();
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [4.0, 4.0, 4.0]);
+
+    // 6. Self-aliasing add (caller passes acc's own grad tensor back in) must not deadlock.
+    let self_alias = acc.grad(&p).unwrap().clone();
+    let mut sa = Grads::default();
+    sa.insert(&p, self_alias);
+    acc.add(&sa).unwrap();
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [8.0, 8.0, 8.0]);
+}
+
+#[test]
+fn extreme_norm_subnormal_safe_clipping_and_unit_unscale() {
+    // Extreme finite gradients near f32::MAX clipped to a tiny max_norm: single f32 clip factor would underflow
+    // to 0.0, whereas two-factor scaling preserves direction and exact norm.
+    let (p, q) = (param(&[0.0, 0.0]), param(&[0.0, 0.0]));
+    let mut acc = GradAccumulator::new(&[p.clone(), q.clone()]);
+    let mut grads = Grads::default();
+    let v = f32::MAX * 0.25;
+    grads.insert(&p, Tensor::from_slice(&[3.0 * (v / 5.0), 0.0], [2]).unwrap());
+    grads.insert(&q, Tensor::from_slice(&[0.0, 4.0 * (v / 5.0)], [2]).unwrap());
+    acc.add_owned(grads).unwrap();
+
+    let n = acc.global_norm().unwrap();
+    assert!(n.is_finite() && (n - v as f64).abs() <= 1e-6 * v as f64, "norm={n}");
+    assert_eq!(global_grad_norm(&[p.clone(), q.clone()], &acc).unwrap().to_bits(), n.to_bits());
+
+    // max_norm = 1e-10 -> clip factor ≈ 1.17e-48 (well below f32::MIN_POSITIVE ≈ 1.18e-38 and even below min subnormal 1.4e-45!).
+    let max_norm = 1e-10;
+    let n_before = acc.clip_grad_norm(max_norm).unwrap();
+    assert_eq!(n_before.to_bits(), n.to_bits());
+    let gp = acc.grad(&p).unwrap().to_vec::<f32>().unwrap();
+    let gq = acc.grad(&q).unwrap().to_vec::<f32>().unwrap();
+    assert!((gp[0] as f64 - 0.6 * max_norm).abs() <= 1e-5 * max_norm, "gp={gp:?}");
+    assert!((gq[1] as f64 - 0.8 * max_norm).abs() <= 1e-5 * max_norm, "gq={gq:?}");
+    assert!((acc.global_norm().unwrap() - max_norm).abs() <= 1e-5 * max_norm);
+
+    // Subnormal gradients: global_norm must not underflow to 0.0.
+    acc.zero();
+    let tiny = f32::from_bits(1);
+    acc.add_owned(grads_for(&p, &[tiny, tiny])).unwrap();
+    let want_tiny = 2.0f64.sqrt() * (tiny as f64);
+    assert!((acc.global_norm().unwrap() - want_tiny).abs() <= 1e-12 * want_tiny);
+
+    // `unscale_clip(1.0, ...)` read-only fast path preserves finite gradients bit-for-bit and catches NaN/Inf.
+    acc.zero();
+    acc.add_owned(grads_for(&p, &[3.0, 4.0])).unwrap();
+    assert!(acc.unscale_clip(1.0, 0.0).unwrap());
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [3.0, 4.0]);
+    assert!(acc.unscale_clip(1.0, 1.0).unwrap());
+    assert!((acc.global_norm().unwrap() - 1.0).abs() < 1e-5);
+    acc.zero();
+    acc.add_owned(grads_for(&p, &[1.0, f32::NAN])).unwrap();
+    assert!(!acc.unscale_clip(1.0, 0.0).unwrap());
+    assert!(!acc.unscale_clip(1.0, 1.0).unwrap());
+}

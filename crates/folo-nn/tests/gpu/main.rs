@@ -681,7 +681,48 @@ fn grad_accumulator_on_gpu_matches_cpu() {
             assert_eq!(g.device(), dev);
             close(g, c, 1e-5, 1e-5, &format!("grad, max_norm {max_norm}"));
         }
+        // Device global_norm matches CPU within f32 reduction precision.
+        let cn = cpu.global_norm().unwrap();
+        let gn = gpu.global_norm().unwrap();
+        assert!((gn - cn).abs() <= 1e-4 * (1.0 + cn), "global_norm {gn} vs {cn}");
+        let gn2 = global_grad_norm(&dparams, &gpu).unwrap();
+        assert!((gn2 - cn).abs() <= 1e-4 * (1.0 + cn), "global_grad_norm {gn2} vs {cn}");
     }
+
+    // `add_owned` on GPU adopts fresh gradients zero-copy and matches `add` across multiple passes.
+    let mut owned_gpu = GradAccumulator::new(&dparams);
+    let mut ref_gpu = GradAccumulator::new(&dparams);
+    let g0 = grads_of(&dparams, &passes[0]);
+    let orig_handle = g0.get(&dparams[0]).unwrap().clone();
+    ref_gpu.add(&g0).unwrap();
+    owned_gpu.add_owned(g0).unwrap();
+    assert!(owned_gpu.grad(&dparams[0]).unwrap().same_storage(&orig_handle));
+    let g1 = grads_of(&dparams, &passes[1]);
+    ref_gpu.add(&g1).unwrap();
+    owned_gpu.add_owned(g1).unwrap();
+    for d in &dparams {
+        close(owned_gpu.grad(d).unwrap(), ref_gpu.grad(d).unwrap(), 1e-6, 1e-6, "add_owned gpu");
+    }
+
+    // Device global_norm handles huge finite values (near f32::MAX), zeros, +Inf, and NaN without overflow.
+    let dp = Tensor::zeros_with([4], folo_core::DType::F32, dev).unwrap().requires_grad_();
+    let mut eacc = GradAccumulator::new(std::slice::from_ref(&dp));
+    let put = |acc: &mut GradAccumulator, vals: [f32; 4]| {
+        acc.zero();
+        let mut g = folo_core::Grads::default();
+        g.insert(&dp, Tensor::from_slice(&vals, [4]).unwrap().to_device(dev).unwrap());
+        acc.add_owned(g).unwrap();
+    };
+    put(&mut eacc, [0.0; 4]);
+    assert_eq!(eacc.global_norm().unwrap(), 0.0);
+    put(&mut eacc, [f32::MAX; 4]);
+    let want = 2.0 * (f32::MAX as f64);
+    let got = eacc.global_norm().unwrap();
+    assert!(got.is_finite() && (got - want).abs() <= 1e-5 * want, "f32::MAX norm {got} vs {want}");
+    put(&mut eacc, [1.0, f32::INFINITY, 2.0, 3.0]);
+    assert_eq!(eacc.global_norm().unwrap(), f64::INFINITY);
+    put(&mut eacc, [1.0, f32::INFINITY, f32::NAN, 3.0]);
+    assert!(eacc.global_norm().unwrap().is_nan());
 }
 
 /// The device check of `RunningStats::all_finite`, `all_finite_live`, and `recapture` sees a NaN or an
