@@ -309,3 +309,30 @@ fn extreme_norm_subnormal_safe_clipping_and_unit_unscale() {
     let clipped = acc.grad(&p).unwrap().to_vec::<f32>().unwrap();
     assert!(clipped.iter().all(|x| x.is_finite()) && clipped[0] > 0.0, "clipped={clipped:?}");
 }
+
+#[test]
+fn empty_slot_aliases_valid_slot_in_same_pass() {
+    for owned in [false, true] {
+        let (q, p) = (param(&[0.0, 0.0]), param(&[0.0, 0.0]));
+        let mut acc = GradAccumulator::new(&[q.clone(), p.clone()]);
+        // Populate only `p` first (`q` stays empty).
+        let pass1 = grads_for(&p, &[2.0, -4.0]);
+        if owned {
+            acc.add_owned(pass1).unwrap();
+        } else {
+            acc.add(&pass1).unwrap();
+        }
+        // Pass 2: `q` receives a handle aliasing `p`'s live accumulator buffer, while `p` receives `[3, 5]`.
+        let p_buf = acc.grad(&p).unwrap().clone();
+        let mut pass2 = Grads::default();
+        pass2.insert(&q, p_buf);
+        pass2.insert(&p, Tensor::from_slice(&[3.0f32, 5.0], [2]).unwrap());
+        if owned {
+            acc.add_owned(pass2).unwrap();
+        } else {
+            acc.add(&pass2).unwrap();
+        }
+        assert_eq!(acc.grad(&q).unwrap().to_vec::<f32>().unwrap(), [2.0, -4.0]);
+        assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [5.0, 1.0]);
+    }
+}

@@ -64,11 +64,13 @@ impl GradAccumulator {
         let _g = no_grad();
         let pairs: Vec<(usize, &Tensor)> =
             self.slots.iter().enumerate().filter_map(|(i, s)| grads.get(&s.param).map(|g| (i, g))).collect();
+        let empty_snaps = self.snapshot_aliased_empty(&pairs)?;
         self.add_valid_pairs(&pairs)?;
-        for (i, g) in pairs {
+        for (pos, &(i, g)) in pairs.iter().enumerate() {
             let s = &mut self.slots[i];
             if !s.valid {
-                copy_into_private_slot(s, g)?;
+                let src = empty_snaps.get(pos).and_then(|o| o.as_ref()).unwrap_or(g);
+                copy_into_private_slot(s, src)?;
             }
         }
         self.passes += 1;
@@ -112,13 +114,17 @@ impl GradAccumulator {
         // Drop any untracked gradients in `grads` before copying/accumulating.
         drop(grads);
 
-        let valid_pairs: Vec<(usize, &Tensor)> =
-            extracted.iter().filter(|(i, _)| self.slots[*i].valid).map(|(i, g)| (*i, g)).collect();
-        self.add_valid_pairs(&valid_pairs)?;
+        let all_pairs: Vec<(usize, &Tensor)> = extracted.iter().map(|(i, g)| (*i, g)).collect();
+        let empty_snaps = self.snapshot_aliased_empty(&all_pairs)?;
+        self.add_valid_pairs(&all_pairs)?;
 
-        for (i, g) in extracted {
+        for (pos, (i, g)) in extracted.into_iter().enumerate() {
             let s = &mut self.slots[i];
             if s.valid {
+                continue;
+            }
+            if let Some(snap) = empty_snaps.get(pos).and_then(|o| o.as_ref()) {
+                copy_into_private_slot(s, snap)?;
                 continue;
             }
             let can_adopt = !g.requires_grad()
@@ -139,6 +145,33 @@ impl GradAccumulator {
         }
         self.passes += 1;
         Ok(())
+    }
+
+    /// Snapshot any incoming gradient for an empty slot whose storage aliases an accumulator buffer that will
+    /// be mutated by this pass (`add_valid_pairs` or an earlier empty-slot copy). Returns an empty `Vec` with no
+    /// allocations when no aliasing is present.
+    fn snapshot_aliased_empty(&self, pairs: &[(usize, &Tensor)]) -> Result<Vec<Option<Tensor>>> {
+        if !pairs.iter().any(|&(i, _)| !self.slots[i].valid)
+            || !pairs.iter().any(|&(i, _)| self.slots[i].buf.is_some())
+        {
+            return Ok(Vec::new());
+        }
+        let mut written_keys: HashSet<usize> = HashSet::new();
+        for &(i, _) in pairs {
+            if let Some(buf) = &self.slots[i].buf {
+                written_keys.insert(storage_key(buf));
+            }
+        }
+        let mut snaps = Vec::new();
+        for (pos, &(i, g)) in pairs.iter().enumerate() {
+            if !self.slots[i].valid && written_keys.contains(&storage_key(g)) {
+                if snaps.is_empty() {
+                    snaps.resize(pairs.len(), None);
+                }
+                snaps[pos] = Some(g.mul_scalar(1.0)?);
+            }
+        }
+        Ok(snaps)
     }
 
     /// Accumulate `g` into every already-valid slot referenced by `pairs`.
