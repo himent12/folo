@@ -92,11 +92,10 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
-        let url = format!("http://{addr}");
-        let lock_url = serve_lock::local_url(addr);
+        let listen = ListenUrls::from_addr(addr);
         // Before the store opens (it can take a while): a second start can say where this one is.
         if let Some(lock) = &serve_lock
-            && let Err(e) = lock.publish(&lock_url)
+            && let Err(e) = lock.publish(&listen.url)
         {
             tracing::warn!("could not record the address in the data dir: {e}");
         }
@@ -133,15 +132,12 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
                 allow_hosts: args.allow_host.clone(),
             },
         );
-        out.human(format!(
-            "FOLO {VERSION} serving {} on {url}",
-            if args.mock { "mock data" } else { "the real store" }
-        ));
-        out.human(format!("  API:    {url}/api/health"));
+        out.human(listen.banner_line(args.mock));
+        out.human(format!("  API:    {}/api/health", listen.url));
         match &web_dir {
-            None => out.human(format!("  Studio: {url}/  (embedded)")),
+            None => out.human(format!("  Studio: {}/  (embedded)", listen.url)),
             Some(dir) if web_ready => {
-                out.human(format!("  Studio: {url}/  (from {})", folo_api::json::path(dir)))
+                out.human(format!("  Studio: {}/  (from {})", listen.url, folo_api::json::path(dir)))
             }
             Some(dir) => out.human(format!(
                 "  Studio: not built ({} has no index.html); build web/ or use the Vite dev server on :5173",
@@ -155,17 +151,7 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             out.human("  Token:  required on /api (Authorization: Bearer)");
         }
         out.human("Press Ctrl+C to stop.");
-        out.record(&json!({
-            "event": "listening",
-            "url": url,
-            "api": format!("{url}/api"),
-            "mock": args.mock,
-            "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
-            "web_dir": web_dir.as_ref().map(crate::output::record_path),
-            "web_ready": web_ready,
-            "data_dir": (!args.mock).then(|| crate::output::record_path(&data_dir)),
-            "token": token_set,
-        }));
+        out.record(&listen.listening_record(args.mock, web_dir.as_deref(), web_ready, &data_dir, token_set));
         server
             .serve(listener, folo_server::shutdown_signal())
             .await
@@ -174,6 +160,60 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         out.human("Stopped.");
         Ok(())
     })
+}
+
+/// Connectable URL and bound socket address derived from a bound listener.
+///
+/// When `folo serve` binds a wildcard address (`0.0.0.0` or `::`), `url` uses the matching loopback address
+/// (`http://127.0.0.1:<port>` or `http://[::1]:<port>`) so humans and local agents immediately get a directly
+/// clickable, connectable URL (connecting to a wildcard address fails on Windows), while `bind` preserves the
+/// exact socket address the listener bound.
+#[derive(Debug, PartialEq, Eq)]
+struct ListenUrls {
+    url: String,
+    bind: String,
+    wildcard: bool,
+}
+
+impl ListenUrls {
+    fn from_addr(addr: std::net::SocketAddr) -> Self {
+        Self {
+            url: serve_lock::local_url(addr),
+            bind: addr.to_string(),
+            wildcard: addr.ip().is_unspecified(),
+        }
+    }
+
+    fn banner_line(&self, mock: bool) -> String {
+        let mode = if mock { "mock data" } else { "the real store" };
+        if self.wildcard {
+            format!("FOLO {VERSION} serving {mode} on {} (bound to {})", self.url, self.bind)
+        } else {
+            format!("FOLO {VERSION} serving {mode} on {}", self.url)
+        }
+    }
+
+    fn listening_record(
+        &self,
+        mock: bool,
+        web_dir: Option<&std::path::Path>,
+        web_ready: bool,
+        data_dir: &std::path::Path,
+        token: bool,
+    ) -> serde_json::Value {
+        json!({
+            "event": "listening",
+            "url": self.url,
+            "bind": self.bind,
+            "api": format!("{}/api", self.url),
+            "mock": mock,
+            "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
+            "web_dir": web_dir.map(crate::output::record_path),
+            "web_ready": web_ready,
+            "data_dir": (!mock).then(|| crate::output::record_path(data_dir)),
+            "token": token,
+        })
+    }
 }
 
 /// Another process (`folo serve`, or an embedded `folo mcp`) owns `dir`; `url` is where it listens, when it says.
@@ -254,5 +294,64 @@ mod tests {
         let other = bind_failed("localhost", 7878, Error::other("too many open files"));
         let h = other.hint.as_deref().unwrap();
         assert!(!h.contains("resolve --host") && h.contains("--host") && h.contains("--port"), "{h}");
+    }
+
+    #[test]
+    fn listen_urls_expose_loopback_for_wildcards_and_preserve_explicit_hosts() {
+        let data = std::path::Path::new("data");
+
+        // IPv4 wildcard -> clickable IPv4 loopback URL + explicit bind address.
+        let v4_wild = ListenUrls::from_addr("0.0.0.0:7878".parse().unwrap());
+        assert!(v4_wild.wildcard);
+        assert_eq!(v4_wild.url, "http://127.0.0.1:7878");
+        assert_eq!(v4_wild.bind, "0.0.0.0:7878");
+        assert_eq!(
+            v4_wild.banner_line(false),
+            format!("FOLO {VERSION} serving the real store on http://127.0.0.1:7878 (bound to 0.0.0.0:7878)")
+        );
+        let rec = v4_wild.listening_record(true, None, true, data, false);
+        assert_eq!(rec["url"], "http://127.0.0.1:7878");
+        assert_eq!(rec["api"], "http://127.0.0.1:7878/api");
+        assert_eq!(rec["bind"], "0.0.0.0:7878");
+
+        // IPv6 wildcard -> clickable IPv6 loopback URL + explicit bind address.
+        let v6_wild = ListenUrls::from_addr("[::]:7878".parse().unwrap());
+        assert!(v6_wild.wildcard);
+        assert_eq!(v6_wild.url, "http://[::1]:7878");
+        assert_eq!(v6_wild.bind, "[::]:7878");
+        assert_eq!(
+            v6_wild.banner_line(true),
+            format!("FOLO {VERSION} serving mock data on http://[::1]:7878 (bound to [::]:7878)")
+        );
+        let rec = v6_wild.listening_record(false, None, true, data, true);
+        assert_eq!(rec["url"], "http://[::1]:7878");
+        assert_eq!(rec["api"], "http://[::1]:7878/api");
+        assert_eq!(rec["bind"], "[::]:7878");
+
+        // Explicit loopback and LAN hosts stay as bound without a redundant "(bound to ...)" suffix.
+        for (raw, want_url, want_bind) in [
+            ("127.0.0.1:7878", "http://127.0.0.1:7878", "127.0.0.1:7878"),
+            ("[::1]:7878", "http://[::1]:7878", "[::1]:7878"),
+            ("192.168.1.5:7878", "http://192.168.1.5:7878", "192.168.1.5:7878"),
+        ] {
+            let l = ListenUrls::from_addr(raw.parse().unwrap());
+            assert!(!l.wildcard, "{raw}");
+            assert_eq!(l.url, want_url, "{raw}");
+            assert_eq!(l.bind, want_bind, "{raw}");
+            assert_eq!(l.banner_line(false), format!("FOLO {VERSION} serving the real store on {want_url}"));
+            let rec = l.listening_record(false, None, true, data, false);
+            assert_eq!(rec["url"], want_url);
+            assert_eq!(rec["api"], format!("{want_url}/api"));
+            assert_eq!(rec["bind"], want_bind);
+        }
+
+        // Scoped IPv6 host is preserved verbatim.
+        let scoped =
+            std::net::SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1234".parse().unwrap(), 7878, 0, 7));
+        let l = ListenUrls::from_addr(scoped);
+        assert!(!l.wildcard);
+        assert_eq!(l.url, "http://[fe80::1234%7]:7878");
+        assert_eq!(l.bind, "[fe80::1234%7]:7878");
+        assert!(!l.banner_line(false).contains("bound to"));
     }
 }
