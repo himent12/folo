@@ -203,7 +203,8 @@ pub struct LetterboxDesc {
 }
 
 /// Letterbox one image (see [`LetterboxDesc`]) into `y` of `dtype`. In f32 bit-exact with folo-data's CPU
-/// resize followed by `value as f32 * scale`; in f16 that value rounded once.
+/// resize followed by `value as f32 * scale`; in f16 converted from that f32 value (within 1 binary16 ULP under
+/// WGSL's floating-point conversion rules).
 pub fn letterbox_rgb8(
     ctx: &GpuContext,
     src: &wgpu::Buffer,
@@ -217,7 +218,12 @@ pub fn letterbox_rgb8(
     let [sw, sh] = d.src;
     let [rw, rh] = d.resized;
     let [fx, fy] = d.prefilter;
-    if [ow, oh, sw, sh, rw, rh, fx, fy].contains(&0) || d.pad[0] + rw > ow || d.pad[1] + rh > oh {
+    let pad_x_end = d.pad[0].checked_add(rw);
+    let pad_y_end = d.pad[1].checked_add(rh);
+    if [ow, oh, sw, sh, rw, rh, fx, fy].contains(&0)
+        || pad_x_end.is_none_or(|e| e > ow)
+        || pad_y_end.is_none_or(|e| e > oh)
+    {
         return Err(shape_err(format!("letterbox: invalid geometry {d:?}")));
     }
     // The prefilter sums a block (plus the rounding term) in u32; the plain bilinear sums stay below 2^31.
@@ -225,10 +231,29 @@ pub fn letterbox_rgb8(
         return Err(GpuError::Limit(format!("letterbox: a {fx}x{fy} prefilter block is too large")));
     }
     // Prefiltered taps must index inside the prefiltered image (checked on the host when built).
-    check_buf(src, (d.src_offset + sw * sh * 3).div_ceil(4), DType::F32, "letterbox source")?;
-    check_buf(taps, d.taps + 3 * (rw + rh), DType::F32, "letterbox taps")?;
-    let n = ow.checked_mul(oh).ok_or_else(|| shape_err("letterbox: canvas too large"))?;
-    check_buf(y, d.out_offset + 3 * n, dtype, "letterbox output")?;
+    // All shader byte/word/element addresses are u32, so reject any extent that overflows usize or u32.
+    let src_bytes = prod(&[sw, sh, 3])?;
+    let src_end = d
+        .src_offset
+        .checked_add(src_bytes)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("letterbox: source range exceeds u32".into()))?;
+    let taps_words = rw
+        .checked_add(rh)
+        .and_then(|s| s.checked_mul(3))
+        .and_then(|w| d.taps.checked_add(w))
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("letterbox: taps range exceeds u32".into()))?;
+    let n = prod(&[ow, oh])?;
+    let out_elems = prod(&[n, 3])?;
+    let out_end = d
+        .out_offset
+        .checked_add(out_elems)
+        .filter(|&e| e <= u32::MAX as usize)
+        .ok_or_else(|| GpuError::Limit("letterbox: output range exceeds u32".into()))?;
+    check_buf(src, src_end.div_ceil(4), DType::F32, "letterbox source")?;
+    check_buf(taps, taps_words, DType::F32, "letterbox taps")?;
+    check_buf(y, out_end, dtype, "letterbox output")?;
     let k =
         ctx.kernel(&LETTERBOX, Spec::new().bool("PREFILTER", fx > 1 || fy > 1).f16(dtype == DType::F16))?;
     let p = Params::new()
@@ -305,7 +330,8 @@ pub fn detect_candidates(
 
 /// Converts `n` packed `u8` bytes from `src` (starting at byte `src_offset`) into `y` (starting at element
 /// `out_offset`) as `dtype` (`F32` or `F16`), multiplying each value by `scale` (`1.0 / 255.0` for image
-/// normalization). In f32 bit-exact with `byte as f32 * scale`; in f16 that value rounded once.
+/// normalization). In f32 bit-exact with `byte as f32 * scale`; in f16 converted from that f32 value (within 1
+/// binary16 ULP under WGSL's floating-point conversion rules).
 #[allow(clippy::too_many_arguments)]
 pub fn u8_to_float_scale(
     ctx: &GpuContext,
@@ -353,7 +379,8 @@ pub fn u8_to_float_scale(
 /// Converts `batch` interleaved RGB `u8` images (`[batch, height, width, 3]` at byte `src_offset` in `src`)
 /// into planar `[batch, 3, height, width]` of `dtype` (`F32` or `F16`) at element `out_offset` in `y`,
 /// multiplying each value by `scale`. Uses a 3-word / 4-pixel packed `vec4` path when `(height * width) % 4 == 0`
-/// and both offsets are 4-aligned.
+/// and both offsets are 4-aligned. In f32 bit-exact with `byte as f32 * scale`; in f16 within 1 binary16 ULP
+/// under WGSL's floating-point conversion rules.
 #[allow(clippy::too_many_arguments)]
 pub fn rgb8_hwc_to_chw_norm(
     ctx: &GpuContext,

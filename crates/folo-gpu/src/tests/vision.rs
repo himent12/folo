@@ -18,6 +18,26 @@ fn read_out(ctx: &crate::GpuContext, buf: &wgpu::Buffer, elems: usize, dtype: DT
     }
 }
 
+fn assert_vision_parity(got: &[f32], want: &[f32], dtype: DType, ctx: &str) {
+    assert_eq!(got.len(), want.len(), "{ctx}: length mismatch");
+    match dtype {
+        DType::F32 => assert_close(got, want, 0.0, 0.0, ctx),
+        // WGSL f32 -> f16 narrowing permits either adjacent representable binary16 value (<= 1 ULP).
+        DType::F16 => {
+            for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+                let gb = half::f16::from_f32(g).to_bits();
+                let wb = half::f16::from_f32(w).to_bits();
+                let same_zero = (gb & 0x7fff) == 0 && (wb & 0x7fff) == 0;
+                let same_sign = (gb & 0x8000) == (wb & 0x8000);
+                assert!(
+                    same_zero || (same_sign && gb.abs_diff(wb) <= 1),
+                    "{ctx}[{i}]: f16 mismatch got={g} (0x{gb:04x}) want={w} (0x{wb:04x})"
+                );
+            }
+        }
+    }
+}
+
 fn cpu_scale(bytes: &[u8], scale: f32, dtype: DType) -> Vec<f32> {
     bytes
         .iter()
@@ -96,11 +116,10 @@ fn u8_to_float_scale_parity_and_slack_safety() {
             u8_to_float_scale(&ctx, src_buf.raw(), out_buf.raw(), n, src_off, out_off, scale, dtype).unwrap();
             let got = read_out(&ctx, out_buf.raw(), total_out, dtype);
             let want = cpu_scale(&src_bytes[src_off..src_off + n], scale, dtype);
-            assert_close(
+            assert_vision_parity(
                 &got[out_off..out_off + n],
                 &want,
-                0.0,
-                0.0,
+                dtype,
                 &format!("u8_to_float_scale {dtype:?} n={n} src={src_off} out={out_off}"),
             );
             assert!(
@@ -119,7 +138,7 @@ fn u8_to_float_scale_parity_and_slack_safety() {
             if n > 0 {
                 let got = read_out(&ctx, buf.raw(), n, dtype);
                 let want = cpu_scale(&src_bytes[..n], scale, dtype);
-                assert_close(&got, &want, 0.0, 0.0, &format!("upload_u8_scaled {dtype:?} n={n}"));
+                assert_vision_parity(&got, &want, dtype, &format!("upload_u8_scaled {dtype:?} n={n}"));
             }
         }
     }
@@ -181,11 +200,10 @@ fn rgb8_hwc_to_chw_norm_parity_and_slack_safety() {
                 .unwrap();
             let got = read_out(&ctx, out_buf.raw(), total_out, dtype);
             let want = cpu_hwc_to_chw(&src_bytes[src_off..src_off + total], b, h, w, scale, dtype);
-            assert_close(
+            assert_vision_parity(
                 &got[out_off..out_off + total],
                 &want,
-                0.0,
-                0.0,
+                dtype,
                 &format!("rgb8_hwc_to_chw_norm {dtype:?} [{b},{h},{w}] src={src_off} out={out_off}"),
             );
             assert!(got[..out_off].iter().all(|&v| v == sentinel));
@@ -199,7 +217,7 @@ fn rgb8_hwc_to_chw_norm_parity_and_slack_safety() {
             if b * h * w > 0 {
                 let got = read_out(&ctx, buf.raw(), rgb.len(), dtype);
                 let want = cpu_hwc_to_chw(&rgb, b, h, w, scale, dtype);
-                assert_close(&got, &want, 0.0, 0.0, &format!("upload_rgb8 {dtype:?} [{b},{h},{w}]"));
+                assert_vision_parity(&got, &want, dtype, &format!("upload_rgb8 {dtype:?} [{b},{h},{w}]"));
             }
         }
     }
@@ -304,6 +322,38 @@ fn letterbox_prefilter_specialized_and_plain_parity() {
         let got = read_out(&ctx, out_buf.raw(), 3 * plane, DType::F32);
         assert_close(&got, &want, 0.0, 0.0, &format!("letterbox prefilter=({fx},{fy})"));
     }
+
+    // Overflowing offsets that would wrap u32 on wasm32 must be rejected before dispatch.
+    let small_taps = ctx.alloc(256).unwrap();
+    let small_out = ctx.alloc(256).unwrap();
+    let bad_base = LetterboxDesc {
+        out: [2, 2],
+        src: [2, 2],
+        src_offset: 0,
+        pad: [0, 0],
+        resized: [2, 2],
+        prefilter: [1, 1],
+        pad_value: 114,
+        scale,
+        out_offset: 0,
+        taps: 0,
+    };
+    let mut bad_src = bad_base;
+    bad_src.src_offset = (u32::MAX - 7) as usize;
+    assert!(
+        letterbox_rgb8(&ctx, src_buf.raw(), small_taps.raw(), small_out.raw(), &bad_src, DType::F32).is_err()
+    );
+    let mut bad_taps = bad_base;
+    bad_taps.taps = (u32::MAX - 4) as usize;
+    assert!(
+        letterbox_rgb8(&ctx, src_buf.raw(), small_taps.raw(), small_out.raw(), &bad_taps, DType::F32)
+            .is_err()
+    );
+    let mut bad_out = bad_base;
+    bad_out.out_offset = (u32::MAX - 4) as usize;
+    assert!(
+        letterbox_rgb8(&ctx, src_buf.raw(), small_taps.raw(), small_out.raw(), &bad_out, DType::F32).is_err()
+    );
     assert!(ctx.kernels_without_registry().is_empty());
 }
 
