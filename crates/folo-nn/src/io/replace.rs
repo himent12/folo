@@ -246,9 +246,35 @@ mod tests {
             .unwrap_err();
         assert!(t.elapsed() >= SHORT.budget, "gave up after {:?}", t.elapsed());
         assert!(err.contains("another program may hold it open") && err.contains("last.folo"), "{err}");
+        assert!(err.contains("its permissions may not allow replacing it"), "{err}");
+        assert!(!err.contains("not a permissions problem"), "{err}");
         drop(held);
         assert_eq!(std::fs::read(&path).unwrap(), bytes("old"));
         assert_eq!(names(&dir), ["last.folo"]);
+    }
+
+    /// `ERROR_ACCESS_DENIED` on a regular writable file is retried (since held files and ACL denials return the
+    /// same OS error), while a read-only file or a directory fails immediately.
+    #[cfg(windows)]
+    #[test]
+    fn held_open_retries_writable_access_denied_but_not_readonly_or_dir() {
+        let dir = TestDir::new("nn-replace-held-open");
+        let file = dir.join("last.folo");
+        std::fs::write(&file, b"old").unwrap();
+        let access_denied = std::io::Error::from_raw_os_error(5);
+        assert!(super::held_open(&access_denied, &file));
+
+        let orig = std::fs::metadata(&file).unwrap().permissions();
+        let mut ro = orig.clone();
+        ro.set_readonly(true);
+        std::fs::set_permissions(&file, ro).unwrap();
+        let retried_ro = super::held_open(&access_denied, &file);
+        std::fs::set_permissions(&file, orig).unwrap();
+        assert!(!retried_ro);
+
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(!super::held_open(&access_denied, &sub));
     }
 
     /// Denies everyone (`*S-1-1-0`) the rights to `paths` that replacing a file needs, until dropped.
@@ -284,6 +310,25 @@ mod tests {
             }
             Some(deny)
         }
+
+        /// Whether this environment actually rejects `std::fs::rename` over a target denied `(DC)`/`(DE)` (some
+        /// elevated Windows CI tokens still permit rename despite the explicit deny ACE).
+        fn enforces_rename_denial() -> bool {
+            let probe = TestDir::new("nn-replace-acl-probe");
+            let dst = probe.join("dst");
+            let src = probe.join("src");
+            std::fs::write(&dst, b"old").unwrap();
+            std::fs::write(&src, b"new").unwrap();
+            let Some(guard) = Deny::new(&[(probe.path(), "(DC)"), (&dst, "(DE)")]) else {
+                return false;
+            };
+            let denied = std::fs::rename(&src, &dst).is_err();
+            drop(guard);
+            if !denied {
+                eprintln!("skipped: environment allowed std::fs::rename despite icacls /deny");
+            }
+            denied
+        }
     }
 
     #[cfg(windows)]
@@ -309,6 +354,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_target_whose_permissions_deny_replacing_it_says_permissions_may_be_why() {
+        if !Deny::enforces_rename_denial() {
+            return;
+        }
         let dir = TestDir::new("nn-replace-acl");
         let path = dir.join("last.folo");
         write_file(&path, Some(&meta("old")), &[]).unwrap();

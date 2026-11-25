@@ -160,6 +160,7 @@ describe('LiveRun ordering', () => {
     handlers.connection?.('open');
     await vi.advanceTimersByTimeAsync(0);
     handlers.step?.({ ...step(3), epoch: 59 });
+    await vi.advanceTimersByTimeAsync(20);
     expect(streamedRun('run_7d1e')?.epoch).toBe(59);
     expect(streamedRun('run_other')).toBeUndefined();
     // Down past the grace: the shell falls back to its own (polled) source.
