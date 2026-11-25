@@ -24,7 +24,7 @@ it.
 | `src/throughput/` | The measured throughput table and run-time estimates: `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the predictor cache of `/api/predict` |
 | `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (tests in `src/index/tests.rs`) |
-| `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, `/eval`, exports |
+| `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, `/eval`, exports (tests in `src/models/tests.rs`) |
 | `src/uploads.rs` | Upload sessions (`/api/uploads`): streams in parts into `<data dir>/uploads/<id>/` |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |

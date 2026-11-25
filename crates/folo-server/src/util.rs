@@ -1,7 +1,122 @@
 //! Small helpers: hashing, a seeded RNG, RFC 3339 formatting, folder names.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// One in-flight computation shared by concurrent callers for the same key (single-flight).
+///
+/// Waiters block on `ready` until the leader publishes a result with [`Flight::finish`] or aborts (e.g. via a
+/// drop guard on panic) with [`Flight::abort`], which returns `None` so waiting callers can retry.
+pub(crate) struct Flight<T> {
+    state: Mutex<FlightState<T>>,
+    ready: Condvar,
+    #[cfg(test)]
+    waiters: std::sync::atomic::AtomicUsize,
+}
+
+enum FlightState<T> {
+    Running,
+    Done(T),
+    Aborted,
+}
+
+impl<T: Clone> Flight<T> {
+    /// Starts a new running flight.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(FlightState::Running),
+            ready: Condvar::new(),
+            #[cfg(test)]
+            waiters: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// Number of callers currently parked in [`Flight::wait`].
+    #[cfg(test)]
+    pub(crate) fn waiters(&self) -> usize {
+        self.waiters.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits for the leader to finish. Returns `Some(value)` on completion, or `None` if the leader aborted
+    /// (for example, panicked) and the caller should retry.
+    pub(crate) fn wait(&self) -> Option<T> {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
+        let mut counted = false;
+        loop {
+            match &*st {
+                FlightState::Running => {
+                    #[cfg(test)]
+                    if !counted {
+                        self.waiters.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        counted = true;
+                    }
+                    st = self.ready.wait(st).unwrap_or_else(|p| p.into_inner());
+                }
+                FlightState::Done(v) => return Some(v.clone()),
+                FlightState::Aborted => return None,
+            }
+        }
+    }
+
+    /// Publishes `value` to all current and future waiters.
+    pub(crate) fn finish(&self, value: T) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        *st = FlightState::Done(value);
+        self.ready.notify_all();
+    }
+
+    /// Marks a still-running flight as aborted (e.g. leader panicked) and wakes waiters to retry.
+    pub(crate) fn abort(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(*st, FlightState::Running) {
+            *st = FlightState::Aborted;
+            self.ready.notify_all();
+        }
+    }
+}
+
+/// Bounded 2-party rendezvous for concurrency tests: panics cleanly instead of hanging if both parties fail to
+/// arrive concurrently within `timeout`.
+#[cfg(test)]
+pub(crate) struct Rendezvous {
+    arrived: Mutex<(usize, bool)>,
+    cv: Condvar,
+}
+
+#[cfg(test)]
+impl Rendezvous {
+    pub(crate) fn new() -> Self {
+        Self { arrived: Mutex::new((0, false)), cv: Condvar::new() }
+    }
+
+    pub(crate) fn arrive(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut st = self.arrived.lock().unwrap_or_else(|p| p.into_inner());
+        st.0 += 1;
+        if st.0 >= 2 {
+            st.1 = true;
+            self.cv.notify_all();
+            return true;
+        }
+        while !st.1 {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                st.1 = true;
+                self.cv.notify_all();
+                return false;
+            };
+            let (guard, res) = self.cv.wait_timeout(st, left).unwrap_or_else(|p| p.into_inner());
+            st = guard;
+            if res.timed_out() && st.0 < 2 {
+                st.1 = true;
+                self.cv.notify_all();
+                return false;
+            }
+        }
+        st.0 >= 2
+    }
+}
 
 /// FNV-1a 64-bit hash of `bytes`.
 pub fn fnv1a(bytes: &[u8]) -> u64 {
