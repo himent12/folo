@@ -40,8 +40,9 @@ snapshots every floating buffer, while `RunningStats::capture_training(model)` c
 `BatchNorm2d` buffers once per epoch, refreshes them in place via `recapture()` with zero per-batch allocations, checks
 live finiteness via `all_finite_live()` without re-walking the module tree, and pairs with
 `RunningStats::all_finite_eval(model)` to validate frozen eval-mode BN buffers at epoch entry (`restore()` undoes a
-non-finite batch). Buffers on a device are checked there with a single readback (`Σ 0 · x` over all of them is 0
-exactly when every value is finite).
+non-finite batch). Buffers on a device are checked with one readback per device via multi-tensor
+`Tensor::norm_partials_many(bufs, NormReduce::AbsMax, None)` + `max_all()` (falling back to `Σ 0 · x == 0` when
+`norm_partials_many` is unsupported).
 
 `fuse_conv_bn(w, b, γ, β, mean, var, eps)` is the reusable fusion (`k = γ / sqrt(var + eps)`, `W' = W·k`,
 `b' = β + (b − mean)·k`), in `F32`.

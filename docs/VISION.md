@@ -63,10 +63,11 @@ ONNX opset-17-expressible ops (`export::onnx` and `model::quant` currently targe
   `pad_p3`/`pad_p4` strictly to the `P3`/`P4` head inputs *after* `neck.down3`/`neck.down4` taps so the bottom-up neck
   stays free of float barriers by design. `LazyAlignHead` pairs a depthwise-free dense `ClsBranchV2` with `BoxBranchV2`
   (`2 × WsQARepConv3x3` + `4·reg_max` `out` — `64` channels at default `reg_max = 16` — and opt-in separate
-  `iou_out: Conv1×1(c_box → 1)` supervised by `iou_quality_loss` against detached predicted-vs-GT plain IoU and fused
-  at inference via `fuse_cls_iou_scores` `p_cls^(1 − α) · p_iou^α`, default `α = 0.5`), plus optional `o2o`
+  `iou_out: Conv1×1(c_box → 1)` with standalone `iou_quality_loss` helper to supervise it against detached
+  predicted-vs-GT plain IoU and `fuse_cls_iou_scores` `p_cls^(1 − α) · p_iou^α` used by `HeadOutputV2::detections` /
+  `decode_images` with an explicit `alpha`, e.g. `DEFAULT_IOU_FUSION_ALPHA = 0.5`), plus optional `o2o`
   (`O2oClsLevel` with `PeakSuppress` 3×3 local-peak-preserving lateral inhibition sharing `BoxBranchV2`).
-  `HeadOutputV2::into_head_output()` converts directly to v1's `HeadOutput`.
+  `HeadOutputV2::into_head_output()` converts directly to v1's `HeadOutput` (dropping `iou_raw`).
 
 ### int8 inference (`model/quant/`)
 Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
@@ -94,27 +95,31 @@ A shared graph walk (`walk.rs`) drives three executors:
   logits (streaming active runs linearly with `fast_exp`) only at anchors inside at least one GT candidate mask —
   bit-identical to a full-grid decode while skipping background anchors. It then builds the loss terms from folo-core
   tensor ops (fused custom ops for the full-size BCE and gather), so gradients flow into both head branches.
-- On a GPU the whole loss runs as folo-gpu kernels (`folo_gpu::detect`: assigner, fused BCE, fused CIoU + DFL with a
-  hand-written backward, as one custom op) and only the reported items are read back.
+- On a GPU, when `device_loss_supported` holds (`cls_loss == Bce`, `box_loss ∈ {Ciou, Rpiou}`, `topk ∈ 1..=64`,
+  `topk2 != Some(0)`, `reg_max ∈ 2..=32`), the whole loss runs as folo-gpu kernels (`folo_gpu::detect`: assigner, fused
+  BCE, fused CIoU/R-PIoU + DFL with a hand-written backward, as one custom op) and only the reported items are read
+  back.
 - **Opt-in assigner, loss & distillation options (`assign.rs`, `loss/terms/`, `loss/device.rs`, `loss/distill/`):**
   all default to off:
   - *Assigner (CPU + GPU parity):* `TalConfig.eps_free` removes `eps` attenuation on small-box targets via
     `(m / m_max) * u_max`; `TalConfig.nwd_weight` blends Plain-IoU with Normalized Wasserstein Distance (`C = 12.8 px`)
     using scale weight `λ(s_g) = λ₀ · exp(−(s_g / 24)²)`.
   - *Classification terms:* `LossConfig.mal_gamma > 0` enables Matchability-Aware Loss (`p^γ · softplus(x)`
-    on background negatives, unweighted BCE on positives; CPU + GPU fused); `LossConfig.cls_loss = ClsLossKind::Vfl`
-    selects Varifocal Loss (quality-weighted `t · BCE(x, t)` on positives and `vfl_alpha · p^vfl_gamma · softplus(x)` on
-    negatives; defaults `0.75` / `2.0`); `ClsLossKind::Qfl` selects Quality Focal Loss (`|t − p|^qfl_beta · BCE(x, t)`,
-    default `qfl_beta = 2.0`).
+    on background negatives, unweighted BCE on positives; requires `cls_loss == Bce`; CPU + GPU fused);
+    `LossConfig.cls_loss = ClsLossKind::Vfl` selects Varifocal Loss (quality-weighted `t · BCE(x, t)` on positives and
+    `vfl_alpha · p^vfl_gamma · softplus(x)` on negatives; defaults `0.75` / `2.0`, requires `mal_gamma == 0`);
+    `ClsLossKind::Qfl` selects Quality Focal Loss (`|t − p|^qfl_beta · BCE(x, t)`, default `qfl_beta = 2.0`, requires
+    `mal_gamma == 0`).
   - *Box & DFL terms:* `LossConfig.box_loss` selects `Ciou` (default), `Rpiou` (purely algebraic Rational-Focal
     Edge-Decoupled IoU: `rpiou_beta`, `rpiou_kappa`, `rpiou_delta`; CPU + GPU fused), `InnerCiou` (Inner-CIoU using
     auxiliary boxes scaled by `inner_ratio` in `[0.5, 1.5]`, default `0.7`), or `WiouV3` (Wise-IoU v3 distance-attended
     non-monotonic dynamic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`, `wiou_momentum = 0.01`, running `L_IoU_bar`
     persisted in checkpoints as `folo.wiou_iou_mean`); `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend;
     `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)` log-space 1D optimal-transport cumulative tail barrier to DFL
-    (when `reg_max > 2`; CPU + GPU fused). `Vfl`, `Qfl`, `InnerCiou`, and `WiouV3` run through the host-assigner +
-    `loss_with_assignment` path (fused CPU custom ops for VFL/QFL classification, device-generic tensor composites on
-    other devices), while `Bce` + `Ciou`/`Rpiou` take the fused `folo_gpu::detect` kernels on GPU.
+    (when `reg_max > 2`; CPU + GPU fused when `device_loss_supported`, host `f64` readback on the fallback path).
+    `Vfl`, `Qfl`, `InnerCiou`, and `WiouV3` run through the host-assigner + `loss_with_assignment` path (fused CPU
+    custom ops for VFL/QFL classification, device-generic tensor composites on other devices, with foreground `atan`
+    host readbacks for `InnerCiou`).
   - *Distillation (`loss/distill/`):* dense teacher output KD (MODEL.md §8.9, fused GPU path in `distill/fused.rs`),
     plus `DistillConfig.bckd_gamma > 0` (BCKD focal disagreement weighting `sg(|p_S − p_T|^γ)` with positive teacher
     clamping) and `DistillConfig.gt_verify` (positive-only GT-verified DFL KD gating where `IoU(b_T, g) > IoU(b_S, g) +
@@ -163,8 +168,8 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
 - **Non-finite batches:** batches with a non-finite loss or BatchNorm statistic are skipped and their running
   statistics restored. At epoch entry, `RunningStats::all_finite_eval` validates any frozen eval-mode BN buffers once
   and `RunningStats::capture_training` allocates snapshot buffers once for active train-mode BNs, refreshing them in
-  place with `recapture()` across batches and checking `all_finite_live()` without per-batch allocations or module-tree
-  walks.
+  place with `recapture()` only when marked dirty after a finite batch and checking `all_finite_live()` without
+  per-batch snapshot tensor allocations or module-tree walks.
 - **After every epoch:** validation runs on a pre-folded eval clone (`FoloModel::fused_eval_clone()`, with GPU
   `ForwardPlans` enabled) of the EMA model (or live model when `ema = false`) so Conv+BN is folded once per epoch
   instead of per batch while leaving the live and EMA models untouched, scored with `metrics::Evaluator` (fitness

@@ -33,8 +33,9 @@ produces plain buffers that the trainer wraps in tensors.
   it by a path that names the `images` folder to use the mirror). A missing label file means a background image.
 - Label lines (`dataset/labels.rs`, parsed directly from byte/str slices without intermediate per-line allocations):
   `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding box is used).
-  Coordinates may exceed `[0, 1]` by up to 0.01 (clipped, with a warning); exact duplicates are removed; zero-size boxes
-  are dropped.
+  Coordinates may exceed `[0, 1]` by up to 0.01 (clipped with a warning, except non-degenerate 5-token boxes within
+  `1e-5` of the boundary, which keep their original coordinates without warning); exact duplicates are removed;
+  zero-size boxes are dropped.
 - A label file is **broken** (and its image skipped) if a value is not a finite number, a line has the wrong number of
   values, a class id is negative, fractional or `>= nc`, a size is negative, or coordinates are clearly not
   normalised.
@@ -263,16 +264,20 @@ the geometry.
 - In-flight work is bounded (a window of positions plus `prefetch_batches` finished batches). Dropping the epoch
   iterator stops and joins every thread. `EpochIter::throughput()` reports images/s.
 - Inside workers, image kernels run single-threaded (`folo_data::par::serial`); outside, they split rows with rayon.
-- The workers and the collator reuse image-sized byte buffers and small row/plan scratch (`src/buffers.rs`): a
-  per-thread TLS fast path (up to 32 MiB of pooled `Vec<u8>` buffers plus reusable small `u8`/`u32` scratch slots for
-  mosaic, mixup, resize, letterbox, and PNG decode) sits in front of the process-wide pool, bounded together at
-  `MAX_BYTES` (512 MiB) via a shared `TOTAL_POOLED_BYTES` atomic and emptied when the loader's threads stop. A fresh
-  buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost 0.5-1 ms per
-  buffer on our test machine against 0.05-0.1 ms reused; buffers are zeroed where `vec![0; n]` was and otherwise
-  overwritten whole, so the bytes do not depend on reuse.
+- The workers and the collator reuse image-sized byte buffers and small row/plan scratch (`src/buffers.rs`):
+  - Image-sized `Vec<u8>` buffers (`≥ 64 KiB`, used for decoded/resized/warped images and PNG decode) pass through a
+    per-thread TLS pool (up to 32 MiB per thread) in front of the process-wide pool, bounded together at `MAX_BYTES`
+    (512 MiB) via `TOTAL_POOLED_BYTES` and emptied when the last pooled thread leaves `pooled()`.
+  - Small per-thread scratch slots (`TLS_SCRATCH`: up to 4 × 256 KiB `u8` and 8 × 32 Ki `u32` slots per thread, kept
+    separate from `TOTAL_POOLED_BYTES` and cleared on leaving `pooled()`) back mosaic, mixup, resize, and letterbox
+    row/plan scratch with zero mutex contention.
+  A fresh buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost
+  0.5-1 ms per buffer on our test machine against 0.05-0.1 ms reused; buffers are zeroed where `vec![0; n]` was and
+  otherwise overwritten whole, so the bytes do not depend on reuse.
 - `tests/golden.rs` pins the digests of the first batches for each path of the transform (mosaic, rotation and
-  shear, mixup — with AVX2 blending — and up-down flips, letterbox + affine, validation), from memory and from JPEG
-  (with fast EXIF orientation) and PNG files: a change that alters a batch's bytes fails there.
+  shear, mixup — with runtime-dispatched AVX2 blending on x86-64 CPUs with AVX2 — and up-down flips, letterbox +
+  affine, validation), from memory and from JPEG and PNG files (EXIF reorientation is pinned separately in `image.rs`
+  and `tests/formats.rs`): a change that alters a batch's bytes fails there.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
