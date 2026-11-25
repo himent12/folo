@@ -48,7 +48,11 @@ export function jumpTarget(key: Jump): HTMLElement | null {
   const visible = (el: HTMLElement | null) => (el && el.getClientRects().length ? el : null);
   switch (key) {
     case 'data':
-      return visible(document.getElementById('dataset-pick')) ?? document.querySelector<HTMLElement>('input[name="dataset"]:checked');
+      return (
+        visible(document.getElementById('dataset-pick')) ??
+        document.querySelector<HTMLElement>('input[name="dataset"]:checked') ??
+        document.querySelector<HTMLElement>('input[name="dataset"]:not(:disabled)')
+      );
     case 'model':
       return visible(document.querySelector<HTMLElement>('#arch-pick [aria-checked="true"]')) ?? document.querySelector<HTMLElement>('input[name="arch"]:checked');
     case 'batch':
@@ -150,10 +154,23 @@ export function copiedSeed(seed: Signal<string>, wasOver: boolean) {
   };
 }
 
-/** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
-export function firstError(errors: FormErrors): { text: string; key: Jump } | null {
-  for (const [k, v] of Object.entries(errors)) if (v) return { text: `${FIELD[k as keyof typeof errors]}: ${v}`, key: JUMP[k as keyof typeof errors] };
-  return null;
+/** Count of fields currently in error across the form. */
+export function errorCount(errors: FormErrors): number {
+  let n = 0;
+  for (const v of Object.values(errors)) if (v) n++;
+  return n;
+}
+
+/** The first problem, named by its field (shown beside a disabled Start, as a way to that field), plus how many other fields also need attention. */
+export function firstError(errors: FormErrors): { text: string; key: Jump; more: number } | null {
+  let first: { text: string; key: Jump } | null = null;
+  let total = 0;
+  for (const [k, v] of Object.entries(errors)) {
+    if (!v) continue;
+    total++;
+    if (!first) first = { text: `${FIELD[k as keyof typeof errors]}: ${v}`, key: JUMP[k as keyof typeof errors] };
+  }
+  return first ? { ...first, more: total - 1 } : null;
 }
 
 /** Brings a jump's control into view and focuses it, marking the spot where the browser keeps the focus ring hidden. */
