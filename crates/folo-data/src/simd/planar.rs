@@ -534,24 +534,71 @@ unsafe fn rgb_to_rgb0_u32_avx2(src: &[u8], dst: &mut [u32]) {
     }
 }
 
+/// Reverses 16 interleaved RGB pixels (48 bytes = 3 × 16-byte vectors) in place using pure SIMD shuffles.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn reverse_rgb16_avx2(v0: __m128i, v1: __m128i, v2: __m128i) -> (__m128i, __m128i, __m128i) {
+    // v0: p0..p4, p5[0]; v1: p5[1..2], p6..p9, p10[0..1]; v2: p10[2], p11..p15.
+    let m0_v2 = _mm_setr_epi8(13, 14, 15, 10, 11, 12, 7, 8, 9, 4, 5, 6, 1, 2, 3, -1);
+    let m0_v1 = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 14);
+    let m1_v1 = _mm_setr_epi8(15, -1, 11, 12, 13, 8, 9, 10, 5, 6, 7, 2, 3, 4, -1, 0);
+    // `alignr::<15>(v2, v0)` puts `v0[15]` (= p5[0]) at lane 0 and `v2[0]` (= p10[2]) at lane 1.
+    let m1_v02 = _mm_setr_epi8(-1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, -1);
+    let m2_v1 = _mm_setr_epi8(1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    let m2_v0 = _mm_setr_epi8(-1, 12, 13, 14, 9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2);
+
+    let o0 = _mm_or_si128(_mm_shuffle_epi8(v2, m0_v2), _mm_shuffle_epi8(v1, m0_v1));
+    let v02 = _mm_alignr_epi8::<15>(v2, v0);
+    let o1 = _mm_or_si128(_mm_shuffle_epi8(v1, m1_v1), _mm_shuffle_epi8(v02, m1_v02));
+    let o2 = _mm_or_si128(_mm_shuffle_epi8(v1, m2_v1), _mm_shuffle_epi8(v0, m2_v0));
+    (o0, o1, o2)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn flip_lr_row_avx2(row: &mut [u8], w: usize) {
     let p = row.as_mut_ptr();
+    let half = w / 2;
+    let mut x = 0usize;
+    // Fast 16-pixel (48-byte) symmetric pure-SIMD swaps with exact 16-byte stores (zero overshoot).
+    while x + 16 <= half {
+        let left = x * 3;
+        let right = (w - 16 - x) * 3;
+        // SAFETY: `x + 16 <= half`, so `[left..left+48)` and `[right..right+48)` are disjoint and within `w * 3`.
+        unsafe {
+            let l0 = _mm_loadu_si128(p.add(left) as *const __m128i);
+            let l1 = _mm_loadu_si128(p.add(left + 16) as *const __m128i);
+            let l2 = _mm_loadu_si128(p.add(left + 32) as *const __m128i);
+            let r0 = _mm_loadu_si128(p.add(right) as *const __m128i);
+            let r1 = _mm_loadu_si128(p.add(right + 16) as *const __m128i);
+            let r2 = _mm_loadu_si128(p.add(right + 32) as *const __m128i);
+            let (rl0, rl1, rl2) = reverse_rgb16_avx2(l0, l1, l2);
+            let (rr0, rr1, rr2) = reverse_rgb16_avx2(r0, r1, r2);
+            _mm_storeu_si128(p.add(left) as *mut __m128i, rr0);
+            _mm_storeu_si128(p.add(left + 16) as *mut __m128i, rr1);
+            _mm_storeu_si128(p.add(left + 32) as *mut __m128i, rr2);
+            _mm_storeu_si128(p.add(right) as *mut __m128i, rl0);
+            _mm_storeu_si128(p.add(right + 16) as *mut __m128i, rl1);
+            _mm_storeu_si128(p.add(right + 32) as *mut __m128i, rl2);
+        }
+        x += 16;
+    }
     let rev4 = _mm_setr_epi8(9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2, -1, -1, -1, -1);
-    // Outermost 2 pairs scalar so every 16-byte SIMD load at `right` stays within `row`.
-    let edge = 2.min(w / 2);
-    for x in 0..edge {
+    // For the 4-pixel tail, ensure at least 2 pixels remain past `right + 12` so 16-byte load stays in bounds.
+    while x < 2.min(half) {
         let (a, b) = (x * 3, (w - 1 - x) * 3);
         row.swap(a, b);
         row.swap(a + 1, b + 1);
         row.swap(a + 2, b + 2);
+        x += 1;
     }
-    let mut x = edge;
-    while x + 4 <= w / 2 {
+    // Re-derive `p` after any `row.swap` reborrow above so provenance stays valid under Stacked/Tree Borrows.
+    let p = row.as_mut_ptr();
+    while x + 4 <= half {
         let left = x * 3;
         let right = (w - 4 - x) * 3;
-        // SAFETY: `x >= 2`, so `right + 16 <= w * 3`; `x + 4 <= w / 2`, so `[left..left+12)` and `[right..right+12)`
+        // SAFETY: `x >= 2`, so `right + 16 <= w * 3`; `x + 4 <= half`, so `[left..left+12)` and `[right..right+12)`
         // are disjoint. Exact 12-byte stores (`u64` + `u32`) avoid overwriting neighbouring pixels.
         unsafe {
             let vl = _mm_shuffle_epi8(_mm_loadu_si128(p.add(left) as *const __m128i), rev4);
@@ -563,7 +610,7 @@ unsafe fn flip_lr_row_avx2(row: &mut [u8], w: usize) {
         }
         x += 4;
     }
-    while x < w / 2 {
+    while x < half {
         let (a, b) = (x * 3, (w - 1 - x) * 3);
         row.swap(a, b);
         row.swap(a + 1, b + 1);
@@ -577,8 +624,22 @@ unsafe fn flip_lr_row_avx2(row: &mut [u8], w: usize) {
 unsafe fn copy_flip_lr_row_avx2(src: &[u8], dst: &mut [u8], w: usize) {
     let sp = src.as_ptr();
     let dp = dst.as_mut_ptr();
-    let rev4 = _mm_setr_epi8(9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2, -1, -1, -1, -1);
     let mut x = 0usize;
+    while x + 16 <= w {
+        let d = (w - x - 16) * 3;
+        // SAFETY: `x + 16 <= w`, so 48 bytes are readable at `sp + x * 3` and writable at `dp + d`.
+        unsafe {
+            let v0 = _mm_loadu_si128(sp.add(x * 3) as *const __m128i);
+            let v1 = _mm_loadu_si128(sp.add(x * 3 + 16) as *const __m128i);
+            let v2 = _mm_loadu_si128(sp.add(x * 3 + 32) as *const __m128i);
+            let (o0, o1, o2) = reverse_rgb16_avx2(v0, v1, v2);
+            _mm_storeu_si128(dp.add(d) as *mut __m128i, o0);
+            _mm_storeu_si128(dp.add(d + 16) as *mut __m128i, o1);
+            _mm_storeu_si128(dp.add(d + 32) as *mut __m128i, o2);
+        }
+        x += 16;
+    }
+    let rev4 = _mm_setr_epi8(9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2, -1, -1, -1, -1);
     // 16-byte load at `x * 3` needs `x * 3 + 16 <= w * 3` => `x + 6 <= w`.
     while x + 6 <= w {
         let d = (w - x - 4) * 3;
