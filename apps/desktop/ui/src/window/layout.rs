@@ -12,7 +12,7 @@
 //! frame's results, so a subtree that did not change is answered from them instead of laid out again,
 //! with exactly the results a fresh layout gives; measure functions are boxed once per measured node.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use smallvec::SmallVec;
 
@@ -25,8 +25,8 @@ pub(crate) use super::layout_tree::{MeasureKey, Measured};
 pub(crate) struct TaffyLayoutEngine {
     /// The tree (it keeps last frame's results for the subtrees that did not change).
     pub(crate) tree: LayoutTree,
-    /// Absolute bounds already computed this frame, by node.
-    pub(crate) absolute_layout_bounds: HashMap<LayoutId, Bounds<Pixels>>,
+    /// Absolute bounds already computed this frame, indexed densely by `usize::from(id.0)`.
+    pub(crate) absolute_layout_bounds: Vec<Option<Bounds<Pixels>>>,
     /// Roots computed this frame (so `compute_layout` runs once per root and available space).
     pub(crate) computed_layouts: HashSet<LayoutId>,
     /// Reused buffer for the children of the node being added.
@@ -38,7 +38,7 @@ impl TaffyLayoutEngine {
     pub(crate) fn new() -> Self {
         TaffyLayoutEngine {
             tree: LayoutTree::default(),
-            absolute_layout_bounds: HashMap::new(),
+            absolute_layout_bounds: Vec::new(),
             computed_layouts: HashSet::new(),
             child_buffer: Vec::new(),
         }
@@ -92,7 +92,9 @@ impl TaffyLayoutEngine {
             let mut stack = SmallVec::<[LayoutId; 64]>::new();
             stack.push(id);
             while let Some(id) = stack.pop() {
-                self.absolute_layout_bounds.remove(&id);
+                if let Some(slot) = self.absolute_layout_bounds.get_mut(usize::from(id.0)) {
+                    *slot = None;
+                }
                 stack.extend(self.tree.children(id.0).iter().copied().map(LayoutId));
             }
         }
@@ -111,8 +113,9 @@ impl TaffyLayoutEngine {
     /// A node's bounds relative to the root it was computed under: taffy's rounded device pixels divided by
     /// the scale factor, parent origins added (GPUI's `layout_bounds`).
     pub(crate) fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
-        if let Some(bounds) = self.absolute_layout_bounds.get(&id) {
-            return *bounds;
+        let index = usize::from(id.0);
+        if let Some(bounds) = self.absolute_layout_bounds.get(index).copied().flatten() {
+            return bounds;
         }
         let layout = self.tree.final_layout(id.0);
         let mut bounds = Bounds {
@@ -122,7 +125,10 @@ impl TaffyLayoutEngine {
         if let Some(parent) = self.tree.parent(id.0) {
             bounds.origin += self.layout_bounds(LayoutId(parent), scale_factor).origin;
         }
-        self.absolute_layout_bounds.insert(id, bounds);
+        if index >= self.absolute_layout_bounds.len() {
+            self.absolute_layout_bounds.resize(index + 1, None);
+        }
+        self.absolute_layout_bounds[index] = Some(bounds);
         bounds
     }
 }

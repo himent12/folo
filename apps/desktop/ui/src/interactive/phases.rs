@@ -65,7 +65,7 @@ impl Interactivity {
                     self.scroll_offset = Some(state.scroll_offset.get_or_insert_with(Rc::default).clone());
                 }
 
-                let style = self.compute_style_internal(None, element_state.as_mut(), window);
+                let style = self.compute_style_internal(None, element_state.as_ref(), window);
                 let layout_id = f(style, window, cx);
                 (layout_id, element_state)
             },
@@ -94,7 +94,7 @@ impl Interactivity {
             global_id,
             |element_state, window| {
                 let mut element_state = element_state.map(|state| state.unwrap_or_default());
-                let style = self.compute_style_internal(None, element_state.as_mut(), window);
+                let style = self.compute_style_internal(None, element_state.as_ref(), window);
 
                 if let Some(state) = element_state.as_mut() {
                     if let Some(clicked) = state.clicked_state.as_ref() {
@@ -109,10 +109,13 @@ impl Interactivity {
                     }
                 }
 
+                let has_active_click = element_state
+                    .as_ref()
+                    .and_then(|state| state.clicked_state.as_ref())
+                    .is_some_and(|clicked| clicked.borrow().is_clicked());
                 let result = window.with_text_style_ref(style.text_style(), |window| {
                     window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
-                        let hitbox = self
-                            .should_insert_hitbox(&style)
+                        let hitbox = (self.should_insert_hitbox(&style) || has_active_click)
                             .then(|| window.insert_hitbox(bounds, self.hitbox_behavior));
                         let scroll_offset = self.clamp_scroll_position(bounds, &style, window);
                         f(&style, scroll_offset, hitbox, window, cx)
@@ -135,6 +138,8 @@ impl Interactivity {
             || self.tracked_focus_handle.is_some()
             || self.hover_style.is_some()
             || self.group_hover_style.is_some()
+            || self.active_style.is_some()
+            || self.group_active_style.is_some()
             || self.hover_listener.is_some()
             || !self.mouse_up_listeners.is_empty()
             || !self.mouse_down_listeners.is_empty()
@@ -202,7 +207,7 @@ impl Interactivity {
             global_id,
             |element_state, window| {
                 let mut element_state = element_state.map(|state| state.unwrap_or_default());
-                let style = self.compute_style_internal(hitbox, element_state.as_mut(), window);
+                let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
                 self.paint_hover_group_handler(window);
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
@@ -256,8 +261,8 @@ impl Interactivity {
         _cx: &mut App,
     ) -> Style {
         window.with_optional_element_state(global_id, |element_state, window| {
-            let mut element_state = element_state.map(|state| state.unwrap_or_default());
-            let style = self.compute_style_internal(hitbox, element_state.as_mut(), window);
+            let element_state = element_state.map(|state| state.unwrap_or_default());
+            let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
             (style, element_state)
         })
     }
@@ -267,7 +272,7 @@ impl Interactivity {
     fn compute_style_internal(
         &self,
         hitbox: Option<&Hitbox>,
-        element_state: Option<&mut InteractiveElementState>,
+        element_state: Option<&InteractiveElementState>,
         window: &Window,
     ) -> Style {
         let mut style = Style::default();
@@ -287,8 +292,10 @@ impl Interactivity {
                 style.refine(hover_style);
             }
         }
-        if let Some(state) = element_state {
-            let clicked = *state.clicked_state.get_or_insert_with(Default::default).borrow();
+        if let Some(state) = element_state
+            && let Some(clicked_state) = state.clicked_state.as_ref()
+        {
+            let clicked = *clicked_state.borrow();
             if clicked.group
                 && let Some(group) = self.group_active_style.as_ref()
             {
