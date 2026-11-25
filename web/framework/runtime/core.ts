@@ -14,6 +14,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { sortJobs } from './flushOrder';
+
 const NOTIFIED = 1;
 const OUTDATED = 2;
 const RUNNING = 4;
@@ -287,8 +289,9 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
   _globalVersion = globalVersion - 1;
   _flags = OUTDATED;
   _id = nextId++;
-  /** An owning computed's place: the owner it was created in (see `position`). */
-  _owner: Owner | null = null;
+  /** An owning computed's place: the owner it was created in (for tree-order flushing). */
+  _parent: Owner | null = null;
+  _depth = 0;
   _node: Link | undefined = undefined;
   _targets: Link | undefined = undefined;
   _sources: Link | undefined = undefined;
@@ -407,6 +410,7 @@ export type Cleanup = () => void;
 /** A node of the owner tree: what effects, components and roots belong to, and are disposed with. */
 export class Owner {
   _parent: Owner | null = null;
+  _depth = 0;
   _prev: Owner | null = null;
   _next: Owner | null = null;
   _first: Owner | null = null;
@@ -425,11 +429,13 @@ export class Owner {
 export function owning(c: ReadSignal<unknown>): void {
   const n = c as ComputedNode<unknown>;
   n._flags |= OWNING;
-  n._owner = owner;
+  n._parent = owner;
+  n._depth = owner === null ? 0 : owner._depth + 1;
 }
 
 function attach(parent: Owner | null, child: Owner): void {
   child._parent = parent;
+  child._depth = parent === null ? 0 : parent._depth + 1;
   if (parent === null) return;
   child._flags |= ATTACHED;
   child._prev = parent._last;
@@ -541,8 +547,10 @@ export function runWithOwner<T>(o: Owner | null, fn: () => T): T {
  */
 export function createRoot<T>(fn: (dispose: () => void) => T, parent?: Owner | null): T {
   const root = new Owner();
-  if (parent === undefined) root._parent = owner;
-  else attach(parent, root);
+  if (parent === undefined) {
+    root._parent = owner;
+    root._depth = owner === null ? 0 : owner._depth + 1;
+  } else attach(parent, root);
   return runWithOwner(root, () => fn(() => dispose(root)));
 }
 
@@ -588,7 +596,8 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
     return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
   }, options?.equals);
   c._flags |= OWNING;
-  c._owner = parent;
+  c._parent = parent;
+  c._depth = parent === null ? 0 : parent._depth + 1;
   // Created now, where it is written, as Svelte creates a block: what it renders comes before what follows it in the
   // document (component order, `createUniqueId` numbering). Untracked: whoever reads it later subscribes then. An
   // error is kept for that first read.
@@ -660,7 +669,9 @@ export function createContext<T>(defaultValue?: T): Context<T | undefined> {
 
 /** What the render phase runs, in creation order: DOM bindings, and owning computeds (branches, lists). */
 interface Job {
-  _id: number;
+  readonly _id: number;
+  readonly _parent: Owner | null;
+  readonly _depth: number;
   _flags: number;
   _update(): void;
 }
@@ -725,30 +736,12 @@ function schedule(): void {
   }
 }
 
-/** A job's position in the tree: the places of its ancestors, from the root, then its own. */
-function position(j: Job): number[] {
-  const out: number[] = [];
-  let o: Owner | null = j instanceof Owner ? j : (out.push(j._id), (j as ComputedNode<unknown>)._owner);
-  for (; o !== null; o = o._parent) out.push(o._id);
-  return out.reverse();
-}
-
-function before(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
-  return a.length - b.length;
-}
-
 /**
  * Runs `q` in tree order, as Svelte walks its effect tree (parents before children, siblings in document order: a
  * branch created late runs at its memo's place); returns the first error.
  */
 function run(q: Job[], error: unknown): unknown {
-  if (q.length > 1) {
-    const keys = new Map<Job, number[]>();
-    for (const j of q) keys.set(j, position(j));
-    q.sort((a, b) => before(keys.get(a)!, keys.get(b)!));
-  }
+  sortJobs(q);
   for (let i = 0; i < q.length; i++) {
     try {
       q[i]!._update();

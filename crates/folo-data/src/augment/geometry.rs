@@ -159,13 +159,19 @@ pub fn flip_ud(s: &mut Sample) {
     }
 }
 
+/// Target `(width, height)` after scaling `(w, h)` so its long side is `long` pixels.
+pub(crate) fn long_side_dims(w: u32, h: u32, long: u32) -> (u32, u32) {
+    let r = long as f64 / w.max(h) as f64;
+    let nw = ((w as f64 * r).round() as u32).max(1);
+    let nh = ((h as f64 * r).round() as u32).max(1);
+    (nw, nh)
+}
+
 /// Resizes a sample so its long side is `long` pixels (keeping the aspect ratio). Boxes are normalised, so they do
 /// not change.
 pub fn resize_long_side(s: Sample, long: u32) -> Sample {
     let (w, h) = (s.image.width, s.image.height);
-    let r = long as f64 / w.max(h) as f64;
-    let nw = ((w as f64 * r).round() as u32).max(1);
-    let nh = ((h as f64 * r).round() as u32).max(1);
+    let (nw, nh) = long_side_dims(w, h, long);
     if (nw, nh) == (w, h) {
         return s;
     }

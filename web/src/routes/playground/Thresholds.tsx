@@ -21,14 +21,21 @@ interface SliderValues {
 }
 
 /** Overlap and Max detections, with their hints (the Thresholds panel), or inline (a sheet's rows). */
-export function SecondarySliders(props: SliderValues & { inline: boolean }) {
+export function SecondarySliders(props: SliderValues & { inline: boolean; o2o?: boolean }) {
   const iou = bindable(props, 'iou', DEFAULTS.iou);
   const maxDet = bindable(props, 'maxDet', DEFAULTS.maxDet);
   return (
     <>
-      <div title={NMS_TIP}>
-        <Slider inline={props.inline} label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint={IOU_HINT} />
-      </div>
+      {props.o2o ? (
+        <p class="no-nms" class:inline={props.inline}>
+          <span>Overlap (IoU)</span>
+          <span class="faint">Not used · end-to-end model</span>
+        </p>
+      ) : (
+        <div title={NMS_TIP}>
+          <Slider inline={props.inline} label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint={IOU_HINT} />
+        </div>
+      )}
       <Slider inline={props.inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} hint={MAX_HINT} />
     </>
   );
@@ -65,7 +72,7 @@ export function RailThresholds(props: SliderValues & { o2o: boolean }) {
 }
 
 /** The phone sheet's every threshold, or the tablet popover's Max detections; then what is drawn on the image. */
-export function MoreBody(props: SliderValues & { tablet: boolean; toggles: () => JSX.Element }) {
+export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean; toggles: () => JSX.Element }) {
   const conf = bindable(props, 'conf', DEFAULTS.conf);
   const iou = bindable(props, 'iou', DEFAULTS.iou);
   const maxDet = bindable(props, 'maxDet', DEFAULTS.maxDet);
@@ -73,11 +80,19 @@ export function MoreBody(props: SliderValues & { tablet: boolean; toggles: () =>
     <div class="sheet-body">
       <div class="more-sliders">
         {props.tablet ? (
-          <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} />
+          <>
+            {props.o2o ? (
+              <p class="no-nms inline">
+                <span>Overlap (IoU)</span>
+                <span class="faint">Not used · end-to-end model</span>
+              </p>
+            ) : null}
+            <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} />
+          </>
         ) : (
           <>
             <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-            <SecondarySliders inline bind:iou={iou} bind:maxDet={maxDet} />
+            <SecondarySliders inline o2o={props.o2o} bind:iou={iou} bind:maxDet={maxDet} />
           </>
         )}
       </div>
@@ -102,9 +117,14 @@ css`
   .no-nms {
     display: flex;
     justify-content: space-between;
+    align-items: baseline;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
+  }
+  .no-nms.inline {
+    align-items: center;
+    min-height: 44px;
   }
   .sheet-body {
     overflow-y: auto;

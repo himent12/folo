@@ -17,7 +17,7 @@
  */
 import FileJson from '$icons/file-json';
 import Plus from '$icons/plus';
-import { bindable, computed, createUniqueId, css, effect, For, signal, tick, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, For, onCleanup, signal, tick, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Bench, BenchCatalog, BenchEntry, BenchPrediction, LabelAgent, Model, StartBenchEntry } from '$lib/api/types';
 import { checkPredictions, estimateBytes, ExternalSendError, PART_BYTES, parsePredictions, partsOf, sendExternal, type PredictionSummary } from '$lib/bench/external';
@@ -89,6 +89,10 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   const reading = signal(false);
   const check = signal<Check | null>(null);
   let fileInput: HTMLInputElement | undefined;
+  /** Monotonic token for each file pick / dialog reset so stale reads never overwrite a newer selection. */
+  let pickSeq = 0;
+  /** Whether the user manually typed a non-empty leaderboard name (kept across file replacements). */
+  let nameEdited = false;
   /** The benchmark's image ids, for the predictions' check (loaded once the external kind is shown). */
   const imageIds = signal<string[] | null>(null);
   /** A large file on its way in parts: the records sent of all of them; `confirm` while closing asks first. */
@@ -98,9 +102,19 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
   const confirmStop = signal(false);
   let abort: AbortController | null = null;
 
+  onCleanup(() => {
+    pickSeq++;
+  });
+
   // Every opening starts fresh on the kind it was opened with; the first model that shares classes is picked.
   effect(() => {
-    if (!open.get()) return;
+    if (!open.get()) {
+      pickSeq++;
+      untrack(() => reading.set(false));
+      return;
+    }
+    pickSeq++;
+    nameEdited = false;
     untrack(() => {
       error.set(undefined);
       touched.set(false);
@@ -112,6 +126,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
       extName.set('');
       scored.set(true);
       file.set(null);
+      reading.set(false);
       check.set(null);
       modelId.set('');
       sending.set(null);
@@ -181,11 +196,15 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
       }
     });
   });
+  const suggestedName = (name: string) => name.replace(/\.json$/i, '').replace(/[-_ ]?predictions?$/i, '') || 'external';
+
   async function pick(e: Event & { currentTarget: HTMLInputElement }) {
     const input = e.currentTarget;
     const f = input.files?.[0];
     input.value = '';
-    if (!f) return;
+    if (!f || busy.peek() || sending.peek()) return;
+    const seq = ++pickSeq;
+    const stale = () => seq !== pickSeq || !open.peek();
     file.set(f);
     reading.set(true);
     check.set(null);
@@ -193,8 +212,12 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
       // "Reading the file…" paints before the parse holds the page (seconds for a 200 MB file); the text is let go
       // as soon as it is parsed, and the records are checked where they are, never copied.
       await tick();
+      if (stale()) return;
       await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-      const parsed = parsePredictions(await f.text());
+      if (stale()) return;
+      const text = await f.text();
+      if (stale()) return;
+      const parsed = parsePredictions(text);
       if ('error' in parsed) check.set({ ok: false, error: parsed.error });
       else {
         const catalog = props.catalog;
@@ -206,13 +229,19 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
           names: Object.fromEntries((catalog?.conditions ?? []).map((x) => [x.id, x.name])),
         });
         check.set(c);
-        if (c.ok) scored.set(c.summary.scores);
-        if (c.ok && !extName.peek().trim()) extName.set(f.name.replace(/\.json$/i, '').replace(/[-_ ]?predictions?$/i, '') || 'external');
+        if (c.ok) {
+          scored.set(c.summary.scores);
+          if (!nameEdited || !extName.peek().trim()) {
+            extName.set(suggestedName(f.name));
+            nameEdited = false;
+          }
+        }
       }
     } catch {
+      if (stale()) return;
       check.set({ ok: false, error: 'The file could not be read.' });
     } finally {
-      reading.set(false);
+      if (seq === pickSeq) reading.set(false);
     }
   }
   const condName = (id: string) => props.catalog?.conditions.find((c) => c.id === id)?.name ?? id;
@@ -268,11 +297,13 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
       ? 'Reading the file'
       : !file.get()
         ? 'Choose a predictions file'
-        : c && !c.ok
-          ? 'Fix the predictions file first'
-          : !extName.get().trim()
-            ? 'Enter a name'
-            : null;
+        : !c
+          ? 'Checking the file'
+          : !c.ok
+            ? 'Fix the predictions file first'
+            : !extName.get().trim()
+              ? 'Enter a name'
+              : null;
   });
   const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (imagesShown.get() ?? undefined)));
   const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
@@ -546,7 +577,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             <div class="file">
               <input ref={(e) => (fileInput = e)} type="file" accept="application/json,.json" hidden onchange={pick} />
               <div class="f-row">
-                <Button icon={FileJson} onclick={() => fileInput?.click()}>
+                <Button icon={FileJson} disabled={busy.get() || !!sending.get()} onclick={() => fileInput?.click()}>
                   {file.get() ? 'Choose another file' : 'Choose predictions file'}
                 </Button>
                 {file.get() ? (
@@ -587,7 +618,14 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               )}
             </div>
             <Field label="Name on the leaderboard" for={`${uid}-name`} error={show(errs.get().name)}>
-              <Input id={`${uid}-name`} bind:value={extName} placeholder="e.g. yolo26n" autocomplete="off" invalid={!!show(errs.get().name)} />
+              <Input
+                id={`${uid}-name`}
+                bind:value={extName}
+                oninput={(e) => (nameEdited = !!e.currentTarget.value.trim())}
+                placeholder="e.g. yolo26n"
+                autocomplete="off"
+                invalid={!!show(errs.get().name)}
+              />
             </Field>
             <Switch
               label="The model gives confidences"
