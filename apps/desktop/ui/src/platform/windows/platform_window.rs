@@ -5,8 +5,6 @@ use super::drop_target;
 use super::util::*;
 use super::window::{WindowOpenState, WindowsWindow, calculate_window_rect};
 use crate::*;
-use ::windows::Win32::Foundation::*;
-use ::windows::Win32::Graphics::Gdi::*;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::HSTRING;
@@ -86,12 +84,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        let mut point = POINT::default();
-        // SAFETY: valid out pointers; reading the cursor position does not move it.
-        unsafe {
-            let _ = GetCursorPos(&mut point);
-            let _ = ScreenToClient(self.0.hwnd, &mut point);
-        }
+        let point = self.0.client_cursor_pos(self.0.hwnd);
         logical_point(point.x as f32, point.y as f32, self.scale_factor())
     }
 

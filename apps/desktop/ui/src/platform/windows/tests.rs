@@ -222,24 +222,34 @@ fn losing_the_capture_or_activation_releases_the_pressed_buttons() {
     destroy(hwnd);
 }
 
-/// A view filling the window that counts its clicks.
-struct Clickable(Rc<RefCell<usize>>);
+/// A view filling the window that counts its clicks and outside mouse-up releases.
+struct Clickable {
+    clicks: Rc<RefCell<usize>>,
+    up_out: Rc<RefCell<usize>>,
+}
 
 impl Render for Clickable {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let clicks = self.0.clone();
-        div().id("clickable").size_full().on_click(move |_, _, _| *clicks.borrow_mut() += 1)
+        let clicks = self.clicks.clone();
+        let up_out = self.up_out.clone();
+        div()
+            .id("clickable")
+            .size_full()
+            .on_click(move |_, _, _| *clicks.borrow_mut() += 1)
+            .on_mouse_up_out(MouseButton::Left, move |_, _, _| *up_out.borrow_mut() += 1)
     }
 }
 
 /// A press cancelled by the capture going away or by deactivation clicks nothing, even with the cursor
-/// over the element (wherever the real cursor is: the press is reported released outside the window);
-/// a press released in the window clicks.
+/// over the element (the press is reported released outside the window so `on_mouse_up_out` still runs);
+/// a press released in the window clicks. Works identically under `FOLO_UI_OFFSCREEN=1` without moving
+/// the window onto a display or touching the real pointer.
 #[test]
 fn a_cancelled_press_does_not_click() {
     let platform = platform();
     let app = App::new_app(platform.clone(), Arc::new(()));
     let clicks: Rc<RefCell<usize>> = Rc::default();
+    let up_out: Rc<RefCell<usize>> = Rc::default();
     let handle = app
         .update(|cx| {
             let options = WindowOptions {
@@ -249,65 +259,121 @@ fn a_cancelled_press_does_not_click() {
                 ..Default::default()
             };
             let clicks = clicks.clone();
-            cx.open_window(options, move |_, cx| cx.new(|_| Clickable(clicks)))
+            let up_out = up_out.clone();
+            cx.open_window(options, move |_, cx| cx.new(|_| Clickable { clicks, up_out }))
         })
         .unwrap();
     let draw = || app.update(|cx| cx.update_window(handle.into(), |_, window, cx| window.draw(cx))).unwrap();
     draw();
     let hwnd = platform.window_handles()[0];
-    // The (hidden) window goes under the real cursor, which is read, never moved: a cancelled press
-    // reported where the cursor is would land on the element and click it.
-    let mut cursor = POINT::default();
     let mut client = RECT::default();
-    // SAFETY: valid out pointers; moving our own hidden window shows nothing and activates nothing.
-    unsafe {
-        use ::windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
-        GetCursorPos(&mut cursor).unwrap();
-        // The client area's top-left 40 px up and left of the cursor (the frame and caption around it).
-        let mut window = RECT::default();
-        GetWindowRect(hwnd, &mut window).unwrap();
-        let mut origin = POINT::default();
-        assert!(ClientToScreen(hwnd, &mut origin).as_bool());
-        let (x, y) = (cursor.x - 40 - (origin.x - window.left), cursor.y - 40 - (origin.y - window.top));
-        SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
-        assert!(ScreenToClient(hwnd, &mut cursor).as_bool());
-        GetClientRect(hwnd, &mut client).unwrap();
-    }
+    // SAFETY: valid out pointer for our own window.
+    unsafe { GetClientRect(hwnd, &mut client).unwrap() };
+    let inside = POINT { x: client.right / 2, y: client.bottom / 2 };
     assert!(
-        cursor.x > 0 && cursor.y > 0 && cursor.x < client.right && cursor.y < client.bottom,
-        "{cursor:?}"
+        inside.x > client.left
+            && inside.y > client.top
+            && inside.x < client.right
+            && inside.y < client.bottom,
+        "{inside:?} in {client:?}"
     );
-    let at = ((cursor.y as isize) << 16) | cursor.x as isize;
-    let take = || std::mem::take(&mut *clicks.borrow_mut());
+    // Point the injected cursor directly inside the client area: if `cancel_presses` did not clamp
+    // the release outside the client rect, it would land on `Clickable` and fire `on_click`.
+    platform.set_test_client_cursor(Some(inside));
+    let at = ((inside.y as isize) << 16) | (inside.x as isize & 0xFFFF);
+    let take = || (std::mem::take(&mut *clicks.borrow_mut()), std::mem::take(&mut *up_out.borrow_mut()));
 
     send(hwnd, WM_MOUSEMOVE, 0, at);
     send(hwnd, WM_LBUTTONDOWN, 0, at);
     send(hwnd, WM_LBUTTONUP, 0, at);
-    assert_eq!(take(), 1, "a press released in the window clicks");
+    assert_eq!(take(), (1, 0), "a press released in the window clicks");
 
     draw();
     send(hwnd, WM_LBUTTONDOWN, 0, at);
     // SAFETY: ending this thread's capture, as Windows does.
     unsafe { ReleaseCapture().unwrap() };
-    assert_eq!(take(), 0, "the capture went away");
+    assert_eq!(take(), (0, 1), "the capture went away");
 
     draw();
     send(hwnd, WM_LBUTTONDOWN, 0, at);
     send(hwnd, WM_CANCELMODE, 0, 0);
-    assert_eq!(take(), 0, "WM_CANCELMODE");
+    assert_eq!(take(), (0, 1), "WM_CANCELMODE");
 
     draw();
     send(hwnd, WM_LBUTTONDOWN, 0, at);
     send(hwnd, WM_ACTIVATE, WA_INACTIVE as usize, 0);
     pump();
-    assert_eq!(take(), 0, "the window was deactivated");
+    assert_eq!(take(), (0, 1), "the window was deactivated");
     // The cancelled press is over: a release arriving later clicks nothing either.
     draw();
     send(hwnd, WM_LBUTTONUP, 0, at);
-    assert_eq!(take(), 0, "a stray release");
+    assert_eq!(take(), (0, 0), "a stray release");
+
+    // With the cursor already outside the client area, cancellation still clears the press without
+    // clicking.
+    platform.set_test_client_cursor(Some(POINT { x: client.right + 20, y: client.bottom + 20 }));
+    draw();
+    send(hwnd, WM_LBUTTONDOWN, 0, at);
+    send(hwnd, WM_CANCELMODE, 0, 0);
+    assert_eq!(take(), (0, 1), "cancelled with cursor outside client rect");
+
+    // Ordinary click still succeeds after cancelled presses.
+    platform.set_test_client_cursor(Some(inside));
+    draw();
+    send(hwnd, WM_MOUSEMOVE, 0, at);
+    send(hwnd, WM_LBUTTONDOWN, 0, at);
+    send(hwnd, WM_LBUTTONUP, 0, at);
+    assert_eq!(take(), (1, 0), "ordinary click still succeeds after cancellations");
 
     destroy(hwnd);
     drop(app);
+}
+
+/// `cancel_presses` clamps an in-client cursor just outside the client rect (`(-1, -1)` in device
+/// pixels) and keeps an already-outside cursor coordinate as reported.
+#[test]
+fn cancelled_press_reports_release_outside_client_rect() {
+    let platform = platform();
+    let window = platform.open_windows_window(hidden_params()).unwrap();
+    let hwnd = window.hwnd();
+    let scale = window.scale_factor();
+    let mut client = RECT::default();
+    // SAFETY: valid out pointer for our own window.
+    unsafe { GetClientRect(hwnd, &mut client).unwrap() };
+    let inside = POINT { x: client.right / 2, y: client.bottom / 2 };
+    let outside = POINT { x: client.right + 25, y: client.bottom + 15 };
+    let at = ((inside.y as isize) << 16) | (inside.x as isize & 0xFFFF);
+
+    let ups: Rc<RefCell<Vec<Point<Pixels>>>> = Rc::default();
+    window.on_input(Box::new({
+        let ups = ups.clone();
+        move |input| {
+            if let PlatformInput::MouseUp(e) = input {
+                ups.borrow_mut().push(e.position);
+            }
+            DispatchEventResult::default()
+        }
+    }));
+
+    platform.set_test_client_cursor(Some(inside));
+    send(hwnd, WM_LBUTTONDOWN, 0, at);
+    send(hwnd, WM_CANCELMODE, 0, 0);
+    assert_eq!(
+        std::mem::take(&mut *ups.borrow_mut()),
+        vec![super::util::logical_point((client.left - 1) as f32, (client.top - 1) as f32, scale)],
+        "cursor inside client rect is clamped just outside it"
+    );
+
+    platform.set_test_client_cursor(Some(outside));
+    send(hwnd, WM_LBUTTONDOWN, 0, at);
+    send(hwnd, WM_CANCELMODE, 0, 0);
+    assert_eq!(
+        std::mem::take(&mut *ups.borrow_mut()),
+        vec![super::util::logical_point(outside.x as f32, outside.y as f32, scale)],
+        "cursor outside client rect is preserved"
+    );
+
+    destroy(hwnd);
 }
 
 /// A focusable field that records what the platform types into it; `ctrl-k` is bound and handled.

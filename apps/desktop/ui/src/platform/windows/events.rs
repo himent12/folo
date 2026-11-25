@@ -436,6 +436,21 @@ impl WindowInner {
         self.cancel_presses(hwnd);
     }
 
+    /// Cursor position in `hwnd`'s client device pixels.
+    pub(crate) fn client_cursor_pos(&self, hwnd: HWND) -> POINT {
+        #[cfg(test)]
+        if let Some(p) = self.shared.test_client_cursor.get() {
+            return p;
+        }
+        let mut p = POINT::default();
+        // SAFETY: valid out pointers; reading the cursor position does not move it.
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(hwnd, &mut p);
+        }
+        p
+    }
+
     /// A mouse up for each button pressed in the window, outside the window: where a real release lands
     /// when the button comes up elsewhere. The press was cancelled, not completed, so it must click and
     /// drop nothing, even with the cursor still over the element pressed; what ends a press wherever it
@@ -449,12 +464,10 @@ impl WindowInner {
         if buttons.is_empty() {
             return;
         }
-        let mut p = POINT::default();
+        let mut p = self.client_cursor_pos(hwnd);
         let mut client = RECT::default();
-        // SAFETY: valid out pointers; reading the cursor position does not move it.
+        // SAFETY: valid out pointer.
         unsafe {
-            let _ = GetCursorPos(&mut p);
-            let _ = ScreenToClient(hwnd, &mut p);
             let _ = GetClientRect(hwnd, &mut client);
         }
         if p.x >= client.left && p.x < client.right && p.y >= client.top && p.y < client.bottom {
