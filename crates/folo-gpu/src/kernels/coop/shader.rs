@@ -496,8 +496,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let _ = writeln!(s, "  let cbase = sg * {FRAG}u;");
     for i in 0..fm {
         for j in 0..fnn {
+            let last = i + 1 == fm && j + 1 == fnn;
             let _ = writeln!(s, "  coopStoreT(acc{i}_{j}, &Cs[cbase], 16u);");
-            s.push_str("  workgroupBarrier();\n  {\n");
+            s.push_str("  subgroupBarrier();\n  {\n");
             let _ = writeln!(
                 s,
                 "    let row = m0 + wm * {}u + {}u + er; let col = n0 + wn * {}u + {}u + ec;",
@@ -561,7 +562,11 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                     }
                 }
             }
-            s.push_str("    }\n  }\n  workgroupBarrier();\n");
+            if last {
+                s.push_str("    }\n  }\n");
+            } else {
+                s.push_str("    }\n  }\n  subgroupBarrier();\n");
+            }
         }
     }
     s.push_str("}\n");
@@ -595,3 +600,47 @@ pub(crate) static COOP_CAT: KernelDef = KernelDef {
     ],
     source: Source::Generated(gen_coop),
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epilogue_uses_subgroup_barriers_without_trailing_barrier() {
+        for cfg in [
+            CoopConfig::C32X32,
+            CoopConfig::C64X64,
+            CoopConfig::C64X128,
+            CoopConfig::C128X128,
+            CoopConfig::C32X128,
+            CoopConfig::C16X256,
+        ] {
+            let frags = (cfg.fm() * cfg.fnn()) as usize;
+            for subpixel in [false, true] {
+                let mut spec = Spec::new()
+                    .u32("BM", cfg.bm)
+                    .u32("BN", cfg.bn)
+                    .u32("BK", cfg.bk)
+                    .u32("WGM", cfg.wgm)
+                    .u32("WGN", cfg.wgn)
+                    .u32("CONV_MODE", u32::from(subpixel))
+                    .bool("SUBPIXEL", subpixel);
+                if subpixel {
+                    spec = spec.u32("KH", 2).u32("KW", 2);
+                }
+                let src = gen_coop(&spec);
+                let epilogue = src.split_once("let cbase = sg * ").expect("epilogue marker").1;
+                assert_eq!(
+                    epilogue.matches("workgroupBarrier()").count(),
+                    0,
+                    "{cfg:?} subpixel={subpixel}: unexpected workgroupBarrier in epilogue"
+                );
+                assert_eq!(
+                    epilogue.matches("subgroupBarrier()").count(),
+                    2 * frags - 1,
+                    "{cfg:?} subpixel={subpixel}: expected 2*frags-1 subgroupBarriers"
+                );
+            }
+        }
+    }
+}
