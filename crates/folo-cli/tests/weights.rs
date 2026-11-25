@@ -2,6 +2,7 @@
 //! with its redirect, what is installed and what is not (a bad checksum, a cut body, a server error, no answer),
 //! and the fallback to the GitHub CLI when the download is refused (`FOLO_GH` names a missing or failing `gh`).
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -61,9 +62,15 @@ struct Server {
 
 impl Server {
     fn start(routes: impl FnOnce(&str) -> Vec<(String, Answer)>) -> Server {
+        Self::start_seq(|base| routes(base).into_iter().map(|(p, a)| (p, vec![a])).collect())
+    }
+
+    /// Serves a queue of answers per path: each request pops the front until one answer remains, which then repeats.
+    fn start_seq(routes: impl FnOnce(&str) -> Vec<(String, Vec<Answer>)>) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes = routes(&base);
+        let mut queues: HashMap<String, VecDeque<Answer>> =
+            routes(&base).into_iter().map(|(p, answers)| (p, VecDeque::from(answers))).collect();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&requests);
         std::thread::spawn(move || {
@@ -72,8 +79,10 @@ impl Server {
                 let head = read_head(&mut s);
                 let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
                 log.lock().unwrap().push(head);
-                let answer =
-                    routes.iter().find(|(p, _)| *p == path).map_or(Answer::Status(404), |(_, a)| a.clone());
+                let answer = queues
+                    .get_mut(&path)
+                    .and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() })
+                    .unwrap_or(Answer::Status(404));
                 let _ = respond(&mut s, &answer);
             }
         });
@@ -118,7 +127,14 @@ fn respond(s: &mut TcpStream, answer: &Answer) -> std::io::Result<()> {
         Answer::Redirect(to) => ("302 Found", format!("Location: {to}\r\n"), b"", 0),
         Answer::Status(404) => ("404 Not Found", String::new(), b"Not Found", 9),
         Answer::Status(code) => {
-            (if *code == 503 { "503 Service Unavailable" } else { "500 Error" }, String::new(), b"", 0)
+            let reason = match *code {
+                400 => "400 Bad Request",
+                429 => "429 Too Many Requests",
+                502 => "502 Bad Gateway",
+                503 => "503 Service Unavailable",
+                _ => "500 Error",
+            };
+            (reason, String::new(), b"", 0)
         }
         Answer::Cut(b) => ("200 OK", String::new(), &b[..b.len() / 2], b.len()),
     };
@@ -258,12 +274,14 @@ fn a_cut_body_a_server_error_or_no_answer_is_a_download_error() {
     let e = failed(&cache, pull(&cache, &cut.base, NO_GH, &[]));
     assert_eq!(e["code"], "download_failed", "{e}");
     assert!(e["message"].as_str().unwrap().contains("broke off"), "{e}");
+    assert_eq!(cut.paths(), [SUMS, ASSET, ASSET, ASSET, ASSET]);
 
-    // A server error is not a reason to try `gh`.
+    // A server error is retried and never falls back to `gh`.
     let busy = Server::start(|_| vec![(SUMS.into(), Answer::Status(503))]);
     let e = failed(&cache, pull(&cache, &busy.base, NO_GH, &[]));
     assert_eq!(e["code"], "download_failed", "{e}");
     assert!(e["message"].as_str().unwrap().ends_with("answered 503"), "{e}");
+    assert_eq!(busy.paths(), [SUMS, SUMS, SUMS, SUMS]);
 
     // A connection closed without an answer (as when nothing answers): no HTTP status at all.
     let e = failed(&cache, pull(&cache, &hang_up(), NO_GH, &[]));
@@ -271,9 +289,67 @@ fn a_cut_body_a_server_error_or_no_answer_is_a_download_error() {
     assert!(e["hint"].as_str().unwrap().contains("network"), "{e}");
 }
 
+#[test]
+fn transient_errors_and_cut_bodies_recover_on_retry() {
+    let (bytes, sha) = model();
+    let server = Server::start_seq(|_| {
+        vec![
+            (SUMS.into(), vec![Answer::Status(503), Answer::Status(429), sums_of(sha)]),
+            (
+                ASSET.into(),
+                vec![Answer::Cut(Arc::clone(bytes)), Answer::Status(502), Answer::Ok(Arc::clone(bytes))],
+            ),
+        ]
+    });
+    let root = TestDir::new("weights-retry-ok");
+    let cache = root.join("cache");
+
+    let (code, lines, stderr) = pull(&cache, &server.base, NO_GH, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let done = lines.last().unwrap();
+    assert_eq!((done["event"].as_str(), done["downloaded"].as_bool()), (Some("done"), Some(true)), "{done}");
+    assert_eq!(done["via"].as_str(), Some("https"));
+    assert_eq!(done["sha256"].as_str(), Some(sha.as_str()));
+    assert_eq!(cached(&cache), ["folo-n-coco-v2.folo"]);
+    assert_eq!(std::fs::read(cache.join("folo-n-coco-v2.folo")).unwrap(), **bytes);
+    assert_eq!(server.paths(), [SUMS, SUMS, SUMS, ASSET, ASSET, ASSET]);
+}
+
+#[test]
+fn non_retryable_client_error_fails_immediately_without_retries() {
+    let server = Server::start(|_| vec![(SUMS.into(), Answer::Status(400))]);
+    let root = TestDir::new("weights-400");
+    let cache = root.join("cache");
+
+    let e = failed(&cache, pull(&cache, &server.base, NO_GH, &[]));
+    assert_eq!(e["code"], "download_failed", "{e}");
+    assert!(e["message"].as_str().unwrap().ends_with("answered 400"), "{e}");
+    assert_eq!(server.paths(), [SUMS]);
+}
+
+#[test]
+fn failed_force_repull_preserves_existing_cached_weights() {
+    let (bytes, sha) = model();
+    let ok =
+        Server::start(|_| vec![(SUMS.into(), sums_of(sha)), (ASSET.into(), Answer::Ok(Arc::clone(bytes)))]);
+    let root = TestDir::new("weights-atomic-force");
+    let cache = root.join("cache");
+
+    let (code, _, stderr) = pull(&cache, &ok.base, NO_GH, &[]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let broken = Server::start(|_| vec![(SUMS.into(), Answer::Status(503))]);
+    let (code, lines, stderr) = pull(&cache, &broken.base, NO_GH, &["--force"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(lines.last().unwrap()["error"]["code"], "download_failed");
+    assert_eq!(cached(&cache), ["folo-n-coco-v2.folo"]);
+    assert_eq!(std::fs::read(cache.join("folo-n-coco-v2.folo")).unwrap(), **bytes);
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
     c.env("FOLO_NO_CACHE", "1");
+    c.env("FOLO_WEIGHTS_RETRY_DELAY_MS", "0");
     c
 }
