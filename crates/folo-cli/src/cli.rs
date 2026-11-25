@@ -794,9 +794,10 @@ pub struct CheckArgs {
     /// Read only image headers instead of decoding every image (faster; misses truncated image data).
     #[arg(long)]
     pub headers_only: bool,
-    /// List only issues at least this serious in `--json` (`counts` always covers every issue).
-    #[arg(long, value_enum, default_value_t = SeverityArg::Info)]
-    pub min_severity: SeverityArg,
+    /// List only issues at least this serious (`counts` always covers every issue) [default: warning in human
+    /// output, info in --json].
+    #[arg(long, value_enum)]
+    pub min_severity: Option<SeverityArg>,
 }
 
 /// Issue severity, most serious first.
@@ -805,6 +806,7 @@ pub enum SeverityArg {
     /// The loader skips the image.
     Error,
     /// Fixed up on load, or suspicious.
+    #[value(alias = "warn")]
     Warning,
     /// Background images.
     Info,

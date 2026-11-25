@@ -11,7 +11,7 @@ use folo_data::{DataError, DatasetStats, Format, Histogram, ImageFormat, LoadedD
 use serde_json::{Value, json};
 
 use crate::cli::{
-    CheckArgs, ConvertArgs, DatasetCommand, FormatArg, StatsArgs, SynthArgs, SynthImageFormat,
+    CheckArgs, ConvertArgs, DatasetCommand, FormatArg, SeverityArg, StatsArgs, SynthArgs, SynthImageFormat,
     TargetFormatArg,
 };
 use crate::output::{CliError, ExitCode, Out};
@@ -294,8 +294,18 @@ fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     let secs = t0.elapsed().as_secs_f64();
     let (errors, warnings, infos) =
         (report.count(Severity::Error), report.count(Severity::Warning), report.count(Severity::Info));
+    let total = errors + warnings + infos;
     let by_kind: serde_json::Map<String, Value> =
         report.counts().into_iter().map(|(k, n)| (k.as_str().to_string(), json!(n))).collect();
+    let json_min = args.min_severity.unwrap_or(SeverityArg::Info);
+    let human_min = args.min_severity.unwrap_or(SeverityArg::Warning);
+    let issues: Vec<Value> = report
+        .issues
+        .iter()
+        .filter(|i| severity_allows(json_min, i.severity()))
+        .map(|i| issue_json(i, &report.root, args.fix_dry_run))
+        .collect();
+    let filtered_out = report.issues.len().saturating_sub(issues.len());
     out.record(&json!({
         "path": folo_api::json::path(&args.path),
         "root": folo_api::json::path(&report.root),
@@ -304,16 +314,19 @@ fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
         "images": report.images(),
         "splits": splits_json(report.splits),
         "clean": report.is_clean(),
-        "counts": { "error": errors, "warning": warnings, "info": infos, "by_kind": by_kind },
-        "issues": report
-            .issues
-            .iter()
-            .filter(|i| severity_rank(i.severity()) <= args.min_severity as u8)
-            .map(|i| issue_json(i, &report.root, args.fix_dry_run))
-            .collect::<Vec<_>>(),
+        "min_severity": severity_arg_name(json_min),
+        "counts": {
+            "error": errors,
+            "warning": warnings,
+            "info": infos,
+            "total": total,
+            "by_kind": by_kind,
+        },
+        "filtered_out": filtered_out,
+        "issues": issues,
         "seconds": secs,
     }));
-    for line in check_lines(&report, args.fix_dry_run, secs) {
+    for line in check_lines(&report, args.fix_dry_run, human_min, secs) {
         out.human(line);
     }
     if report.is_clean() {
@@ -340,7 +353,25 @@ fn severity_rank(s: Severity) -> u8 {
     }
 }
 
-fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
+/// Whether an issue of severity `actual` passes a `--min-severity` threshold of `min`.
+fn severity_allows(min: SeverityArg, actual: Severity) -> bool {
+    let cutoff = match min {
+        SeverityArg::Error => 0,
+        SeverityArg::Warning => 1,
+        SeverityArg::Info => 2,
+    };
+    severity_rank(actual) <= cutoff
+}
+
+fn severity_arg_name(s: SeverityArg) -> &'static str {
+    match s {
+        SeverityArg::Error => "error",
+        SeverityArg::Warning => "warning",
+        SeverityArg::Info => "info",
+    }
+}
+
+fn check_lines(r: &CheckReport, fixes: bool, min_severity: SeverityArg, secs: f64) -> Vec<String> {
     const SHOWN: usize = 200;
     let mut l = vec![format!(
         "checked {} images ({}, {}) in {secs:.1}s",
@@ -348,11 +379,11 @@ fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
         format_name(r.format),
         folo_api::json::path(&r.root)
     )];
-    let problems: Vec<_> = r.issues.iter().filter(|i| i.severity() != Severity::Info).collect();
-    if !problems.is_empty() {
+    let listed: Vec<_> = r.issues.iter().filter(|i| severity_allows(min_severity, i.severity())).collect();
+    if !listed.is_empty() {
         l.push(String::new());
     }
-    for i in problems.iter().take(SHOWN) {
+    for i in listed.iter().take(SHOWN) {
         let at = match i.line {
             Some(n) => format!("{}:{n}", rel(&i.file, &r.root)),
             None => rel(&i.file, &r.root),
@@ -367,9 +398,12 @@ fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
             l.push(format!("{:26}would {f}", ""));
         }
     }
-    if problems.len() > SHOWN {
-        l.push(format!("... {} more (--json lists every issue)", problems.len() - SHOWN));
+    if listed.len() > SHOWN {
+        l.push(format!("... {} more (--json lists every issue)", listed.len() - SHOWN));
     }
+    let errors = r.count(Severity::Error);
+    let warnings = r.count(Severity::Warning);
+    let infos = r.count(Severity::Info);
     let empty = r.counts().get(&CheckKind::EmptyImage).copied().unwrap_or(0);
     l.push(String::new());
     let summary: Vec<String> = r
@@ -379,17 +413,23 @@ fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
         .map(|(k, n)| format!("{n} {}", k.as_str()))
         .collect();
     if r.is_clean() {
-        l.push("clean: no errors or warnings".into());
+        l.push(format!("clean: 0 error(s), 0 warning(s), {infos} info(s)"));
     } else {
-        l.push(format!(
-            "{} error(s), {} warning(s): {}",
-            r.count(Severity::Error),
-            r.count(Severity::Warning),
-            summary.join(", ")
-        ));
+        l.push(format!("{errors} error(s), {warnings} warning(s), {infos} info(s): {}", summary.join(", ")));
+    }
+    if min_severity == SeverityArg::Error && warnings > 0 {
+        l.push(format!("({warnings} warning(s) hidden by --min-severity error)"));
     }
     if empty > 0 {
-        l.push(format!("{empty} empty image(s) without boxes (background images; fine unless unintended)"));
+        if min_severity == SeverityArg::Info {
+            l.push(format!(
+                "{empty} empty image(s) without boxes (background images; fine unless unintended)"
+            ));
+        } else {
+            l.push(format!(
+                "{empty} empty image(s) without boxes (background images; pass --min-severity info to list them)"
+            ));
+        }
     }
     l
 }
@@ -565,5 +605,27 @@ mod tests {
         assert_eq!(truncate_class_name("héllo_wörld", 5), "héll…");
         assert_eq!(truncate_class_name("abc", 1), "…");
         assert_eq!(truncate_class_name("abc", 0), "");
+    }
+
+    #[test]
+    fn severity_filter_orders_error_warning_info() {
+        assert_eq!(severity_arg_name(SeverityArg::Error), "error");
+        assert_eq!(severity_arg_name(SeverityArg::Warning), "warning");
+        assert_eq!(severity_arg_name(SeverityArg::Info), "info");
+
+        // Error threshold: only errors pass.
+        assert!(severity_allows(SeverityArg::Error, Severity::Error));
+        assert!(!severity_allows(SeverityArg::Error, Severity::Warning));
+        assert!(!severity_allows(SeverityArg::Error, Severity::Info));
+
+        // Warning threshold: errors and warnings pass; info is filtered.
+        assert!(severity_allows(SeverityArg::Warning, Severity::Error));
+        assert!(severity_allows(SeverityArg::Warning, Severity::Warning));
+        assert!(!severity_allows(SeverityArg::Warning, Severity::Info));
+
+        // Info threshold: every severity passes.
+        assert!(severity_allows(SeverityArg::Info, Severity::Error));
+        assert!(severity_allows(SeverityArg::Info, Severity::Warning));
+        assert!(severity_allows(SeverityArg::Info, Severity::Info));
     }
 }

@@ -232,6 +232,11 @@ fn check_reports_each_issue_and_exits_1() {
     let listed = only["issues"].as_array().unwrap();
     assert!(!listed.is_empty() && listed.iter().all(|i| i["severity"] == "error"), "{listed:?}");
     assert_eq!(only["counts"], r["counts"]);
+    assert_eq!(only["min_severity"], "error");
+    assert_eq!(
+        only["filtered_out"].as_u64().unwrap() + listed.len() as u64,
+        only["counts"]["total"].as_u64().unwrap()
+    );
 
     // Without --fix-dry-run there are no fixes; human output names the file and line.
     let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json"]);
@@ -244,6 +249,88 @@ fn check_reports_each_issue_and_exits_1() {
         "{stdout}"
     );
     assert!(stderr.contains("error(s)"), "{stderr}");
+}
+
+/// `--min-severity` filters both human and `--json` output across `info`, `warning`/`warn`, and `error`,
+/// while keeping crisp per-severity counts and exit code semantics intact.
+#[test]
+fn check_min_severity_filters_human_and_json_with_per_severity_counts() {
+    let t = TestDir::new("cli-check-min-severity");
+    let dir = synth(&t, "mixed", &[]);
+    // One error (class overflow), one warning (duplicate image), and one info (empty background image).
+    std::fs::write(dir.join("labels/train/000000.txt"), "9 0.5 0.5 0.2 0.2\n").unwrap();
+    std::fs::copy(dir.join("images/train/000001.jpg"), dir.join("images/train/000001_dup.jpg")).unwrap();
+    std::fs::write(dir.join("labels/train/000002.txt"), "").unwrap();
+
+    // JSON default (info): includes error, warning, info; filtered_out == 0.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json"]);
+    assert_eq!(code, 1);
+    let r_all = &json_lines(&stdout)[0];
+    let counts = &r_all["counts"];
+    let errs = counts["error"].as_u64().unwrap();
+    let warns = counts["warning"].as_u64().unwrap();
+    let infos = counts["info"].as_u64().unwrap();
+    let total = counts["total"].as_u64().unwrap();
+    assert!(errs >= 1 && warns >= 1 && infos >= 1, "{counts}");
+    assert_eq!(total, errs + warns + infos, "{counts}");
+    assert_eq!(r_all["min_severity"], "info");
+    assert_eq!(r_all["filtered_out"], 0);
+    assert_eq!(r_all["issues"].as_array().unwrap().len() as u64, total);
+
+    // JSON `--min-severity warn` (alias of `warning`): excludes info, keeps error + warning.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json", "--min-severity", "warn"]);
+    assert_eq!(code, 1);
+    let r_warn = &json_lines(&stdout)[0];
+    let warn_issues = r_warn["issues"].as_array().unwrap();
+    assert_eq!(r_warn["min_severity"], "warning");
+    assert_eq!(r_warn["counts"], *counts);
+    assert_eq!(r_warn["filtered_out"], infos);
+    assert_eq!(warn_issues.len() as u64, errs + warns);
+    assert!(warn_issues.iter().all(|i| i["severity"] != "info"), "{warn_issues:?}");
+
+    // JSON `--min-severity error`: only error issues; counts unchanged; filtered_out == warns + infos.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json", "--min-severity", "error"]);
+    assert_eq!(code, 1);
+    let r_err = &json_lines(&stdout)[0];
+    let err_issues = r_err["issues"].as_array().unwrap();
+    assert_eq!(r_err["min_severity"], "error");
+    assert_eq!(r_err["counts"], *counts);
+    assert_eq!(r_err["filtered_out"], warns + infos);
+    assert_eq!(err_issues.len() as u64, errs);
+    assert!(err_issues.iter().all(|i| i["severity"] == "error"), "{err_issues:?}");
+
+    // Human default: lists error + warning, hides info lines, shows all three per-severity counts.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir)]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("error    class_overflow"), "{stdout}");
+    assert!(stdout.contains("warning  duplicate_image"), "{stdout}");
+    assert!(!stdout.contains("info     empty_image"), "{stdout}");
+    assert!(stdout.contains(&format!("{errs} error(s), {warns} warning(s), {infos} info(s):")), "{stdout}");
+    assert!(stdout.contains("--min-severity info"), "{stdout}");
+
+    // Human `--min-severity error`: hides warnings too and reports how many warnings were hidden.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--min-severity", "error"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("error    class_overflow"), "{stdout}");
+    assert!(!stdout.contains("warning  duplicate_image"), "{stdout}");
+    assert!(!stdout.contains("info     empty_image"), "{stdout}");
+    assert!(stdout.contains(&format!("{errs} error(s), {warns} warning(s), {infos} info(s):")), "{stdout}");
+    assert!(stdout.contains(&format!("({warns} warning(s) hidden by --min-severity error)")), "{stdout}");
+
+    // Human `--min-severity info`: lists error, warning, AND info lines.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--min-severity", "info"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("error    class_overflow"), "{stdout}");
+    assert!(stdout.contains("warning  duplicate_image"), "{stdout}");
+    assert!(stdout.contains("info     empty_image"), "{stdout}");
+    assert!(stdout.contains(&format!("{errs} error(s), {warns} warning(s), {infos} info(s):")), "{stdout}");
+
+    // Human `--min-severity warn` alias works identically to `warning`.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--min-severity", "warn"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("error    class_overflow"), "{stdout}");
+    assert!(stdout.contains("warning  duplicate_image"), "{stdout}");
+    assert!(!stdout.contains("info     empty_image"), "{stdout}");
 }
 
 #[test]
