@@ -253,6 +253,18 @@ macro_rules! dims_impl {
 }
 dims_impl!(usize, i32, i64, isize);
 
+impl Dims for DimVec {
+    fn to_indices(&self, rank: usize, op: &'static str) -> Result<DimVec> {
+        self.as_slice().to_indices(rank, op)
+    }
+}
+
+impl Dims for &DimVec {
+    fn to_indices(&self, rank: usize, op: &'static str) -> Result<DimVec> {
+        self.as_slice().to_indices(rank, op)
+    }
+}
+
 /// Every dimension, for reductions over the whole tensor: `t.sum(AllDims, false)`.
 #[derive(Debug, Clone, Copy)]
 pub struct AllDims;
@@ -342,6 +354,18 @@ macro_rules! shape_spec_impl {
     )*};
 }
 shape_spec_impl!(usize, i32, i64, isize);
+
+impl ShapeSpec for DimVec {
+    fn resolve(&self, numel: usize, op: &'static str) -> Result<Shape> {
+        self.as_slice().resolve(numel, op)
+    }
+}
+
+impl ShapeSpec for &DimVec {
+    fn resolve(&self, numel: usize, op: &'static str) -> Result<Shape> {
+        self.as_slice().resolve(numel, op)
+    }
+}
 
 #[cfg(test)]
 mod tests {

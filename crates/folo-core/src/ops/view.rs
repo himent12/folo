@@ -62,14 +62,14 @@ impl Tensor {
             return Err(Error::invalid_arg("permute", format!("{} dims given for rank {r}", dims.len())));
         }
         let perm: DimVec = dims.iter().map(|d| d.to_index(r, "permute")).collect::<Result<_>>()?;
-        let mut seen = vec![false; r];
+        let mut seen: smallvec::SmallVec<[bool; 8]> = smallvec::smallvec![false; r];
         for &p in &perm {
             if std::mem::replace(&mut seen[p], true) {
                 return Err(Error::invalid_arg("permute", format!("{perm:?} is not a permutation")));
             }
         }
         let out = self.with_layout(self.layout().permute(&perm));
-        let mut inv = vec![0usize; r];
+        let mut inv = DimVec::from_elem(0, r);
         for (i, &p) in perm.iter().enumerate() {
             inv[p] = i;
         }

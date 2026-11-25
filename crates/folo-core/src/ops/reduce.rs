@@ -87,10 +87,10 @@ impl Tensor {
         let d = dims.to_indices(self.rank(), "mean")?;
         if self.dtype() == DType::F16 {
             self.check_float("mean")?;
-            return self.to_dtype(DType::F32)?.mean(d.to_vec(), keepdim)?.to_dtype(DType::F16);
+            return self.to_dtype(DType::F32)?.mean(&d, keepdim)?.to_dtype(DType::F16);
         }
         let n: usize = d.iter().map(|&i| self.dims()[i]).product();
-        self.sum(d.to_vec(), keepdim)?.mul_scalar(1.0 / n.max(1) as f32)
+        self.sum(&d, keepdim)?.mul_scalar(1.0 / n.max(1) as f32)
     }
 
     /// Mean of all elements as a rank-0 tensor.
@@ -104,7 +104,7 @@ impl Tensor {
         let d = dims.to_indices(self.rank(), "var")?;
         if self.dtype() == DType::F16 {
             self.check_float("var")?;
-            return self.to_dtype(DType::F32)?.var(d.to_vec(), unbiased, keepdim)?.to_dtype(DType::F16);
+            return self.to_dtype(DType::F32)?.var(&d, unbiased, keepdim)?.to_dtype(DType::F16);
         }
         self.check_float("var")?;
         let n: usize = d.iter().map(|&i| self.dims()[i]).product();
@@ -142,13 +142,12 @@ impl Tensor {
                         let kept = Tensor::wrap(s, keep_shape.clone(), "var")?;
                         let out = Self::finish_reduce(kept, &d, keepdim)?;
                         let x_saved = self.detach();
-                        let d_vec = d.to_vec();
                         let scale = 2.0 / denom as f32;
                         return Ok(out.track("var", &[self], move |g| {
-                            let mean = x_saved.mean(d_vec.clone(), true)?;
+                            let mean = x_saved.mean(&d, true)?;
                             let diff = x_saved.sub(&mean)?;
                             let raw = diff.mul(&g.reshape(&keep_shape)?.mul_scalar(scale)?)?;
-                            let gx = raw.sub(&raw.mean(d_vec.clone(), true)?)?;
+                            let gx = raw.sub(&raw.mean(&d, true)?)?;
                             Ok(grads![Some(gx)])
                         }));
                     }
@@ -157,9 +156,9 @@ impl Tensor {
                 }
             }
         }
-        let mean = self.mean(d.to_vec(), true)?;
+        let mean = self.mean(&d, true)?;
         let diff = self.sub(&mean)?;
-        diff.square()?.sum(d.to_vec(), keepdim)?.mul_scalar(1.0 / denom as f32)
+        diff.square()?.sum(&d, keepdim)?.mul_scalar(1.0 / denom as f32)
     }
 
     fn extreme(&self, op: ReduceOp, dims: impl Dims, keepdim: bool, name: &'static str) -> Result<Tensor> {
@@ -173,7 +172,7 @@ impl Tensor {
         Ok(out.track_saved(name, &[self], &[&y.clone()], move |g| {
             // The gradient goes to the extreme elements, split evenly between ties.
             let mask = x.eq(&y)?;
-            let count = mask.sum(dims.to_vec(), true)?;
+            let count = mask.sum(&dims, true)?;
             Ok(grads![Some(mask.mul(&g.reshape(y.shape())?.div(&count)?)?)])
         }))
     }
@@ -268,8 +267,8 @@ impl Tensor {
     /// `log(sum(exp(x)))` over `dims`, numerically stable.
     pub fn logsumexp(&self, dims: impl Dims, keepdim: bool) -> Result<Tensor> {
         let d = dims.to_indices(self.rank(), "logsumexp")?;
-        let m = self.max(d.to_vec(), true)?.detach().clamp(f32::MIN, f32::MAX)?;
-        let s = self.sub(&m)?.exp()?.sum(d.to_vec(), true)?.log()?.add(&m)?;
+        let m = self.max(&d, true)?.detach().clamp(f32::MIN, f32::MAX)?;
+        let s = self.sub(&m)?.exp()?.sum(&d, true)?.log()?.add(&m)?;
         Self::finish_reduce(s, &d, keepdim)
     }
 

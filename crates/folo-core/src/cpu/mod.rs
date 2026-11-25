@@ -242,13 +242,13 @@ fn check_norm_views(
 }
 
 /// Element offset of each batch matrix for a layout `[B.., r, c]`.
-fn batch_offsets(layout: &Layout) -> Vec<usize> {
+fn batch_offsets(layout: &Layout) -> smallvec::SmallVec<[usize; 8]> {
     let r = layout.rank();
     let dims = &layout.dims()[..r - 2];
     let strides = &layout.strides()[..r - 2];
     let count: usize = dims.iter().product();
-    let mut out = Vec::with_capacity(count);
-    let mut idx = vec![0usize; dims.len()];
+    let mut out = smallvec::SmallVec::with_capacity(count);
+    let mut idx = crate::shape::DimVec::from_elem(0, dims.len());
     for _ in 0..count {
         out.push(layout.offset() + idx.iter().zip(strides).map(|(i, s)| i * s).sum::<usize>());
         for d in (0..dims.len()).rev() {
@@ -260,6 +260,58 @@ fn batch_offsets(layout: &Layout) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Fast-path concatenation of contiguous CPU views along `dim` into contiguous `dst`.
+/// Returns `false` (leaving `dst` untouched) if any view is not contiguous or storage types do not match.
+pub(crate) fn cat_contiguous(dst: &mut Storage, views: &[View<'_>], dim: usize) -> bool {
+    let Ok(dst_cpu) = dst.as_cpu_mut("cat") else {
+        return false;
+    };
+    let Some(first) = views.first() else {
+        return false;
+    };
+    let dims = first.shape().dims();
+    if dim >= dims.len() {
+        return false;
+    }
+    let outer: usize = dims[..dim].iter().product();
+    let inner: usize = dims[dim + 1..].iter().product();
+    let mut piece_lens: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::with_capacity(views.len());
+    for v in views {
+        let Some(len) = v.shape().dims()[dim].checked_mul(inner) else {
+            return false;
+        };
+        piece_lens.push(len);
+    }
+    macro_rules! go {
+        ($($var:ident),*) => {
+            match dst_cpu {
+                $(CpuStorage::$var(d) => {
+                    let mut srcs: smallvec::SmallVec<[&[_]; 8]> = smallvec::SmallVec::with_capacity(views.len());
+                    for v in views {
+                        let Ok(CpuStorage::$var(s)) = v.storage.as_cpu("cat") else {
+                            return false;
+                        };
+                        if !v.layout.fits(s.len()) {
+                            return false;
+                        }
+                        if v.layout.numel() == 0 {
+                            srcs.push(&[]);
+                        } else {
+                            let Some(r) = v.layout.contiguous_range() else {
+                                return false;
+                            };
+                            srcs.push(&s[r]);
+                        }
+                    }
+                    elementwise::cat_contiguous_slices(d, &srcs, &piece_lens, outer);
+                    true
+                })*
+            }
+        };
+    }
+    go!(F32, F16, U8, U32, I64)
 }
 
 impl Backend for CpuBackend {
@@ -789,9 +841,9 @@ fn conv_forward(
             Some(_) => Ok(None),
             None => contiguous_f32(x, "conv2d").map(|d| Some(d.into_owned())),
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<smallvec::SmallVec<[_; 4]>>>()?;
     let (n, _, h, wi) = nchw(xs[0].shape());
-    let mut parts = Vec::with_capacity(xs.len());
+    let mut parts: smallvec::SmallVec<[_; 4]> = smallvec::SmallVec::with_capacity(xs.len());
     for (x, o) in xs.iter().zip(&owned) {
         let c = x.shape().dims()[1];
         parts.push(match o {

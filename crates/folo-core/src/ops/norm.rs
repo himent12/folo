@@ -266,18 +266,18 @@ fn layer_norm_backward_composite(
     let dx = r.mul(&gw.sub(&c1_adj.add(&xh.mul(&c2)?)?)?)?;
     let mut out: SmallVec<[Option<Tensor>; 2]> = SmallVec::new();
     out.push(Some(dx));
-    let reduce_dims: Vec<usize> = (0..x.rank() - 1).collect();
+    let reduce_dims: crate::shape::DimVec = (0..x.rank() - 1).collect();
     if has_w {
         out.push(if need_w {
             let prod = g.mul(&xh)?;
-            Some(if reduce_dims.is_empty() { prod } else { prod.sum(reduce_dims.clone(), false)? })
+            Some(if reduce_dims.is_empty() { prod } else { prod.sum(&reduce_dims, false)? })
         } else {
             None
         });
     }
     if has_b {
         out.push(if need_b {
-            Some(if reduce_dims.is_empty() { g.clone() } else { g.sum(reduce_dims, false)? })
+            Some(if reduce_dims.is_empty() { g.clone() } else { g.sum(&reduce_dims, false)? })
         } else {
             None
         });
@@ -305,10 +305,10 @@ fn rms_norm_backward_composite(
     let mut out: SmallVec<[Option<Tensor>; 2]> = SmallVec::new();
     out.push(Some(dx));
     if has_w {
-        let reduce_dims: Vec<usize> = (0..x.rank() - 1).collect();
+        let reduce_dims: crate::shape::DimVec = (0..x.rank() - 1).collect();
         out.push(if need_w {
             let prod = g.mul(&xh)?;
-            Some(if reduce_dims.is_empty() { prod } else { prod.sum(reduce_dims, false)? })
+            Some(if reduce_dims.is_empty() { prod } else { prod.sum(&reduce_dims, false)? })
         } else {
             None
         });

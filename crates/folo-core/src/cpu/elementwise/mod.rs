@@ -1,5 +1,6 @@
 //! Copies, casts and elementwise kernels.
 
+mod cat;
 mod simd;
 mod simd_log_tanh;
 #[cfg(test)]
@@ -14,6 +15,8 @@ use crate::Layout;
 use crate::backend::{BinaryOp, UnaryOp};
 use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
+
+pub(crate) use cat::cat_contiguous_slices;
 
 pub use simd::SILU_MAX_REL_ERR;
 pub(crate) use simd::{exp_scalar, silu_bias_inplace};
