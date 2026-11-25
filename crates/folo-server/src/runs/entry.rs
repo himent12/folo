@@ -40,6 +40,7 @@ impl RunEntry {
                 interrupted: false,
                 alive_written: None,
             }),
+            metrics_cache: Mutex::default(),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
             measure: Mutex::new(None),

@@ -778,3 +778,161 @@ fn a_run_left_training_ends_when_it_last_trained() {
     assert!((400.0..=400.0 + late).contains(&paused), "paused_s {paused}, want 400 to {}", 400.0 + late);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `Runs::metrics` parses `metrics.jsonl` incrementally across appends, handles unterminated trailing lines, and
+/// resets cleanly when the file is truncated or rewritten in place.
+#[test]
+fn metrics_cache_parses_incrementally_and_resets_on_rewrite() {
+    let dir = TestDir::new("runs-metrics-cache");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"m"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let make_step = |epoch: u32, step: u64, total: f32| -> String {
+        let s: Step = serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"step":{step},"loss":{{"box":1,"cls":1,"dfl":1,"total":{total}}},"lr":0.01,"imgs_per_s":1,"eta_s":1}}"#
+        ))
+        .unwrap();
+        folo_vision::train::event_record(&RunEvent::Step(s)).to_string()
+    };
+
+    // Initial write without trailing newline: line 2 is served on the fly without committing past it.
+    std::fs::write(e.metrics_path(), format!("{}\n{}", make_step(1, 1, 3.0), make_step(1, 2, 2.5))).unwrap();
+    let m1 = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(m1.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(e.metrics_cache.lock().unwrap().full_parses, 1);
+
+    // Finish line 2 with a newline and append step 3: incremental read (no full re-parse).
+    append_line(&e.metrics_path(), "");
+    append_line(&e.metrics_path(), &make_step(1, 3, 2.0));
+    let m2 = runs.metrics(e.id(), &MetricsQuery { after_step: Some(1), ..MetricsQuery::default() }).unwrap();
+    assert_eq!(m2.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(e.metrics_cache.lock().unwrap().full_parses, 1, "appends reuse the cached prefix");
+
+    // Truncate/rewrite the file with different values: cache invalidates and re-parses from byte 0.
+    std::fs::write(e.metrics_path(), format!("{}\n", make_step(1, 1, 7.5))).unwrap();
+    let m3 = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(m3.steps.len(), 1);
+    assert_eq!(m3.steps[0].loss.total, 7.5);
+    assert_eq!(e.metrics_cache.lock().unwrap().full_parses, 2, "truncation triggers a fresh parse");
+}
+
+/// Resuming after a crash that left a torn line (no trailing newline) in `metrics.jsonl` writes a newline-safe
+/// resume marker so neither the resume boundary nor the next session's `status: running` line is swallowed.
+#[test]
+fn resume_marker_is_newline_safe_after_torn_last_line() {
+    let dir = TestDir::new("runs-resume-torn");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"r"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let make_step = |epoch: u32, step: u64, total: f32| -> Step {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"step":{step},"loss":{{"box":1,"cls":1,"dfl":1,"total":{total}}},"lr":0.01,"imgs_per_s":1,"eta_s":1}}"#
+        ))
+        .unwrap()
+    };
+    let make_epoch = |epoch: u32| -> Epoch {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},"val":{{"map50":0.1,"map50_95":0.05,"precision":0.1,"recall":0.1,"per_class":[]}},"duration_s":1}}"#
+        ))
+        .unwrap()
+    };
+    let line = |ev: RunEvent| folo_vision::train::event_record(&ev).to_string();
+
+    // Crash mid-epoch-2 leaving `status: running` as last status and a torn JSON fragment without `\n`.
+    let torn = format!(
+        "{}\n{}\n{}\n{}\n{{\"event\":\"step\",\"epoch\":2,\"step\":3",
+        line(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))),
+        line(RunEvent::Step(make_step(1, 1, 3.0))),
+        line(RunEvent::Epoch(make_epoch(1))),
+        line(RunEvent::Step(make_step(2, 2, 9.0))),
+    );
+    std::fs::write(e.metrics_path(), torn).unwrap();
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.epochs_done = 1;
+        st.file.run.started = Some(now());
+        e.finish(&mut st, RunStatus::Stopped, None);
+    }
+
+    // Resume writes `\n{"event":"resume"}\n`; discarded epoch-2 step 2 is immediately hidden even though the
+    // crashed session never wrote a terminal status line.
+    runs.restart(&e, config, None).unwrap();
+    let queued = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(queued.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1]);
+
+    // Subsequent status: running + live tail step 2 (loss 2.0) appear cleanly on their own line.
+    append_line(&e.metrics_path(), &line(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))));
+    e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+    e.on_event(&RunEvent::Step(make_step(2, 2, 2.0)));
+    let live = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+    assert_eq!(live.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(live.steps[1].loss.total, 2.0);
+}
+
+/// Streaming `/logs` skips corrupt/blank lines, counts exact totals, and handles both `after` cursors and tail
+/// windows (including escaped strings and `limit = 0`) without reading the whole log into `Vec<LogLine>`.
+#[test]
+fn streaming_logs_skips_corrupt_lines_and_handles_cursors_and_tails() {
+    let dir = TestDir::new("runs-logs-stream");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"l"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let log_json = |i: usize| {
+        serde_json::to_string(&LogLine {
+            t: format!("2026-01-01T00:00:{i:02}Z"),
+            level: LogLevel::Info,
+            message: format!("msg \"quoted\" #{i}"),
+        })
+        .unwrap()
+    };
+    let content = format!(
+        "{}\n\nnot-json\n{}\r\n{{\"t\":123,\"level\":\"info\",\"message\":\"bad\"}}\n{}\n{}\n{}",
+        log_json(0),
+        log_json(1),
+        log_json(2),
+        log_json(3),
+        log_json(4), // no trailing newline
+    );
+    std::fs::write(e.dir.join("log.jsonl"), content).unwrap();
+
+    let tail = runs.logs(e.id(), &LogsQuery::last(2)).unwrap();
+    assert_eq!(tail.total, 5);
+    assert_eq!(
+        tail.lines.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+        ["msg \"quoted\" #3", "msg \"quoted\" #4",]
+    );
+
+    let page = runs.logs(e.id(), &LogsQuery { limit: 2, after: Some(1) }).unwrap();
+    assert_eq!(page.total, 5);
+    assert_eq!(
+        page.lines.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+        ["msg \"quoted\" #1", "msg \"quoted\" #2",]
+    );
+
+    let empty = runs.logs(e.id(), &LogsQuery::last(0)).unwrap();
+    assert_eq!((empty.total, empty.lines.len()), (5, 0));
+
+    let past = runs.logs(e.id(), &LogsQuery { limit: 10, after: Some(99) }).unwrap();
+    assert_eq!((past.total, past.lines.len()), (5, 0));
+}
