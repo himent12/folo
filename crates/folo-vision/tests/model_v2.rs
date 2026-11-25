@@ -711,3 +711,24 @@ fn v2_config_validation_o2o_detach_and_hypercontext_invariance() {
     )
     .unwrap();
 }
+
+#[test]
+fn standard_groups_excludes_v2_gamma_id_and_alpha_raw_from_weight_decay() {
+    let model = FoloV2Model::new(FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o)).unwrap();
+    let sg = folo_nn::optim::StandardGroups::from_module(&model);
+    let gamma_in_bn = sg.bn.iter().filter(|(n, _)| n.ends_with(".gamma_id")).count();
+    let alpha_in_bn = sg.bn.iter().filter(|(n, _)| n.ends_with(".alpha_raw")).count();
+    assert!(gamma_in_bn > 0, "expected FoloV2 WsQARepConv3x3 gamma_id parameters in bn group");
+    assert!(alpha_in_bn > 0, "expected FoloV2 PeakSuppress alpha_raw parameters in bn group");
+    assert!(
+        sg.decay.iter().all(|(n, _)| !n.ends_with(".gamma_id") && !n.ends_with(".alpha_raw")),
+        "v2 gamma_id and alpha_raw must never receive weight decay"
+    );
+    assert!(
+        sg.bias.iter().all(|(n, _)| !n.ends_with(".gamma_id") && !n.ends_with(".alpha_raw")),
+        "v2 gamma_id and alpha_raw must not receive bias warmup"
+    );
+    let groups = sg.into_groups(0.01, 0.937, 5e-4);
+    let bn_group = groups.iter().find(|g| g.name == "bn").unwrap();
+    assert_eq!(bn_group.weight_decay, 0.0);
+}

@@ -570,13 +570,21 @@ fn take_state(
     }
 }
 
+/// Returns true for 1-D scale / gate parameters that should receive no weight decay and standard warmup
+/// (like BatchNorm γ) rather than weight decay or bias warmup: FOLO v2-Iso's `WsQARepConv3x3::gamma_id`
+/// and `PeakSuppress::alpha_raw`.
+fn is_no_decay_scale(name: &str, t: &Tensor) -> bool {
+    t.dims().len() == 1 && matches!(name.rsplit('.').next(), Some("gamma_id" | "alpha_raw"))
+}
+
 /// docs/MODEL.md §8.2's three groups, assigned by role: `decay` (conv / linear weights), `bn` (BatchNorm
-/// weights), `bias` (every tensor named `bias`: BatchNorm biases and conv / linear biases).
+/// weights and 1-D scale/gate parameters such as `gamma_id` and `alpha_raw`), `bias` (every tensor named
+/// `bias`: BatchNorm biases and conv / linear biases).
 #[derive(Debug, Clone, Default)]
 pub struct StandardGroups {
     /// Weights that get weight decay.
     pub decay: Vec<(String, Tensor)>,
-    /// BatchNorm γ.
+    /// BatchNorm γ and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
     pub bn: Vec<(String, Tensor)>,
     /// Biases (BatchNorm β and layer biases).
     pub bias: Vec<(String, Tensor)>,
@@ -585,9 +593,11 @@ pub struct StandardGroups {
 }
 
 impl StandardGroups {
-    /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`], `bias`
-    /// if its last name segment is `bias`, and `decay` otherwise. For the FOLO detector this is exactly
-    /// the name rule of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other weight).
+    /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`] or a 1-D
+    /// no-decay scale/gate parameter whose last name segment is `gamma_id` or `alpha_raw`, `bias` if its
+    /// last name segment is `bias`, and `decay` otherwise. For the FOLO v1 detector this is exactly the name
+    /// rule of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other weight); for FOLO v2-Iso it
+    /// also protects `gamma_id` and `alpha_raw` from weight decay and bias warmup.
     pub fn from_module(model: &dyn Module) -> Self {
         let mut bn_ids = std::collections::HashSet::new();
         let mut dw_ids = std::collections::HashSet::new();
@@ -605,7 +615,7 @@ impl StandardGroups {
         model.for_each_module(&mut |_, m| note(m));
         let mut out = StandardGroups::default();
         for (name, t) in model.named_parameters() {
-            if bn_ids.contains(&t.id()) {
+            if bn_ids.contains(&t.id()) || is_no_decay_scale(&name, &t) {
                 out.bn.push((name, t));
             } else if name == "bias" || name.ends_with(".bias") {
                 out.bias.push((name, t));
