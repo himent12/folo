@@ -371,6 +371,8 @@ pub fn run() {
                         if auto {
                             let spawn = should_auto_spawn(spawn_server, &connect_url);
                             app.autoconnect(connect_url.clone(), spawn, app::Reason::Launch, cx);
+                        } else if server_mode == app::ServerMode::Local {
+                            app.connected_url = Some(connect_url.clone());
                         }
                         if open.as_deref() == Some("new-run") {
                             app.open_new_run_pending = true;
