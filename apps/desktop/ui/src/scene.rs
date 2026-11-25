@@ -5,8 +5,8 @@
 use crate::{
     Background, Bounds, Corners, DevicePixels, Edges, Hsla, Point, ScaledPixels, Size, image::RenderImage,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// One id sequence for masks and paths, so ids never collide across kinds.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -311,30 +311,60 @@ impl ColorMask {
     }
 }
 
-/// A path's geometry in device pixels: triangles (what `PathBuilder` makes: lyon's tessellation, as
-/// GPUI draws paths), or contours filled with a rule or stroked with a style.
+/// A path's immutable geometry in device pixels: triangles (what `PathBuilder` makes: lyon's
+/// tessellation, as GPUI draws paths), or contours filled with a rule or stroked with a style.
+/// Geometry fields are read-only after construction so the cached [`Self::geometry_hash`] can never
+/// go stale.
 #[derive(Debug)]
 pub struct PathData {
-    /// Process-unique id (path coverage is cached by it).
+    /// Process-unique id.
     pub id: u64,
     /// The contours (empty for `PathKind::Triangles`).
-    pub contours: Vec<Contour>,
+    pub(crate) contours: Vec<Contour>,
     /// Fill, stroke, or triangles.
-    pub kind: PathKind,
+    pub(crate) kind: PathKind,
     /// For `PathKind::Triangles`: three points per triangle.
-    pub triangles: Vec<Point<ScaledPixels>>,
+    pub(crate) triangles: Vec<Point<ScaledPixels>>,
+    /// Cached geometry hash (computed lazily once the path is rendered).
+    pub(crate) geometry_hash: OnceLock<u64>,
 }
 
 impl PathData {
     /// Wraps the geometry with a new id.
     pub fn new(contours: Vec<Contour>, kind: PathKind) -> Self {
-        Self { id: next_id(), contours, kind, triangles: Vec::new() }
+        Self { id: next_id(), contours, kind, triangles: Vec::new(), geometry_hash: OnceLock::new() }
     }
 
     /// Triangles (three points each) with a new id.
     pub fn from_triangles(triangles: Vec<Point<ScaledPixels>>) -> Self {
         debug_assert_eq!(triangles.len() % 3, 0);
-        Self { id: next_id(), contours: Vec::new(), kind: PathKind::Triangles, triangles }
+        Self {
+            id: next_id(),
+            contours: Vec::new(),
+            kind: PathKind::Triangles,
+            triangles,
+            geometry_hash: OnceLock::new(),
+        }
+    }
+
+    /// The contours (empty for `PathKind::Triangles`).
+    pub fn contours(&self) -> &[Contour] {
+        &self.contours
+    }
+
+    /// How this path is filled, stroked, or tessellated.
+    pub fn kind(&self) -> &PathKind {
+        &self.kind
+    }
+
+    /// The triangles (three points per triangle) when `kind` is `PathKind::Triangles`.
+    pub fn triangles(&self) -> &[Point<ScaledPixels>] {
+        &self.triangles
+    }
+
+    /// Hash of the geometry fields that affect coverage, computed once and cached.
+    pub(crate) fn geometry_hash(&self) -> u64 {
+        *self.geometry_hash.get_or_init(|| crate::raster::path::compute_geometry_hash(self))
     }
 }
 

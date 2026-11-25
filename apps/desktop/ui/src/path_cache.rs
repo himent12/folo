@@ -8,8 +8,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 
-use crate::{BuiltPath, Pixels, Point};
+use crate::{BuiltPath, PathData, Pixels, Point, ScaledPixels};
 
 /// Bytes the cache may hold after any call: its keys, its triangles and its table at the size the table
 /// has allocated (not only its entries). A few hundred chart lines.
@@ -39,24 +40,44 @@ fn table_bytes(n: usize) -> usize {
     slots * SLOT + 16
 }
 
+/// Strong + weak refcount header of an `ArcInner` allocation.
+const ARC_HEADER: usize = std::mem::size_of::<usize>() * 2;
+
 /// The bytes an entry for a key of `key_words` and a path of `points` allocates (its key and its
-/// triangles, without spare capacity).
+/// `Arc<[Point<Pixels>]>` triangles, without spare capacity).
 fn entry_bytes(key_words: usize, points: usize) -> usize {
-    key_words * std::mem::size_of::<u32>() + points * std::mem::size_of::<Point<Pixels>>()
+    key_words * std::mem::size_of::<u32>() + ARC_HEADER + points * std::mem::size_of::<Point<Pixels>>()
+}
+
+/// The bytes a cached scaled `Arc<PathData>` allocates (its `ArcInner<PathData>` and triangle buffer).
+fn scaled_bytes(points: usize) -> usize {
+    ARC_HEADER + std::mem::size_of::<PathData>() + points * std::mem::size_of::<Point<ScaledPixels>>()
 }
 
 struct Entry {
     /// The key, without spare capacity.
     key: Box<[u32]>,
-    /// The path, its triangles without spare capacity.
+    /// The path, its triangles shared in an exact-sized `Arc<[Point<Pixels>]>`.
     path: BuiltPath<Pixels>,
+    /// Device-pixel `PathData` cached for the last scale factor painted with this entry.
+    scaled: Option<(u32, Arc<PathData>)>,
     last_used: u64,
 }
 
 impl Entry {
-    /// What this entry allocates: its key and its triangles (its slot is the table's).
+    /// What this entry's key and logical triangles allocate.
+    fn base_bytes(&self) -> usize {
+        entry_bytes(self.key.len(), self.path.triangles.len())
+    }
+
+    /// What this entry's cached scaled `PathData` allocates, if present.
+    fn scaled_bytes(&self) -> usize {
+        self.scaled.as_ref().map_or(0, |(_, data)| scaled_bytes(data.triangles.capacity()))
+    }
+
+    /// What this entry allocates: its key, triangles, and optional scaled `PathData`.
     fn bytes(&self) -> usize {
-        entry_bytes(self.key.len(), self.path.triangles.capacity())
+        self.base_bytes() + self.scaled_bytes()
     }
 }
 
@@ -64,7 +85,8 @@ impl Entry {
 #[derive(Default)]
 pub(crate) struct PathCache {
     entries: HashMap<u64, Entry>,
-    /// What the entries allocate (keys and triangles); the table is counted by its capacity.
+    /// What the entries allocate (keys, logical triangles, and cached scaled `PathData`); the table is
+    /// counted by its capacity.
     heap: usize,
     clock: u64,
     hits: u64,
@@ -106,7 +128,8 @@ impl Hasher for WordHasher {
 }
 
 impl PathCache {
-    /// What the cache holds: its entries' keys and triangles, and its table at its allocated size.
+    /// What the cache holds: its entries' keys, triangles, cached scaled `PathData`, and its table at
+    /// its allocated size.
     fn bytes(&self) -> usize {
         self.heap + table_bytes(self.entries.capacity())
     }
@@ -121,22 +144,64 @@ impl PathCache {
     }
 
     /// Keeps `path` as what `key` builds, dropping the least recently used paths beyond the budget.
-    fn insert(&mut self, key: Vec<u32>, path: &BuiltPath<Pixels>) {
+    fn insert(&mut self, key: Vec<u32>, path: &mut BuiltPath<Pixels>) {
         // Measured before anything is copied: a path too big to keep costs no copy.
         let bytes = entry_bytes(key.len(), path.triangles.len());
         if bytes + SLOT > MAX_ENTRY {
             return;
         }
         self.clock += 1;
-        // A clone's triangles have no spare capacity; the key is cut to its length.
-        let entry = Entry { key: key.into_boxed_slice(), path: path.clone(), last_used: self.clock };
-        if let Some(old) = self.entries.insert(hash(&entry.key), entry) {
+        let h = hash(&key);
+        path.cache_hash = Some(h);
+        // `Arc<[Point<Pixels>]>` has no spare capacity; the key is cut to its length.
+        let entry =
+            Entry { key: key.into_boxed_slice(), path: path.clone(), scaled: None, last_used: self.clock };
+        if let Some(old) = self.entries.insert(h, entry) {
             self.heap -= old.bytes();
         }
         self.heap += bytes;
         if self.bytes() > BUDGET {
             self.evict();
         }
+    }
+
+    /// Returns cached device-pixel [`PathData`] for `path` at `scale_factor`, or scales and caches it
+    /// on the matching entry (verified by `Arc::ptr_eq` on `path.triangles`) when it fits the budget.
+    fn scaled_path_data(&mut self, path: &BuiltPath<Pixels>, scale_factor: f32) -> Arc<PathData> {
+        let build_scaled = || {
+            let scaled: Vec<Point<ScaledPixels>> =
+                path.triangles.iter().map(|p| p.scale(scale_factor)).collect();
+            Arc::new(PathData::from_triangles(scaled))
+        };
+        let Some(h) = path.cache_hash else {
+            return build_scaled();
+        };
+        let scale_bits = scale_factor.to_bits();
+        let Some(entry) = self.entries.get_mut(&h) else {
+            return build_scaled();
+        };
+        if !Arc::ptr_eq(&entry.path.triangles, &path.triangles) {
+            return build_scaled();
+        }
+        self.clock += 1;
+        entry.last_used = self.clock;
+        if let Some((bits, data)) = &entry.scaled
+            && *bits == scale_bits
+        {
+            return Arc::clone(data);
+        }
+        let data = build_scaled();
+        let extra = scaled_bytes(data.triangles.capacity());
+        if entry.base_bytes() + extra + SLOT > MAX_ENTRY {
+            return data;
+        }
+        let old_extra = entry.scaled_bytes();
+        entry.scaled = Some((scale_bits, Arc::clone(&data)));
+        self.heap = self.heap - old_extra + extra;
+        if self.bytes() > BUDGET {
+            self.evict();
+        }
+        data
     }
 
     /// Drops the least recently used paths until the cache, its table cut to what is left, is down to
@@ -173,9 +238,18 @@ pub(crate) fn cached<E>(
     if let Some(hit) = CACHE.try_with(|c| c.borrow_mut().get(&key)).ok().flatten() {
         return Ok(hit);
     }
-    let path = build()?;
-    let _ = CACHE.try_with(|c| c.borrow_mut().insert(key, &path));
+    let mut path = build()?;
+    let _ = CACHE.try_with(|c| c.borrow_mut().insert(key, &mut path));
     Ok(path)
+}
+
+/// Device-pixel [`PathData`] for `path` at `scale_factor`, reusing the thread-local cache's scaled
+/// geometry when `path` came from it.
+pub(crate) fn scaled_path_data(path: &BuiltPath<Pixels>, scale_factor: f32) -> Arc<PathData> {
+    CACHE.try_with(|c| c.borrow_mut().scaled_path_data(path, scale_factor)).unwrap_or_else(|_| {
+        let scaled: Vec<Point<ScaledPixels>> = path.triangles.iter().map(|p| p.scale(scale_factor)).collect();
+        Arc::new(PathData::from_triangles(scaled))
+    })
 }
 
 /// This thread's cache: (entries, bytes, hits so far). For tests.
@@ -350,7 +424,7 @@ mod tests {
     /// A path of `n` triangles at `i`, as the cache holds it.
     fn triangles(i: u32, n: usize) -> BuiltPath<Pixels> {
         let p = point(px(i as f32), px(0.));
-        BuiltPath { triangles: vec![p; 3 * n], bounds: Default::default() }
+        BuiltPath { triangles: Arc::from(vec![p; 3 * n]), bounds: Default::default(), cache_hash: None }
     }
 
     /// A path of one triangle.
@@ -359,18 +433,18 @@ mod tests {
     }
 
     /// What the cache counts is what it holds: a key with spare capacity (as `PathBuilder::key` may make
-    /// one) is kept and counted at its length, the triangles at their capacity, the table at its size.
+    /// one) is kept and counted at its length, the triangles in an exact-sized `Arc`, the table at its size.
     #[test]
     fn the_cache_counts_what_it_holds() {
         let mut c = PathCache::default();
         let mut key = Vec::with_capacity(100_000);
         key.extend([1, 2, 3]);
         let mut path = tiny(1);
-        path.triangles.reserve(10_000);
-        c.insert(key, &path);
+        c.insert(key, &mut path);
         let e = c.entries.values().next().unwrap();
         assert_eq!(std::mem::size_of_val(&*e.key), 12, "no spare capacity is kept");
-        assert_eq!(e.path.triangles.capacity(), 3);
+        assert_eq!(e.path.triangles.len(), 3);
+        assert!(Arc::ptr_eq(&e.path.triangles, &path.triangles), "triangles are shared without copying");
         assert_eq!(c.heap, e.bytes());
         assert_eq!(c.bytes(), e.bytes() + table_bytes(c.entries.capacity()));
         assert!(c.bytes() < 1000, "{} bytes", c.bytes());
@@ -385,7 +459,9 @@ mod tests {
         let mut c = PathCache::default();
         let mut most = 0;
         for i in 0..300_000 {
-            c.insert(vec![i], &tiny(i));
+            let mut path = tiny(i);
+            c.insert(vec![i], &mut path);
+            drop(path);
             let held = (counting::live() - base) as usize;
             assert!(held <= c.bytes(), "{held} bytes allocated, {} counted, after {i}", c.bytes());
             assert!(c.bytes() <= BUDGET, "{} bytes after {i}", c.bytes());
@@ -403,11 +479,11 @@ mod tests {
     #[test]
     fn a_path_too_big_to_keep_is_not_copied() {
         let mut c = PathCache::default();
-        let big = triangles(1, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>());
+        let mut big = triangles(1, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>());
         let key = vec![7];
         let before = counting::live();
         counting::reset_peak();
-        c.insert(key, &big);
+        c.insert(key, &mut big);
         assert!(c.entries.is_empty());
         let peak = (counting::peak() - before) as usize;
         assert!(peak < 1024, "{peak} bytes allocated on the way");
@@ -420,13 +496,13 @@ mod tests {
         let mut c = PathCache::default();
         let mut i = 0;
         while c.bytes() + 4096 < BUDGET {
-            c.insert(vec![i], &triangles(i, 100));
+            c.insert(vec![i], &mut triangles(i, 100));
             i += 1;
         }
         let small_count = i;
         assert_eq!(c.evictions, 0);
-        let big = triangles(0, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>() / 6);
-        c.insert(vec![u32::MAX], &big);
+        let mut big = triangles(0, MAX_ENTRY / std::mem::size_of::<Point<Pixels>>() / 6);
+        c.insert(vec![u32::MAX], &mut big);
         assert_eq!(c.evictions, 1, "one pass");
         assert!(c.bytes() <= LOW_WATER, "{} bytes", c.bytes());
         assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
@@ -435,10 +511,8 @@ mod tests {
         assert!(c.get(&[0]).is_none());
     }
 
-    /// A cache full of small paths (136 bytes each, as a filled four-point polygon's) is cut down and then
-    /// takes thousands of inserts before the next cut: the cut leaves room for the table's next growth.
-    /// Cut to a table exactly full, the next insert doubled the table, went over the budget and cut again
-    /// (a sort of some 28 000 entries) on every insert or every second one.
+    /// A cache full of small paths is cut down and then takes thousands of inserts before the next cut:
+    /// the cut leaves room for the table's next growth.
     #[test]
     fn a_cache_of_small_paths_is_not_cut_on_every_insert() {
         let mut c = PathCache::default();
@@ -447,18 +521,105 @@ mod tests {
             k[0] = i;
             k
         };
-        assert_eq!(entry_bytes(22, 6), 136);
+        assert_eq!(entry_bytes(22, 6), 136 + ARC_HEADER);
         let mut i = 0;
         while c.evictions == 0 {
-            c.insert(key(i), &triangles(i, 2));
+            c.insert(key(i), &mut triangles(i, 2));
             i += 1;
         }
         for _ in 0..3000 {
-            c.insert(key(i), &triangles(i, 2));
+            c.insert(key(i), &mut triangles(i, 2));
             i += 1;
             assert!(c.bytes() <= BUDGET, "{} bytes after {i}", c.bytes());
         }
         assert!(c.evictions <= 3, "{} cuts in 3000 inserts after the first", c.evictions - 1);
+    }
+
+    /// Repeated builds share `Arc<[Point<Pixels>]>`, repeated `scaled_path_data` calls at the same scale
+    /// share `Arc<PathData>` (and its cached `geometry_hash`), replacing `triangles` bypasses stale reuse,
+    /// and cached scaled entries stay within the byte budget.
+    #[test]
+    fn cached_path_shares_triangles_and_scaled_path_data_within_budget() {
+        clear();
+        let first = chart_line(100, 0., 1.5, false).build().unwrap();
+        let second = chart_line(100, 0., 1.5, false).build().unwrap();
+        assert!(Arc::ptr_eq(&first.triangles, &second.triangles), "cache hit shares triangles");
+
+        let d1 = scaled_path_data(&first, 1.5);
+        let d2 = scaled_path_data(&second, 1.5);
+        assert!(Arc::ptr_eq(&d1, &d2), "same scale reuses Arc<PathData>");
+        assert_eq!(d1.geometry_hash(), crate::raster::path::compute_geometry_hash(&d1));
+
+        // Different scale rebuilds and replaces the cached scaled entry cleanly.
+        let d3 = scaled_path_data(&second, 2.0);
+        assert!(!Arc::ptr_eq(&d1, &d3));
+        assert_eq!(d3.triangles.len(), first.triangles.len());
+        let d4 = scaled_path_data(&first, 2.0);
+        assert!(Arc::ptr_eq(&d3, &d4));
+
+        // Replacing `triangles` on a caller-owned BuiltPath never returns stale cached geometry.
+        let mut mutated = second;
+        mutated.triangles = Arc::from([point(px(1.), px(2.)), point(px(3.), px(4.)), point(px(5.), px(6.))]);
+        let dm = scaled_path_data(&mutated, 2.0);
+        assert!(!Arc::ptr_eq(&d3, &dm));
+        assert_eq!(dm.triangles.len(), 3);
+    }
+
+    /// Attaching scaled `PathData` tracks exact heap bytes (verified by the counting allocator), refuses
+    /// to cache scaled geometry when base + scaled exceeds [`MAX_ENTRY`], and evicts oldest entries when
+    /// attaching scaled geometry pushes total usage past [`BUDGET`].
+    #[test]
+    fn scaled_path_data_obeys_max_entry_budget_and_allocator_accounting() {
+        // 1. Exact allocator accounting for scaled attachment and scale replacement.
+        let base = counting::live();
+        let mut c = PathCache::default();
+        let mut p = triangles(1, 50);
+        c.insert(vec![1], &mut p);
+        let d1 = c.scaled_path_data(&p, 1.5);
+        assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
+        let d2 = c.scaled_path_data(&p, 2.0);
+        assert!(!Arc::ptr_eq(&d1, &d2));
+        drop(d1);
+        drop(d2);
+        drop(p);
+        let held = (counting::live() - base) as usize;
+        assert!(held <= c.bytes(), "{held} bytes allocated, {} counted", c.bytes());
+        assert!(c.bytes() - held <= 64, "{held} bytes allocated, {} counted", c.bytes());
+        drop(c);
+        assert_eq!(counting::live(), base, "all scaled and logical allocations freed");
+
+        // 2. MAX_ENTRY guard: base fits (> MAX_ENTRY/2), but base + scaled > MAX_ENTRY.
+        let mut c = PathCache::default();
+        let pts_per_tri = 3 * std::mem::size_of::<Point<Pixels>>();
+        let n_tris = (MAX_ENTRY * 3 / 4) / pts_per_tri;
+        let mut large = triangles(7, n_tris);
+        c.insert(vec![7], &mut large);
+        assert_eq!(c.entries.len(), 1, "base entry fits under MAX_ENTRY");
+        let heap_before = c.heap;
+        let _scaled = c.scaled_path_data(&large, 1.5);
+        assert!(
+            c.entries.values().next().unwrap().scaled.is_none(),
+            "scaled data exceeding MAX_ENTRY must not be retained"
+        );
+        assert_eq!(c.heap, heap_before);
+
+        // 3. BUDGET eviction when attaching scaled data pushes total bytes over BUDGET.
+        let mut c = PathCache::default();
+        let mut kept = Vec::new();
+        let mut i = 0u32;
+        while c.bytes() + 32_768 < BUDGET {
+            let mut path = triangles(i, 500);
+            c.insert(vec![i], &mut path);
+            kept.push(path);
+            i += 1;
+        }
+        assert_eq!(c.evictions, 0);
+        for path in &kept {
+            let _ = c.scaled_path_data(path, 1.5);
+            assert!(c.bytes() <= BUDGET, "{} bytes > BUDGET", c.bytes());
+            assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
+        }
+        assert!(c.evictions >= 1, "attaching scaled data near BUDGET must evict");
     }
 
     /// A path built while the thread is torn down, by the destructor of a thread local destroyed after

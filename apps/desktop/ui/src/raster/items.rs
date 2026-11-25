@@ -4,7 +4,6 @@
 
 use super::geom::{IRect, clip_rect, raster_span};
 use super::hash::{finish, mix, mix_f2};
-use super::path::geometry_hash;
 use super::quad::opaque_core;
 use super::tiles::TILE;
 use crate::{Background, BackgroundTag, Bounds, Corners, Hsla, Primitive, ScaledPixels};
@@ -194,7 +193,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if rect.is_empty() {
                     continue;
                 }
-                let geometry = geometry_hash(&p.path);
+                let geometry = p.path.geometry_hash();
                 let mut h = mix_rect(6, &rect);
                 h = mix_bounds(h, &p.bounds);
                 // A gradient spans the clipped bounds, so the clip matters beyond `rect`.

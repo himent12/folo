@@ -124,9 +124,9 @@ fn paint_path_scales_clips_and_fades() {
     let Primitive::Path(prim) = &scene.primitives[0] else { panic!("a path") };
     assert_eq!(prim.bounds, path.bounds.scale(1.5));
     assert_eq!(prim.paint, red().opacity(0.5).into());
-    assert_eq!(prim.path.kind, PathKind::Triangles);
+    assert_eq!(*prim.path.kind(), PathKind::Triangles);
     let scaled: Vec<_> = path.triangles.iter().map(|q| q.scale(1.5)).collect();
-    assert_eq!(prim.path.triangles, scaled);
+    assert_eq!(prim.path.triangles(), scaled.as_slice());
 
     // Gradients pass through; a path outside the mask is skipped; an empty path paints nothing.
     let gradient = linear_gradient(180., linear_color_stop(red(), 0.), linear_color_stop(red(), 1.));

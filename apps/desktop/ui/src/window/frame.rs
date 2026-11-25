@@ -10,7 +10,7 @@ use std::any::Any;
 use smallvec::SmallVec;
 
 use crate::{
-    AnyTooltip, App, Bounds, CursorStyle, DispatchTree, FocusId, GlobalElementId, Pixels, Scene,
+    AnyTooltip, App, Bounds, CursorStyle, DispatchTree, FocusHandle, FocusId, GlobalElementId, Pixels, Scene,
     WindowControlArea, window::input_handler::InputHandlerSlot,
 };
 
@@ -111,6 +111,24 @@ impl DispatchPhase {
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut crate::Window, &mut App) + 'static>;
 
+/// One mouse-down listener slot in paint order: click-to-focus entries stay inline (no heap box) while
+/// preserving exact bubble-phase interleaving with boxed `MouseDownEvent` listeners.
+pub(crate) enum MouseDownEntry {
+    /// Focuses `focus_handle` on bubble when `hitbox_id` is hovered and default was not prevented.
+    Focus { hitbox_id: HitboxId, focus_handle: FocusHandle },
+    /// A boxed `MouseDownEvent` listener.
+    Boxed(AnyMouseListener),
+}
+
+/// One mouse-move listener slot in paint order: hover-refresh watchers stay inline (no heap box) while
+/// preserving exact capture-phase interleaving with boxed `MouseMoveEvent` listeners.
+pub(crate) enum MouseMoveEntry {
+    /// Refreshes the window on capture when `hitbox_id`'s hover state changes.
+    HoverRefresh { hitbox_id: HitboxId, was_hovered: bool },
+    /// A boxed `MouseMoveEvent` listener.
+    Boxed(AnyMouseListener),
+}
+
 /// A cursor style request for a hitbox (or for the whole window when `hitbox_id` is `None`).
 #[derive(Clone, Debug)]
 pub(crate) struct CursorStyleRequest {
@@ -171,8 +189,16 @@ pub(crate) struct Frame {
     pub(crate) element_states: ElementStateMap,
     /// Hit-testable rectangles, in paint order.
     pub(crate) hitboxes: Vec<Hitbox>,
-    /// Mouse listeners, in paint order (dispatched topmost first in bubble).
-    pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    /// Mouse-down listeners, in paint order (dispatched topmost first in bubble).
+    pub(crate) mouse_down_listeners: Vec<MouseDownEntry>,
+    /// Mouse-up listeners, in paint order.
+    pub(crate) mouse_up_listeners: Vec<AnyMouseListener>,
+    /// Mouse-move listeners, in paint order.
+    pub(crate) mouse_move_listeners: Vec<MouseMoveEntry>,
+    /// Scroll-wheel listeners, in paint order.
+    pub(crate) scroll_wheel_listeners: Vec<AnyMouseListener>,
+    /// Listeners for less-common `MouseEvent` types (`MouseExitEvent`, `FileDropEvent`).
+    pub(crate) other_mouse_listeners: Vec<AnyMouseListener>,
     /// The key dispatch tree: key contexts, key / action listeners, focus ids, tab stops.
     pub(crate) dispatch_tree: DispatchTree,
     /// The display list for the renderer.
@@ -198,7 +224,11 @@ impl Frame {
             focus: None,
             element_states: Default::default(),
             hitboxes: Vec::new(),
-            mouse_listeners: Vec::new(),
+            mouse_down_listeners: Vec::new(),
+            mouse_up_listeners: Vec::new(),
+            mouse_move_listeners: Vec::new(),
+            scroll_wheel_listeners: Vec::new(),
+            other_mouse_listeners: Vec::new(),
             dispatch_tree: DispatchTree::new(),
             scene: Scene::new(),
             cursor_styles: Vec::new(),
@@ -216,7 +246,11 @@ impl Frame {
         self.focus = None;
         self.element_states.clear();
         self.hitboxes.clear();
-        self.mouse_listeners.clear();
+        self.mouse_down_listeners.clear();
+        self.mouse_up_listeners.clear();
+        self.mouse_move_listeners.clear();
+        self.scroll_wheel_listeners.clear();
+        self.other_mouse_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.cursor_styles.clear();

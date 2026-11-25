@@ -73,13 +73,29 @@ pub enum PathStyle {
 
 /// A built path (GPUI's `Path<Pixels>`; named `BuiltPath` because the scene primitive is `Path`): lyon's
 /// triangles and the box of their vertices. `PathBuilder::build` returns `BuiltPath<Pixels>`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct BuiltPath<P: Clone + Debug + Default + PartialEq = Pixels> {
-    /// Three points per triangle.
-    pub triangles: Vec<Point<P>>,
+    /// Three points per triangle (shared across cache hits).
+    pub triangles: Arc<[Point<P>]>,
     /// The vertices' bounding box (GPUI's `Path::bounds`: the first vertex's point, grown by each
     /// triangle).
     pub bounds: Bounds<P>,
+    /// Key hash of the thread-local [`crate::path_cache`] entry this path came from (verified by
+    /// `Arc::ptr_eq` on `triangles` before reusing cached device-pixel [`PathData`]).
+    pub(crate) cache_hash: Option<u64>,
+}
+
+impl<P: Clone + Debug + Default + PartialEq> BuiltPath<P> {
+    /// Wraps pre-tessellated triangles (three points per triangle) and their bounding box.
+    pub fn new(triangles: impl Into<Arc<[Point<P>]>>, bounds: Bounds<P>) -> Self {
+        Self { triangles: triangles.into(), bounds, cache_hash: None }
+    }
+}
+
+impl<P: Clone + Debug + Default + PartialEq> PartialEq for BuiltPath<P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.triangles == other.triangles && self.bounds == other.bounds
+    }
 }
 
 impl BuiltPath<Pixels> {
@@ -88,6 +104,7 @@ impl BuiltPath<Pixels> {
         BuiltPath {
             triangles: self.triangles.iter().map(|p| p.scale(factor)).collect(),
             bounds: self.bounds.scale(factor),
+            cache_hash: None,
         }
     }
 }
@@ -95,7 +112,7 @@ impl BuiltPath<Pixels> {
 impl BuiltPath<ScaledPixels> {
     /// The scene's geometry for this path (a new id).
     pub fn to_path_data(&self) -> PathData {
-        PathData::from_triangles(self.triangles.clone())
+        PathData::from_triangles(self.triangles.to_vec())
     }
 }
 
@@ -107,16 +124,16 @@ pub fn paint_path(
     path: &BuiltPath<Pixels>,
     color: impl Into<Background>,
 ) {
-    let path = path.scale(cx.scale_factor);
+    let bounds = path.bounds.scale(cx.scale_factor);
     let clip = cx.content_mask.scale(cx.scale_factor).bounds;
-    if path.bounds.intersect(&clip).is_empty() {
+    if bounds.intersect(&clip).is_empty() {
         return;
     }
     let paint: Background = color.into();
     scene.push_path(crate::scene::Path {
-        bounds: path.bounds,
+        bounds,
         clip,
-        path: Arc::new(path.to_path_data()),
+        path: crate::path_cache::scaled_path_data(path, cx.scale_factor),
         paint: paint.opacity(cx.opacity),
     });
 }
@@ -506,7 +523,7 @@ fn tessellate_stroke(
 /// first vertex (an empty tessellation is an empty path at the origin).
 fn built_path(buf: lyon::tessellation::VertexBuffers<lyon::math::Point, u16>) -> BuiltPath<Pixels> {
     let Some(first) = buf.vertices.first() else {
-        return BuiltPath { triangles: Vec::new(), bounds: Bounds::default() };
+        return BuiltPath { triangles: Arc::from([]), bounds: Bounds::default(), cache_hash: None };
     };
     let mut min = (first.x, first.y);
     let mut max = min;
@@ -520,5 +537,5 @@ fn built_path(buf: lyon::tessellation::VertexBuffers<lyon::math::Point, u16>) ->
         }
     }
     let bounds = Bounds::from_corners(point(px(min.0), px(min.1)), point(px(max.0), px(max.1)));
-    BuiltPath { triangles, bounds }
+    BuiltPath { triangles: Arc::from(triangles), bounds, cache_hash: None }
 }

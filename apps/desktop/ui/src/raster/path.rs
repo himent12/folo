@@ -12,7 +12,7 @@ use super::triangles::COUNT_MAX;
 use crate::{FillRule, LineCap, LineJoin, PathData, PathKind, Underline};
 
 /// A hash of everything about a path's geometry that affects its coverage.
-pub(crate) fn geometry_hash(p: &PathData) -> u64 {
+pub(crate) fn compute_geometry_hash(p: &PathData) -> u64 {
     let mut h = 0x5157_4a5e_u64;
     for c in &p.contours {
         h = mix(h, c.points.len() as u64 | (c.closed as u64) << 63);

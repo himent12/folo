@@ -486,8 +486,11 @@ fn active_style_listeners_are_skipped_without_active_styles_and_clear_when_remov
             .child(div().id("plain").w(px(60.)).h(px(30.)).bg(color(1)).hover(|s| s.bg(color(2))))
             .into_any_element()
     });
-    let listeners = with_window(&mut app, window, |window, _| window.rendered_frame.mouse_listeners.len());
-    assert_eq!(listeners, 1, "only the hover refresh listener should be registered");
+    let (down_len, move_len) = with_window(&mut app, window, |window, _| {
+        (window.rendered_frame.mouse_down_listeners.len(), window.rendered_frame.mouse_move_listeners.len())
+    });
+    assert_eq!(down_len, 0, "no active mouse-down listener should be registered");
+    assert_eq!(move_len, 1, "only the hover refresh listener should be registered");
     mouse_move(&mut app, window, 10., 10.);
     app.frame(window);
     assert!(!app.is_dirty(window));
@@ -546,4 +549,165 @@ fn active_style_listeners_are_skipped_without_active_styles_and_clear_when_remov
     mouse_up(&mut app, window, 45., 45.);
     app.frame(window);
     assert_eq!(quads_of(&mut app, window, color(4)).len(), 1, "group_active style cleared");
+}
+
+#[test]
+fn inline_focus_and_hover_refresh_respect_interleaved_listener_order() {
+    use std::cell::Cell;
+
+    use crate::{
+        DispatchPhase, MouseExitEvent, canvas,
+        window::{MouseDownEntry, MouseMoveEntry},
+    };
+
+    let events = log();
+    let prevent_child_down = Rc::new(Cell::new(true));
+    let stop_capture_down = Rc::new(Cell::new(false));
+    let parent_focus_slot: Rc<RefCell<Option<crate::FocusHandle>>> = Rc::default();
+    let child_focus_slot: Rc<RefCell<Option<crate::FocusHandle>>> = Rc::default();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let events = events.clone();
+        let prevent_child_down = prevent_child_down.clone();
+        let stop_capture_down = stop_capture_down.clone();
+        let parent_focus_slot = parent_focus_slot.clone();
+        let child_focus_slot = child_focus_slot.clone();
+        move |_, cx| {
+            let parent_focus =
+                parent_focus_slot.borrow_mut().get_or_insert_with(|| cx.focus_handle()).clone();
+            let child_focus = child_focus_slot.borrow_mut().get_or_insert_with(|| cx.focus_handle()).clone();
+            let log_parent_down = events.clone();
+            let log_child_down = events.clone();
+            let log_move = events.clone();
+            let prevent_child_down = prevent_child_down.clone();
+            let stop_capture_down = stop_capture_down.clone();
+            div()
+                .size_full()
+                .track_focus(&parent_focus)
+                .capture_any_mouse_down(move |_, _, cx| {
+                    if stop_capture_down.get() {
+                        cx.stop_propagation();
+                    }
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                    log_parent_down
+                        .borrow_mut()
+                        .push(format!("parent down prevented={}", window.default_prevented()));
+                })
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, (), window, _| {
+                            let log_move = log_move.clone();
+                            window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    log_move.borrow_mut().push("parent capture move".into());
+                                    cx.stop_propagation();
+                                }
+                            });
+                        },
+                    )
+                    .size_0(),
+                )
+                .child(
+                    div()
+                        .w(px(60.))
+                        .h(px(30.))
+                        .bg(color(1))
+                        .hover(|s| s.bg(color(2)))
+                        .track_focus(&child_focus)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            log_child_down.borrow_mut().push("child down".into());
+                            if prevent_child_down.get() {
+                                window.prevent_default();
+                            }
+                        }),
+                )
+                .into_any_element()
+        }
+    });
+
+    // Verify inline variants are used (no boxed closures for focus or hover refresh).
+    with_window(&mut app, window, |window, _| {
+        let f = &window.rendered_frame;
+        assert!(f.mouse_down_listeners.iter().any(|e| matches!(e, MouseDownEntry::Focus { .. })));
+        assert!(f.mouse_move_listeners.iter().any(|e| matches!(e, MouseMoveEntry::HoverRefresh { .. })));
+    });
+
+    // 1. Parent capture mouse-move stops propagation BEFORE the child's inline HoverRefresh runs.
+    mouse_move(&mut app, window, 150., 50.);
+    app.frame(window);
+    assert!(!app.is_dirty(window));
+    events.borrow_mut().clear();
+    mouse_move(&mut app, window, 10., 10.);
+    assert_eq!(*events.borrow(), ["parent capture move"]);
+    assert!(!app.is_dirty(window), "capture stop_propagation blocked child inline HoverRefresh");
+
+    // 2. Child bubble on_mouse_down calls prevent_default(): blocks both inline Focus handlers,
+    //    while still allowing parent bubble on_mouse_down to run and observe default_prevented().
+    events.borrow_mut().clear();
+    mouse_down(&mut app, window, 10., 10.);
+    assert_eq!(*events.borrow(), ["child down", "parent down prevented=true"]);
+    let focused = with_window(&mut app, window, |window, cx| window.focused(cx).is_some());
+    assert!(!focused, "child on_mouse_down prevent_default blocked inline Focus handlers");
+
+    // 3. Without child prevent_default(), child inline Focus focuses the child and prevents parent
+    //    inline Focus (parent bubble listener sees default_prevented() == true).
+    prevent_child_down.set(false);
+    events.borrow_mut().clear();
+    mouse_down(&mut app, window, 10., 10.);
+    assert_eq!(*events.borrow(), ["child down", "parent down prevented=true"]);
+    let focused_child = with_window(&mut app, window, |window, _| {
+        child_focus_slot.borrow().as_ref().unwrap().is_focused(window)
+    });
+    assert!(focused_child, "child inline Focus should win over parent inline Focus");
+
+    // 4. Capture stop_propagation() blocks inline Focus completely.
+    with_window(&mut app, window, |window, _| window.blur());
+    app.frame(window);
+    stop_capture_down.set(true);
+    events.borrow_mut().clear();
+    mouse_down(&mut app, window, 10., 10.);
+    assert!(events.borrow().is_empty());
+    let focused_after_stop = with_window(&mut app, window, |window, cx| window.focused(cx).is_some());
+    assert!(!focused_after_stop, "capture stop_propagation blocked inline Focus");
+
+    // 5. Fallback `other_mouse_listeners` bucket delivers MouseExitEvent and FileDropEvent::Exited
+    //    without crosstalk between the two event types.
+    let other_log = log();
+    let (mut app2, window2) = open(size(px(100.), px(100.)), 1.0, {
+        let other_log = other_log.clone();
+        move |_, _| {
+            let log_exit = other_log.clone();
+            let log_drop = other_log.clone();
+            canvas(
+                |_, _, _| {},
+                move |_, (), window, _| {
+                    let log_exit = log_exit.clone();
+                    window.on_mouse_event(move |_: &MouseExitEvent, phase, _, _| {
+                        if phase == DispatchPhase::Bubble {
+                            log_exit.borrow_mut().push("exit".into());
+                        }
+                    });
+                    let log_drop = log_drop.clone();
+                    window.on_mouse_event(move |_: &crate::FileDropEvent, phase, _, _| {
+                        if phase == DispatchPhase::Bubble {
+                            log_drop.borrow_mut().push("drop-exit".into());
+                        }
+                    });
+                },
+            )
+            .size_full()
+            .into_any_element()
+        }
+    });
+    app2.simulate_input(
+        window2,
+        PlatformInput::MouseExited(MouseExitEvent {
+            position: Point::default(),
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }),
+    );
+    app2.simulate_input(window2, PlatformInput::FileDrop(crate::FileDropEvent::Exited));
+    assert_eq!(*other_log.borrow(), ["exit", "drop-exit"]);
 }

@@ -13,8 +13,9 @@ use std::any::Any;
 
 use crate::{
     Action, AnyDrag, App, DispatchEventResult, DispatchPhase, ExternalPaths, FileDropEvent, KeyDownEvent,
-    Keystroke, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, PlatformInput, Window,
-    WindowControlArea, window::DispatchNodeId,
+    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput,
+    ScrollWheelEvent, Window, WindowControlArea,
+    window::{AnyMouseListener, DispatchNodeId, MouseDownEntry, MouseMoveEntry},
 };
 
 impl Window {
@@ -131,7 +132,7 @@ impl Window {
         }
     }
 
-    /// Dispatches a mouse event to the rendered frame's mouse listeners.
+    /// Dispatches a mouse event to the rendered frame's matching mouse listener bucket.
     pub(crate) fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         let hit_test = self.hit_test_mouse(&self.rendered_frame);
         if hit_test != self.mouse_hit_test {
@@ -140,23 +141,77 @@ impl Window {
         }
 
         // The listeners are taken out for the dispatch (they get the window) and put back after.
-        let mut listeners = std::mem::take(&mut self.rendered_frame.mouse_listeners);
-        for listener in listeners.iter_mut().flatten() {
-            listener(event, DispatchPhase::Capture, self, cx);
-            if !cx.propagate_event {
-                break;
-            }
-        }
-        if cx.propagate_event {
-            for listener in listeners.iter_mut().rev().flatten() {
-                listener(event, DispatchPhase::Bubble, self, cx);
-                if !cx.propagate_event {
-                    break;
+        // A draw cannot happen during dispatch (the window is leased), so these are this frame's.
+        if event.is::<MouseDownEvent>() {
+            let mut listeners = std::mem::take(&mut self.rendered_frame.mouse_down_listeners);
+            for entry in &mut listeners {
+                if let MouseDownEntry::Boxed(listener) = entry {
+                    listener(event, DispatchPhase::Capture, self, cx);
+                    if !cx.propagate_event {
+                        break;
+                    }
                 }
             }
+            if cx.propagate_event {
+                for entry in listeners.iter_mut().rev() {
+                    match entry {
+                        MouseDownEntry::Focus { hitbox_id, focus_handle } => {
+                            if hitbox_id.is_hovered(self) && !self.default_prevented() {
+                                self.focus(focus_handle);
+                                self.prevent_default();
+                            }
+                        }
+                        MouseDownEntry::Boxed(listener) => {
+                            listener(event, DispatchPhase::Bubble, self, cx);
+                            if !cx.propagate_event {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            self.rendered_frame.mouse_down_listeners = listeners;
+        } else if event.is::<MouseMoveEvent>() {
+            let mut listeners = std::mem::take(&mut self.rendered_frame.mouse_move_listeners);
+            for entry in &mut listeners {
+                match entry {
+                    MouseMoveEntry::HoverRefresh { hitbox_id, was_hovered } => {
+                        if hitbox_id.is_hovered(self) != *was_hovered {
+                            self.refresh();
+                        }
+                    }
+                    MouseMoveEntry::Boxed(listener) => {
+                        listener(event, DispatchPhase::Capture, self, cx);
+                        if !cx.propagate_event {
+                            break;
+                        }
+                    }
+                }
+            }
+            if cx.propagate_event {
+                for entry in listeners.iter_mut().rev() {
+                    if let MouseMoveEntry::Boxed(listener) = entry {
+                        listener(event, DispatchPhase::Bubble, self, cx);
+                        if !cx.propagate_event {
+                            break;
+                        }
+                    }
+                }
+            }
+            self.rendered_frame.mouse_move_listeners = listeners;
+        } else if event.is::<MouseUpEvent>() {
+            let mut listeners = std::mem::take(&mut self.rendered_frame.mouse_up_listeners);
+            self.dispatch_boxed_mouse_listeners(&mut listeners, event, cx);
+            self.rendered_frame.mouse_up_listeners = listeners;
+        } else if event.is::<ScrollWheelEvent>() {
+            let mut listeners = std::mem::take(&mut self.rendered_frame.scroll_wheel_listeners);
+            self.dispatch_boxed_mouse_listeners(&mut listeners, event, cx);
+            self.rendered_frame.scroll_wheel_listeners = listeners;
+        } else {
+            let mut listeners = std::mem::take(&mut self.rendered_frame.other_mouse_listeners);
+            self.dispatch_boxed_mouse_listeners(&mut listeners, event, cx);
+            self.rendered_frame.other_mouse_listeners = listeners;
         }
-        // A draw cannot happen during dispatch (the window is leased), so these are this frame's.
-        self.rendered_frame.mouse_listeners = listeners;
 
         if self.active_drag.is_some() {
             if event.is::<MouseMoveEvent>() {
@@ -164,6 +219,27 @@ impl Window {
             } else if event.is::<MouseUpEvent>() {
                 self.active_drag = None;
                 self.refresh();
+            }
+        }
+    }
+
+    /// Runs capture (forward) then bubble (reverse) over a list of boxed mouse listeners.
+    fn dispatch_boxed_mouse_listeners(
+        &mut self,
+        listeners: &mut [AnyMouseListener],
+        event: &dyn Any,
+        cx: &mut App,
+    ) {
+        for listener in listeners.iter_mut() {
+            listener(event, DispatchPhase::Capture, self, cx);
+            if !cx.propagate_event {
+                return;
+            }
+        }
+        for listener in listeners.iter_mut().rev() {
+            listener(event, DispatchPhase::Bubble, self, cx);
+            if !cx.propagate_event {
+                return;
             }
         }
     }
