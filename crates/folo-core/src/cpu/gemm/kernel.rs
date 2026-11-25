@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+#[cfg(target_arch = "x86_64")]
+use super::RegAct;
 use super::{MR, NR, RegEpi};
 
 pub(super) type Kernel =
@@ -121,7 +123,8 @@ unsafe fn kernel_avx2_entry(
     unsafe { kernel_avx2(kc, a, b, c, ldc, mr, nr, acc, epi) }
 }
 
-/// AVX2/FMA 6x16 micro-kernel: 12 ymm accumulators, 2 for B, 1 broadcast of A.
+/// AVX2/FMA micro-kernel with 4x K-unrolling (preserving exact sequential K accumulation order) and
+/// specialized 2x16 (`mr <= 2`), 4x16 (`mr <= 4`), and 6x16 (`mr <= 6`) register tiles.
 ///
 /// # Safety
 /// As [`kernel_generic`], and the CPU supports AVX2 and FMA.
@@ -140,43 +143,128 @@ unsafe fn kernel_avx2(
     epi: Option<&RegEpi>,
 ) {
     use std::arch::x86_64::*;
-    let mut c00 = _mm256_setzero_ps();
-    let mut c01 = _mm256_setzero_ps();
-    let mut c10 = _mm256_setzero_ps();
-    let mut c11 = _mm256_setzero_ps();
-    let mut c20 = _mm256_setzero_ps();
-    let mut c21 = _mm256_setzero_ps();
-    let mut c30 = _mm256_setzero_ps();
-    let mut c31 = _mm256_setzero_ps();
-    let mut c40 = _mm256_setzero_ps();
-    let mut c41 = _mm256_setzero_ps();
-    let mut c50 = _mm256_setzero_ps();
-    let mut c51 = _mm256_setzero_ps();
+    if mr == 0 || nr == 0 {
+        return;
+    }
     let mut ap = a;
     let mut bp = b;
-    // SAFETY: the caller guarantees kc * MR floats at `a` and kc * NR at `b`, and owns the block at `c`.
+    let k4 = kc / 4;
+    let kr = kc % 4;
+
+    // SAFETY: the caller guarantees `kc * MR` floats at `a`, `kc * NR` floats at `b`, and owns `mr x nr` at `c`.
     unsafe {
-        for _ in 0..kc {
-            let b0 = _mm256_loadu_ps(bp);
-            let b1 = _mm256_loadu_ps(bp.add(8));
-            let a0 = _mm256_broadcast_ss(&*ap);
-            c00 = _mm256_fmadd_ps(a0, b0, c00);
-            c01 = _mm256_fmadd_ps(a0, b1, c01);
-            let a1 = _mm256_broadcast_ss(&*ap.add(1));
-            c10 = _mm256_fmadd_ps(a1, b0, c10);
-            c11 = _mm256_fmadd_ps(a1, b1, c11);
-            let a2 = _mm256_broadcast_ss(&*ap.add(2));
-            c20 = _mm256_fmadd_ps(a2, b0, c20);
-            c21 = _mm256_fmadd_ps(a2, b1, c21);
-            let a3 = _mm256_broadcast_ss(&*ap.add(3));
-            c30 = _mm256_fmadd_ps(a3, b0, c30);
-            c31 = _mm256_fmadd_ps(a3, b1, c31);
-            let a4 = _mm256_broadcast_ss(&*ap.add(4));
-            c40 = _mm256_fmadd_ps(a4, b0, c40);
-            c41 = _mm256_fmadd_ps(a4, b1, c41);
-            let a5 = _mm256_broadcast_ss(&*ap.add(5));
-            c50 = _mm256_fmadd_ps(a5, b0, c50);
-            c51 = _mm256_fmadd_ps(a5, b1, c51);
+        if mr <= 2 {
+            let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            macro_rules! step2 {
+                ($k:expr) => {{
+                    let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                    let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                    let a0 = _mm256_broadcast_ss(&*ap.add($k * MR));
+                    c00 = _mm256_fmadd_ps(a0, b0, c00);
+                    c01 = _mm256_fmadd_ps(a0, b1, c01);
+                    let a1 = _mm256_broadcast_ss(&*ap.add($k * MR + 1));
+                    c10 = _mm256_fmadd_ps(a1, b0, c10);
+                    c11 = _mm256_fmadd_ps(a1, b1, c11);
+                }};
+            }
+            for _ in 0..k4 {
+                step2!(0);
+                step2!(1);
+                step2!(2);
+                step2!(3);
+                ap = ap.add(4 * MR);
+                bp = bp.add(4 * NR);
+            }
+            for _ in 0..kr {
+                step2!(0);
+                ap = ap.add(MR);
+                bp = bp.add(NR);
+            }
+            let rows = [[c00, c01], [c10, c11]];
+            store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);
+            return;
+        }
+        if mr <= 4 {
+            let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c20, mut c21) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c30, mut c31) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            macro_rules! step4 {
+                ($k:expr) => {{
+                    let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                    let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                    let a0 = _mm256_broadcast_ss(&*ap.add($k * MR));
+                    c00 = _mm256_fmadd_ps(a0, b0, c00);
+                    c01 = _mm256_fmadd_ps(a0, b1, c01);
+                    let a1 = _mm256_broadcast_ss(&*ap.add($k * MR + 1));
+                    c10 = _mm256_fmadd_ps(a1, b0, c10);
+                    c11 = _mm256_fmadd_ps(a1, b1, c11);
+                    let a2 = _mm256_broadcast_ss(&*ap.add($k * MR + 2));
+                    c20 = _mm256_fmadd_ps(a2, b0, c20);
+                    c21 = _mm256_fmadd_ps(a2, b1, c21);
+                    let a3 = _mm256_broadcast_ss(&*ap.add($k * MR + 3));
+                    c30 = _mm256_fmadd_ps(a3, b0, c30);
+                    c31 = _mm256_fmadd_ps(a3, b1, c31);
+                }};
+            }
+            for _ in 0..k4 {
+                step4!(0);
+                step4!(1);
+                step4!(2);
+                step4!(3);
+                ap = ap.add(4 * MR);
+                bp = bp.add(4 * NR);
+            }
+            for _ in 0..kr {
+                step4!(0);
+                ap = ap.add(MR);
+                bp = bp.add(NR);
+            }
+            let rows = [[c00, c01], [c10, c11], [c20, c21], [c30, c31]];
+            store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);
+            return;
+        }
+        let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c20, mut c21) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c30, mut c31) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c40, mut c41) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c50, mut c51) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        macro_rules! step6 {
+            ($k:expr) => {{
+                let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                let a0 = _mm256_broadcast_ss(&*ap.add($k * MR));
+                c00 = _mm256_fmadd_ps(a0, b0, c00);
+                c01 = _mm256_fmadd_ps(a0, b1, c01);
+                let a1 = _mm256_broadcast_ss(&*ap.add($k * MR + 1));
+                c10 = _mm256_fmadd_ps(a1, b0, c10);
+                c11 = _mm256_fmadd_ps(a1, b1, c11);
+                let a2 = _mm256_broadcast_ss(&*ap.add($k * MR + 2));
+                c20 = _mm256_fmadd_ps(a2, b0, c20);
+                c21 = _mm256_fmadd_ps(a2, b1, c21);
+                let a3 = _mm256_broadcast_ss(&*ap.add($k * MR + 3));
+                c30 = _mm256_fmadd_ps(a3, b0, c30);
+                c31 = _mm256_fmadd_ps(a3, b1, c31);
+                let a4 = _mm256_broadcast_ss(&*ap.add($k * MR + 4));
+                c40 = _mm256_fmadd_ps(a4, b0, c40);
+                c41 = _mm256_fmadd_ps(a4, b1, c41);
+                let a5 = _mm256_broadcast_ss(&*ap.add($k * MR + 5));
+                c50 = _mm256_fmadd_ps(a5, b0, c50);
+                c51 = _mm256_fmadd_ps(a5, b1, c51);
+            }};
+        }
+        for _ in 0..k4 {
+            step6!(0);
+            step6!(1);
+            step6!(2);
+            step6!(3);
+            ap = ap.add(4 * MR);
+            bp = bp.add(4 * NR);
+        }
+        for _ in 0..kr {
+            step6!(0);
             ap = ap.add(MR);
             bp = bp.add(NR);
         }
@@ -185,8 +273,8 @@ unsafe fn kernel_avx2(
     }
 }
 
-/// `epi` on row `i` of a finished block, in registers: `+ bias[i]`, then SiLU through the lanes
-/// [`crate::cpu::elementwise::silu_bias_inplace`] uses, so the result is bit for bit the row pass's.
+/// `epi` on row `i` of a finished block, in registers: `+ bias[i]`, then the fused activation matching
+/// [`crate::cpu::elementwise::bias_act_inplace`] bit for bit.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -196,20 +284,37 @@ fn finish_avx2(v: std::arch::x86_64::__m256, epi: Option<&RegEpi>, i: usize) -> 
         None => v,
         Some(e) => {
             let x = _mm256_add_ps(v, _mm256_set1_ps(e.bias[i]));
-            if e.silu { crate::cpu::elementwise::silu8(x) } else { x }
+            match e.act {
+                RegAct::None => x,
+                RegAct::Silu => crate::cpu::elementwise::silu8(x),
+                // `vmaxps(x, +0.0)` returns `x > +0.0 ? x : +0.0`, matching `f32::max(x, 0.0)` on all values
+                // including `-0.0` and `NaN`.
+                RegAct::Relu => _mm256_max_ps(x, _mm256_setzero_ps()),
+                RegAct::LeakyRelu(a) => {
+                    let pos = _mm256_cmp_ps::<_CMP_GT_OQ>(x, _mm256_setzero_ps());
+                    let neg = _mm256_mul_ps(_mm256_set1_ps(a), x);
+                    _mm256_blendv_ps(neg, x, pos)
+                }
+                // `vminps(6.0, vmaxps(0.0, y))` preserves NaN and matches `y.clamp(0.0, 6.0)` bit for bit.
+                RegAct::Hardswish => {
+                    let y = _mm256_add_ps(x, _mm256_set1_ps(3.0));
+                    let c = _mm256_min_ps(_mm256_set1_ps(6.0), _mm256_max_ps(_mm256_setzero_ps(), y));
+                    _mm256_mul_ps(_mm256_mul_ps(x, c), _mm256_set1_ps(1.0 / 6.0))
+                }
+            }
         }
     }
 }
 
-/// Store a finished 6x16 register block into the `mr x nr` block at `c`: `C (+)= rows`, then `epi`.
+/// Store a finished `rows.len() x 16` register block into the `mr x nr` block at `c`: `C (+)= rows`, then `epi`.
 ///
 /// # Safety
-/// As [`kernel_generic`] for `c`, and the CPU supports AVX2 and FMA.
+/// As [`kernel_generic`] for `c`, `mr <= rows.len()`, `nr <= NR`, and the CPU supports AVX2 and FMA.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub(super) unsafe fn store_block_avx2(
-    rows: &[[std::arch::x86_64::__m256; 2]; MR],
+    rows: &[[std::arch::x86_64::__m256; 2]],
     c: *mut f32,
     ldc: usize,
     mr: usize,
@@ -218,10 +323,11 @@ pub(super) unsafe fn store_block_avx2(
     epi: Option<&RegEpi>,
 ) {
     use std::arch::x86_64::*;
+    assert!(mr <= rows.len() && mr <= MR && nr <= NR);
     // SAFETY: every access is inside the mr x nr block at `c` (the caller's) or the local `tmp`.
     unsafe {
-        if mr == MR && nr == NR {
-            for (i, r) in rows.iter().enumerate() {
+        if nr == NR {
+            for (i, r) in rows.iter().enumerate().take(mr) {
                 let cp = c.add(i * ldc);
                 let (mut v0, mut v1) = (r[0], r[1]);
                 if acc {

@@ -19,6 +19,7 @@ pub(crate) use simd::{exp_scalar, silu_bias_inplace};
 pub(crate) use simd::{exp8, silu8};
 pub(crate) use transpose::{
     copy_strided_f32, copy_strided_f32_into, copy_strided_f32_into_slice, transpose_f32_2d,
+    transpose_f32_2d_serial,
 };
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
