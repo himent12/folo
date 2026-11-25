@@ -220,3 +220,76 @@ async fn val_endpoint() {
     let req = json!({ "model_id": "m_1", "dataset_id": "ds_1" });
     err(&real, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
 }
+
+#[tokio::test]
+async fn model_routes_support_etag_and_not_modified() {
+    let (server, _) = mock();
+    let app = server.router();
+
+    for path in ["/api/models", "/api/models/m_31aa", "/api/models/m_31aa/eval"] {
+        let (status, headers, body) = send(&app, get(path)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+        assert!(etag.starts_with("W/\"") && etag.ends_with('"'), "{path}: {etag}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-cache", "{path}");
+        assert!(headers.get_all(header::VARY).iter().any(|v| v == "accept-encoding"), "{path}");
+        assert!(!body.is_empty(), "{path}");
+
+        // Matching If-None-Match (with gzip accepted too) answers 304 with empty body.
+        let req = Request::get(path)
+            .header(header::IF_NONE_MATCH, &etag)
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let (s304, h304, b304) = send(&app, req).await;
+        assert_eq!(s304, StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(h304[header::ETAG], etag.as_str(), "{path}");
+        assert_eq!(h304[header::CACHE_CONTROL], "no-cache", "{path}");
+        assert!(b304.is_empty(), "{path}");
+
+        // Stale If-None-Match returns 200 with full JSON body.
+        let stale =
+            Request::get(path).header(header::IF_NONE_MATCH, "W/\"stale\"").body(Body::empty()).unwrap();
+        let (s200, h200, b200) = send(&app, stale).await;
+        assert_eq!(s200, StatusCode::OK, "{path}");
+        assert_eq!(h200[header::ETAG], etag.as_str(), "{path}");
+        assert_eq!(b200, body, "{path}");
+    }
+
+    // RealStore: adding a `.folo` file changes `GET /api/models`'s ETag immediately (no stale 304).
+    let dir = TestDir::new("models-etag-real");
+    let real = Server::new(Arc::new(RealStore::open(dir.to_path_buf())), Options::default()).router();
+    let (s1, h1, _) = send(&real, get("/api/models")).await;
+    assert_eq!(s1, StatusCode::OK);
+    let empty_etag = h1[header::ETAG].to_str().unwrap().to_string();
+
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 1).unwrap(),
+        &mut folo_core::rng::Rng::seed(7),
+    )
+    .unwrap();
+    m.set_classes(vec!["cat".into()]).unwrap();
+    m.set_imgsz(64);
+    m.save(dir.join("models").join("demo.folo")).unwrap();
+
+    let req =
+        Request::get("/api/models").header(header::IF_NONE_MATCH, &empty_etag).body(Body::empty()).unwrap();
+    let (s2, h2, b2) = send(&real, req).await;
+    assert_eq!(s2, StatusCode::OK, "adding a model invalidates the previous ETag");
+    let new_etag = h2[header::ETAG].to_str().unwrap().to_string();
+    assert_ne!(new_etag, empty_etag);
+    let list: ModelList = serde_json::from_slice(&b2).unwrap();
+    assert_eq!(list.models.len(), 1);
+    let id = &list.models[0].id;
+
+    // Detail route resolves via the bounded id index and returns 304 on repeat.
+    let (sd, hd, _) = send(&real, get(&format!("/api/models/{id}"))).await;
+    assert_eq!(sd, StatusCode::OK);
+    let detail_etag = hd[header::ETAG].to_str().unwrap().to_string();
+    let req_d = Request::get(format!("/api/models/{id}"))
+        .header(header::IF_NONE_MATCH, &detail_etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&real, req_d).await.0, StatusCode::NOT_MODIFIED);
+}

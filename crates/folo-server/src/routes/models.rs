@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use folo_api::{ExportSpec, ModelList, OnnxSwitches, ValReport, ValRequest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
@@ -17,16 +17,79 @@ use super::{WEIGHTS_CHUNK, blocking};
 
 // ---- models ------------------------------------------------------------------------------------------------------
 
-pub(super) async fn list_models(State(st): State<AppState>) -> Result<Json<ModelList>> {
-    Ok(Json(ModelList { models: blocking(&st, |s| s.list_models()).await? }))
+/// Weak ETag (`W/"<32 hex>"`, 128-bit SHA-256 of canonical JSON bytes) for compressible JSON model endpoints.
+/// Weak because [`crate::Server`]'s compression layer may gzip-encode `application/json`, and RFC 9110 §8.8.3.3
+/// forbids sharing a strong validator across different content codings.
+fn json_etag(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(36);
+    out.push_str("W/\"");
+    for b in &digest[..16] {
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out.push('"');
+    out
 }
 
-pub(super) async fn get_model(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(blocking(&st, move |s| s.get_model(&id)).await?).into_response())
+/// Serializes `value` once, derives its weak `ETag`, and answers `412 Precondition Failed` (`If-Match`),
+/// `304 Not Modified` (`If-None-Match`), or `200 OK` with `ETag`, `Cache-Control: no-cache`, and
+/// `Vary: accept-encoding`.
+fn cached_json_response(value: &impl Serialize, headers: &HeaderMap) -> Result<Response> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|e| Error::internal(format!("serializing JSON response: {e}")))?;
+    let etag = json_etag(&bytes);
+    let etag_val = HeaderValue::from_str(&etag).expect("ASCII ETag");
+    if !crate::web::if_match(headers, &etag) {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            [
+                (header::ETAG, etag_val),
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                (header::VARY, HeaderValue::from_static("accept-encoding")),
+            ],
+        )
+            .into_response());
+    }
+    let common = [
+        (header::ETAG, etag_val),
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        (header::VARY, HeaderValue::from_static("accept-encoding")),
+    ];
+    if crate::web::if_none_match(headers, &etag) == Some(true) {
+        return Ok((StatusCode::NOT_MODIFIED, common).into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        common,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        bytes,
+    )
+        .into_response())
 }
 
-pub(super) async fn model_eval(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(blocking(&st, move |s| s.model_eval(&id)).await?).into_response())
+pub(super) async fn list_models(State(st): State<AppState>, headers: HeaderMap) -> Result<Response> {
+    let list = ModelList { models: blocking(&st, |s| s.list_models()).await? };
+    cached_json_response(&list, &headers)
+}
+
+pub(super) async fn get_model(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let model = blocking(&st, move |s| s.get_model(&id)).await?;
+    cached_json_response(&model, &headers)
+}
+
+pub(super) async fn model_eval(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let eval = blocking(&st, move |s| s.model_eval(&id)).await?;
+    cached_json_response(&eval, &headers)
 }
 
 pub(super) async fn export_model(
@@ -60,16 +123,6 @@ fn not_modified(headers: &HeaderMap, etag: &str, modified: std::time::SystemTime
     let Some(since) = v.to_str().ok().and_then(|v| httpdate::parse_http_date(v).ok()) else { return false };
     let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     secs(modified) <= secs(since)
-}
-
-/// False when the request has `If-Match` and it names neither `etag` nor `*` (the strong comparison, RFC 9110
-/// §13.1.1: a weak tag never matches).
-fn if_match(headers: &HeaderMap, etag: &str) -> bool {
-    let mut values = headers.get_all(header::IF_MATCH).iter().peekable();
-    if values.peek().is_none() {
-        return true;
-    }
-    values.filter_map(|v| v.to_str().ok()).any(|v| v.split(',').any(|t| t.trim() == "*" || t.trim() == etag))
 }
 
 /// What a request's `Range` header asks of a body of some length ([`byte_range`]).
@@ -148,7 +201,7 @@ pub(super) async fn model_weights(
         (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
     ];
     // A download in parts names the version it started with: another one is never mixed in.
-    if !if_match(&headers, &w.etag) {
+    if !crate::web::if_match(&headers, &w.etag) {
         return Ok((StatusCode::PRECONDITION_FAILED, validators).into_response());
     }
     if not_modified(&headers, &w.etag, w.modified) {
@@ -202,4 +255,64 @@ pub(super) async fn val(
     ApiJson(req): ApiJson<ValRequest>,
 ) -> Result<Json<ValReport>> {
     Ok(Json(blocking(&st, move |s| s.val(req)).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn json_etag_is_weak_and_content_addressed() {
+        let a = json_etag(br#"{"models":[]}"#);
+        let b = json_etag(br#"{"models":[]}"#);
+        let c = json_etag(br#"{"models":[1]}"#);
+        assert!(a.starts_with("W/\"") && a.ends_with('"') && a.len() == 36, "{a}");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[tokio::test]
+    async fn cached_json_response_handles_conditional_headers() {
+        let payload = json!({ "models": [{ "id": "m_1" }] });
+        let res = cached_json_response(&payload, &HeaderMap::new()).unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let etag = res.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert!(etag.starts_with("W/\""), "{etag}");
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(res.headers()[header::VARY], "accept-encoding");
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "application/json");
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), payload);
+
+        let strong_form = etag.strip_prefix("W/").unwrap().to_string();
+        for inm in [etag.clone(), strong_form, format!("\"other\", {etag}"), "*".into()] {
+            let mut h = HeaderMap::new();
+            h.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&inm).unwrap());
+            let res = cached_json_response(&payload, &h).unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_MODIFIED, "{inm}");
+            assert_eq!(res.headers()[header::ETAG], etag.as_str());
+            assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(res.headers()[header::VARY], "accept-encoding");
+            assert!(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+        }
+
+        let mut stale = HeaderMap::new();
+        stale.insert(header::IF_NONE_MATCH, HeaderValue::from_static("W/\"stale\""));
+        let res = cached_json_response(&payload, &stale).unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // RFC 9110 §13.1.1: weak ETag fails strong If-Match (412, never cached), while `*` passes.
+        let mut im = HeaderMap::new();
+        im.insert(header::IF_MATCH, HeaderValue::from_str(&etag).unwrap());
+        let res = cached_json_response(&payload, &im).unwrap();
+        assert_eq!(res.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+
+        let mut im_star = HeaderMap::new();
+        im_star.insert(header::IF_MATCH, HeaderValue::from_static("*"));
+        let res = cached_json_response(&payload, &im_star).unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
 }

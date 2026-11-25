@@ -13,7 +13,7 @@ it.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | `Server` (the router and its middleware: token, origin, `Host`, CORS, compression, logging), `Options`, `WebSource` |
-| `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`, `OriginalUri` in `404`/`405` fallbacks) and handler files grouped by area: `system.rs` (health, system, throughput, benchmark probes), `datasets.rs` (datasets + shared `serve_image` with strong `ETag` / `304` / `412`), `models.rs` (models + `POST /api/val`), `runs.rs` (runs + `/runs/estimate`), `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
+| `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`, `OriginalUri` in `404`/`405` fallbacks) and handler files grouped by area: `system.rs` (health, system, throughput, benchmark probes), `datasets.rs` (datasets + shared `serve_image` with strong `ETag` / `304` / `412`), `models.rs` (models with conditional `ETag` / `304`, weights downloads, and `POST /api/val`), `runs.rs` (runs + `/runs/estimate`), `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
 | `src/store.rs` | The `Store` trait: everything a handler can ask, with `501 not_implemented` defaults for optional parts |
 | `src/real/` | `RealStore`: `mod.rs` (the struct, `open_with_cloud`, parallel startup indexing, the data dir layout), `store.rs` (its `Store` impl), `datasets.rs`, `registry.rs`, `deletion.rs`, `training.rs`, `models.rs`, `uploads.rs`, `gpu_idle.rs`, `tests.rs` |
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
@@ -24,7 +24,7 @@ it.
 | `src/throughput/` | The measured throughput table and run-time estimates: `mod.rs`, `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs`, `tests.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the single-flight predictor cache of `/api/predict` |
 | `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (tests in `src/index/tests.rs`) |
-| `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, single-flight `/eval` cache, `/export` publishing, and cached derived `/weights?format=...` builds with per-`(model, variant)` locks (tests in `src/models/tests.rs`) |
+| `src/models/` | The real store's models: `mod.rs` (`Models`, bounded LRU caches, `<data dir>/models` scan and `by_id` index, published weights), `meta.rs` (`.folo` header metadata, `ModelRef`, FLOPs), `weights.rs` (cached derived `/weights?format=...` with per-`(model, variant)` locks), `eval.rs` (single-flight bounded `/eval` cache and `POST /api/val`), `export.rs` (`/export` publishing and ONNX export), `tests.rs` |
 | `src/uploads/` | Upload sessions (`/api/uploads`): `mod.rs` (sessions into `<data dir>/uploads/<id>/`, condvar-gated expiry sweeper), `fingerprints.rs` (cached `uploads.json` fingerprints), `pipe.rs` (streaming part bridge), `unpack.rs` (tar extraction and path validation), `tests.rs` |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |

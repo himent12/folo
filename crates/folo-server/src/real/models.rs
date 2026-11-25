@@ -49,7 +49,7 @@ impl RealStore {
         if let Some(p) = folo_api::weights::find(id) {
             return self.models.published_model(id).ok_or_else(|| self.published_not_found(p));
         }
-        self.models.scan().into_iter().find(|m| m.model.id == id).ok_or_else(|| Error::not_found("model", id))
+        self.models.file_model(id).ok_or_else(|| Error::not_found("model", id))
     }
 
     /// `model_not_found` for published weights that are not downloaded (or that this store does not list).
