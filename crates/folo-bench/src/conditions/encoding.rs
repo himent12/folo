@@ -35,8 +35,9 @@ pub(super) fn encode_jpeg_quality(image: &RgbImage, quality: u8) -> Result<Vec<u
         return Err(Error::Encode("the image is empty".into()));
     }
     let mut out = Vec::new();
+    let len = image.width() as usize * image.height() as usize * 3;
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
-        .write_image(image.as_raw(), image.width(), image.height(), image::ExtendedColorType::Rgb8)
+        .write_image(&image.as_raw()[..len], image.width(), image.height(), image::ExtendedColorType::Rgb8)
         .map_err(|e| Error::Encode(e.to_string()))?;
     Ok(out)
 }

@@ -280,6 +280,23 @@ fn render_decodes_applies_and_encodes() {
 }
 
 #[test]
+fn oversized_backing_buffer_matches_tightly_packed_image() {
+    let base = scene(12, 9);
+    for extra in [1usize, 3, 12 * 3] {
+        let mut padded = base.as_raw().to_vec();
+        padded.extend((0..extra).map(|i| (i * 37) as u8));
+        let oversized = RgbImage::from_raw(12, 9, padded).expect("RgbImage accepts oversized buffers");
+        for c in Condition::ALL {
+            let (got, got_boxes) = apply(c, 3, &oversized, &[bx(1.0, 1.0, 8.0, 6.0)], 7).unwrap();
+            let (want, want_boxes) = apply(c, 3, &base, &[bx(1.0, 1.0, 8.0, 6.0)], 7).unwrap();
+            assert_eq!(got.dimensions(), want.dimensions(), "{} extra={extra}", c.id());
+            assert_eq!(got.as_raw(), want.as_raw(), "{} extra={extra}", c.id());
+            assert_eq!(got_boxes, want_boxes, "{} extra={extra}", c.id());
+        }
+    }
+}
+
+#[test]
 fn docs_table_is_in_step() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/BENCH.md");
     let doc = std::fs::read_to_string(path).expect("docs/BENCH.md").replace("\r\n", "\n");
