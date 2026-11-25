@@ -417,8 +417,20 @@ export default function ImagePanel(props: ImagePanelProps) {
             </div>
             {props.sheetShown && props.tablet ? (
               /* Tablets: a popover anchored under its button (bg.overlay, shadow-lg), over the panels below, never a
-                 bottom sheet clipped at the viewport. Escape returns focus to the button. */
-              <div class="pop" id="pg-more" role="dialog" aria-modal="false" aria-labelledby="pg-more-title" tabindex={-1} ref={sheetEl}>
+                 bottom sheet clipped at the viewport. Escape returns focus to the button; Tab away closes it. */
+              <div
+                class="pop"
+                id="pg-more"
+                role="dialog"
+                aria-modal="false"
+                aria-labelledby="pg-more-title"
+                tabindex={-1}
+                ref={sheetEl}
+                onfocusout={(e) => {
+                  const next = e.relatedTarget as Node | null;
+                  if (next && !sheetEl.peek()?.contains(next) && !moreBtn.peek()?.contains(next)) moreOpen.set(false);
+                }}
+              >
                 <div class="pop-head">
                   <h2 id="pg-more-title">{props.sheetTitle}</h2>
                   {props.resetButton}

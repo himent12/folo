@@ -29,4 +29,30 @@ describe('rememberFocus', () => {
     restore();
     expect(document.activeElement).toBe(elsewhere);
   });
+
+  it('uses fallback when the opener became disabled or disconnected before close', () => {
+    const opener = document.createElement('button');
+    const fallback = document.createElement('button');
+    const inside = document.createElement('button');
+    document.body.append(opener, fallback, inside);
+    opener.focus();
+    const restore = rememberFocus(() => fallback);
+    inside.focus();
+    opener.disabled = true;
+    inside.remove();
+    restore();
+    expect(document.activeElement).toBe(fallback);
+
+    // Also when the opener was removed from the DOM entirely.
+    const opener2 = document.createElement('button');
+    const inside2 = document.createElement('button');
+    document.body.append(opener2, inside2);
+    opener2.focus();
+    const restore2 = rememberFocus(() => fallback);
+    inside2.focus();
+    opener2.remove();
+    inside2.remove();
+    restore2();
+    expect(document.activeElement).toBe(fallback);
+  });
 });

@@ -60,6 +60,22 @@ describe('the sample inspector', () => {
     expect(index.get()).toBe(0);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     expect(index.get()).toBe(0);
+
+    // Position indicator is a polite live region.
+    const pos = document.querySelector<HTMLElement>('dialog footer .pos')!;
+    expect(pos.getAttribute('aria-live')).toBe('polite');
+
+    // Another modal dialog on top suppresses arrow stepping underneath.
+    const topDialog = document.createElement('dialog');
+    topDialog.open = true;
+    document.body.appendChild(topDialog);
+    try {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+      flushSync();
+      expect(index.get()).toBe(0);
+    } finally {
+      topDialog.remove();
+    }
     c.unmount();
   });
 });

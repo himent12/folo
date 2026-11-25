@@ -561,7 +561,9 @@ export default function Editor(props: EditorProps) {
                 <span use:tooltip={{ text: 'Previous', keys: 'K' }}>
                   <Button variant="ghost" size="sm" icon={ChevronLeft} aria-label="Previous image" disabled={idx.get() <= 0} onclick={() => step(-1)} />
                 </span>
-                <span class="pos num">{idx.get() >= 0 ? `${num(idx.get() + 1)} of ${num(props.images.length)}` : 'Not in this filter'}</span>
+                <span class="pos num" aria-live="polite">
+                  {idx.get() >= 0 ? `${num(idx.get() + 1)} of ${num(props.images.length)}` : 'Not in this filter'}
+                </span>
                 <span use:tooltip={{ text: 'Next', keys: 'J' }}>
                   <Button
                     variant="ghost"

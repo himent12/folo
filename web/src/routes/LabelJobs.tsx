@@ -82,6 +82,38 @@ export default function LabelJobs() {
   const hasData = computed(() => (jobs.data ? jobs.data.length > 0 : !jobs.error));
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = filter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    const all = jobs.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shown.get().length;
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
+  });
+  function clearFilters() {
+    query.set('');
+    filter.set('all');
+    announce('Cleared labeling job filters.');
+    queueMicrotask(() => {
+      const input = searchEl.peek();
+      if (input && input.isConnected && !input.disabled) input.focus();
+    });
+  }
   const open = (j: LabelJob) => router.go(`/datasets/label/${j.id}`);
 
   return (
@@ -125,6 +157,7 @@ export default function LabelJobs() {
               <div class="lt-search">
                 <Input
                   bind:value={query}
+                  bind:el={searchEl}
                   icon={Search}
                   placeholder="Filter by name or class"
                   aria-label="Filter labeling jobs"
@@ -237,7 +270,7 @@ export default function LabelJobs() {
                           title="No labeling jobs match"
                           description="Try another status or search term."
                           actions={() => (
-                            <Button size="sm" onclick={() => (query.set(''), filter.set('all'))}>
+                            <Button size="sm" onclick={clearFilters}>
                               Clear filters
                             </Button>
                           )}
@@ -331,6 +364,12 @@ export default function LabelJobs() {
                 </Meta>
               </p>
             ) : null}
+            <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+              {filterStatus.get()}
+            </p>
+            <p class="sr-only" role="status" aria-live="polite" data-live-note>
+              {liveNote.get()}
+            </p>
           </>
         )}
       </Page>

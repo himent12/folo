@@ -19,6 +19,7 @@ import DatasetImage from '$lib/detect/DatasetImage';
 import { count, num } from '$lib/format';
 import Button from '$lib/ui/Button';
 import { DialogStatus } from '$lib/ui/feedback';
+import { rememberFocus } from '$lib/ui/focus';
 import Kbd from '$lib/ui/Kbd';
 import { motion } from '$lib/ui/motion';
 import Spinner from '$lib/ui/Spinner';
@@ -58,10 +59,23 @@ export default function Inspector(props: InspectorProps) {
   const selected = signal<number | null>(null);
   const showBoxes = signal(true);
 
+  const statusNote = signal('');
+  function announce(message: string) {
+    if (statusNote.peek() === message) {
+      statusNote.set('');
+      queueMicrotask(() => {
+        if (!unmounted) statusNote.set(message);
+      });
+    } else {
+      statusNote.set(message);
+    }
+  }
+
   function toggleBoxes() {
     const next = !showBoxes.peek();
     showBoxes.set(next);
     if (!next) hovered.set(null);
+    announce(next ? 'Boxes shown.' : 'Boxes hidden.');
   }
 
   const idx = computed(() => {
@@ -72,13 +86,37 @@ export default function Inspector(props: InspectorProps) {
   const total = computed(() => props.pager.total ?? 0);
 
   // ---------- open / close ----------
+  let restore: (() => void) | null = null;
+  let lastAnnouncedId: string | null = null;
   effect(() => {
     if (id.get() && !dialog.open) {
+      restore = rememberFocus();
       dialog.showModal();
       // The dialog takes focus as a container (as ui/Dialog does): no control or label row starts focused, so nothing
       // in the list looks picked before anything is.
       dialog.focus();
     } else if (!id.get() && dialog.open) dialog.close();
+  });
+
+  // Announce image changes while stepping through the inspector (not on initial open, where the dialog label speaks).
+  effect(() => {
+    const curId = id.get();
+    if (!curId) {
+      lastAnnouncedId = null;
+      untrack(() => statusNote.set(''));
+      return;
+    }
+    const cur = img.get();
+    const pos = idx.get();
+    if (!cur || pos < 0) return;
+    if (lastAnnouncedId !== null && lastAnnouncedId !== cur.id) {
+      const boxes = count(cur.boxes.length, 'labelled box', 'labelled boxes');
+      const hidden = untrack(() => !showBoxes.get());
+      untrack(() =>
+        announce(`${stem(cur.file)}, image ${num(pos + 1)} of ${num(total.peek())}, ${boxes}${hidden ? ', boxes hidden' : ''}.`),
+      );
+    }
+    lastAnnouncedId = cur.id;
   });
 
   /** A copy's result, said beside the path in the dialog (the toaster sits behind the modal); it is about one image. */
@@ -151,6 +189,10 @@ export default function Inspector(props: InspectorProps) {
   onCleanup(() => {
     unmounted = true;
     clearPendingStep();
+    const r = restore;
+    restore = null;
+    if (dialog?.open) dialog.close();
+    r?.();
   });
 
   // Changing image, closing the inspector (`id` -> null), or swapping/reloading the pager invalidates any pending step.
@@ -510,8 +552,12 @@ export default function Inspector(props: InspectorProps) {
       style={{ '--ar': img.get() ? im().width / im().height : undefined }}
       aria-label={img.get() ? `Image ${stem(im().file)}` : 'Image'}
       onclose={() => {
+        if (unmounted) return;
         clearPendingStep();
         if (id.peek()) props.onclose();
+        const r = restore;
+        restore = null;
+        r?.();
       }}
       onkeydown={onkeydown}
     >
@@ -657,6 +703,9 @@ export default function Inspector(props: InspectorProps) {
 
         <InspectorRail img={img.get()} classes={props.classes} only={props.only} bind:hovered={hovered} selected={selected.get()} pick={pick} status={status} />
       </div>
+      <p class="sr-only" role="status" aria-live="polite" data-inspector-status>
+        {statusNote.get()}
+      </p>
     </dialog>
   );
 }

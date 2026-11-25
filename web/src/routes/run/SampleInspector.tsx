@@ -83,7 +83,8 @@ export default function SampleInspector(props: SampleInspectorProps) {
   effect(() => {
     if (props.index === null) return;
     const onkey = (e: KeyboardEvent) => {
-      if (e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+      if (document.querySelectorAll('dialog[open]').length > 1) return;
       const t = e.target;
       if (t instanceof Element && t.closest('input, select, textarea, [role="slider"]')) return;
       e.preventDefault();
@@ -109,7 +110,7 @@ export default function SampleInspector(props: SampleInspectorProps) {
       size="lg"
       footer={() => (
         <>
-          <span class="pos num">
+          <span class="pos num" aria-live="polite">
             {(props.index ?? 0) + 1} of {count()}
           </span>
           <Button icon={ChevronLeft} disabled={!props.index} onclick={() => step(-1)} title="Previous sample (←)">

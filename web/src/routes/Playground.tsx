@@ -101,9 +101,19 @@ export default function Playground() {
   let fileInput!: HTMLInputElement;
   const dragging = signal(false);
 
-  // Focus moves into the sheet (or the tablet's popover) as it opens and back to its button as it closes.
+  // Focus moves into the sheet (or the tablet's popover) as it opens and back to its button as it closes if lost.
+  let wasSheetOpen = false;
   effect(() => {
-    if (sheetShown.get()) sheetEl.get()?.focus();
+    const shown = sheetShown.get();
+    if (shown) {
+      wasSheetOpen = true;
+      sheetEl.get()?.focus();
+    } else if (wasSheetOpen) {
+      wasSheetOpen = false;
+      const at = document.activeElement;
+      const lost = !at || at === document.body || !at.isConnected || !!sheetEl.peek()?.contains(at);
+      if (lost) moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus();
+    }
   });
   // The tablet's popover is transient: a press outside it (and outside its button) closes it, focus staying put.
   effect(() => {
@@ -506,9 +516,13 @@ export default function Playground() {
   }
 
   function onwindowkey(e: KeyboardEvent) {
-    if (e.key !== 'Escape' || pickerOpen.peek()) return;
-    if (sheetShown.peek()) closeSheet();
-    else if (picked.peek()) picked.set(null);
+    if (e.defaultPrevented || e.key !== 'Escape' || pickerOpen.peek()) return;
+    if (document.querySelector('dialog[open]')) return;
+    if (sheetShown.peek()) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSheet();
+    } else if (picked.peek()) picked.set(null);
   }
 
   function onwindowdown(e: PointerEvent) {

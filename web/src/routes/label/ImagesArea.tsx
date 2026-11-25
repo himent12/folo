@@ -80,6 +80,16 @@ export default function ImagesArea(props: ImagesAreaProps) {
     return c;
   });
   const shown = computed(() => (props.show === 'all' ? props.images : props.images.filter((i) => inFilter(i, props.show))));
+  const hasFiltered = signal(false);
+  effect(() => {
+    if (props.show !== 'all' && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    if (!hasFiltered.get() || !props.images.length) return '';
+    const n = shown.get().length;
+    const total = props.images.length;
+    return n < total ? `Showing ${num(n)} of ${count(total, 'image')}.` : `Showing all ${count(total, 'image')}.`;
+  });
   const options = computed(() => FILTERS.map(([value, label]) => ({ value, label, meta: num(counts.get()[value]) })));
   // The cells take the job's commonest image shape (ui/TileGrid).
   const aspect = computed(() => dominantAspect(props.images.slice(0, 64)));
@@ -244,6 +254,9 @@ export default function ImagesArea(props: ImagesAreaProps) {
       </div>
 
       <UploadStatus uploads={props.uploads} />
+      <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+        {filterStatus.get()}
+      </p>
 
       {props.images.length === 0 ? (
         <div class="zone" class:dragging={dragging.get()}>
