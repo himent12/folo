@@ -201,9 +201,15 @@ impl Renderer {
             self.ensure_pool();
         }
         let pool = if parts > 1 { self.pool.as_ref() } else { None };
-        let chunk = n.div_ceil(parts).max(1);
-        let tasks: Vec<_> = prims.chunks(chunk).zip(items.chunks_mut(chunk)).collect();
-        for_each(pool, tasks, &|(p, it): (&[Primitive], &mut [Item])| items::resolve(p, frame_rect, it));
+        if let Some(pool) = pool {
+            let chunk = n.div_ceil(parts).max(1);
+            let tasks: Vec<_> = prims.chunks(chunk).zip(items.chunks_mut(chunk)).collect();
+            for_each(Some(pool), tasks, &|(p, it): (&[Primitive], &mut [Item])| {
+                items::resolve(p, frame_rect, it)
+            });
+        } else {
+            items::resolve(prims, frame_rect, &mut items);
+        }
         let ta = Instant::now();
         self.tiles.bin(&items, parts, pool);
         let tb = Instant::now();
@@ -225,36 +231,40 @@ impl Renderer {
         self.quads.clear();
         self.glyphs.clear();
         let mut jobs: Vec<(usize, prep::Job)> = Vec::new();
-        let all = self.dirty.len() == self.tiles.len();
-        for k in 0..if all { 1 } else { self.dirty.len() } {
-            let entries: &[u32] = if all { &[] } else { self.tiles.entries(self.dirty[k] as usize).0 };
-            let indices: Box<dyn Iterator<Item = usize>> = if all {
-                Box::new((0..n).filter(|&i| !self.items[i].rect.is_empty()))
-            } else {
-                Box::new(entries.iter().map(|&i| i as usize))
-            };
-            for i in indices {
-                if self.mark[i] == self.stamp {
-                    continue;
+        let mut prepare_item = |i: usize| {
+            if self.mark[i] == self.stamp {
+                return;
+            }
+            self.mark[i] = self.stamp;
+            self.slot[i] =
+                match prep::prepare(&prims[i], &mut self.caches, &mut self.glyphs, &glyph, frame_rect) {
+                    Prepared::Lazy => LAZY,
+                    Prepared::Glyph(g) => GLYPH | g,
+                    Prepared::Quad => {
+                        self.quads.push(OnceLock::new());
+                        QUAD | (self.quads.len() as u32 - 1)
+                    }
+                    Prepared::Item(p) => {
+                        self.preps.push(p);
+                        self.preps.len() as u32 - 1
+                    }
+                    Prepared::Pending(job) => {
+                        jobs.push((i, job));
+                        LAZY
+                    }
+                };
+        };
+        if self.dirty.len() == self.tiles.len() {
+            for (i, item) in self.items.iter().enumerate() {
+                if !item.rect.is_empty() {
+                    prepare_item(i);
                 }
-                self.mark[i] = self.stamp;
-                self.slot[i] =
-                    match prep::prepare(&prims[i], &mut self.caches, &mut self.glyphs, &glyph, frame_rect) {
-                        Prepared::Lazy => LAZY,
-                        Prepared::Glyph(g) => GLYPH | g,
-                        Prepared::Quad => {
-                            self.quads.push(OnceLock::new());
-                            QUAD | (self.quads.len() as u32 - 1)
-                        }
-                        Prepared::Item(p) => {
-                            self.preps.push(p);
-                            self.preps.len() as u32 - 1
-                        }
-                        Prepared::Pending(job) => {
-                            jobs.push((i, job));
-                            LAZY
-                        }
-                    };
+            }
+        } else {
+            for &t in &self.dirty {
+                for &i in self.tiles.entries(t as usize).0 {
+                    prepare_item(i as usize);
+                }
             }
         }
         // Cache misses (shadow masks, resampled images, path coverage) are made on the pool.

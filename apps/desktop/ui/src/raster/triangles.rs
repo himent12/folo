@@ -46,6 +46,14 @@ impl Edge {
         Edge { ax: a.0, ay: a.1, dx, dy, min: if top_left { 0 } else { 1 } }
     }
 
+    /// Edge value shifted by `-min`: non-negative iff `(x, y)` lies inside the edge by the top-left
+    /// fill rule. Incrementing `x` by 256 (one pixel) adds `-256 * dy`.
+    #[inline(always)]
+    fn eval(&self, x: i64, y: i64) -> i64 {
+        self.dx * (y - self.ay) - self.dy * (x - self.ax) - self.min
+    }
+
+    #[cfg(test)]
     #[inline(always)]
     fn inside(&self, x: i64, y: i64) -> bool {
         self.dx * (y - self.ay) - self.dy * (x - self.ax) >= self.min
@@ -77,6 +85,7 @@ pub(crate) fn coverage(triangles: &[Point<ScaledPixels>], clip: [f32; 4], rect: 
             v.swap(1, 2);
         }
         let edges = [Edge::new(v[0], v[1]), Edge::new(v[1], v[2]), Edge::new(v[2], v[0])];
+        let [s0, s1, s2] = edges.map(|e| -256 * e.dy);
         let ymin = v.iter().map(|p| p.1).min().unwrap_or(0).max(clip[1]);
         let ymax = v.iter().map(|p| p.1).max().unwrap_or(0).min(clip[3]);
         let xmin = v.iter().map(|p| p.0).min().unwrap_or(0).max(clip[0]);
@@ -106,16 +115,30 @@ pub(crate) fn coverage(triangles: &[Point<ScaledPixels>], clip: [f32; 4], rect: 
                 if lo > hi + 256. {
                     continue;
                 }
-                let i0 = ((((lo as i64) - 128 - ox) >> 8) as i32 - 1).max(rect.x0);
-                let i1 = ((((hi as i64) - 128 - ox) >> 8) as i32 + 2).min(rect.x1);
-                for i in i0..i1 {
-                    let sx = i as i64 * 256 + 128 + ox;
-                    if sx >= clip[0] && sx < clip[2] && edges.iter().all(|e| e.inside(sx, sy)) {
-                        let b = &mut bits[row + (i - rect.x0) as usize];
-                        if (*b >> (2 * k)) & COUNT_MAX != COUNT_MAX {
-                            *b += 1 << (2 * k);
-                        }
+                let off = 128 + ox;
+                // Exact pixel range whose sample x (`i * 256 + off`) lies in `[clip[0], clip[2])`.
+                let clip_i0 = ((clip[0] - off + 255) >> 8) as i32;
+                let clip_i1 = ((clip[2] - off + 255) >> 8) as i32;
+                let i0 = ((((lo as i64) - off) >> 8) as i32 - 1).max(rect.x0).max(clip_i0);
+                let i1 = ((((hi as i64) - off) >> 8) as i32 + 2).min(rect.x1).min(clip_i1);
+                if i0 >= i1 {
+                    continue;
+                }
+                let sx0 = i0 as i64 * 256 + off;
+                let mut e0 = edges[0].eval(sx0, sy);
+                let mut e1 = edges[1].eval(sx0, sy);
+                let mut e2 = edges[2].eval(sx0, sy);
+                let shift = 2 * k;
+                let mask_max = COUNT_MAX << shift;
+                let inc = 1u8 << shift;
+                let dst = &mut bits[row + (i0 - rect.x0) as usize..row + (i1 - rect.x0) as usize];
+                for b in dst {
+                    if (e0 | e1 | e2) >= 0 && (*b & mask_max) != mask_max {
+                        *b += inc;
                     }
+                    e0 += s0;
+                    e1 += s1;
+                    e2 += s2;
                 }
             }
         }
@@ -186,5 +209,83 @@ mod tests {
         assert_eq!(c[8..13].iter().map(|&b| covered(b)).collect::<Vec<_>>(), [0, 0, 2, 4, 4]);
         let c = coverage(&sq, [2.375, 0., 8., 8.], IRect::new(0, 0, 8, 8));
         assert_eq!(covered(c[8 + 2]), 3);
+    }
+
+    /// Reference implementation evaluating `Edge::inside` directly on every sample of `rect`.
+    fn reference_coverage(triangles: &[Point<ScaledPixels>], clip: [f32; 4], rect: IRect) -> Vec<u8> {
+        let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
+        let mut bits = vec![0u8; w * h];
+        let clip = clip.map(fixed);
+        for t in triangles.as_chunks::<3>().0 {
+            let mut v = [0; 3].map(|_| (0i64, 0i64));
+            for (v, p) in v.iter_mut().zip(t) {
+                *v = (fixed(p.x.0), fixed(p.y.0));
+            }
+            let area = (v[1].0 - v[0].0) * (v[2].1 - v[0].1) - (v[1].1 - v[0].1) * (v[2].0 - v[0].0);
+            if area == 0 {
+                continue;
+            }
+            if area < 0 {
+                v.swap(1, 2);
+            }
+            let edges = [Edge::new(v[0], v[1]), Edge::new(v[1], v[2]), Edge::new(v[2], v[0])];
+            for j in rect.y0..rect.y1 {
+                let row = (j - rect.y0) as usize * w;
+                for (k, &(ox, oy)) in SAMPLES.iter().enumerate() {
+                    let sy = j as i64 * 256 + 128 + oy;
+                    if sy < clip[1] || sy >= clip[3] {
+                        continue;
+                    }
+                    for i in rect.x0..rect.x1 {
+                        let sx = i as i64 * 256 + 128 + ox;
+                        if sx >= clip[0] && sx < clip[2] && edges.iter().all(|e| e.inside(sx, sy)) {
+                            let b = &mut bits[row + (i - rect.x0) as usize];
+                            if (*b >> (2 * k)) & COUNT_MAX != COUNT_MAX {
+                                *b += 1 << (2 * k);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        bits
+    }
+
+    #[test]
+    fn incremental_edge_stepping_matches_reference_exactly() {
+        // Deterministic LCG covering thin, tiny, negative-origin, clipped, and ±LIMIT triangles.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next_f = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 40) as f32 / (1u32 << 24) as f32) * 24. - 4.
+        };
+        let mut tris = Vec::new();
+        for _ in 0..40 {
+            tris.extend(tri([(next_f(), next_f()), (next_f(), next_f()), (next_f(), next_f())]));
+        }
+        // Extreme ±LIMIT triangles (verify no i64 overflow in edge stepping or clip bounds).
+        tris.extend(tri([(-LIMIT * 2., -LIMIT * 2.), (LIMIT * 2., -LIMIT), (0., LIMIT * 2.)]));
+        tris.extend(tri([(-LIMIT, LIMIT), (LIMIT, -LIMIT), (LIMIT, LIMIT)]));
+        // Subpixel sliver right on sample coordinates.
+        tris.extend(tri([(2.375, 1.125), (2.375 + 1. / 256., 1.125), (2.375, 5.875)]));
+
+        let rects = [IRect::new(0, 0, 16, 16), IRect::new(-5, -3, 11, 9)];
+        let clips = [
+            OPEN,
+            [-2.375, -1.625, 7.625, 6.125],
+            [2.375, 1.125, 2.375, 8.0],
+            [0.0, 0.0, 16.0, 16.0],
+            [-LIMIT, -LIMIT, LIMIT, LIMIT],
+            [f32::NAN, 0.0, 4.0, 4.0],
+        ];
+        for rect in rects {
+            for clip in clips {
+                assert_eq!(
+                    coverage(&tris, clip, rect),
+                    reference_coverage(&tris, clip, rect),
+                    "mismatch for rect={rect:?} clip={clip:?}"
+                );
+            }
+        }
     }
 }
