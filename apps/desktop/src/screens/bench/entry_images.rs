@@ -141,12 +141,15 @@ impl FoloApp {
                         radius::MD,
                         window,
                         cx,
-                        act(move |this, _, cx| {
+                        act(move |this, w, cx| {
                             let target = (bid.clone(), eid.clone(), iid.clone());
                             if this.bench.selected_entry_image.as_ref() == Some(&target) {
                                 this.bench.selected_entry_image = None;
                             } else {
                                 this.bench.selected_entry_image = Some(target);
+                                let fh = this.fh("eimg-prev", cx);
+                                w.focus(&fh);
+                                this.reveal_pending = 2;
                             }
                             cx.notify();
                         }),
@@ -244,6 +247,7 @@ impl FoloApp {
         let show_truth = !self.bench.entry_inspect_hide_truth;
         let show_preds = !self.bench.entry_inspect_hide_preds;
         let img = self.bench_image(&b.id, &im.image.id, None, cx);
+        let failed = img.is_none() && self.bench_image_failed(&b.id, &im.image.id, None);
         let mut boxes = Vec::new();
         if show_truth {
             boxes.extend(
@@ -261,6 +265,8 @@ impl FoloApp {
             }));
         }
         let dims = (im.image.width as f32, im.image.height as f32);
+        let painted = image_canvas(t, img, dims, boxes, Fit::Contain, true, true);
+        let painted = if failed { crate::screens::unavailable_over(t, painted, true) } else { painted };
         let stage = div()
             .flex_1()
             .min_w(px(320.))
@@ -270,7 +276,7 @@ impl FoloApp {
             .bg(t.bg_inset)
             .border_1()
             .border_color(t.line_subtle)
-            .child(image_canvas(t, img, dims, boxes, Fit::Contain, true, true));
+            .child(painted);
 
         let n = images.len();
         let prev_id = images[(idx + n - 1) % n].image.id.clone();
@@ -299,6 +305,19 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let retry_btn = failed.then(|| {
+            let (bid, iid) = (b.id.clone(), im.image.id.clone());
+            self.button(
+                "eimg-detail-retry",
+                "Retry",
+                Btn::Secondary,
+                Some("icons/refresh-cw.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.retry_bench_image(&bid, &iid, None, cx)),
+            )
+        });
+        let close_bid = b.id.clone();
         let close_img_id = im.image.id.clone();
         let close = self.icon_button(
             "eimg-close",
@@ -308,8 +327,14 @@ impl FoloApp {
             cx,
             act(move |this, w, cx| {
                 this.bench.selected_entry_image = None;
-                let fh = this.fh(format!("eimg-open-{close_img_id}"), cx);
+                let key = if this.bench_image_failed(&close_bid, &close_img_id, None) {
+                    format!("eimg-retry-{close_img_id}")
+                } else {
+                    format!("eimg-open-{close_img_id}")
+                };
+                let fh = this.fh(key, cx);
                 w.focus(&fh);
+                this.reveal_pending = 2;
                 cx.notify();
             }),
         );
@@ -457,6 +482,7 @@ impl FoloApp {
                     .ellipsis()
                     .child(im.image.file.clone()),
             )
+            .children(retry_btn)
             .child(truth_chip)
             .child(preds_chip)
             .child(close);

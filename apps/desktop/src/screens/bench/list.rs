@@ -577,35 +577,54 @@ mod tests {
                 partial: false,
             }),
             created: "2026-11-12T10:00:00Z".into(),
+            ..base.clone()
+        };
+        let d = Bench {
+            id: "bn_d".into(),
+            name: "Delta nan".into(),
+            images: 100,
+            entries: 2,
+            active: false,
+            best: Some(BenchBest {
+                entry_id: "e3".into(),
+                name: "folo-nan".into(),
+                score: f32::NAN,
+                partial: false,
+            }),
+            created: "2026-11-11T10:00:00Z".into(),
             ..base
         };
-        let all = [a, b, c];
+        let all = [a, b, c, d];
 
         // Status filter & query matching name and leader.
         let running = filter_benches(&all, BenchListFilter::Running, "");
         assert_eq!(running.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a"]);
         let scored = filter_benches(&all, BenchListFilter::Scored, "");
-        assert_eq!(scored.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a", "bn_c"]);
+        assert_eq!(scored.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a", "bn_c", "bn_d"]);
         let by_leader = filter_benches(&all, BenchListFilter::All, "folo-n");
-        assert_eq!(by_leader.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c"]);
+        assert_eq!(by_leader.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_d"]);
 
-        // Missing leader score sorts LAST in both desc and asc.
+        // Missing and non-finite leader scores sort LAST in both desc and asc.
         let mut refs: Vec<&Bench> = all.iter().collect();
         sort_benches(&mut refs, Some(("leader", true)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a", "bn_c", "bn_b"]);
+        assert_eq!(refs[0].id, "bn_a");
+        assert_eq!(refs[1].id, "bn_c");
+        assert!(refs[2..].iter().all(|x| x.id == "bn_b" || x.id == "bn_d"));
         sort_benches(&mut refs, Some(("leader", false)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_a", "bn_b"]);
+        assert_eq!(refs[0].id, "bn_c");
+        assert_eq!(refs[1].id, "bn_a");
+        assert!(refs[2..].iter().all(|x| x.id == "bn_b" || x.id == "bn_d"));
 
         // Invalid/missing created timestamp sorts LAST in both desc and asc.
         sort_benches(&mut refs, Some(("created", true)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_a", "bn_b"]);
+        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_d", "bn_a", "bn_b"]);
         sort_benches(&mut refs, Some(("created", false)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a", "bn_c", "bn_b"]);
+        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_a", "bn_d", "bn_c", "bn_b"]);
 
         // Images and entries sort numerically.
         sort_benches(&mut refs, Some(("images", true)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_a", "bn_b"]);
+        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_a", "bn_d", "bn_b"]);
         sort_benches(&mut refs, Some(("entries", false)));
-        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_b", "bn_a", "bn_c"]);
+        assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_b", "bn_d", "bn_a", "bn_c"]);
     }
 }

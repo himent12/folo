@@ -281,10 +281,10 @@ impl FoloApp {
             rows.push(row(thumb, name, what, group, sev, pct(c.weight / total)));
         }
         let plan = panel(&t).overflow_hidden().child(header).child(intro).child(head).children(rows).child(
-            div().px(px(16.)).py(px(10.)).child(
-                text(ty::SM, t.text_tertiary)
-                    .child("Click a severity (1–3) to preview the first image under it."),
-            ),
+            div().px(px(16.)).py(px(10.)).child(text(ty::SM, t.text_tertiary).child(format!(
+                "Click a severity (1–{}) to preview the first image under it.",
+                crate::api::BENCH_SEVERITIES
+            ))),
         );
         div().flex().flex_col().gap(px(16.)).children(design).child(plan).into_any_element()
     }

@@ -450,7 +450,7 @@ mod tests {
         });
 
         // 3. Entry image inline inspector: open, toggle Truth/Detections, step Next, and Close.
-        let (eid, first_img, second_img) = drive(&mut app, window, |this, w, cx| {
+        let eid = drive(&mut app, window, |this, w, cx| {
             let eid = this
                 .bench
                 .entries
@@ -463,9 +463,8 @@ mod tests {
                 .id
                 .clone();
             this.navigate(Route::BenchEntry(bid.into(), eid.clone()), w, cx);
-            (eid, String::new(), String::new())
+            eid
         });
-        let _ = (first_img, second_img);
         app.frame(window.into());
         app.run_until_idle();
         app.frame(window.into());
@@ -484,12 +483,14 @@ mod tests {
         drive(&mut app, window, |this, w, cx| this.focus_key(&format!("eimg-open-{first_img}"), w, cx));
         app.frame(window.into());
         send_enter(&mut app, window);
-        drive(&mut app, window, |this, _, _| {
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
             assert_eq!(
                 this.bench.selected_entry_image,
                 Some((bid.into(), eid.clone(), first_img.clone())),
                 "activating tile opens inline inspector"
             );
+            assert!(this.fh("eimg-prev", cx).is_focused(w), "opening inspector moves focus to its bar");
         });
         drive(&mut app, window, |this, w, cx| this.focus_key("eimg-toggle-truth", w, cx));
         app.frame(window.into());
@@ -510,8 +511,13 @@ mod tests {
         drive(&mut app, window, |this, w, cx| this.focus_key("eimg-close", w, cx));
         app.frame(window.into());
         send_enter(&mut app, window);
-        drive(&mut app, window, |this, _, _| {
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
             assert_eq!(this.bench.selected_entry_image, None, "Close dismisses inline inspector");
+            assert!(
+                this.fh(format!("eimg-open-{second_img}"), cx).is_focused(w),
+                "Close returns focus to the inspected tile"
+            );
         });
     }
 }

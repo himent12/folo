@@ -201,7 +201,7 @@ pub struct BenchState {
     pub list_filter: BenchListFilter,
     /// Active sort on the Benchmarks list `(column_key, descending)`.
     pub list_sort: Option<(&'static str, bool)>,
-    /// Per `(benchmark_id, condition_id)`: selected severity (1..=3) previewed on the Plan tab.
+    /// Per `(benchmark_id, condition_id)`: selected severity (`1..=BENCH_SEVERITIES`) previewed on the Plan tab.
     pub plan_preview_sev: HashMap<(String, String), u8>,
     /// Entry image currently expanded in the Entry Images detail panel: `(bench_id, entry_id, image_id)`.
     pub selected_entry_image: Option<(String, String, String)>,
