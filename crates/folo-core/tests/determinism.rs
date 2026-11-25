@@ -241,3 +241,31 @@ fn layer_norm_and_rms_norm_are_bitwise_reproducible() {
         ]
     });
 }
+
+#[test]
+fn transpose_and_cat_are_bitwise_reproducible() {
+    let mut rng = Rng::seed(19);
+    let rgb_nchw = Tensor::randn([1, 3, 128, 128], 0.0, 1.0, &mut rng);
+    let rgb_nhwc = Tensor::randn([1, 128, 128, 3], 0.0, 1.0, &mut rng);
+    let rgba_nhwc = Tensor::randn([2, 97, 89, 4], 0.0, 1.0, &mut rng);
+    let ch16_nhwc = Tensor::randn([1, 80, 80, 16], 0.0, 1.0, &mut rng);
+    let attn = Tensor::randn([1, 256, 8, 64], 0.0, 1.0, &mut rng);
+    let c1 = Tensor::randn([2, 16, 40, 40], 0.0, 1.0, &mut rng);
+    let c2 = Tensor::randn([2, 24, 40, 40], 0.0, 1.0, &mut rng);
+    let c3 = Tensor::randn([1, 32, 40, 40], 0.0, 1.0, &mut rng);
+    let c4 = Tensor::randn([1, 48, 40, 40], 0.0, 1.0, &mut rng);
+    let tail1 = Tensor::randn([2048, 4], 0.0, 1.0, &mut rng);
+    let tail2 = Tensor::randn([2048, 20], 0.0, 1.0, &mut rng);
+    assert_reproducible("transpose_and_cat", &|| {
+        vec![
+            rgb_nchw.permute([0, 2, 3, 1]).unwrap().contiguous().unwrap(),
+            rgb_nhwc.permute([0, 3, 1, 2]).unwrap().contiguous().unwrap(),
+            rgba_nhwc.permute([0, 3, 1, 2]).unwrap().contiguous().unwrap(),
+            ch16_nhwc.permute([0, 3, 1, 2]).unwrap().contiguous().unwrap(),
+            attn.permute([0, 2, 1, 3]).unwrap().contiguous().unwrap(),
+            Tensor::cat(&[&c1, &c2, &c1], 1).unwrap(),
+            Tensor::cat(&[&c3, &c4], 1).unwrap(),
+            Tensor::cat(&[&tail1, &tail2], 1).unwrap(),
+        ]
+    });
+}

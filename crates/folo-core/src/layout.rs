@@ -318,6 +318,18 @@ impl<const K: usize> RowPlan<K> {
             return;
         }
         let nd = self.outer.len();
+        if nd == 0 {
+            f(range.start, self.base);
+            return;
+        }
+        if nd == 1 {
+            let step: [usize; K] = std::array::from_fn(|k| self.outer_strides[k][0]);
+            for row in range {
+                let offs = std::array::from_fn(|k| self.base[k] + row * step[k]);
+                f(row, offs);
+            }
+            return;
+        }
         let (mut idx, mut offs) = self.row_start(range.start);
         for row in range {
             f(row, offs);
@@ -349,6 +361,28 @@ impl RowPlan<1> {
         let &cols = self.outer.last()?;
         let &s = self.outer_strides[0].last()?;
         (cols > 1 && s == 1 && self.len > 1 && self.inner[0] > 1).then_some((self.rows / cols, cols))
+    }
+
+    /// If `self.inner[0] == 1` (each inner row is a contiguous `block = self.len` slice) and the last two outer
+    /// dimensions transpose a `rows × cols` grid of `block`-element strips (source has `cols` contiguous at
+    /// stride `block` and `rows` at stride `src_rs > 0`), returns `Some((batches, cols, rows, src_rs))`.
+    ///
+    /// Covers 4D head swaps like `[B, S, H, D] <-> [B, H, S, D]` (`permute([0, 2, 1, 3])`) and spatial swaps
+    /// like `[N, C, H, W] <-> [N, H, C, W]` (`transpose(1, 2)`).
+    pub(crate) fn block_transpose_plane(&self) -> Option<(usize, usize, usize, usize)> {
+        if self.inner[0] != 1 || self.len <= 1 || self.outer.len() < 2 {
+            return None;
+        }
+        let nd = self.outer.len();
+        let cols = self.outer[nd - 2];
+        let rows = self.outer[nd - 1];
+        let s_col = self.outer_strides[0][nd - 2];
+        let s_row = self.outer_strides[0][nd - 1];
+        if cols > 1 && rows > 1 && s_col == self.len && s_row > 0 {
+            Some((self.rows / (cols * rows), cols, rows, s_row))
+        } else {
+            None
+        }
     }
 }
 
@@ -418,5 +452,25 @@ mod tests {
         let mut all = vec![];
         p.for_rows(0..p.rows, |_, [o]| all.push(o));
         assert_eq!(mid, all[5..]);
+
+        // nd == 0 (single row) and nd == 1 (2D narrow) fast paths in for_rows.
+        let flat = RowPlan::<1>::new(&[12], [&[1]], [5]);
+        let mut flat_offs = vec![];
+        flat.for_rows(0..flat.rows, |r, [o]| flat_offs.push((r, o)));
+        assert_eq!(flat_offs, vec![(0, 5)]);
+
+        let sliced = Layout::contiguous([4, 6]).slice(1, 2, 3, 1);
+        let ps = RowPlan::<1>::new(sliced.dims(), [sliced.strides()], [sliced.offset()]);
+        let mut s_offs = vec![];
+        ps.for_rows(1..4, |r, [o]| s_offs.push((r, o)));
+        assert_eq!(s_offs, vec![(1, 8), (2, 14), (3, 20)]);
+
+        // block_transpose_plane detects 4D attention [B, S, H, D] <-> [B, H, S, D] and spatial swaps.
+        let attn = Layout::contiguous([2, 16, 8, 64]).permute(&[0, 2, 1, 3]);
+        let pa = RowPlan::<1>::new(attn.dims(), [attn.strides()], [attn.offset()]);
+        assert_eq!(pa.block_transpose_plane(), Some((2, 8, 16, 8 * 64)));
+        let attn_rev = Layout::contiguous([2, 8, 16, 64]).permute(&[0, 2, 1, 3]);
+        let par = RowPlan::<1>::new(attn_rev.dims(), [attn_rev.strides()], [attn_rev.offset()]);
+        assert_eq!(par.block_transpose_plane(), Some((2, 16, 8, 16 * 64)));
     }
 }

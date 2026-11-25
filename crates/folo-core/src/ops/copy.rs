@@ -12,7 +12,7 @@ impl Tensor {
     pub fn cat<T: Borrow<Tensor>>(tensors: &[T], dim: impl Dim) -> Result<Tensor> {
         let first = tensors.first().ok_or_else(|| Error::invalid_arg("cat", "no tensors given"))?.borrow();
         let d = dim.to_index(first.rank(), "cat")?;
-        let mut total = 0;
+        let mut total = 0usize;
         for t in tensors {
             let t = t.borrow();
             first.check_same_device(t, "cat")?;
@@ -28,29 +28,42 @@ impl Tensor {
                     rhs: t.shape().clone(),
                 });
             }
-            total += t.dims()[d];
+            total = total
+                .checked_add(t.dims()[d])
+                .ok_or_else(|| Error::invalid_arg("cat", "concatenated dimension overflows usize"))?;
         }
         if tensors.len() == 1 {
             return Ok(first.clone());
         }
         let shape = first.shape().with_dim(d, total);
+        let numel = shape
+            .dims()
+            .iter()
+            .try_fold(1usize, |a, &b| a.checked_mul(b))
+            .ok_or_else(|| Error::invalid_arg("cat", format!("output shape {shape} overflows usize")))?;
         // The pieces tile the output exactly, so it needs no initialisation.
         let out = Tensor::uninit_with(&shape, first.dtype(), first.device())?;
-        let b = first.backend()?;
-        let full = Layout::contiguous(shape);
-        let mut sizes = Vec::with_capacity(tensors.len());
-        {
+        let mut sizes: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::with_capacity(tensors.len());
+        let inputs: smallvec::SmallVec<[&Tensor; 8]> = tensors.iter().map(|t| t.borrow()).collect();
+        for &t in &inputs {
+            sizes.push(t.dims()[d]);
+        }
+        if numel > 0 {
             let mut os = out.cell().write();
-            let mut start = 0;
-            for t in tensors {
-                let t = t.borrow();
-                let n = t.dims()[d];
-                t.with_view(|v| b.copy_into(&mut os, &full.slice(d, start, n, 1), v))?;
-                sizes.push(n);
-                start += n;
+            let used_fast = first.device().is_cpu()
+                && inputs.iter().all(|t| t.numel() == 0 || t.is_contiguous())
+                && super::try_with_views_dyn(&inputs, |views| crate::cpu::cat_contiguous(&mut os, views, d))
+                    == Some(true);
+            if !used_fast {
+                let b = first.backend()?;
+                let full = Layout::contiguous(shape);
+                let mut start = 0;
+                for (&t, &n) in inputs.iter().zip(&sizes) {
+                    t.with_view(|v| b.copy_into(&mut os, &full.slice(d, start, n, 1), v))?;
+                    start += n;
+                }
             }
         }
-        let inputs: Vec<&Tensor> = tensors.iter().map(|t| t.borrow()).collect();
         Ok(out.track("cat", &inputs, move |g| {
             let mut start = 0;
             let mut gs = smallvec::SmallVec::new();
@@ -79,7 +92,7 @@ impl Tensor {
                 }
                 t.unsqueeze(d)
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<smallvec::SmallVec<[Tensor; 8]>>>()?;
         Tensor::cat(&parts, d)
     }
 
@@ -304,7 +317,7 @@ impl Tensor {
             let mut os = out.cell().write();
             self.with_view(|v| b.copy_into(&mut os, &inner, v))?;
         }
-        let pads = pads.to_vec();
+        let pads: smallvec::SmallVec<[(usize, usize); 4]> = pads.iter().copied().collect();
         let in_dims: DimVec = self.dims().iter().copied().collect();
         Ok(out.track("pad", &[self], move |g| {
             let mut gx = g.clone();
@@ -325,16 +338,17 @@ impl Tensor {
             ));
         }
         let lead = reps.len() - self.rank();
-        let dims: Vec<usize> = std::iter::repeat_n(1, lead).chain(self.dims().iter().copied()).collect();
-        let mut inter = Vec::with_capacity(2 * dims.len());
-        let mut expanded = Vec::with_capacity(2 * dims.len());
-        let mut fin = Vec::with_capacity(dims.len());
+        let dims: smallvec::SmallVec<[usize; 8]> =
+            std::iter::repeat_n(1, lead).chain(self.dims().iter().copied()).collect();
+        let mut inter: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::with_capacity(2 * dims.len());
+        let mut expanded: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::with_capacity(2 * dims.len());
+        let mut fin: DimVec = DimVec::with_capacity(dims.len());
         for (&d, &r) in dims.iter().zip(reps) {
             inter.extend([1, d]);
             expanded.extend([r, d]);
             fin.push(r * d);
         }
-        self.reshape(inter)?.broadcast_to(expanded)?.contiguous()?.reshape(fin)
+        self.reshape(inter.as_slice())?.broadcast_to(expanded.as_slice())?.contiguous()?.reshape(fin)
     }
 
     /// Convert to `dtype` (floats to integers truncate toward zero and saturate). Gradients flow between float
@@ -455,6 +469,81 @@ mod tests {
         // Integer cat.
         let i = Tensor::cat(&[Tensor::arange_i64(0, 2), Tensor::arange_i64(5, 6)], 0).unwrap();
         assert_eq!(i.to_vec::<i64>().unwrap(), vec![0, 1, 5]);
+    }
+
+    #[test]
+    fn cat_contiguous_fast_paths_and_edge_cases() {
+        // Large outer == 1 (dim 0 and N=1 channel cat) -> chunked parallel path.
+        let a = Tensor::arange(0.0, 20_000.0, 1.0).unwrap().reshape([1, 20, 1000]).unwrap();
+        let b = Tensor::arange(20_000.0, 45_000.0, 1.0).unwrap().reshape([1, 25, 1000]).unwrap();
+        let empty = Tensor::zeros([1, 0, 1000]);
+        let c = Tensor::cat(&[&empty, &a, &empty, &b, &a], 1).unwrap();
+        assert_eq!(c.dims(), &[1, 65, 1000]);
+        let cv = c.to_vec::<f32>().unwrap();
+        assert_eq!(cv[0], 0.0);
+        assert_eq!(cv[19_999], 19_999.0);
+        assert_eq!(cv[20_000], 20_000.0);
+        assert_eq!(cv[44_999], 44_999.0);
+        assert_eq!(cv[45_000], 0.0);
+        assert_eq!(cv[64_999], 19_999.0);
+
+        // Large outer > 1 with small dst_row (< CHUNK) -> row-batched parallel path.
+        let x = Tensor::arange(0.0, 4096.0 * 4.0, 1.0).unwrap().reshape([4096, 4]).unwrap();
+        let y = Tensor::arange(100_000.0, 100_000.0 + 4096.0 * 8.0, 1.0).unwrap().reshape([4096, 8]).unwrap();
+        let z = Tensor::cat(&[&x, &y, &x], 1).unwrap();
+        assert_eq!(z.dims(), &[4096, 16]);
+        let zv = z.to_vec::<f32>().unwrap();
+        for r in [0, 1, 1023, 4095] {
+            let row = &zv[r * 16..(r + 1) * 16];
+            for k in 0..4 {
+                assert_eq!(row[k], (r * 4 + k) as f32);
+                assert_eq!(row[12 + k], (r * 4 + k) as f32);
+            }
+            for k in 0..8 {
+                assert_eq!(row[4 + k], (100_000 + r * 8 + k) as f32);
+            }
+        }
+
+        // Large outer > 1 with large dst_row (>= CHUNK) -> multi-row chunked parallel path.
+        let m1 = Tensor::arange(0.0, 2.0 * 10_000.0, 1.0).unwrap().reshape([2, 10, 1000]).unwrap();
+        let m2 =
+            Tensor::arange(50_000.0, 50_000.0 + 2.0 * 15_000.0, 1.0).unwrap().reshape([2, 15, 1000]).unwrap();
+        let m = Tensor::cat(&[&m1, &m2], 1).unwrap();
+        assert_eq!(m.dims(), &[2, 25, 1000]);
+        let mv = m.to_vec::<f32>().unwrap();
+        assert_eq!(mv[0], 0.0);
+        assert_eq!(mv[10_000], 50_000.0);
+        assert_eq!(mv[25_000], 10_000.0);
+        assert_eq!(mv[35_000], 65_000.0);
+
+        // Non-F32 dtypes (U8, U32, F16) and autograd through contiguous cat.
+        let u1 = Tensor::from_slice(&[1u8, 2, 3, 4], [2, 2]).unwrap();
+        let u2 = Tensor::from_slice(&[9u8, 8], [2, 1]).unwrap();
+        assert_eq!(Tensor::cat(&[&u1, &u2], 1).unwrap().to_vec::<u8>().unwrap(), vec![1, 2, 9, 3, 4, 8]);
+        let h1 = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).to_dtype(DType::F16).unwrap();
+        let h2 = t(&[5.0, 6.0], &[2, 1]).to_dtype(DType::F16).unwrap();
+        assert_eq!(
+            Tensor::cat(&[&h1, &h2], 1).unwrap().to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 5.0, 3.0, 4.0, 6.0]
+        );
+        let ga = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).requires_grad_();
+        let gb = t(&[5.0, 6.0], &[2, 1]).requires_grad_();
+        let loss = Tensor::cat(&[&ga, &gb, &ga], 1)
+            .unwrap()
+            .mul(&Tensor::arange(1.0, 11.0, 1.0).unwrap().reshape([2, 5]).unwrap())
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        let grads = loss.backward().unwrap();
+        // Row 0 weights: [1, 2, 3, 4, 5] -> ga gets [1+4, 2+5] = [5, 7], gb gets [3]
+        // Row 1 weights: [6, 7, 8, 9, 10] -> ga gets [6+9, 7+10] = [15, 17], gb gets [8]
+        assert_eq!(grads.get(&ga).unwrap().to_vec::<f32>().unwrap(), vec![5.0, 7.0, 15.0, 17.0]);
+        assert_eq!(grads.get(&gb).unwrap().to_vec::<f32>().unwrap(), vec![3.0, 8.0]);
+
+        // Output element count overflow must error rather than wrapping to zero.
+        let half_max = 1usize << (usize::BITS - 1);
+        let huge = Tensor::scalar(1.0f32).broadcast_to([1, half_max]).unwrap();
+        assert!(Tensor::cat(&[&huge, &huge], 0).is_err());
     }
 
     #[test]

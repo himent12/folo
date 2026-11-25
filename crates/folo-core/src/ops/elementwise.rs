@@ -173,7 +173,7 @@ impl Tensor {
             return Err(Error::ShapeMismatch { op: "sum_to", lhs: self.shape().clone(), rhs: shape.clone() });
         }
         let off = self.rank() - shape.rank();
-        let dims: Vec<usize> =
+        let dims: crate::shape::DimVec =
             (0..self.rank()).filter(|&d| d < off || (shape[d - off] == 1 && self.dims()[d] != 1)).collect();
         let s = if dims.is_empty() { self.clone() } else { self.sum(dims, true)? };
         s.reshape(shape)

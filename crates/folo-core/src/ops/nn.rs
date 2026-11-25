@@ -143,7 +143,7 @@ impl Tensor {
         let s = self.conv2d_kernel(weight, bias, p)?;
         let out = Tensor::wrap(s, shape, OP)?;
         let (x, wt, has_bias, p) = (self.clone(), weight.clone(), bias.is_some(), *p);
-        let mut inputs = vec![self, weight];
+        let mut inputs: smallvec::SmallVec<[&Tensor; 3]> = smallvec::smallvec![self, weight];
         if let Some(b) = bias {
             inputs.push(b);
         }
@@ -190,7 +190,7 @@ impl Tensor {
         let s = x.conv2d_kernel(&w16, b16.as_ref(), p)?;
         let out = Tensor::wrap(s, shape, OP)?;
         let (wt, bias_dtype, p) = (weight.clone(), bias.map(Tensor::dtype), *p);
-        let mut inputs = vec![&x, weight];
+        let mut inputs: smallvec::SmallVec<[&Tensor; 3]> = smallvec::smallvec![&x, weight];
         if let Some(b) = bias {
             inputs.push(b);
         }
