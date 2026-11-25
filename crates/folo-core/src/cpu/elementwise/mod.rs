@@ -1,6 +1,7 @@
 //! Copies, casts and elementwise kernels.
 
 mod simd;
+mod simd_log_tanh;
 #[cfg(test)]
 mod tests;
 
@@ -346,6 +347,56 @@ fn map2_slice(
     out
 }
 
+/// Map two strided `f32` operands of the form `bwd_scalar(a, b)` using vectorised `(1, 1)` and `(1, 0)` slice
+/// kernels and `bwd_scalar` directly on `(0, 1)` / general strides (so ops like `g / x` avoid `g * (1 / x)`).
+#[inline]
+fn map2_exact_slice(
+    a: &[f32],
+    la: &Layout,
+    b: &[f32],
+    lb: &Layout,
+    slice_fn: fn(&[f32], &[f32], &mut [f32]),
+    bc_b_fn: fn(&[f32], f32, &mut [f32]),
+    bwd_scalar: fn(f32, f32) -> f32,
+) -> Vec<f32> {
+    let n = la.numel();
+    let mut out = alloc_uninit(n);
+    if let (Some(ra), Some(rb)) = (la.contiguous_range(), lb.contiguous_range()) {
+        let (a, b) = (&a[ra], &b[rb]);
+        let piece = |c: usize, o: &mut [f32]| {
+            let r = c * CHUNK..c * CHUNK + o.len();
+            slice_fn(&a[r.clone()], &b[r], o);
+        };
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
+        }
+        return out;
+    }
+    let plan = RowPlan::<2>::new(la.dims(), [la.strides(), lb.strides()], [la.offset(), lb.offset()]);
+    let [sa, sb] = plan.inner;
+    fill_rows(&mut out, &plan, |row, [oa, ob]| {
+        let len = row.len();
+        match (sa, sb) {
+            (1, 1) => slice_fn(&a[oa..oa + len], &b[ob..ob + len], row),
+            (1, 0) => bc_b_fn(&a[oa..oa + len], b[ob], row),
+            (0, 1) => {
+                let av = a[oa];
+                for (r, &bv) in row.iter_mut().zip(&b[ob..ob + len]) {
+                    *r = bwd_scalar(av, bv);
+                }
+            }
+            _ => {
+                for (i, r) in row.iter_mut().enumerate() {
+                    *r = bwd_scalar(a[oa + i * sa], b[ob + i * sb]);
+                }
+            }
+        }
+    });
+    out
+}
+
 /// `cond != 0 ? a : b` with three strided operands of the output shape.
 pub(crate) fn where3<C: Copy + Send + Sync>(
     c: &[C],
@@ -415,11 +466,6 @@ pub fn silu_backward(x: f32, g: f32) -> f32 {
 }
 
 #[inline(always)]
-fn softplus(x: f32) -> f32 {
-    x.max(0.0) + fast_exp(-x.abs()).ln_1p()
-}
-
-#[inline(always)]
 fn sign(x: f32) -> f32 {
     if x > 0.0 {
         1.0
@@ -445,6 +491,7 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
         Some(UnaryOp::Silu) => simd::silu_bias_inplace(v, bias),
         Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
         Some(UnaryOp::Sigmoid) => simd::sigmoid_bias_inplace(v, bias),
+        Some(UnaryOp::Tanh) => simd_log_tanh::tanh_bias_inplace(v, bias),
         Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
         Some(UnaryOp::Hardswish) => go(v, bias, |x| x * (x + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
         Some(op) => {
@@ -493,14 +540,14 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Neg => map1(x, lx, |v| -v),
         Abs => map1(x, lx, f32::abs),
         Exp => map1_slice(x, lx, simd::exp_slice, simd::exp_scalar),
-        Log => map1(x, lx, f32::ln),
+        Log => map1_slice(x, lx, simd_log_tanh::ln_slice, simd_log_tanh::ln_scalar),
         Sqrt => map1(x, lx, f32::sqrt),
         Rsqrt => map1(x, lx, |v| 1.0 / v.sqrt()),
         Recip => map1(x, lx, |v| 1.0 / v),
         Square => map1(x, lx, |v| v * v),
         Sin => map1(x, lx, f32::sin),
         Cos => map1(x, lx, f32::cos),
-        Tanh => map1(x, lx, f32::tanh),
+        Tanh => map1_slice(x, lx, simd_log_tanh::tanh_slice, simd_log_tanh::tanh_scalar),
         Atan => map1(x, lx, f32::atan),
         Asin => map1(x, lx, f32::asin),
         Acos => map1(x, lx, f32::acos),
@@ -510,7 +557,7 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Relu => map1(x, lx, |v| v.max(0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
-        Softplus => map1(x, lx, softplus),
+        Softplus => map1_slice(x, lx, simd_log_tanh::softplus_slice, simd_log_tanh::softplus_scalar),
         Clamp(lo, hi) => map1(x, lx, move |v| v.max(lo).min(hi)),
         PowScalar(p) => {
             if p == 2.0 {
@@ -542,7 +589,15 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
         Neg => map2(x, lx, g, lg, |_, g| -g),
         Abs => map2(x, lx, g, lg, |x, g| g * sign(x)),
         Exp => map2_slice(x, lx, g, lg, simd::exp_bwd_slice, simd::exp_bwd_broadcast_g, simd::exp_scalar),
-        Log => map2(x, lx, g, lg, |x, g| g / x),
+        Log => map2_exact_slice(
+            x,
+            lx,
+            g,
+            lg,
+            simd_log_tanh::log_bwd_slice,
+            simd_log_tanh::log_bwd_broadcast_g,
+            simd_log_tanh::log_bwd_scalar,
+        ),
         Sqrt => map2(x, lx, g, lg, |x, g| g * 0.5 / x.sqrt()),
         // Divide in stages rather than squaring x, which under/overflows for representable results.
         Rsqrt => map2(x, lx, g, lg, |x, g| -0.5 * g / x.sqrt() / x),
@@ -550,10 +605,15 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
         Square => map2(x, lx, g, lg, |x, g| 2.0 * x * g),
         Sin => map2(x, lx, g, lg, |x, g| g * x.cos()),
         Cos => map2(x, lx, g, lg, |x, g| -g * x.sin()),
-        Tanh => map2(x, lx, g, lg, |x, g| {
-            let t = x.tanh();
-            g * (1.0 - t * t)
-        }),
+        Tanh => map2_slice(
+            x,
+            lx,
+            g,
+            lg,
+            simd_log_tanh::tanh_bwd_slice,
+            simd_log_tanh::tanh_bwd_broadcast_g,
+            simd_log_tanh::tanh_deriv_scalar,
+        ),
         // g / (1 + x^2), written as (g / x) / (x + 1 / x) for |x| > 1 so that x^2 never overflows.
         Atan => {
             map2(x, lx, g, lg, |x, g| if x.abs() > 1.0 { (g / x) / (x + 1.0 / x) } else { g / (1.0 + x * x) })

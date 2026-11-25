@@ -15,8 +15,8 @@
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 // Cody-Waite split of ln(2) = LN2_HI + LN2_LO (exact high bits with 12 trailing zero mantissa bits + residual,
 // so `n * LN2_HI` is exact in f32 for all `|n| <= 150` even without FMA).
-const LN2_HI: f32 = 0.693_359_4;
-const LN2_LO: f32 = -2.121_944_4e-4;
+pub(super) const LN2_HI: f32 = 0.693_359_4;
+pub(super) const LN2_LO: f32 = -2.121_944_4e-4;
 
 // Degree-5 minimax coefficients for `(exp(r) - 1) / r` on `r ∈ [-ln(2)/2, ln(2)/2]` (max rel err `9.54e-8`).
 const EXP5_C5: f32 = 8.290_312e-3;
@@ -39,13 +39,13 @@ pub const SILU_MAX_REL_ERR: f64 = 5e-7;
 
 /// `max(a, b)` with x86 `vmaxps` NaN semantics (`b` when either is NaN), for bit-exact scalar == AVX2.
 #[inline(always)]
-fn maxps(a: f32, b: f32) -> f32 {
+pub(super) fn maxps(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
 /// `min(a, b)` with x86 `vminps` NaN semantics (`b` when either is NaN), for bit-exact scalar == AVX2.
 #[inline(always)]
-fn minps(a: f32, b: f32) -> f32 {
+pub(super) fn minps(a: f32, b: f32) -> f32 {
     if a < b { a } else { b }
 }
 
@@ -55,7 +55,7 @@ fn minps(a: f32, b: f32) -> f32 {
 
 /// Core non-FMA `exp(xc)` for `xc` already clamped into `[-104.0, 89.0]` (never NaN).
 #[inline(always)]
-fn exp_clamped_scalar(xc: f32) -> f32 {
+pub(super) fn exp_clamped_scalar(xc: f32) -> f32 {
     let z = xc * LOG2E + EXP_MAGIC_0;
     let n = z - EXP_MAGIC_0;
     let r = (xc - n * LN2_HI) - n * LN2_LO;
@@ -75,7 +75,7 @@ fn exp_clamped_scalar(xc: f32) -> f32 {
 
 /// Non-FMA `exp(-|x|)` clamped at `-104.0` (NaN maps to `-104.0`; callers handle NaN propagation).
 #[inline(always)]
-fn exp_neg_abs_scalar(x: f32) -> f32 {
+pub(super) fn exp_neg_abs_scalar(x: f32) -> f32 {
     let t_abs = f32::from_bits(x.to_bits() & 0x7FFF_FFFF);
     let t = maxps(0.0 - t_abs, -104.0);
     exp_clamped_scalar(t)
@@ -84,7 +84,7 @@ fn exp_neg_abs_scalar(x: f32) -> f32 {
 /// Division-free non-FMA `1 / (1 + e)` for `e ∈ [0, 1]` via bit-hack seed + Householder-6
 /// `(1 + e0)(1 + e0^2 + e0^4)` (error `e0^6 <= 1.66e-8`, exact at `e = 0` and `e = 1`).
 #[inline(always)]
-fn recip_1_plus_scalar(e: f32) -> f32 {
+pub(super) fn recip_1_plus_scalar(e: f32) -> f32 {
     let d = 1.0 + e;
     let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
     let e0 = 1.0 - d * r0;
@@ -186,7 +186,7 @@ pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn has_avx2() -> bool {
+pub(super) fn has_avx2() -> bool {
     std::is_x86_feature_detected!("avx2")
 }
 
@@ -200,7 +200,7 @@ fn has_avx2_fma() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn exp_clamped8(xc: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn exp_clamped8(xc: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let one = _mm256_set1_ps(1.0);
     let magic0 = _mm256_set1_ps(EXP_MAGIC_0);
@@ -229,7 +229,7 @@ fn exp_clamped8(xc: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn exp_neg_abs8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn exp_neg_abs8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let zero = _mm256_setzero_ps();
     let t_abs = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
@@ -241,7 +241,7 @@ fn exp_neg_abs8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn recip_1_plus8(e: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn recip_1_plus8(e: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let one = _mm256_set1_ps(1.0);
     let d = _mm256_add_ps(one, e);
@@ -437,6 +437,7 @@ macro_rules! define_unary_slice {
         }
     };
 }
+pub(super) use define_unary_slice;
 
 /// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 backward slice loop (both `(x, g)` and `(x, broadcast g)`).
 macro_rules! define_bwd_slice {
@@ -549,6 +550,7 @@ macro_rules! define_bwd_slice {
         }
     };
 }
+pub(super) use define_bwd_slice;
 
 /// Generate a 2x8-unrolled + 8-wide + padded-tail in-place `v[i] = op(v[i] + bias)` epilogue loop.
 macro_rules! define_bias_inplace {
@@ -603,6 +605,7 @@ macro_rules! define_bias_inplace {
         }
     };
 }
+pub(super) use define_bias_inplace;
 
 define_unary_slice!(exp_slice, exp_avx2, exp8, exp_scalar);
 define_unary_slice!(sigmoid_slice, sigmoid_avx2, sigmoid8, sigmoid_scalar);
