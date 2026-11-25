@@ -60,8 +60,10 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   row-pointer `rows.rs`/`arows.rs`, tile- or K-split parallelism) backs `matmul` and conv2d.
 - Each GEMM task packs the B panels of its own columns into an L2-sized buffer one `KC` block at a time, reading
   row-contiguous operands row by row so the prefetcher can follow (column tiles first, rows only when there are too
-  few columns, about three tasks per thread and none under ~1 MFLOP). Transposed operands (`sk == 1`, e.g. `X @ Wᵀ` in
-  `Linear`) pack through the cache-blocked `8×8` AVX2 transpose (`transpose_f32_2d_serial`).
+  few columns, about three tasks per thread and none under `PAR_FLOPS` = `2²¹` ≈ 2.1 MFLOPs / 1.05M MACs). `Strided::pack`
+  takes a contiguous copy path when `so == 1`; for transposed operands (`sk == 1`, `so != 1`, e.g. `X @ Wᵀ` in `Linear`),
+  it packs through `transpose_f32_2d_serial` (8×8 AVX2 blocks when AVX2 is available and both panel dimensions are at
+  least 8, with an L1-blocked scalar fallback).
 - A row-major A whose packed form fits one K super-block (16 MiB: every conv weight) is not packed at all: the
   micro-kernels broadcast its rows through row pointers, the same FMAs in the same order (bit for bit the packed
   path), so a conv forward has no serial packing pass.
@@ -76,9 +78,10 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   dropped columns per output row; planes are spaced an odd number of cache lines apart so the rows do not alias in
   L1; stride-2 rows are padded once and both column phases dealt out in one pass).
 - Pointwise convs pack B as a plain copy.
-- Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; at stride 1, both an AVX2/FMA path and a Wasm SIMD128
-  `f32x4 × 4` path pad the plane once, accumulate every output vector's taps in registers, and fuse bias / SiLU / ReLU
-  in registers before storing).
+- Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; at stride 1, the AVX2/FMA path pads the plane once,
+  accumulates every output vector's taps in registers, and fuses bias / SiLU in registers — applying other activations
+  such as ReLU in a post-store pass — while the Wasm SIMD128 `f32x4 × 4` path for overwriting stride-1 convs with
+  finite weights and padded scratch ≤ 16 MiB fuses bias, SiLU, and ReLU in registers before storing).
 - So do convs with at most 4 input channels (one group, not pointwise, `c·kh·kw <= 256`: the 3-channel stem,
   `cpu/conv/small_c.rs`): per output row the `c·kh·kw` taps are gathered into L1 (with an AVX2 stride-2 de-interleave
   fast path for `3×3 s2 p1`), and every output channel is that many FMAs per pixel in the GEMM's order with bias and
@@ -237,8 +240,8 @@ these kernels:
   pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
   `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
   the input planes in place; other convs read a padded, phase-split copy of each image's rows (`image_rows`, padding
-  with the zero point and rounding each channel group's phase block to a 64-byte cache line so parallel `fill` workers
-  never false-share adjacent boundary lines) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
+  with the zero point and rounding each channel group's phase block up to a 64-byte / 16-`u32` multiple to reduce
+  cache-line false sharing across parallel `fill` workers) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
   (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
@@ -254,8 +257,9 @@ these kernels:
   stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving.
 - **Others.** AVX2-vectorised `quantize` / `dequantize` (4 channels per C4 word read) between `f32` NCHW and C4
   codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic, reusing a thread-local
-  scratch buffer for small planes below `MIN_POOLED` and pooled `ScratchWords` via `for_each_init` for larger/parallel
-  planes), and AVX2 nearest 2× upsampling, all with serial fast paths below `PAR_MIN`.
+  scratch buffer for small serial planes below `MIN_POOLED`, a single pooled `ScratchWords` for larger serial planes,
+  and per-worker pooled `ScratchWords` via `for_each_init` on the parallel path), and AVX2 nearest 2× upsampling, all
+  with serial fast paths below `PAR_MIN`.
 
 Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
 with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
@@ -270,9 +274,11 @@ q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 ### The buffer cache
 `f32` buffers from 16 KiB (`MIN_POOLED = 4096` floats) are recycled through a two-level cache (`cpu/pool_alloc/`;
 `cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one to custom ops) so training and inference
-loops do not pay page faults every step: a lock-free per-thread TLS magazine (at most 8 buffers, each ≤ 4 MiB, ≤ 16 MiB
-per thread) sits in front of the shared size-keyed pool, coordinated by a shared atomic total-bytes budget and clear
-epoch so `set_buffer_cache_limit` and pressure drains bound both levels together. When the shared pool is full, lengths
+loops do not pay page faults every step: a per-thread TLS magazine (guarded by an uncontended per-thread mutex so
+`clear_buffer_cache` and limit changes can drain live slots immediately; at most 8 buffers, each ≤ 4 MiB, ≤ 16 MiB
+per thread) sits in front of the shared size-keyed pool to avoid global-pool contention, coordinated by a shared atomic
+total-bytes budget and clear epoch so `set_buffer_cache_limit` and pressure drains bound both levels together. When the
+shared pool is full, lengths
 unused for two limits of traffic, and for twice the
 longest they ever went unused before coming back, are evicted for the ones now asked for, so a later workload
 (another model, another input shape) gets cached too while one that cycles through more than the cache holds keeps a

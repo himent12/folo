@@ -74,7 +74,9 @@ Timings use `performance.now()` (coarsened by browsers to 0.1 ms, or 5 µs on cr
 SIMD128 RGBA → planar-`f32` letterboxing on the CPU; on WebGPU `inference_ms` is the forward pass, device-side candidate
 extraction (`Tensor::detect_candidates`, or dense decode fallback) and the awaited compact readback (the forward pass is
 queued work, the readback is where the GPU time shows), and `postprocess_ms` is NMS and rescaling. On the CPU the split
-is the server's: candidate-first / sparse decode and NMS count as postprocessing.
+matches the native predictor: on the candidate-first path (`predict_candidates`), forward, candidate selection, and
+sparse box decode count in `inference_ms` while `finish_candidates` (NMS / top-k) and rescaling count in
+`postprocess_ms`; on the dense fallback path (`out.detections`), decode counts in `postprocess_ms`.
 Several `detect` calls may be in flight on one detector; each awaits its own readback.
 
 ### `detector.info() → FoloDetectorInfo`
