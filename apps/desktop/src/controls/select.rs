@@ -2,14 +2,94 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
+    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseMoveEvent,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
 use super::tooltip::tip;
 use crate::app::{FoloApp, focus_ring};
 use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
+
+/// Incremental keyboard typeahead buffer for open [`FoloApp::select`] menus.
+#[derive(Default)]
+pub struct SelectTypeahead {
+    query: String,
+    last: Option<std::time::Instant>,
+    menu: Option<&'static str>,
+}
+
+/// Pause after which the next typed character starts a fresh typeahead prefix.
+const TYPEAHEAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(800);
+
+impl SelectTypeahead {
+    /// Clears any buffered prefix (called when a menu closes, switches, or navigates away).
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.last = None;
+        self.menu = None;
+    }
+
+    /// Appends `ch` to the active prefix for `menu` and returns the matching enabled option index.
+    ///
+    /// Multi-character prefixes search from `current` (wrapping around), falling back to a fresh
+    /// single-character search if the extended prefix misses. Repeating the same letter cycles
+    /// through matching options when no option matches the doubled prefix.
+    pub fn match_option(
+        &mut self,
+        menu: &'static str,
+        ch: char,
+        now: std::time::Instant,
+        labels: &[SharedString],
+        disabled: &[bool],
+        current: usize,
+    ) -> Option<usize> {
+        let n = labels.len();
+        if n == 0 {
+            self.clear();
+            return None;
+        }
+        let expired = self.menu != Some(menu)
+            || self.last.is_none_or(|t| now.saturating_duration_since(t) > TYPEAHEAD_WINDOW);
+        if expired {
+            self.query.clear();
+            self.menu = Some(menu);
+        }
+        self.last = Some(now);
+        let ch_lower: String = ch.to_lowercase().collect();
+        let cur = current % n;
+        let find = |prefix: &str, start: usize| -> Option<usize> {
+            for off in 0..n {
+                let i = (start + off) % n;
+                if disabled.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                if labels[i].to_lowercase().starts_with(prefix) {
+                    return Some(i);
+                }
+            }
+            None
+        };
+        if self.query.is_empty() {
+            self.query = ch_lower;
+            let cur_matches = !disabled.get(cur).copied().unwrap_or(false)
+                && labels[cur].to_lowercase().starts_with(&self.query);
+            let start = if cur_matches { (cur + 1) % n } else { 0 };
+            return find(&self.query, start);
+        }
+        if self.query == ch_lower {
+            return find(&ch_lower, (cur + 1) % n);
+        }
+        let mut extended = self.query.clone();
+        extended.push_str(&ch_lower);
+        if let Some(hit) = find(&extended, cur) {
+            self.query = extended;
+            return Some(hit);
+        }
+        self.query = ch_lower;
+        find(&self.query, (cur + 1) % n)
+    }
+}
 
 /// The narrowest a menu opens: wide enough for an option's name and detail side by side, also under
 /// a narrow trigger (a leaderboard's Run select is 220 px).
@@ -129,6 +209,7 @@ impl FoloApp {
         let hl = if open { self.menu_hl.min(n.saturating_sub(1)) } else { selected };
         let menu_scroll = self.menu_scroll.clone();
         let dead: Vec<bool> = off.iter().map(Option::is_some).collect();
+        let labels: Vec<SharedString> = options.iter().map(|(label, _)| label.clone()).collect();
         let trigger = div()
             .id(key)
             .track_focus(&fh)
@@ -176,16 +257,19 @@ impl FoloApp {
                 window.focus(&this.fh(key, cx));
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                 this.menu_hl = selected;
+                this.menu_typeahead.clear();
                 this.menu_scroll.scroll_to_item(selected);
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
                 let is_open = this.menu_open == Some(key);
+                let mods = ev.keystroke.modifiers;
                 match ev.keystroke.key.as_str() {
                     _ if n == 0 => return,
                     "enter" | "space" if is_open => {
                         let pick = this.menu_hl.min(n - 1);
                         this.menu_open = None;
+                        this.menu_typeahead.clear();
                         if pick != selected && !dead[pick] {
                             keys(this, pick, window, cx);
                         }
@@ -193,28 +277,58 @@ impl FoloApp {
                     "enter" | "space" | "down" | "up" if !is_open => {
                         this.menu_open = Some(key);
                         this.menu_hl = selected;
+                        this.menu_typeahead.clear();
                         this.menu_scroll.scroll_to_item(selected);
                     }
                     "down" => {
+                        this.menu_typeahead.clear();
                         this.menu_hl = step(this.menu_hl.min(n - 1), true);
                         this.menu_scroll.scroll_to_item(this.menu_hl);
                     }
                     "up" => {
+                        this.menu_typeahead.clear();
                         this.menu_hl = step(this.menu_hl.min(n - 1), false);
                         this.menu_scroll.scroll_to_item(this.menu_hl);
                     }
                     "home" if is_open => {
+                        this.menu_typeahead.clear();
                         this.menu_hl = first;
                         this.menu_scroll.scroll_to_item(first);
                     }
                     "end" if is_open => {
+                        this.menu_typeahead.clear();
                         this.menu_hl = last;
                         this.menu_scroll.scroll_to_item(last);
                     }
-                    "escape" if is_open => this.menu_open = None,
+                    "escape" if is_open => {
+                        this.menu_open = None;
+                        this.menu_typeahead.clear();
+                    }
                     "tab" if is_open => {
                         this.menu_open = None;
+                        this.menu_typeahead.clear();
                         return;
+                    }
+                    _ if is_open && !mods.control && !mods.alt && !mods.platform => {
+                        let typed = ev.keystroke.key_char.as_deref().unwrap_or(ev.keystroke.key.as_str());
+                        let mut chars = typed.chars();
+                        let Some(ch) = chars
+                            .next()
+                            .filter(|c| chars.next().is_none() && !c.is_control() && !c.is_whitespace())
+                        else {
+                            return;
+                        };
+                        if let Some(next) = this.menu_typeahead.match_option(
+                            key,
+                            ch,
+                            std::time::Instant::now(),
+                            &labels,
+                            &dead,
+                            this.menu_hl.min(n - 1),
+                        ) {
+                            this.menu_hl = next;
+                            this.menu_scroll.scroll_to_item(next);
+                        }
                     }
                     _ => return,
                 }
@@ -274,6 +388,7 @@ impl FoloApp {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.menu_open == Some(key) && !on_trigger {
                             this.menu_open = None;
+                            this.menu_typeahead.clear();
                             cx.notify();
                         }
                     }))
@@ -317,9 +432,18 @@ impl FoloApp {
                                         d.cursor_pointer()
                                             .hover(|s| s.bg(t.bg_hover))
                                             .active(|s| s.bg(t.bg_active))
+                                            .on_mouse_move(cx.listener(
+                                                move |this, _: &MouseMoveEvent, _, cx| {
+                                                    if this.menu_hl != i {
+                                                        this.menu_hl = i;
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ))
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 f(this, i, window, cx);
                                                 this.menu_open = None;
+                                                this.menu_typeahead.clear();
                                                 cx.notify();
                                             }))
                                     })
@@ -376,5 +500,62 @@ mod tests {
         assert_eq!(menu_box((600., 820.), 1280.), (300., false));
         // A wide select keeps its own width.
         assert_eq!(menu_box((900., 1240.), 1280.), (340., false));
+    }
+
+    #[test]
+    fn typeahead_matches_prefix_cycles_repeats_skips_disabled_and_expires() {
+        let labels: Vec<SharedString> =
+            ["Alpha", "Beta", "Bison", "Bravo", "Gamma"].into_iter().map(SharedString::from).collect();
+        let disabled = [false, false, true, false, false];
+        let mut ta = SelectTypeahead::default();
+        let t0 = std::time::Instant::now();
+
+        // Single letter jumps to first enabled match ("Beta").
+        assert_eq!(ta.match_option("m", 'b', t0, &labels, &disabled, 0), Some(1));
+        // Repeated same letter skips disabled "Bison" and cycles to "Bravo".
+        assert_eq!(
+            ta.match_option("m", 'b', t0 + std::time::Duration::from_millis(120), &labels, &disabled, 1),
+            Some(3)
+        );
+        // Next press wraps back to "Beta".
+        assert_eq!(
+            ta.match_option("m", 'b', t0 + std::time::Duration::from_millis(240), &labels, &disabled, 3),
+            Some(1)
+        );
+
+        // Multi-character prefix ("br") jumps directly to "Bravo".
+        ta.clear();
+        assert_eq!(ta.match_option("m", 'b', t0, &labels, &disabled, 0), Some(1));
+        assert_eq!(
+            ta.match_option("m", 'r', t0 + std::time::Duration::from_millis(150), &labels, &disabled, 1),
+            Some(3)
+        );
+
+        // Extended prefix miss ("brg") falls back to fresh single-letter lookup ("Gamma").
+        assert_eq!(
+            ta.match_option("m", 'g', t0 + std::time::Duration::from_millis(250), &labels, &disabled, 3),
+            Some(4)
+        );
+
+        // After the 800 ms window, typing starts a fresh prefix from index 0.
+        assert_eq!(
+            ta.match_option("m", 'a', t0 + std::time::Duration::from_millis(1200), &labels, &disabled, 4),
+            Some(0)
+        );
+
+        // Repeated identical letter cycles through every match even when one starts with doubled letters.
+        let a_labels: Vec<SharedString> =
+            ["Aardvark", "Alpaca", "Ant"].into_iter().map(SharedString::from).collect();
+        let a_disabled = [false, false, false];
+        ta.clear();
+        assert_eq!(ta.match_option("a", 'a', t0, &a_labels, &a_disabled, 0), Some(1));
+        assert_eq!(
+            ta.match_option("a", 'a', t0 + std::time::Duration::from_millis(100), &a_labels, &a_disabled, 1),
+            Some(2)
+        );
+        assert_eq!(
+            ta.match_option("a", 'a', t0 + std::time::Duration::from_millis(200), &a_labels, &a_disabled, 2),
+            Some(0)
+        );
     }
 }

@@ -60,21 +60,61 @@ impl FoloApp {
         if self.history.len() > 50 {
             self.history.remove(0);
         }
+        self.forward_history.clear();
         self.after_navigate(window, cx);
+    }
+
+    /// Whether `route` points to a run, model, dataset, benchmark, or benchmark entry removed in this session.
+    fn route_gone(&self, route: &Route) -> bool {
+        if deleted_route(&self.deleted, route).is_some() {
+            return true;
+        }
+        match route {
+            Route::Bench(id) => self.bench.removed.contains_key(id),
+            Route::BenchEntry(b, e) => {
+                self.bench.removed.contains_key(b) || self.bench.removed.contains_key(e)
+            }
+            _ => false,
+        }
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Past the pages of what was deleted since, and the page already open.
         while let Some(r) = self.history.pop() {
-            if r != self.route && deleted_route(&self.deleted, &r).is_none() {
-                self.route = r;
+            if r != self.route && !self.route_gone(&r) {
+                let prev = std::mem::replace(&mut self.route, r);
+                self.forward_history.push(prev);
+                if self.forward_history.len() > 50 {
+                    self.forward_history.remove(0);
+                }
                 self.after_navigate(window, cx);
                 return;
             }
         }
         if let Some(parent) = self.parent_route() {
-            self.route = parent;
+            let target = if self.route_gone(&parent) { Route::Benches } else { parent };
+            let prev = std::mem::replace(&mut self.route, target);
+            self.forward_history.push(prev);
+            if self.forward_history.len() > 50 {
+                self.forward_history.remove(0);
+            }
             self.after_navigate(window, cx);
+        }
+    }
+
+    /// Re-opens the page most recently left with [`Self::back`] (`Alt+→`), skipping any route that
+    /// was deleted since or matches the current page.
+    pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(r) = self.forward_history.pop() {
+            if r != self.route && !self.route_gone(&r) {
+                let prev = std::mem::replace(&mut self.route, r);
+                self.history.push(prev);
+                if self.history.len() > 50 {
+                    self.history.remove(0);
+                }
+                self.after_navigate(window, cx);
+                return;
+            }
         }
     }
 
@@ -126,6 +166,8 @@ impl FoloApp {
         self.pr_focus = None;
         self.class_table_sort = None;
         self.menu_open = None;
+        self.menu_typeahead.clear();
+        self.palette = None;
         self.run_x_fit = None;
         self.log_filter = crate::app::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));
@@ -163,5 +205,61 @@ impl FoloApp {
             self.palette = None;
             self.navigate(route, window, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{drive, open};
+
+    #[test]
+    fn back_and_forward_round_trip_and_clear_on_new_navigation() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Datasets, w, cx);
+            this.navigate(Route::Runs, w, cx);
+            this.navigate(Route::Models, w, cx);
+            assert_eq!(this.route, Route::Models);
+            assert!(this.forward_history.is_empty());
+
+            // Back pushes Models onto forward_history.
+            this.back(w, cx);
+            assert_eq!(this.route, Route::Runs);
+            this.back(w, cx);
+            assert_eq!(this.route, Route::Datasets);
+            assert_eq!(this.forward_history, vec![Route::Models, Route::Runs]);
+
+            // Forward restores Runs, then Models.
+            this.forward(w, cx);
+            assert_eq!(this.route, Route::Runs);
+            this.forward(w, cx);
+            assert_eq!(this.route, Route::Models);
+            assert!(this.forward_history.is_empty());
+
+            // Back once, then navigating to a new page clears forward_history.
+            this.back(w, cx);
+            assert_eq!(this.route, Route::Runs);
+            assert_eq!(this.forward_history, vec![Route::Models]);
+            this.navigate(Route::Settings, w, cx);
+            assert_eq!(this.route, Route::Settings);
+            assert!(this.forward_history.is_empty());
+
+            // Forward when empty is a no-op.
+            this.forward(w, cx);
+            assert_eq!(this.route, Route::Settings);
+
+            // Forward skips deleted benchmarks and entries recorded in `bench.removed`.
+            this.navigate(Route::Bench("bn_gone".into()), w, cx);
+            this.navigate(Route::BenchEntry("bn_ok".into(), "ent_gone".into()), w, cx);
+            this.back(w, cx);
+            this.back(w, cx);
+            assert_eq!(this.route, Route::Settings);
+            this.bench.removed.insert("bn_gone".into(), 1);
+            this.bench.removed.insert("ent_gone".into(), 2);
+            this.forward(w, cx);
+            assert_eq!(this.route, Route::Settings, "removed benchmark and entry are skipped");
+            assert!(this.forward_history.is_empty());
+        });
     }
 }

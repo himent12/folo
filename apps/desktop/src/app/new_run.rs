@@ -670,6 +670,10 @@ impl FoloApp {
                             this.overlay_return = None;
                             let prev = std::mem::replace(&mut this.route, Route::Run(id));
                             this.history.push(prev);
+                            if this.history.len() > 50 {
+                                this.history.remove(0);
+                            }
+                            this.forward_history.clear();
                         }
                     }
                     Err(e) => {

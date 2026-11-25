@@ -48,29 +48,65 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
 }
 
 /// The items matching `q`, at most 40: the 40 best matches, each group kept together under one heading
-/// (the group of the best match first, best first within a group), so a group never shows twice. No
-/// query: every item as listed.
+/// (the group of the best match first, best first within a group), so a group never shows twice.
+/// Every `title`/`group` match strictly precedes fallback matches in `detail` (detail-only matches
+/// whose group already appeared in primary matches are grouped under `"Details"`). No query: every
+/// item as listed.
 pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
-    let mut scored: Vec<(i32, usize, PaletteItem)> = items
+    let mut scored: Vec<(bool, i32, usize, PaletteItem)> = items
         .into_iter()
         .enumerate()
-        .filter_map(|(i, it)| fuzzy(q, &format!("{} {}", it.title, it.group)).map(|s| (s, i, it)))
+        .filter_map(|(i, it)| {
+            if let Some(s) = fuzzy(q, &format!("{} {}", it.title, it.group)) {
+                Some((true, s, i, it))
+            } else if !it.detail.is_empty() {
+                fuzzy(q, &it.detail).map(|s| (false, s, i, it))
+            } else {
+                None
+            }
+        })
         .collect();
     if !q.is_empty() {
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
         // Cut before grouping: grouping first let a big group of weak matches push a strong match
         // of a later group out of the list.
         scored.truncate(40);
-        let mut groups: Vec<&'static str> = Vec::new();
-        for (_, _, it) in &scored {
+        let mut primary_groups: Vec<&'static str> = Vec::new();
+        for (primary, _, _, it) in &scored {
+            if *primary && !primary_groups.contains(&it.group) {
+                primary_groups.push(it.group);
+            }
+        }
+        // Keep detail-only matches strictly below every primary match without repeating a heading.
+        for (primary, _, _, it) in &mut scored {
+            if !*primary && primary_groups.contains(&it.group) {
+                it.group = "Details";
+            }
+        }
+        let mut groups: Vec<&'static str> = primary_groups;
+        for (_, _, _, it) in &scored {
             if !groups.contains(&it.group) {
                 groups.push(it.group);
             }
         }
-        // Stable: within a group the order by score stays.
-        scored.sort_by_key(|(_, _, it)| groups.iter().position(|g| *g == it.group));
+        // Stable: within a group the order by (primary, score) stays.
+        scored.sort_by_key(|(_, _, _, it)| groups.iter().position(|g| *g == it.group));
     }
-    scored.into_iter().map(|(_, _, it)| it).take(40).collect()
+    scored.into_iter().map(|(_, _, _, it)| it).take(40).collect()
+}
+
+/// Rows skipped by PageUp / PageDown inside the palette result list.
+const PALETTE_PAGE_STEP: usize = 8;
+
+/// Scrolls the palette list to keep the selected row in view. When moving upward (or jumping to row
+/// 0), reveals a group's heading above its first row; when moving downward, targets the row itself
+/// so `FirstVisible` never stops at the heading and leaves the selected row below the viewport.
+fn reveal_palette_item(p: &mut crate::app::Palette, row_child: &[usize], moving_down: bool) {
+    if let Some(&ix) = row_child.get(p.selected) {
+        let first_in_group = ix > 0 && (p.selected == 0 || row_child[p.selected - 1] + 1 != ix);
+        let target = if !moving_down && first_in_group { ix - 1 } else { ix };
+        p.scroll.scroll_to_item(target);
+    }
 }
 
 impl FoloApp {
@@ -218,6 +254,23 @@ impl FoloApp {
                 });
             }
         }
+        if let Some(benches) = self.bench.list.ready() {
+            for b in benches {
+                let id = b.id.clone();
+                let mut detail = counted(b.images, "image", "images");
+                if let Some(best) = b.best.as_ref().filter(|x| x.score.is_finite()) {
+                    detail.push_str(&format!(" · {} {:.1}", best.name, best.score));
+                }
+                items.push(PaletteItem {
+                    group: "Benchmarks",
+                    icon: "icons/target.svg",
+                    title: b.name.clone(),
+                    detail,
+                    keys: &[],
+                    action: act(move |this, w, cx| this.navigate(Route::Bench(id.clone()), w, cx)),
+                });
+            }
+        }
         // One command per theme (custom ones too), as Settings' selects pick them: the theme becomes
         // its mode's, and the mode switches to it unless it is System. Last, and for a query only
         // (`filtered_palette`): "theme" finds them.
@@ -255,6 +308,8 @@ impl FoloApp {
     }
 
     pub(super) fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Trigger benchmark loading if `/system` reported `vision_bench` after the palette opened.
+        self.ensure_benches(cx);
         let t = theme(cx);
         let items = self.filtered_palette(t.id);
         let n = items.len();
@@ -370,11 +425,12 @@ impl FoloApp {
             );
         }
         if n == 0 {
-            list =
-                list.child(div().p(px(24.)).flex().justify_center().child(
-                    text(ty::SM, t.text_tertiary).child("No matches. Try a run, model or dataset name."),
-                ));
+            list = list.child(div().p(px(24.)).flex().justify_center().child(
+                text(ty::SM, t.text_tertiary).child("No matches. Try a run, model, dataset or benchmark."),
+            ));
         }
+        let row_child_home = row_child.clone();
+        let row_child_end = row_child.clone();
         let panel_el =
             div().id("palette").absolute().top(px(88.)).left_0().right_0().flex().justify_center().child(
                 div()
@@ -382,6 +438,25 @@ impl FoloApp {
                     .w(px(640.))
                     .occlude()
                     .capture_any_mouse_down(Self::guard_presses(cx))
+                    // Empty-query Home/End propagate out of `TextInput::home`/`end` so they jump the list
+                    // even when `input::bind_keys` is active.
+                    .on_action(cx.listener(move |this, _: &crate::input::Home, _, cx| {
+                        let Some(p) = this.palette.as_mut() else { return };
+                        if n > 0 {
+                            p.selected = 0;
+                            reveal_palette_item(p, &row_child_home, false);
+                        }
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &crate::input::End, _, cx| {
+                        let Some(p) = this.palette.as_mut() else { return };
+                        if n > 0 {
+                            let prev = p.selected.min(n - 1);
+                            p.selected = n - 1;
+                            reveal_palette_item(p, &row_child_end, p.selected > prev);
+                        }
+                        cx.notify();
+                    }))
                     .flex()
                     .flex_col()
                     .rounded(px(radius::XL))
@@ -392,23 +467,34 @@ impl FoloApp {
                     .overflow_hidden()
                     .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
                         let Some(p) = this.palette.as_mut() else { return };
+                        let m = ev.keystroke.modifiers;
                         match ev.keystroke.key.as_str() {
-                            "down" | "up" => {
-                                p.selected = if ev.keystroke.key == "down" {
-                                    (p.selected + 1).min(n.saturating_sub(1))
-                                } else {
-                                    p.selected.saturating_sub(1)
+                            "down" | "up" | "pagedown" | "pageup" if !m.alt && !m.platform => {
+                                if n == 0 {
+                                    return;
+                                }
+                                let max_ix = n - 1;
+                                let cur = p.selected.min(max_ix);
+                                p.selected = match ev.keystroke.key.as_str() {
+                                    "down" => (cur + 1).min(max_ix),
+                                    "up" => cur.saturating_sub(1),
+                                    "pagedown" => cur.saturating_add(PALETTE_PAGE_STEP).min(max_ix),
+                                    _ => cur.saturating_sub(PALETTE_PAGE_STEP),
                                 };
-                                // Reveal the row; for the first row of a group, its heading too.
-                                if let Some(&ix) = row_child.get(p.selected) {
-                                    let ix = if ix > 0
-                                        && (p.selected == 0 || row_child[p.selected - 1] + 1 != ix)
-                                    {
-                                        ix - 1
-                                    } else {
-                                        ix
-                                    };
-                                    p.scroll.scroll_to_item(ix);
+                                reveal_palette_item(p, &row_child, p.selected > cur);
+                            }
+                            "home" | "end"
+                                if (m.control && !m.alt && !m.shift && !m.platform)
+                                    || (p.query.is_empty()
+                                        && !m.control
+                                        && !m.alt
+                                        && !m.shift
+                                        && !m.platform) =>
+                            {
+                                if n > 0 {
+                                    let prev = p.selected.min(n - 1);
+                                    p.selected = if ev.keystroke.key == "home" { 0 } else { n - 1 };
+                                    reveal_palette_item(p, &row_child, p.selected > prev);
                                 }
                             }
                             "enter" => {
@@ -557,12 +643,46 @@ mod tests {
         assert_eq!(&groups[..3], ["Go to", "Runs", "Runs"], "grouped, the best group first");
         assert_eq!(groups.last(), Some(&"Actions"));
     }
+
+    #[test]
+    fn rank_matches_detail_behind_title_and_group() {
+        let mut by_title = item("Models", "folo-s-demo");
+        by_title.detail = "folo-n · mAP50-95 0.500".into();
+        let mut by_detail_same_group = item("Models", "street-detector");
+        by_detail_same_group.detail = "folo-s · mAP50-95 0.720".into();
+        let other_group_title = item("Runs", "exp-folo-s-baseline");
+        let plain = item("Models", "other-model");
+        let ranked = rank("folo-s", vec![by_detail_same_group, plain, other_group_title, by_title]);
+        let summary: Vec<(&str, &str)> = ranked.iter().map(|i| (i.group, i.title.as_str())).collect();
+        // Every primary match (across Models and Runs) precedes the detail-only match, and no heading repeats.
+        assert_eq!(
+            summary,
+            [("Models", "folo-s-demo"), ("Runs", "exp-folo-s-baseline"), ("Details", "street-detector")]
+        );
+    }
 }
 
 #[cfg(test)]
 mod theme_commands {
+    use crate::api::FEATURE_VISION_BENCH;
+    use crate::app::Route;
     use crate::app::tests::{drive, open};
+    use crate::store::Load;
     use crate::theme::{ModePref, theme};
+    use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+
+    fn press(app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<crate::app::FoloApp>, key: &str) {
+        let ks = Keystroke::parse(key).unwrap();
+        app.simulate_input(
+            w.into(),
+            PlatformInput::KeyDown(KeyDownEvent { keystroke: ks.clone(), is_held: false }),
+        );
+        app.run_until_idle();
+        app.frame(w.into());
+        app.simulate_input(w.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke: ks }));
+        app.run_until_idle();
+        app.frame(w.into());
+    }
 
     /// "Theme: <name>" for every theme, custom ones too, picking it as Settings does; the toggle stays.
     #[test]
@@ -609,5 +729,99 @@ mod theme_commands {
             (theme(cx).id.as_str().to_string(), this.theme_prefs.mode, this.theme_prefs.light.clone())
         });
         assert_eq!(now, ("sepia-2".into(), ModePref::Light, "sepia-2".into()));
+    }
+
+    #[test]
+    fn benchmarks_indexed_and_jump_keys_navigate_palette() {
+        let (mut app, window) = open();
+        // Register production keybindings (including TextInput Home/End) so jump keys are exercised
+        // through the real dispatch path.
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        // Opening the palette before `/system` reports `vision_bench` still loads benchmarks once
+        // the feature arrives on the next render.
+        drive(&mut app, window, |this, w, cx| {
+            this.store.features.retain(|f| f != FEATURE_VISION_BENCH);
+            this.bench.list = Load::Idle;
+            this.open_palette(w, cx);
+            assert!(this.bench.list.needs_fetch(), "no fetch before vision_bench is reported");
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, cx| {
+            this.store.features.push(FEATURE_VISION_BENCH.into());
+            cx.notify();
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+
+        let (total, first_bench_id, first_bench_name) = drive(&mut app, window, |this, _, cx| {
+            let benches = this.bench.list.ready().expect("benchmarks loaded while palette stayed open");
+            (this.filtered_palette(theme(cx).id).len(), benches[0].id.clone(), benches[0].name.clone())
+        });
+        assert!(total > super::PALETTE_PAGE_STEP + 2, "need enough items to page: {total}");
+
+        // PageDown advances by PALETTE_PAGE_STEP; PageUp returns to 0.
+        press(&mut app, window, "pagedown");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            super::PALETTE_PAGE_STEP
+        );
+        press(&mut app, window, "pageup");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), 0);
+
+        // With empty query and production TextInput bindings active, plain End/Home jump the list.
+        press(&mut app, window, "end");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), total - 1);
+        press(&mut app, window, "home");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), 0);
+
+        // With a non-empty query, plain End stays with the text input; Ctrl+End still jumps the list.
+        let bench_items = drive(&mut app, window, |this, _, cx| {
+            let p = this.palette.as_mut().unwrap();
+            p.query = "a".into();
+            p.input.update(cx, |i, cx| i.set_text("a", cx));
+            p.selected = 0;
+            this.filtered_palette(theme(cx).id).len()
+        });
+        assert!(bench_items > 1);
+        app.frame(window.into());
+        press(&mut app, window, "end");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            0,
+            "plain End must not steal cursor movement while typing a query"
+        );
+        press(&mut app, window, "ctrl-end");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            bench_items - 1,
+            "Ctrl+End still jumps to the last palette item"
+        );
+
+        // Alt+Right while palette is open must not navigate underneath and strand palette focus.
+        let route_before = drive(&mut app, window, |this, _, _| {
+            this.forward_history.push(Route::Runs);
+            this.route.clone()
+        });
+        press(&mut app, window, "alt-right");
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.route, route_before, "Alt+Right ignored while palette is open");
+            assert!(this.palette.is_some());
+        });
+
+        // Benchmarks appear in the palette and activate into Route::Bench.
+        drive(&mut app, window, |this, w, cx| {
+            let items = this.palette_items(theme(cx).id);
+            let b = items
+                .into_iter()
+                .find(|i| i.group == "Benchmarks" && i.title == first_bench_name)
+                .expect("benchmark indexed in palette");
+            this.close_palette(w, cx);
+            (b.action)(this, w, cx);
+        });
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Bench(first_bench_id));
     }
 }

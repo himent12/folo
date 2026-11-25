@@ -77,6 +77,21 @@ impl Default for Connector {
     }
 }
 
+/// Returns `raw` trimmed if it is a valid server address without embedded URL credentials
+/// (`user:pass@host`), so secrets are never written to `desktop.json`.
+pub(crate) fn persistable_server_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !crate::api::http::address_ok(trimmed) {
+        return None;
+    }
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
@@ -136,6 +151,8 @@ impl FoloApp {
         self.model_classes_expanded.clear();
         self.class_table_sort = None;
         self.exporting.clear();
+        self.forward_history.clear();
+        self.menu_typeahead.clear();
         self.log_filter = super::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));
         self.log_cache.clear();
@@ -485,6 +502,16 @@ impl FoloApp {
         self.recover_wait = 0;
     }
 
+    /// Settings › Server address › Connect / Enter: remembers a valid credential-free URL in
+    /// `desktop.json` and connects to it.
+    pub fn connect_server(&mut self, cx: &mut Context<Self>) {
+        let url = self.server_url.read(cx).text().to_string();
+        if let Some(saveable) = persistable_server_url(&url) {
+            self.saved_server_url = Some(saveable);
+        }
+        self.switch_source(ServerMode::Local, cx);
+    }
+
     /// Settings › Data source.
     pub fn switch_source(&mut self, mode: ServerMode, cx: &mut Context<Self>) {
         match mode {
@@ -509,5 +536,23 @@ impl FoloApp {
                 self.autoconnect(url, spawn, Reason::Typed, cx);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod url_persist_tests {
+    use super::persistable_server_url;
+
+    #[test]
+    fn persistable_server_url_rejects_credentials_and_bad_addresses() {
+        assert_eq!(persistable_server_url(" http://10.0.0.5:7878 "), Some("http://10.0.0.5:7878".into()));
+        assert_eq!(
+            persistable_server_url("https://folo.internal/api"),
+            Some("https://folo.internal/api".into())
+        );
+        assert_eq!(persistable_server_url("https://user:secret@host:7878"), None);
+        assert_eq!(persistable_server_url("http://token@127.0.0.1:7878"), None);
+        assert_eq!(persistable_server_url("http://127.0.0.1:99999"), None);
+        assert_eq!(persistable_server_url("   "), None);
     }
 }
