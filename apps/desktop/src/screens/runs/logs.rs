@@ -19,6 +19,68 @@ use crate::ui::*;
 /// Maximum matching lines rendered in the scrollback at once (tail window).
 pub(crate) const LOG_DISPLAY_CAP: usize = 300;
 
+/// Cached per-run log level counts and filtered line indices, invalidated when the run, log
+/// revision, line buffer identity, level filter, or search query changes. Avoids per-frame O(N)
+/// lowercase string allocations while scrolling or repainting a run page.
+#[derive(Default)]
+pub(crate) struct LogFilterCache {
+    counts_key: Option<(String, u64, usize, usize)>,
+    counts: (usize, usize),
+    filter_key: Option<(String, u64, usize, usize, LogFilter, String)>,
+    indices: Vec<usize>,
+    #[cfg(test)]
+    recomputes: usize,
+}
+
+impl LogFilterCache {
+    /// Ensures cached level counts and filtered line indices match the given inputs.
+    pub(crate) fn ensure(
+        &mut self,
+        run_id: &str,
+        log_rev: u64,
+        lines: &[LogLine],
+        filter: LogFilter,
+        query: &str,
+    ) {
+        let ptr = lines.as_ptr() as usize;
+        let len = lines.len();
+        let counts_hit = self
+            .counts_key
+            .as_ref()
+            .is_some_and(|(id, rev, p, l)| id == run_id && *rev == log_rev && *p == ptr && *l == len);
+        if !counts_hit {
+            self.counts = level_counts(lines);
+            self.counts_key = Some((run_id.to_string(), log_rev, ptr, len));
+        }
+        let filter_hit = self.filter_key.as_ref().is_some_and(|(id, rev, p, l, f, q)| {
+            id == run_id && *rev == log_rev && *p == ptr && *l == len && *f == filter && q == query
+        });
+        if !filter_hit {
+            self.indices = filter_log_indices(lines, filter, query);
+            self.filter_key = Some((run_id.to_string(), log_rev, ptr, len, filter, query.to_string()));
+            #[cfg(test)]
+            {
+                self.recomputes += 1;
+            }
+        }
+    }
+
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        self.counts
+    }
+
+    pub(crate) fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.counts_key = None;
+        self.counts = (0, 0);
+        self.filter_key = None;
+        self.indices.clear();
+    }
+}
+
 impl FoloApp {
     /// The log panel. `beside`: it sits beside Config, so its scrollback takes the row's height
     /// (at least its usual 372 px); stacked, it is 372 px tall.
@@ -40,12 +102,15 @@ impl FoloApp {
             self.hint_keys("↑ ↓ a line · PgUp / PgDn a screen · Home / End the first and last lines");
         }
         let log_chrome = self.scroll_chrome(self.log_scroll.clone(), t.bg_inset, 0., 0., cx);
+        if let Some(Load::Ready(hist)) = self.store.logs.get(&r.id) {
+            self.log_cache.ensure(&r.id, self.store.log_rev, &hist.lines, filter, &query);
+        }
         let (notice, copy_btn, warns, errors, body) = match self.store.logs.get(&r.id) {
             Some(Load::Ready(hist)) => {
                 let total_in_buf = hist.lines.len();
                 let dropped = hist.dropped;
-                let (warns, errors) = level_counts(&hist.lines);
-                let shown = filter_log_lines(&hist.lines, filter, &query);
+                let (warns, errors) = self.log_cache.counts();
+                let shown = self.log_cache.indices();
                 let matched = shown.len();
                 let start = matched.saturating_sub(LOG_DISPLAY_CAP);
                 let displayed = matched - start;
@@ -163,7 +228,8 @@ impl FoloApp {
                                         .children(clear_btn),
                                 )
                             })
-                            .children(shown[start..].iter().map(|l| {
+                            .children(shown[start..].iter().map(|&idx| {
+                                let l = &hist.lines[idx];
                                 let (tag, color) = match l.level {
                                     LogLevel::Debug => ("DBG", t.text_tertiary),
                                     LogLevel::Info => ("INF", t.text_tertiary),
@@ -351,13 +417,19 @@ impl FoloApp {
     /// Puts the run's currently filtered log lines on the clipboard, one line per entry as shown
     /// (local time, level, message).
     pub(crate) fn copy_log(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(hist) = self.store.logs.get(id).and_then(|l| l.ready()) else { return };
         let query = self.log_search.read(cx).text().to_string();
         let filtered = self.log_filter != LogFilter::All || !query.trim().is_empty();
-        let shown = filter_log_lines(&hist.lines, self.log_filter, &query);
-        if shown.is_empty() {
+        if let Some(Load::Ready(hist)) = self.store.logs.get(id) {
+            self.log_cache.ensure(id, self.store.log_rev, &hist.lines, self.log_filter, &query);
+        } else {
             return;
         }
+        let Some(hist) = self.store.logs.get(id).and_then(|l| l.ready()) else { return };
+        let indices = self.log_cache.indices();
+        if indices.is_empty() {
+            return;
+        }
+        let shown: Vec<&LogLine> = indices.iter().map(|&i| &hist.lines[i]).collect();
         let text = format_log_lines(&shown);
         let n = shown.len() as u64;
         cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(text));
@@ -387,23 +459,46 @@ pub(crate) fn format_log_lines(lines: &[&LogLine]) -> String {
         .collect()
 }
 
-/// Filters log lines by severity level and optional case-insensitive substring search.
-pub(crate) fn filter_log_lines<'a>(lines: &'a [LogLine], filter: LogFilter, query: &str) -> Vec<&'a LogLine> {
+/// Whether `q` (trimmed, lowercased) matches `level`'s severity token (`ERROR`/`ERR`, `WARN`/`WRN`,
+/// `INFO`/`INF`, `DEBUG`/`DBG`).
+fn level_matches_query(level: LogLevel, q: &str) -> bool {
+    match level {
+        LogLevel::Debug => matches!(q, "dbg" | "debug"),
+        LogLevel::Info => matches!(q, "inf" | "info"),
+        LogLevel::Warn => matches!(q, "wrn" | "warn" | "warning"),
+        LogLevel::Error => matches!(q, "err" | "error"),
+    }
+}
+
+/// Indices into `lines` matching `filter` and optional case-insensitive search across severity
+/// level tokens and message text (with `/` / `\` path normalization).
+pub(crate) fn filter_log_indices(lines: &[LogLine], filter: LogFilter, query: &str) -> Vec<usize> {
     let q = query.trim().to_lowercase();
-    let q_slash = q.replace('\\', "/");
+    let q_slash = if q.contains('\\') { Some(q.replace('\\', "/")) } else { None };
+    let q_norm = q_slash.as_deref().unwrap_or(&q);
     lines
         .iter()
-        .filter(|l| {
+        .enumerate()
+        .filter_map(|(i, l)| {
             if !shows(filter, l.level) {
-                return false;
+                return None;
             }
-            if q.is_empty() {
-                return true;
+            if q.is_empty() || level_matches_query(l.level, &q) {
+                return Some(i);
             }
             let lower = l.message.to_lowercase();
-            lower.contains(&q) || lower.replace('\\', "/").contains(&q_slash)
+            let hit = lower.contains(&q)
+                || (q_slash.is_some() && lower.contains(q_norm))
+                || (lower.contains('\\') && lower.replace('\\', "/").contains(q_norm));
+            hit.then_some(i)
         })
         .collect()
+}
+
+/// Filters log lines by severity level and optional case-insensitive substring search.
+#[cfg(test)]
+pub(crate) fn filter_log_lines<'a>(lines: &'a [LogLine], filter: LogFilter, query: &str) -> Vec<&'a LogLine> {
+    filter_log_indices(lines, filter, query).into_iter().map(|i| &lines[i]).collect()
 }
 
 /// Empty-state message for the log scrollback, distinguishing 0-line logs from filter/search misses
@@ -560,6 +655,56 @@ mod tests {
         assert_eq!(filter_log_lines(&lines, LogFilter::All, "out of memory").len(), 1);
         assert_eq!(filter_log_lines(&lines, LogFilter::Warn, "WARMUP").len(), 1);
         assert_eq!(filter_log_lines(&lines, LogFilter::Error, "warmup").len(), 0);
+        // Severity level tokens match case-insensitively without false positives on short substrings.
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "ERROR").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "err").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "WARN").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "wrn").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "INFO").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::All, "inf").len(), 1);
+        assert_eq!(filter_log_lines(&lines, LogFilter::Error, "INFO").len(), 0);
+        // Searching for "in" does not match Info lines whose message lacks "in".
+        let plain = vec![LogLine { t: String::new(), level: LogLevel::Info, message: "epoch 1 done".into() }];
+        assert_eq!(filter_log_lines(&plain, LogFilter::All, "in").len(), 0);
+    }
+
+    #[test]
+    fn log_filter_cache_reuses_results_until_key_changes() {
+        let mut lines = vec![
+            LogLine { t: String::new(), level: LogLevel::Info, message: "epoch 1".into() },
+            LogLine { t: String::new(), level: LogLevel::Warn, message: "slow io".into() },
+            LogLine { t: String::new(), level: LogLevel::Error, message: "oom".into() },
+        ];
+        let mut cache = LogFilterCache::default();
+        cache.ensure("run_1", 1, &lines, LogFilter::All, "ERROR");
+        assert_eq!(cache.counts(), (1, 1));
+        assert_eq!(cache.indices(), &[2]);
+        assert_eq!(cache.recomputes, 1);
+
+        // Identical key: cache hit, no recompute.
+        cache.ensure("run_1", 1, &lines, LogFilter::All, "ERROR");
+        assert_eq!(cache.recomputes, 1);
+
+        // Query change recomputes indices but keeps level counts.
+        cache.ensure("run_1", 1, &lines, LogFilter::Warn, "");
+        assert_eq!(cache.indices(), &[1, 2]);
+        assert_eq!(cache.recomputes, 2);
+
+        // Filter change recomputes.
+        cache.ensure("run_1", 1, &lines, LogFilter::Error, "");
+        assert_eq!(cache.indices(), &[2]);
+        assert_eq!(cache.recomputes, 3);
+
+        // New log revision recomputes counts and indices.
+        lines.push(LogLine { t: String::new(), level: LogLevel::Error, message: "cuda fail".into() });
+        cache.ensure("run_1", 2, &lines, LogFilter::Error, "");
+        assert_eq!(cache.counts(), (1, 2));
+        assert_eq!(cache.indices(), &[2, 3]);
+        assert_eq!(cache.recomputes, 4);
+
+        // Different run with same rev invalidates cache.
+        cache.ensure("run_2", 2, &lines, LogFilter::Error, "");
+        assert_eq!(cache.recomputes, 5);
     }
 
     #[test]

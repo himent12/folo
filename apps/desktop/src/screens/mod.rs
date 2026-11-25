@@ -243,6 +243,7 @@ impl FoloApp {
         s.run_data.clear();
         s.samples.clear();
         s.logs.clear();
+        self.log_cache.clear();
         // Images that failed are asked for again (their few automatic retries may be spent).
         s.images_px.forget_failed();
         self.images_more.clear();

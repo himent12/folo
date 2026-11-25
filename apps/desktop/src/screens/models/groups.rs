@@ -79,19 +79,35 @@ pub fn same_as_best(store: &Store, m: &Model) -> bool {
         })
 }
 
-/// The value a column sorts by (higher first when descending); an unscored model sorts as -1.
-fn sort_value(m: &Model, key: &str) -> f64 {
+/// The value a column sorts by; missing or non-finite values return `None` so they always sort last.
+fn sort_value(m: &Model, key: &str) -> Option<f64> {
     match key {
-        "map" => m.metrics.as_ref().map_or(-1., |x| x.map50_95 as f64),
-        "map50" => m.metrics.as_ref().map_or(-1., |x| x.map50 as f64),
-        "size" => m.bytes as f64,
-        "classes" => m.classes.len() as f64,
-        _ => time::parse(&m.created).unwrap_or(0) as f64,
+        "map" => m.metrics.as_ref().map(|x| x.map50_95 as f64).filter(|v| v.is_finite()),
+        "map50" => m.metrics.as_ref().map(|x| x.map50 as f64).filter(|v| v.is_finite()),
+        "size" => Some(m.bytes as f64),
+        "classes" => Some(m.classes.len() as f64),
+        _ => time::parse(&m.created).map(|t| t as f64),
+    }
+}
+
+/// Compares optional numeric sort keys so `None` (and non-finite values) always sort last,
+/// regardless of ascending or descending direction.
+fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, desc: bool) -> Ordering {
+    let a = a.filter(|v| v.is_finite());
+    let b = b.filter(|v| v.is_finite());
+    match (a, b) {
+        (Some(va), Some(vb)) => {
+            let o = va.total_cmp(&vb);
+            if desc { o.reverse() } else { o }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
 }
 
 /// `models` in their groups, in group order, each group's rows sorted by `sort` (ties by name; the
-/// server's order without a sort).
+/// server's order without a sort). Missing/unscored rows always sort last in both directions.
 pub fn group_models(store: &Store, models: &[Model], sort: Option<(&str, bool)>) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for m in models {
@@ -105,8 +121,7 @@ pub fn group_models(store: &Store, models: &[Model], sort: Option<(&str, bool)>)
     if let Some((key, desc)) = sort {
         for g in &mut groups {
             g.rows.sort_by(|a, b| {
-                let o = sort_value(a, key).total_cmp(&sort_value(b, key));
-                (if desc { o.reverse() } else { o }).then_with(|| a.name.cmp(&b.name))
+                cmp_opt_f64(sort_value(a, key), sort_value(b, key), desc).then_with(|| a.name.cmp(&b.name))
             });
         }
     }
@@ -216,20 +231,62 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        // Inside each group, the highest mAP50-95 first; flipping the sort flips each group alone.
+        // Inside each group, the highest mAP50-95 first; flipping the sort flips measured scores
+        // while keeping unscored models last.
         for g in &groups {
-            let maps: Vec<f32> = g.rows.iter().map(|m| m.metrics.map_or(-1., |x| x.map50_95)).collect();
-            assert!(maps.windows(2).all(|w| w[0] >= w[1]), "{}: {maps:?}", g.set.label);
+            let scored: Vec<f32> = g.rows.iter().filter_map(|m| m.metrics.map(|x| x.map50_95)).collect();
+            assert!(scored.windows(2).all(|w| w[0] >= w[1]), "{}: {scored:?}", g.set.label);
+            let first_none = g.rows.iter().position(|m| m.metrics.is_none()).unwrap_or(g.rows.len());
+            assert!(g.rows[first_none..].iter().all(|m| m.metrics.is_none()), "unscored models last");
         }
         let up = group_models(&store, &models, Some(("map", false)));
         assert_eq!(up.iter().map(|g| g.set.key.clone()).collect::<Vec<_>>(), keys);
         for g in &up {
-            let maps: Vec<f32> = g.rows.iter().map(|m| m.metrics.map_or(-1., |x| x.map50_95)).collect();
-            assert!(maps.windows(2).all(|w| w[0] <= w[1]), "{}: {maps:?}", g.set.label);
+            let scored: Vec<f32> = g.rows.iter().filter_map(|m| m.metrics.map(|x| x.map50_95)).collect();
+            assert!(scored.windows(2).all(|w| w[0] <= w[1]), "{}: {scored:?}", g.set.label);
+            let first_none = g.rows.iter().position(|m| m.metrics.is_none()).unwrap_or(g.rows.len());
+            assert!(g.rows[first_none..].iter().all(|m| m.metrics.is_none()), "unscored models last asc");
         }
         // A model whose run is gone has an unknown split: not ranked.
         let orphan = Model { run_id: Some("run_gone".into()), ..base };
         let set = eval_set(&store, &orphan);
         assert!(!set.ranked && set.label.ends_with("split unknown"), "{set:?}");
+    }
+
+    #[test]
+    fn unscored_and_missing_models_always_sort_last_in_both_directions() {
+        let api = MockBackend::new(4200, true);
+        let store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let base = api.models().unwrap().remove(0);
+        let mk = |id: &str, name: &str, metrics: Option<(f32, f32)>, created: &str| Model {
+            id: id.into(),
+            name: name.into(),
+            run_id: None,
+            source: None,
+            metrics: metrics.map(|(m95, m50)| crate::api::ModelMetrics {
+                map50_95: m95,
+                map50: m50,
+                precision: 0.5,
+                recall: 0.5,
+                best_f1_conf: None,
+            }),
+            created: created.into(),
+            ..base.clone()
+        };
+        let models = vec![
+            mk("m_none_b", "unscored-b", None, "bad-date"),
+            mk("m_low", "low", Some((0.25, 0.40)), "2026-11-01T00:00:00Z"),
+            mk("m_none_a", "unscored-a", None, ""),
+            mk("m_high", "high", Some((0.75, 0.90)), "2026-11-05T00:00:00Z"),
+        ];
+        for key in ["map", "map50", "created"] {
+            let desc = group_models(&store, &models, Some((key, true)));
+            let desc_ids: Vec<&str> = desc[0].rows.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(desc_ids, ["m_high", "m_low", "m_none_a", "m_none_b"], "{key} desc");
+
+            let asc = group_models(&store, &models, Some((key, false)));
+            let asc_ids: Vec<&str> = asc[0].rows.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(asc_ids, ["m_low", "m_high", "m_none_a", "m_none_b"], "{key} asc");
+        }
     }
 }

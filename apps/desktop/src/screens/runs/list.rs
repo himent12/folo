@@ -159,10 +159,12 @@ impl FoloApp {
             Rc::new(move |this, i, _, _| this.run_filter = filters[i]),
         );
         let archs = [None, Some(Arch::N), Some(Arch::S), Some(Arch::M), Some(Arch::L), Some(Arch::X)];
+        let arch_labels = arch_filter_labels(&runs);
+        let arch_refs: Vec<&str> = arch_labels.iter().map(String::as_str).collect();
         let arch_sel = archs.iter().position(|a| *a == self.run_arch_filter).unwrap_or(0);
         let arch_seg = self.segmented(
             "runs-arch-filter",
-            &["All", "n", "s", "m", "l", "x"],
+            &arch_refs,
             arch_sel,
             window,
             cx,
@@ -181,20 +183,9 @@ impl FoloApp {
         .into_iter()
         .cloned()
         .collect();
-        // Sorted like Models (stable, so ties keep the server's newest-first order).
-        if let Some((k, desc)) = self.runs_sort {
-            let score = |r: &Run| -> f64 {
-                match k {
-                    "best" => r.best.as_ref().map_or(-1., |b| b.map50_95 as f64),
-                    "duration" => duration_of(r, now).unwrap_or(-1.),
-                    _ => time::parse(&r.created).unwrap_or(0) as f64,
-                }
-            };
-            visible.sort_by(|a, b| {
-                let o = score(a).total_cmp(&score(b));
-                if desc { o.reverse() } else { o }
-            });
-        }
+        // Sorted like Models (stable, so ties keep the server's newest-first order); unmeasured or
+        // missing values always sort last in both ascending and descending order.
+        sort_runs(&mut visible, self.runs_sort, now);
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: folo_ui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
         // Single-line rows; secondary facts get their own columns as the window allows, whole
@@ -513,6 +504,57 @@ impl FoloApp {
     }
 }
 
+/// Sorts `runs` stably by the given `(column_key, descending)` pair. Missing, unmeasured, or
+/// non-finite values always sort last in both ascending and descending order.
+pub(crate) fn sort_runs(runs: &mut [Run], sort: Option<(&str, bool)>, now: i64) {
+    let Some((k, desc)) = sort else { return };
+    let score = |r: &Run| -> Option<f64> {
+        match k {
+            "best" => r.best.as_ref().map(|b| b.map50_95 as f64),
+            "duration" => duration_of(r, now),
+            _ => time::parse(&r.created).map(|t| t as f64),
+        }
+    };
+    runs.sort_by(|a, b| cmp_opt_f64(score(a), score(b), desc));
+}
+
+/// Compares optional numeric sort keys so `None` (and non-finite values) always sort last,
+/// regardless of ascending or descending direction.
+fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a = a.filter(|v| v.is_finite());
+    let b = b.filter(|v| v.is_finite());
+    match (a, b) {
+        (Some(va), Some(vb)) => {
+            let o = va.total_cmp(&vb);
+            if desc { o.reverse() } else { o }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Labels with per-architecture counts for `runs-arch-filter` (`"All\u{a0}N"`, `"n\u{a0}K"`, ...).
+fn arch_filter_labels(runs: &[Run]) -> Vec<String> {
+    const ARCHS: [(Option<Arch>, &str); 6] = [
+        (None, "All"),
+        (Some(Arch::N), "n"),
+        (Some(Arch::S), "s"),
+        (Some(Arch::M), "m"),
+        (Some(Arch::L), "l"),
+        (Some(Arch::X), "x"),
+    ];
+    ARCHS
+        .iter()
+        .map(|&(arch, name)| {
+            let n = runs.iter().filter(|r| arch.is_none_or(|w| r.config.arch == w)).count();
+            // A no-break space marks the count for the segmented control's quieter style.
+            format!("{name}\u{a0}{n}")
+        })
+        .collect()
+}
+
 /// The line under a narrowed list: "3 of 10 runs", "0 of 10 runs" when nothing matches; none
 /// when everything is shown.
 fn shown_line(shown: usize, total: usize) -> Option<String> {
@@ -633,7 +675,70 @@ fn run_trend(t: &crate::theme::Theme, values: Vec<f32>, epochs: u32, live: bool)
 
 #[cfg(test)]
 mod tests {
-    use super::{RunCols, shown_line};
+    use super::{RunCols, arch_filter_labels, shown_line, sort_runs};
+    use crate::api::{Arch, Backend, BestEpoch, Run};
+
+    #[test]
+    fn missing_run_sort_values_always_sort_last_in_both_directions() {
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let mk =
+            |id: &str, best: Option<f32>, started: Option<&str>, finished: Option<&str>, created: &str| Run {
+                id: id.into(),
+                name: id.into(),
+                best: best.map(|m| BestEpoch { epoch: 1, map50_95: m }),
+                started: started.map(str::to_string),
+                finished: finished.map(str::to_string),
+                paused_s: None,
+                created: created.into(),
+                ..base.clone()
+            };
+        let now = crate::api::time::parse("2026-11-10T12:00:00Z").unwrap();
+        let initial = vec![
+            mk("none_first", None, None, None, "not-a-timestamp"),
+            mk(
+                "low",
+                Some(0.20),
+                Some("2026-11-10T11:59:00Z"),
+                Some("2026-11-10T11:59:10Z"),
+                "2026-11-01T00:00:00Z",
+            ),
+            mk("nan", Some(f32::NAN), None, None, ""),
+            mk(
+                "high",
+                Some(0.80),
+                Some("2026-11-10T11:00:00Z"),
+                Some("2026-11-10T11:10:00Z"),
+                "2026-11-05T00:00:00Z",
+            ),
+        ];
+
+        for key in ["best", "duration", "created"] {
+            let mut desc = initial.clone();
+            sort_runs(&mut desc, Some((key, true)), now);
+            let desc_ids: Vec<&str> = desc.iter().map(|r| r.id.as_str()).collect();
+            assert_eq!(desc_ids, ["high", "low", "none_first", "nan"], "{key} desc");
+
+            let mut asc = initial.clone();
+            sort_runs(&mut asc, Some((key, false)), now);
+            let asc_ids: Vec<&str> = asc.iter().map(|r| r.id.as_str()).collect();
+            assert_eq!(asc_ids, ["low", "high", "none_first", "nan"], "{key} asc");
+        }
+    }
+
+    #[test]
+    fn arch_filter_labels_include_counts_with_nobreak_space() {
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let mk = |arch: Arch| {
+            let mut r = base.clone();
+            r.config.arch = arch;
+            r
+        };
+        let runs = vec![mk(Arch::N), mk(Arch::N), mk(Arch::S), mk(Arch::L)];
+        assert_eq!(
+            arch_filter_labels(&runs),
+            vec!["All\u{a0}4", "n\u{a0}2", "s\u{a0}1", "m\u{a0}0", "l\u{a0}1", "x\u{a0}0"]
+        );
+    }
 
     #[test]
     fn a_narrowed_list_says_what_it_shows_even_when_nothing_matches() {
