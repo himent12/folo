@@ -102,14 +102,18 @@ impl EpochFiles {
     }
 }
 
-/// Promotes `last` to `best` atomically, preferring an O(1) same-filesystem hardlink (`hard_link` to a
-/// sibling temporary path followed by a brief [`folo_nn::io::rename_over_with`]) and falling back to an
-/// atomic byte copy when hardlinks are unavailable or a concurrent reader on Windows holds `last` open
-/// without `FILE_SHARE_DELETE`.
+/// Promotes `last` to `best` atomically.
 ///
-/// Safe because [`folo_nn::io::safetensors::write_file`] always writes `last` to a fresh temporary file and
-/// atomically renames it over `last`, leaving any previous inode linked by `best` immutable.
+/// On Unix, prefers an O(1) same-filesystem hardlink (`hard_link` to a sibling temporary path followed by
+/// [`folo_nn::io::rename_over_with`]) and falls back to an atomic byte copy when hardlinks are unavailable
+/// (cross-device, unsupported filesystem, etc.). Safe because [`folo_nn::io::safetensors::write_file`] always
+/// writes `last` to a fresh temporary file and atomically renames it over `last`, leaving any previous inode
+/// linked by `best` immutable.
+///
+/// On Windows, uses an independent atomic copy so a reader holding `best.folo` open without
+/// `FILE_SHARE_DELETE` cannot share an NTFS file object with `last.folo` and block future epoch writes.
 fn promote_best(last: &Path, best: &Path) -> Result<()> {
+    #[cfg(not(windows))]
     if let Ok(tmp) = try_hardlink_temp(last, best) {
         if folo_nn::io::rename_over_with(&tmp, best, folo_nn::io::RenameRetry::BRIEF).is_ok() {
             return Ok(());
@@ -119,6 +123,7 @@ fn promote_best(last: &Path, best: &Path) -> Result<()> {
     write_atomic(best, |f| std::fs::File::open(last).and_then(|mut src| std::io::copy(&mut src, f).map(drop)))
 }
 
+#[cfg(not(windows))]
 fn try_hardlink_temp(src: &Path, dst: &Path) -> std::io::Result<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
