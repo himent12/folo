@@ -12,7 +12,7 @@
 //! - `reduce.rs`: reductions, arg-reductions, softmax and top-k over one dimension (`[outer, d, inner]`).
 //! - `index.rs`: `index_select`, `index_add`, `gather` and `scatter_add` over one dimension.
 //! - `pool.rs`: max, average and adaptive average pooling and nearest upsampling, with their gradients.
-//! - `pool_alloc.rs`: the cache of large `f32` buffers ([`set_buffer_cache_limit`]).
+//! - `pool_alloc/`: the two-level cache of large `f32` buffers ([`set_buffer_cache_limit`]).
 //! - [`gemm`] (`gemm/`): the single-precision GEMM: blocked driver, micro-kernels, row-pointer operands.
 //! - `conv/`: conv2d forward and gradients: implicit-im2col GEMM, Winograd, depthwise, few-input-channel and
 //!   per-site paths.
