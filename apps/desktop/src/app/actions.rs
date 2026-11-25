@@ -494,7 +494,9 @@ impl FoloApp {
 
     pub fn export_model(&mut self, id: String, format: &'static str, cx: &mut Context<Self>) {
         self.export_open = false;
-        if !self.exporting.insert((id.clone(), format)) {
+        // `fetch` is a no-op while a connection switch holds requests: don't strand an in-flight flag.
+        if self.hold_loading || !self.exporting.insert((id.clone(), format)) {
+            cx.notify();
             return;
         }
         cx.notify();

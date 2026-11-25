@@ -351,8 +351,22 @@ impl FoloApp {
         ];
         let n = options.len();
         let fmts: Vec<&'static str> = options.iter().map(|o| o.0).collect();
-        let hl = self.export_hl.min(n - 1);
+        let usable: Vec<usize> =
+            (0..n).filter(|&i| !self.exporting.contains(&(m.id.clone(), fmts[i]))).collect();
+        let first_usable = usable.first().copied().unwrap_or(0);
+        let last_usable = usable.last().copied().unwrap_or(0);
+        let hl = if usable.contains(&self.export_hl) { self.export_hl } else { first_usable };
+        let step_usable = usable.clone();
+        let step = move |i: usize, down: bool| {
+            let next = if down {
+                step_usable.iter().find(|&&u| u > i)
+            } else {
+                step_usable.iter().rev().find(|&&u| u < i)
+            };
+            next.copied().unwrap_or(i)
+        };
         let mid = m.id.clone();
+        let key_usable = usable.clone();
         // Like a select: focus stays on the trigger, arrows move a highlight, Enter commits it.
         let trigger = self
             .button(
@@ -364,15 +378,18 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| {
                     this.export_open = !this.export_open;
-                    this.export_hl = 0;
+                    this.export_hl = first_usable;
                     cx.notify();
                 }),
             )
             // Captured before the button's own Enter/Space toggle.
             .capture_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
-                    let fmt = fmts[this.export_hl.min(fmts.len() - 1)];
-                    if !this.exporting.contains(&(mid.clone(), fmt)) {
+                    let pick =
+                        if key_usable.contains(&this.export_hl) { this.export_hl } else { first_usable };
+                    if let Some(&fmt) = fmts.get(pick)
+                        && !this.exporting.contains(&(mid.clone(), fmt))
+                    {
                         this.export_model(mid.clone(), fmt, cx);
                     }
                     cx.stop_propagation();
@@ -394,12 +411,12 @@ impl FoloApp {
                 match ev.keystroke.key.as_str() {
                     "down" | "up" if !open => {
                         this.export_open = true;
-                        this.export_hl = 0;
+                        this.export_hl = first_usable;
                     }
-                    "down" => this.export_hl = (this.export_hl + 1).min(n - 1),
-                    "up" => this.export_hl = this.export_hl.saturating_sub(1),
-                    "home" if open => this.export_hl = 0,
-                    "end" if open => this.export_hl = n - 1,
+                    "down" => this.export_hl = step(this.export_hl.min(n - 1), true),
+                    "up" => this.export_hl = step(this.export_hl.min(n - 1), false),
+                    "home" if open => this.export_hl = first_usable,
+                    "end" if open => this.export_hl = last_usable,
                     "escape" if open => this.export_open = false,
                     "tab" if open => {
                         this.export_open = false;
@@ -572,18 +589,41 @@ mod tests {
             assert_eq!(this.class_table_sort, Some(("map50", false)));
         });
 
-        // 2. Duplicate export guard: calling export_model while already in flight is a no-op;
-        // once completed, exporting clears cleanly.
-        drive(&mut app, window, |this, _, cx| {
-            this.exporting.insert((mid.clone(), "onnx"));
+        // 2. Duplicate export guard & hold_loading guard (each step drains async tasks).
+        let before = drive(&mut app, window, |this, _, cx| {
             let before = this.toasts.len();
+            // While hold_loading is true, export_model must not strand an in-flight flag.
+            this.hold_loading = true;
             this.export_model(mid.clone(), "onnx", cx);
-            assert_eq!(this.toasts.len(), before, "in-flight export blocks duplicate request");
+            assert!(this.exporting.is_empty(), "hold_loading drops export without stranding flag");
+            this.hold_loading = false;
+            // With onnx already in flight, a duplicate request must not dispatch or toast.
+            this.exporting.insert((mid.clone(), "onnx"));
+            this.export_model(mid.clone(), "onnx", cx);
+            before
+        });
+        drive(&mut app, window, |this, _, cx| {
+            assert_eq!(this.toasts.len(), before, "in-flight export blocked duplicate async request");
+            assert!(this.exporting.contains(&(mid.clone(), "onnx")), "sentinel still present");
+            // Opening the menu while folo-f16 is busy selects the available format (onnx = 1).
             this.exporting.remove(&(mid.clone(), "onnx"));
+            this.exporting.insert((mid.clone(), "folo-f16"));
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("model-export", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, cx| {
+            assert!(this.export_open);
+            assert_eq!(this.export_hl, 1, "menu skips busy folo-f16 and highlights available onnx");
+            this.export_open = false;
+            this.exporting.clear();
             this.export_model(mid.clone(), "onnx", cx);
         });
         drive(&mut app, window, |this, _, _| {
             assert!(this.exporting.is_empty(), "exporting clears after completion");
+            assert_eq!(this.toasts.len(), before + 1, "completed export posts one toast");
         });
 
         // 3. Details panel links navigate to the source run and training dataset, resetting table sort.
