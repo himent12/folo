@@ -128,8 +128,10 @@ pub struct Evaluator {
     /// `(num_classes + 1)²`, row-major `[pred][truth]`, index `num_classes` = background.
     confusion: Vec<u64>,
     // Scratch buffers reused across images.
-    pred_order: Vec<u32>,
-    gt_order: Vec<u32>,
+    // `pred_order`: `( (class << 32) | desc_f32_key(score), input_idx )` — sorts in place with no indirection.
+    pred_order: Vec<(u64, u32)>,
+    // `gt_order`: `( (class << 1) | ignored_bit, input_idx )` — sorts in place with no indirection.
+    gt_order: Vec<(u64, u32)>,
     ious: Vec<f64>,
     gt_matched: Vec<bool>,
     tp_bits: Vec<u16>,
@@ -192,43 +194,40 @@ impl Evaluator {
         self.num_images += 1;
         self.update_confusion(preds, truths);
 
-        // One sort per image: predictions by (class, score desc, input order); truths by (class, input order), with
-        // COCO-ignored truths last within their class (pycocotools' stable sort on `_ignore`).
+        // One in-place sort per image over packed register keys (zero indirection, zero allocation;
+        // trailing input index preserves exact input order on ties).
         let coco = self.cfg.coco_compatible;
         let pred_order = &mut self.pred_order;
         pred_order.clear();
-        pred_order.extend((0..preds.len() as u32).filter(|&i| !preds[i as usize].score.is_nan()));
-        pred_order.sort_by(|&a, &b| {
-            let (pa, pb) = (&preds[a as usize], &preds[b as usize]);
-            pa.class.cmp(&pb.class).then(pb.score.total_cmp(&pa.score))
-        });
-        let gt_order = &mut self.gt_order;
-        gt_order.clear();
-        gt_order.extend(0..truths.len() as u32);
-        if coco {
-            gt_order
-                .sort_by_key(|&i| (truths[i as usize].class, outside_coco_area(&truths[i as usize].bbox)));
-        } else {
-            gt_order.sort_by_key(|&i| truths[i as usize].class);
-        }
-        for t in truths {
-            if !(coco && outside_coco_area(&t.bbox)) {
-                self.gt_counts[t.class as usize] += 1;
+        for (i, p) in preds.iter().enumerate() {
+            if !p.score.is_nan() {
+                let key = ((p.class as u64) << 32) | desc_f32_key(p.score) as u64;
+                pred_order.push((key, i as u32));
             }
         }
+        pred_order.sort_unstable();
+        let gt_order = &mut self.gt_order;
+        gt_order.clear();
+        for (i, t) in truths.iter().enumerate() {
+            let ign = coco && outside_coco_area(&t.bbox);
+            if !ign {
+                self.gt_counts[t.class as usize] += 1;
+            }
+            gt_order.push((((t.class as u64) << 1) | u64::from(ign), i as u32));
+        }
+        gt_order.sort_unstable();
 
         let (mut pi, mut gi) = (0, 0);
         while pi < self.pred_order.len() {
-            let class = preds[self.pred_order[pi] as usize].class;
-            let p_end = pi + self.pred_order[pi..].partition_point(|&i| preds[i as usize].class == class);
-            while gi < self.gt_order.len() && truths[self.gt_order[gi] as usize].class < class {
+            let class = (self.pred_order[pi].0 >> 32) as u32;
+            let p_end = pi + self.pred_order[pi..].partition_point(|&(k, _)| (k >> 32) as u32 == class);
+            while gi < self.gt_order.len() && ((self.gt_order[gi].0 >> 1) as u32) < class {
                 gi += 1;
             }
-            let g_end = gi + self.gt_order[gi..].partition_point(|&i| truths[i as usize].class == class);
-            // Regular (not ignored) truths come first: `gt_order[gi..g_reg]`.
+            let g_end = gi + self.gt_order[gi..].partition_point(|&(k, _)| (k >> 1) as u32 == class);
+            // Regular (not ignored) truths have bit 0 == 0 and sort before ignored truths (`bit 0 == 1`).
             let g_reg = if coco {
-                gi + self.gt_order[gi..g_end]
-                    .partition_point(|&i| !outside_coco_area(&truths[i as usize].bbox))
+                gi + self.gt_order[gi..g_end].partition_point(|&(k, _)| (k & 1) == 0)
             } else {
                 g_end
             };
@@ -258,11 +257,28 @@ impl Evaluator {
         class: usize,
     ) {
         let (np, ng, n_reg) = (p1 - p0, g1 - g0, g_reg - g0);
+        let coco = self.cfg.coco_compatible;
+        let all_bits = (1u16 << NUM_IOU_THRESHOLDS) - 1;
+        if ng == 0 {
+            let out = &mut self.dets[class];
+            out.reserve(np);
+            for &(_, pi) in &self.pred_order[p0..p1] {
+                let p = &preds[pi as usize];
+                let ig_k = if coco && outside_coco_area(&p.bbox) { all_bits } else { 0 };
+                out.push(DetRecord { score: p.score, tp: 0, ig: ig_k });
+            }
+            return;
+        }
         self.ious.clear();
-        for &pi in &self.pred_order[p0..p1] {
+        let mut max_iou = 0.0f64;
+        for &(_, pi) in &self.pred_order[p0..p1] {
             let pb = &preds[pi as usize].bbox;
-            for &gi in &self.gt_order[g0..g1] {
-                self.ious.push(iou_f64(pb, &truths[gi as usize].bbox));
+            for &(_, gi) in &self.gt_order[g0..g1] {
+                let v = iou_f64(pb, &truths[gi as usize].bbox);
+                if v > max_iou {
+                    max_iou = v;
+                }
+                self.ious.push(v);
             }
         }
         let mut tp = std::mem::take(&mut self.tp_bits);
@@ -271,14 +287,19 @@ impl Evaluator {
         let mut ig = std::mem::take(&mut self.ig_bits);
         ig.clear();
         ig.resize(np, 0);
-        if ng > 0 {
+        if max_iou >= self.thresholds[0].min(1.0 - 1e-10) {
             for (t, &thr) in self.thresholds.iter().enumerate() {
+                let thr_cap = thr.min(1.0 - 1e-10);
+                if max_iou < thr_cap {
+                    break;
+                }
                 self.gt_matched.clear();
                 self.gt_matched.resize(ng, false);
-                for (d, (tp, ig)) in tp.iter_mut().zip(ig.iter_mut()).enumerate() {
-                    let mut best = thr.min(1.0 - 1e-10);
+                for (d, (tp_d, ig_d)) in tp.iter_mut().zip(ig.iter_mut()).enumerate() {
+                    let row = &self.ious[d * ng..(d + 1) * ng];
+                    let mut best = thr_cap;
                     let mut m = usize::MAX;
-                    for g in 0..ng {
+                    for (g, &v) in row.iter().enumerate() {
                         if self.gt_matched[g] {
                             continue;
                         }
@@ -286,7 +307,6 @@ impl Evaluator {
                         if m < n_reg && g >= n_reg {
                             break;
                         }
-                        let v = self.ious[d * ng + g];
                         if v < best {
                             continue;
                         }
@@ -297,22 +317,22 @@ impl Evaluator {
                         self.gt_matched[m] = true;
                         // A match to an ignored truth is neither a TP nor a FP.
                         if m < n_reg {
-                            *tp |= 1 << t;
+                            *tp_d |= 1 << t;
                         } else {
-                            *ig |= 1 << t;
+                            *ig_d |= 1 << t;
                         }
                     }
                 }
             }
         }
-        let coco = self.cfg.coco_compatible;
         let out = &mut self.dets[class];
-        for (k, &pi) in self.pred_order[p0..p1].iter().enumerate() {
+        out.reserve(np);
+        for (k, &(_, pi)) in self.pred_order[p0..p1].iter().enumerate() {
             let p = &preds[pi as usize];
             let mut ig_k = ig[k];
             if coco && outside_coco_area(&p.bbox) {
                 // Unmatched detections outside the area range are ignored too.
-                ig_k |= !(tp[k] | ig_k) & ((1 << NUM_IOU_THRESHOLDS) - 1);
+                ig_k |= !(tp[k] | ig_k) & all_bits;
             }
             out.push(DetRecord { score: p.score, tp: tp[k], ig: ig_k });
         }
@@ -325,16 +345,25 @@ impl Evaluator {
         let nc = self.num_classes;
         let stride = nc + 1;
         let conf = self.cfg.confusion_conf;
+        let kept = |p: &Detection| p.score > conf;
+        if truths.is_empty() {
+            for p in preds {
+                if kept(p) {
+                    self.confusion[p.class as usize * stride + nc] += 1;
+                }
+            }
+            return;
+        }
+        let iou_thr = self.cfg.confusion_iou;
         let pairs = &mut self.pairs;
         pairs.clear();
-        let kept = |p: &Detection| p.score > conf;
         for (pi, p) in preds.iter().enumerate() {
             if !kept(p) {
                 continue;
             }
             for (gi, g) in truths.iter().enumerate() {
                 let v = crate::boxes::box_iou(&p.bbox, &g.bbox);
-                if v > self.cfg.confusion_iou {
+                if v > iou_thr {
                     pairs.push((v, gi as u32, pi as u32));
                 }
             }
@@ -500,6 +529,15 @@ impl Evaluator {
     }
 }
 
+/// Order-reversing `u32` bijection for every non-NaN `f32`: `desc_f32_key(a) < desc_f32_key(b)` iff
+/// `b.total_cmp(&a) == Less` (including `-0.0 < +0.0` and `±inf`).
+#[inline]
+pub(crate) fn desc_f32_key(s: f32) -> u32 {
+    let b = s.to_bits();
+    let mask = ((b as i32) >> 31) as u32;
+    !(b ^ (mask | 0x8000_0000))
+}
+
 /// Confidence grid point `i` (`i / 1000`), in f32 like the scores it is compared with.
 #[inline]
 fn conf_grid(i: usize) -> f32 {
@@ -550,42 +588,55 @@ fn class_eval(recs: &[DetRecord], n_gt: u64, recall_pts: &[f64; NUM_RECALL_POINT
     let nd = sorted.len();
     let n_gt_f = n_gt as f64;
 
+    // Single pass across all 10 IoU thresholds without allocating per-detection `rc`/`pr` buffers:
+    // precision only increases on a TP, and `{ i : i >= j_m } == { i : bucket(i) >= m }`, so a 101-point
+    // suffix max over per-bucket max precisions is bit-for-bit identical to the full envelope + search.
+    let mut tp_c = [0u64; NUM_IOU_THRESHOLDS];
+    let mut fp_c = [0u64; NUM_IOU_THRESHOLDS];
+    let mut cur_b = [0usize; NUM_IOU_THRESHOLDS];
+    let mut bucket_max = [[0.0f64; NUM_RECALL_POINTS]; NUM_IOU_THRESHOLDS];
+    for d in &sorted {
+        let (tp_bits, ig_bits) = (d.tp, d.ig);
+        if tp_bits == 0 && ig_bits == 0 {
+            for f in &mut fp_c {
+                *f += 1;
+            }
+            continue;
+        }
+        for t in 0..NUM_IOU_THRESHOLDS {
+            if (tp_bits >> t) & 1 == 1 {
+                tp_c[t] += 1;
+                let tp_f = tp_c[t] as f64;
+                let rc = tp_f / n_gt_f;
+                let mut b = cur_b[t];
+                while b + 1 < NUM_RECALL_POINTS && rc >= recall_pts[b + 1] {
+                    b += 1;
+                }
+                cur_b[t] = b;
+                let p = tp_f / (tp_f + fp_c[t] as f64 + f64::EPSILON);
+                if p > bucket_max[t][b] {
+                    bucket_max[t][b] = p;
+                }
+            } else if (ig_bits >> t) & 1 == 0 {
+                fp_c[t] += 1;
+            }
+        }
+    }
     let mut ap = [0.0; NUM_IOU_THRESHOLDS];
     let mut pr50 = vec![0.0; NUM_RECALL_POINTS];
-    let mut rc = vec![0.0f64; nd];
-    let mut pr = vec![0.0f64; nd];
     for (t, ap_t) in ap.iter_mut().enumerate() {
-        let (mut tp, mut fp) = (0u64, 0u64);
-        for (i, d) in sorted.iter().enumerate() {
-            if d.tp >> t & 1 == 1 {
-                tp += 1;
-            } else if d.ig >> t & 1 == 0 {
-                fp += 1;
-            }
-            rc[i] = tp as f64 / n_gt_f;
-            pr[i] = tp as f64 / (tp as f64 + fp as f64 + f64::EPSILON);
-        }
-        // Precision envelope: make precision monotonically non-increasing in recall.
-        for i in (1..nd).rev() {
-            if pr[i] > pr[i - 1] {
-                pr[i - 1] = pr[i];
+        let bm = &mut bucket_max[t];
+        let mut running = 0.0f64;
+        for v in bm.iter_mut().rev() {
+            if *v > running {
+                running = *v;
+            } else {
+                *v = running;
             }
         }
-        // Sample at the recall points with a left-sided search; points beyond the last recall get 0.
-        let mut q = [0.0f64; NUM_RECALL_POINTS];
-        let mut j = 0;
-        for (qi, &r) in q.iter_mut().zip(recall_pts) {
-            while j < nd && rc[j] < r {
-                j += 1;
-            }
-            if j == nd {
-                break;
-            }
-            *qi = pr[j];
-        }
-        *ap_t = q.iter().sum::<f64>() / NUM_RECALL_POINTS as f64;
+        *ap_t = bm.iter().sum::<f64>() / NUM_RECALL_POINTS as f64;
         if t == 0 {
-            pr50.copy_from_slice(&q);
+            pr50.copy_from_slice(bm);
         }
     }
 
@@ -726,5 +777,36 @@ mod tests {
         assert_eq!(r[7], 0.07);
         assert_eq!(r[35], 0.35000000000000003);
         assert_eq!(r[100], 1.0);
+    }
+
+    #[test]
+    fn desc_f32_key_matches_total_cmp_descending() {
+        let vals = [
+            f32::INFINITY,
+            f32::MAX,
+            100.0,
+            1.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            0.0,
+            -0.0,
+            -f32::from_bits(1),
+            -f32::MIN_POSITIVE,
+            -1.0,
+            -100.0,
+            f32::MIN,
+            f32::NEG_INFINITY,
+        ];
+        for w in vals.windows(2) {
+            assert_eq!(w[1].total_cmp(&w[0]), std::cmp::Ordering::Less);
+            assert!(
+                desc_f32_key(w[0]) < desc_f32_key(w[1]),
+                "key({})={:#x} >= key({})={:#x}",
+                w[0],
+                desc_f32_key(w[0]),
+                w[1],
+                desc_f32_key(w[1])
+            );
+        }
     }
 }
