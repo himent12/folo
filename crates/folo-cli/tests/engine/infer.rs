@@ -190,6 +190,7 @@ fn predict_val_and_export_reject_invalid_args_before_opening_model() {
         (&["predict", "--json", "--model", "none.folo", "a.jpg", "--max-det", "0"], "--max-det"),
         (&["predict", "--json", "--model", "none.folo", "a.jpg", "--imgsz", "33"], "--imgsz"),
         (&["predict", "--json", "--model", "none.folo", "a.jpg", "--imgsz", "0"], "--imgsz"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--imgsz", "8224"], "--imgsz"),
     ];
     for (args, flag) in predict_cases {
         let (code, lines, stderr) = folo(args);
@@ -214,6 +215,12 @@ fn predict_val_and_export_reject_invalid_args_before_opening_model() {
         assert!(e["message"].as_str().unwrap().contains(flag), "{args:?}: {e}");
         assert!(e["hint"].as_str().unwrap().contains("folo describe val --json"), "{e}");
     }
+
+    // `val` has no 8192 imgsz ceiling in the engine, so `--imgsz 8224` reaches model lookup instead of `invalid_config`.
+    let (code, lines, stderr) =
+        folo(&["val", "--json", "--model", "none.folo", "--data", "none", "--imgsz", "8224"]);
+    let e = &lines.last().unwrap_or_else(|| panic!("val 8224: {stderr}"))["error"];
+    assert_eq!((code, e["code"].as_str()), (3, Some("model_not_found")), "{e}");
 
     // `--save` pointing to an existing regular file or empty string is a usage error before opening the model.
     let root = TestDir::new("cli-predict-save-file");

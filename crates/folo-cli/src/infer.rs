@@ -158,6 +158,7 @@ fn check_infer_args(
     iou: f32,
     max_det: u32,
     imgsz: Option<u32>,
+    max_imgsz: Option<u32>,
     batch: Option<u32>,
 ) -> Result<(), CliError> {
     if !(0.0..=1.0).contains(&conf) {
@@ -169,13 +170,20 @@ fn check_infer_args(
     if max_det == 0 {
         return Err(invalid_config(command, "--max-det must be at least 1"));
     }
-    if let Some(s) = imgsz
-        && (s == 0 || !s.is_multiple_of(32) || s > 8192)
-    {
-        return Err(invalid_config(
-            command,
-            format!("--imgsz must be a multiple of 32 in 32..=8192, got {s}"),
-        ));
+    if let Some(s) = imgsz {
+        if let Some(max) = max_imgsz {
+            if s == 0 || !s.is_multiple_of(32) || s > max {
+                return Err(invalid_config(
+                    command,
+                    format!("--imgsz must be a multiple of 32 in 32..={max}, got {s}"),
+                ));
+            }
+        } else if s == 0 || !s.is_multiple_of(32) {
+            return Err(invalid_config(
+                command,
+                format!("--imgsz must be a positive multiple of 32, got {s}"),
+            ));
+        }
     }
     if batch == Some(0) {
         return Err(invalid_config(command, "--batch must be at least 1"));
@@ -203,7 +211,7 @@ fn check_save_dir(save: Option<&Path>) -> Result<(), CliError> {
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
-    check_infer_args("val", args.conf, args.iou, args.max_det, args.imgsz, Some(args.batch))?;
+    check_infer_args("val", args.conf, args.iou, args.max_det, args.imgsz, None, Some(args.batch))?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model =
         open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
@@ -452,23 +460,34 @@ fn save_paths(dir: &Path, images: &[(PathBuf, PathBuf)]) -> Result<Vec<(PathBuf,
 /// overwritten in place, failed writes leave no temporary files behind, and filenames up to the filesystem's
 /// component limit still succeed.
 fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    write_new_with(dst, bytes, &NEXT)
+}
+
+fn write_new_with(dst: &Path, bytes: &[u8], next: &std::sync::atomic::AtomicU64) -> Result<(), String> {
     use std::io::Write;
+    use std::sync::atomic::Ordering;
     let dir = dst.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let dst_name = dst.file_name().map(|n| n.to_string_lossy().to_lowercase());
-    let tmp = loop {
-        let candidate = folo_nn::io::temp_path(dir).map_err(|e| e.to_string())?;
-        // Never write through `dst` itself if it happens to match the next `.folo-<pid>-<n>.tmp` name.
-        if candidate.file_name().map(|n| n.to_string_lossy().to_lowercase()) != dst_name {
-            break candidate;
+    let (tmp, mut f) = loop {
+        let n = next.fetch_add(1, Ordering::Relaxed);
+        let name = format!("{}{}-{n}.tmp", folo_nn::io::TEMP_PREFIX, std::process::id());
+        // Skip before creating so we never briefly publish an empty file at `dst`.
+        if Some(name.to_lowercase()) == dst_name {
+            continue;
         }
-        let _ = std::fs::remove_file(&candidate);
+        let candidate = dir.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
     };
     let r = (|| -> std::io::Result<()> {
-        {
-            let mut f = std::fs::OpenOptions::new().write(true).truncate(true).open(&tmp)?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
         folo_nn::io::rename_over(&tmp, dst)
     })();
     if let Err(e) = r {
@@ -522,9 +541,9 @@ fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), Cl
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
-    check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, None)?;
-    check_save_outside(args.save.as_deref(), &args.sources)?;
+    check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, Some(8192), None)?;
     check_save_dir(args.save.as_deref())?;
+    check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model(
         "predict",
@@ -870,25 +889,27 @@ mod tests {
 
     #[test]
     fn check_infer_args_validates_thresholds_and_sizes() {
-        // Boundary valid values pass.
-        check_infer_args("predict", 0.0, 0.0, 1, Some(32), None).unwrap();
-        check_infer_args("val", 1.0, 1.0, 300, Some(8192), Some(1)).unwrap();
+        // Boundary valid values pass (`val` has no 8192 upper bound, matching `val::check_config`).
+        check_infer_args("predict", 0.0, 0.0, 1, Some(32), Some(8192), None).unwrap();
+        check_infer_args("predict", 1.0, 1.0, 300, Some(8192), Some(8192), None).unwrap();
+        check_infer_args("val", 1.0, 1.0, 300, Some(8224), None, Some(1)).unwrap();
 
-        for (conf, iou, max_det, imgsz, batch, flag) in [
-            (-0.01, 0.5, 10, None, None, "--conf"),
-            (1.01, 0.5, 10, None, None, "--conf"),
-            (f32::NAN, 0.5, 10, None, None, "--conf"),
-            (f32::INFINITY, 0.5, 10, None, None, "--conf"),
-            (0.25, -0.1, 10, None, None, "--iou"),
-            (0.25, 1.5, 10, None, None, "--iou"),
-            (0.25, f32::NAN, 10, None, None, "--iou"),
-            (0.25, 0.7, 0, None, None, "--max-det"),
-            (0.25, 0.7, 10, Some(0), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(33), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(8224), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(64), Some(0), "--batch"),
+        for (conf, iou, max_det, imgsz, max_imgsz, batch, flag) in [
+            (-0.01, 0.5, 10, None, Some(8192), None, "--conf"),
+            (1.01, 0.5, 10, None, Some(8192), None, "--conf"),
+            (f32::NAN, 0.5, 10, None, Some(8192), None, "--conf"),
+            (f32::INFINITY, 0.5, 10, None, Some(8192), None, "--conf"),
+            (0.25, -0.1, 10, None, Some(8192), None, "--iou"),
+            (0.25, 1.5, 10, None, Some(8192), None, "--iou"),
+            (0.25, f32::NAN, 10, None, Some(8192), None, "--iou"),
+            (0.25, 0.7, 0, None, Some(8192), None, "--max-det"),
+            (0.25, 0.7, 10, Some(0), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(8224), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), None, Some(1), "--imgsz"),
+            (0.25, 0.7, 10, Some(64), None, Some(0), "--batch"),
         ] {
-            let e = check_infer_args("predict", conf, iou, max_det, imgsz, batch).unwrap_err();
+            let e = check_infer_args("predict", conf, iou, max_det, imgsz, max_imgsz, batch).unwrap_err();
             assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "invalid_config"), "{flag}: {e:?}");
             assert!(e.message.contains(flag), "expected {flag} in {}", e.message);
             assert!(e.hint.as_deref().is_some_and(|h| h.contains("folo describe predict --json")));
@@ -941,13 +962,21 @@ mod tests {
         write_new(&long_dst, b"long").unwrap();
         assert_eq!(std::fs::read(&long_dst).unwrap(), b"long");
 
+        // Destination matching the next candidate temp name skips that slot before creation.
+        let colliding_name = format!("{}{}-0.tmp", folo_nn::io::TEMP_PREFIX, std::process::id());
+        let colliding = dir.join(&colliding_name);
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        write_new_with(&colliding, b"exact", &counter).unwrap();
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(std::fs::read(&colliding).unwrap(), b"exact");
+
         // Failed rename (directory in destination's place) cleans up the temporary file and leaves no leftovers.
         let existing_dir = dir.join("taken");
         std::fs::create_dir(&existing_dir).unwrap();
         assert!(write_new(&existing_dir, b"nope").is_err());
         assert!(existing_dir.is_dir());
         assert!(
-            dir_names(dir.path()).iter().all(|n| !n.ends_with(".tmp")),
+            dir_names(dir.path()).iter().all(|n| n == &colliding_name || !n.ends_with(".tmp")),
             "leftover temp file: {:?}",
             dir_names(dir.path())
         );
