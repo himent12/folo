@@ -46,8 +46,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 
 ## Errors
 Non-2xx responses return `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`,
-except RFC 9110 conditional and range responses that carry no body (`304 Not Modified`, `412 Precondition Failed`,
-and `416 Range Not Satisfiable`, used by `/weights` and image endpoints).
+except RFC 9110 conditional and range responses that carry no body (`304 Not Modified` and `412 Precondition Failed`
+on `/models`, `/models/{id}`, `/models/{id}/eval`, `/weights`, and image endpoints; `416 Range Not Satisfiable` on
+`/weights`).
 `hint` is always present (`null` when there is nothing useful to add). Codes are stable, and they are one
 vocabulary with the CLI and MCP (`folo_api::codes`, with `Code::find`, lists every code with its status and the
 CLI's exit code; a test keeps the sources in line with it). Messages that wrap a driver report are cut to 500 characters:
@@ -292,6 +293,12 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
 - `GET /api/models/{id}` → `Model`. The weights of a run in progress are not listed, but its `m_<run suffix>-last`
   (and `m_<run suffix>`, once it has a `best.folo`) answer here and on `/weights` as soon as the file exists: how a
   cloud control plane copies a worker run's checkpoint while it trains (docs/CLOUD.md).
+- **Conditional caching on JSON model routes.** `GET /api/models`, `GET /api/models/{id}`, and `GET /api/models/{id}/eval`
+  return a weak `ETag` (`W/"<32 hex>"`, 128-bit SHA-256 of the canonical JSON bytes — weak because the compression layer
+  may gzip-encode `application/json`), `Cache-Control: no-cache`, and `Vary: accept-encoding`. A matching `If-None-Match`
+  (weak comparison, `*` too) answers `304 Not Modified` with those headers and no body; `If-Match` uses strong
+  comparison per RFC 9110 (`*` succeeds for an existing resource, while any entity-tag, including a replayed weak `ETag`,
+  answers `412 Precondition Failed` with `ETag`, `Cache-Control: no-store`, `Vary: accept-encoding`, and no body).
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
   ```jsonc
@@ -545,7 +552,8 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   The stream starts with a `status` event and replays nothing else (use `/metrics` and `/logs` for history). A `: keep-alive`
   comment is sent every 15 s. The stream stays open after the run finishes (so `EventSource` does not reconnect in a
   loop) and ends when the run is deleted or the server shuts down. Any number of clients may subscribe. A client too
-  slow to keep up gets a `warn` `log` event saying how many events it missed. Clients must ignore unknown event
+  slow to keep up gets a `warn` `log` event saying how many events it missed followed by a fresh `status` snapshot
+  resynchronized at the live tail (so stale buffered status transitions cannot appear after the snapshot). Clients must ignore unknown event
   names (new types may be added).
   `status` and `step` events carry `steps_per_epoch` and `epochs`, so progress can be drawn from the stream alone.
   `steps_per_epoch` is only known once the trainer is built: a run's snapshot (`GET /api/runs/{id}`) and its
@@ -995,7 +1003,7 @@ exported more than once.
   - `removed` `{ "id" }`: an image was deleted;
   - `reload` `{}`: more changed than the stream carries, so load the images again (sent instead of one `image`
     event each when more than 100 images are added or marked at once, and to a client that fell behind the
-    stream);
+    stream, where `reload` is followed by a fresh `job` snapshot resynchronized at the live tail);
   - `log` `{ "t", "level", "message" }`: the job's log (calls made, tokens used, boxes dropped, failures).
 
   The stream replays nothing: load the job's images with `GET …/images`, then apply events.
@@ -1375,7 +1383,7 @@ A loop does not survive the server: one that was running when the server stopped
   then `entry` (`BenchEntry`, on every change; progress at most twice a second), `loop` (`BenchLoop`, on every
   change), `bench` again when the benchmark changes (name, plan, entry count, best entry), and `removed`
   (`{ "id" }`, an entry or a loop was deleted), until the client disconnects, the benchmark is deleted or the
-  server shuts down. A subscriber that fell behind gets the current `bench` and should load the lists again.
+  server shuts down. A subscriber that fell behind gets a fresh `bench` snapshot resynchronized at the live tail and should load the lists again.
   A new entry sends `entry`, then `bench`; a finished one too; a deleted one `removed`, then `bench`; a `bench`
   event is also sent whenever `active` changes.
 

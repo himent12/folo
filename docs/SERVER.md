@@ -10,26 +10,30 @@ folo-cli and folo-mcp sit on it. The contracts live elsewhere and are not repeat
 ```text
 lib.rs             Server: the router and its middleware, Options, AppState, serve
 routes/            one module per area of API.md (datasets, models, runs, inference, system, uploads, label, cloud,
-                   bench); routes::blocking runs a Store call on tokio's blocking pool
-store.rs           the Store trait: everything a handler needs, whatever the data source
+                   bench); routes::blocking runs a Store call on tokio's blocking pool; mod.rs reports full request
+                   paths via OriginalUri on 404/405; routes/models.rs serves weak-ETag conditional JSON responses
+store.rs           the Store trait: everything a handler needs, whatever the data source, plus pre-serialized SseFrame
 real/              RealStore: the glue between the trait and the services below
 mock/              MockStore: deterministic data for `folo serve --mock` (mock/runs/ simulates training)
-runs/              the run registry, the FIFO queue and its worker thread, history and resume
-engine.rs          device selection, GPU info, engine error mapping, the predictor cache of /api/predict
-index.rs           dataset indexes and their Fingerprint
-models.rs          models: finished runs' weights, <data dir>/models, published weights, /eval, exports
-uploads.rs         upload sessions (/api/uploads)
+runs/              the run registry, the FIFO queue and its worker thread, incremental metrics cache, streaming /logs,
+                   history and resume
+engine.rs          device selection, GPU info, engine error mapping, single-flight predictor LRU cache of /api/predict
+index.rs           dataset indexes, single-pass split-sliced image paging, single-pass issue paging, and their Fingerprint
+models/            models: finished runs' weights, <data dir>/models, published weights, bounded LRU caches,
+                   single-flight /eval, per-(model, variant) derived weights, exports (mod, meta, weights, eval, export)
+uploads/           upload sessions (/api/uploads): cached uploads.json, condvar sweeper, streaming tar unpacker
+                   (mod, fingerprints, pipe, unpack)
 cloud/             the cloud control plane: connections, ledger, reaper, executor/ (one thread per cloud run)
-label/             agent labeling: jobs, the Agent trait, claude.rs, codex.rs and antigravity/
-bench/             vision benchmarks: storage, entries, scheduling and self-improvement loops
+label/             agent labeling: jobs, parallel image probes, the Agent trait, claude.rs, codex.rs and antigravity/
+bench/             vision benchmarks: storage, single-flight variant render caches, entries, scheduling and loops
 throughput/        the measured throughput table and run-time estimates
 cli.rs             the `folo train` command of a TrainConfig (GET /api/runs/{id}/cli)
 probe.rs           POST /api/system/benchmark
 system.rs, web.rs, error.rs   host information, the embedded Studio (`embed-web`), the error envelope
 ```
 
-`models.rs` / `real/models.rs` and `uploads.rs` / `real/uploads.rs` are not duplicates: the top-level file is the
-service, the one under `real/` connects it to `RealStore`.
+`models/` / `real/models.rs` and `uploads/` / `real/uploads.rs` are not duplicates: the top-level folder is the
+service, the file under `real/` connects it to `RealStore`.
 
 ## Router
 `Server::new(store, options)` builds the router (`Server::with_embedded`), from the inside out:
@@ -56,9 +60,14 @@ service, the one under `real/` connects it to `RealStore`.
 5. the request log and trace layer (without headers, so a token never reaches the log).
 
 Handlers are thin: they parse the request and call the `Store`, through `routes::blocking` for calls that may touch
-the disk or burn CPU. An SSE stream (`GET /api/runs/{id}/events`, `routes/runs.rs`, `run_events`) sends the run's
-`status` first, then live events from a broadcast receiver; a client that falls behind gets a `log` warning, the
-stream sends a keep-alive comment every 15 s (`KEEP_ALIVE`) and ends when the server shuts down.
+the disk or burn CPU (including `list_datasets` and `label_logs`). All three SSE streams (`GET /api/runs/{id}/events`,
+`GET /api/label/jobs/{id}/events`, `GET /api/bench/benchmarks/{id}/events`) broadcast shared pre-serialized `SseFrame`
+payloads so events are serialized once regardless of subscriber count. Each stream sends an initial state snapshot
+first, then live frames from a broadcast receiver, with a keep-alive comment every 15 s (`KEEP_ALIVE`), ending when
+the resource is deleted or the server shuts down. When a slow subscriber lags, the stream atomically snapshots current
+state and resubscribes at the live tail so stale buffered transitions cannot arrive after the snapshot: runs send a
+warning `log` frame followed by a fresh `status` snapshot; labeling jobs send `reload` followed by a fresh `job`
+snapshot; benchmarks send a fresh `bench` snapshot.
 
 ```text
   HTTP / SSE client (Studio, Desktop, folo-client, folo mcp --server)
@@ -107,10 +116,16 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
 
 ## Datasets, models and inference
 - The real store's datasets are read with folo-data and indexed into a JSON cache under the data dir, invalidated by
-  file mtimes (`index.rs`, `Fingerprint`: file sizes and modification times under the dataset folder).
-- Finished runs' checkpoints and `.folo` files under `<data dir>/models` are its models; `/eval` runs folo-vision's
-  validator, cached.
-- `/predict` keeps an LRU of loaded, fused `Predictor`s (`engine.rs`, `PREDICTOR_CACHE` models).
+  file mtimes (`index.rs`, `Fingerprint`: file sizes and modification times under the dataset folder). On startup
+  `folo-index` checks and rebuilds registered datasets in parallel via rayon; image listings slice directly by split
+  range and page in a single pass, and issue listings filter and count in a single pass.
+- Finished runs' checkpoints, `.folo` files under `<data dir>/models` and pulled published weights are its models
+  (`models/`); in-memory metadata, file-ID, skipped-file and `/eval` caches use exact bounded LRU eviction
+  (`MAX_META_CACHE = 4096`, `MAX_FILE_ID_CACHE = 4096`, `MAX_SKIPPED_CACHE = 512`, `MAX_EVAL_CACHE = 128`).
+  `/eval` runs folo-vision's validator with single-flight deduplication per `(model, key)` (disk-cached under
+  `cache/eval/`), derived `/weights?format=…` exports serialize per `(model, variant)`, and `GET /api/models`,
+  `GET /api/models/{id}` and `GET /api/models/{id}/eval` support conditional weak-`ETag` (`304` / `412`) caching.
+- `/predict` keeps a single-flight LRU of loaded, fused `Predictor`s (`engine.rs`, `PREDICTOR_CACHE` models).
 - Devices go through folo-vision's `resolve_device` / `can_place` (`auto` is the GPU when folo-gpu finds an adapter,
   else the CPU) and GPU info comes from folo-gpu.
 - The request and response types live in `folo-api`, a dependency-light crate (serde and serde_json; schemars behind
@@ -226,19 +241,19 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 | `RealStore::files` | `RwLock<()>` (`real/mod.rs`) | Shared during dataset registration and run creation/resume; exclusive during dataset unregister and `DELETE /api/datasets/{id}?files=true` so tombstones and file deletion cannot race run admission. |
 | `RunEntry::state` → `Runs::queue` | `Mutex` lock order (`runs/queue.rs`) | `move_queued` and `stop_as` always lock the run's `state` before `Runs::queue` so queue moves, starts, stops and deletes cannot deadlock. |
 | Service registries & slots | `RwLock` + per-item `Mutex` (`real/`, `label/`, `bench/`) | Read locks on `entries`, `jobs` and `benches` are held briefly for lookups to clone an `Arc`; write locks serialize additions/removals (including registry writes). Per-item locks (`Entry::{reg, slot, deleted}` + `Condvar`, `Job`, `Slot`) guard state mutations and atomic saves. |
-| Upload sessions | `Mutex` + per-session `Mutex` (`uploads.rs`) | `Uploads::sessions` (`Mutex<HashMap<…>>`) guards session creation (including session folder creation and tar unpacker startup), lookup and expiry; per-session `Session::state` serializes parts of one upload. |
+| Upload sessions | `Mutex` + per-session `Mutex` (`uploads/`) | `Uploads::sessions` (`Mutex<HashMap<…>>`) guards session creation (including staging folder creation with rollback guard and tar unpacker startup), lookup and expiry; per-session `Session::state` serializes parts of one upload. |
 
 ### Background threads
 | thread name | started by | lifecycle & job |
 |---|---|---|
 | `folo-system-probe` | `SystemProbe::default()` (`system.rs`) | One-shot setup of `sysinfo` CPU counters so `folo serve` binds without waiting ~150 ms. |
-| `folo-index` | `RealStore::open_with_cloud` (`real/mod.rs`) | Checks fingerprints and loads or rebuilds index caches for registered datasets on startup; exits once done. |
+| `folo-index` | `RealStore::open_with_cloud` (`real/mod.rs`) | Checks fingerprints and loads or rebuilds index caches for registered datasets in parallel (via rayon) on startup; exits once done. |
 | `folo-runs` | `Runs::ensure_worker` (`runs/queue.rs`) | Spawned lazily on the first local run; trains queued local runs one at a time in FIFO order. |
 | `folo-gpu-idle` | `RealStore::open_with_cloud` (`real/gpu_idle.rs`) | Holds `Weak` refs; clears cached predictors after 300 s (`PREDICTOR_IDLE`) and releases GPU pool buffers after 30 s (`GPU_IDLE_RELEASE`) when idle. Exits when `RealStore` drops. |
-| `folo-uploads`, `folo-<upload_id>` | `Uploads::open` / `Unpacker::start` (`uploads.rs`) | Sweeper expires idle upload sessions (`UPLOAD_IDLE` = 1 h; holds `Weak` ref). Each dataset tar upload spawns one streaming unpacker thread `folo-<id>` joined on session close/drop. |
+| `folo-uploads`, `folo-<upload_id>` | `Uploads::open` / `Unpacker::start` (`uploads/`) | Condvar-gated sweeper expires idle upload sessions (`UPLOAD_IDLE` = 1 h; zero idle wakeups, exits immediately on shutdown; holds `Weak` ref). Each dataset tar upload spawns one streaming unpacker thread `folo-<id>` joined on session close/drop. |
 | `folo-cloud-reaper`, `folo-cloud-<run_id>`, `folo-cloud-copy-<run_id>` | `Cloud::recover_and_reap` / `executor::spawn` / `Exec::start_copy` (`cloud/`) | Reaper sweeps every 30 s (`reaper_every`) for unfollowed/terminating/unseen instances; one executor thread per active cloud run; optional background checkpoint-download thread (`Exec::start_copy`) during `training`. |
 | `folo-label-<job_id>` | `Labeler::start` (`label/labeling.rs`) | One thread per active labeling job, driving `parallel` worker calls in a thread scope and child CLI processes. |
-| `folo-bench-models`, `folo-bench-expiry`, `folo-bench-agent-<id>`, `folo-bench-loop-<id>` | `Benches::open` / `entries.rs` / `bench/mod.rs` | Persistent FIFO model-entry worker and open external-entry expiry sweeper (30 min timeout); one thread per active agent entry or self-improvement loop. |
+| `folo-bench-models`, `folo-bench-expiry`, `folo-bench-agent-<id>`, `folo-bench-loop-<id>` | `Benches::open` / `entries.rs` / `bench/mod.rs` | Persistent FIFO model-entry worker and condvar-gated open external-entry expiry sweeper (30 min timeout; sleeps the full tick up to 60 s and wakes immediately on timeout updates or shutdown); one thread per active agent entry or self-improvement loop. |
 
 ### Shutdown order
 When `Ctrl+C` or `SIGTERM` resolves `shutdown_signal()`:
