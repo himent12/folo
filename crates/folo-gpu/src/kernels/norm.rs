@@ -8,7 +8,8 @@
 //!    workgroup using a 1-barrier 32-wide pairwise Chan `subgroupShuffleDown` reduction when the native device
 //!    supports 32-wide subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (browser WebGPU,
 //!    WARP, Lavapipe).
-//! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance,
+//! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance (1-barrier
+//!    32-wide pairwise Chan `subgroupShuffleDown` when available, portable `bn_tree_merge` fallback otherwise),
 //!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
 //!    place.
 //! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4.
@@ -17,11 +18,14 @@
 //! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂` (`vec4` when `H·W` is a multiple
 //!    of 4, evaluating `bn_act_grad` on 4 real lanes at once and `bn_act_grad_f32` on odd `H·W`; 1-barrier
 //!    `subgroupAdd` when available, portable shared-memory fallback otherwise);
-//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂`;
+//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂` (1-barrier `subgroupAdd` when available, portable fallback
+//!    otherwise);
 //! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, `vec4` when `H·W` is a multiple
 //!    of 4.
 
-use super::{check_buf, prod, vec_prelude, vec_prelude_f16};
+#[cfg(test)]
+pub(crate) use super::FORCE_NO_SUBGROUPS;
+use super::{check_buf, prod, use_subgroups, vec_prelude, vec_prelude_f16};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
@@ -29,31 +33,6 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 const COMMON: &str = include_str!("../shaders/bn_common.wgsl");
 const WELFORD: &str = include_str!("../shaders/bn_welford.wgsl");
-
-// Tests set this thread-locally to exercise the portable shared-memory fallback even on hardware with 32-wide
-// subgroups, without racing concurrent test threads or leaking across panics.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static FORCE_NO_SUBGROUPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn use_subgroups(ctx: &GpuContext) -> bool {
-    // Keep browser WebGPU explicitly on the portable path until wgpu exposes both `SUBGROUP` and WGSL `subgroup_id`.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = ctx;
-        false
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        #[cfg(test)]
-        if FORCE_NO_SUBGROUPS.with(std::cell::Cell::get) {
-            return false;
-        }
-        let caps = ctx.caps();
-        caps.subgroups && caps.subgroup_size == (32, 32)
-    }
-}
 
 const STATS_MAIN_SUBGROUPS: &str = r#"
 var<workgroup> wn: array<f32, 8>;
@@ -268,8 +247,141 @@ fn gen_stats(spec: &Spec) -> String {
     }
 }
 
-fn gen_finalize(_: &Spec) -> String {
-    format!("{COMMON}{WELFORD}{}", include_str!("../shaders/bn_finalize.wgsl"))
+const FINALIZE_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> wn: array<f32, 8>;
+var<workgroup> wm: array<f32, 8>;
+var<workgroup> wq: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let c = wid.x;
+    let t = bn_finalize_thread(c, lid);
+    var na = t.x;
+    var ma = t.y;
+    var qa = t.z;
+    for (var off = 16u; off > 0u; off = off >> 1u) {
+        let nb = subgroupShuffleDown(na, off);
+        let mb = subgroupShuffleDown(ma, off);
+        let qb = subgroupShuffleDown(qa, off);
+        if (lane < off) {
+            if (na == 0.0) {
+                na = nb;
+                ma = mb;
+                qa = qb;
+            } else if (nb > 0.0) {
+                let n = na + nb;
+                let d = mb - ma;
+                let delta = d * (nb / n);
+                ma += delta;
+                qa += qb + d * (delta * na);
+                na = n;
+            }
+        }
+    }
+    let sg = min(sgid, 7u);
+    if (lane == 0u) {
+        wn[sg] = na;
+        wm[sg] = ma;
+        wq[sg] = qa;
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        var na = wn[0];
+        var ma = wm[0];
+        var qa = wq[0];
+        for (var i = 1u; i < 8u; i += 1u) {
+            let nb = wn[i];
+            if (na == 0.0) {
+                na = nb;
+                ma = wm[i];
+                qa = wq[i];
+            } else if (nb > 0.0) {
+                let n = na + nb;
+                let d = wm[i] - ma;
+                let delta = d * (nb / n);
+                ma += delta;
+                qa += wq[i] + d * (delta * na);
+                na = n;
+            }
+        }
+        bn_finalize_write(c, na, ma, qa);
+    }
+}
+"#;
+
+const FINALIZE_MAIN_PORTABLE: &str = r#"
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let c = wid.x;
+    let t = bn_finalize_thread(c, lid);
+    wn[lid] = t.x;
+    wm[lid] = t.y;
+    wq[lid] = t.z;
+    workgroupBarrier();
+    bn_tree_merge(lid);
+    if (lid == 0u) {
+        bn_finalize_write(c, wn[0], wm[0], wq[0]);
+    }
+}
+"#;
+
+const BWD_FINALIZE_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> s1: array<f32, 8>;
+var<workgroup> s2: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let c = wid.x;
+    let a = bn_bwd_finalize_thread(c, lid);
+    let r1 = subgroupAdd(a.x);
+    let r2 = subgroupAdd(a.y);
+    let sg = min(sgid, 7u);
+    if (lane == 0u) {
+        s1[sg] = r1;
+        s2[sg] = r2;
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        let db = ((s1[0] + s1[1]) + (s1[2] + s1[3])) + ((s1[4] + s1[5]) + (s1[6] + s1[7]));
+        let dw = ((s2[0] + s2[1]) + (s2[2] + s2[3])) + ((s2[4] + s2[5]) + (s2[6] + s2[7]));
+        bn_bwd_finalize_write(c, db, dw);
+    }
+}
+"#;
+
+const BWD_FINALIZE_MAIN_PORTABLE: &str = r#"
+var<workgroup> s1: array<f32, 256>;
+var<workgroup> s2: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let c = wid.x;
+    let a = bn_bwd_finalize_thread(c, lid);
+    s1[lid] = a.x;
+    s2[lid] = a.y;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            s1[lid] += s1[lid + s];
+            s2[lid] += s2[lid + s];
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u) {
+        bn_bwd_finalize_write(c, s1[0], s2[0]);
+    }
+}
+"#;
+
+fn gen_finalize(spec: &Spec) -> String {
+    let body = include_str!("../shaders/bn_finalize.wgsl");
+    if spec.is_subgroups() {
+        format!("{COMMON}{body}{FINALIZE_MAIN_SUBGROUPS}")
+    } else {
+        format!("{COMMON}{WELFORD}{body}{FINALIZE_MAIN_PORTABLE}")
+    }
 }
 
 fn gen_apply(spec: &Spec) -> String {
@@ -282,8 +394,10 @@ fn gen_bwd_reduce(spec: &Spec) -> String {
     format!("{}{COMMON}{body}{main}", prelude(spec))
 }
 
-fn gen_bwd_finalize(_: &Spec) -> String {
-    format!("{COMMON}{}", include_str!("../shaders/bn_bwd_finalize.wgsl"))
+fn gen_bwd_finalize(spec: &Spec) -> String {
+    let body = include_str!("../shaders/bn_bwd_finalize.wgsl");
+    let main = if spec.is_subgroups() { BWD_FINALIZE_MAIN_SUBGROUPS } else { BWD_FINALIZE_MAIN_PORTABLE };
+    format!("{COMMON}{body}{main}")
 }
 
 fn gen_bwd_dx(spec: &Spec) -> String {
@@ -399,7 +513,8 @@ pub fn batch_norm_forward(
         [chunks as u32, d.c as u32, 1],
     )?;
 
-    let k = ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()))?;
+    let k =
+        ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()).subgroups(sg))?;
     let mom = running.as_ref().map_or(0.0, |r| r.momentum);
     let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
     let p = Params::new().uz(d.c)?.uz(chunks)?.f(eps).f(1.0 - mom).f(mom).f(mom * unbias as f32);
@@ -452,7 +567,7 @@ pub fn batch_norm_backward(
     let p = d.walk_params(hw_u, m_u, chunks, len)?;
     ctx.dispatch(&k, &[x, g, mean, invstd, w, b, part.raw()], &p, [chunks as u32, d.c as u32, 1])?;
 
-    let k = ctx.kernel(&BWD_FINALIZE, Spec::new().u32("ACT", 0))?;
+    let k = ctx.kernel(&BWD_FINALIZE, Spec::new().u32("ACT", 0).subgroups(sg))?;
     let p = Params::new().uz(d.c)?.uz(chunks)?.f((1.0 / m as f64) as f32);
     ctx.dispatch(&k, &[part.raw(), mean, invstd, w, b, dw, db, coef.raw()], &p, [d.c as u32, 1, 1])?;
 

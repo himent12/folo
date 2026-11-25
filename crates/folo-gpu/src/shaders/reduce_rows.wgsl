@@ -1,10 +1,9 @@
 // Reduce the contiguous last axis: out[row] = reduce(x[row * R .. row * R + R]). One workgroup per row.
+// `reduce.rs` appends either the 1-barrier 32-wide subgroup reduction or the portable 8-barrier fallback.
 // Spec: OP (0 sum, 1 max, 2 min). Params: 0 = rows, 1 = R, 2 = scale applied to the result (1/R for mean),
 // 3 = identity. XT / YT are the storage types of X and Y (f32 or f16); the arithmetic is f32.
 @group(0) @binding(1) var<storage, read> X: array<XT>;
 @group(0) @binding(2) var<storage, read_write> Y: array<YT>;
-
-var<workgroup> partial: array<f32, 256>;
 
 // The reduction identity (0, -inf or +inf) comes from the host: WGSL constants cannot be infinite.
 fn identity() -> f32 { return pf(3u); }
@@ -20,12 +19,7 @@ fn combine(a: f32, b: f32) -> f32 {
     }
 }
 
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
-        @builtin(local_invocation_index) lid: u32) {
-    let row = wid.y * nwg.x + wid.x;
-    let rows = pu(0u);
-    let r = pu(1u);
+fn reduce_rows_thread(row: u32, rows: u32, r: u32, lid: u32) -> f32 {
     var acc = identity();
     if (row < rows) {
         let base = row * r;
@@ -33,15 +27,5 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             acc = combine(acc, f32(X[base + i]));
         }
     }
-    partial[lid] = acc;
-    workgroupBarrier();
-    for (var s = 128u; s > 0u; s >>= 1u) {
-        if (lid < s) {
-            partial[lid] = combine(partial[lid], partial[lid + s]);
-        }
-        workgroupBarrier();
-    }
-    if (lid == 0u && row < rows) {
-        Y[row] = YT(partial[0] * pf(2u));
-    }
+    return acc;
 }

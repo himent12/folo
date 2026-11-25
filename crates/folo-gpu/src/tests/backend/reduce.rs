@@ -199,3 +199,85 @@ fn topk_orders_nan_and_infinities_by_total_cmp() {
     let (_, zi) = t.to_device(dev).unwrap().topk(4, true).unwrap();
     assert_eq!(zi.to_device(Device::Cpu).unwrap().to_vec2::<i64>().unwrap()[3], vec![0, 1, 2, 3]);
 }
+
+#[test]
+fn subgroup_vs_portable_row_reductions_and_softmax() {
+    use super::fixtures::assert_close_t;
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+    let dev = dev!();
+    // Row reductions (Sum/Mean/Max/Min) and softmax/log_softmax (cached n <= 1024 and uncached n > 1024).
+    for &(rows, n) in &[(3usize, 17usize), (2, 256), (2, 400), (2, 1057)] {
+        let x = randn(&[rows, n], 91).to_device(dev).unwrap();
+        let run = |portable: bool| {
+            let _g = ForceGuard::set(portable);
+            (
+                x.sum(1, false).unwrap(),
+                x.mean(1, false).unwrap(),
+                x.max(1, false).unwrap(),
+                x.min(1, false).unwrap(),
+                x.softmax(1).unwrap(),
+                x.log_softmax(1).unwrap(),
+            )
+        };
+        let (sum_sg, mean_sg, max_sg, min_sg, sm_sg, lsm_sg) = run(false);
+        let (sum_fb, mean_fb, max_fb, min_fb, sm_fb, lsm_fb) = run(true);
+        let tag = format!("sg vs portable {rows}x{n}");
+        assert_close_t(&sum_sg, &sum_fb, 1e-4, 1e-5, &format!("{tag} sum"));
+        assert_close_t(&mean_sg, &mean_fb, 1e-5, 1e-5, &format!("{tag} mean"));
+        assert_same(&max_sg, &max_fb, &format!("{tag} max"));
+        assert_same(&min_sg, &min_fb, &format!("{tag} min"));
+        assert_close_t(&sm_sg, &sm_fb, 1e-6, 1e-5, &format!("{tag} softmax"));
+        assert_close_t(&lsm_sg, &lsm_fb, 1e-5, 1e-5, &format!("{tag} log_softmax"));
+    }
+    // NaN and ±inf propagation in max/min and softmax must match CPU on BOTH subgroup and portable paths.
+    let (inf, nan) = (f32::INFINITY, f32::NAN);
+    let mut vals = vec![-2.0f32; 5 * 300];
+    vals[17] = nan;
+    vals[300 + 299] = inf;
+    vals[2 * 300..3 * 300].fill(-inf);
+    vals[3 * 300 + 42] = inf;
+    vals[3 * 300 + 250] = nan;
+    vals[4 * 300 + 1] = 10.0;
+    let special = Tensor::from_vec(vals, [5, 300]).unwrap();
+    for portable in [false, true] {
+        let _g = ForceGuard::set(portable);
+        let xg = special.to_device(dev).unwrap();
+        assert_close_t(
+            &xg.max(1, false).unwrap(),
+            &special.max(1, false).unwrap(),
+            0.0,
+            0.0,
+            &format!("max nan fb={portable}"),
+        );
+        assert_close_t(
+            &xg.min(1, false).unwrap(),
+            &special.min(1, false).unwrap(),
+            0.0,
+            0.0,
+            &format!("min nan fb={portable}"),
+        );
+        assert_close_t(
+            &xg.sum(1, false).unwrap(),
+            &special.sum(1, false).unwrap(),
+            0.0,
+            0.0,
+            &format!("sum nan fb={portable}"),
+        );
+        check(dev, std::slice::from_ref(&special), 1e-6, 1e-5, &format!("sm special fb={portable}"), |v| {
+            v[0].softmax(1)
+        });
+        check(dev, std::slice::from_ref(&special), 1e-6, 1e-5, &format!("lsm special fb={portable}"), |v| {
+            v[0].log_softmax(1)
+        });
+    }
+}

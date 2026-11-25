@@ -93,3 +93,131 @@ fn softmax_and_log_softmax() {
         assert_close(&got, &cpu_softmax(&x, n, true), 1e-4, 1e-5, &format!("log_softmax {rows}x{n}"));
     }
 }
+
+#[test]
+fn optim_norm_partials_and_unscale_subgroups_match_portable() {
+    use crate::kernels::optim::{
+        NormPartial, norm_partials_len, norm_partials_many, unscale_check, unscale_check_many,
+    };
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let ctx = gpu!();
+    let mut rng = Rng::new(42);
+    let t0 = rng.vec(300, -3.0, 3.0);
+    let mut t1 = rng.vec(600, -5.0, 5.0);
+    t1[513] = f32::NAN;
+    let t2 = rng.vec(17, -2.0, 2.0);
+    let b0 = ctx.upload(bytemuck::cast_slice(&t0)).unwrap();
+    let b1 = ctx.upload(bytemuck::cast_slice(&t1)).unwrap();
+    let b2 = ctx.upload(bytemuck::cast_slice(&t2)).unwrap();
+    let h_buf = ctx.upload(bytemuck::cast_slice(&[0.5f32])).unwrap();
+    let xs = [(b0.raw(), t0.len()), (b1.raw(), t1.len()), (b2.raw(), t2.len())];
+    let plen = norm_partials_len(&[t0.len(), t1.len(), t2.len()]);
+
+    let run_norm = |op: NormPartial, portable: bool| -> Vec<f32> {
+        let _g = ForceGuard::set(portable);
+        let part = ctx.alloc((plen * 4) as u64).unwrap();
+        norm_partials_many(
+            &ctx,
+            op,
+            &xs,
+            (op == NormPartial::ScaledSquares).then_some(h_buf.raw()),
+            part.raw(),
+        )
+        .unwrap();
+        bytemuck::pod_collect_to_vec(&ctx.read(part.raw(), 0, (plen * 4) as u64).unwrap())
+    };
+
+    for op in [NormPartial::AbsMax, NormPartial::ScaledSquares] {
+        let sg = run_norm(op, false);
+        let fb = run_norm(op, true);
+        assert_eq!(sg.len(), fb.len());
+        for (i, (&a, &b)) in sg.iter().zip(&fb).enumerate() {
+            if a.is_nan() && b.is_nan() {
+                continue;
+            }
+            let err = (a - b).abs();
+            let lim = 1e-4 + 1e-5 * b.abs();
+            assert!(err <= lim, "{op:?} partial[{i}]: sg={a} fb={b} err={err}");
+        }
+        // Workgroup containing t1[513] = NaN (index 2 + 2 = 4) must produce NaN on both paths.
+        assert!(sg[4].is_nan() && fb[4].is_nan(), "{op:?} must propagate NaN in partial[4]");
+    }
+
+    // unscale_check and unscale_check_many: finite case (flag 0), full overflow (flag 1), and a single NaN in a
+    // non-leader lane of the final partial tail subgroup (verifying both the flag and the scaled buffer contents).
+    let mut tail_nan = vec![2.0f32; 300];
+    tail_nan[299] = f32::NAN;
+    let mut small_tail_nan = vec![3.0f32; 19];
+    small_tail_nan[18] = f32::NAN;
+
+    for (x0_in, x1_in, factor, expect_single, expect_many) in [
+        (vec![1.0f32; 300], vec![2.0f32; 19], 0.5f32, 0u32, 0u32),
+        (vec![1e38f32; 300], vec![2.0f32; 19], 10.0f32, 1u32, 1u32),
+        (tail_nan, vec![2.0f32; 19], 0.5f32, 1u32, 1u32),
+        (vec![1.0f32; 300], small_tail_nan, 0.5f32, 0u32, 1u32),
+    ] {
+        let run_single = |portable: bool| -> (u32, Vec<f32>) {
+            let _g = ForceGuard::set(portable);
+            let x = ctx.upload(bytemuck::cast_slice(&x0_in)).unwrap();
+            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check(&ctx, x.raw(), x0_in.len(), factor, flag.raw()).unwrap();
+            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
+            let got_x: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x.raw(), 0, (x0_in.len() * 4) as u64).unwrap());
+            (got_flag[0], got_x)
+        };
+        let (fs, xs_sg) = run_single(false);
+        let (fp, xs_fb) = run_single(true);
+        assert_eq!(fs, expect_single, "unscale_check sg flag factor={factor}");
+        assert_eq!(fp, expect_single, "unscale_check fb flag factor={factor}");
+        for (i, (&a, &b)) in xs_sg.iter().zip(&xs_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_check[{i}]: {a} vs {b}"
+            );
+        }
+
+        let run_many = |portable: bool| -> (u32, Vec<f32>, Vec<f32>) {
+            let _g = ForceGuard::set(portable);
+            let x0 = ctx.upload(bytemuck::cast_slice(&x0_in)).unwrap();
+            let x1 = ctx.upload(bytemuck::cast_slice(&x1_in)).unwrap();
+            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check_many(&ctx, &[(x0.raw(), x0_in.len()), (x1.raw(), x1_in.len())], factor, flag.raw())
+                .unwrap();
+            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
+            let g0: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x0.raw(), 0, (x0_in.len() * 4) as u64).unwrap());
+            let g1: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x1.raw(), 0, (x1_in.len() * 4) as u64).unwrap());
+            (got_flag[0], g0, g1)
+        };
+        let (ms, m0_sg, m1_sg) = run_many(false);
+        let (mp, m0_fb, m1_fb) = run_many(true);
+        assert_eq!(ms, expect_many, "unscale_check_many sg flag factor={factor}");
+        assert_eq!(mp, expect_many, "unscale_check_many fb flag factor={factor}");
+        for (i, (&a, &b)) in m0_sg.iter().zip(&m0_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_many x0[{i}]: {a} vs {b}"
+            );
+        }
+        for (i, (&a, &b)) in m1_sg.iter().zip(&m1_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_many x1[{i}]: {a} vs {b}"
+            );
+        }
+    }
+}
