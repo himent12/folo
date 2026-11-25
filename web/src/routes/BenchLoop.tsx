@@ -28,6 +28,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
 import Dialog from '$lib/ui/Dialog';
@@ -66,7 +67,7 @@ export default function BenchLoop() {
   const models = new Resource((s) => hub.api.models(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
   const jobs = new Resource((s) => hub.api.labelJobs(s));
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   const catalog = new Resource((s) => hub.api.benchCatalog(s));
   const live = new LiveBench(() => id.get() || null);
   const bench = () => live.bench;

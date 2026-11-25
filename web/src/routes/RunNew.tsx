@@ -140,7 +140,7 @@ function RunNewForm() {
   /** A connection is chosen: the run trains on its GPU, not this machine's. */
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   // While another run holds this machine, a new one waits in the queue: the Summary says so and Start reads "Queue run".
   // The shell's list (polled every 2 s) is the current one; this page's own stands in until it arrives.
   const ahead = computed(() => aheadOf(watched.runs ?? runs.data, onCloud.get()));

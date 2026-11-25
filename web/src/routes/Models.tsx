@@ -16,6 +16,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import PhoneSections from '$lib/shell/PhoneSections';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -85,7 +86,7 @@ export default function Models() {
   // No models yet: the empty state's New run is the page's create action, so the top bar's steps aside.
   ownCreateAction(() => models.data?.length === 0);
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const noDatasets = computed(() => noDatasetsYet(datasets.data));

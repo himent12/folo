@@ -405,3 +405,38 @@ describe('a sample set generating across a reload', () => {
     }
   });
 });
+
+describe('progressive dataset list rendering', () => {
+  it('renders every dataset card as soon as /api/datasets answers without blocking on a slow /api/datasets/:id call', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.datasets();
+    const slowId = list.find((d) => d.id === 'ds_fasteners')!.id;
+    const realDataset = api.dataset.bind(api);
+    let resolveSlow!: (d: Awaited<ReturnType<typeof realDataset>>) => void;
+    const slowPromise = new Promise<Awaited<ReturnType<typeof realDataset>>>((ok) => {
+      resolveSlow = ok;
+    });
+    vi.spyOn(api, 'dataset').mockImplementation((id: string) => {
+      if (id === slowId) return slowPromise;
+      if (id === 'ds_shapes') return Promise.reject(new ApiError(404, 'path_not_found', 'missing'));
+      return realDataset(id);
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+
+    open(Datasets, '/datasets');
+    // Fast datasets settle and render their status/strip while the slow dataset's card is already visible with a skeleton strip.
+    await until(() => target.querySelector('.card[data-name="shapes"]')?.textContent?.includes('Folder missing'), 'fast datasets settled');
+    const slowCard = target.querySelector(`.card[data-id="${slowId}"]`)!;
+    expect(slowCard).not.toBeNull();
+    expect(slowCard.textContent).toContain('fasteners');
+    expect(slowCard.querySelector('.foot .sk, .foot [aria-hidden="true"]')).not.toBeNull();
+    expect(slowCard.querySelector('.foot .strip')).toBeNull();
+
+    // Resolving the slow dataset fills in its ClassStrip in place.
+    const slowDetail = await realDataset(slowId);
+    resolveSlow(slowDetail);
+    await until(() => target.querySelector(`.card[data-id="${slowId}"] .foot button, .card[data-id="${slowId}"] .foot .strip`), 'slow dataset strip');
+    expect(target.querySelector(`.card[data-id="${slowId}"]`)!.textContent).not.toContain('Folder missing');
+  });
+});

@@ -35,6 +35,7 @@ import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import { href, router } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
+import { watched } from '$lib/shell/runList';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -126,7 +127,7 @@ export default function Run() {
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: crumbName.get() });
   });
 
-  const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  const others = new Resource((s) => hub.api.runs(s), { poll: 5000, startFrom: () => watched.source });
   const stepCount = computed(() => {
     void live.version;
     return live.steps.length;

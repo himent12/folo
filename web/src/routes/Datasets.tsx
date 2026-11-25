@@ -6,9 +6,10 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { computed, css, effect, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
+import type { Dataset } from '$lib/api/types';
 import ClassStrip from '$lib/detect/ClassStrip';
 import { ago, count } from '$lib/format';
 import { LABEL_FEATURE } from '$lib/label';
@@ -31,7 +32,7 @@ import AddDatasetDialog from './datasets/AddDatasetDialog';
 import DatasetCard, { cardFacts, DatasetCardSkeleton } from './datasets/DatasetCard';
 import { imageCount } from './dataset/health';
 import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
-import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
+import { datasetProblem, missingError, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 type SortKey = 'name' | 'images' | 'boxes' | 'classes';
@@ -43,6 +44,15 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 ];
 const cmpName = (a: ListedDataset, b: ListedDataset) =>
   a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id);
+const sameBase = (a: Dataset, b: Dataset) =>
+  a.name === b.name &&
+  a.path === b.path &&
+  a.format === b.format &&
+  a.splits.train === b.splits.train &&
+  a.splits.val === b.splits.val &&
+  a.splits.test === b.splits.test &&
+  a.classes.length === b.classes.length &&
+  a.classes.every((c, i) => c === b.classes[i]);
 /** How often the list reads itself again while a sample set this tab asked for still generates. */
 const GENERATION_POLL_MS = 3000;
 
@@ -51,24 +61,112 @@ export default function Datasets() {
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
   ownCreateAction();
 
-  // The list endpoint has no stats; fetch each dataset for its class balance and box count (and to learn which ones
-  // cannot be read: a folder that was moved is marked, not shown as if nothing were wrong).
+  // Render the list as soon as GET /api/datasets answers, then fill each dataset's stats and folder status in
+  // independently so one slow dataset never holds back the whole page.
   // A dataset whose folder was found missing is not read again on every visit (./datasets/problem readDataset): only
   // when the list may have changed (`again`, below).
+  const listed = new Resource((s) => hub.api.datasets(s));
+  const details = signal<ReadonlyMap<string, ListedDataset>>(new Map());
+  const rereadTick = signal(0);
   let again = false;
-  const datasets = new Resource(async (s) => {
-    const api = hub.api;
-    const fresh = again;
-    again = false;
-    const list = await api.datasets(s);
-    return Promise.all(
-      list.map((d): Promise<ListedDataset> => readDataset(api, d.id, () => api.dataset(d.id, s), fresh).catch((e) => ({ ...d, problem: datasetProblem(e) }))),
-    );
+  let rereadSeq = 0;
+  let detailSeq = 0;
+  let detailCtrl: AbortController | null = null;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+    rereadSeq++;
+    detailSeq++;
+    detailCtrl?.abort();
+    detailCtrl = null;
   });
+
   const reread = () => {
     again = true;
-    void datasets.refresh();
+    const seq = ++rereadSeq;
+    const epoch = untrack(() => hub.epoch);
+    const beforeList = listed.data;
+    void listed.refresh().then(() => {
+      if (!alive || seq !== rereadSeq || untrack(() => hub.epoch) !== epoch) return;
+      if (listed.error || listed.stale) {
+        again = false;
+        return;
+      }
+      // Resource.reuse() keeps listed.data identical when the list itself did not change;
+      // bump rereadTick so an explicit reread still re-checks each dataset's detail and folder.
+      if (listed.data === beforeList) rereadTick.set((n) => n + 1);
+    });
   };
+
+  effect(() => {
+    const list = listed.data;
+    void rereadTick.get();
+    if (!list) {
+      detailSeq++;
+      detailCtrl?.abort();
+      detailCtrl = null;
+      details.set(new Map());
+      return;
+    }
+    if (untrack(() => listed.error || listed.stale)) {
+      again = false;
+      return;
+    }
+    const api = untrack(() => hub.api);
+    const fresh = again;
+    again = false;
+    const seq = ++detailSeq;
+    detailCtrl?.abort();
+    const ctl = (detailCtrl = new AbortController());
+    const prev = untrack(() => details.get());
+    const seed = new Map<string, ListedDataset>();
+    const toFetch: Dataset[] = [];
+    for (const d of list) {
+      const existing = prev.get(d.id);
+      if (!fresh && existing && !existing.pending && (existing.stats || existing.problem) && sameBase(existing, d)) {
+        seed.set(d.id, existing);
+        continue;
+      }
+      if (!fresh) {
+        const known = missingError(api, d.id);
+        if (known !== undefined) {
+          seed.set(d.id, { ...d, problem: datasetProblem(known) });
+          continue;
+        }
+      }
+      seed.set(d.id, existing && !existing.pending ? { ...d, stats: existing.stats, problem: existing.problem } : { ...d, pending: true });
+      toFetch.push(d);
+    }
+    details.set(seed);
+    for (const d of toFetch) {
+      void readDataset(api, d.id, () => api.dataset(d.id, ctl.signal), fresh).then(
+        (full) => {
+          if (ctl.signal.aborted || seq !== detailSeq) return;
+          details.set((cur) => {
+            const next = new Map(cur);
+            next.set(d.id, full);
+            return next;
+          });
+        },
+        (e: unknown) => {
+          if (ctl.signal.aborted || seq !== detailSeq) return;
+          details.set((cur) => {
+            const next = new Map(cur);
+            next.set(d.id, { ...d, problem: datasetProblem(e) });
+            return next;
+          });
+        },
+      );
+    }
+  });
+
+  const datasetsData = computed<ListedDataset[] | undefined>(() => {
+    const list = listed.data;
+    if (!list) return undefined;
+    const map = details.get();
+    return list.map((d) => map.get(d.id) ?? { ...d, pending: true });
+  });
+
   // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
   // added in another tab, by an agent, or a folder moved meanwhile).
   const seen = datasetChanges.peek();
@@ -80,7 +178,7 @@ export default function Datasets() {
   // never cut short by the next), while the tab is shown, until it is there (./datasets/changes).
   const waiting = signal<{ what: string; since: number } | null>(null);
   effect(() => {
-    const list = datasets.data;
+    const list = listed.data;
     const server = untrack(() => hub.server);
     const g = untrack(() => pendingGeneration(server));
     if (!g || !list || landed(g, list)) {
@@ -99,8 +197,8 @@ export default function Datasets() {
       if (!live || !pendingGeneration(server)) return void waiting.set(null);
       // Its "started …" moves on with each read, even one that finds nothing new.
       waiting.set((w) => w && { ...w });
-      if (document.visibilityState !== 'visible' || datasets.loading || datasets.refreshing) return later();
-      void datasets.refresh().finally(later);
+      if (document.visibilityState !== 'visible' || listed.loading || listed.refreshing) return later();
+      void listed.refresh().finally(later);
     };
     later();
     return () => {
@@ -109,7 +207,7 @@ export default function Datasets() {
     };
   });
   effect(() => {
-    const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();
+    const back = () => document.visibilityState === 'visible' && !listed.loading && reread();
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);
   });
@@ -143,12 +241,12 @@ export default function Datasets() {
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.
   const format = signal<Format>('all');
   const sort = signal<SortKey>('name');
-  const formatCount = (f: Format) => (datasets.data ?? []).filter((d) => f === 'all' || d.format === f).length;
+  const formatCount = (f: Format) => (listed.data ?? []).filter((d) => f === 'all' || d.format === f).length;
   const shown = computed(() => {
     const q = query.get().trim().toLowerCase();
     const f = format.get();
     const s = sort.get();
-    return (datasets.data ?? [])
+    return (datasetsData.get() ?? [])
       .filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)))
       .sort((a, b) => {
         if (s === 'images') return (b.problem ? -1 : imageCount(b)) - (a.problem ? -1 : imageCount(a)) || cmpName(a, b);
@@ -161,7 +259,7 @@ export default function Datasets() {
   // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it. A dataset that cannot be read
   // holds no images now: the counts of its registration are not added (stress s1-datasets-6).
   const facts = computed<string[] | null>(() => {
-    const list = datasets.data;
+    const list = datasetsData.get();
     if (!list?.length) return null;
     const boxes = list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0);
     const images = list.reduce((a, d) => a + (d.problem ? 0 : imageCount(d)), 0);
@@ -169,11 +267,11 @@ export default function Datasets() {
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
-  const offline = computed(() => !datasets.data && isOffline(datasets.error));
+  const offline = computed(() => !listed.data && isOffline(listed.error));
   /** Datasets to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
-  const hasData = computed(() => (datasets.data ? datasets.data.length > 0 : !datasets.error));
+  const hasData = computed(() => (listed.data ? listed.data.length > 0 : !listed.error));
   /** Cards to show (or their skeleton); with none a panel holds the state alone, where the grid would be. */
-  const hasRows = computed(() => (datasets.data ? shown.get().length > 0 : !datasets.error));
+  const hasRows = computed(() => (listed.data ? shown.get().length > 0 : !listed.error));
   /** Agent labeling is hidden when the server's health explicitly reports it is unavailable (e.g. `folo serve --mock`). */
   const canLabel = computed(() => !hub.lacks(LABEL_FEATURE));
 
@@ -207,9 +305,9 @@ export default function Datasets() {
               bind:value={format}
               disabled={!hasData.get()}
               options={[
-                { value: 'all', label: 'All', meta: datasets.data?.length ? String(formatCount('all')) : undefined },
-                { value: 'yolo', label: 'YOLO', meta: datasets.data?.length ? String(formatCount('yolo')) : undefined },
-                { value: 'coco', label: 'COCO', meta: datasets.data?.length ? String(formatCount('coco')) : undefined },
+                { value: 'all', label: 'All', meta: listed.data?.length ? String(formatCount('all')) : undefined },
+                { value: 'yolo', label: 'YOLO', meta: listed.data?.length ? String(formatCount('yolo')) : undefined },
+                { value: 'coco', label: 'COCO', meta: listed.data?.length ? String(formatCount('coco')) : undefined },
               ]}
             />
           </div>{' '}
@@ -225,8 +323,8 @@ export default function Datasets() {
           <>
             {/* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, as Desktop's: three
                 at 1440 px, four on a wide content column; a short last row keeps the columns' width. */}
-            <ul class="cards" aria-label="Datasets" aria-busy={!datasets.data}>
-              {datasets.data ? (
+            <ul class="cards" aria-label="Datasets" aria-busy={!listed.data}>
+              {listed.data ? (
                 <For each={shown.get()} key={(d) => d.id}>
                   {(d) => <DatasetCard dataset={d()} />}
                 </For>
@@ -240,7 +338,7 @@ export default function Datasets() {
                 classes, the format tag, the class balance on the right. */}
             <div class="phone-list">
               <Panel pad="none">
-              {datasets.data ? (
+              {listed.data ? (
                 <ul class="rows" aria-label="Datasets">
                   <For each={shown.get()} key={(d) => d.id}>
                     {(d) => (
@@ -266,6 +364,10 @@ export default function Datasets() {
                             <span class="m-strip">
                               <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} named />
                             </span>
+                          </span>
+                        ) : d().pending ? (
+                          <span class="m-side">
+                            <Skeleton w="104px" h="4px" />
                           </span>
                         ) : null}
                       </li>
@@ -299,9 +401,9 @@ export default function Datasets() {
           // No cards (an error, no datasets, none that match): one panel holds the state where the grid would be.
           <Panel pad="none">
             <div class="state" aria-label="Datasets">
-              {datasets.error && !datasets.data ? (
-                <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
-              ) : datasets.data?.length === 0 ? (
+              {listed.error && !listed.data ? (
+                <ErrorState error={listed.error} title="Could not load datasets" retry={() => reread()} />
+              ) : listed.data?.length === 0 ? (
                 // The header already holds the primary action: offer the quick start.
                 <EmptyState
                   icon={Images}
@@ -351,12 +453,12 @@ export default function Datasets() {
         {/* No totals line under the cards (they are the header's facts): only a narrowed list says what it shows, and a
             sample set on its way says so (also after a reload: nothing else on screen tells that one is coming,
             studio-data F1). */}
-        {datasets.data && (shown.get().length < datasets.data.length || waiting.get()) ? (
+        {listed.data && (shown.get().length < listed.data.length || waiting.get()) ? (
           <p class="list-foot num">
             <Meta>
-              {shown.get().length < datasets.data.length ? (
+              {shown.get().length < listed.data.length ? (
                 <span>
-                  {shown.get().length} of {count(datasets.data.length, 'dataset')}
+                  {shown.get().length} of {count(listed.data.length, 'dataset')}
                 </span>
               ) : null}{' '}
               {waiting.get() ? (
@@ -368,7 +470,7 @@ export default function Datasets() {
           </p>
         ) : null}
       </Page>{' '}
-      <AddDatasetDialog bind:open={adding} bind:mode={addMode} known={datasets.data} />
+      <AddDatasetDialog bind:open={adding} bind:mode={addMode} known={listed.data} />
     </>
   );
 }

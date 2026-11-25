@@ -22,6 +22,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import { href, router } from '$lib/router';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -66,7 +67,7 @@ export default function Runs() {
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
   ownCreateAction();
 
-  const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
+  const runs = new Resource((s) => hub.api.runs(s), { poll: 3000, startFrom: () => watched.source });
   const datasets = new Resource((s) => hub.api.datasets(s));
   const noDatasets = computed(() => noDatasetsYet(datasets.data));
   refreshOnDatasetChange(datasets);

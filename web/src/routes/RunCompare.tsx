@@ -17,6 +17,7 @@ import { metric } from '$lib/format';
 import { href, router } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -89,7 +90,7 @@ export default function RunCompare() {
   const ids = computed(() => [...new Set((router.route.query.get('ids') ?? '').split(',').filter(Boolean))].slice(0, MAX), {
     equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
   });
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   const datasets = new Resource((s) => hub.api.datasets(s));
   // Names for runs fine-tuned from a model ("Start from").
   const models = new Resource((s) => hub.api.models(s));
