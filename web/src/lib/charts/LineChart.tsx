@@ -11,12 +11,13 @@ import { END_LABELS_MIN, memoPlaceEndLabels } from './endLabels';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
 import { TouchGesture, type PinAction } from './pin';
-import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
+import { patternOf, dashOf, inkOf, memoSeriesSummary, strokeWidth } from './lineSeries';
 import { capInPlotOf, eventOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
 import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
 import { hoverOf, pickNearest, pillOf } from './lineHover';
+import { createRectCache } from './rectCache';
 import { textMeasurer } from './textWidth';
 import type { Future, Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
@@ -228,8 +229,13 @@ export default function LineChart(props: LineChartProps) {
 
   const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), keyed.get(), p.xTitle, xFormat.get(), x.get()));
 
+  const rectCache = createRectCache();
+  effect(() => {
+    void width.get();
+    rectCache.clear();
+  });
   const local = (e: PointerEvent) => {
-    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+    const rect = rectCache.get(e.currentTarget as SVGElement);
     return { px: e.clientX - rect.left, py: e.clientY - rect.top };
   };
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
@@ -308,9 +314,13 @@ export default function LineChart(props: LineChartProps) {
     };
   });
 
+  function onpointerenter() {
+    rectCache.clear();
+  }
   function onpointerdown(e: PointerEvent) {
     spoken.set('');
     if (!touchy(e)) return;
+    rectCache.clear();
     const { px, py } = local(e);
     const h = hover.peek();
     gesture = new TouchGesture(px, py, pinned.peek() && h ? h.px : null);
@@ -344,6 +354,7 @@ export default function LineChart(props: LineChartProps) {
     if (props.pick) picked.set(pickAt(px, py, PICK_PX));
   }
   function onpointerleave(e: PointerEvent) {
+    rectCache.clear();
     if (!touchy(e) && !pinned.peek()) {
       cursor.set(null);
       picked.set(null);
@@ -358,7 +369,8 @@ export default function LineChart(props: LineChartProps) {
   // pointer movement here or on a linked chart never produces announcements.
   const spoken = signal('');
 
-  const summary = computed(() => seriesSummary(keyed.get()));
+  const summaryOf = memoSeriesSummary();
+  const summary = computed(() => summaryOf(keyed.get()));
 
   function onkeydown(e: KeyboardEvent) {
     const s = longestSeries.peek();
@@ -547,6 +559,7 @@ export default function LineChart(props: LineChartProps) {
               aria-roledescription="chart"
               aria-label={p.label}
               tabindex={hasData.get() ? 0 : -1}
+              onpointerenter={onpointerenter}
               onpointermove={onpointermove}
               onpointerleave={onpointerleave}
               onpointerdown={onpointerdown}

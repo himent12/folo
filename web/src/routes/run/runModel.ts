@@ -221,36 +221,36 @@ export class RunModel {
     const end = this.endMark.get();
     return end === 'live' ? undefined : end;
   });
-  private ep = (f: EpochField): Pt[] => this.epochData.points(f).slice();
+  private ep = (f: EpochField): Pt[] => this.epochData.points(f);
   readonly mapSeries = computed((): Series[] => {
-    this.epochsRev();
+    const rev = this.epochsRev();
     return [
-      { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, end: this.endMark.get(), points: this.ep('map50_95') },
-      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('map50') },
+      { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, end: this.endMark.get(), points: this.ep('map50_95'), rev },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('map50'), rev },
     ];
   });
   readonly prSeries = computed((): Series[] => {
-    this.epochsRev();
+    const rev = this.epochsRev();
     return [
-      { id: 'p', label: 'precision', color: 'var(--chart-3)', end: this.endMark.get(), points: this.ep('precision') },
-      { id: 'r', label: 'recall', color: 'var(--chart-4)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('recall') },
+      { id: 'p', label: 'precision', color: 'var(--chart-3)', end: this.endMark.get(), points: this.ep('precision'), rev },
+      { id: 'r', label: 'recall', color: 'var(--chart-4)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('recall'), rev },
     ];
   });
   private alpha = () => Number(this.smoothing.get());
   readonly lossSeries = computed((): Series[] => {
-    this.stepsRev();
+    const rev = this.stepsRev();
     const a = this.alpha();
     const d = this.stepData;
     return [
-      { id: 'raw', label: 'total (raw)', color: 'var(--text-primary)', ghost: true, points: a > 0 ? d.raw('total').pts.slice() : [] },
+      { id: 'raw', label: 'total (raw)', color: 'var(--text-primary)', ghost: true, points: a > 0 ? d.raw('total').pts : [], rev },
       // One name per series (DESIGN_DIRECTION §2.23): the legend, the end labels and the phone legend all say total,
       // box, cls and dfl, with the full names under ⓘ (./readings LOSS_TERMS).
-      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, end: this.endMark.get(), points: d.smoothed('total', a).pts.slice() },
+      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, end: this.endMark.get(), points: d.smoothed('total', a).pts, rev },
       // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted. Box
       // is painted over dfl's dots where they run together late in a run, and each line is labelled at its end.
-      { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, end: this.trailMark.get(), points: d.smoothed('box', a).pts.slice() },
-      { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', end: this.trailMark.get(), points: d.smoothed('cls', a).pts.slice() },
-      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', end: this.trailMark.get(), points: d.smoothed('dfl', a).pts.slice() },
+      { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, end: this.trailMark.get(), points: d.smoothed('box', a).pts, rev },
+      { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', end: this.trailMark.get(), points: d.smoothed('cls', a).pts, rev },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', end: this.trailMark.get(), points: d.smoothed('dfl', a).pts, rev },
     ];
   });
   readonly lrSeries = computed((): Series[] => {
@@ -271,8 +271,8 @@ export class RunModel {
    * it, as the loss lines: the chart's downsampler keeps each bucket's extremes (a slowdown survives) and the last step.
    */
   readonly ipsSeries = computed((): Series[] => {
-    this.stepsRev();
-    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', end: this.endMark.get(), points: this.stepData.smoothed('ips', 0.9).pts.slice() }];
+    const rev = this.stepsRev();
+    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', end: this.endMark.get(), points: this.stepData.smoothed('ips', 0.9).pts, rev }];
   });
   /** The throughput of the last steps (the tile's sparkline, smoothed as the old chart drew it) and their average. */
   readonly ips = computed(() => {

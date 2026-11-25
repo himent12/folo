@@ -10,6 +10,7 @@ import { computed, css, defaults, effect, Index, signal } from 'fw';
 import { ticks as niceTicks } from './downsample';
 import { binAt, categoryBars, edgeX } from './histogram';
 import { TouchGesture, type PinAction } from './pin';
+import { createRectCache } from './rectCache';
 
 export interface HistogramProps {
   edges: number[];
@@ -91,8 +92,13 @@ export default function Histogram(props: HistogramProps) {
   const pinned = signal(false);
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
+  const rectCache = createRectCache();
+  effect(() => {
+    void width.get();
+    rectCache.clear();
+  });
   const local = (e: PointerEvent) => {
-    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+    const rect = rectCache.get(e.currentTarget as SVGElement);
     return { px: e.clientX - rect.left, py: e.clientY - rect.top };
   };
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
@@ -124,8 +130,12 @@ export default function Histogram(props: HistogramProps) {
       document.removeEventListener('keydown', esc);
     };
   });
+  function onpointerenter() {
+    rectCache.clear();
+  }
   function onpointerdown(e: PointerEvent) {
     if (!touchy(e)) return;
+    rectCache.clear();
     const { px, py } = local(e);
     const h = hovered.peek();
     const at = pinned.peek() && h !== null ? bars.peek()[h] : undefined;
@@ -151,6 +161,7 @@ export default function Histogram(props: HistogramProps) {
     hovered.set(py >= mm.top && py <= p.height - mm.bottom ? binAt(bars.peek(), px) : null);
   }
   function onpointerleave(e: PointerEvent) {
+    rectCache.clear();
     if (!touchy(e) && !pinned.peek()) hovered.set(null);
   }
   function onkeydown(e: KeyboardEvent) {
@@ -199,6 +210,7 @@ export default function Histogram(props: HistogramProps) {
             aria-label={`${p.label}. Focus and use the arrow keys to read each bin.`}
             tabindex={0}
             onkeydown={onkeydown}
+            onpointerenter={onpointerenter}
             onpointermove={onpointermove}
             onpointerleave={onpointerleave}
             onpointerdown={onpointerdown}

@@ -8,10 +8,12 @@
  * arrows, Home and End. Assistive tech gets the chart's own table (`table`).
  */
 import { scaleLinear } from 'd3-scale';
-import { bindable, computed, css, defaults, effect, For, Index, signal } from 'fw';
+import { bindable, computed, css, defaults, effect, For, Index, MediaQuery, signal } from 'fw';
+import { media } from '$lib/design/tokens';
 import { seriesText } from './ink';
 import { TouchGesture, type PinAction } from './pin';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
+import { createRectCache } from './rectCache';
 import { spokenAt, type XYMark, type XYPoint, type XYRef, type XYSeries, type XYStrip } from './xy';
 
 export interface XYChartProps {
@@ -57,7 +59,7 @@ export default function XYChart(props: XYChartProps) {
 
   const width = signal(0);
   const stops = computed(() =>
-    (p.stops ?? [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).slice().sort((a, b) => a - b),
+    (p.stops ? p.stops.slice() : [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).sort((a, b) => a - b),
   );
   const m = computed(() => {
     const strip = p.strip;
@@ -120,8 +122,13 @@ export default function XYChart(props: XYChartProps) {
   const pinned = signal(false);
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
+  const rectCache = createRectCache();
+  effect(() => {
+    void width.get();
+    rectCache.clear();
+  });
   const local = (e: PointerEvent) => {
-    const r = (e.currentTarget as SVGElement).getBoundingClientRect();
+    const r = rectCache.get(e.currentTarget as SVGElement);
     return { px: e.clientX - r.left, py: e.clientY - r.top };
   };
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
@@ -152,8 +159,12 @@ export default function XYChart(props: XYChartProps) {
       document.removeEventListener('keydown', esc);
     };
   });
+  function onpointerenter() {
+    rectCache.clear();
+  }
   function onpointerdown(e: PointerEvent) {
     if (!touchy(e)) return;
+    rectCache.clear();
     const { px, py } = local(e);
     const c = cursor.peek();
     gesture = new TouchGesture(px, py, pinned.peek() && c !== null ? x.peek()(c) : null);
@@ -177,6 +188,7 @@ export default function XYChart(props: XYChartProps) {
     cursor.set(inPlot(px) && py >= 0 && py <= p.height ? nearestStop(px) : null);
   }
   function onpointerleave(e: PointerEvent) {
+    rectCache.clear();
     if (!touchy(e) && !pinned.peek()) cursor.set(null);
   }
   const spoken = signal('');
@@ -199,10 +211,14 @@ export default function XYChart(props: XYChartProps) {
     cursor.set(next);
     spoken.set(spokenAt(next, { series: p.series, table: p.table, xFormat: p.xFormat, yFormat: p.yFormat, xLabel: p.xLabel, speak: p.speak }));
   }
-  // The reading hints of every chart (./hint): "← → to inspect" on keyboard focus, "Tap to pin a value" once on touch.
+  // The reading hints of every chart (./hint): "← → to inspect" on keyboard focus (hidden on phones and touch-only
+  // devices, matching LineChart), "Tap to pin a value" once on touch.
   const keyFocus = signal(false);
+  const keyless = new MediaQuery(`${media.phone}, (hover: none) and (pointer: coarse)`, false);
   const tapHint = signal(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches && claimOnce(TAP_HINT_KEY));
-  const hint = computed(() => chartHint({ reading: cursor.get() !== null, keyFocus: keyFocus.get(), tap: tapHint.get() }));
+  const hint = computed(() =>
+    chartHint({ reading: cursor.get() !== null, keyFocus: keyFocus.get() && !keyless.current, tap: tapHint.get() }),
+  );
   function onfocus() {
     try {
       keyFocus.set(!!svgEl.peek()?.matches(':focus-visible'));
@@ -328,6 +344,7 @@ export default function XYChart(props: XYChartProps) {
             aria-roledescription="chart"
             aria-label={`${p.label}. Focus and use the arrow keys to read it point by point.`}
             tabindex={0}
+            onpointerenter={onpointerenter}
             onpointermove={onpointermove}
             onpointerleave={onpointerleave}
             onpointerdown={onpointerdown}
