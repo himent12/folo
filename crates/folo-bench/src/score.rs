@@ -25,6 +25,8 @@
 //! parallel by fixed chunks that are merged in order), and bootstrap resample `r` draws from a generator seeded
 //! by the seed and `r` only.
 
+use std::collections::HashMap;
+
 use folo_api::{
     BBox, BenchAccuracy, BenchAxis, BenchAxisScore, BenchCalibration, BenchCalibrationBin,
     BenchClassAccuracy, BenchConditionResult, BenchDetection, BenchLabelPoint, BenchLocalization, BenchPlan,
@@ -141,13 +143,33 @@ fn valid_box(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
     x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() && x2 > x1 && y2 > y1
 }
 
-/// The usable detections of a list, scores clamped (all 1 when unscored), in input order.
-fn clean_detections(dets: &[BenchDetection], num_classes: usize, scored: bool) -> Vec<BenchDetection> {
-    dets.iter()
-        .filter(|d| valid_box(d.x1, d.y1, d.x2, d.y2) && (d.class as usize) < num_classes)
-        .filter(|d| !scored || d.score.is_finite())
-        .map(|d| BenchDetection { score: if scored { d.score.clamp(0.0, 1.0) } else { 1.0 }, ..*d })
-        .collect()
+/// The usable detections of a list at or above `min_score`, scores clamped (all 1 when unscored), in input order.
+fn clean_detections_above(
+    dets: &[BenchDetection],
+    num_classes: usize,
+    scored: bool,
+    min_score: f32,
+) -> Vec<BenchDetection> {
+    if num_classes == 0 || dets.is_empty() || min_score.is_nan() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(dets.len());
+    for d in dets {
+        if valid_box(d.x1, d.y1, d.x2, d.y2) && (d.class as usize) < num_classes {
+            let score = if scored {
+                if !d.score.is_finite() {
+                    continue;
+                }
+                d.score.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if score >= min_score {
+                out.push(BenchDetection { score, ..*d });
+            }
+        }
+    }
+    out
 }
 
 fn to_detection(d: &BenchDetection) -> Detection {
@@ -162,15 +184,36 @@ struct Prepared {
 
 /// The usable true boxes of a list, in input order.
 fn clean_truths(truths: &[BBox], num_classes: usize) -> Vec<Truth> {
-    truths
-        .iter()
-        .filter(|b| valid_box(b.x1, b.y1, b.x2, b.y2) && (b.class as usize) < num_classes)
-        .map(|b| Truth { bbox: Xyxy::new(b.x1, b.y1, b.x2, b.y2), class: b.class })
-        .collect()
+    if num_classes == 0 || truths.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(truths.len());
+    for b in truths {
+        if valid_box(b.x1, b.y1, b.x2, b.y2) && (b.class as usize) < num_classes {
+            out.push(Truth { bbox: Xyxy::new(b.x1, b.y1, b.x2, b.y2), class: b.class });
+        }
+    }
+    out
 }
 
 fn prepare(s: &Sample, num_classes: usize, scored: bool) -> Prepared {
-    let dets = clean_detections(&s.detections, num_classes, scored).iter().map(to_detection).collect();
+    if num_classes == 0 {
+        return Prepared { truths: Vec::new(), dets: Vec::new() };
+    }
+    let mut dets = Vec::with_capacity(s.detections.len());
+    for d in &s.detections {
+        if valid_box(d.x1, d.y1, d.x2, d.y2) && (d.class as usize) < num_classes {
+            let score = if scored {
+                if !d.score.is_finite() {
+                    continue;
+                }
+                d.score.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            dets.push(Detection { bbox: Xyxy::new(d.x1, d.y1, d.x2, d.y2), score, class: d.class });
+        }
+    }
     Prepared { truths: clean_truths(&s.truths, num_classes), dets }
 }
 
@@ -198,62 +241,85 @@ fn box_area_f64(b: &Xyxy) -> f64 {
     (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64)
 }
 
-/// The matching of one image: for each detection (input order) the IoU of the true box it matches, if any; and
-/// how many true boxes were matched. Class-indexed so each detection only checks truths of its own class.
-fn match_image(dets: &[Detection], truths: &[Truth]) -> (Vec<Option<f64>>, usize) {
-    let mut out = vec![None; dets.len()];
-    if dets.is_empty() || truths.is_empty() {
-        return (out, 0);
-    }
-    let mut det_order: Vec<usize> = (0..dets.len()).collect();
-    det_order
-        .sort_by(|&a, &b| dets[a].class.cmp(&dets[b].class).then(dets[b].score.total_cmp(&dets[a].score)));
-    let mut gt_order: Vec<usize> = (0..truths.len()).collect();
-    gt_order.sort_by_key(|&g| truths[g].class);
+/// Reusable scratch buffers for [`match_image_into`].
+#[derive(Default)]
+struct MatchScratch {
+    det_order: Vec<usize>,
+    gt_order: Vec<usize>,
+    taken: Vec<bool>,
+    gt_areas: Vec<f64>,
+    out: Vec<Option<f64>>,
+}
 
-    let mut taken: Vec<bool> = Vec::new();
-    let mut gt_areas: Vec<f64> = Vec::new();
+/// The matching of one image into `sc.out`: for each detection (input order) the IoU of the true box it matches,
+/// if any; returns how many true boxes were matched. Class-indexed so each detection only checks truths of its
+/// own class.
+fn match_image_into(dets: &[Detection], truths: &[Truth], sc: &mut MatchScratch) -> usize {
+    sc.out.clear();
+    sc.out.resize(dets.len(), None);
+    if dets.is_empty() || truths.is_empty() {
+        return 0;
+    }
+    sc.det_order.clear();
+    sc.det_order.extend(0..dets.len());
+    sc.det_order
+        .sort_by(|&a, &b| dets[a].class.cmp(&dets[b].class).then(dets[b].score.total_cmp(&dets[a].score)));
+    sc.gt_order.clear();
+    sc.gt_order.extend(0..truths.len());
+    sc.gt_order.sort_by_key(|&g| truths[g].class);
+
     let mut matched = 0;
     let (mut di, mut gi) = (0, 0);
-    while di < det_order.len() {
-        let class = dets[det_order[di]].class;
-        let d_end = di + det_order[di..].partition_point(|&i| dets[i].class == class);
-        while gi < gt_order.len() && truths[gt_order[gi]].class < class {
+    while di < sc.det_order.len() {
+        let class = dets[sc.det_order[di]].class;
+        let d_end = di + sc.det_order[di..].partition_point(|&i| dets[i].class == class);
+        while gi < sc.gt_order.len() && truths[sc.gt_order[gi]].class < class {
             gi += 1;
         }
-        let g_end = gi + gt_order[gi..].partition_point(|&i| truths[i].class == class);
+        let g_end = gi + sc.gt_order[gi..].partition_point(|&i| truths[i].class == class);
         let ng = g_end - gi;
         if ng > 0 {
-            taken.clear();
-            taken.resize(ng, false);
-            gt_areas.clear();
-            gt_areas.extend(gt_order[gi..g_end].iter().map(|&g| box_area_f64(&truths[g].bbox)));
-            for &d in &det_order[di..d_end] {
+            sc.taken.clear();
+            sc.taken.resize(ng, false);
+            sc.gt_areas.clear();
+            sc.gt_areas.extend(sc.gt_order[gi..g_end].iter().map(|&g| box_area_f64(&truths[g].bbox)));
+            for &d in &sc.det_order[di..d_end] {
                 let db = &dets[d].bbox;
                 let d_area = box_area_f64(db);
                 let (mut best, mut m) = (MATCH_IOU, None);
                 for local_g in 0..ng {
-                    if taken[local_g] {
+                    if sc.taken[local_g] {
                         continue;
                     }
-                    let v =
-                        iou_with_areas(db, d_area, &truths[gt_order[gi + local_g]].bbox, gt_areas[local_g]);
+                    let v = iou_with_areas(
+                        db,
+                        d_area,
+                        &truths[sc.gt_order[gi + local_g]].bbox,
+                        sc.gt_areas[local_g],
+                    );
                     if v >= best {
                         best = v;
                         m = Some(local_g);
                     }
                 }
                 if let Some(local_g) = m {
-                    taken[local_g] = true;
+                    sc.taken[local_g] = true;
                     matched += 1;
-                    out[d] = Some(best);
+                    sc.out[d] = Some(best);
                 }
             }
         }
         di = d_end;
         gi = g_end;
     }
-    (out, matched)
+    matched
+}
+
+/// Convenience wrapper for one-off matching.
+fn match_image(dets: &[Detection], truths: &[Truth]) -> (Vec<Option<f64>>, usize) {
+    let mut sc = MatchScratch::default();
+    let matched = match_image_into(dets, truths, &mut sc);
+    (sc.out, matched)
 }
 
 /// A detection of the unchanged images after matching.
@@ -346,13 +412,23 @@ pub fn evaluate(samples: &[Sample], num_classes: usize, scored: bool, seed: u64)
             .collect(),
     };
 
-    let matches: Vec<Vec<Option<f64>>> =
-        images.par_iter().map(|p| match_image(&p.dets, &p.truths).0).collect();
-    let recs: Vec<Rec> = images
-        .iter()
-        .zip(&matches)
-        .flat_map(|(p, m)| p.dets.iter().zip(m).map(|(d, &iou)| Rec { score: d.score, iou }))
+    let rec_chunks: Vec<Vec<Rec>> = images
+        .par_chunks(CHUNK)
+        .map_init(MatchScratch::default, |sc, chunk| {
+            let chunk_dets: usize = chunk.iter().map(|p| p.dets.len()).sum();
+            let mut out = Vec::with_capacity(chunk_dets);
+            for p in chunk {
+                match_image_into(&p.dets, &p.truths, sc);
+                out.extend(p.dets.iter().zip(&sc.out).map(|(d, &iou)| Rec { score: d.score, iou }));
+            }
+            out
+        })
         .collect();
+    let total_dets: usize = rec_chunks.iter().map(Vec::len).sum();
+    let mut recs = Vec::with_capacity(total_dets);
+    for chunk in rec_chunks {
+        recs.extend(chunk);
+    }
     let truths: u64 = images.iter().map(|p| p.truths.len() as u64).sum();
 
     Evaluation {
@@ -569,9 +645,9 @@ pub fn map(samples: &[Sample], num_classes: usize, scored: bool) -> Map {
     Map { map50: rep.map50, map50_95: rep.map50_95 }
 }
 
-/// `min(1, map / clean)`, 0 when the unchanged mAP is 0 (or anything is not a number).
+/// `min(1, map / clean)`, 0 when the unchanged mAP is 0 (or either input is non-finite).
 fn kept_share(map: f32, clean: f32) -> f32 {
-    if clean > 0.0 && map.is_finite() { (map / clean).clamp(0.0, 1.0) } else { 0.0 }
+    if clean > 0.0 && clean.is_finite() && map.is_finite() { (map / clean).clamp(0.0, 1.0) } else { 0.0 }
 }
 
 /// The robustness axis from the unchanged images' mAP@0.5:0.95 and the mAPs of the variants that ran
@@ -584,7 +660,15 @@ pub fn robustness(
     plan: &BenchPlan,
     runs: &[(Condition, u8, Map)],
 ) -> Option<BenchRobustness> {
-    let mut conditions = Vec::new();
+    if plan.conditions.is_empty() || runs.is_empty() {
+        return None;
+    }
+    // Index runs once with first-wins semantics when a `(condition, severity)` pair appears more than once.
+    let mut by_pair: HashMap<(Condition, u8), Map> = HashMap::with_capacity(runs.len());
+    for &(c, s, m) in runs {
+        by_pair.entry((c, s)).or_insert(m);
+    }
+    let mut conditions = Vec::with_capacity(plan.conditions.len());
     let (mut num, mut den) = (0.0f64, 0.0f64);
     for pc in &plan.conditions {
         let Some(c) = Condition::parse(&pc.condition) else { continue };
@@ -592,7 +676,7 @@ pub fn robustness(
             .severities
             .iter()
             .map(|&s| {
-                let (_, _, m) = runs.iter().find(|r| r.0 == c && r.1 == s)?;
+                let &m = by_pair.get(&(c, s))?;
                 Some(BenchSeverityPoint {
                     severity: s,
                     map50_95: m.map50_95,
@@ -620,9 +704,9 @@ pub fn robustness(
     Some(BenchRobustness { retention: if den > 0.0 { (num / den) as f32 } else { 0.0 }, conditions })
 }
 
-/// The localization axis: `(mean IoU − 0.5) / 0.5`, 0 when nothing is right.
+/// The localization axis: `(mean IoU − 0.5) / 0.5`, 0 when nothing is right or `mean_iou` is non-finite.
 pub fn localization_axis(l: &BenchLocalization) -> f32 {
-    l.mean_iou.map_or(0.0, |m| ((m - 0.5) / 0.5).clamp(0.0, 1.0))
+    l.mean_iou.filter(|m| m.is_finite()).map_or(0.0, |m| ((m - 0.5) / 0.5).clamp(0.0, 1.0))
 }
 
 /// The score: `100 · Σ weight · axis / Σ weight` over the measured axes (calibration is `None` without
@@ -667,16 +751,16 @@ pub fn score(evaluation: &Evaluation, robustness: Option<&BenchRobustness>, comp
 /// [`BenchAccuracy::best_conf`]), highest first, how many true boxes they miss and how many of them match nothing.
 pub fn outcome(sample: &Sample, num_classes: usize, scored: bool, confidence: f32) -> Outcome {
     let truths = clean_truths(&sample.truths, num_classes);
-    let mut detections: Vec<BenchDetection> = clean_detections(&sample.detections, num_classes, scored)
-        .into_iter()
-        .filter(|d| d.score >= confidence)
-        .collect();
+    let mut detections = clean_detections_above(&sample.detections, num_classes, scored, confidence);
     detections.sort_by(|a, b| b.score.total_cmp(&a.score));
+    if detections.is_empty() || truths.is_empty() {
+        return Outcome { missed: truths.len() as u32, wrong: detections.len() as u32, detections };
+    }
     let dets: Vec<Detection> = detections.iter().map(to_detection).collect();
-    let (m, matched) = match_image(&dets, &truths);
+    let (_, matched) = match_image(&dets, &truths);
     Outcome {
         missed: (truths.len() - matched) as u32,
-        wrong: m.iter().filter(|v| v.is_none()).count() as u32,
+        wrong: (detections.len() - matched) as u32,
         detections,
     }
 }
@@ -684,12 +768,9 @@ pub fn outcome(sample: &Sample, num_classes: usize, scored: bool, confidence: f3
 /// The labels a contestant gives an image: its detections at or above `threshold` as boxes (cleaned: see the
 /// module docs), highest confidence first.
 pub fn labels(detections: &[BenchDetection], num_classes: usize, scored: bool, threshold: f32) -> Vec<BBox> {
-    let mut kept: Vec<BenchDetection> = clean_detections(detections, num_classes, scored)
-        .into_iter()
-        .filter(|d| d.score >= threshold)
-        .collect();
+    let mut kept = clean_detections_above(detections, num_classes, scored, threshold);
     kept.sort_by(|a, b| b.score.total_cmp(&a.score));
-    kept.iter().map(|d| BBox { class: d.class, x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2 }).collect()
+    kept.into_iter().map(|d| BBox { class: d.class, x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2 }).collect()
 }
 
 #[cfg(test)]

@@ -640,3 +640,178 @@ fn o1_bin_lookups_match_linear_scan_at_every_edge() {
         assert_eq!(iou_bin(v), linear_iou(v), "iou_bin({v:?})");
     }
 }
+
+#[test]
+fn robustness_edge_cases_duplicate_runs_weights_and_non_finite() {
+    // Unsorted severities in plan, unknown condition, empty severities, duplicate runs (first-wins),
+    // zero/negative/non-finite weights, and non-finite mAP values.
+    let p = plan(&[
+        ("unknown_cond", &[1], 1.0),
+        ("haze", &[5, 1], 2.0),
+        ("jpeg", &[], 1.0),
+        ("defocus", &[2], 0.0),
+        ("distance", &[1], -3.0),
+        ("occlusion", &[1], f32::NAN),
+    ]);
+    let runs = [
+        (Condition::Haze, 1, m(0.4)),
+        (Condition::Haze, 1, m(0.05)), // duplicate: first entry (0.4) must win
+        (Condition::Haze, 5, m(0.2)),
+        (Condition::Defocus, 2, m(0.5)),
+        (Condition::Distance, 1, m(0.5)),
+        (Condition::Occlusion, 1, m(0.5)),
+    ];
+    let r = robustness(0.5, &p, &runs).unwrap();
+    // Plan order preserved; unknown_cond & empty jpeg skipped.
+    assert_eq!(
+        r.conditions.iter().map(|c| c.condition.as_str()).collect::<Vec<_>>(),
+        ["haze", "defocus", "distance", "occlusion"]
+    );
+    // Haze severities sorted ascending; duplicate severity 1 used first entry (0.4 / 0.5 = 0.8).
+    let haze = &r.conditions[0];
+    assert_eq!(haze.points.iter().map(|pt| pt.severity).collect::<Vec<_>>(), [1, 5]);
+    assert!(close(haze.points[0].retention, 0.8));
+    assert!(close(haze.points[1].retention, 0.4));
+    assert!(close(haze.retention, 0.6));
+    // Non-positive / NaN weights contribute 0 to numerator and denominator, so overall equals haze (0.6).
+    assert!(close(r.retention, 0.6));
+
+    // All counted conditions with non-positive weights: returns Some with overall retention 0.0.
+    let zero_w = plan(&[("defocus", &[2], 0.0), ("distance", &[1], f32::INFINITY)]);
+    let rz = robustness(0.5, &zero_w, &runs).unwrap();
+    assert_eq!(rz.retention, 0.0);
+    assert_eq!(rz.conditions.len(), 2);
+
+    // Non-finite clean_map or variant map produces 0.0 retention (never NaN).
+    for bad_clean in [f32::NAN, f32::INFINITY, -0.5] {
+        let rb = robustness(bad_clean, &plan(&[("haze", &[1], 1.0)]), &runs).unwrap();
+        assert_eq!(rb.retention, 0.0);
+        assert_eq!(rb.conditions[0].points[0].retention, 0.0);
+    }
+    let bad_runs = [
+        (Condition::Haze, 1, Map { map50: 0.5, map50_95: f32::NAN }),
+        (Condition::Haze, 2, Map { map50: 0.5, map50_95: f32::INFINITY }),
+        (Condition::Haze, 3, Map { map50: 0.5, map50_95: -0.2 }),
+    ];
+    let rb = robustness(0.5, &plan(&[("haze", &[1, 2, 3], 1.0)]), &bad_runs).unwrap();
+    assert_eq!(rb.retention, 0.0);
+    assert!(rb.conditions[0].points.iter().all(|pt| pt.retention == 0.0));
+}
+
+#[test]
+fn score_and_localization_axis_sanitize_non_finite_values() {
+    assert_eq!(localization_axis(&BenchLocalization { mean_iou: None, matches: 0, histogram: vec![] }), 0.0);
+    assert_eq!(
+        localization_axis(&BenchLocalization { mean_iou: Some(f32::NAN), matches: 1, histogram: vec![] }),
+        0.0
+    );
+    assert_eq!(
+        localization_axis(&BenchLocalization {
+            mean_iou: Some(f32::INFINITY),
+            matches: 1,
+            histogram: vec![]
+        }),
+        0.0
+    );
+    assert_eq!(
+        localization_axis(&BenchLocalization { mean_iou: Some(0.4), matches: 1, histogram: vec![] }),
+        0.0
+    );
+    assert!(close(
+        localization_axis(&BenchLocalization { mean_iou: Some(0.75), matches: 1, histogram: vec![] }),
+        0.5
+    ));
+    assert_eq!(
+        localization_axis(&BenchLocalization { mean_iou: Some(1.2), matches: 1, histogram: vec![] }),
+        1.0
+    );
+
+    let mut e = evaluate(&three_images(), 1, true, 0);
+    e.accuracy.map50_95 = f32::NAN;
+    e.self_labeling.recall = f32::INFINITY;
+    e.localization.mean_iou = Some(f32::NAN);
+    if let Some(cal) = &mut e.calibration {
+        cal.ece = f32::NEG_INFINITY;
+    }
+    let rob = BenchRobustness { retention: 1.5, conditions: vec![] };
+    let sc = score(&e, Some(&rob), true);
+    assert!(sc.total.is_finite() && (0.0..=100.0).contains(&sc.total));
+    assert_eq!(sc.axes[0].value, Some(0.0)); // NaN accuracy -> 0
+    assert_eq!(sc.axes[1].value, Some(1.0)); // 1.5 robustness -> clamped to 1
+    assert_eq!(sc.axes[2].value, Some(0.0)); // Inf self-labeling -> 0
+    assert_eq!(sc.axes[3].value, Some(0.0)); // 1 - (-Inf) = Inf calibration -> 0
+    assert_eq!(sc.axes[4].value, Some(0.0)); // NaN localization -> 0
+}
+
+#[test]
+fn outcome_and_labels_edge_cases_and_tie_order() {
+    let s = Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![
+            d(0, 0.5, 0.0, 0.0, 10.0, 10.0),
+            d(0, 0.5, 20.0, 0.0, 30.0, 10.0),
+            d(0, 0.5, 40.0, 0.0, 50.0, 10.0),
+        ],
+    };
+    // NaN threshold keeps nothing.
+    let o_nan = outcome(&s, 1, true, f32::NAN);
+    assert_eq!((o_nan.detections.len(), o_nan.missed, o_nan.wrong), (0, 1, 0));
+    assert!(labels(&s.detections, 1, true, f32::NAN).is_empty());
+
+    // Threshold > 1.0 keeps nothing because valid scores are clamped to [0, 1].
+    assert!(outcome(&s, 1, true, 1.01).detections.is_empty());
+    assert!(labels(&s.detections, 1, true, 1.01).is_empty());
+
+    // Equal scores preserve exact input order.
+    let o_tie = outcome(&s, 1, true, 0.5);
+    assert_eq!(o_tie.detections.iter().map(|b| b.x1).collect::<Vec<_>>(), [0.0, 20.0, 40.0]);
+    assert_eq!((o_tie.missed, o_tie.wrong), (0, 2));
+    let l_tie = labels(&s.detections, 1, true, 0.5);
+    assert_eq!(l_tie.iter().map(|b| b.x1).collect::<Vec<_>>(), [0.0, 20.0, 40.0]);
+
+    // num_classes == 0 drops everything cleanly.
+    let o_zero = outcome(&s, 0, true, 0.0);
+    assert_eq!((o_zero.detections.len(), o_zero.missed, o_zero.wrong), (0, 0, 0));
+    assert!(labels(&s.detections, 0, true, 0.0).is_empty());
+}
+
+#[test]
+fn bootstrap_sparse_tp_matches_reference_with_all_fp_and_non_monotonic_tp() {
+    // Class 0: all false positives (any_tp == 0).
+    // Class 1: TP only at IoU 0.50 (zero TPs at 0.55..0.95).
+    // Class 2: non-monotonic TP bitmask: det A (higher score) matches GT1 at IoU 0.50 (box [0,0,10,5.2]),
+    //          det B (lower score) matches GT1 at IoU 0.80 (box [0,0,10,8.0]); at IoU 0.50 det A steals GT1
+    //          so det B is FP at 0.50 but TP at 0.55..0.80!
+    let samples = vec![
+        Sample {
+            truths: vec![t(0, 0.0, 0.0, 10.0, 10.0), t(1, 0.0, 0.0, 10.0, 10.0), t(2, 0.0, 0.0, 10.0, 10.0)],
+            detections: vec![
+                d(0, 0.9, 50.0, 50.0, 60.0, 60.0),
+                d(0, 0.4, 70.0, 70.0, 80.0, 80.0),
+                d(1, 0.8, 0.0, 0.0, 10.0, 5.1),
+                d(1, 0.2, 40.0, 40.0, 50.0, 50.0),
+                d(2, 0.95, 0.0, 0.0, 10.0, 5.2),
+                d(2, 0.85, 0.0, 0.0, 10.0, 8.0),
+            ],
+        },
+        Sample {
+            truths: vec![t(0, 10.0, 10.0, 20.0, 20.0), t(2, 0.0, 0.0, 10.0, 10.0)],
+            detections: vec![
+                d(0, 0.7, 80.0, 80.0, 90.0, 90.0),
+                d(2, 0.9, 80.0, 80.0, 90.0, 90.0), // leading FP before TPs
+                d(2, 0.5, 0.0, 0.0, 10.0, 9.5),
+            ],
+        },
+    ];
+    for scored in [true, false] {
+        let images = prepare_all(&samples, 3, scored);
+        let rep = report(images.par_iter(), 3);
+        let fast = bootstrap(&images, 3, 1234, rep.map50_95);
+        let want = naive_bootstrap(&images, 3, 1234, rep.map50_95);
+        assert_eq!(
+            (fast[0].to_bits(), fast[1].to_bits()),
+            (want[0].to_bits(), want[1].to_bits()),
+            "scored={scored}: fast={fast:?} want={want:?}"
+        );
+    }
+}
