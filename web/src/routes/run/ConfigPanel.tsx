@@ -4,7 +4,7 @@
  * the LR decay, the warmup and the optimizer's momentum and weight decay; without it, the request as asked for.
  * Close mosaic is the trainer's capped count ("last 7 epochs (requested 10)"). Copy JSON copies the request: the
  * TrainConfig `POST /api/runs` and MCP `train` take, which resolves the same way again. With `cli` (servers that list
- * `run_cli`), the same run from a terminal on the server's machine closes the panel: "In PowerShell:" and the
+ * `run_cli`), the same run from a terminal on the server's machine closes the panel: "In PowerShell (for the server's machine):" and the
  * command on one copyable line (ui/CommandLine).
  */
 import Copy from '$icons/copy';

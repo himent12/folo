@@ -217,6 +217,13 @@ export default function Runs() {
   /** Phones: checkboxes show in select mode (or once a run is selected), so rows keep their width otherwise. */
   const picking = signal(false);
   const choosing = computed(() => picking.get() || selected.get().length > 0);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  function clearSelection() {
+    picking.set(false);
+    selected.set([]);
+    const input = searchEl.peek();
+    if (input && !input.disabled) input.focus();
+  }
 
   const count = (f: Filter) => (runs.data ?? []).filter((r) => groups[f].includes(r.status)).length;
   const shown = computed(() =>
@@ -299,7 +306,7 @@ export default function Runs() {
                     </span>
                   ) : null}
                   {selected.get().length > 0 ? (
-                    <Button variant="ghost" size="sm" onclick={() => (picking.set(false), selected.set([]))} aria-label="Clear selection">
+                    <Button variant="ghost" size="sm" onclick={clearSelection} aria-label="Clear selection">
                       Clear
                     </Button>
                   ) : null}
@@ -343,7 +350,7 @@ export default function Runs() {
             </span>
           ) : null}{' '}
           <div class="lt-search">
-            <Input type="search" icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable.get()} />
+            <Input type="search" icon={Search} bind:value={query} bind:el={searchEl} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable.get()} />
           </div>
         </div>{' '}
         <Panel pad="none">
@@ -676,6 +683,10 @@ css`
     /* Neutral: a selected row is marked in ink: its leading bar, the fill and the inverted check. */
     accent-color: var(--text-primary);
     cursor: pointer;
+  }
+  input[type='checkbox']:disabled {
+    cursor: not-allowed;
+    pointer-events: none;
   }
   .runs .check input {
     opacity: 0;

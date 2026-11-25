@@ -518,10 +518,12 @@ describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
 
     const clear = target.querySelector<HTMLButtonElement>('header button[aria-label="Clear selection"]')!;
     expect(clear.textContent?.trim()).toBe('Clear');
+    clear.focus();
     clear.click();
     flushSync();
     expect(tbl.querySelectorAll('td.check input:checked')).toHaveLength(0);
     expect(boxes[4]!.disabled).toBe(false);
     expect(target.querySelector('header button[aria-label="Clear selection"]')).toBeNull();
+    expect(document.activeElement).toBe(target.querySelector('.lt-search input'));
   });
 });

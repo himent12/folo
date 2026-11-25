@@ -241,6 +241,9 @@ css`
       width: 44px;
       height: 56px;
     }
+    .r-check:has(> input:disabled) {
+      cursor: not-allowed;
+    }
     /* The checkbox itself is the 44 px target (DESIGN_DIRECTION §2.10), not only its label: the input is a 44 px box
        whose drawn mark is the 20 px square at its centre, ink when checked as everywhere (§2.6). */
     .r-check input[type='checkbox'] {
@@ -279,6 +282,7 @@ css`
     }
     .r-check input[type='checkbox']:disabled {
       cursor: not-allowed;
+      pointer-events: none;
     }
     /* Off (four runs picked, the most Compare takes): an outline only, the control edge at half strength, so it never
        reads as filled, and a filled square means checked (round 26: a dark inset fill read as checked). */
