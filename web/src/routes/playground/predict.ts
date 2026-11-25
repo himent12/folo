@@ -3,7 +3,7 @@ import { ApiError, type Api } from '$lib/api/client';
 import type { MockApi } from '$lib/api/mock';
 import type { PredictInput, Prediction } from '$lib/api/types';
 import type { Backend, BrowserEngine } from '$lib/inference/browser';
-import { imageBlob, type Source } from './source';
+import { imageBlob, sourceImageKey, type Source } from './source';
 
 // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
 // re-filter and run NMS in the browser. Suppressing on the server first would lose boxes a looser IoU should keep.
@@ -66,6 +66,7 @@ export function ask(r: {
       tag,
       backend: on,
       image: () => imageBlob(s, signal),
+      imageKey: sourceImageKey(s),
       options: { conf: options.conf, iou: options.iou, maxDet: options.max_det },
       signal,
     });
