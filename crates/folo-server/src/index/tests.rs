@@ -237,3 +237,100 @@ fn errors_map_to_api_codes() {
     assert_eq!(code(&dir), "invalid_dataset");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `list_images` slices contiguous splits directly (keeping global image ids), handles single-pass class
+/// filtering and pagination bounds, and falls back safely if an index's images are not contiguous by split.
+#[test]
+fn list_images_slices_splits_and_filters_in_a_single_pass() {
+    let img = |file: &str, split: Split, classes: &[u32]| IndexImage {
+        file: file.into(),
+        split,
+        width: 10,
+        height: 10,
+        boxes: classes.iter().map(|&c| BBox { class: c, x1: 0.0, y1: 0.0, x2: 5.0, y2: 5.0 }).collect(),
+    };
+    let make_index = |images: Vec<IndexImage>, splits: Splits| Index {
+        version: INDEX_VERSION,
+        fingerprint: Fingerprint::default(),
+        watched: Vec::new(),
+        excluded: Vec::new(),
+        base: PathBuf::new(),
+        root: PathBuf::new(),
+        format: DatasetFormat::Yolo,
+        classes: vec!["cat".into(), "dog".into()],
+        splits,
+        stats: DatasetStats {
+            boxes: 0,
+            empty_images: 0,
+            broken_labels: 0,
+            class_counts: vec![0, 0],
+            box_size_hist: Histogram { edges: Vec::new(), counts: Vec::new() },
+            boxes_per_image_hist: Histogram { edges: Vec::new(), counts: Vec::new() },
+        },
+        images,
+        issues: Vec::new(),
+    };
+
+    let idx = make_index(
+        vec![
+            img("t0.jpg", Split::Train, &[0]),
+            img("t1.jpg", Split::Train, &[1]),
+            img("t2.jpg", Split::Train, &[0, 1]),
+            img("v0.jpg", Split::Val, &[1]),
+            img("v1.jpg", Split::Val, &[0]),
+            img("x0.jpg", Split::Test, &[0]),
+        ],
+        Splits { train: 3, val: 2, test: 1 },
+    );
+
+    // Split slicing preserves global image ids (`val` starts at id 3, `test` at id 5).
+    let val = idx.list_images(&ImageQuery { split: Some(Split::Val), offset: 0, limit: 10, class: None });
+    assert_eq!(val.total, 2);
+    assert_eq!(
+        val.images.iter().map(|i| (i.id.as_str(), i.file.as_str())).collect::<Vec<_>>(),
+        [("3", "v0.jpg"), ("4", "v1.jpg")]
+    );
+
+    let test = idx.list_images(&ImageQuery { split: Some(Split::Test), offset: 0, limit: 10, class: None });
+    assert_eq!(test.total, 1);
+    assert_eq!(test.images[0].id, "5");
+
+    // Offset / limit bounds (including extreme u64 values) never panic or overflow.
+    let mid = idx.list_images(&ImageQuery { split: None, offset: 2, limit: 2, class: None });
+    assert_eq!(mid.total, 6);
+    assert_eq!(mid.images.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["2", "3"]);
+    let past = idx.list_images(&ImageQuery {
+        split: Some(Split::Train),
+        offset: u64::MAX,
+        limit: u64::MAX,
+        class: None,
+    });
+    assert_eq!((past.total, past.images.len()), (3, 0));
+
+    // Single-pass class filtering within a split and across all splits.
+    let train_c0 =
+        idx.list_images(&ImageQuery { split: Some(Split::Train), offset: 1, limit: 1, class: Some(0) });
+    assert_eq!(train_c0.total, 2);
+    assert_eq!(train_c0.images.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["2"]);
+
+    let all_c1 = idx.list_images(&ImageQuery { split: None, offset: 0, limit: 2, class: Some(1) });
+    assert_eq!(all_c1.total, 3);
+    assert_eq!(all_c1.images.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+
+    // Non-contiguous fallback: interleaved splits still produce exact totals and ids.
+    let interleaved = make_index(
+        vec![
+            img("v0.jpg", Split::Val, &[0]),
+            img("t0.jpg", Split::Train, &[0]),
+            img("v1.jpg", Split::Val, &[1]),
+        ],
+        Splits { train: 1, val: 2, test: 0 },
+    );
+    let page =
+        interleaved.list_images(&ImageQuery { split: Some(Split::Val), offset: 0, limit: 10, class: None });
+    assert_eq!(page.total, 2);
+    assert_eq!(
+        page.images.iter().map(|i| (i.id.as_str(), i.file.as_str())).collect::<Vec<_>>(),
+        [("0", "v0.jpg"), ("2", "v1.jpg")]
+    );
+}
