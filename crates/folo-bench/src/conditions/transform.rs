@@ -6,8 +6,9 @@ use image::RgbImage;
 
 use crate::Error;
 use crate::pixels::{
-    Plane, area_taps, bilinear_taps, convolve_separable, convolve_taps, for_rows, gauss, gaussian_kernel,
-    mean_rgb, mix, resample, row_rng, srgb,
+    area_taps, bilinear_taps, convolve_separable_haze_u8, convolve_separable_u8, convolve_taps_u8, for_rows,
+    gauss, gaussian_kernel, mean_rgb, mix, resample_plane_to_u8, resample_u8_to_plane, resample_u8_to_u8,
+    row_rng, srgb,
 };
 
 use super::encoding::encode_jpeg_quality;
@@ -54,58 +55,53 @@ pub fn apply(
     }
     // Pixel sizes of the tables are for a 640 px long side.
     let px = w.max(h) as f32 / REFERENCE_SIDE;
-    let raw = image.as_raw();
+    // `RgbImage::from_raw` allows an oversized backing buffer; only the active `w * h * 3` pixel bytes belong
+    // to the image.
+    let raw = &image.as_raw()[..w * h * 3];
     let mut boxes = boxes.to_vec();
     let data = match condition {
         Condition::LowLight => low_light(raw, w, LOW_LIGHT_GAIN[i], LOW_LIGHT_NOISE[i], seed),
         Condition::Overexposure => {
             let (t, g) = (srgb(), OVEREXPOSURE_GAIN[i]);
-            map_values(raw, |_, v| t.enc(t.lin(v) * g))
+            map_values(raw, w, |_, v| t.enc(t.lin(v) * g))
         }
         Condition::LowContrast => {
             let m = mean_rgb(raw).iter().map(|&v| v as f32).sum::<f32>() / 3.0;
             let k = LOW_CONTRAST_KEEP[i];
-            map_values(raw, |_, v| (m + k * (v as f32 - m) + 0.5).clamp(0.0, 255.0) as u8)
+            map_values(raw, w, |_, v| (m + k * (v as f32 - m) + 0.5).clamp(0.0, 255.0) as u8)
         }
         Condition::Defocus => {
             let k = gaussian_kernel(DEFOCUS_SIGMA[i] * px);
-            convolve_separable(&Plane::from_u8(raw, w, h), &k, &k).to_u8()
+            convolve_separable_u8(raw, w, h, &k, &k)
         }
         Condition::MotionBlur => {
             let taps = motion_kernel(MOTION_LENGTH[i] * px, seed);
-            convolve_taps(&Plane::from_u8(raw, w, h), &taps).to_u8()
+            convolve_taps_u8(raw, w, h, &taps)
         }
         Condition::SensorNoise => {
             let sigma = SENSOR_NOISE_SIGMA[i];
-            let mut out = raw.to_vec();
-            for_rows(&mut out, w * 3, |y, row| {
+            let stride = w * 3;
+            let mut out = vec![0u8; raw.len()];
+            for_rows(&mut out, stride, |y, dst| {
+                let src = &raw[y * stride..(y + 1) * stride];
                 let mut rng = row_rng(seed, y);
-                for v in row {
-                    *v = (*v as f32 + sigma * gauss(&mut rng) + 0.5).clamp(0.0, 255.0) as u8;
+                for (o, &v) in dst.iter_mut().zip(src) {
+                    *o = (v as f32 + sigma * gauss(&mut rng) + 0.5).clamp(0.0, 255.0) as u8;
                 }
             });
             out
         }
         Condition::Haze => {
             let k = gaussian_kernel(HAZE_SIGMA[i] * px);
-            let mut p = convolve_separable(&Plane::from_u8(raw, w, h), &k, &k);
             let t = HAZE_TRANSMISSION[i];
             let veil = HAZE_AIRLIGHT.map(|a| a * (1.0 - t));
-            for q in p.data.as_chunks_mut::<3>().0 {
-                for (v, a) in q.iter_mut().zip(veil) {
-                    *v = *v * t + a;
-                }
-            }
-            p.to_u8()
+            convolve_separable_haze_u8(raw, w, h, &k, &k, t, veil)
         }
         Condition::ColorCast => {
             let (t, r) = (srgb(), CAST_RED[i]);
             let keep = [r, 1.0 - CAST_GREEN_SHARE * (1.0 - r), 1.0];
             let m = CAST_TINT_SHARE * (1.0 - r);
-            let luts: [[u8; 256]; 3] = std::array::from_fn(|c| {
-                std::array::from_fn(|v| t.enc(t.lin(v as u8) * keep[c] * (1.0 - m) + CAST_TINT[c] * m))
-            });
-            map_values(raw, |c, v| luts[c][v as usize])
+            map_values(raw, w, |c, v| t.enc(t.lin(v) * keep[c] * (1.0 - m) + CAST_TINT[c] * m))
         }
         Condition::Jpeg => {
             let bytes = encode_jpeg_quality(image, JPEG_QUALITY[i]).ok();
@@ -123,17 +119,15 @@ pub fn apply(
             if (w2, h2) == (w, h) {
                 raw.to_vec()
             } else {
-                let p = Plane::from_u8(raw, w, h);
-                let small = resample(&p, w2, h2, &area_taps(w, w2), &area_taps(h, h2));
-                resample(&small, w, h, &bilinear_taps(w2, w), &bilinear_taps(h2, h)).to_u8()
+                let small = resample_u8_to_plane(raw, w, h, w2, h2, &area_taps(w, w2), &area_taps(h, h2));
+                resample_plane_to_u8(&small, w, h, &bilinear_taps(w2, w), &bilinear_taps(h2, h))
             }
         }
         Condition::Distance => {
             let s = DISTANCE_SCALE[i];
             let (w2, h2) = (shrink(w, s), shrink(h, s));
             let (ox, oy) = ((w - w2) / 2, (h - h2) / 2);
-            let small =
-                resample(&Plane::from_u8(raw, w, h), w2, h2, &area_taps(w, w2), &area_taps(h, h2)).to_u8();
+            let small = resample_u8_to_u8(raw, w, h, w2, h2, &area_taps(w, w2), &area_taps(h, h2));
             let fill = mean_rgb(raw);
             let mut out = vec![0u8; raw.len()];
             for_rows(&mut out, w * 3, |y, row| {
@@ -189,27 +183,34 @@ fn shrink(n: usize, s: f32) -> usize {
 }
 
 /// Every value through `f(channel, value)`, by a table per channel.
-fn map_values(raw: &[u8], f: impl Fn(usize, u8) -> u8) -> Vec<u8> {
+fn map_values(raw: &[u8], w: usize, f: impl Fn(usize, u8) -> u8) -> Vec<u8> {
     let luts: [[u8; 256]; 3] = std::array::from_fn(|c| std::array::from_fn(|v| f(c, v as u8)));
-    let mut out = raw.to_vec();
-    for p in out.as_chunks_mut::<3>().0 {
-        for (c, v) in p.iter_mut().enumerate() {
-            *v = luts[c][*v as usize];
+    let stride = w * 3;
+    let mut out = vec![0u8; raw.len()];
+    for_rows(&mut out, stride, |y, dst| {
+        let src = &raw[y * stride..(y + 1) * stride];
+        for (o, s) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<3>().0) {
+            o[0] = luts[0][s[0] as usize];
+            o[1] = luts[1][s[1] as usize];
+            o[2] = luts[2][s[2] as usize];
         }
-    }
+    });
     out
 }
 
 /// Gain in linear light, then shot and read noise in linear light (per pixel and channel).
 fn low_light(raw: &[u8], w: usize, gain: f32, n: f32, seed: u64) -> Vec<u8> {
     let t = srgb();
-    let mut out = raw.to_vec();
-    for_rows(&mut out, w * 3, |y, row| {
+    let s_lut: [f32; 256] = std::array::from_fn(|v| t.lin(v as u8) * gain);
+    let sigma_lut: [f32; 256] = std::array::from_fn(|v| n * (s_lut[v] + 0.004).sqrt());
+    let stride = w * 3;
+    let mut out = vec![0u8; raw.len()];
+    for_rows(&mut out, stride, |y, dst| {
+        let src = &raw[y * stride..(y + 1) * stride];
         let mut rng = row_rng(seed, y);
-        for v in row {
-            let s = t.lin(*v) * gain;
-            let sigma = n * (s + 0.004).sqrt();
-            *v = t.enc(s + sigma * gauss(&mut rng));
+        for (o, &v) in dst.iter_mut().zip(src) {
+            let idx = v as usize;
+            *o = t.enc(s_lut[idx] + sigma_lut[idx] * gauss(&mut rng));
         }
     });
     out
