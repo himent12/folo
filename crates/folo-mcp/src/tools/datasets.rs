@@ -6,7 +6,7 @@ use folo_api::{Dataset, IssueCounts, IssuePage, IssueSeverity, RegisterDataset, 
 use folo_server::store::{ImageQuery, IssueQuery};
 
 use super::Progress;
-use super::arguments::check_name;
+use super::arguments::{check_name, closest_match};
 use super::results::{
     MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, fit_page, json_len, out, page_window, short, summary_classes,
 };
@@ -179,11 +179,14 @@ impl Inner {
         if let Some(k) = &a.kind
             && !folo_api::ISSUE_KINDS.contains(&k.as_str())
         {
-            return Err(invalid_arguments(format!(
-                "unknown issue kind `{}`; kind is one of {}",
-                short(k, 40),
-                folo_api::ISSUE_KINDS.join(", ")
-            )));
+            let mut msg = format!("unknown issue kind `{}`", short(k, 40));
+            if let Some(s) = closest_match(k, &folo_api::ISSUE_KINDS) {
+                msg.push_str(&format!("; did you mean `{s}`? kind is one of "));
+            } else {
+                msg.push_str("; kind is one of ");
+            }
+            msg.push_str(&folo_api::ISSUE_KINDS.join(", "));
+            return Err(invalid_arguments(msg));
         }
         self.ensure_dataset(&a.dataset_id).await?;
         let q = IssueQuery { kind: a.kind.clone(), severity: a.severity, offset, limit };

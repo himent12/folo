@@ -11,6 +11,7 @@
 //! (crates/folo-cli/src/mcp.rs) calls both. The modules:
 //!
 //! - `server`: the rmcp `ServerHandler` ([`FoloMcp`]): tools, resources and subscriptions, prompts, logging.
+//! - `batch_cache`: bounded LRU cache of recent `predict_batch` payloads (`folo://predictions/{batch_id}`).
 //! - `tools/`: the tool table, its schemas and argument checks, and one handler file per area.
 //! - `resources`: `folo://` URIs, listing and templates; `render`: the sample-grid JPEG of
 //!   `folo://runs/{id}/samples/{epoch}`.
@@ -22,6 +23,7 @@
 //!   with its boxes numbered.
 //! - [`bench`]: vision benchmarks in process or through `folo serve`, shared with `folo bench`.
 
+mod batch_cache;
 pub mod bench;
 mod confine;
 mod errors;

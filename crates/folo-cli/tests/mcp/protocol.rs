@@ -71,6 +71,15 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     );
     let traversal = c.request("resources/read", json!({ "uri": "folo://docs/..%2F..%2FCargo.toml" }));
     assert!(traversal["error"]["code"].is_i64(), "{traversal}");
+    let doc_typo = c.request("resources/read", json!({ "uri": "folo://docs/api" }));
+    assert!(doc_typo["error"]["code"].is_i64(), "{doc_typo}");
+    assert!(
+        doc_typo["error"]["message"].as_str().unwrap().contains("did you mean `folo://docs/API`?"),
+        "{doc_typo}"
+    );
+    let ds_typo = c.request("resources/read", json!({ "uri": "folo://datasets/ds_5a1f" }));
+    assert!(ds_typo["error"]["code"].is_i64(), "{ds_typo}");
+    assert!(ds_typo["error"]["message"].as_str().unwrap().contains("did you mean `ds_5a1e`"), "{ds_typo}");
     let page = checked(
         c,
         &schemas,
@@ -385,6 +394,18 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     );
     let unknown = c.request("tools/call", json!({ "name": "no_such_tool", "arguments": {} }));
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    let tool_typo = c.request("tools/call", json!({ "name": "predcit", "arguments": {} }));
+    assert_eq!(tool_typo["error"]["code"], -32602, "{tool_typo}");
+    assert!(
+        tool_typo["error"]["message"].as_str().unwrap().contains("did you mean `predict`?"),
+        "{tool_typo}"
+    );
+    let prompt_typo = c.request("prompts/get", json!({ "name": "diagnose_runs", "arguments": {} }));
+    assert_eq!(prompt_typo["error"]["code"], -32602, "{prompt_typo}");
+    assert!(
+        prompt_typo["error"]["message"].as_str().unwrap().contains("did you mean `diagnose_run`?"),
+        "{prompt_typo}"
+    );
     let method = c.request("no/such/method", json!({}));
     assert_eq!(method["error"]["code"], -32601, "{method}");
     // Cloud: the mock's connection, its offers, and run_3c01's instance (terminating one that is gone answers it).

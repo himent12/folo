@@ -5,12 +5,91 @@ use std::time::{Duration, Instant};
 
 use rmcp::model::{JsonObject, ProgressNotificationParam, ProgressToken};
 use rmcp::service::{Peer, RoleServer};
+use serde_json::Value;
 
 use super::ToolDef;
-use super::arguments::{parse_args, unknown_argument};
-use super::results::Output;
+use super::arguments::{MAX_SUGGEST_CHARS, closest_named, parse_args, unknown_argument};
+use super::results::{Output, short};
 use crate::errors::{Error, read_only};
 use crate::server::Inner;
+
+/// Candidate identifier(s) supplied by a tool call or resource read for fuzzy `"did you mean ...?"`
+/// enrichment on `*_not_found` errors.
+pub(crate) enum NotFoundTarget {
+    Dataset(String),
+    Model(String),
+    Run(String),
+    Runs(Vec<String>),
+}
+
+/// Entity IDs captured from tool arguments before dispatch so `*_not_found` errors can suggest close IDs.
+struct CallIds {
+    dataset_id: Option<String>,
+    model_id: Option<String>,
+    run_id: Option<String>,
+    run_ids: Vec<String>,
+}
+
+impl CallIds {
+    fn from_args(tool: &str, args: &JsonObject) -> Self {
+        let take = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.chars().count() <= MAX_SUGGEST_CHARS)
+                .map(str::to_string)
+        };
+        let dataset_id = take("dataset_id");
+        let model_id = take("model_id").or_else(|| (tool == "train").then(|| take("weights")).flatten());
+        let run_id = take("run_id").or_else(|| (tool == "train").then(|| take("resume_run_id")).flatten());
+        let run_ids = args
+            .get("run_ids")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty() && s.chars().count() <= MAX_SUGGEST_CHARS)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { dataset_id, model_id, run_id, run_ids }
+    }
+
+    fn target_for(&self, code: &str) -> Option<NotFoundTarget> {
+        match code {
+            "dataset_not_found" => self.dataset_id.clone().map(NotFoundTarget::Dataset),
+            "model_not_found" => self.model_id.clone().map(NotFoundTarget::Model),
+            "run_not_found" => {
+                if let Some(id) = &self.run_id {
+                    Some(NotFoundTarget::Run(id.clone()))
+                } else if !self.run_ids.is_empty() {
+                    Some(NotFoundTarget::Runs(self.run_ids.clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+fn format_suggestion(id: &str, name: &str) -> String {
+    if name.is_empty() || name == id {
+        format!("did you mean `{id}`?")
+    } else {
+        format!("did you mean `{id}` ({})?", short(name, 48))
+    }
+}
+
+fn append_hint(e: &mut Error, extra: String) {
+    match &mut e.body.hint {
+        Some(h) if !h.is_empty() => {
+            h.push_str("; ");
+            h.push_str(&extra);
+        }
+        slot => *slot = Some(extra),
+    }
+}
 
 /// Sends `notifications/progress` for one request, if it asked for progress: monotonically increasing values, at
 /// most ~4 per second (the final value is always sent).
@@ -67,6 +146,7 @@ impl Inner {
             return Err(e);
         }
         super::bench::refuse_confined(def.name, self.opts.confine)?;
+        let call_ids = CallIds::from_args(def.name, &args);
         let res = match def.name {
             "folo_info" => self.folo_info(parse_args(args)?).await,
             "list_datasets" => self.list_datasets(parse_args(args)?).await,
@@ -110,7 +190,90 @@ impl Inner {
             "stop_bench_entry" => self.stop_bench_entry(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
-        res.map_err(|e| mcp_code(crate::confine::map_denied(e)))
+        match res {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                let e = mcp_code(crate::confine::map_denied(e));
+                let target = call_ids.target_for(&e.body.code);
+                Err(match target {
+                    Some(t) => self.enrich_not_found(e, t).await,
+                    None => e,
+                })
+            }
+        }
+    }
+
+    /// Appends a fuzzy `"did you mean ...?"` suggestion to `e.body.hint` when `e` is a matching
+    /// `*_not_found` error. Dataset suggestions strictly respect `--confine` so hidden datasets are
+    /// never leaked. Listing failures leave `e` unchanged.
+    pub(crate) async fn enrich_not_found(&self, mut e: Error, target: NotFoundTarget) -> Error {
+        let suggestion = match (e.body.code.as_str(), target) {
+            ("dataset_not_found", NotFoundTarget::Dataset(id)) => {
+                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                    return e;
+                }
+                let c = self.confinement.clone();
+                let Ok(items) = self
+                    .blocking(move |s| {
+                        Ok(s.list_datasets()?
+                            .into_iter()
+                            .filter(|d| c.dataset(s, &d.id).is_ok())
+                            .map(|d| (d.id, d.name))
+                            .collect::<Vec<_>>())
+                    })
+                    .await
+                else {
+                    return e;
+                };
+                closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
+            }
+            ("model_not_found", NotFoundTarget::Model(id)) => {
+                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                    return e;
+                }
+                let Ok(items) = self
+                    .blocking(|s| {
+                        Ok(s.list_models()?.into_iter().map(|m| (m.id, m.name)).collect::<Vec<_>>())
+                    })
+                    .await
+                else {
+                    return e;
+                };
+                closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
+            }
+            ("run_not_found", NotFoundTarget::Run(id)) => {
+                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                    return e;
+                }
+                let Ok(items) = self
+                    .blocking(|s| Ok(s.list_runs()?.into_iter().map(|r| (r.id, r.name)).collect::<Vec<_>>()))
+                    .await
+                else {
+                    return e;
+                };
+                closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
+            }
+            ("run_not_found", NotFoundTarget::Runs(ids)) => {
+                if ids.is_empty() {
+                    return e;
+                }
+                let Ok(items) = self
+                    .blocking(|s| Ok(s.list_runs()?.into_iter().map(|r| (r.id, r.name)).collect::<Vec<_>>()))
+                    .await
+                else {
+                    return e;
+                };
+                ids.iter()
+                    .find(|id| !items.iter().any(|(existing, _)| existing == *id))
+                    .and_then(|missing| closest_named(missing, &items))
+                    .map(|(cid, name)| format_suggestion(cid, name))
+            }
+            _ => None,
+        };
+        if let Some(s) = suggestion {
+            append_hint(&mut e, s);
+        }
+        e
     }
 
     /// With `--confine`, fails unless dataset `id` reads only files inside the data dir.

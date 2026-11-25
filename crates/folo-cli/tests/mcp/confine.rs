@@ -64,6 +64,19 @@ fn read_only_hides_and_rejects_mutating_tools() {
     let prompts = c.result("prompts/list", json!({}))["prompts"].as_array().unwrap().clone();
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0]["name"], "diagnose_run");
+    // Unknown tool/prompt suggestions never reveal hidden mutating tools or prompts in --read-only mode.
+    let hidden_tool = c.request("tools/call", json!({ "name": "trani", "arguments": {} }));
+    assert_eq!(hidden_tool["error"]["code"], -32602, "{hidden_tool}");
+    assert!(!hidden_tool["error"]["message"].as_str().unwrap().contains("train"), "{hidden_tool}");
+    let visible_tool = c.request("tools/call", json!({ "name": "predcit", "arguments": {} }));
+    assert_eq!(visible_tool["error"]["code"], -32602, "{visible_tool}");
+    assert!(
+        visible_tool["error"]["message"].as_str().unwrap().contains("did you mean `predict`?"),
+        "{visible_tool}"
+    );
+    let hidden_prompt = c.request("prompts/get", json!({ "name": "label_folders", "arguments": {} }));
+    assert_eq!(hidden_prompt["error"]["code"], -32602, "{hidden_prompt}");
+    assert!(!hidden_prompt["error"]["message"].as_str().unwrap().contains("did you mean"), "{hidden_prompt}");
     c.finish();
 }
 
@@ -231,6 +244,14 @@ fn confine_checks_what_a_dataset_reads() {
     // `mapped` now reads outside (edited above) and is hidden too.
     assert_eq!(ids, [id.as_str()]);
     c.tool_error("get_dataset", json!({ "dataset_id": out_id }), "path_outside_data_dir");
+    // A typo of a confined dataset ID must never leak the confined dataset in a suggestion.
+    let out_typo = format!("{}_x", &out_id[..out_id.len().saturating_sub(1)]);
+    let missing_out = c.tool_error("get_dataset", json!({ "dataset_id": out_typo }), "dataset_not_found");
+    assert!(
+        !missing_out.to_string().contains(&out_id),
+        "confined dataset leaked in suggestion: {missing_out}"
+    );
+    assert!(!missing_out.to_string().contains("outside"), "confined dataset name leaked: {missing_out}");
     c.tool_error("list_dataset_images", json!({ "dataset_id": out_id }), "path_outside_data_dir");
     let read = c.request("resources/read", json!({ "uri": format!("folo://datasets/{out_id}/images/0") }));
     assert!(read.get("error").is_some(), "{read}");
