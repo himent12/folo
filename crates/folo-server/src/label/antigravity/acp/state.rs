@@ -262,10 +262,6 @@ pub(super) fn drain_pending<T: Into<StdoutLine>>(
             state.kill_immediately = true;
             return Err(AgentError::Timeout(state.usage.to_usage(0)));
         }
-        if parent_exited() {
-            state.kill_immediately = true;
-            return Err(unexpected_exit(&state.usage, stderr_text));
-        }
         match recv.try_recv() {
             Ok(item) => match item.into() {
                 StdoutLine::Error(why) => {
@@ -278,6 +274,9 @@ pub(super) fn drain_pending<T: Into<StdoutLine>>(
                 StdoutLine::Line(line) => {
                     if drained >= MAX_DRAIN_LINES || now >= drain_deadline {
                         state.kill_immediately = true;
+                        if parent_exited() {
+                            return Err(unexpected_exit(&state.usage, stderr_text));
+                        }
                         return Err(AgentError::Failed(Failure {
                             used: state.usage.to_usage(0),
                             ..Failure::new("`agy acp` flooded stdout before the next request")
@@ -292,6 +291,9 @@ pub(super) fn drain_pending<T: Into<StdoutLine>>(
                     }
                     if after >= drain_deadline {
                         state.kill_immediately = true;
+                        if parent_exited() {
+                            return Err(unexpected_exit(&state.usage, stderr_text));
+                        }
                         return Err(AgentError::Failed(Failure {
                             used: state.usage.to_usage(0),
                             ..Failure::new("`agy acp` flooded stdout before the next request")
@@ -299,7 +301,13 @@ pub(super) fn drain_pending<T: Into<StdoutLine>>(
                     }
                 }
             },
-            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Empty) => {
+                if parent_exited() {
+                    state.kill_immediately = true;
+                    return Err(unexpected_exit(&state.usage, stderr_text));
+                }
+                return Ok(());
+            }
             Err(mpsc::TryRecvError::Disconnected) => return Err(unexpected_exit(&state.usage, stderr_text)),
         }
     }

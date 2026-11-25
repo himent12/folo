@@ -1,7 +1,7 @@
 //! Unit tests for bounded stdout line reading, Condvar completion signals, and ACP stdout framing error propagation.
 
 use std::io::{BufReader, Cursor, ErrorKind};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -191,4 +191,59 @@ fn oversize_stdout_framing_error_propagates_with_usage_and_immediate_kill() {
     );
     assert!(out.kill_immediately && !saw_prompt);
     assert!(matches!(out.result, Err(AgentError::Failed(f)) if f.message.contains("stdout framing error")));
+
+    // 3. Even when the child exits immediately after emitting an oversize line (e.g. SIGPIPE when stdout closes),
+    // `drain_pending` drains queued usage and the framing error before checking `parent_exited()`.
+    let (out_tx, out_rx) = mpsc::channel::<StdoutLine>();
+    let exited = AtomicBool::new(false);
+    let mut saw_prompt = false;
+    let mut send = |msg: &Value| -> bool {
+        let id = msg.get("id").and_then(Value::as_u64);
+        match msg["method"].as_str() {
+            Some("initialize") => {
+                let _ = out_tx.send(StdoutLine::Line(init_ok(id, true, false, false)));
+            }
+            Some("session/new") => {
+                let _ = out_tx.send(StdoutLine::Line(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessionId": "s1",
+                            "configOptions": [{ "id": "thought_level", "category": "thought_level", "currentValue": "low", "options": [{ "value": "low" }] }]
+                        }
+                    })
+                    .to_string(),
+                ));
+                let _ = out_tx.send(StdoutLine::Line(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": { "update": { "sessionUpdate": "usage_update", "inputTokens": 222, "outputTokens": 11 } }
+                    })
+                    .to_string(),
+                ));
+                let _ = out_tx.send(StdoutLine::Error("`agy acp` stdout framing error: exceeded cap".into()));
+                exited.store(true, Ordering::Relaxed);
+            }
+            Some("session/prompt") => saw_prompt = true,
+            _ => {}
+        }
+        true
+    };
+    let mut parent_exited = || exited.load(Ordering::Relaxed);
+    let out = drive_acp_inner(
+        &req,
+        &work,
+        Duration::from_secs(5),
+        CANCEL_GRACE,
+        &mut send,
+        &out_rx,
+        &|| "broken pipe stderr".into(),
+        &mut parent_exited,
+    );
+    assert!(out.kill_immediately && !saw_prompt);
+    let Err(AgentError::Failed(f)) = out.result else { panic!("{:?}", out.result) };
+    assert!(f.message.contains("stdout framing error"), "{f:?}");
+    assert_eq!((f.used.calls, f.used.input_tokens, f.used.output_tokens), (1, 222, 11));
 }
