@@ -300,4 +300,39 @@ describe('Dataset page history', () => {
     expect(back).toHaveBeenCalledOnce();
     await until(() => hash() === '#/datasets/ds_shapes', 'the unfiltered view');
   });
+
+  it('filters images via interactive class-balance chips and clears empty states in one click', async () => {
+    const readImages = api.datasetImages.bind(api);
+    let emptyClass: number | null = null;
+    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q) => {
+      if (emptyClass !== null && q?.class === emptyClass) return { total: 0, images: [] };
+      return readImages(id, q);
+    });
+
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    const chips = [...target.querySelectorAll<HTMLButtonElement>('.class-strip button.chip')];
+    expect(chips.length).toBeGreaterThan(0);
+
+    // Click first class chip -> updates URL query and highlights chip
+    chips[0]!.click();
+    await until(() => router.route.query.get('class') !== null, 'class filter set');
+    const selectedClass = Number(router.route.query.get('class'));
+    expect(chips[0]!.getAttribute('aria-pressed')).toBe('true');
+
+    // Click active chip again -> clears filter back to unfiltered view
+    chips[0]!.click();
+    await until(() => router.route.query.get('class') === null, 'class filter cleared');
+    expect(chips[0]!.getAttribute('aria-pressed')).toBe('false');
+
+    // Empty-state reset when class filter matches 0 images
+    emptyClass = selectedClass;
+    chips[0]!.click();
+    const clearBtn = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find((b) => b.textContent?.includes('Clear filters')),
+      'empty state Clear filters button',
+    );
+    clearBtn.click();
+    await until(() => router.route.query.get('class') === null, 'empty state cleared');
+  });
 });

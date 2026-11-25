@@ -101,4 +101,33 @@ describe('Dataset stats: Health heading', () => {
     expect(summary.querySelector('.h-count')?.textContent).toBe(`${n} findings`);
     expect(summary.querySelectorAll('.h-sev').length).toBe(0);
   });
+
+  it('highlights the active class balance bar and offers a one-click Clear filter pill', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    let cleared = 0;
+    c = mount(StatsTab, {
+      target,
+      props: {
+        dataset,
+        stats: dataset.stats!,
+        activeClass: 1,
+        onclass: () => {},
+        onclearclass: () => {
+          cleared++;
+        },
+      },
+    });
+    flushSync();
+
+    const activeBars = [...target.querySelectorAll<HTMLButtonElement>('#ds-balance .bars button[aria-pressed="true"]')];
+    expect(activeBars).toHaveLength(1);
+    expect(activeBars[0]!.classList.contains('active')).toBe(true);
+    expect(activeBars[0]!.querySelector('.cname')?.textContent).toBe(dataset.classes[1]);
+
+    const clearBtn = target.querySelector<HTMLButtonElement>('#ds-balance button.clear-cls')!;
+    expect(clearBtn).not.toBeNull();
+    expect(clearBtn.textContent).toContain('Clear filter');
+    clearBtn.click();
+    expect(cleared).toBe(1);
+  });
 });
