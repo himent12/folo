@@ -12,9 +12,73 @@ export interface RowNavOptions {
   toggle?: (row: HTMLElement) => void;
 }
 
-/** Rows that take part: any `[data-row]` that is rendered (phones hide the desktop table). */
+function isRowVisible(r: HTMLElement): boolean {
+  if (r.hidden || r.style.display === 'none') return false;
+  return !r.checkVisibility || r.checkVisibility();
+}
+
+/** Rows that take part: any visible `[data-row]` inside a visible container (phones hide the desktop table).
+ *  Checks container visibility once up front so hidden tables skip querying and inspecting every row. */
 export function navRows(root: HTMLElement): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>('[data-row]')].filter((r) => r.checkVisibility?.() ?? true);
+  if (root.checkVisibility && !root.checkVisibility()) return [];
+  const list = root.querySelectorAll<HTMLElement>('[data-row]');
+  const out: HTMLElement[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i]!;
+    if (isRowVisible(r)) out.push(r);
+  }
+  return out;
+}
+
+/** Steps from `from` to the next visible `[data-row]` without calling `checkVisibility()` on every row in the table. */
+function stepVisibleRow(root: HTMLElement, from: HTMLElement, move: number | 'first' | 'last'): HTMLElement | undefined {
+  if (root.checkVisibility && !root.checkVisibility()) return undefined;
+  const list = root.querySelectorAll<HTMLElement>('[data-row]');
+  const n = list.length;
+  if (!n) return undefined;
+  if (move === 'first') {
+    for (let i = 0; i < n; i++) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  if (move === 'last') {
+    for (let i = n - 1; i >= 0; i--) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  let idx = -1;
+  for (let i = 0; i < n; i++) {
+    if (list[i] === from) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    for (let i = 0; i < n; i++) if (isRowVisible(list[i]!)) return list[i];
+    return undefined;
+  }
+  const dir = move > 0 ? 1 : -1;
+  for (let i = idx + dir; i >= 0 && i < n; i += dir) {
+    if (isRowVisible(list[i]!)) return list[i];
+  }
+  return isRowVisible(from) ? from : undefined;
+}
+
+function hasRowNode(nodes: NodeList): boolean {
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n && n.nodeType === 1) {
+      const el = n as Element;
+      if (el.hasAttribute('data-row') || el.querySelector('[data-row]')) return true;
+    }
+  }
+  return false;
+}
+
+function hasRowMutation(records: MutationRecord[]): boolean {
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i]!;
+    if (hasRowNode(rec.addedNodes) || hasRowNode(rec.removedNodes)) return true;
+  }
+  return false;
 }
 
 /** Gives exactly one row the tab stop: `keep` when it is still a row, else the first. */
@@ -73,11 +137,16 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const back = was === undefined ? undefined : rows.find((r) => rowKey(r) === was);
     current = settleTabStop(rows, back ?? current) ?? null;
   };
-  const focusRow = (row: HTMLElement | undefined) => {
+  const focusRow = (row: HTMLElement | undefined, rows?: HTMLElement[]) => {
     if (!row) return;
     remember(row);
+    const prev = current;
     current = row;
-    settleTabStop(navRows(root), row);
+    if (rows) settleTabStop(rows, row);
+    else if (prev && prev !== row && root.contains(prev) && prev.tabIndex === 0) {
+      prev.tabIndex = -1;
+      row.tabIndex = 0;
+    } else settleTabStop(navRows(root), row);
     row.focus();
     row.scrollIntoView?.({ block: 'nearest' });
   };
@@ -92,7 +161,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const move = MOVES[key];
     if (move !== undefined) {
       e.preventDefault();
-      focusRow(stepRow(navRows(root), row, move));
+      focusRow(stepVisibleRow(root, row, move));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       row.click();
@@ -106,9 +175,15 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-row]');
     if (row && root.contains(row)) {
       remember(row);
-      if (row === current) return;
+      if (row === current && row.tabIndex === 0) return;
+      const prev = current;
       current = row;
-      settleTabStop(navRows(root), row);
+      if (prev && root.contains(prev) && prev.tabIndex === 0) {
+        prev.tabIndex = -1;
+        row.tabIndex = 0;
+      } else {
+        settleTabStop(navRows(root), row);
+      }
     }
   };
   // A row opened by a click counts as the one the list was on.
@@ -128,10 +203,12 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const rows = navRows(root);
     if (!rows.length) return;
     e.preventDefault();
-    focusRow(current && rows.includes(current) ? current : rows[0]);
+    focusRow(current && rows.includes(current) ? current : rows[0], rows);
   };
 
-  const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver(settle);
+  const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver((records) => {
+    if (hasRowMutation(records)) settle();
+  });
   observer?.observe(root, { childList: true, subtree: true });
   root.addEventListener('keydown', onkeydown);
   root.addEventListener('focusin', onfocusin);

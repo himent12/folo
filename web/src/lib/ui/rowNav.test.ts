@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { forgetRows, rowNav, settleTabStop, stepRow } from './rowNav';
+import { forgetRows, navRows, rowNav, settleTabStop, stepRow } from './rowNav';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -147,6 +147,81 @@ describe('rowNav', () => {
     const again = make();
     nav = rowNav(again.t);
     expect(again.rows.map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    nav.destroy();
+  });
+
+  it('short-circuits hidden containers in navRows and skips CSS-hidden rows on step', () => {
+    const { t, rows } = table(4);
+    const rootVis = vi.fn().mockReturnValue(false);
+    const rowVis = rows.map(() => vi.fn().mockReturnValue(true));
+    Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
+    rows.forEach((r, i) => Object.defineProperty(r, 'checkVisibility', { value: rowVis[i], configurable: true }));
+
+    // Hidden table (e.g., desktop table hidden on phone): 1 container check, 0 per-row checks.
+    expect(navRows(t)).toEqual([]);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+    for (const spy of rowVis) expect(spy).not.toHaveBeenCalled();
+
+    // Visible table with a CSS-hidden middle row (checkVisibility() returns false without inline display:none):
+    // navRows and ArrowDown/J skip it and land on the next visible row.
+    rootVis.mockReturnValue(true);
+    rowVis[1]!.mockReturnValue(false);
+    rows[3]!.hidden = true;
+    expect(navRows(t)).toEqual([rows[0], rows[2]]);
+
+    const nav = rowNav(t);
+    rows[0]!.focus();
+    for (const spy of rowVis) spy.mockClear();
+    key(rows[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(rows[2]);
+    expect(rows[0]!.tabIndex).toBe(-1);
+    expect(rows[1]!.tabIndex).toBe(-1);
+    expect(rows[2]!.tabIndex).toBe(0);
+    // Stepping checked only the candidate rows it visited (row 1 and row 2), never scanning the whole table.
+    expect(rowVis[0]).not.toHaveBeenCalled();
+    expect(rowVis[1]).toHaveBeenCalledTimes(1);
+    expect(rowVis[2]).toHaveBeenCalledTimes(1);
+    nav.destroy();
+  });
+
+  it('skips settle when mutations only update cell contents and checks only the next row on keypress', async () => {
+    const { t, rows } = table(4);
+    const rootVis = vi.fn().mockReturnValue(true);
+    const rowVis = rows.map(() => vi.fn().mockReturnValue(true));
+    Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
+    rows.forEach((r, i) => Object.defineProperty(r, 'checkVisibility', { value: rowVis[i], configurable: true }));
+
+    const nav = rowNav(t);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+
+    // Mutate a cell inside a row (e.g., live SSE metric tick): MutationObserver should ignore non-row changes.
+    const td = rows[0]!.querySelector('td')!;
+    const badge = document.createElement('span');
+    badge.textContent = 'epoch 4';
+    td.appendChild(badge);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rootVis).toHaveBeenCalledTimes(1);
+
+    // Moving with J checks container once and only the target row (O(1) per keypress).
+    rows[0]!.focus();
+    rootVis.mockClear();
+    for (const spy of rowVis) spy.mockClear();
+    key(rows[0]!, 'j');
+    expect(document.activeElement).toBe(rows[1]);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+    expect(rowVis[1]).toHaveBeenCalledTimes(1);
+    expect(rowVis[2]).not.toHaveBeenCalled();
+    expect(rowVis[3]).not.toHaveBeenCalled();
+
+    // Adding an actual [data-row] still triggers settle.
+    const extra = document.createElement('tr');
+    extra.setAttribute('data-row', '');
+    extra.dataset.id = 'r4';
+    t.querySelector('tbody')!.appendChild(extra);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rootVis).toHaveBeenCalledTimes(2);
+    expect(extra.tabIndex).toBe(-1);
+
     nav.destroy();
   });
 });

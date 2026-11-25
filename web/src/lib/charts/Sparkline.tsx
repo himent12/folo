@@ -1,6 +1,4 @@
 /** A tiny trend line for tables and tiles. Decorative: always pair it with the number it summarises. */
-import { scaleLinear } from 'd3-scale';
-import { area, line } from 'd3-shape';
 import { computed, css, defaults } from 'fw';
 
 export interface SparklineProps {
@@ -16,36 +14,71 @@ export interface SparklineProps {
   endColor?: string;
 }
 
+const fmt = (n: number) => Number(n.toFixed(2));
+
+/** Direct SVG polyline and closed area paths for a sparkline (avoids pulling d3-scale/d3-shape for linear mapping). */
+export function sparklinePaths(values: readonly number[], width: number, height: number, domain?: [number, number], length?: number) {
+  let min = Infinity;
+  let max = -Infinity;
+  let finiteCount = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    if (!Number.isFinite(v)) continue;
+    finiteCount++;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (finiteCount < 2) return null;
+  const lo = domain?.[0] ?? min;
+  const hi = domain?.[1] ?? max;
+  const xSpan = Math.max(1, Math.max(length ?? values.length, values.length) - 1);
+  const ySpan = hi === lo ? 1 : hi - lo;
+  const xRange = width - 4;
+  const yRange = height - 4;
+  const xOf = (i: number) => fmt(1 + (i / xSpan) * xRange);
+  const yOf = (v: number) => fmt(height - 2 - ((v - lo) / ySpan) * yRange);
+
+  const lineParts: string[] = [];
+  const areaParts: string[] = [];
+  let run: [number, number][] = [];
+  let last: [number, number] = [0, 0];
+
+  const flushRun = () => {
+    if (!run.length) return;
+    lineParts.push(`M${run[0]![0]},${run[0]![1]}${run.slice(1).map(([px, py]) => `L${px},${py}`).join('')}`);
+    if (run.length >= 2) {
+      const firstX = run[0]![0];
+      const lastX = run[run.length - 1]![0];
+      areaParts.push(`M${firstX},${run[0]![1]}${run.slice(1).map(([px, py]) => `L${px},${py}`).join('')}L${lastX},${height}L${firstX},${height}Z`);
+    }
+    run = [];
+  };
+
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    if (!Number.isFinite(v)) {
+      flushRun();
+      continue;
+    }
+    const pt: [number, number] = [xOf(i), yOf(v)];
+    run.push(pt);
+    last = pt;
+  }
+  flushRun();
+
+  return { d: lineParts.join(''), a: areaParts.join(''), last };
+}
+
 export default function Sparkline(props: SparklineProps) {
   const p = defaults(props, { width: 80, height: 24, color: 'var(--chart-1)', fill: true });
 
-  const geo = computed(() => {
-    const values = p.values;
-    const { width, height, domain, length } = p;
-    const vs = values.filter((v) => Number.isFinite(v));
-    if (vs.length < 2) return null;
-    const lo = domain?.[0] ?? Math.min(...vs);
-    const hi = domain?.[1] ?? Math.max(...vs);
-    const n = Math.max(length ?? values.length, values.length) - 1;
-    const x = scaleLinear().domain([0, Math.max(1, n)]).range([1, width - 3]);
-    const y = scaleLinear().domain([lo, hi === lo ? lo + 1 : hi]).range([height - 2, 2]);
-    const pts = values.map((v, i) => [x(i), y(v)] as [number, number]);
-    const last = pts[pts.length - 1]!;
-    return {
-      d: line()(pts) ?? '',
-      a:
-        area()
-          .y0(height)
-          .y1((pt) => pt[1])(pts) ?? '',
-      last,
-    };
-  });
+  const geo = computed(() => sparklinePaths(p.values, p.width, p.height, p.domain, p.length));
 
   return (
     <svg class="spark" width={p.width} height={p.height} viewBox={`0 0 ${p.width} ${p.height}`} aria-hidden="true">
       {geo.get() ? (
         <>
-          {p.fill ? <path class="a" d={geo.get()!.a} style:fill={p.color} /> : null}
+          {p.fill && geo.get()!.a ? <path class="a" d={geo.get()!.a} style:fill={p.color} /> : null}
           <path class="l" d={geo.get()!.d} style:stroke={p.color} />
           <circle cx={geo.get()!.last[0]} cy={geo.get()!.last[1]} r="2" style:fill={p.endColor ?? p.color} />
         </>
