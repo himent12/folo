@@ -36,19 +36,21 @@ npm run shoot      # screenshots of the built site into site/shots (installed Ch
 - **Search.** A prebuilt index (`search.json`, one entry per H2/H3 section) is fetched on first use and searched in
   the browser; no service. Open it with `/` or Ctrl+K (⌘K), move with ↑ ↓, open with Enter.
 - **Reading aids.** A per-page table of contents that tracks the section being read (inline and collapsible below
-  1200 px), copy buttons on code blocks, build-time highlighting (shiki), previous / next links, links to the GitHub
-  source file and raw Markdown copy, and roadmap status markers for `- [x]` / `- [~]` / `- [ ]`.
+  1200 px), copy buttons on code blocks, heading anchor links that copy the section URL with toast feedback, build-time
+  highlighting (shiki), previous / next links, links to the GitHub source file and raw Markdown copy, and roadmap
+  status markers for `- [x]` / `- [~]` / `- [ ]`.
 - **For agents.** `llms.txt` (the repository's llms.txt with its links pointed at the site), `llms-full.txt` (every
   page's Markdown in one file) and the raw Markdown of each page at `md/<repository path>`.
 - **Theme.** Colours, type, spacing, radii and motion come from `design/tokens.json`, the tokens Studio and Desktop
   use, generated into CSS variables at build time (`scripts/tokens.ts`; the same variable names as Studio). With no
   saved choice the site follows the system's light or dark setting; the top-bar button cycles between system, light and
   dark and remembers it.
-  Fonts are the self-hosted Geist and Geist Mono from `design/fonts`. Highlighting colours are the tokens' status
-  `text` colours, which meet AA on every surface.
+  Fonts are the self-hosted Geist and Geist Mono from `design/fonts`. Highlighting colours use the tokens' status
+  `text` colours (and `--chart-text-5` for functions) on dark `--bg-inset` and light `--bg-app` code surfaces, meeting
+  WCAG AA across both themes.
 - **Layout.** Three columns from 1200 px, no side table of contents below that, and below 960 px the sidebar becomes
   a drawer. Every control has a visible focus ring, there is a skip link, and wide tables and code blocks become
-  keyboard-scrollable regions when they overflow.
+  keyboard-scrollable regions with directional edge cues when they overflow.
 
 ## Where things are
 ```
