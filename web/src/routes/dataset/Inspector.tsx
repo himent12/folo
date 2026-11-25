@@ -212,6 +212,7 @@ export default function Inspector(props: InspectorProps) {
     ty.set(h / 2 - ((b.y1 + b.y2) / 2) * s * nz);
   }
 
+  let animating = false;
   const rectCache = createRectCache();
   effect(() => {
     void vw.get();
@@ -219,7 +220,10 @@ export default function Inspector(props: InspectorProps) {
     rectCache.clear();
   });
   function local(e: { clientX: number; clientY: number }) {
-    const r = rectCache.get(viewport.peek()!);
+    const v = viewport.peek()!;
+    // Avoid caching an intermediate rect while the dialog's opening scale animation is in flight.
+    const running = animating || !!dialog?.getAnimations?.().some((a) => a.playState === 'running');
+    const r = running ? v.getBoundingClientRect() : rectCache.get(v);
     return [e.clientX - r.left, e.clientY - r.top] as const;
   }
 
@@ -235,7 +239,24 @@ export default function Inspector(props: InspectorProps) {
       zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py, false);
     };
     v.addEventListener('wheel', onwheel, { passive: false });
-    return () => v.removeEventListener('wheel', onwheel);
+    const d = dialog;
+    const onAnimStart = () => {
+      animating = true;
+      rectCache.clear();
+    };
+    const onAnimDone = () => {
+      animating = false;
+      rectCache.clear();
+    };
+    d?.addEventListener('animationstart', onAnimStart);
+    d?.addEventListener('animationend', onAnimDone);
+    d?.addEventListener('animationcancel', onAnimDone);
+    return () => {
+      v.removeEventListener('wheel', onwheel);
+      d?.removeEventListener('animationstart', onAnimStart);
+      d?.removeEventListener('animationend', onAnimDone);
+      d?.removeEventListener('animationcancel', onAnimDone);
+    };
   });
 
   const pointers = new Map<number, { x: number; y: number }>();

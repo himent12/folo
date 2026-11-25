@@ -17,6 +17,17 @@ const SERIES = [
   },
 ];
 
+const roListeners: ResizeObserverCallback[] = [];
+const OrigRO = globalThis.ResizeObserver;
+globalThis.ResizeObserver = class {
+  constructor(cb: ResizeObserverCallback) {
+    roListeners.push(cb);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+
 describe('XYChart', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -68,10 +79,13 @@ describe('XYChart', () => {
     }
   });
 
-  it('caches the SVG DOMRect across pointermove bursts', async () => {
-    const { c, svg } = mount();
+  it('caches the SVG DOMRect across pointermove bursts and invalidates when readout height changes', async () => {
+    const { target, c, svg } = mount();
     try {
       await Promise.resolve();
+      const readout = target.querySelector<HTMLElement>('.readout')!;
+      let readoutHeight = 20;
+      Object.defineProperty(readout, 'clientHeight', { get: () => readoutHeight, configurable: true });
       const rectSpy = vi.spyOn(svg, 'getBoundingClientRect');
       svg.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
       for (let px = 50; px < 300; px += 25) {
@@ -79,10 +93,18 @@ describe('XYChart', () => {
         flush();
       }
       expect(rectSpy).toHaveBeenCalledTimes(1);
-      svg.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+      // Readout wraps onto a second line -> ResizeObserver updates readoutH and invalidates cached SVG rect.
+      readoutHeight = 40;
+      for (const cb of roListeners) cb([{ target: readout } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+      flush();
       svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 100, clientY: 80, bubbles: true }));
       flush();
       expect(rectSpy).toHaveBeenCalledTimes(2);
+      svg.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+      svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 80, bubbles: true }));
+      flush();
+      expect(rectSpy).toHaveBeenCalledTimes(3);
+      expect(OrigRO).toBeDefined();
     } finally {
       c.unmount();
     }

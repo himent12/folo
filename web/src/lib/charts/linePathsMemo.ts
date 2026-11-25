@@ -34,10 +34,10 @@ function stampOf(arr: Pt[] | undefined): PointStamp {
 }
 
 function sameStamped(cur: Pt[] | undefined, prev: PointStamp): boolean {
-  if (cur === prev.arr) {
-    if (!cur) return true;
-    return cur.length === prev.len && cur[0] === prev.first && cur[cur.length - 1] === prev.last;
+  if (prev.arr && (prev.arr.length !== prev.len || prev.arr[0] !== prev.first || prev.arr[prev.arr.length - 1] !== prev.last)) {
+    return false;
   }
+  if (cur === prev.arr) return true;
   return samePoints(cur, prev.arr);
 }
 

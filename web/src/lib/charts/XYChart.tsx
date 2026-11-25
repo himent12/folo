@@ -122,9 +122,11 @@ export default function XYChart(props: XYChartProps) {
   const pinned = signal(false);
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
+  const readoutH = signal(0);
   const rectCache = createRectCache();
   effect(() => {
     void width.get();
+    void readoutH.get();
     rectCache.clear();
   });
   const local = (e: PointerEvent) => {
@@ -309,7 +311,7 @@ export default function XYChart(props: XYChartProps) {
 
   return (
     <div class="xy">
-      <div class="readout num" aria-hidden="true">
+      <div class="readout num" bind:clientHeight={readoutH} aria-hidden="true">
         {p.readout(() => cursor.get(), () => hint.get())}
       </div>
       <p class="sr-only" aria-live="polite">

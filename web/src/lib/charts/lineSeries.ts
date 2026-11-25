@@ -44,6 +44,8 @@ export interface Series {
   lower?: Pt[];
   /** Optional revision bumped when `points` grows in place, so live callers do not need to `.slice()` every tick. */
   rev?: number;
+  /** Optional precomputed running min/max (`lo`, `hi`) of finite `y` values, letting `seriesSummary` run in O(1). */
+  bounds?: { lo: number; hi: number };
 }
 
 /**
@@ -127,9 +129,17 @@ export const latest = (s: Series) => {
   return null;
 };
 
-/** Per-series summary for assistive tech: latest, minimum and maximum. */
+/** Per-series summary for assistive tech: latest, minimum and maximum. Uses precomputed `s.bounds` in O(1) when provided. */
 export function seriesSummary(keyed: Series[]) {
   return keyed.map((s) => {
+    if (s.bounds) {
+      return {
+        s,
+        last: latest(s),
+        lo: Number.isFinite(s.bounds.lo) ? s.bounds.lo : null,
+        hi: Number.isFinite(s.bounds.hi) ? s.bounds.hi : null,
+      };
+    }
     let lo = Infinity;
     let hi = -Infinity;
     for (const p of s.points) {
@@ -139,70 +149,6 @@ export function seriesSummary(keyed: Series[]) {
     }
     return { s, last: latest(s), lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
   });
-}
-
-/**
- * Incremental `seriesSummary`: reuses each series' running min/max when `points` grows by append in place (O(delta)
- * per live step instead of rescanning the full history on every tick).
- */
-export function memoSeriesSummary() {
-  type Entry = {
-    points: Pt[];
-    len: number;
-    first: Pt | undefined;
-    lastPt: Pt | undefined;
-    rev: number | undefined;
-    lo: number;
-    hi: number;
-    last: number | null;
-  };
-  let cache = new Map<string, Entry>();
-  return function summary(keyed: Series[]) {
-    const next = new Map<string, Entry>();
-    const out = keyed.map((s) => {
-      const pts = s.points;
-      const len = pts.length;
-      const first = pts[0];
-      const lastPt = pts[len - 1];
-      const prev = cache.get(s.id);
-      if (
-        prev &&
-        prev.points === pts &&
-        prev.len > 0 &&
-        len >= prev.len &&
-        first === prev.first &&
-        pts[prev.len - 1] === prev.lastPt &&
-        (len > prev.len || prev.rev === s.rev)
-      ) {
-        let lo = prev.lo;
-        let hi = prev.hi;
-        let last = prev.last;
-        for (let i = prev.len; i < len; i++) {
-          const y = pts[i]!.y;
-          if (!Number.isFinite(y)) continue;
-          if (y < lo) lo = y;
-          if (y > hi) hi = y;
-          last = y;
-        }
-        next.set(s.id, { points: pts, len, first, lastPt, rev: s.rev, lo, hi, last });
-        return { s, last, lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
-      }
-      let lo = Infinity;
-      let hi = -Infinity;
-      let last: number | null = null;
-      for (let i = 0; i < len; i++) {
-        const y = pts[i]!.y;
-        if (!Number.isFinite(y)) continue;
-        if (y < lo) lo = y;
-        if (y > hi) hi = y;
-        last = y;
-      }
-      next.set(s.id, { points: pts, len, first, lastPt, rev: s.rev, lo, hi, last });
-      return { s, last, lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
-    });
-    cache = next;
-    return out;
-  };
 }
 
 /** Stroke width of a series' line in px, as LineChart's `.line` classes draw it (`light`: the light theme). */

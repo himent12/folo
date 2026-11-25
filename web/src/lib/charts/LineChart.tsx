@@ -11,7 +11,7 @@ import { END_LABELS_MIN, memoPlaceEndLabels } from './endLabels';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
 import { TouchGesture, type PinAction } from './pin';
-import { patternOf, dashOf, inkOf, memoSeriesSummary, strokeWidth } from './lineSeries';
+import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
 import { capInPlotOf, eventOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
@@ -369,8 +369,7 @@ export default function LineChart(props: LineChartProps) {
   // pointer movement here or on a linked chart never produces announcements.
   const spoken = signal('');
 
-  const summaryOf = memoSeriesSummary();
-  const summary = computed(() => summaryOf(keyed.get()));
+  const summary = computed(() => seriesSummary(keyed.get()));
 
   function onkeydown(e: KeyboardEvent) {
     const s = longestSeries.peek();
