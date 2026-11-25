@@ -3,7 +3,7 @@
  * Lets users see and switch the active drawing/selected class in one click or keypress, with horizontal fade-scroll
  * on narrow screens so long class lists never overflow the dialog.
  */
-import { css, For } from 'fw';
+import { css, effect, For, signal } from 'fw';
 import { classInk } from '$lib/design/classInk';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import Kbd from '$lib/ui/Kbd';
@@ -27,6 +27,39 @@ export default function EditorHints(props: EditorHintsProps) {
     const n = Math.min(props.classes.length, 9);
     return n <= 1 ? '1' : `1–${n}`;
   };
+  const stripEl = signal<HTMLDivElement | null>(null);
+  const keepStrip = (el: HTMLDivElement) => {
+    stripEl.set(el);
+    return () => {
+      if (stripEl.peek() === el) stripEl.set(null);
+    };
+  };
+
+  effect(() => {
+    const strip = stripEl.get();
+    const cls = props.activeClass;
+    const count = props.classes.length;
+    if (!strip || count === 0) return;
+    const btn = strip.querySelector<HTMLButtonElement>(`button[data-cls="${cls}"]`);
+    if (!btn) return;
+    const maxScroll = Math.max(0, strip.scrollWidth - strip.clientWidth);
+    if (maxScroll <= 0) return;
+    const sr = strip.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    if (br.width > 0 && sr.width > 0) {
+      // Keep the active chip whole and clear of the 48 px edge fade mask without scrolling outer dialog containers.
+      const pad = Math.max(0, Math.min(48, Math.floor((sr.width - br.width) / 2)));
+      let next = strip.scrollLeft;
+      if (br.left < sr.left + pad) next = Math.max(0, strip.scrollLeft + (br.left - sr.left) - pad);
+      else if (br.right > sr.right - pad) next = Math.min(maxScroll, strip.scrollLeft + (br.right - sr.right) + pad);
+      if (next !== strip.scrollLeft) {
+        strip.scrollLeft = next;
+        strip.dispatchEvent(new Event('scroll'));
+      }
+    } else {
+      btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
+  });
 
   return (
     <div class="ed-hints">
@@ -37,6 +70,7 @@ export default function EditorHints(props: EditorHintsProps) {
           aria-label={props.hasSelection ? 'Set selected box class' : 'Active drawing class'}
           data-scrolls
           use:fadeScroll
+          use:keepStrip
         >
           <For each={quick()} key={(item) => item.cls}>
             {(item) => {
@@ -46,6 +80,7 @@ export default function EditorHints(props: EditorHintsProps) {
                   type="button"
                   class="ck"
                   class:active={active()}
+                  data-cls={item().cls}
                   aria-pressed={active()}
                   disabled={props.disabled}
                   onclick={() => props.onselectclass(item().cls)}
@@ -61,7 +96,7 @@ export default function EditorHints(props: EditorHintsProps) {
       ) : null}
 
       {!props.touch ? (
-        <div class="key-strip" aria-label="Keyboard shortcuts">
+        <div class="key-strip" role="group" aria-label="Keyboard shortcuts">
           {quick().length > 0 ? (
             <span class="kh">
               <Kbd keys={keySpan()} subtle />
@@ -143,7 +178,7 @@ css`
     outline-offset: -2px;
   }
   @media (hover: hover) {
-    .ck:hover:not(:disabled) {
+    .ck:hover:not(:disabled, .active) {
       border-color: var(--line-strong);
       background: var(--bg-hover);
       color: var(--text-primary);
@@ -186,11 +221,14 @@ css`
   }
   @media (pointer: coarse) {
     .ck {
+      min-width: 44px;
       min-height: 44px;
+      justify-content: center;
     }
   }
   @media (max-width: 767px) {
-    .key-strip {
+    .key-strip,
+    .ck :global(.kbd) {
       display: none;
     }
   }

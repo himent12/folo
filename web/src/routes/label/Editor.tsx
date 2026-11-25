@@ -116,11 +116,8 @@ export default function Editor(props: EditorProps) {
   const redoCount = computed(() => (rev.get(), history.future.length));
   const canUndo = computed(() => undoCount.get() > 0);
   const canRedo = computed(() => redoCount.get() > 0);
-  const activeClass = computed(() => {
-    const b = picked.get();
-    if (b) return b.class;
-    return Math.min(lastClass.get(), Math.max(0, props.job.classes.length - 1));
-  });
+  const drawClass = computed(() => Math.min(lastClass.get(), Math.max(0, props.job.classes.length - 1)));
+  const activeClass = computed(() => picked.get()?.class ?? drawClass.get());
   function forget() {
     history.clear();
     rev.set(rev.peek() + 1);
@@ -204,7 +201,7 @@ export default function Editor(props: EditorProps) {
   function addBox() {
     const cur = img.peek();
     if (!cur || locked.peek()) return;
-    edit([...draft.peek(), newBox(cur.width, cur.height, Math.min(lastClass.peek(), props.job.classes.length - 1))]);
+    edit([...draft.peek(), newBox(cur.width, cur.height, drawClass.peek())]);
     selected.set(draft.peek().length - 1);
   }
   /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: ten steps. */
@@ -593,7 +590,7 @@ export default function Editor(props: EditorProps) {
                   bind:selected={selected}
                   bind:scale={scale}
                   hovered={hovered.get()}
-                  cls={lastClass.get()}
+                  cls={drawClass.get()}
                   disabled={!!locked.get()}
                   onchange={edit}
                 />
@@ -615,10 +612,10 @@ export default function Editor(props: EditorProps) {
                     Boxes <span class="meta num">{draft.get().length}</span>
                   </h3>
                   <span class="tools">
-                    <span use:tooltip={undoTip.get()}>
+                    <span class:off={!canUndo.get() || !!locked.get()} use:tooltip={undoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
                     </span>
-                    <span use:tooltip={redoTip.get()}>
+                    <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
                     <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
@@ -759,8 +756,8 @@ css`
     min-width: 0;
   }
   .canvas-box {
-    height: min(640px, calc(100dvh - 260px));
-    min-height: 280px;
+    height: min(576px, calc(100dvh - 324px));
+    min-height: 240px;
   }
   .nav {
     display: flex;
@@ -824,6 +821,13 @@ css`
   }
   .tools > span {
     display: inline-flex;
+  }
+  /* A disabled button takes no pointer events in some browsers: the wrapper takes the hover so contextual undo/redo tips show. */
+  .tools > span.off {
+    cursor: not-allowed;
+  }
+  .tools > span.off > :global(:disabled) {
+    pointer-events: none;
   }
   .hist-depth {
     font-size: var(--type-sm-size);
