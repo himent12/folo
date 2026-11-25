@@ -13,12 +13,12 @@ the determinism rules.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs with an example, and the re-exports |
-| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco.rs` (COCO instances JSON), `cache/` (the on-disk scan cache: `probe.rs`, `coco.rs`, `listing.rs`) |
+| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco.rs` (COCO instances JSON), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
 | `src/resize.rs`, `src/warp.rs` | Bilinear resize and affine warp of 8-bit RGB images (the warp reads a `Plane`: images placed on one colour, so a mosaic needs no canvas; also fuses warp, HSV, flips and planar conversion in one pass) |
-| `src/simd/` | Bit-exact AVX2/FMA SIMD kernels and scalar fallbacks: `planar.rs` (RGB → planar `u8`/`f32`/`RGB0`, row flip, mixup blend, `RGBA`/`L8` → `RGB`), `bilinear/` (`mod.rs`, `hinterp.rs`, `warp.rs`: vertical blend and horizontal fixed-point interpolation for resize and warp), `box_filter.rs` (vertical row sum and horizontal box-downsample reduction), `hsv_fused.rs` (explicit AVX2 hexcone HSV and L1-fused warp/RGB → HSV → flip → planar passes) |
+| `src/simd/` | Bit-exact AVX2/FMA SIMD kernels and scalar fallbacks (`mod.rs`, `tests.rs`): `planar.rs` (RGB → planar `u8`/`f32` and packed `RGB0` `u32`, row flip, mixup blend, `RGBA`/`L8` → `RGB`), `bilinear/` (`mod.rs`, `hinterp.rs`, `warp.rs`: vertical blend and horizontal fixed-point interpolation for resize and warp), `box_filter.rs` (vertical row sum and horizontal box-downsample reduction), `hsv_fused.rs` (explicit AVX2 hexcone HSV and L1-fused warp/RGB → HSV → flip → planar passes) |
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
@@ -34,7 +34,7 @@ the determinism rules.
 | `src/paths.rs` | Path helpers shared by `folo dataset check --json` and the server |
 | `src/rng.rs` | xoshiro256++ seeded through SplitMix64 |
 | `src/error.rs` | `DataError` and `Result` |
-| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `guard.rs` (its own binary: a guard stays installed for the process), `common/` (helpers) |
+| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `unfinished.rs` (`.folo-unfinished` marker claim and refusal), `guard.rs` (its own binary: a guard stays installed for the process), `fixtures/jpeg/` (JPEG decoder parity fixtures embedded by `src/image.rs` unit tests), `common/` (helpers) |
 | `benches/pipeline.rs` | Stage timings and `DataLoader` images/s |
 | `examples/` | `shapes.rs` (the MODEL.md §10.6 shapes dataset), `synth_sheet.rs` (a contact sheet of synthetic images), `aug_stats.rs` (statistics of the training transform's output), `open_time.rs` (times opening a dataset), `loader_profile.rs` (time and allocations of each stage of a training sample) |
 

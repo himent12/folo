@@ -46,9 +46,10 @@ subgroup built-ins are enabled via `wgpu::Features::SUBGROUP` alone, while `Spec
 WGSL variant and tags the pipeline cache key. When `kernels::use_subgroups(ctx)` is true (native adapters with
 `SUBGROUP` and subgroup width `(32, 32)`; always `false` on `wasm32` / browser WebGPU), reductions (`reduce_rows`,
 `softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`) and gradient-norm partials
-(`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants with a portable shared-memory tree fallback
-otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with no workgroup barrier (direct
-per-element `atomicOr` otherwise). Every file in `src/shaders/` opens with a
+(`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants (and `topk` selection passes for `d > 512`
+dispatch a 2-barrier 32-wide subgroup reduction per pass, skipping the second barrier on the final pass) with a
+portable shared-memory tree fallback otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with
+no workgroup barrier (direct per-element `atomicOr` otherwise). Every file in `src/shaders/` opens with a
 comment saying what it computes, in most files followed by its `Spec` constants and its parameter words; the bindings
 come next.
 
@@ -66,7 +67,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | unary, binary, comparisons, `where` | `unary`, `unary_backward`, `binary`, `where_cond` (through `GpuBackend::ew` in `encode.rs`) | `kernels::ew::elementwise` | generated in `ew.rs` | `src/tests/backend/elementwise.rs` |
 | sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` (ceiling-division split-K for `Sum`/`Max`/`Min` from `GpuBackend`, plus `Mean` in `reduce_split` directly; 32-wide subgroup reductions on rows) | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/reduce.rs` |
 | softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` (online row softmax when `inner == 1`, 1 read up to 1,024 elems / 2-pass online above; `softmax_cols` otherwise, register-cached for `D ≤ 32` and 2-pass online above) | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
-| top-k | `topk` | `kernels::reduce::topk` | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
+| top-k | `topk` | `kernels::reduce::topk` (workgroup-parallel bitonic sort for `d ≤ 512`; `k`-pass selection with 32-wide subgroup reductions and a portable shared-memory tree fallback above) | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
 | matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
 | conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv.rs` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
