@@ -263,9 +263,11 @@ mod tests {
         });
         app.frame(window.into());
 
-        // Collect action icon centers in the right-hand actions column (grouped by row y-band).
+        // Collect action icon pairs `[left_action, delete]` in the right-hand actions column:
+        // each finished/failed row paints two 15–16 px icons inside 28 px buttons 4 px apart (dx ≈ 32 px),
+        // independent of titlebar height or header wrapping across platforms.
         let sp = |v: folo_ui::ScaledPixels| f64::from(v) as f32;
-        let action_icons = |app: &mut folo_ui::HeadlessApp| -> Vec<(f32, f32)> {
+        let row_left_actions = |app: &mut folo_ui::HeadlessApp| -> Vec<(f32, f32)> {
             let mut pts: Vec<(f32, f32)> = app
                 .scene(window.into())
                 .primitives
@@ -274,7 +276,7 @@ mod tests {
                     Primitive::MonoSprite(s)
                         if s.kind == SpriteKind::Svg
                             && sp(s.bounds.origin.x) >= 1100.
-                            && sp(s.bounds.origin.y) >= 240. =>
+                            && sp(s.bounds.size.width) >= 14. =>
                     {
                         Some((
                             sp(s.bounds.origin.x) + sp(s.bounds.size.width) / 2.,
@@ -285,25 +287,28 @@ mod tests {
                 })
                 .collect();
             pts.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.total_cmp(&b.0)));
-            pts
+            let mut rows: Vec<(f32, f32)> = Vec::new();
+            let mut i = 0;
+            while i < pts.len() {
+                let mut band = vec![pts[i]];
+                let y0 = pts[i].1;
+                i += 1;
+                while i < pts.len() && (pts[i].1 - y0).abs() < 8. {
+                    band.push(pts[i]);
+                    i += 1;
+                }
+                band.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some(pair) = band.windows(2).find(|w| (24.0..=40.0).contains(&(w[1].0 - w[0].0))) {
+                    rows.push(pair[0]);
+                }
+            }
+            rows
         };
-        let icons = action_icons(&mut app);
-        // Top row is the first Done entry: leftmost right-hand icon is Pin, rightmost is Delete.
-        let top_y = icons.first().expect("row action icons painted").1;
-        let pin_pt = icons
-            .iter()
-            .copied()
-            .filter(|(_, y)| (*y - top_y).abs() < 12.)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("pin icon painted");
-        // Bottom row is the injected Failed entry: leftmost right-hand icon is Chevron toggle.
-        let bot_y = icons.last().expect("failed row icons painted").1;
-        let chevron_pt = icons
-            .iter()
-            .copied()
-            .filter(|(_, y)| (*y - bot_y).abs() < 12.)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("chevron icon painted");
+        let row_actions = row_left_actions(&mut app);
+        assert!(row_actions.len() >= 2, "expected done + failed action pairs: {row_actions:?}");
+        // First row is the first Done entry (Pin); last row is the injected Failed entry (Chevron).
+        let pin_pt = *row_actions.first().expect("pin icon painted");
+        let chevron_pt = *row_actions.last().expect("chevron icon painted");
 
         drive(&mut app, window, |this, _, _| {
             let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
