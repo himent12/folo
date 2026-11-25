@@ -81,6 +81,8 @@ impl Trainer {
         // A batch's wall time starts when the previous one ends, so the ETA counts the wait for the loader too:
         // with mosaic on large JPEGs the loader, not the step, often sets the pace.
         let phase = self.mosaic_phase(e);
+        let mut snapshot = RunningStats::capture_training(&self.model)?;
+        let mut snapshot_dirty = false;
         let mut batch_start = Instant::now();
         for item in source.by_ref() {
             let (mut batch, staged) = item?;
@@ -93,7 +95,10 @@ impl Trainer {
             };
             let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
 
-            let snapshot = RunningStats::capture(&self.model)?;
+            if snapshot_dirty {
+                snapshot.recapture()?;
+                snapshot_dirty = false;
+            }
             // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
             // forward, so its activations are gone before the student's graph is built.
             let teacher_batch = match &self.teacher {
@@ -155,10 +160,11 @@ impl Trainer {
             loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
             let kd = kd.map(|kd| [kd.cls, kd.dfl]);
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
-            let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
+            let finite = loss.is_finite() && kd_finite && snapshot.all_finite_live()?;
             let items = loss.items;
             let wiou_batch_mean = loss.mean_iou_loss;
             if finite {
+                snapshot_dirty = !snapshot.is_empty();
                 if epoch_loss_cfg.box_loss == BoxLossKind::WiouV3
                     && let Some(m) = wiou_batch_mean
                     && m.is_finite()
