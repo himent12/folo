@@ -4,14 +4,21 @@
  * coordinates on a line under the list, and the classes found (each a show / hide toggle) as a tab between the two;
  * below 1024 px it is a panel under the image with the coordinates as columns.
  */
-import { bindable, css, Dynamic, effect, For, type Signal } from 'fw';
+import Check from '$icons/check';
+import Copy from '$icons/copy';
+import { bindable, computed, css, Dynamic, effect, For, onCleanup, signal, type Signal } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
+import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import Tabs from '$lib/ui/Tabs';
+import { toast } from '$lib/ui/toast';
+import { tooltip } from '$lib/ui/tooltip';
+import { jsonText } from './json';
 import JsonView from './JsonView';
 import { FETCH, px, score } from './predict';
 import Swatch from './Swatch';
+import { confidenceSummary } from './viewState';
 
 type Det = Prediction['boxes'][number];
 
@@ -53,6 +60,41 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     if (!props.rail && tab.get() === 'classes') tab.set('detections');
   });
   const sel = () => (props.selectedIdx === null ? null : (props.rows.find((r) => r.i === props.selectedIdx)?.b ?? null));
+  const summary = computed(() => (props.result ? confidenceSummary(props.rows) : null));
+  const copied = signal(false);
+  const copyStatus = signal('');
+  let copyReset: ReturnType<typeof setTimeout> | undefined;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+    clearTimeout(copyReset);
+  });
+
+  // Reset the transient "Copied" check when the exported payload changes.
+  effect(() => {
+    void props.json;
+    clearTimeout(copyReset);
+    copied.set(false);
+  });
+
+  async function copyDetectionsJson() {
+    if (!props.json) return;
+    try {
+      await navigator.clipboard.writeText(jsonText(props.json));
+      if (!alive) return;
+      copied.set(true);
+      const n = props.rows.length;
+      copyStatus.set(`Copied ${n} ${n === 1 ? 'detection' : 'detections'} as JSON`);
+      clearTimeout(copyReset);
+      copyReset = setTimeout(() => {
+        if (alive) copied.set(false);
+      }, 1600);
+    } catch {
+      if (!alive) return;
+      copyStatus.set('Could not copy detections JSON');
+      toast.info('Copy failed', 'Your browser blocked clipboard access.');
+    }
+  }
 
   return (
     <div class="results" class:rail={!!props.rail}>
@@ -68,7 +110,23 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               { value: 'json', label: 'JSON' },
             ]}
           />
+          {props.result && props.json ? (
+            <span class="copy-json" use:tooltip={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={copied.get() ? Check : Copy}
+                aria-label={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}
+                onclick={copyDetectionsJson}
+              >
+                {props.rail ? null : copied.get() ? 'Copied' : 'Copy JSON'}
+              </Button>
+            </span>
+          ) : null}
         </div>
+        <span class="sr-only" role="status" aria-live="polite">
+          {copyStatus.get()}
+        </span>
         <div id="pg-panel" role="tabpanel" aria-labelledby={`pg-${view()}`}>
           {!props.result ? (
             <p class="placeholder">
@@ -101,7 +159,47 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               ) : null}
             </p>
           ) : (
-            <div class="scroll">
+            <>
+              {summary.get() ? (
+                <div
+                  class="conf-summary num"
+                  aria-label={`Confidence distribution for ${summary.get()!.count} ${summary.get()!.count === 1 ? 'detection' : 'detections'}: median ${score(summary.get()!.median)}, range ${score(summary.get()!.min)} to ${score(summary.get()!.max)}, ${summary.get()!.high} high, ${summary.get()!.mid} medium, ${summary.get()!.low} low`}
+                >
+                  <div class="conf-meta">
+                    <span class="conf-count">
+                      <b>{summary.get()!.count}</b> {summary.get()!.count === 1 ? 'detection' : 'detections'}
+                    </span>
+                    <span class="conf-range">
+                      med <b>{score(summary.get()!.median)}</b>
+                      <span class="sep" aria-hidden="true">
+                        ·
+                      </span>
+                      {score(summary.get()!.min)}–{score(summary.get()!.max)}
+                    </span>
+                  </div>
+                  <div
+                    class="conf-bar"
+                    title={`High (≥0.75): ${summary.get()!.high} · Mid (0.50–0.74): ${summary.get()!.mid} · Low (<0.50): ${summary.get()!.low}`}
+                    aria-hidden="true"
+                  >
+                    {summary.get()!.high > 0 ? <span class="seg-high" style={{ flexGrow: summary.get()!.high }}></span> : null}
+                    {summary.get()!.mid > 0 ? <span class="seg-mid" style={{ flexGrow: summary.get()!.mid }}></span> : null}
+                    {summary.get()!.low > 0 ? <span class="seg-low" style={{ flexGrow: summary.get()!.low }}></span> : null}
+                  </div>
+                  <div class="conf-buckets">
+                    <span class="bucket">
+                      <span class="dot high" aria-hidden="true"></span>≥0.75 <b>{summary.get()!.high}</b>
+                    </span>
+                    <span class="bucket">
+                      <span class="dot mid" aria-hidden="true"></span>0.50–0.74 <b>{summary.get()!.mid}</b>
+                    </span>
+                    <span class="bucket">
+                      <span class="dot low" aria-hidden="true"></span>&lt;0.50 <b>{summary.get()!.low}</b>
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+              <div class="scroll">
               <table class="table dense">
                 <thead>
                   <tr>
@@ -212,6 +310,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                 </p>
               ) : null}
             </div>
+            </>
           )}
         </div>
       </Dynamic>
@@ -226,7 +325,94 @@ function Bare(props: { pad?: string; children?: JSX.Element }) {
 
 css`
   .tabs-row {
-    padding: 0 var(--space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) 0 var(--space-4);
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .tabs-row :global(.tabs) {
+    flex: 1;
+    border-bottom: 0;
+  }
+  .tabs-row :global(.tabs button::after) {
+    bottom: 0;
+  }
+  .copy-json {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+  .conf-summary {
+    display: grid;
+    gap: 6px;
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--line-subtle);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .conf-meta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .conf-summary b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .conf-range {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .conf-range .sep {
+    color: var(--text-tertiary);
+  }
+  .conf-bar {
+    display: flex;
+    gap: 2px;
+    height: 4px;
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    background: var(--bg-active);
+  }
+  .seg-high {
+    background: var(--success-solid);
+  }
+  .seg-mid {
+    background: var(--warning-solid);
+  }
+  .seg-low {
+    background: var(--danger-solid);
+  }
+  .conf-buckets {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    color: var(--text-tertiary);
+  }
+  .bucket {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-full);
+    flex-shrink: 0;
+  }
+  .dot.high {
+    background: var(--success-solid);
+  }
+  .dot.mid {
+    background: var(--warning-solid);
+  }
+  .dot.low {
+    background: var(--danger-solid);
   }
   /* A state in the frame (DESIGN_DIRECTION 8): one line with the panel's 16 px padding, on its left edge, never a
      centred block held open. */

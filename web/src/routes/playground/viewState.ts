@@ -103,6 +103,50 @@ export function areDefaultThresholds(conf: number, iou: number, maxDet: number, 
   return conf === DEFAULTS.conf && (o2o || iou === DEFAULTS.iou) && maxDet === DEFAULTS.maxDet;
 }
 
+/** Summary of visible detection confidence scores for the live distribution badge. */
+export interface ConfidenceSummary {
+  count: number;
+  min: number;
+  median: number;
+  max: number;
+  mean: number;
+  /** High confidence detections (score >= 0.75). */
+  high: number;
+  /** Medium confidence detections (0.50 <= score < 0.75). */
+  mid: number;
+  /** Low confidence detections (score < 0.50). */
+  low: number;
+}
+
+/** Computes live confidence distribution stats for currently visible detections, or null when empty. */
+export function confidenceSummary(rows: readonly { b: Pick<Det, 'score'> }[]): ConfidenceSummary | null {
+  const count = rows.length;
+  if (count === 0) return null;
+  const scores = rows.map((r) => r.b.score).sort((a, b) => a - b);
+  let sum = 0;
+  let high = 0;
+  let mid = 0;
+  let low = 0;
+  for (const s of scores) {
+    sum += s;
+    if (s >= 0.75) high++;
+    else if (s >= 0.5) mid++;
+    else low++;
+  }
+  const midIdx = Math.floor(count / 2);
+  const median = count % 2 === 1 ? scores[midIdx]! : (scores[midIdx - 1]! + scores[midIdx]!) / 2;
+  return {
+    count,
+    min: scores[0]!,
+    median,
+    max: scores[count - 1]!,
+    mean: sum / count,
+    high,
+    mid,
+    low,
+  };
+}
+
 /** Structured payload shown in the Playground's JSON tab. */
 export function predictionJson(
   pred: Prediction | null,
