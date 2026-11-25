@@ -171,6 +171,27 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     hide();
   };
 
+  const paint = (el: HTMLDivElement) => {
+    if (!o) return;
+    el.textContent = o.text;
+    if (o.keys) {
+      const k = document.createElement('span');
+      k.className = 'folo-tooltip-keys';
+      for (const part of formatKeys(o.keys)) {
+        const kb = document.createElement('kbd');
+        kb.textContent = part;
+        k.appendChild(kb);
+      }
+      el.appendChild(k);
+    }
+    const r = node.getBoundingClientRect();
+    const t = el.getBoundingClientRect();
+    const p = placeTip(r, t, o.side, boundsFor(node, t.width));
+    el.dataset.side = p.side;
+    el.style.setProperty('--arrow', `${p.arrow}px`);
+    el.style.transform = `translate(${p.x}px, ${p.y}px)`;
+  };
+
   const show = (immediate: boolean, focused?: HTMLElement) => {
     if (!o) return;
     clearTimeout(showTimer);
@@ -183,26 +204,10 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       clearTimeout(hideTimer);
       if (activeAnchor && activeAnchor !== node) hideCurrent?.();
       const el = mount(node.closest<HTMLElement>('dialog[open]') ?? document.body);
-      el.textContent = o.text;
-      if (o.keys) {
-        const k = document.createElement('span');
-        k.className = 'folo-tooltip-keys';
-        for (const part of formatKeys(o.keys)) {
-          const kb = document.createElement('kbd');
-          kb.textContent = part;
-          k.appendChild(kb);
-        }
-        el.appendChild(k);
-      }
       el.dataset.show = '';
       activeAnchor = node;
       hideCurrent = hide;
-      const r = node.getBoundingClientRect();
-      const t = el.getBoundingClientRect();
-      const p = placeTip(r, t, o.side, boundsFor(node, t.width));
-      el.dataset.side = p.side;
-      el.style.setProperty('--arrow', `${p.arrow}px`);
-      el.style.transform = `translate(${p.x}px, ${p.y}px)`;
+      paint(el);
       // A new target (hover described one button, focus lands on another): the old one stops being described.
       const next = focused ?? target();
       if (next !== described) release(described);
@@ -258,7 +263,11 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   return {
     update(next: TooltipOptions) {
       o = norm(next);
-      if (!o && (activeAnchor === node || pendingAnchor === node)) hide();
+      if (!o) {
+        if (activeAnchor === node || pendingAnchor === node) hide();
+      } else if (activeAnchor === node && tip && 'show' in tip.dataset) {
+        paint(tip);
+      }
     },
     destroy() {
       o = null;

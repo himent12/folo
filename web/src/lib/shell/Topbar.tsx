@@ -12,6 +12,7 @@ import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Kbd from '$lib/ui/Kbd';
+import { tooltip } from '$lib/ui/tooltip';
 import Logo from './Logo';
 import OfflineNotice from './OfflineNotice';
 import { page } from './crumbs';
@@ -20,7 +21,20 @@ export default function Topbar(props: { onsearch: () => void }) {
   /** On phones the breadcrumb collapses to its last item; a back button leads to the parent. */
   const parent = computed(() => (page.crumbs.length >= 2 ? page.crumbs[page.crumbs.length - 2] : undefined));
   const themeIcon = computed(() => (prefs.theme === 'dark' ? Moon : prefs.theme === 'light' ? Sun : Monitor));
-  const themeLabel = computed(() => `Theme: ${prefs.theme} (click to change)`);
+  const themeDetail = computed(() => {
+    const active = prefs.activeTheme;
+    const sameAsMode = active.name.toLowerCase() === active.mode;
+    const detail = prefs.theme === 'system' ? (sameAsMode ? 'system' : `system, ${active.mode}`) : sameAsMode ? '' : active.mode;
+    return { name: active.name, detail };
+  });
+  const themeAria = computed(() => {
+    const { name, detail } = themeDetail.get();
+    return `Cycle theme (${name}${detail ? `, ${detail}` : ''})`;
+  });
+  const themeTip = computed(() => {
+    const { name, detail } = themeDetail.get();
+    return `Theme: ${name}${detail ? ` (${detail})` : ''} · click to cycle`;
+  });
 
   return (
     <header class="topbar" data-tip-chrome>
@@ -65,7 +79,9 @@ export default function Topbar(props: { onsearch: () => void }) {
             <Kbd keys="Mod+K" subtle />
           </span>
         </button>
-        <Button variant="ghost" icon={themeIcon.get()} aria-label={themeLabel.get()} title={themeLabel.get()} onclick={() => prefs.cycleTheme()} />
+        <span class="theme-wrap" use:tooltip={{ text: themeTip.get(), side: 'bottom' }}>
+          <Button variant="ghost" icon={themeIcon.get()} aria-label={themeAria.get()} onclick={() => prefs.cycleTheme()} />
+        </span>
         <span class="mobile-only">
           <Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" />
         </span>
@@ -143,6 +159,9 @@ css`
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+  .theme-wrap {
+    display: inline-flex;
   }
   .search {
     display: flex;
