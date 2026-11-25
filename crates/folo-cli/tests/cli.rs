@@ -35,6 +35,20 @@ fn doctor_json() {
     assert_eq!(code, 0, "{stderr}");
     let v = &json_lines(&stdout)[0];
     assert!(v["cpu"]["threads"].as_u64().unwrap() >= 1);
+    let simd = &v["cpu"]["simd"];
+    assert!(
+        simd["avx2"].is_boolean()
+            && simd["avx_vnni"].is_boolean()
+            && simd["neon"].is_boolean()
+            && simd["int8_fast"].is_boolean(),
+        "{simd}"
+    );
+    let paths = &v["paths"];
+    for k in ["data_dir", "weights_dir", "cache_dir"] {
+        let p = paths[k].as_str().unwrap_or_else(|| panic!("paths.{k} missing: {paths}"));
+        assert!(!p.is_empty() && !p.contains('\\'), "paths.{k}={p}");
+    }
+    assert!(paths["cache_enabled"].is_boolean(), "{paths}");
     assert!(v["memory"]["total_bytes"].as_u64().unwrap() > 0);
     assert!(v["web_dist"]["exists"].is_boolean());
     assert_eq!(v["gpu_detection"], "wgpu");
@@ -56,6 +70,8 @@ fn doctor_json() {
     }
     assert!(stderr.contains("amp "), "{stderr}");
     assert!(stderr.contains("cpu"), "human text goes to stderr in --json mode");
+    assert!(stderr.contains("simd"), "{stderr}");
+    assert!(stderr.contains("data ") && stderr.contains("weights ") && stderr.contains("cache "), "{stderr}");
     assert!(stderr.contains("gpu"), "{stderr}");
 
     // `--version` names the same build: folo 0.1.0 (1a2b3c4d5e6f 2026-11-07).
@@ -70,6 +86,58 @@ fn doctor_json() {
     assert!(d.iter().all(|p| p.parse::<u32>().is_ok()), "{line}");
     assert_eq!(v["git_sha"], sha);
     assert_eq!(v["build_date"], date);
+}
+
+#[test]
+fn doctor_reports_resolved_dirs_and_scalar_override() {
+    let dir = TestDir::new("doctor-paths");
+    let home = dir.join("home");
+    let data = dir.join("data");
+    let weights = dir.join("weights");
+
+    // Explicit overrides: `FOLO_DATA_DIR` wins over `FOLO_HOME`, relative `FOLO_CACHE_DIR` resolves to absolute,
+    // `FOLO_Q8_SCALAR=1` disables fast int8, and `FOLO_NO_CACHE=1` (from `folo_cmd`) marks `cache_enabled: false`.
+    let out = folo_cmd()
+        .current_dir(&dir)
+        .args(["doctor", "--json"])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env("FOLO_HOME", &home)
+        .env("FOLO_DATA_DIR", &data)
+        .env("FOLO_WEIGHTS_DIR", &weights)
+        .env("FOLO_CACHE_DIR", "rel-cache")
+        .env("FOLO_Q8_SCALAR", "1")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let v = &json_lines(&stdout)[0];
+    assert_eq!(v["cpu"]["simd"]["int8_fast"], false, "{v}");
+    assert_eq!(v["paths"]["data_dir"], folo_api::json::path(&data), "{v}");
+    assert_eq!(v["paths"]["weights_dir"], folo_api::json::path(&weights), "{v}");
+    assert_eq!(v["paths"]["cache_dir"], folo_api::json::path(dir.join("rel-cache")), "{v}");
+    assert_eq!(v["paths"]["cache_enabled"], false, "{v}");
+    assert!(stderr.contains("FOLO_Q8_SCALAR"), "{stderr}");
+    assert!(stderr.contains("FOLO_NO_CACHE"), "{stderr}");
+
+    // Fallback to `FOLO_HOME` with caches enabled (`FOLO_NO_CACHE=0`, `webgpu` skips GPU pipeline cache writes).
+    let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["doctor", "--json"])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env("FOLO_HOME", &home)
+        .env("FOLO_NO_CACHE", "0")
+        .env_remove("FOLO_DATA_DIR")
+        .env_remove("FOLO_WEIGHTS_DIR")
+        .env_remove("FOLO_CACHE_DIR")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let v = &json_lines(&stdout)[0];
+    assert_eq!(v["paths"]["data_dir"], folo_api::json::path(&home), "{v}");
+    assert_eq!(v["paths"]["weights_dir"], folo_api::json::path(home.join("weights")), "{v}");
+    assert_eq!(v["paths"]["cache_dir"], folo_api::json::path(home.join("cache")), "{v}");
+    assert_eq!(v["paths"]["cache_enabled"], true, "{v}");
+    assert!(!stderr.contains("FOLO_NO_CACHE"), "{stderr}");
 }
 
 #[test]

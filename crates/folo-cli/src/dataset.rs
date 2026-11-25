@@ -187,6 +187,22 @@ fn hist_rows(h: &Histogram, label: impl Fn(f64, f64, bool) -> String) -> Vec<Str
         .collect()
 }
 
+/// Maximum character width of a class label in the human `folo dataset stats` table.
+const MAX_CLASS_NAME_CHARS: usize = 24;
+
+/// Truncates `name` to at most `max_chars` Unicode scalar values, marking truncated labels with `…`.
+fn truncate_class_name(name: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let mut s: String = name.chars().take(max_chars - 1).collect();
+    s.push('…');
+    s
+}
+
 fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> {
     let [train, val, test] = ds.split_sizes();
     let images = train + val + test;
@@ -206,19 +222,27 @@ fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> 
     ];
     let max = s.class_counts.iter().copied().max().unwrap_or(0);
     let total = s.boxes.max(1);
-    let width = ds.classes.iter().map(|c| c.chars().count()).max().unwrap_or(5).clamp(5, 24);
-    l.push(format!("  {:<width$} {:>8}  {:>6}", "class", "boxes", "share"));
     const SHOWN: usize = 40;
     let mut order: Vec<usize> = (0..s.class_counts.len()).collect();
     if order.len() > SHOWN {
         order.sort_by_key(|&i| std::cmp::Reverse(s.class_counts[i]));
     }
-    for &i in order.iter().take(SHOWN) {
+    let idx_width = s.class_counts.len().saturating_sub(1).to_string().len().max(2);
+    let shown_names: Vec<(usize, String)> = order
+        .iter()
+        .take(SHOWN)
+        .map(|&i| {
+            let raw = ds.classes.get(i).cloned().unwrap_or_else(|| format!("class{i}"));
+            (i, truncate_class_name(&raw, MAX_CLASS_NAME_CHARS))
+        })
+        .collect();
+    let width =
+        shown_names.iter().map(|(_, n)| n.chars().count()).max().unwrap_or(5).clamp(5, MAX_CLASS_NAME_CHARS);
+    l.push(format!("  {:>idx_width$}  {:<width$} {:>8}  {:>6}", "id", "class", "boxes", "share"));
+    for (i, label) in shown_names {
         let c = s.class_counts[i];
-        let name = ds.classes.get(i).cloned().unwrap_or_else(|| format!("class{i}"));
-        let name: String = name.chars().take(width).collect();
         l.push(format!(
-            "  {name:<width$} {c:>8}  {:>5.1}%  {}",
+            "  {i:>idx_width$}  {label:<width$} {c:>8}  {:>5.1}%  {}",
             100.0 * c as f64 / total as f64,
             bar(c, max, 30)
         ));
@@ -527,5 +551,19 @@ mod tests {
         assert_eq!(bar(1, 1000, 4), "▏", "non-zero values show a sliver");
         assert_eq!(bar(5, 10, 3), "█▌");
         assert_eq!(rel(Path::new("/d/x/images/a.jpg"), Path::new("/d/x")), "images/a.jpg");
+    }
+
+    #[test]
+    fn truncate_class_name_marks_long_labels_with_ellipsis() {
+        assert_eq!(truncate_class_name("circle", 24), "circle");
+        assert_eq!(truncate_class_name("a".repeat(24).as_str(), 24), "a".repeat(24));
+        let truncated = truncate_class_name("industrial_safety_helmet_yellow", 24);
+        assert_eq!(truncated.chars().count(), 24);
+        assert!(truncated.ends_with('…'), "{truncated}");
+        assert_eq!(truncated, "industrial_safety_helme…");
+        // Unicode-safe truncation.
+        assert_eq!(truncate_class_name("héllo_wörld", 5), "héll…");
+        assert_eq!(truncate_class_name("abc", 1), "…");
+        assert_eq!(truncate_class_name("abc", 0), "");
     }
 }

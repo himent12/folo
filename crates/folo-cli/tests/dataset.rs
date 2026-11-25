@@ -71,6 +71,11 @@ fn synth_then_stats_and_a_clean_check() {
         stdout.contains("box size") && stdout.contains("boxes per image") && stdout.contains('█'),
         "{stdout}"
     );
+    assert!(stdout.contains("id  class"), "{stdout}");
+    assert!(
+        stdout.contains(" 0  circle") && stdout.contains(" 1  box") && stdout.contains(" 2  star"),
+        "{stdout}"
+    );
 
     let (code, stdout, stderr) = folo(&["dataset", "check", s(&dir), "--json"]);
     assert_eq!(code, 0, "{stderr}");
@@ -84,6 +89,27 @@ fn synth_then_stats_and_a_clean_check() {
     let (code, stdout, _) = folo(&["dataset", "synth", s(&dir), "--images", "2", "--json"]);
     assert_eq!(code, 1);
     assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "output_exists");
+}
+
+/// Two class names sharing a 24-character prefix stay distinguishable in human `folo dataset stats` (via class
+/// index and ellipsis) while `--json` keeps the full names.
+#[test]
+fn stats_disambiguates_long_truncated_class_names_in_human_output() {
+    let t = TestDir::new("cli-stats-long-names");
+    let a = "industrial_safety_helmet_yellow";
+    let b = "industrial_safety_helmet_white";
+    let dir = synth(&t, "long_names", &["--classes", &format!("{a},{b}")]);
+
+    let (code, stdout, stderr) = folo(&["dataset", "stats", s(&dir), "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let v = &json_lines(&stdout)[0];
+    assert_eq!(v["classes"], serde_json::json!([a, b]), "JSON keeps full class names");
+
+    let (code, stdout, stderr) = folo(&["dataset", "stats", s(&dir)]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(" 0  industrial_safety_helme…"), "{stdout}");
+    assert!(stdout.contains(" 1  industrial_safety_helme…"), "{stdout}");
+    assert!(!stdout.contains(a) && !stdout.contains(b), "long labels are truncated in human table: {stdout}");
 }
 
 /// A synth stopped part way (issue #316) leaves its folder marked unfinished: `stats` and `check` refuse it, the
