@@ -359,7 +359,7 @@ trait as the HTTP handlers: the embedded `RealStore` / `MockStore`, or `proxy::H
 
 ### folo-cli
 The `folo` binary ([CLI.md](CLI.md)): `serve`, `describe`, `doctor`, `train`, `stop`, `val`, `predict`, `export`,
-`bench`, `dataset check|stats|synth|convert`, `weights`, `cloud`, `label` and `mcp` (Model Context Protocol server over
+`quantize`, `bench`, `dataset check|stats|synth|convert`, `weights`, `cloud`, `label` and `mcp` (Model Context Protocol server over
 stdio so agents can train and run models); `bench` and `label` run folo-mcp's benchmark and labeling operations. Every
 command takes
 `--json` (one JSON object per line on stdout, human text on stderr; `folo mcp` keeps stdout for the protocol, also
