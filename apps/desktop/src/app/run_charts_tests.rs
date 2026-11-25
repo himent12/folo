@@ -123,9 +123,8 @@ fn loss_chart_toggles_switch_smoothing_and_log_scale() {
 fn training_loss_header_fits_without_wrapping_at_1120x620() {
     use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
     let api = Arc::new(MockBackend::new(4200, true));
-    let mut app =
-        HeadlessApp::new(HeadlessOptions { size: size(px(1120.), px(620.)), ..Default::default() })
-            .with_assets(crate::Assets);
+    let mut app = HeadlessApp::new(HeadlessOptions { size: size(px(1120.), px(620.)), ..Default::default() })
+        .with_assets(crate::Assets);
     let window = app.update(|cx| {
         cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
         crate::app::bind_keys(cx);
@@ -155,7 +154,7 @@ fn training_loss_header_fits_without_wrapping_at_1120x620() {
                 (py(b.origin.y) >= 40.
                     && py(b.bottom()) <= 300.
                     && (py(b.origin.y) < py(clip.origin.y) - 0.5 || py(b.bottom()) > py(clip.bottom()) + 0.5))
-                .then_some((*b, *clip))
+                    .then_some((*b, *clip))
             }
             _ => None,
         })
