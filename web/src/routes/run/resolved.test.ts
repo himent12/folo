@@ -38,6 +38,7 @@ describe('Run › Config wording', () => {
     expect(settingText(effectiveBatchSetting(r))).toBe('64 (8 × 8)');
     expect(accumulationText(4, 16)).toBe('4 batches per optimizer step · effective batch 64');
     expect(settingText(warmupSetting(r))).toBe('48 optimizer steps (3 epochs)');
+    expect(settingText(warmupSetting({ ...r, warmup_iters: 1, optimizer_steps_per_epoch: 1 }))).toBe('1 optimizer step (1 epoch)');
     expect(settingText(warmupSetting({ ...r, warmup_iters: 100 }))).toBe('100 optimizer steps (6.3 epochs)');
     expect(decaySetting(r).value).toBe('Linear to 1%');
     expect(momentumSetting(r)).toEqual(['Momentum', { value: '0.937' }]);

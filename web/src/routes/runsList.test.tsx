@@ -498,6 +498,28 @@ describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
     expect(target.querySelector('.list-foot')?.textContent?.trim()).toBe(`0 of ${runs.length} runs`);
   });
 
+  it('treats duplicate ?sel= ids as one selection and keeps Compare disabled until two distinct runs are selected', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.runs();
+    const first = list[0]!.id;
+    const second = list[1]!.id;
+    await open(Runs, `/runs?sel=${first},${first}`, api);
+    await table('table.runs', (t) => !!t.querySelector('tbody tr[data-row]'), 'the rows');
+
+    const compareEl = () => [...target.querySelectorAll<HTMLElement>('header a, header button')].find((el) => el.textContent?.includes('Compare'))!;
+    expect(compareEl().querySelector('.count')?.textContent?.trim()).toBe('1');
+    expect(compareEl().hasAttribute('disabled') || compareEl().getAttribute('aria-disabled') === 'true').toBe(true);
+    expect(target.querySelector('header .cmp-hint')?.textContent).toContain('Select one more run to compare');
+
+    // Picking a second distinct run enables Compare with both distinct ids.
+    target.querySelector<HTMLInputElement>(`tr[data-id="${second}"] .check input`)!.click();
+    flushSync();
+    expect(compareEl().querySelector('.count')?.textContent?.trim()).toBe('2');
+    expect(compareEl().getAttribute('href')).toBe(`#/runs/compare?ids=${first},${second}`);
+    expect(compareEl().hasAttribute('disabled')).toBe(false);
+    expect(compareEl().getAttribute('aria-disabled')).toBeNull();
+  });
+
   it('offers a Clear selection button once runs are picked and explains the 4-run cap on disabled checkboxes', async () => {
     const api = new MockApi('normal', 0);
     await open(Runs, '/runs', api);

@@ -270,6 +270,21 @@ export default function Settings() {
   // Changed in another tab too (prefs follows the storage event): the control shows what the sizes use.
   effect(() => units.set(prefs.units));
 
+  /** Explicit activation of a jump link: scroll and focus immediately, drop any pending URL hold, and sync `?section=`
+   *  in place so sharing the URL opens the chosen section while passive scroll stays free of history churn. */
+  function jumpTo(id: string, keyboard: boolean) {
+    cancelAnimationFrame(jumping);
+    jumping = 0;
+    unhold();
+    opened = id;
+    goTo(id, keyboard);
+    if (router.route.name === 'settings' && router.route.query.get('section') !== id) {
+      const next = new URLSearchParams(router.route.query);
+      next.set('section', id);
+      router.go(`/settings?${next.toString()}`, { replace: true });
+    }
+  }
+
   /** A section link in the strip (below 1024 px). */
   const link = (s: () => { id: string; label: string }) => (
     <a
@@ -277,9 +292,10 @@ export default function Settings() {
       class:on={current.get() === s().id}
       aria-current={current.get() === s().id ? 'location' : undefined}
       onclick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
         e.preventDefault();
         // A click from the keyboard (Enter) has no pointer detail.
-        goTo(s().id, e.detail === 0);
+        jumpTo(s().id, e.detail === 0);
       }}
     >
       {s().label}

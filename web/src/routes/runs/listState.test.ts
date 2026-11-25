@@ -22,6 +22,13 @@ describe('the Runs list state in the URL', () => {
     });
   });
 
+  it('deduplicates sel in insertion order before applying the four-run cap', () => {
+    expect(readState(new URLSearchParams('sel=run_a,run_a')).sel).toEqual(['run_a']);
+    expect(readState(new URLSearchParams('sel=,run_a,,run_a,')).sel).toEqual(['run_a']);
+    expect(readState(new URLSearchParams('sel=a,a,b,a,c,b,d,e')).sel).toEqual(['a', 'b', 'c', 'd']);
+    expect(writeState({ ...DEFAULT_STATE, sel: ['a', 'a', 'b', 'c', 'b', 'd', 'e'] })).toBe('sel=a,b,c,d');
+  });
+
   it('summarizes active status and search filters for empty-state recovery', () => {
     expect(emptyFilterSummary({ filter: 'failed', q: 'bccd' })).toBe('No failed runs match "bccd".');
     expect(emptyFilterSummary({ filter: 'active', q: '  ' })).toBe('No active runs right now.');

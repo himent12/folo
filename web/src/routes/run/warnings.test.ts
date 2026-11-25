@@ -69,6 +69,24 @@ describe('shortCause and scheduleTitle', () => {
     expect(scheduleTitle([WARMUP])).toBe('Mostly warmup:');
   });
 
+  it('pluralizes optimizer steps cleanly for 0, 1, and 2+ steps while accepting both singular and plural trainer logs', () => {
+    const zeroLog = 'this run takes only 0 optimizer steps (0 epochs × 0: 0 training images, batch 16); Train for at least 1 epochs';
+    const onePluralLog = 'this run takes only 1 optimizer steps (1 epochs × 1: 4 training images, batch 16); Train for at least 200 epochs';
+    const oneSingularLog = 'this run takes only 1 optimizer step (1 epoch × 1: 4 training images, batch 16); Train for at least 200 epochs';
+    const twoLog = 'this run takes only 2 optimizer steps (2 epochs × 1: 4 training images, batch 16); Train for at least 200 epochs';
+
+    expect(scheduleWarnings([line('warn', onePluralLog), line('warn', oneSingularLog)])).toEqual([onePluralLog, oneSingularLog]);
+    expect(shortCause([zeroLog])).toBe('0 optimizer steps');
+    expect(shortCause([onePluralLog])).toBe('1 optimizer step');
+    expect(shortCause([oneSingularLog])).toBe('1 optimizer step');
+    expect(shortCause([twoLog])).toBe('2 optimizer steps');
+    expect(shortCause(["warmup takes 1 of the run's 1 optimizer steps"])).toBe('warmup takes 1 of 1 optimizer step');
+    expect(shortCause(["warmup takes 1 of the run's 2 optimizer steps"])).toBe('warmup takes 1 of 2 optimizer steps');
+    expect(plain(onePluralLog)).toMatch(/^This run takes only 1 optimizer step \(1 per epoch: 4 training images, batch 16\)\./);
+    expect(plain(oneSingularLog)).toMatch(/^This run takes only 1 optimizer step \(1 per epoch: 4 training images, batch 16\)\./);
+    expect(minimumEpochs([oneSingularLog])).toBe(200);
+  });
+
   it('do not say a run that scored well was too short to learn, nor that its mAP is near 0', () => {
     expect(scheduleTitle([SHORT], true)).toBe('More epochs would likely improve this:');
     expect(scheduleTitle([WARMUP], true)).toBe('Mostly warmup:');
