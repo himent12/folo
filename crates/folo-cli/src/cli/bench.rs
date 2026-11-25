@@ -38,7 +38,7 @@ pub struct BenchServerArgs {
     #[arg(long, env = "FOLO_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
     /// Use the `folo serve` at this URL (e.g. http://127.0.0.1:7878) instead of the data dir.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, env = "FOLO_SERVER", value_name = "URL", value_parser = NonEmptyStringValueParser::new())]
     pub server: Option<String>,
     /// The token that `folo serve` was started with (`--token`).
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]

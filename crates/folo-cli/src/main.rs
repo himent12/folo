@@ -521,4 +521,46 @@ mod tests {
         let hint = e.hint.as_deref().unwrap();
         assert_eq!(hint, "run `folo dataset --help` or `folo describe dataset --json`");
     }
+
+    /// Every command/subcommand in the CLI tree that defines `--server` binds it to `FOLO_SERVER` and rejects empty
+    /// values.
+    #[test]
+    fn server_flag_advertises_folo_server_env_everywhere() {
+        fn check_cmd(cmd: &clap::Command, found: &mut Vec<String>, prefix: &str) {
+            let path = if prefix.is_empty() {
+                cmd.get_name().to_string()
+            } else {
+                format!("{prefix} {}", cmd.get_name())
+            };
+            for arg in cmd.get_arguments() {
+                if arg.get_long() == Some("server") {
+                    assert_eq!(
+                        arg.get_env().and_then(|e| e.to_str()),
+                        Some("FOLO_SERVER"),
+                        "{path} --server must bind FOLO_SERVER"
+                    );
+                    found.push(path.clone());
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                check_cmd(sub, found, &path);
+            }
+        }
+        let mut found = Vec::new();
+        check_cmd(&Cli::command(), &mut found, "");
+        assert!(found.contains(&"folo mcp".to_string()), "{found:?}");
+        assert!(found.contains(&"folo bench catalog".to_string()), "{found:?}");
+        assert!(found.contains(&"folo label jobs".to_string()), "{found:?}");
+        // All 1 mcp + 8 bench + 12 label subcommands expose --server with FOLO_SERVER.
+        assert_eq!(found.len(), 21, "{found:?}");
+
+        // Explicit empty `--server ""` is rejected as a usage error.
+        for argv in [
+            &["folo", "mcp", "--server", ""][..],
+            &["folo", "bench", "catalog", "--server", ""],
+            &["folo", "label", "jobs", "--server", ""],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} must fail");
+        }
+    }
 }

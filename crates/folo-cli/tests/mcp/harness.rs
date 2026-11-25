@@ -388,6 +388,6 @@ pub(super) fn remove_dir_link(link: &std::path::Path) {
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 pub fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
-    c.env("FOLO_NO_CACHE", "1");
+    c.env("FOLO_NO_CACHE", "1").env_remove("FOLO_SERVER");
     c
 }

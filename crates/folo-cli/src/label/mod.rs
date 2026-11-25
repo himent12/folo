@@ -198,7 +198,7 @@ fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
     if let Some(url) = &conn.server {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(usage(format!(
-                "--server must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
             )));
         }
         let data_dir = conn.data_dir.clone().unwrap_or_else(crate::default_data_dir);

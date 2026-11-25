@@ -101,7 +101,7 @@ fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliErro
     if let Some(url) = &conn.server {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(usage(format!(
-                "--server must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
             )));
         }
         return Ok(http(url));
@@ -203,7 +203,7 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
     let model = matches!(who, Contestant::Model { .. });
     let s = open(&a.conn, a.device.as_deref())?;
     if a.device.is_some() && s.local.is_none() {
-        let why = if remote { "--server" } else { "the `folo serve` that owns the data dir" };
+        let why = if remote { "--server / FOLO_SERVER" } else { "the `folo serve` that owns the data dir" };
         return Err(usage(format!(
             "--device is for an entry run in this process; {why} runs it on its own device"
         )));

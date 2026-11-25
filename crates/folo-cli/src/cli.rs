@@ -891,7 +891,7 @@ pub struct McpArgs {
     pub confine: bool,
     /// Forward every tool to a running `folo serve` at this URL (e.g. http://127.0.0.1:7878) instead of running
     /// the engine in this process.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, env = "FOLO_SERVER", value_name = "URL", value_parser = NonEmptyStringValueParser::new())]
     pub server: Option<String>,
     /// With --server: the token that `folo serve` was started with (`--token`), sent as `Authorization: Bearer`.
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]

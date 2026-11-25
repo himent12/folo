@@ -147,6 +147,7 @@ impl Env {
             .env("FOLO_ANTIGRAVITY_BIN", &self.antigravity)
             .env("FOLO_GPU_ADAPTER", "folo-cli-tests-no-such-adapter")
             .env_remove("FOLO_DATA_DIR")
+            .env_remove("FOLO_SERVER")
             .env_remove("FOLO_TOKEN");
         c
     }

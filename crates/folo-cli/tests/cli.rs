@@ -705,9 +705,134 @@ fn serve_bind_errors_distinguish_occupied_port_from_bad_host() {
     }
 }
 
+/// `FOLO_SERVER` provides a fallback URL wherever `--server` is accepted (`mcp`, `bench`, `label`), with clear
+/// precedence: `--server` flag > `FOLO_SERVER` env > embedded / local data-dir fallback.
+#[test]
+fn folo_server_env_fallback_and_precedence() {
+    use std::io::Write;
+    use std::time::Duration;
+
+    // A real `folo serve` on a fresh data dir (supports both `/api/bench` and `/api/label` and `/api/system`).
+    let dir = TestDir::new("cli-folo-server-env");
+    let mut server: ChildGuard = folo_cmd()
+        .args(["--json", "serve", "--port", "0", "--data-dir", dir.to_str().unwrap()])
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .env_remove("FOLO_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let line = read_line_within(server.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+    assert_eq!(listening["event"], "listening", "{line}");
+    let url = listening["url"].as_str().unwrap().to_string();
+
+    // Another empty data dir (no server owns it) to confirm env/flag routes through `url` rather than local store.
+    let other_dir = TestDir::new("cli-folo-server-env-other");
+
+    // 1. `FOLO_SERVER` fallback on `folo bench catalog` and `folo label jobs`.
+    for (args, check_key) in
+        [(&["bench", "catalog", "--json"][..], "axes"), (&["label", "jobs", "--json"], "jobs")]
+    {
+        let out = folo_cmd()
+            .args(args)
+            .env("FOLO_SERVER", &url)
+            .env("FOLO_DATA_DIR", other_dir.path())
+            .env_remove("FOLO_TOKEN")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        let v = &json_lines(&stdout)[0];
+        assert!(v.get(check_key).is_some(), "{args:?}: {v}");
+    }
+
+    // 2. Precedence: `--server` flag overrides `FOLO_SERVER` (even when `FOLO_SERVER` has an invalid scheme).
+    for args in [
+        &["bench", "catalog", "--server", url.as_str(), "--json"][..],
+        &["label", "jobs", "--server", url.as_str(), "--json"],
+    ] {
+        let out = folo_cmd()
+            .args(args)
+            .env("FOLO_SERVER", "ftp://wrong.invalid")
+            .env_remove("FOLO_TOKEN")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+    }
+
+    // 3. `FOLO_SERVER` fallback and `--server` override on `folo mcp` (`folo_info` reports proxy mode).
+    let run_mcp = |extra_args: &[&str], env_val: Option<&str>| -> String {
+        let mut cmd = folo_cmd();
+        cmd.arg("mcp")
+            .args(extra_args)
+            .env("FOLO_DATA_DIR", other_dir.path())
+            .env("FOLO_GPU_BACKEND", "webgpu")
+            .env_remove("FOLO_TOKEN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(v) = env_val {
+            cmd.env("FOLO_SERVER", v);
+        }
+        let mut mcp: ChildGuard = cmd.spawn().unwrap().into();
+        let mut stdin = mcp.stdin.take().unwrap();
+        for msg in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+        ] {
+            writeln!(stdin, "{msg}").unwrap();
+        }
+        let info = find_line_within(mcp.stdout.take().unwrap(), Duration::from_secs(30), |l| {
+            l.contains(r#""id":2"#)
+        });
+        drop(stdin);
+        info
+    };
+
+    // Env fallback -> proxy mode.
+    let info_env = run_mcp(&[], Some(&url));
+    assert!(
+        info_env.contains(r#"\"mode\":\"proxy\""#) || info_env.contains(r#""mode":"proxy""#),
+        "{info_env}"
+    );
+    // Flag overrides invalid env -> still proxy mode.
+    let info_override = run_mcp(&["--server", &url], Some("ftp://wrong.invalid"));
+    assert!(
+        info_override.contains(r#"\"mode\":\"proxy\""#) || info_override.contains(r#""mode":"proxy""#),
+        "{info_override}"
+    );
+    // Neither flag nor env -> embedded mode on `other_dir`.
+    let info_embedded = run_mcp(&[], None);
+    assert!(
+        info_embedded.contains(r#"\"mode\":\"embedded\""#) || info_embedded.contains(r#""mode":"embedded""#),
+        "{info_embedded}"
+    );
+
+    // 4. Invalid / empty `FOLO_SERVER` and `FOLO_SERVER` + `mcp --mock` conflict fail with exit 2 (usage).
+    for (args, env_val) in [
+        (&["bench", "catalog", "--json"][..], ""),
+        (&["bench", "catalog", "--json"], "ftp://bad.invalid"),
+        (&["label", "jobs", "--json"], ""),
+        (&["label", "jobs", "--json"], "ftp://bad.invalid"),
+        (&["mcp"], ""),
+        (&["mcp"], "ftp://bad.invalid"),
+        (&["mcp", "--mock"], url.as_str()),
+    ] {
+        let out = folo_cmd().args(args).env("FOLO_SERVER", env_val).stdin(Stdio::null()).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?} FOLO_SERVER={env_val:?}: {stderr}");
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
-    c.env("FOLO_NO_CACHE", "1");
+    c.env("FOLO_NO_CACHE", "1").env_remove("FOLO_SERVER");
     c
 }
