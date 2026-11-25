@@ -25,6 +25,29 @@ afterEach(() => {
 });
 
 describe('Dialog focus return', () => {
+  it('returns focus to the opener on normal close and invokes onclose', () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Open';
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const open = signal(true);
+    const onclose = vi.fn();
+    const view = render(() => <Dialog open={open.get()} title="Confirm" onclose={onclose} />, target);
+    flush();
+
+    const dialog = target.querySelector<HTMLDialogElement>('dialog')!;
+    expect(dialog.open).toBe(true);
+    expect(document.activeElement).toBe(dialog);
+
+    dialog.open = false;
+    dialog.dispatchEvent(new Event('close'));
+    flush();
+    expect(onclose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(opener);
+    view.unmount();
+  });
+
   it('returns focus to the opener when unmounted while open without invoking onclose', () => {
     const opener = document.createElement('button');
     opener.textContent = 'Open';

@@ -83,32 +83,29 @@ export default function LabelJobs() {
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
-  const liveNote = signal('');
-  function announce(message: string) {
-    if (liveNote.peek() === message) {
-      liveNote.set('');
-      queueMicrotask(() => liveNote.set(message));
-    } else {
-      liveNote.set(message);
-    }
-  }
   const hasFiltered = signal(false);
+  const justCleared = signal(false);
   effect(() => {
     const active = filter.get() !== 'all' || query.get().trim().length > 0;
-    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+    if (active) {
+      if (!hasFiltered.peek()) hasFiltered.set(true);
+      if (justCleared.peek()) justCleared.set(false);
+    }
   });
   const filterStatus = computed(() => {
     const all = jobs.data;
     if (!all || !hasFiltered.get()) return '';
     const n = shown.get().length;
-    return n < all.length
-      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
-      : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
+    const summary =
+      n < all.length
+        ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
+        : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
+    return justCleared.get() ? `Cleared labeling job filters. ${summary}` : summary;
   });
   function clearFilters() {
+    justCleared.set(true);
     query.set('');
     filter.set('all');
-    announce('Cleared labeling job filters.');
     queueMicrotask(() => {
       const input = searchEl.peek();
       if (input && input.isConnected && !input.disabled) input.focus();
@@ -366,9 +363,6 @@ export default function LabelJobs() {
             ) : null}
             <p class="sr-only" role="status" aria-live="polite" data-filter-status>
               {filterStatus.get()}
-            </p>
-            <p class="sr-only" role="status" aria-live="polite" data-live-note>
-              {liveNote.get()}
             </p>
           </>
         )}

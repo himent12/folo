@@ -54,5 +54,17 @@ describe('rememberFocus', () => {
     inside2.remove();
     restore2();
     expect(document.activeElement).toBe(fallback);
+
+    // Also when the opener is marked hidden or refuses focus (e.g. CSS display: none).
+    const hiddenOpener = document.createElement('button');
+    const inside3 = document.createElement('button');
+    document.body.append(hiddenOpener, inside3);
+    hiddenOpener.focus();
+    const restore3 = rememberFocus(() => fallback);
+    inside3.focus();
+    hiddenOpener.focus = () => {};
+    inside3.remove();
+    restore3();
+    expect(document.activeElement).toBe(fallback);
   });
 });

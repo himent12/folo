@@ -128,6 +128,16 @@ export default function ImagePanel(props: ImagePanelProps) {
   /** The picked detection, for the phone's one line under the image. */
   const sel = () => (props.selectedIdx !== null ? props.kept[props.selectedIdx] : undefined);
 
+  /** Closes the tablet popover when Tab / Shift+Tab leaves both the popover and its trigger (never into a modal dialog). */
+  function onPopoverFocusOut(e: FocusEvent) {
+    if (!props.sheetShown || !props.tablet) return;
+    const next = e.relatedTarget as Node | null;
+    if (!next) return;
+    if (sheetEl.peek()?.contains(next) || moreBtn.peek()?.contains(next)) return;
+    if (next instanceof Element && next.closest('dialog[open]')) return;
+    moreOpen.set(false);
+  }
+
   // What went wrong and the ways out, in one block above the image, where the result would be, at every width: the
   // image stays whole, and the failure and its recovery are in the first screen.
   const noticeStrip = () => (
@@ -402,7 +412,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                   <span class="grow"></span>
                 </>
               )}
-              <span class="more-btn" ref={moreBtn}>
+              <span class="more-btn" ref={moreBtn} onfocusout={onPopoverFocusOut}>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -426,10 +436,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                 aria-labelledby="pg-more-title"
                 tabindex={-1}
                 ref={sheetEl}
-                onfocusout={(e) => {
-                  const next = e.relatedTarget as Node | null;
-                  if (next && !sheetEl.peek()?.contains(next) && !moreBtn.peek()?.contains(next)) moreOpen.set(false);
-                }}
+                onfocusout={onPopoverFocusOut}
               >
                 <div class="pop-head">
                   <h2 id="pg-more-title">{props.sheetTitle}</h2>

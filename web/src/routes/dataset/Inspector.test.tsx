@@ -501,10 +501,13 @@ describe('Inspector labels', () => {
     flushSync();
     expect(status().textContent).toBe('Boxes hidden.');
 
-    // Stepping to next image announces file, position, boxes, and hidden state.
-    imageId.set(img1.id);
-    flushSync();
-    expect(status().textContent).toContain('image 2 of');
+    // Stepping to next image via J key announces file, position, boxes, and hidden state.
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(imageId.peek()).toBe(img1.id);
+      expect(status().textContent).toContain('image 2 of');
+    });
     expect(status().textContent).toContain('boxes hidden');
 
     // Closing restores focus to the opener.

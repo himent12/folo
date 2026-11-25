@@ -101,19 +101,10 @@ export default function Playground() {
   let fileInput!: HTMLInputElement;
   const dragging = signal(false);
 
-  // Focus moves into the sheet (or the tablet's popover) as it opens and back to its button as it closes if lost.
-  let wasSheetOpen = false;
+  // Focus moves into the sheet (or the tablet's popover) as it opens; explicit closes (Escape, Close, sheetDrag)
+  // restore focus via `closeSheet()`, while outside pointer clicks and Tab-out leave focus where the user put it.
   effect(() => {
-    const shown = sheetShown.get();
-    if (shown) {
-      wasSheetOpen = true;
-      sheetEl.get()?.focus();
-    } else if (wasSheetOpen) {
-      wasSheetOpen = false;
-      const at = document.activeElement;
-      const lost = !at || at === document.body || !at.isConnected || !!sheetEl.peek()?.contains(at);
-      if (lost) moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus();
-    }
+    if (sheetShown.get()) sheetEl.get()?.focus();
   });
   // The tablet's popover is transient: a press outside it (and outside its button) closes it, focus staying put.
   effect(() => {
@@ -127,7 +118,7 @@ export default function Playground() {
   });
   function closeSheet() {
     moreOpen.set(false);
-    moreBtn.peek()?.querySelector('button')?.focus();
+    moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
   }
   // Dragging the sheet's header down closes it; a shorter pull springs back (ui/sheetDrag, as every sheet).
 

@@ -8,7 +8,7 @@ import ImageOff from '$icons/image-off';
 import ImagePlus from '$icons/image-plus';
 import Scan from '$icons/scan';
 import Upload from '$icons/upload';
-import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, type Signal } from 'fw';
+import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, untrack, type Signal } from 'fw';
 import type { LabelImage } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { count, num } from '$lib/format';
@@ -80,15 +80,20 @@ export default function ImagesArea(props: ImagesAreaProps) {
     return c;
   });
   const shown = computed(() => (props.show === 'all' ? props.images : props.images.filter((i) => inFilter(i, props.show))));
-  const hasFiltered = signal(false);
+  // Announce filter counts only when the active filter changes, never on live agent SSE image updates.
+  const filterStatus = signal('');
+  let prevShow = untrack(() => props.show);
   effect(() => {
-    if (props.show !== 'all' && !hasFiltered.peek()) hasFiltered.set(true);
-  });
-  const filterStatus = computed(() => {
-    if (!hasFiltered.get() || !props.images.length) return '';
-    const n = shown.get().length;
-    const total = props.images.length;
-    return n < total ? `Showing ${num(n)} of ${count(total, 'image')}.` : `Showing all ${count(total, 'image')}.`;
+    const cur = props.show;
+    if (cur === prevShow) return;
+    prevShow = cur;
+    const total = untrack(() => props.images.length);
+    if (!total) {
+      filterStatus.set('');
+      return;
+    }
+    const n = shown.peek().length;
+    filterStatus.set(n < total ? `Showing ${num(n)} of ${count(total, 'image')}.` : `Showing all ${count(total, 'image')}.`);
   });
   const options = computed(() => FILTERS.map(([value, label]) => ({ value, label, meta: num(counts.get()[value]) })));
   // The cells take the job's commonest image shape (ui/TileGrid).

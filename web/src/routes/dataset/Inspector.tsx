@@ -60,11 +60,13 @@ export default function Inspector(props: InspectorProps) {
   const showBoxes = signal(true);
 
   const statusNote = signal('');
+  let noteSeq = 0;
   function announce(message: string) {
+    const seq = ++noteSeq;
     if (statusNote.peek() === message) {
       statusNote.set('');
       queueMicrotask(() => {
-        if (!unmounted) statusNote.set(message);
+        if (!unmounted && seq === noteSeq && id.peek()) statusNote.set(message);
       });
     } else {
       statusNote.set(message);
@@ -103,6 +105,7 @@ export default function Inspector(props: InspectorProps) {
     const curId = id.get();
     if (!curId) {
       lastAnnouncedId = null;
+      noteSeq++;
       untrack(() => statusNote.set(''));
       return;
     }
