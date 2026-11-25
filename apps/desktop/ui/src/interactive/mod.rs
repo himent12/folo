@@ -174,6 +174,9 @@ pub struct Interactivity {
     pub(crate) tooltip_id: Option<TooltipId>,
     /// The size of its children's bounding box (scroll containers).
     pub(crate) content_size: Size<Pixels>,
+    /// Maximum scrollable extent computed during prepaint (`-scroll_max..=0`), captured by the
+    /// wheel listener so clamped wheel input at an edge skips redundant redraws.
+    pub(crate) scroll_max: Size<Pixels>,
     /// The key context it adds to the dispatch tree.
     pub(crate) key_context: Option<KeyContext>,
     /// It takes focus (a tracked handle, or one kept in its element state).

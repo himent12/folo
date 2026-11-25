@@ -5,8 +5,6 @@
 
 use std::{cell::RefCell, ops::Range, panic, rc::Rc};
 
-use smallvec::SmallVec;
-
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Edges, Element, ElementId, GlobalElementId, Hitbox,
     InspectorElementId, InteractiveElement, Interactivity, IntoElement, IsZero, LayoutId, Overflow, Pixels,
@@ -27,17 +25,18 @@ where
     interactivity.base_style.overflow.y = Some(Overflow::Scroll);
     UniformList {
         item_count,
-        render_items: Box::new(move |range, window, cx| {
-            f(range, window, cx).into_iter().map(|item| item.into_any_element()).collect()
+        render_items: Box::new(move |range, out, window, cx| {
+            for item in f(range, window, cx) {
+                out(item.into_any_element());
+            }
         }),
         interactivity,
         scroll_handle: None,
     }
 }
 
-/// Renders the rows in a range.
-pub(crate) type RenderItems =
-    Box<dyn Fn(Range<usize>, &mut Window, &mut App) -> smallvec::SmallVec<[AnyElement; 64]>>;
+/// Renders the rows in a range directly into a caller-supplied sink (no intermediate buffer).
+pub(crate) type RenderItems = Box<dyn Fn(Range<usize>, &mut dyn FnMut(AnyElement), &mut Window, &mut App)>;
 
 /// The list element.
 pub struct UniformList {
@@ -55,8 +54,8 @@ pub struct UniformList {
 pub struct UniformListFrameState {
     /// The measured row height.
     pub(crate) item_height: Pixels,
-    /// The rows rendered this frame.
-    pub(crate) items: smallvec::SmallVec<[AnyElement; 32]>,
+    /// The rows rendered this frame (backed by `Window`'s scratch pool during prepaint..paint).
+    pub(crate) items: Vec<AnyElement>,
 }
 
 /// Where `scroll_to_item` puts the item.
@@ -127,8 +126,9 @@ impl UniformList {
         if self.item_count == 0 {
             return Size::default();
         }
-        let mut items = (self.render_items)(0..1, window, cx);
-        let Some(mut item) = items.pop() else {
+        let mut last = None;
+        (self.render_items)(0..1, &mut |item| last = Some(item), window, cx);
+        let Some(mut item) = last else {
             return Size::default();
         };
         let available_space = size(
@@ -182,7 +182,7 @@ impl Element for UniformList {
                     },
                 )
             });
-        (layout_id, UniformListFrameState { item_height: item_size.height, items: SmallVec::new() })
+        (layout_id, UniformListFrameState { item_height: item_size.height, items: Vec::new() })
     }
 
     fn prepaint(
@@ -220,7 +220,7 @@ impl Element for UniformList {
         let render_items = &self.render_items;
         let items = &mut frame_state.items;
 
-        self.interactivity.prepaint(
+        let hitbox = self.interactivity.prepaint(
             global_id,
             inspector_id,
             bounds,
@@ -247,10 +247,25 @@ impl Element for UniformList {
                 let first = (-(scroll_offset.y + padding.top) / item_height).floor().max(0.) as usize;
                 let last = ((-scroll_offset.y + list_height) / item_height).ceil().max(0.) as usize;
                 let visible_range = first..last.min(item_count);
-                let rendered = render_items(visible_range.clone(), window, cx);
+                let max_visible = visible_range.len();
+                if items.capacity() == 0 {
+                    *items = window.take_element_scratch();
+                } else {
+                    items.clear();
+                }
+                render_items(
+                    visible_range.clone(),
+                    &mut |item| {
+                        if items.len() < max_visible {
+                            items.push(item);
+                        }
+                    },
+                    window,
+                    cx,
+                );
 
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    for (mut item, ix) in rendered.into_iter().zip(visible_range) {
+                    for (item, ix) in items.iter_mut().zip(visible_range) {
                         let item_origin = padded_bounds.origin
                             + point(scroll_offset.x, item_height * ix as f32 + scroll_offset.y + padding.top);
                         let available_space = size(
@@ -259,12 +274,18 @@ impl Element for UniformList {
                         );
                         item.layout_as_root(available_space, window, cx);
                         item.prepaint_at(item_origin, window, cx);
-                        items.push(item);
                     }
                 });
                 hitbox
             },
-        )
+        );
+        if item_count > 0 && item_height > Pixels::ZERO {
+            let list_max = (content_height - padded_bounds.size.height).max(Pixels::ZERO);
+            if list_max.0.is_finite() {
+                self.interactivity.scroll_max.height = self.interactivity.scroll_max.height.min(list_max);
+            }
+        }
+        hitbox
     }
 
     fn paint(
@@ -290,7 +311,10 @@ impl Element for UniformList {
                     item.paint(window, cx);
                 }
             },
-        )
+        );
+        if items.capacity() > 0 {
+            window.return_element_scratch(std::mem::take(items));
+        }
     }
 }
 

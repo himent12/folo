@@ -186,3 +186,71 @@ fn scroll_to_item_center_and_clamping() {
     assert_eq!(at(2, ScrollStrategy::Top, 0.), px(0.), "visible rows do not move the list");
     let _: Pixels = at(1, ScrollStrategy::Top, 0.);
 }
+
+#[test]
+fn uniform_list_reuses_scratch_pool_and_skips_redraw_on_clamped_wheel() {
+    use crate::{PlatformInput, ScrollDelta, ScrollWheelEvent, point};
+
+    let handle = UniformListScrollHandle::new();
+    let (mut app, window, _) = list_app(handle.clone());
+    draw(&mut app, window);
+
+    // Scratch buffer was returned to the window's pool after painting frame 1.
+    let pool_state = app.read(|cx| match cx.windows.get(&window.id) {
+        Some(Some(w)) => (w.element_scratch_pool.len(), w.element_scratch_pool.first().map(Vec::capacity)),
+        _ => (0, None),
+    });
+    assert_eq!(pool_state.0, 1);
+    assert!(pool_state.1.unwrap_or(0) >= 5);
+
+    let wheel = |app: &mut crate::HeadlessApp, dy: f32| {
+        app.simulate_input(
+            window,
+            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: point(px(25.), px(50.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                ..Default::default()
+            }),
+        );
+    };
+
+    // At top (offset 0): wheel up is a no-op and leaves the window clean.
+    wheel(&mut app, 40.);
+    assert!(!app.is_dirty(window), "wheel up at top of uniform_list must not redraw");
+
+    // Scroll to the very bottom (100 * 20 - 100 = 1900).
+    wheel(&mut app, -5000.);
+    assert!(app.is_dirty(window));
+    draw(&mut app, window);
+    assert_eq!(*handle.0.borrow().base_handle.0.borrow().offset.borrow(), point(px(0.), px(-1900.)));
+
+    // At bottom: further wheel down is clamped and leaves the window clean.
+    wheel(&mut app, -40.);
+    assert!(!app.is_dirty(window), "wheel down at bottom of uniform_list must not redraw");
+
+    // Pool depth stays 1 across repeated redraws (no leak or unbounded growth).
+    let pool_len = app.read(|cx| match cx.windows.get(&window.id) {
+        Some(Some(w)) => w.element_scratch_pool.len(),
+        _ => 0,
+    });
+    assert_eq!(pool_len, 1);
+}
+
+#[test]
+fn uniform_list_truncates_excess_rendered_items_without_panicking() {
+    let (mut app, window) = open(move |_, _| {
+        div()
+            .h(px(40.))
+            .w(px(50.))
+            .child(
+                uniform_list("excess", 10, move |range, _, _| {
+                    // Deliberately return extra items beyond `range.len()`.
+                    (0..range.len() + 3).map(|ix| div().h(px(20.)).w_full().bg(rgb(ix as u32 + 1))).collect()
+                })
+                .h_full(),
+            )
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    assert_eq!(painted_rows(&scene).len(), 2, "only visible_range.len() rows are laid out and painted");
+}

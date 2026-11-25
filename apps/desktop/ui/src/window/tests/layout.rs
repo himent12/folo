@@ -81,18 +81,21 @@ fn nested_flex_at_scale_1_5_rounds_to_device_pixels() {
 #[test]
 fn wheel_scrolls_clamps_and_moves_children() {
     let (mut app, window) = open(size(px(400.), px(300.)), 1.0, tree);
+    // Already at the top: wheel up is clamped and does not redraw.
+    wheel(&mut app, window, 100., 150., point(px(0.), px(20.)));
+    assert!(!app.is_dirty(window), "clamped wheel up at top does not redraw");
     // Over the scroller; 300 px of content in 215: the most it scrolls is 85.
     wheel(&mut app, window, 100., 150., point(px(0.), px(-40.)));
     assert!(app.is_dirty(window), "a wheel that moved the content redraws");
     app.frame(window);
     assert_bounds(quad_of(&mut app, window, color(7)), device(12., 33., 376., 100., 1.));
     wheel(&mut app, window, 100., 150., point(px(0.), px(-1000.)));
+    assert!(app.is_dirty(window));
     app.frame(window);
     assert_bounds(quad_of(&mut app, window, color(7)), device(12., -12., 376., 100., 1.));
     // Clamped: a further wheel down does not move it, and does not redraw.
-    app.frame(window);
     wheel(&mut app, window, 100., 150., point(px(0.), px(-10.)));
-    app.frame(window);
+    assert!(!app.is_dirty(window), "clamped wheel down at bottom does not redraw");
     assert_bounds(quad_of(&mut app, window, color(7)), device(12., -12., 376., 100., 1.));
     // Children are clipped by the scroller (overflow hidden on y).
     let clip = app.scene(window).primitives.iter().find_map(|p| match p {

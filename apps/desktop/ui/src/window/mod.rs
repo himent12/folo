@@ -166,6 +166,8 @@ pub struct Window {
     /// Resolved base+active styles computed during the current draw, reused by `Interactivity` across
     /// `request_layout` -> `prepaint` -> `paint` to skip redundant `Style::refine` work.
     pub(crate) frame_styles: Vec<crate::Style>,
+    /// Reusable `Vec<AnyElement>` scratch buffers pooled across frames (used by `UniformList`).
+    pub(crate) element_scratch_pool: Vec<Vec<crate::AnyElement>>,
 }
 
 impl Window {
@@ -269,11 +271,30 @@ impl Window {
             frame_times: FrameTimes::default(),
             scratch_order: SmallVec::new(),
             frame_styles: Vec::new(),
+            element_scratch_pool: Vec::new(),
             platform_window,
         };
         window.resize_framebuffer();
         window.refresh();
         Ok(window)
+    }
+
+    /// Takes a cleared, reusable `Vec<AnyElement>` scratch buffer from this window's pool.
+    pub(crate) fn take_element_scratch(&mut self) -> Vec<crate::AnyElement> {
+        let mut buf = self.element_scratch_pool.pop().unwrap_or_default();
+        buf.clear();
+        buf
+    }
+
+    /// Returns a `Vec<AnyElement>` scratch buffer to this window's pool for future frames,
+    /// capping pool depth and retained capacity so transient spikes do not linger.
+    pub(crate) fn return_element_scratch(&mut self, mut buf: Vec<crate::AnyElement>) {
+        const MAX_POOLS: usize = 8;
+        const MAX_CAP: usize = 256;
+        buf.clear();
+        if self.element_scratch_pool.len() < MAX_POOLS && buf.capacity() > 0 && buf.capacity() <= MAX_CAP {
+            self.element_scratch_pool.push(buf);
+        }
     }
 
     /// The window's handle.
