@@ -27,12 +27,17 @@ export interface MenuProps {
   label: string;
   items: MenuItem[];
   variant?: 'secondary' | 'ghost';
+  /** Custom trigger icon; defaults to the overflow ellipsis. */
+  icon?: IconType;
+  /** Optional visible button text beside the icon (keep `label` starting with this word per WCAG 2.5.3). */
+  text?: string;
+  disabled?: boolean;
   /** A row's menu inside a box that clips (a table that scrolls sideways): the list is placed on the viewport. */
   fixed?: boolean;
 }
 
 export default function Menu(props: MenuProps) {
-  const p = defaults(props, { variant: 'secondary', fixed: false });
+  const p = defaults(props, { variant: 'secondary', icon: Ellipsis, disabled: false, fixed: false });
   const uid = createUniqueId();
   const open = signal(false);
   /**
@@ -74,6 +79,7 @@ export default function Menu(props: MenuProps) {
   const entries = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
   async function show(where: 'first' | 'last' = 'first') {
+    if (p.disabled || !shown.get().length) return;
     if (p.fixed) place();
     active.set(where === 'first' ? 0 : shown.get().length - 1);
     open.set(true);
@@ -84,7 +90,7 @@ export default function Menu(props: MenuProps) {
     (where === 'first' ? all[0] : all.at(-1))?.focus();
   }
   function ontrigger(e: KeyboardEvent) {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (p.disabled || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
     e.preventDefault();
     void show(e.key === 'ArrowDown' ? 'first' : 'last');
   }
@@ -144,6 +150,10 @@ export default function Menu(props: MenuProps) {
   }
 
   effect(() => {
+    if (p.disabled && open.peek()) open.set(false);
+  });
+
+  effect(() => {
     if (!open.get() || phone.current) return;
     const away = (e: PointerEvent) => {
       const r = root.get();
@@ -193,18 +203,36 @@ export default function Menu(props: MenuProps) {
   return (
     <>
       <div class="menu" ref={root}>
-        <Button
-          variant={p.variant}
-          size={p.variant === 'ghost' ? 'sm' : undefined}
-          icon={Ellipsis}
-          aria-label={p.label}
-          title={p.label}
-          aria-haspopup="menu"
-          aria-expanded={open.get()}
-          aria-controls={`${uid}-list`}
-          onclick={() => (open.get() ? hide() : show())}
-          onkeydown={ontrigger}
-        />
+        {p.text ? (
+          <Button
+            variant={p.variant}
+            size={p.variant === 'ghost' ? 'sm' : undefined}
+            icon={p.icon}
+            disabled={p.disabled}
+            aria-label={p.label}
+            aria-haspopup="menu"
+            aria-expanded={open.get()}
+            aria-controls={`${uid}-list`}
+            onclick={() => (open.get() ? hide() : show())}
+            onkeydown={ontrigger}
+          >
+            {p.text}
+          </Button>
+        ) : (
+          <Button
+            variant={p.variant}
+            size={p.variant === 'ghost' ? 'sm' : undefined}
+            icon={p.icon}
+            disabled={p.disabled}
+            aria-label={p.label}
+            title={p.label}
+            aria-haspopup="menu"
+            aria-expanded={open.get()}
+            aria-controls={`${uid}-list`}
+            onclick={() => (open.get() ? hide() : show())}
+            onkeydown={ontrigger}
+          />
+        )}
         {open.get() && !phone.current ? (
           <div
             class="list"

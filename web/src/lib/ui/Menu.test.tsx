@@ -44,6 +44,22 @@ describe('Menu', () => {
     unmount(c);
     target.remove();
   });
+
+  it('supports visible trigger text and blocks opening when disabled', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const run = vi.fn();
+    const c = mount(Menu, { target, props: { label: 'Export benchmarks', text: 'Export', disabled: true, items: [{ label: 'Export CSV', onclick: run }] } });
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    expect(trigger.textContent?.trim()).toBe('Export');
+    expect(trigger.classList.contains('square')).toBe(false);
+    expect(trigger.disabled).toBe(true);
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('[role="menu"]')).toBeNull();
+    unmount(c);
+    target.remove();
+  });
 });
 
 describe('Menu order', () => {

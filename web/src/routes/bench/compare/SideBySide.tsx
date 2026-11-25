@@ -21,9 +21,19 @@ export interface SideBySideProps {
 }
 
 export default function SideBySide(props: SideBySideProps) {
+  let tableEl: HTMLTableElement | undefined;
   /** A value's difference from the baseline's, unless either is graded on an earlier version. */
   const diffOf = (row: () => Row, v: () => number, i: number) =>
     props.old[i] || props.old[0] ? null : diffAsPrinted(v(), row().values[0] ?? null, row().d);
+
+  function swapBaseline(eid: string) {
+    props.makeBaseline(eid);
+    // The clicked "Make baseline" button unmounts as this entry moves to column 0: keep keyboard focus inside the table.
+    queueMicrotask(() => {
+      if (document.activeElement && document.activeElement !== document.body && tableEl?.contains(document.activeElement)) return;
+      (tableEl?.querySelector<HTMLButtonElement>('button.swap') ?? tableEl)?.focus();
+    });
+  }
 
   const cmpCell = (row: () => Row, b: () => Set<number>, v: () => number | null, i: number) => (
     <td class="r num" class:top={b().has(i)}>
@@ -69,15 +79,15 @@ export default function SideBySide(props: SideBySideProps) {
   return (
     <Panel title="Side by side" meta="against the first, the baseline" pad="none">
       <div class="scroll">
-        <table class="table cmp" aria-label="Scores and axes side by side">
+        <table ref={(el) => (tableEl = el)} tabindex={-1} class="table cmp" aria-label="Scores and axes side by side">
           <thead>
             <tr>
-              <th class="lead m-col">
+              <th scope="col" class="lead m-col">
                 <span class="sr-only">Measure</span>
               </th>
               <For each={props.shown} key={(e) => e.id}>
                 {(e, i) => (
-                  <th class="r e-col">
+                  <th scope="col" class="r e-col">
                     <span class="eh">
                       {props.keyMark(e().id)}
                       <span class="eh-n">{e().name}</span>
@@ -86,7 +96,7 @@ export default function SideBySide(props: SideBySideProps) {
                       {i() === 0 ? (
                         'Baseline'
                       ) : (
-                        <button type="button" class="swap" onclick={() => props.makeBaseline(e().id)}>
+                        <button type="button" class="swap" aria-label={`Make ${e().name} baseline`} onclick={() => swapBaseline(e().id)}>
                           Make baseline
                         </button>
                       )}
@@ -102,7 +112,9 @@ export default function SideBySide(props: SideBySideProps) {
                 const b = computed(() => props.best(row().key, row().values, row().d));
                 return (
                   <tr class:total={row().key === 'score'}>
-                    <td class="lead">{row().label}</td>
+                    <th scope="row" class="lead">
+                      {row().label}
+                    </th>
                     <Index each={row().values}>{(v, i) => cmpCell(row, () => b.get(), v, i)}</Index>
                   </tr>
                 );
@@ -175,7 +187,12 @@ css`
     text-decoration-color: var(--line-strong);
     text-underline-offset: 3px;
   }
-  .cmp tr.total td {
+  .cmp tbody th.lead {
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    color: var(--text-primary);
+  }
+  .cmp tr.total :is(th, td) {
     font-weight: var(--weight-semibold);
   }
   .top {

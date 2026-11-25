@@ -2,6 +2,7 @@
 // entries and its loops. The parts are in ./bench/.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
+import Download from '$icons/download';
 import GitCompare from '$icons/git-compare-arrows';
 import Pencil from '$icons/pencil';
 import Plus from '$icons/plus';
@@ -24,6 +25,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
+import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -43,6 +45,7 @@ import { AgentChoice } from './label/agentChoice';
 import AddEntryDialog, { type EntryKind } from './bench/AddEntryDialog';
 import DesignDialog from './bench/DesignDialog';
 import EditBenchDialog from './bench/EditBenchDialog';
+import { leaderboardExport } from './bench/export';
 import Leaderboard from './bench/Leaderboard.tsx';
 import { boardOrder, comparePath, compareHint, compareReason, keepSelection } from './bench/leaderboard';
 import LoopsTab from './bench/LoopsTab';
@@ -355,12 +358,29 @@ export default function Benchmark() {
     if (s.kind === 'dataset') return datasets.data ? datasets.data.some((d) => d.id === s.dataset_id) : null;
     return jobs.data ? jobs.data.some((j) => j.id === s.job_id) : jobs.error ? false : null;
   });
-  // Constant items (their actions read state when clicked): one array, never rebuilt.
-  const menu: MenuItem[] = [
+  function exportBoard(format: 'csv' | 'json') {
+    const b = bench.peek();
+    const entries = board.peek();
+    if (!b || !entries.length) return;
+    const payload = leaderboardExport(b, entries, agents.data);
+    const ok =
+      format === 'csv'
+        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+        : exportTableJson(payload.filenameBase, payload.json);
+    if (ok) toast.success(`Exported ${format.toUpperCase()}`, `${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} from ${b.name}.`);
+  }
+
+  const menu = computed<MenuItem[]>(() => [
     { label: 'Edit name and description', icon: Pencil, onclick: () => editOpen.set(true) },
     { label: 'Copy fingerprint', icon: Copy, onclick: () => void copyFingerprint() },
+    ...(board.get().length
+      ? [
+          { label: 'Export leaderboard CSV', icon: Download, onclick: () => exportBoard('csv') },
+          { label: 'Export leaderboard JSON', icon: Download, onclick: () => exportBoard('json') },
+        ]
+      : []),
     { label: 'Delete benchmark', icon: Trash, danger: true, onclick: () => deleteOpen.set(true) },
-  ];
+  ]);
 
   pageCommands((): PageCommand[] => {
     const b = bench.get();
@@ -375,6 +395,10 @@ export default function Benchmark() {
       out.push({ id: `bench-stop-${e.id}`, label: `Stop entry ${e.name}`, icon: Square, run: () => stopping.set(e) });
     if (!offline.get())
       out.push({ id: 'bench-loop-new', label: 'New self-improvement loop', match: ['New loop'], icon: Repeat, run: () => (setQuery({ tab: 'loops' }), loopOpen.set(true)) });
+    if (board.get().length) {
+      out.push({ id: 'bench-export-csv', label: 'Export leaderboard CSV', icon: Download, run: () => exportBoard('csv') });
+      out.push({ id: 'bench-export-json', label: 'Export leaderboard JSON', icon: Download, run: () => exportBoard('json') });
+    }
     out.push({ id: 'bench-fingerprint', label: 'Copy fingerprint', icon: Copy, run: () => void copyFingerprint() });
     return out;
   });
@@ -500,7 +524,7 @@ export default function Benchmark() {
                 {phone.current ? (
                   <>
                     <Gate reason={addWhy.get()}>{addButton}</Gate>
-                    <Menu label="More benchmark actions" items={menu} />
+                    <Menu label="More benchmark actions" items={menu.get()} />
                   </>
                 ) : (
                   <>
@@ -537,7 +561,7 @@ export default function Benchmark() {
                       </span>
                     ) : null}
                     <Gate reason={addWhy.get()}>{addButton}</Gate>
-                    <Menu label="More benchmark actions" items={menu} />
+                    <Menu label="More benchmark actions" items={menu.get()} />
                   </>
                 )}
               </>

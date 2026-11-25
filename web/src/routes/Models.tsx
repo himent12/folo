@@ -2,6 +2,7 @@
 // imported files in groups of their own). Each comparable group is ranked on its own; the published, imported and
 // unknown-split groups are not ranked. The parts are in ./models/.
 import Box from '$icons/box';
+import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import { computed, css, For, MediaQuery, signal } from 'fw';
@@ -18,11 +19,14 @@ import Page from '$lib/shell/Page';
 import PhoneSections from '$lib/shell/PhoneSections';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { watched } from '$lib/shell/runList';
+import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
+import { modelsExport } from './models/export';
 import Versus from './models/Versus';
 import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
@@ -270,6 +274,31 @@ export default function Models() {
       </span>
     ) : null;
 
+  const canExport = computed(() => !!models.data && shownCount.get() > 0);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function exportList(format: 'csv' | 'json') {
+    const list = groups.peek();
+    const total = list.reduce((a, g) => a + g.rows.length, 0);
+    if (!total) return;
+    const payload = modelsExport(list, best.peek().marks, sourceName);
+    const ok =
+      format === 'csv'
+        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+        : exportTableJson(payload.filenameBase, payload.json);
+    if (ok) liveNote.set(`Exported ${total} ${total === 1 ? 'model' : 'models'} as ${format.toUpperCase()}.`);
+  }
+  const exportItems: MenuItem[] = [
+    { label: 'Export CSV', icon: Download, onclick: () => exportList('csv') },
+    { label: 'Export JSON', icon: Download, onclick: () => exportList('json') },
+  ];
+  function clearFilters() {
+    dsFilter.set('all');
+    query.set('');
+    liveNote.set('Cleared model filters.');
+    queueMicrotask(() => searchEl.peek()?.focus());
+  }
+
   return (
     <Page
       title="Models"
@@ -277,6 +306,13 @@ export default function Models() {
       sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
       // Phones: one line, so the list starts 16 px under it.
       subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+      actions={() => (
+        <>
+          {canExport.get() ? (
+            <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export models" items={exportItems} />
+          ) : null}
+        </>
+      )}
     >
       {/* The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
           own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or
@@ -326,7 +362,7 @@ export default function Models() {
           )}
         </div>{' '}
         <div class="lt-search">
-          <Input bind:value={query} icon={Search} placeholder="Filter by name, architecture or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
+          <Input bind:el={searchEl} bind:value={query} icon={Search} placeholder="Filter by name, architecture or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
         </div>
       </div>{' '}
       <Panel pad="none">
@@ -456,13 +492,7 @@ export default function Models() {
                     title="No models match"
                     description="Try another dataset or search term."
                     actions={() => (
-                      <Button
-                        size="sm"
-                        onclick={() => {
-                          dsFilter.set('all');
-                          query.set('');
-                        }}
-                      >
+                      <Button size="sm" onclick={clearFilters}>
                         Clear filters
                       </Button>
                     )}
@@ -556,10 +586,13 @@ export default function Models() {
       </Panel>{' '}
       {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
       {models.data && shownCount.get() < models.data.length ? (
-        <p class="list-foot num">
+        <p class="list-foot num" role="status" aria-live="polite">
           {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>
       ) : null}{' '}
+      <p class="sr-only" role="status" aria-live="polite">
+        {liveNote.get()}
+      </p>{' '}
       {/* Only with models to look at. The engine comparison is reference: one line until it is asked for. */}
       {models.data?.length ? (
         <details class="bench">

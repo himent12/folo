@@ -10,11 +10,12 @@
  */
 import ArrowLeft from '$icons/arrow-left';
 import ArrowUpRight from '$icons/arrow-up-right';
+import Download from '$icons/download';
 import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
 import Plus from '$icons/plus';
 import X from '$icons/x';
-import { css, For, Index, MediaQuery, onDocument } from 'fw';
+import { css, For, Index, MediaQuery, onDocument, signal } from 'fw';
 import { ApiError } from '$lib/api/index';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
@@ -24,14 +25,17 @@ import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { pageKeys } from '$lib/shell/pageCommands';
+import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import { keyPrefs } from '$lib/ui/keyPrefs';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import Callout from './run/Callout';
 import { RELIABILITY_X, SLOT_PATTERN } from './bench/charts';
+import { compareExport } from './bench/export';
 import DotRows from './bench/compare/DotRows';
 import SideBySide from './bench/compare/SideBySide';
 import { CLS_SHOWN, compareState } from './bench/compare/state';
@@ -90,6 +94,50 @@ export default function BenchCompare() {
   } = compareState();
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
+  const liveNote = signal('');
+  let chipsEl: HTMLDivElement | undefined;
+
+  function setBaseline(eid: string) {
+    const entry = shown.peek().find((x) => x.id === eid);
+    makeBaseline(eid);
+    if (entry) liveNote.set(`Baseline set to ${entry.name}.`);
+  }
+
+  function togglePin(eid: string) {
+    const entry = shown.peek().find((x) => x.id === eid);
+    const next = pinned.peek() === eid ? null : eid;
+    pinned.set(next);
+    if (entry) liveNote.set(next ? `Pinned ${entry.name} to front.` : `Unpinned ${entry.name}.`);
+  }
+
+  function removeEntry(eid: string, index: number) {
+    const entry = shown.peek().find((x) => x.id === eid);
+    setIds(ids.peek().filter((x) => x !== eid));
+    if (entry) liveNote.set(`Removed ${entry.name} from comparison.`);
+    // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
+    queueMicrotask(() => {
+      const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
+      const next = buttons[Math.min(index, buttons.length - 1)] ?? chipsEl?.querySelector<HTMLSelectElement>('select') ?? document.querySelector<HTMLElement>('h1[data-route-focus]');
+      next?.focus();
+    });
+  }
+
+  function exportComparison(format: 'csv' | 'json') {
+    const b = bench();
+    const list = shown.peek();
+    if (!b || list.length < 2) return;
+    const payload = compareExport(b, list, rows.peek(), old.peek(), best, caveats.peek(), res.peek());
+    const ok =
+      format === 'csv'
+        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+        : exportTableJson(payload.filenameBase, payload.json);
+    if (ok) liveNote.set(`Exported comparison of ${list.length} entries as ${format.toUpperCase()}.`);
+  }
+
+  const exportItems: MenuItem[] = [
+    { label: 'Export CSV', icon: Download, onclick: () => exportComparison('csv') },
+    { label: 'Export JSON', icon: Download, onclick: () => exportComparison('json') },
+  ];
 
   // Single-key shortcuts via pageKeys (window bubble, after shell/shortcuts so G B navigates to Benchmarks cleanly):
   // 1–4 pin/unpin an entry across every chart; B rotates the baseline through all shown entries.
@@ -100,13 +148,15 @@ export default function BenchCompare() {
     if (k >= '1' && k <= '4') {
       const target = list[Number(k) - 1];
       if (!target) return false;
-      pinned.set((p) => (p === target.id ? null : target.id));
+      togglePin(target.id);
       return true;
     }
     if (k.toLowerCase() === 'b') {
       const shownIds = list.map((x) => x.id);
       const extra = ids.peek().filter((x) => !shownIds.includes(x));
       setIds([...shownIds.slice(1), shownIds[0]!, ...extra]);
+      const nextBase = list[1];
+      if (nextBase) liveNote.set(`Baseline set to ${nextBase.name}.`);
       return true;
     }
     return false;
@@ -119,7 +169,7 @@ export default function BenchCompare() {
     const p = pinned.peek();
     if (p !== null && shown.peek().some((x) => x.id === p)) {
       e.preventDefault();
-      pinned.set(null);
+      togglePin(p);
     }
   });
 
@@ -188,7 +238,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} best={best} makeBaseline={makeBaseline} keyMark={key} />{' '}
+      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} best={best} makeBaseline={setBaseline} keyMark={key} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>
@@ -413,6 +463,9 @@ export default function BenchCompare() {
       )}
       actions={() => (
         <>
+          {shown.get().length >= 2 ? (
+            <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export comparison" items={exportItems} />
+          ) : null}
           {!phone.current ? (
             <Button icon={ArrowLeft} href={href(`/benchmarks/${bench()?.id}`)}>
               Leaderboard
@@ -422,7 +475,7 @@ export default function BenchCompare() {
       )}
     >
       {/* The legend: one chip per entry, its key, its score, open and remove; then Add. */}
-      <div class="chips" role="group" aria-label="Entries being compared">
+      <div ref={(el) => (chipsEl = el)} class="chips" role="group" aria-label="Entries being compared">
         <For each={shown.get()} key={(e) => e.id}>
           {(e, i) => (
             <span
@@ -440,7 +493,7 @@ export default function BenchCompare() {
                 aria-pressed={pinned.get() === e().id}
                 aria-keyshortcuts={keyPrefs.singleKeys && shown.get().length >= 2 ? String(i() + 1) : undefined}
                 title={pinned.get() === e().id ? 'Let it fall back' : 'Keep it in front'}
-                onclick={() => pinned.set((p) => (p === e().id ? null : e().id))}
+                onclick={() => togglePin(e().id)}
               >
                 {key(e().id)}
                 <span class="nm">{e().name}</span>
@@ -458,7 +511,7 @@ export default function BenchCompare() {
                 class="act rm"
                 aria-label={`Remove ${e().name}`}
                 title="Remove from the comparison"
-                onclick={() => setIds(ids.peek().filter((x) => x !== e().id))}
+                onclick={() => removeEntry(e().id, i())}
               >
                 <X size={14} />
               </button>
@@ -467,6 +520,9 @@ export default function BenchCompare() {
         </For>{' '}
         {ids.get().length < COMPARE_MAX && candidates.get().length ? adder() : null}
       </div>{' '}
+      <p class="sr-only" role="status" aria-live="polite">
+        {liveNote.get()}
+      </p>{' '}
       {shown.get().length < 2 ? (
         <section class="state">
           <EmptyState
