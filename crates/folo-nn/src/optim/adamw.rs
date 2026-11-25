@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
 
+use super::simd::adamw_slice;
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
     validate_groups,
@@ -69,20 +70,34 @@ struct Coef {
 }
 
 fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()> {
-    if cpu_fast(&[p, m, v]) && g.device().is_cpu() && g.dtype() == DType::F32 {
+    if cpu_fast(&[p, m, v])
+        && g.device().is_cpu()
+        && g.dtype() == DType::F32
+        && !p.same_storage(g)
+        && !p.same_storage(m)
+        && !p.same_storage(v)
+        && !m.same_storage(g)
+        && !m.same_storage(v)
+        && !v.same_storage(g)
+    {
         return g.with_f32_slice(|g| -> Result<()> {
             m.update_f32(|m| {
                 v.update_f32(|v| {
                     p.update_f32(|p| {
-                        for (((p, &g), m), v) in p.iter_mut().zip(g).zip(m.iter_mut()).zip(v.iter_mut()) {
-                            if let Some(d) = c.decay {
-                                *p *= d;
-                            }
-                            *m = c.b1 * *m + c.one_minus_b1 * g;
-                            *v = c.b2 * *v + c.one_minus_b2 * (g * g);
-                            let denom = v.sqrt() / c.bc2_sqrt + c.eps;
-                            *p += -c.step_size * (*m / denom);
-                        }
+                        adamw_slice(
+                            p,
+                            g,
+                            m,
+                            v,
+                            c.decay,
+                            c.b1,
+                            c.one_minus_b1,
+                            c.b2,
+                            c.one_minus_b2,
+                            c.step_size,
+                            c.bc2_sqrt,
+                            c.eps,
+                        );
                     })
                 })
             })???;

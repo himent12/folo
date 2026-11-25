@@ -15,7 +15,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 | `src/module.rs` | `Module` (named parameters and buffers, train / eval mode, traversal), `Forward`, `Layer` |
 | `src/layers/` | `conv.rs` (`Conv2d`), `batchnorm.rs` (`BatchNorm2d`, `RunningStats`), `conv_bn_act.rs` (`ConvBnAct`, MODEL.md's `Conv`, and `fuse_conv_bn`), `simple.rs` (`Linear`, `Activation`, `MaxPool2d`, `Upsample`, `Concat`, `Identity`), `container.rs` (`Sequential`, `ModuleList`) |
 | `src/init.rs` | Seeded Kaiming / Xavier initialisation and the head bias priors (MODEL.md §2.9, §6.5) |
-| `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `sgd.rs`, `adamw.rs`, `musgd.rs` (MuSGD, Newton–Schulz `orthogonalize`, and Polar-FOLO `MuonOrtho` / `orthogonalize_with`), `grads.rs` (`GradAccumulator`, clipping) |
+| `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `sgd.rs`, `adamw.rs`, `musgd.rs` (`MuSgd`), `ortho.rs` (Newton–Schulz `orthogonalize` and Polar-FOLO `MuonOrtho` / `orthogonalize_with`), `grads.rs` (`GradAccumulator`, clipping), `simd/` (AVX2 / scalar CPU optimizer, clipping, and AMP unscale kernels) |
 | `src/sched.rs` | `LrSchedule`: warmup, then linear or cosine decay (MODEL.md §8.4, `folo.sched` in FORMAT.md) |
 | `src/ema.rs` | `ModelEma`, `ema_for_run` (a fine-tune's EMA window; MODEL.md §8.5) |
 | `src/amp.rs` | `GradScaler`, dynamic loss scaling for mixed-precision training (`folo.amp` in FORMAT.md) |

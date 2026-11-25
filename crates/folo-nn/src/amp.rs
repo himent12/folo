@@ -12,8 +12,10 @@
 //! factors is a power of two).
 
 use folo_core::{DType, Tensor, no_grad};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::optim::simd::unscale_check_slice;
 use crate::{Error, Result};
 
 /// PyTorch's initial loss scale, `2^16`.
@@ -47,6 +49,32 @@ pub fn unscale_(grads: &[&Tensor], inv_scale: f32) -> Result<bool> {
     let mut flags: Vec<Tensor> = Vec::new();
     let mut sums: Vec<Tensor> = Vec::new();
     let mut finite = true;
+    let all_cpu_f32 =
+        grads.iter().all(|g| g.device().is_cpu() && g.dtype() == DType::F32 && g.is_contiguous());
+    if all_cpu_f32 {
+        const PAR_THRESHOLD: usize = 1 << 16;
+        let total: usize = grads.iter().map(|g| g.numel()).sum();
+        let can_par = grads.len() > 1
+            && total >= PAR_THRESHOLD
+            && grads.len() <= 1024
+            && (0..grads.len()).all(|i| (i + 1..grads.len()).all(|j| !grads[i].same_storage(grads[j])));
+        if can_par {
+            return folo_core::cpu::in_pool(|| {
+                let flags: Vec<bool> = grads
+                    .par_iter()
+                    .map(|g| {
+                        let _g = no_grad();
+                        Ok(g.update_f32(|s| unscale_check_slice(s, inv_scale))?)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(flags.into_iter().all(|ok| ok))
+            });
+        }
+        for g in grads {
+            finite &= g.update_f32(|s| unscale_check_slice(s, inv_scale))?;
+        }
+        return Ok(finite);
+    }
     // All on one device: one multi-tensor kernel (16 tensors per dispatch on the GPU).
     let mut rest = grads;
     if let Some(dev) = grads.first().map(|g| g.device())
@@ -69,6 +97,10 @@ pub fn unscale_(grads: &[&Tensor], inv_scale: f32) -> Result<bool> {
             if g.unscale_check_(inv_scale, flag)? {
                 continue;
             }
+        }
+        if dev.is_cpu() && g.dtype() == DType::F32 && g.is_contiguous() {
+            finite &= g.update_f32(|s| unscale_check_slice(s, inv_scale))?;
+            continue;
         }
         g.mul_scalar_assign(inv_scale)?;
         if dev.is_cpu() && g.dtype() == DType::F32 {

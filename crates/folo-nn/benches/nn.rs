@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use folo_core::rng::Rng;
 use folo_core::{Grads, Tensor};
 use folo_nn::io::{FileKind, LoadOptions, Metadata, ModelConfig, ModelFile, Purpose, save_weights};
-use folo_nn::optim::{AdamW, Optimizer, ParamGroup, Sgd};
+use folo_nn::optim::{AdamW, GradAccumulator, MuSgd, Optimizer, ParamGroup, Sgd};
 use folo_nn::{BatchNorm2d, Conv2d, Conv2dConfig, Forward, ModelEma, ModuleList};
 
 fn bench(budget: Duration, mut f: impl FnMut()) -> Duration {
@@ -79,6 +79,17 @@ fn main() {
     println!("  SGD (Nesterov, L2): {:.2} ms", ms(bench(budget, || sgd.step(&grads).unwrap())));
     let mut adamw = AdamW::new(group()).unwrap();
     println!("  AdamW: {:.2} ms", ms(bench(budget, || adamw.step(&grads).unwrap())));
+    let mut musgd = MuSgd::new(group()).unwrap();
+    println!("  MuSGD (Polar4): {:.2} ms", ms(bench(budget, || musgd.step(&grads).unwrap())));
+    let p_only: Vec<Tensor> = params.iter().map(|(_, p)| p.clone()).collect();
+    let mut acc = GradAccumulator::new(&p_only);
+    acc.add(&grads).unwrap();
+    println!(
+        "  GradAccumulator::unscale_clip (max_norm=10): {:.2} ms",
+        ms(bench(budget, || {
+            let _ = acc.unscale_clip(1.0, 10.0).unwrap();
+        }))
+    );
     let shadow = ModuleList::new(
         (0..255).map(|_| Conv2d::new(Conv2dConfig::new(32, 36, 3).bias(false), &mut rng)).collect::<Vec<_>>(),
     );
