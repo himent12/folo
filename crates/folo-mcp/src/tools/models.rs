@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -17,6 +16,7 @@ use super::dispatch::join;
 use super::results::{
     MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of, short, summary_classes,
 };
+use crate::batch_cache::MAX_BATCH_BYTES;
 use crate::errors::{Error, invalid_arguments};
 use crate::paths::{MAX_BATCH, too_many_inputs};
 use crate::server::Inner;
@@ -224,10 +224,24 @@ impl Inner {
             progress.report((i + 1) as f64, Some(total), i + 1 == total as usize).await;
         }
         let processed = (images.len() - failed.len()) as u64;
-        let batch_id = self.next_batch_id();
+        let model_id = model.id;
+        let Some(batch_id) = self
+            .batches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_insert_next(|id| json!({ "batch_id": id, "model_id": model_id, "images": images }))
+        else {
+            return Err(Error::new(
+                http::StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!(
+                    "predict_batch result exceeds the {} MiB prediction cache budget",
+                    MAX_BATCH_BYTES / (1024 * 1024)
+                ),
+            )
+            .hint("split the batch into fewer images or raise `conf` to return fewer boxes"));
+        };
         let details_uri = format!("folo://predictions/{batch_id}");
-        let details = json!({ "batch_id": batch_id, "model_id": model.id, "images": images });
-        self.batches.lock().unwrap().insert(batch_id.clone(), Arc::new(details));
         let failed_total = failed.len() as u64;
         failed.truncate(MAX_FAILURES);
         let mut result = PredictBatchResult {

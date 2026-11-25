@@ -38,8 +38,9 @@ use serde_json::{Value, json};
 use crate::types::*;
 use schemas::{api_output, input, output, terse_input, terse_output, train_input};
 
+pub(crate) use arguments::closest_match;
 pub use dispatch::Progress;
-pub(crate) use dispatch::join;
+pub(crate) use dispatch::{NotFoundTarget, join};
 pub(crate) use results::short;
 
 /// One tool of the table in docs/MCP.md.

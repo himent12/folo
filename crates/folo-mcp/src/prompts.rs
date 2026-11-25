@@ -7,6 +7,7 @@ use rmcp::model::{GetPromptRequestParams, GetPromptResult, Prompt, PromptArgumen
 use serde_json::json;
 
 use crate::server::Inner;
+use crate::tools::{self, NotFoundTarget};
 
 /// The prompts a server lists (`train_on_folder` and `label_folder` change state, so read-only servers hide them).
 pub fn list(read_only: bool) -> Vec<Prompt> {
@@ -132,15 +133,23 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
         "diagnose_run" => {
             let run_id = arg(&req, "run_id").ok_or_else(|| missing("diagnose_run", "run_id"))?;
             let id = run_id.clone();
-            let (run, metrics, logs) = inner
+            let (run, metrics, logs) = match inner
                 .blocking(move |s| {
                     let metrics = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
                     Ok((s.get_run(&id)?, metrics, s.run_logs(&id, &LogsQuery::last(20))?.lines))
                 })
                 .await
-                .map_err(|e| {
-                    McpError::invalid_params(e.body.message.clone(), Some(json!({ "error": e.body })))
-                })?;
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = inner.enrich_not_found(e, NotFoundTarget::Run(run_id)).await;
+                    let msg = match &e.body.hint {
+                        Some(h) if !h.is_empty() => format!("{} ({h})", e.body.message),
+                        _ => e.body.message.clone(),
+                    };
+                    return Err(McpError::invalid_params(msg, Some(json!({ "error": e.body }))));
+                }
+            };
             // Keep the embedded summary short: every epoch's headline numbers, not the per-class rows.
             let epochs: Vec<_> = metrics
                 .epochs
@@ -181,6 +190,17 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
             Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
                 .with_description(format!("Diagnose run {run_id}")))
         }
-        other => Err(McpError::invalid_params(format!("unknown prompt: {other}"), None)),
+        other => {
+            let available: &[&str] = if inner.opts.read_only {
+                &["diagnose_run"]
+            } else {
+                &["train_on_folder", "label_folder", "diagnose_run"]
+            };
+            let mut msg = format!("unknown prompt: {}", tools::short(other, 64));
+            if let Some(s) = tools::closest_match(other, available) {
+                msg.push_str(&format!("; did you mean `{s}`?"));
+            }
+            Err(McpError::invalid_params(msg, None))
+        }
     }
 }

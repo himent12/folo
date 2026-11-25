@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,12 +26,13 @@ use rmcp::service::{RequestContext, RoleServer, SubscriptionContext};
 use serde_json::{Value, json};
 use tokio::task::AbortHandle;
 
+use crate::batch_cache::{BatchCache, BatchLookup, MAX_BATCH_BYTES, MAX_BATCHES};
 use crate::confine::Confinement;
 use crate::errors::Error;
 use crate::paths::PathPolicy;
 use crate::proxy::HttpStore;
 use crate::resources::{self, FoloUri};
-use crate::tools::{self, Progress};
+use crate::tools::{self, NotFoundTarget, Progress};
 use crate::{Options, prompts};
 
 /// The revisions this server implements and tests (docs/MCP.md).
@@ -58,9 +59,8 @@ pub struct Inner {
     pub(crate) confinement: Confinement,
     /// Runs started by this session (stopped gracefully when the client disconnects).
     pub(crate) created_runs: Mutex<Vec<String>>,
-    /// `predict_batch` results, served as `folo://predictions/{batch_id}` for the server's lifetime.
-    pub(crate) batches: Mutex<HashMap<String, Arc<Value>>>,
-    batch_seq: AtomicU64,
+    /// Bounded LRU cache of recent `predict_batch` results, served as `folo://predictions/{batch_id}`.
+    pub(crate) batches: Mutex<BatchCache>,
     /// `uri -> (fingerprint, revision)` of run snapshots.
     revisions: Mutex<HashMap<String, (u64, u64)>>,
     /// Legacy (`resources/subscribe`) watchers by URI.
@@ -76,10 +76,6 @@ impl Inner {
     {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || f(&*store)).await.map_err(tools::join)?
-    }
-
-    pub(crate) fn next_batch_id(&self) -> String {
-        format!("pb_{}", self.batch_seq.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     /// Records the fingerprint of a resource snapshot and returns its revision (bumped on every change).
@@ -278,8 +274,7 @@ impl FoloMcp {
                 confinement: Confinement::new(paths.clone()),
                 paths,
                 created_runs: Mutex::new(Vec::new()),
-                batches: Mutex::new(HashMap::new()),
-                batch_seq: AtomicU64::new(0),
+                batches: Mutex::new(BatchCache::new()),
                 revisions: Mutex::new(HashMap::new()),
                 legacy_subs: Mutex::new(HashMap::new()),
             }),
@@ -320,6 +315,15 @@ impl FoloMcp {
         let store = self.inner.store.clone();
         let _ = tokio::task::spawn_blocking(move || store.shutdown()).await;
     }
+
+    async fn map_resource_error(&self, uri: &str, e: Error, target: Option<NotFoundTarget>) -> McpError {
+        let e = crate::confine::map_denied(e);
+        let e = match target {
+            Some(t) => self.inner.enrich_not_found(e, t).await,
+            None => e,
+        };
+        resource_error(uri, e)
+    }
 }
 
 /// An `isError` result. Messages and hints are cut so error results stay small too (store and server messages
@@ -337,7 +341,14 @@ fn resource_error(uri: &str, e: Error) -> McpError {
     let e = crate::confine::map_denied(e);
     let data = Some(json!({ "uri": uri, "error": e.body }));
     if e.status == http::StatusCode::NOT_FOUND {
-        McpError::resource_not_found(format!("resource not found: {uri} ({})", e.body.message), data)
+        let mut msg = format!("resource not found: {uri} ({})", e.body.message);
+        if let Some(hint) = e.body.hint.as_deref()
+            && let Some(idx) = hint.find("did you mean ")
+        {
+            msg.push_str("; ");
+            msg.push_str(&hint[idx..]);
+        }
+        McpError::resource_not_found(msg, data)
     } else if e.status.is_client_error() {
         McpError::invalid_params(format!("reading {uri}: {}", e.body.message), data)
     } else {
@@ -420,7 +431,12 @@ impl ServerHandler for FoloMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let Some(def) = tools::find(&request.name) else {
-            return Err(McpError::invalid_params(format!("unknown tool: {}", request.name), None));
+            let listed: Vec<&str> = tools::listed(self.inner.opts.read_only).map(|t| t.name).collect();
+            let mut msg = format!("unknown tool: {}", tools::short(&request.name, 64));
+            if let Some(s) = tools::closest_match(&request.name, &listed) {
+                msg.push_str(&format!("; did you mean `{s}`?"));
+            }
+            return Err(McpError::invalid_params(msg, None));
         };
         let mut progress = Progress::new(context.peer.clone(), context.meta.get_progress_token());
         let args = request.arguments.unwrap_or_default();
@@ -490,74 +506,148 @@ impl ServerHandler for FoloMcp {
         let c = self.inner.confinement.clone();
         let contents = match parsed {
             FoloUri::Dataset(id) => {
-                let d = self
+                let d = match self
                     .inner
-                    .blocking(move |s| {
-                        c.dataset(s, &id)?;
-                        s.get_dataset(&id)
+                    .blocking({
+                        let id = id.clone();
+                        move |s| {
+                            c.dataset(s, &id)?;
+                            s.get_dataset(&id)
+                        }
                     })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Err(self
+                            .map_resource_error(&uri, e, Some(NotFoundTarget::Dataset(id)))
+                            .await);
+                    }
+                };
                 json_contents(&serde_json::to_value(d).unwrap_or_default())
             }
             FoloUri::Image(id, image_id, size) => {
-                let img = self
+                let img = match self
                     .inner
-                    .blocking(move |s| {
-                        c.dataset(s, &id)?;
-                        s.image(&id, &image_id, size.thumb())
+                    .blocking({
+                        let id = id.clone();
+                        move |s| {
+                            c.dataset(s, &id)?;
+                            s.image(&id, &image_id, size.thumb())
+                        }
                     })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(img) => img,
+                    Err(e) => {
+                        return Err(self
+                            .map_resource_error(&uri, e, Some(NotFoundTarget::Dataset(id)))
+                            .await);
+                    }
+                };
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
                 ResourceContents::blob(b64, uri.clone()).with_mime_type(img.content_type)
             }
             FoloUri::Run(id) => {
-                let snap = self
+                let snap = match self
                     .inner
-                    .blocking(move |s| resources::run_snapshot(s, &id))
+                    .blocking({
+                        let id = id.clone();
+                        move |s| resources::run_snapshot(s, &id)
+                    })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        return Err(self.map_resource_error(&uri, e, Some(NotFoundTarget::Run(id))).await);
+                    }
+                };
                 let revision = self.inner.revision(&uri, hash(&snap.to_string()));
                 let mut v = snap;
                 v["revision"] = json!(revision);
                 json_contents(&v)
             }
             FoloUri::Metrics(id) => {
-                let m = self
+                let m = match self
                     .inner
-                    .blocking(move |s| s.run_metrics(&id, &MetricsQuery::default()))
+                    .blocking({
+                        let id = id.clone();
+                        move |s| s.run_metrics(&id, &MetricsQuery::default())
+                    })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Err(self.map_resource_error(&uri, e, Some(NotFoundTarget::Run(id))).await);
+                    }
+                };
                 json_contents(&serde_json::to_value(m).unwrap_or_default())
             }
             FoloUri::Epochs(id) => {
-                let m = self
+                let m = match self
                     .inner
-                    .blocking(move |s| s.run_metrics(&id, &MetricsQuery::every(u64::MAX)))
+                    .blocking({
+                        let id = id.clone();
+                        move |s| s.run_metrics(&id, &MetricsQuery::every(u64::MAX))
+                    })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Err(self.map_resource_error(&uri, e, Some(NotFoundTarget::Run(id))).await);
+                    }
+                };
                 json_contents(&json!({ "epochs": m.epochs, "last_step": m.steps.last() }))
             }
             FoloUri::Samples(id, epoch, tile) => {
-                let jpeg = self
+                let jpeg = match self
                     .inner
-                    .blocking(move |s| {
-                        c.dataset(s, &s.get_run(&id)?.config.dataset_id)?;
-                        crate::render::sample_grid(s, &id, epoch, tile)
+                    .blocking({
+                        let id = id.clone();
+                        move |s| {
+                            c.dataset(s, &s.get_run(&id)?.config.dataset_id)?;
+                            crate::render::sample_grid(s, &id, epoch, tile)
+                        }
                     })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(jpeg) => jpeg,
+                    Err(e) => {
+                        return Err(self.map_resource_error(&uri, e, Some(NotFoundTarget::Run(id))).await);
+                    }
+                };
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
                 ResourceContents::blob(b64, uri.clone()).with_mime_type("image/jpeg")
             }
             FoloUri::Predictions(batch) => {
-                let v =
-                    self.inner.batches.lock().unwrap().get(&batch).cloned().ok_or_else(|| not_found(&uri))?;
+                let lookup = self.inner.batches.lock().unwrap_or_else(|e| e.into_inner()).lookup(&batch);
+                let v = match lookup {
+                    BatchLookup::Found(v) => v,
+                    BatchLookup::Evicted => {
+                        return Err(McpError::resource_not_found(
+                            format!(
+                                "resource not found: {uri} (evicted from cache; at most {MAX_BATCHES} recent \
+                                 predict_batch results / {} MiB are kept)",
+                                MAX_BATCH_BYTES / (1024 * 1024)
+                            ),
+                            Some(json!({ "uri": uri, "evicted": true })),
+                        ));
+                    }
+                    BatchLookup::NotFound => return Err(not_found(&uri)),
+                };
                 json_contents(&v)
             }
             FoloUri::Doc(name) => {
-                let text = resources::doc(&name).ok_or_else(|| not_found(&uri))?;
+                let text = resources::doc(&name).ok_or_else(|| {
+                    let docs: Vec<&str> = resources::doc_names().collect();
+                    match tools::closest_match(&name, &docs) {
+                        Some(s) => McpError::resource_not_found(
+                            format!("resource not found: {uri}; did you mean `folo://docs/{s}`?"),
+                            Some(json!({ "uri": uri, "suggestion": format!("folo://docs/{s}") })),
+                        ),
+                        None => not_found(&uri),
+                    }
+                })?;
                 ResourceContents::text(text, uri.clone()).with_mime_type("text/markdown")
             }
             FoloUri::Throughput => {
@@ -565,14 +655,24 @@ impl ServerHandler for FoloMcp {
                 json_contents(&serde_json::to_value(t).unwrap_or_default())
             }
             FoloUri::Estimate(id, fields) => {
-                let e = self
+                let e = match self
                     .inner
-                    .blocking(move |s| {
-                        c.dataset(s, &id)?;
-                        s.estimate_run(resources::estimate_config(&id, &fields)?)
+                    .blocking({
+                        let id = id.clone();
+                        move |s| {
+                            c.dataset(s, &id)?;
+                            s.estimate_run(resources::estimate_config(&id, &fields)?)
+                        }
                     })
                     .await
-                    .map_err(|e| resource_error(&uri, e))?;
+                {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Err(self
+                            .map_resource_error(&uri, e, Some(NotFoundTarget::Dataset(id)))
+                            .await);
+                    }
+                };
                 json_contents(&serde_json::to_value(e).unwrap_or_default())
             }
         };

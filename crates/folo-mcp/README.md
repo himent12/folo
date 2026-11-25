@@ -14,7 +14,8 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 | path | what it holds |
 |---|---|
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
-| `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: initialization `instructions` (tailored to `--read-only`), `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
+| `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: initialization `instructions` (tailored to `--read-only`), `tools/list` and `tools/call` (with fuzzy tool-name suggestions), resources and subscriptions (with doc/entity suggestions and bounded batch-cache reads), prompts, logging, stopping the session's runs on exit |
+| `src/batch_cache.rs` | `BatchCache`: bounded LRU cache of recent `predict_batch` payloads served at `folo://predictions/{batch_id}` |
 | `src/tools/` | The tools; see below |
 | `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views); `src/types/bench.rs`: the compact benchmark results (catalog, summaries, a benchmark with its leaderboard, an entry's state and score) |
 | `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
@@ -34,9 +35,9 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | file | what it holds |
 |---|---|
 | `mod.rs` | `TOOLS` (name, description, `mutating`, `OnceLock`-memoized compacted input and output schemas, and MCP `ToolAnnotations`) in docs/MCP.md order; `listed`, `find`, `describe` |
-| `dispatch.rs` | `Inner::call`: the `--read-only` refusal, unknown-argument check, the match onto handlers, progress notifications, error-code mapping |
+| `dispatch.rs` | `Inner::call`: the `--read-only` refusal, unknown-argument check, the match onto handlers, progress notifications, error-code mapping, fuzzy `"did you mean ...?"` hints on `*_not_found` errors |
 | `schemas.rs` | Input and output schemas generated with schemars, then shrunk for `tools/list` |
-| `arguments.rs` | Unknown argument names (with a suggestion), parsing, names and `0..=1` values |
+| `arguments.rs` | Unknown argument names (with suggestions), shared fuzzy `closest_match` / `closest_named` helpers, parsing, names and `0..=1` values |
 | `results.rs` | Size limits, one-line summaries and pages of a result |
 | `info.rs` | `folo_info` |
 | `datasets.rs` | `list_datasets`, `get_dataset` (error-bucket-first issue collection), `list_dataset_issues`, `list_dataset_images`, `register_dataset`, `create_synthetic_dataset`; all three paged list handlers validate paging upfront before store access |

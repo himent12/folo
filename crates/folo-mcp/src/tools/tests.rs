@@ -262,3 +262,190 @@ fn tool_annotations_match_tool_semantics() {
         ["cloud_connections", "cloud_offers", "cloud_instances", "cloud_terminate", "start_labeling"]
     );
 }
+
+#[test]
+fn closest_match_and_closest_named_suggest_accurately() {
+    use super::arguments::{MAX_SUGGEST_CHARS, closest_match, closest_named};
+
+    // Case-insensitive exact match, while exact matches and unrelated 3-char strings return None.
+    assert_eq!(closest_match("api", &["API", "CLI", "MCP"]), Some("API"));
+    assert_eq!(closest_match("agent_cookbook", &["API", "AGENT_COOKBOOK"]), Some("AGENT_COOKBOOK"));
+    assert_eq!(closest_match("API", &["API", "CLI"]), None);
+    assert_eq!(closest_match("CLI", &["API", "MCP"]), None);
+    assert_eq!(closest_match("MPC", &["API", "MCP"]), Some("MCP"));
+
+    // Adjacent transposition (OSA distance 1) and 1-2 edit typos.
+    assert_eq!(closest_match("predcit", &["predict", "predict_batch", "train"]), Some("predict"));
+    assert_eq!(closest_match("empty_iamge", &folo_api::ISSUE_KINDS), Some("empty_image"));
+    assert_eq!(closest_match("list_runss", &["list_runs", "list_models"]), Some("list_runs"));
+
+    // Unambiguous prefix and nested prefix hierarchy work, while ambiguous siblings do not guess.
+    assert_eq!(closest_match("ds_5a", &["ds_5a1e", "ds_7c2f"]), Some("ds_5a1e"));
+    assert_eq!(closest_match("pred", &["predict", "predict_batch", "train"]), Some("predict"));
+    assert_eq!(closest_match("ds_", &["ds_5a1e", "ds_7c2f"]), None);
+    assert_eq!(closest_match("list_", &["list_runs", "list_models", "list_datasets"]), None);
+
+    // Distant or oversized needles return None cleanly.
+    assert_eq!(closest_match("typo", &folo_api::ISSUE_KINDS), None);
+    assert_eq!(closest_match("no_such_tool", &["train", "val", "predict"]), None);
+    assert_eq!(closest_match(&"a".repeat(MAX_SUGGEST_CHARS + 1), &["a", "aa"]), None);
+    assert_eq!(closest_match("", &["train"]), None);
+
+    // Named entities: ID typo, unique display name, display name typo, and duplicate-name ambiguity.
+    let items = vec![
+        ("ds_5a1e".into(), "shapes".into()),
+        ("ds_7c2f".into(), "traffic-cams".into()),
+        ("ds_9001".into(), "dup".into()),
+        ("ds_9002".into(), "dup".into()),
+        ("ds_9003".into(), "dups".into()),
+    ];
+    assert_eq!(closest_named("ds_5a1f", &items), Some(("ds_5a1e", "shapes")));
+    assert_eq!(closest_named("shapes", &items), Some(("ds_5a1e", "shapes")));
+    assert_eq!(closest_named("shapess", &items), Some(("ds_5a1e", "shapes")));
+    // Ambiguous duplicate names must not fall through to a neighboring name like `dups`.
+    assert_eq!(closest_named("dup", &items), None);
+    assert_eq!(closest_named("du", &items), None);
+    assert_eq!(closest_named("dupx", &items), None);
+
+    // Case-insensitive alias that is absent from a tool's schema still falls through to closest_match.
+    let register = find("register_dataset").unwrap();
+    let e = unknown_argument(
+        "register_dataset",
+        register.input_schema(),
+        json!({ "PATH": "." }).as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e.body.message, "unknown argument `PATH`; did you mean `path`?");
+}
+
+#[tokio::test]
+async fn not_found_tool_errors_and_issue_kinds_include_suggestions() {
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let home = folo_test_support::TestDir::new("mcp-suggest");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let call = |tool: &str, v: Value| {
+        let def = find(tool).unwrap();
+        let args = v.as_object().unwrap().clone();
+        let inner = server.inner.clone();
+        let label = format!("{tool}({v})");
+        async move {
+            let mut p = Progress::none();
+            inner
+                .call(def, args, &mut p)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{label} unexpectedly succeeded"))
+        }
+    };
+
+    // Dataset ID typo & display name suggestion preserve existing hint.
+    let e = call("get_dataset", json!({ "dataset_id": "ds_5a1f" })).await;
+    assert_eq!(e.body.code, "dataset_not_found");
+    let hint = e.body.hint.as_deref().unwrap();
+    assert!(hint.contains("list_datasets"), "{hint}");
+    assert!(hint.contains("did you mean `ds_5a1e`"), "{hint}");
+
+    let e = call("get_dataset", json!({ "dataset_id": "shapes" })).await;
+    assert_eq!(e.body.code, "dataset_not_found");
+    assert!(e.body.hint.as_deref().unwrap().contains("did you mean `ds_5a1e`"), "{:?}", e.body.hint);
+
+    // Model ID typo (via predict and via train.weights).
+    let e = call("export", json!({ "model_id": "m_53d9", "format": "onnx" })).await;
+    assert_eq!(e.body.code, "model_not_found");
+    assert!(e.body.hint.as_deref().unwrap().contains("did you mean `m_53d1`"), "{:?}", e.body.hint);
+
+    let e = call("train", json!({ "dataset_id": "ds_5a1e", "arch": "folo-n", "weights": "m_53d9" })).await;
+    assert_eq!(e.body.code, "model_not_found");
+    assert!(e.body.hint.as_deref().unwrap().contains("did you mean `m_53d1`"), "{:?}", e.body.hint);
+
+    // Run ID typo (run_status and compare_runs).
+    let e = call("run_status", json!({ "run_id": "run_2b20" })).await;
+    assert_eq!(e.body.code, "run_not_found");
+    assert!(e.body.hint.as_deref().unwrap().contains("did you mean `run_2b02`"), "{:?}", e.body.hint);
+
+    let e = call("compare_runs", json!({ "run_ids": ["run_1a01", "run_2b20"] })).await;
+    assert_eq!(e.body.code, "run_not_found");
+    assert!(e.body.hint.as_deref().unwrap().contains("did you mean `run_2b02`"), "{:?}", e.body.hint);
+
+    // When compare_runs fails on an empty/overlong first ID, do not suggest for a later ID.
+    for first in [String::new(), "x".repeat(200)] {
+        let e = call("compare_runs", json!({ "run_ids": [first, "run_2b20"] })).await;
+        assert_eq!(e.body.code, "run_not_found");
+        assert!(
+            !e.body.hint.as_deref().unwrap_or("").contains("did you mean"),
+            "must not suggest for unreached index 1: {:?}",
+            e.body.hint
+        );
+    }
+
+    // Unknown issue kind typo.
+    let e = call("list_dataset_issues", json!({ "dataset_id": "ds_7c2f", "kind": "empty_iamge" })).await;
+    assert_eq!(e.body.code, "invalid_arguments");
+    assert!(e.body.message.contains("did you mean `empty_image`?"), "{}", e.body.message);
+}
+
+#[tokio::test]
+async fn predict_batch_evicts_oldest_results_past_lru_cap() {
+    use crate::batch_cache::{BatchLookup, MAX_BATCHES};
+
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let home = folo_test_support::TestDir::new("mcp-batch-lru");
+    let img_path = home.join("a.jpg");
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30])).save(&img_path).unwrap();
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let def = find("predict_batch").unwrap();
+    for i in 0..=MAX_BATCHES {
+        let mut p = Progress::none();
+        let out = server
+            .inner
+            .call(
+                def,
+                json!({ "model_id": "m_31aa", "paths": ["a.jpg"] }).as_object().unwrap().clone(),
+                &mut p,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.value["batch_id"], format!("pb_{}", i + 1));
+        // Touch pb_1 right after the first two batches so pb_2 becomes the LRU entry.
+        if i == 1 {
+            let mut cache = server.inner.batches.lock().unwrap();
+            assert!(matches!(cache.lookup("pb_1"), BatchLookup::Found(_)));
+        }
+    }
+    {
+        let mut cache = server.inner.batches.lock().unwrap();
+        assert_eq!(cache.len(), MAX_BATCHES);
+        assert!(matches!(cache.lookup("pb_1"), BatchLookup::Found(_)), "promoted pb_1 must stay cached");
+        assert!(matches!(cache.lookup("pb_2"), BatchLookup::Evicted), "LRU pb_2 must be evicted");
+        assert!(matches!(cache.lookup(&format!("pb_{}", MAX_BATCHES + 1)), BatchLookup::Found(_)));
+
+        // An oversized batch exceeding the cache byte budget returns `payload_too_large` without evicting
+        // existing cached entries.
+        *cache = crate::batch_cache::BatchCache::with_limits(MAX_BATCHES, 16);
+        assert!(cache.try_insert("pb_keep".into(), std::sync::Arc::new(json!({}))));
+    }
+    let mut p = Progress::none();
+    let e = server
+        .inner
+        .call(def, json!({ "model_id": "m_31aa", "paths": ["a.jpg"] }).as_object().unwrap().clone(), &mut p)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.body.code, "payload_too_large");
+    let cache = server.inner.batches.lock().unwrap();
+    assert!(cache.contains("pb_keep"), "oversized batch must not evict valid cached entries");
+}
