@@ -78,10 +78,10 @@ pub(super) fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
 }
 
 /// The relative path an entry unpacks to: its normal components (`.` skipped). An absolute path, `..`, a drive,
-/// a `:` (an NTFS stream), a NUL byte, or a backslash inside a component is `422 invalid_upload` on every OS; on
-/// Windows, components that fail to unpack or lose data there (`< > " | ? *`, ASCII control bytes `< 0x20`,
-/// dot/space-only names, `NUL` with optional trailing dots/spaces, or a parent folder ending in a space or more
-/// than one dot/space) are `422 invalid_upload` too.
+/// a `:` (an NTFS stream), a NUL byte, or a Windows-style traversal (`..\` / leading `\`) inside a component is
+/// `422 invalid_upload` on every OS; on Windows, components that fail to unpack or lose data there (`< > " | ? *`,
+/// ASCII control bytes `< 0x20`, dot/space-only names, `NUL` with optional trailing dots/spaces, or a parent
+/// folder ending in a space or more than one dot/space) are `422 invalid_upload` too.
 pub(super) fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
     let raw = entry.path().map_err(|e| invalid(format!("an entry's name is not a path: {e}")))?;
     let mut parts = Vec::new();
@@ -90,7 +90,8 @@ pub(super) fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
             Component::CurDir => {}
             Component::Normal(n) => {
                 let s = n.to_string_lossy();
-                if s.contains(':') || s.contains('\\') || s.contains('\0') {
+                let has_backslash_traversal = s.starts_with('\\') || s.split('\\').any(|seg| seg == "..");
+                if s.contains(':') || s.contains('\0') || has_backslash_traversal {
                     return Err(invalid(format!(
                         "{}: only relative paths inside the dataset folder are accepted",
                         raw.display()

@@ -37,7 +37,7 @@ impl Fingerprints {
         }
     }
 
-    /// Removes stale `.uploads.json.*.tmp` files left in the parent folder by a crashed process.
+    /// Removes stale `.uploads.json.<pid>.<seq>.tmp` files left in the parent folder by a crashed process.
     pub(super) fn cleanup_stale_temps(&self) {
         let Some(parent) = self.path.parent() else { return };
         let Some(name) = self.path.file_name().and_then(|n| n.to_str()) else { return };
@@ -45,9 +45,8 @@ impl Fingerprints {
         let Ok(entries) = std::fs::read_dir(parent) else { return };
         for entry in entries.flatten() {
             let file_name = entry.file_name();
-            let s = file_name.to_string_lossy();
-            if s.starts_with(&prefix)
-                && s.ends_with(".tmp")
+            let Some(s) = file_name.to_str() else { continue };
+            if is_atomic_temp_name(s, &prefix)
                 && let Err(e) = std::fs::remove_file(entry.path())
                 && e.kind() != std::io::ErrorKind::NotFound
             {
@@ -106,4 +105,18 @@ impl Fingerprints {
             Err(e) => tracing::warn!("writing {}: {e}", self.path.display()),
         }
     }
+}
+
+/// True iff `name` matches `<prefix><pid>.<seq>.tmp` produced by [`write_atomic`].
+fn is_atomic_temp_name(name: &str, prefix: &str) -> bool {
+    let Some(mid) = name.strip_prefix(prefix).and_then(|s| s.strip_suffix(".tmp")) else {
+        return false;
+    };
+    let Some((pid, seq)) = mid.split_once('.') else {
+        return false;
+    };
+    !pid.is_empty()
+        && !seq.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && seq.bytes().all(|b| b.is_ascii_digit())
 }

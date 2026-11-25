@@ -64,7 +64,8 @@ fn fingerprints_cache_reads_uploads_json_once() {
     assert_eq!(fp.disk_reads.load(Ordering::Relaxed), 2, "transient I/O error is retried, not latched");
 }
 
-/// `Uploads::open` removes leftover session directories and stale `.uploads.json.*.tmp` files.
+/// `Uploads::open` removes leftover session directories and stale `.uploads.json.<pid>.<seq>.tmp` files,
+/// while preserving unrelated files (including non-numeric `.uploads.json.*.tmp` names).
 #[test]
 fn open_cleans_leftover_sessions_and_stale_temp_files() {
     let dir = TestDir::new("uploads-open-cleanup");
@@ -72,12 +73,15 @@ fn open_cleans_leftover_sessions_and_stale_temp_files() {
     std::fs::write(dir.join("uploads").join("up_leftover").join("partial.bin"), b"abc").unwrap();
     let stale_tmp = dir.join(".uploads.json.99999.0.tmp");
     std::fs::write(&stale_tmp, b"partial").unwrap();
+    let backup_tmp = dir.join(".uploads.json.backup.tmp");
+    std::fs::write(&backup_tmp, b"backup").unwrap();
     let unrelated = dir.join("keep.txt");
     std::fs::write(&unrelated, b"keep").unwrap();
 
     let uploads = Uploads::open(dir.path());
     assert!(staging_entries(dir.path()).is_empty());
     assert!(!stale_tmp.exists(), "stale atomic temp file should be cleaned on open");
+    assert!(backup_tmp.exists(), "non-atomic .uploads.json.backup.tmp must remain untouched");
     assert!(unrelated.exists(), "unrelated files must remain untouched");
     uploads.shutdown();
 }
@@ -121,7 +125,15 @@ fn path_traversal_and_midstream_failure_clean_staging_dir() {
     let dir = TestDir::new("uploads-traversal-cleanup");
     let uploads = Uploads::open(dir.path());
 
-    for bad_name in ["../escape.txt", "a/../../escape.txt", "/etc/passwd", r"..\escape.txt", "a:stream"] {
+    for bad_name in [
+        "../escape.txt",
+        "a/../../escape.txt",
+        "/etc/passwd",
+        r"..\escape.txt",
+        r"\escape.txt",
+        r"a\..\escape.txt",
+        "a:stream",
+    ] {
         let u = uploads.create(&create_req(UploadKind::Dataset, "bad")).unwrap();
         // Prepend a valid entry so disk files already exist when the hostile second entry arrives.
         let mut archive = raw_tar_entry("data.yaml", b"names: [cat]\n");
@@ -134,6 +146,14 @@ fn path_traversal_and_midstream_failure_clean_staging_dir() {
         assert!(staging_entries(dir.path()).is_empty(), "{bad_name}: staging dir not cleaned");
         assert_eq!(uploads.get(&u.id).unwrap_err().status, StatusCode::NOT_FOUND);
     }
+
+    // A non-traversal backslash filename (valid on Unix) stays inside staging and succeeds.
+    let ok = uploads.create(&create_req(UploadKind::Dataset, "backslash-ok")).unwrap();
+    let archive = raw_tar_entry(r"images/train/camera\left.jpg", b"jpg");
+    uploads.put(&ok.id, 0, Bytes::from(archive)).unwrap();
+    let finished = uploads.finish(&ok.id).unwrap();
+    drop(finished);
+    assert!(staging_entries(dir.path()).is_empty());
 
     uploads.shutdown();
 }
