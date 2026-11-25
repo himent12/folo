@@ -39,29 +39,38 @@ function that returns WGSL for a `Spec`. Generators either concatenate files wit
 `kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm.rs`,
 `kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided.rs`,
 `kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
-`pipeline::render` then puts `Spec::header` (`enable f16;` when asked, `alias T = f32|f16`, one `const` per
-specialisation constant) and `PRELUDE` (the uniform block and `pu` / `pi` / `pf` / `linear_id`) in front. Every file in
-`src/shaders/` opens with a comment saying what it computes, in most files followed by its `Spec` constants and its
-parameter words; the bindings come next.
+`pipeline::render` then puts `Spec::header` (`enable f16;` and `enable wgpu_cooperative_matrix;` when asked,
+`alias T = f32|f16`, one `const` per specialisation constant) and `PRELUDE` (the uniform block and `pu` / `pi` /
+`pf` / `linear_id`) in front. `Spec::header` omits `enable subgroups;` because Naga 30 rejects that directive; native
+subgroup built-ins are enabled via `wgpu::Features::SUBGROUP` alone, while `Spec::subgroups(true)` selects the subgroup
+WGSL variant and tags the pipeline cache key. When `kernels::use_subgroups(ctx)` is true (native adapters with
+`SUBGROUP` and subgroup width `(32, 32)`; always `false` on `wasm32` / browser WebGPU), reductions (`reduce_rows`,
+`softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`) and gradient-norm partials
+(`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants with a portable shared-memory tree fallback
+otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with no workgroup barrier (direct
+per-element `atomicOr` otherwise). Every file in `src/shaders/` opens with a
+comment saying what it computes, in most files followed by its `Spec` constants and its parameter words; the bindings
+come next.
 
 ### From an op to its files
 
 There is no strict naming convention, but the chain is regular. A folo-core op reaches `GpuBackend`'s method of the
 same name in `src/backend/ops.rs`, which calls an entry point in the `src/kernels/` module for that kind of work
-(not one module per op). That entry point dispatches one or more `KernelDef`s; a kernel's `name` is the stem of its
-shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_topk.wgsl`), with two exceptions:
-`max_pool2d` (`maxpool.wgsl`) and `conv2d_depthwise` (`depthwise.wgsl`). Tests are grouped by area, not by op.
+(not one module per op). That entry point dispatches one or more `KernelDef`s; a kernel's `name` is usually the stem
+of its shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_topk.wgsl`), with a few
+exceptions: `max_pool2d` (`maxpool.wgsl`), `conv2d_depthwise` (`depthwise.wgsl`), and the `det_kd_*` distillation
+kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 
 | Op (folo-core) | `GpuBackend` method | Kernel entry point | WGSL | Test against the CPU |
 |---|---|---|---|---|
 | unary, binary, comparisons, `where` | `unary`, `unary_backward`, `binary`, `where_cond` (through `GpuBackend::ew` in `encode.rs`) | `kernels::ew::elementwise` | generated in `ew.rs` | `src/tests/backend/elementwise.rs` |
-| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs` |
-| softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
+| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` (ceiling-division split-K for `Sum`/`Max`/`Min` from `GpuBackend`, plus `Mean` in `reduce_split` directly; 32-wide subgroup reductions on rows) | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/reduce.rs` |
+| softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` (online row softmax when `inner == 1`, 1 read up to 1,024 elems / 2-pass online above; `softmax_cols` otherwise, register-cached for `D ≤ 32` and 2-pass online above) | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
 | top-k | `topk` | `kernels::reduce::topk` | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
 | matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
 | conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv.rs` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
-| max / avg / adaptive pooling and gradients | `max_pool2d`, `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pool_grad::*` | generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
+| max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only), `kernels::pool_grad::*` | `maxpool.wgsl`; generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
 | nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d`, `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
 | index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/index.rs` |
 | copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/transfer.rs` |
@@ -72,11 +81,11 @@ shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
 | assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss/` |
-| distillation term (not a `Backend` method) | `folo_gpu::distill::distill_loss` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
+| distillation term (not a `Backend` method) | `folo_gpu::distill::{distill_loss, distill_loss_with_context}` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
 
-`GpuTensor` (`src/tensor.rs`) has kernels of its own that the backend does not use: `kernels::elementwise`
-(`unary.wgsl`, `binary.wgsl`, `bias_act.wgsl`, tested in `src/tests/elementwise.rs`) and `kernels::pooling`
-(`maxpool.wgsl`, tested in `src/tests/layout.rs`). It shares `kernels::layout`, `kernels::reduce`, `kernels::gemm` and
+`GpuTensor` (`src/tensor.rs`) has one kernel module of its own that the backend does not use: `kernels::elementwise`
+(`unary.wgsl`, `binary.wgsl`, `bias_act.wgsl`, tested in `src/tests/elementwise.rs`). It shares `kernels::layout`,
+`kernels::pooling` (`maxpool.wgsl`, tested in `src/tests/layout.rs`), `kernels::reduce`, `kernels::gemm` and
 `kernels::conv` with the backend.
 
 ## Start here
