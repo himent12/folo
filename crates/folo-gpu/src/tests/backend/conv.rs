@@ -316,3 +316,135 @@ fn conv2d_many_groups_run_one_image_at_a_time() {
         }
     }
 }
+
+#[test]
+fn depthwise_grad_vx4_and_subgroup_vec4_parity() {
+    use crate::kernels::FORCE_NO_SUBGROUPS;
+
+    let dev = dev!();
+    let has_f16 = folo_core::backend::computes_f16(dev);
+    let q = |t: &Tensor| t.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+
+    // Covers VX4 dX (stride 1, dilation 1, odd/even/tail widths w = 1, 2, 3, 5, 16, 20), general fallback dX
+    // (stride 2, dilation 2), VEC4 dW (ow % 4 == 0, SW == 1, DW == 1), scalar dW (odd ow, stride 2, dilation 2),
+    // kernel sizes 1x1 / 3x3 / 5x5 / 7x7, and depthwise multiplier MULT = 2.
+    let cases = [
+        ([2, 8, 9, 16], [8, 1, 3, 3], 1, 1, 1, 8),
+        ([2, 6, 7, 5], [6, 1, 3, 3], 1, 1, 1, 6),
+        ([1, 4, 3, 1], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([1, 4, 4, 2], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([1, 4, 4, 3], [4, 1, 3, 3], 1, 1, 1, 4),
+        ([2, 4, 12, 20], [4, 1, 5, 5], 1, 2, 1, 4),
+        ([2, 3, 10, 12], [3, 1, 7, 7], 1, 3, 1, 3),
+        ([2, 4, 8, 8], [8, 1, 3, 3], 1, 1, 1, 4), // MULT = 2, VEC4 dW + VX4 dX
+        ([2, 4, 8, 8], [4, 1, 1, 1], 1, 0, 1, 4), // 1x1 depthwise
+        ([2, 4, 11, 16], [4, 1, 3, 3], 2, 1, 1, 4), // stride 2 fallback
+        ([2, 4, 9, 12], [4, 1, 3, 3], 1, 2, 2, 4), // dilation 2 fallback
+        ([2, 2, 41, 64], [2, 1, 3, 3], 1, 1, 1, 2), // multi-chunk VEC4 dW (> 4096 pixels, short last chunk)
+    ];
+
+    struct ResetSg(bool);
+    impl Drop for ResetSg {
+        fn drop(&mut self) {
+            FORCE_NO_SUBGROUPS.with(|f| f.set(self.0));
+        }
+    }
+
+    for (idx, &(xs, ws, s, p, dil, g)) in cases.iter().enumerate() {
+        let seed = 200 + idx as u64 * 4;
+        let x = randn(&xs, seed);
+        let w = randn(&ws, seed + 1).mul_scalar(0.3).unwrap();
+        // Run both native (subgroups when supported) and forced-portable fallback.
+        for force_portable in [false, true] {
+            let prev = FORCE_NO_SUBGROUPS.with(|f| f.replace(force_portable));
+            let _guard = ResetSg(prev);
+            check(
+                dev,
+                &[x.clone(), w.clone()],
+                5e-4,
+                2e-4,
+                &format!("dw f32 {xs:?} {ws:?} s{s} p{p} d{dil} g{g} portable={force_portable}"),
+                move |v| v[0].conv2d(&v[1], None, s, p, dil, g),
+            );
+            if has_f16 {
+                let xq = q(&x);
+                let wq = q(&w);
+                let xc = xq.detach().requires_grad_();
+                let wc = wq.detach().requires_grad_();
+                let yc = xc.conv2d(&wc, None, s, p, dil, g).unwrap();
+                let gy = q(&randn(yc.dims(), seed + 2));
+                let gc = yc.backward_with(&gy).unwrap();
+
+                let xg = xq.to_device(dev).unwrap().to_dtype(DType::F16).unwrap().detach().requires_grad_();
+                let wg = wq.to_device(dev).unwrap().to_dtype(DType::F16).unwrap().detach().requires_grad_();
+                let yg = xg.conv2d(&wg, None, s, p, dil, g).unwrap();
+                let gg = yg.backward_with(&gy.to_device(dev).unwrap().to_dtype(DType::F16).unwrap()).unwrap();
+                let label = format!("dw f16 {xs:?} {ws:?} s{s} p{p} d{dil} g{g} portable={force_portable}");
+                assert_close_t(
+                    &gg.get(&xg).unwrap().to_dtype(DType::F32).unwrap(),
+                    gc.get(&xc).unwrap(),
+                    3e-3,
+                    3e-3,
+                    &format!("{label} dX"),
+                );
+                assert_close_t(
+                    &gg.get(&wg).unwrap().to_dtype(DType::F32).unwrap(),
+                    gc.get(&wc).unwrap(),
+                    5e-3,
+                    5e-3,
+                    &format!("{label} dW"),
+                );
+            }
+        }
+    }
+
+    // Asymmetric stride (SH=2, SW=1, ow % 4 == 0): exercises VEC4 dW with vertical stride > 1.
+    {
+        let params = folo_core::Conv2dParams { stride: [2, 1], padding: [1, 1], dilation: [1, 1], groups: 4 };
+        let x = randn(&[2, 4, 11, 12], 290);
+        let w = randn(&[4, 1, 3, 3], 291).mul_scalar(0.3).unwrap();
+        check(dev, &[x, w], 5e-4, 2e-4, "dw asymmetric stride [2, 1]", move |v| {
+            v[0].conv2d_with(&v[1], None, &params)
+        });
+    }
+
+    // Non-finite border checks: padded terms must not multiply 0.0 * ±inf into NaN in VX4 dX or VEC4 dW
+    // (`groups == c_in >= 2` so `is_depthwise()` is true).
+    {
+        // VX4 dX: 1x3 kernel with padding [0, 1], weight [0.0, 1.0, +inf]. Input col 0 has ox(kx=2) = -1
+        // (padded, must skip +inf) and ox(kx=1) = 0, so dX[0,*,0,0] must stay finite (= G[0,*,0,0]).
+        let x = Tensor::ones([1, 2, 1, 4]);
+        let w =
+            Tensor::from_slice(&[0.0f32, 1.0, f32::INFINITY, 0.0, 1.0, f32::INFINITY], [2, 1, 1, 3]).unwrap();
+        let gy = Tensor::from_slice(&[2.0f32, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0], [1, 2, 1, 4]).unwrap();
+        let params = folo_core::Conv2dParams { stride: [1, 1], padding: [0, 1], dilation: [1, 1], groups: 2 };
+        let xg = x.to_device(dev).unwrap().detach().requires_grad_();
+        let wg = w.to_device(dev).unwrap();
+        let yg = xg.conv2d_with(&wg, None, &params).unwrap();
+        let dx =
+            yg.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&xg).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!((dx[0], dx[4]), (2.0, 2.0), "VX4 dX padded border must not turn 0 * inf into NaN: {dx:?}");
+
+        // VEC4 dW: 1x3 kernel with padding [0, 1], finite input, G[*,0] = +inf. Tap kx=0 at ox=0 reads padded
+        // ix = -1 (must skip +inf), while ox = 1..3 read finite G -> dW[*,kx=0] must stay finite!
+        let x2 = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0], [1, 2, 1, 4]).unwrap();
+        let w2 = Tensor::ones([2, 1, 1, 3]);
+        let gy2 =
+            Tensor::from_slice(&[f32::INFINITY, 1.0, 1.0, 1.0, f32::INFINITY, 1.0, 1.0, 1.0], [1, 2, 1, 4])
+                .unwrap();
+        let wg2 = w2.to_device(dev).unwrap().detach().requires_grad_();
+        let yg2 = x2.to_device(dev).unwrap().conv2d_with(&wg2, None, &params).unwrap();
+        let dw = yg2
+            .backward_with(&gy2.to_device(dev).unwrap())
+            .unwrap()
+            .get(&wg2)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(
+            (dw[0], dw[3]),
+            (6.0, 6.0),
+            "VEC4 dW padded border must not turn inf * 0 into NaN: {dw:?}"
+        );
+    }
+}

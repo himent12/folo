@@ -240,7 +240,7 @@ fn pooling_upsample_and_concat() {
     let x = randn(&[2, 5, 13, 11], 16);
     check16(dev, std::slice::from_ref(&x), 0.0, 0.0, "max_pool2d k5 s1 p2", |t| t[0].max_pool2d(5, 1, 2));
     check16(dev, std::slice::from_ref(&x), 0.0, 0.0, "max_pool2d k2 s2", |t| t[0].max_pool2d(2, 2, 0));
-    check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "avg_pool2d (f32 copy)", |t| t[0].avg_pool2d(3, 2, 1));
+    check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "avg_pool2d", |t| t[0].avg_pool2d(3, 2, 1));
     check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "adaptive_avg_pool2d", |t| {
         t[0].adaptive_avg_pool2d([3, 2])
     });
@@ -307,8 +307,8 @@ fn model_conversion_in_place() {
     assert!(y.to_dtype_(DType::F16).is_err());
 }
 
-/// The f16 gradients mixed-precision training uses run (the conv's here, tested for accuracy in `amp.rs` and
-/// `coop.rs`); the ones it does not use still refuse f16 (average pooling's).
+/// The f16 gradients mixed-precision training uses run (conv and average pooling here, tested for accuracy in
+/// `amp.rs` and `coop.rs`); the ones it does not use still refuse f16 (adaptive average pooling's).
 #[test]
 fn gradients_in_f16() {
     let dev = dev16!();
@@ -318,7 +318,10 @@ fn gradients_in_f16() {
     let g = y.backward().unwrap();
     assert_eq!((g.get(&x).unwrap().dtype(), g.get(&w).unwrap().dtype()), (DType::F16, DType::F16));
     let y = x.avg_pool2d(2, 2, 0).unwrap().sum_all().unwrap();
-    let Err(e) = y.backward() else { panic!("f16 average-pooling backward is refused") };
+    let g = y.backward().unwrap();
+    assert_eq!(g.get(&x).unwrap().dtype(), DType::F16);
+    let y = x.adaptive_avg_pool2d([3, 3]).unwrap().sum_all().unwrap();
+    let Err(e) = y.backward() else { panic!("f16 adaptive average-pooling backward is refused") };
     assert!(matches!(e, Error::UnsupportedDType { dtype: DType::F16, .. }), "{e}");
 }
 
@@ -342,4 +345,18 @@ fn adapter_without_f16_falls_back_to_f32_errors() {
     assert!(matches!(x.silu(), Err(Error::DTypeMismatch { .. })));
     // Storage, casts and copies need no shader-f16.
     assert_eq!(x.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(), vec![1.0; 8]);
+    // Direct Backend::avg_pool2d keeps its f32 fallback without shader-f16, while backward refuses F16 cleanly.
+    use folo_core::backend::{Backend, Pool2dParams, View};
+    use folo_core::{Layout, Shape};
+    let backend = crate::GpuBackend::new(crate::context_for(d).unwrap(), d);
+    let shape = Shape::new(&[1, 1, 4, 4]);
+    let p = Pool2dParams { kernel: [2, 2], stride: [2, 2], padding: [0, 0] };
+    let buf = backend.full(d, DType::F16, shape.numel(), 2.0).unwrap();
+    let pooled = backend.avg_pool2d(View::new(&buf, &Layout::contiguous(shape.clone())), &p).unwrap();
+    assert_eq!((pooled.dtype(), pooled.len()), (DType::F16, 4));
+    let out_shape = Shape::new(&[1, 1, 2, 2]);
+    let err = backend
+        .avg_pool2d_backward(View::new(&pooled, &Layout::contiguous(out_shape)), &shape, &p)
+        .unwrap_err();
+    assert!(matches!(err, Error::UnsupportedDType { dtype: DType::F16, .. }), "{err}");
 }

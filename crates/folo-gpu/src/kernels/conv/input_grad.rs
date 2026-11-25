@@ -633,8 +633,24 @@ pub fn conv2d_backward_input(
     }
     let (hw_in, hw_out, khkw) = (d.h * d.w, oh * ow, kh * kw);
     if d.is_depthwise() {
-        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 0).f16(dt == DType::F16);
+        let vx4 = d.win.stride == (1, 1)
+            && d.win.dilation == (1, 1)
+            && khkw <= super::weight_grad::MAX_DEPTHWISE_TAPS
+            && total <= u32::MAX as usize;
+        let spec = d
+            .win
+            .spec()
+            .u32("MULT", (d.c_out / d.c_in) as u32)
+            .u32("MODE", 0)
+            .bool("VX4", vx4)
+            .f16(dt == DType::F16);
         let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
+        if vx4 {
+            let qw = d.w.div_ceil(super::depthwise::DW_VX as usize);
+            let inv = prod(&[d.n, d.c_in, d.h, qw])?;
+            let p = Params::new().uz(inv)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_in)?.uz(qw)?;
+            return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(inv as u64, 256)?);
+        }
         let p = Params::new().uz(total)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_in)?;
         return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(total as u64, 256)?);
     }

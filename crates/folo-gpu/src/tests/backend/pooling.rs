@@ -192,3 +192,92 @@ fn max_pool2d_values_inference_parity_and_edges() {
     );
     drop((v, idx));
 }
+
+#[test]
+fn upsample_2x_vec4_and_native_f16_avg_pool2d() {
+    use folo_core::backend::{Backend, Pool2dParams, View};
+    use folo_core::{DType, Layout, Shape};
+
+    let dev = dev!();
+    let ctx = crate::context_for(dev).expect("registered");
+    let has_f16 = ctx.caps().shader_f16;
+
+    // 1. 2x2 vec4 upsample across even widths (fast path) and odd widths (generic fallback), F32 + F16.
+    for shape in [[1usize, 1, 1, 2], [2, 8, 20, 20], [1, 4, 7, 14], [2, 3, 5, 7]] {
+        let x = randn(&shape, 80 + shape[3] as u64);
+        assert_close_t(
+            &x.to_device(dev).unwrap().upsample_nearest2d(2).unwrap(),
+            &x.upsample_nearest2d(2).unwrap(),
+            0.0,
+            0.0,
+            &format!("upsample 2x f32 fwd exact {shape:?}"),
+        );
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, &format!("upsample 2x f32 {shape:?}"), |v| {
+            v[0].upsample_nearest2d(2)
+        });
+        if has_f16 {
+            let xf = x.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+            let want = xf.upsample_nearest2d(2).unwrap().to_dtype(DType::F16).unwrap();
+            let got = x.to_device(dev).unwrap().to_dtype(DType::F16).unwrap().upsample_nearest2d(2).unwrap();
+            assert_eq!(got.dtype(), DType::F16);
+            assert_close_t(&got, &want, 0.0, 0.0, &format!("upsample 2x f16 {shape:?}"));
+        }
+    }
+
+    // 2. Native f16 avg_pool2d forward + backward accuracy vs CPU f32 on f16-rounded inputs.
+    if has_f16 {
+        let x = randn(&[2, 4, 11, 13], 83).to_dtype(DType::F16).unwrap();
+        let x_cpu = x.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+        let y_cpu = x_cpu.avg_pool2d(3, 2, 1).unwrap();
+        let gy = randn(y_cpu.dims(), 84).to_dtype(DType::F16).unwrap();
+        let gx_cpu =
+            y_cpu.backward_with(&gy.to_dtype(DType::F32).unwrap()).unwrap().get(&x_cpu).unwrap().clone();
+
+        let x_gpu = x.to_device(dev).unwrap().detach().requires_grad_();
+        let y_gpu = x_gpu.avg_pool2d(3, 2, 1).unwrap();
+        assert_eq!(y_gpu.dtype(), DType::F16);
+        assert_close_t(&y_gpu.to_dtype(DType::F32).unwrap(), &y_cpu, 2e-3, 2e-3, "native f16 avg_pool2d fwd");
+
+        let gx_gpu = y_gpu.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&x_gpu).unwrap().clone();
+        assert_eq!(gx_gpu.dtype(), DType::F16);
+        assert_close_t(
+            &gx_gpu.to_dtype(DType::F32).unwrap(),
+            &gx_cpu,
+            2e-3,
+            2e-3,
+            "native f16 avg_pool2d bwd",
+        );
+    }
+
+    // 3. Isolated trace check on a fresh context: even 2x2 -> `upsample_2x_vec4`, odd -> `upsample`,
+    //    and native f16 `avg_pool2d` fwd + bwd each dispatch a single `pool` kernel with no f32 cast detour.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+
+    let s_even = Shape::new(&[1, 4, 10, 12]);
+    let b_even = backend.full(dev, DType::F32, s_even.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend.upsample_nearest2d(View::new(&b_even, &Layout::contiguous(s_even)), [2, 2]).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["upsample_2x_vec4"]);
+
+    let s_odd = Shape::new(&[1, 4, 10, 11]);
+    let b_odd = backend.full(dev, DType::F32, s_odd.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend.upsample_nearest2d(View::new(&b_odd, &Layout::contiguous(s_odd)), [2, 2]).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["upsample"]);
+
+    if fresh.caps().shader_f16 {
+        let s_in = Shape::new(&[1, 4, 11, 13]);
+        let p = Pool2dParams { kernel: [3, 3], stride: [2, 2], padding: [1, 1] };
+        let b_in = backend.full(dev, DType::F16, s_in.numel(), 1.0).unwrap();
+        fresh.trace_begin();
+        let b_out = backend.avg_pool2d(View::new(&b_in, &Layout::contiguous(s_in.clone())), &p).unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool"]);
+
+        let s_out = Shape::new(&[1, 4, 6, 7]);
+        fresh.trace_begin();
+        let _ =
+            backend.avg_pool2d_backward(View::new(&b_out, &Layout::contiguous(s_out)), &s_in, &p).unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool"]);
+    }
+}

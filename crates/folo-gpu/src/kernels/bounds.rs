@@ -95,8 +95,13 @@ mod tests {
                 "conv2d_depthwise",
                 Spec::new().u32("KH", 31).u32("KW", 31).u32("SW", 1).u32("DH", 1).u32("DW", 1),
             ),
-            ("conv2d_depthwise_grad", Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 1)),
+            (
+                "conv2d_depthwise_grad",
+                Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 1).bool("VEC4", true).subgroups(true),
+            ),
+            ("conv2d_depthwise_grad", Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 0).bool("VX4", true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 99).u32("KW", 99).u32("MODE", 0)),
+            ("upsample_2x_vec4", Spec::new().f16(true)),
             ("conv_split_finish", Spec::new().u32("S", 8)),
             ("gemm", Spec::new().u32("BM", 64).u32("BN", 128).u32("BK", 16).u32("TM", 4).u32("TN", 8)),
             (
@@ -168,6 +173,8 @@ mod tests {
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 3).u32("SW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 0)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 1)),
+            ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 0).bool("VX4", true)),
+            ("conv2d_depthwise_grad", Spec::new().u32("KH", 0).u32("KW", 3).u32("MODE", 0).bool("VX4", true)),
             ("gemm", Spec::new().u32("BM", 65536)),
             ("gemm", Spec::new().u32("TM", 0)),
             (

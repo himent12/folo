@@ -2,9 +2,10 @@
 //! max pooling with argmax indices, average and adaptive average pooling, nearest-upsampling's backward.
 //!
 //! All gradients are gathers (one thread per input element sums the outputs that read it), so they are
-//! deterministic and need no float atomics. Planes are dense NCHW, f32 (max pooling with indices also f16, compared
-//! in f32). Windows have no dilation; padding is at most half the kernel, so every window holds at least one real
-//! element.
+//! deterministic and need no float atomics. Planes are dense NCHW; max pooling, average pooling, their
+//! gradients, and upsample backward run natively in f32 or f16 (accumulated/compared in f32), while adaptive
+//! average pooling runs in f32. Windows have no dilation; padding is at most half the kernel, so every window
+//! holds at least one real element.
 
 use super::{check_buf, prod};
 use crate::DType;
@@ -74,8 +75,8 @@ fn gen_pool(spec: &Spec) -> String {
              @group(0) @binding(2) var<storage, read> IDX: array<u32>;\n\
              @group(0) @binding(3) var<storage, read_write> Y: array<T>;\n",
         ),
-        // Upsample backward: f32 or f16 (T), summed in f32.
-        6 => s.push_str(
+        // Avg pool forward/backward and upsample backward: f32 or f16 (T), summed in f32.
+        2 | 3 | 6 => s.push_str(
             "@group(0) @binding(1) var<storage, read> X: array<T>;\n\
              @group(0) @binding(2) var<storage, read_write> Y: array<T>;\n",
         ),
@@ -126,10 +127,10 @@ fn gen_pool(spec: &Spec) -> String {
                       \x20   for (var kx = 0u; kx < kw; kx++) {\n\
                       \x20     let xx = x0 + i32(kx);\n\
                       \x20     if (xx < 0 || xx >= i32(w)) { continue; }\n\
-                      \x20     acc += X[base + u32(yy) * w + u32(xx)];\n\
+                      \x20     acc += f32(X[base + u32(yy) * w + u32(xx)]);\n\
                       \x20   }\n\
                       \x20 }\n\
-                      \x20 Y[i] = acc * (1.0 / f32(kh * kw));\n"
+                      \x20 Y[i] = T(acc * (1.0 / f32(kh * kw)));\n"
                 }
                 _ => {
                     "  let ya = astart(oy, h, oh); let yb = aend(oy, h, oh);\n\
@@ -165,7 +166,7 @@ fn gen_pool(spec: &Spec) -> String {
                       \x20 let inv = 1.0 / f32(kh * kw);\n\
                       \x20 for (var oy = i32(first_out(iy, kh, sh, ph)); oy <= yb; oy++) {\n\
                       \x20   for (var ox = i32(first_out(ix, kw, sw, pw)); ox <= xb; ox++) {\n\
-                      \x20     acc += X[gbase + u32(oy) * ow + u32(ox)] * inv;\n\
+                      \x20     acc += f32(X[gbase + u32(oy) * ow + u32(ox)]) * inv;\n\
                       \x20   }\n\
                       \x20 }\n"
                 }
@@ -304,35 +305,62 @@ pub fn max_pool2d_backward(
     )
 }
 
-/// Average pooling (padding zeros count toward the divisor `KH · KW`). Returns `(OH, OW)`.
+/// Average pooling (padding zeros count toward the divisor `KH · KW`), stored as `dtype` (f32 or f16;
+/// accumulated in f32). Returns `(OH, OW)`.
 pub fn avg_pool2d(
     ctx: &GpuContext,
     x: &wgpu::Buffer,
     y: &wgpu::Buffer,
     (planes, h, w): (usize, usize, usize),
     win: &Pool2d,
+    dtype: DType,
 ) -> Result<(usize, usize)> {
+    check_dtype(ctx, dtype, "avg_pool2d")?;
     let (oh, ow) = win.output(h, w)?;
     let n = prod(&[planes, oh, ow])?;
-    check_buf(x, prod(&[planes, h, w])?, DType::F32, "avg_pool2d input")?;
-    check_buf(y, n, DType::F32, "avg_pool2d output")?;
-    launch(ctx, &POOL, 2, &[x, y], n, (h, w, oh, ow), win.kernel, win.stride, win.padding, false)?;
+    check_buf(x, prod(&[planes, h, w])?, dtype, "avg_pool2d input")?;
+    check_buf(y, n, dtype, "avg_pool2d output")?;
+    launch(
+        ctx,
+        &POOL,
+        2,
+        &[x, y],
+        n,
+        (h, w, oh, ow),
+        win.kernel,
+        win.stride,
+        win.padding,
+        dtype == DType::F16,
+    )?;
     Ok((oh, ow))
 }
 
-/// Gradient of [`avg_pool2d`] into `gx` (`planes × h × w`).
+/// Gradient of [`avg_pool2d`] into `gx` (`planes × h × w`), stored as `dtype` (f32 or f16; accumulated in f32).
 pub fn avg_pool2d_backward(
     ctx: &GpuContext,
     g: &wgpu::Buffer,
     gx: &wgpu::Buffer,
     (planes, h, w): (usize, usize, usize),
     win: &Pool2d,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "avg_pool2d_backward")?;
     let (oh, ow) = win.output(h, w)?;
-    check_buf(g, prod(&[planes, oh, ow])?, DType::F32, "avg_pool2d_backward grad")?;
+    check_buf(g, prod(&[planes, oh, ow])?, dtype, "avg_pool2d_backward grad")?;
     let total = prod(&[planes, h, w])?;
-    check_buf(gx, total, DType::F32, "avg_pool2d_backward output")?;
-    launch(ctx, &POOL, 3, &[g, gx], total, (h, w, oh, ow), win.kernel, win.stride, win.padding, false)
+    check_buf(gx, total, dtype, "avg_pool2d_backward output")?;
+    launch(
+        ctx,
+        &POOL,
+        3,
+        &[g, gx],
+        total,
+        (h, w, oh, ow),
+        win.kernel,
+        win.stride,
+        win.padding,
+        dtype == DType::F16,
+    )
 }
 
 /// The shader computes adaptive window bounds as `(o + 1) · in + out - 1` in `u32`; reject sizes where that wraps.
