@@ -242,14 +242,16 @@ pub(crate) fn step_many<'a>(
         });
     }
 
-    // Check in O(N) whether all non-CPU batches have pairwise-distinct mutated storages (params + states)
-    // and no incoming gradient aliases any mutated storage across batches. When true, group order is
-    // unobservable and batches with identical (OptimStep, Device, state arity) can be coalesced safely;
-    // otherwise preserve strict canonical group order.
-    let total_items: usize = batches.iter().map(|b| b.ps.len()).sum();
-    let mut all_written: HashSet<usize> = HashSet::with_capacity(total_items * 3);
-    let mut batches_disjoint = batches.len() >= 2;
+    // Check in O(N) whether all non-CPU batches have pairwise-distinct mutated storages (params + states),
+    // no incoming gradient aliases any mutated storage across batches, and every gradient is contiguous (so a
+    // later group cannot be updated before an earlier non-contiguous group fails during strided copy). When
+    // true, group order is unobservable and batches with identical (OptimStep, Device, state arity) can be
+    // coalesced safely; otherwise preserve strict canonical group order.
+    let mut batches_disjoint =
+        batches.len() >= 2 && batches.iter().all(|b| b.gs.iter().all(|g| g.as_tensor().is_contiguous()));
     if batches_disjoint {
+        let total_items: usize = batches.iter().map(|b| b.ps.len()).sum();
+        let mut all_written: HashSet<usize> = HashSet::with_capacity(total_items * 3);
         'check: for b in &batches {
             for (p, st) in b.ps.iter().zip(&b.ss) {
                 if !all_written.insert(storage_key(p)) {
@@ -264,13 +266,13 @@ pub(crate) fn step_many<'a>(
                 }
             }
         }
-    }
-    if batches_disjoint {
-        'gcheck: for b in &batches {
-            for g in &b.gs {
-                if all_written.contains(&storage_key(g.as_tensor())) {
-                    batches_disjoint = false;
-                    break 'gcheck;
+        if batches_disjoint {
+            'gcheck: for b in &batches {
+                for g in &b.gs {
+                    if all_written.contains(&storage_key(g.as_tensor())) {
+                        batches_disjoint = false;
+                        break 'gcheck;
+                    }
                 }
             }
         }

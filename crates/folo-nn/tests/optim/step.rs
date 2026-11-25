@@ -235,10 +235,11 @@ fn boosted_groups_and_bias_warmup() {
 #[test]
 fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
     let mut rng = Rng::seed(77);
-    // Exceeds PAR_THRESHOLD (65,536) across 3 groups (decay, bn, bias) to exercise ParamPlan's parallel reuse.
+    // Exceeds PAR_THRESHOLD (65,536) across 3 groups (decay, bn, bias) to exercise ParamPlan's parallel reuse
+    // (8 * 9,216 + 12 * 512 = 79,872 >= 65,536).
     let make_params = |rng: &mut Rng| -> Vec<Vec<(String, Tensor)>> {
         vec![
-            (0..6)
+            (0..8)
                 .map(|i| (format!("w{i}"), Tensor::randn([32, 32, 3, 3], 0.0, 0.5, rng).requires_grad_()))
                 .collect(),
             (0..6)
@@ -248,6 +249,8 @@ fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
         ]
     };
     let ps_sgd = make_params(&mut rng);
+    let total_numel: usize = ps_sgd.iter().flat_map(|g| g.iter()).map(|(_, t)| t.numel()).sum();
+    assert!(total_numel >= 65_536, "fixture must exceed PAR_THRESHOLD: {total_numel}");
     let ps_adam = make_params(&mut rng);
     let mk_groups = |ps: &[Vec<(String, Tensor)>]| {
         vec![
@@ -280,6 +283,8 @@ fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
     let mut ref_sgd = Sgd::new(mk_groups(&ref_sgd_ps)).unwrap();
     let mut ref_adam = AdamW::new(mk_groups(&ref_adam_ps)).unwrap();
 
+    let pool_par = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let pool_ser = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     for _ in 0..3 {
         let mut gs_sgd = folo_core::Grads::default();
         let mut gs_ref_sgd = folo_core::Grads::default();
@@ -290,12 +295,8 @@ fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
                 gs_ref_sgd.insert(rp, gv);
             }
         }
-        sgd.step(&gs_sgd).unwrap();
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap()
-            .install(|| ref_sgd.step(&gs_ref_sgd).unwrap());
+        pool_par.install(|| sgd.step(&gs_sgd).unwrap());
+        pool_ser.install(|| ref_sgd.step(&gs_ref_sgd).unwrap());
 
         let mut gs_adam = folo_core::Grads::default();
         let mut gs_ref_adam = folo_core::Grads::default();
@@ -306,12 +307,8 @@ fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
                 gs_ref_adam.insert(rp, gv);
             }
         }
-        adam.step(&gs_adam).unwrap();
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap()
-            .install(|| ref_adam.step(&gs_ref_adam).unwrap());
+        pool_par.install(|| adam.step(&gs_adam).unwrap());
+        pool_ser.install(|| ref_adam.step(&gs_ref_adam).unwrap());
     }
     for (g, rg) in ps_sgd.iter().zip(&ref_sgd_ps).chain(ps_adam.iter().zip(&ref_adam_ps)) {
         for ((n, p), (_, rp)) in g.iter().zip(rg) {
