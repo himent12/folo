@@ -3,7 +3,8 @@
 //! methods as in embedded mode; only the transport differs: [`folo_client::Client`] (blocking, `http://` or
 //! `https://`, the server's `--token` when it has one). The MCP layer runs the calls on tokio's blocking pool.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use folo_api::{
     CloudConnection, CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, CloudProvider,
@@ -26,15 +27,39 @@ use crate::errors::{Error, not_implemented};
 
 /// Cached remote capability probe shared across an [`HttpStore`] and its [`HttpStore::until`] clones.
 #[derive(Default)]
-struct ProbeCache {
+struct ProbeState {
+    /// Bumped by [`HttpStore::clear_probe_cache`] so an older in-flight probe never commits stale data.
+    generation: u64,
     mock: Option<bool>,
     features: Option<Vec<String>>,
+    /// True while one caller is probing `/api/health` (and `/api/system` for legacy servers) for `features`.
+    features_in_flight: bool,
+    #[cfg(test)]
+    waiters: usize,
+}
+
+#[derive(Default)]
+struct SharedProbe {
+    state: Mutex<ProbeState>,
+    ready: Condvar,
+}
+
+/// Clears `features_in_flight` and wakes waiters even on error or panic.
+struct InFlightGuard<'a>(&'a SharedProbe);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.features_in_flight = false;
+        self.0.ready.notify_all();
+    }
 }
 
 /// A [`Store`] backed by a `folo serve` HTTP API.
 pub struct HttpStore {
     client: Client,
-    probe: Arc<Mutex<ProbeCache>>,
+    deadline: Option<Instant>,
+    probe: Arc<SharedProbe>,
 }
 
 fn action(a: QueueAction) -> QueueRequest {
@@ -56,7 +81,7 @@ impl HttpStore {
     /// `--token`.
     pub fn new(base: &str, token: Option<&str>) -> HttpStore {
         let client = Client::new(base).token(token.unwrap_or_default());
-        HttpStore { client, probe: Arc::new(Mutex::new(ProbeCache::default())) }
+        HttpStore { client, deadline: None, probe: Arc::new(SharedProbe::default()) }
     }
 
     /// The server's base URL.
@@ -66,8 +91,13 @@ impl HttpStore {
 
     /// This store with every request ending by `deadline` (`bench_entry`'s wait promises an answer by then).
     /// Shares the cached `/api/health` and feature probe with the parent store.
-    pub fn until(&self, deadline: std::time::Instant) -> HttpStore {
-        HttpStore { client: self.client.until(deadline), probe: Arc::clone(&self.probe) }
+    pub fn until(&self, deadline: Instant) -> HttpStore {
+        let effective = self.deadline.map_or(deadline, |d| d.min(deadline));
+        HttpStore {
+            client: self.client.until(effective),
+            deadline: Some(effective),
+            probe: Arc::clone(&self.probe),
+        }
     }
 
     /// The client (the labeling tools call `/api/label` through it, `crate::label`).
@@ -76,54 +106,109 @@ impl HttpStore {
     }
 
     /// Clears the cached `/api/health` and feature probe so the next capability check queries the server again.
+    /// Any probe already in flight will not repopulate the cache when it finishes.
     pub fn clear_probe_cache(&self) {
-        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
-        cache.mock = None;
-        cache.features = None;
+        let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.generation = s.generation.wrapping_add(1);
+        s.mock = None;
+        s.features = None;
+        self.probe.ready.notify_all();
     }
 
     /// This store, taking `features` as the server's (tests: a server of an earlier version).
     #[cfg(test)]
     pub(crate) fn assume_features(self, features: Vec<String>) -> HttpStore {
-        self.probe.lock().unwrap_or_else(|e| e.into_inner()).features = Some(features);
+        self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).features = Some(features);
         self
     }
 
-    /// Calls `GET /api/health` and updates the shared cache on success (never caching transient errors).
+    /// Calls `GET /api/health` and updates the shared cache on success if `generation` has not been cleared
+    /// (never caching transient errors).
     fn probe_health(&self) -> Result<Health, Error> {
+        let start_gen = self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).generation;
         let health: Health = self.get("/health")?;
-        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
-        cache.mock = Some(health.mock);
-        if !health.features.is_empty() && cache.features.is_none() {
-            cache.features = Some(health.features.clone());
+        let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.generation == start_gen {
+            s.mock = Some(health.mock);
+            if !health.features.is_empty() && s.features.is_none() {
+                s.features = Some(health.features.clone());
+            }
         }
         Ok(health)
     }
 
-    fn cached_feature(&self, feature: &str) -> Option<bool> {
-        self.probe
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .features
-            .as_ref()
-            .map(|f| f.iter().any(|x| x == feature))
-    }
-
-    /// Whether the server lists `feature` (cached once per session and shared across [`Self::until`] clones).
-    /// `/api/health` answers without a hardware probe; only a server that predates its `features` is asked
-    /// `/api/system`, whose CPU sample once stalled a labeling call for 20 s on a loaded machine.
+    /// Whether the server lists `feature` (cached once per session and shared across [`Self::until`] clones,
+    /// with single-flight coordination so concurrent callers do not duplicate `/api/health` or `/api/system`
+    /// probes). `/api/health` answers without a hardware probe; only a server that predates its `features` is
+    /// asked `/api/system`, whose CPU sample once stalled a labeling call for 20 s on a loaded machine.
     pub fn has_feature(&self, feature: &str) -> Result<bool, Error> {
-        if let Some(has) = self.cached_feature(feature) {
-            return Ok(has);
-        }
-        let health = self.probe_health()?;
+        let start_gen = {
+            let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(features) = &s.features {
+                    return Ok(features.iter().any(|f| f == feature));
+                }
+                if !s.features_in_flight {
+                    s.features_in_flight = true;
+                    break s.generation;
+                }
+                if let Some(deadline) = self.deadline {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(Error::new(
+                            StatusCode::BAD_GATEWAY,
+                            "server_unreachable",
+                            format!("timed out waiting for capability probe of {}", self.base()),
+                        )
+                        .hint(
+                            "is `folo serve` running there? start it, or run `folo mcp` without --server",
+                        ));
+                    };
+                    #[cfg(test)]
+                    {
+                        s.waiters += 1;
+                    }
+                    let (guard, _) =
+                        self.probe.ready.wait_timeout(s, remaining).unwrap_or_else(|e| e.into_inner());
+                    s = guard;
+                    #[cfg(test)]
+                    {
+                        s.waiters -= 1;
+                    }
+                } else {
+                    #[cfg(test)]
+                    {
+                        s.waiters += 1;
+                    }
+                    s = self.probe.ready.wait(s).unwrap_or_else(|e| e.into_inner());
+                    #[cfg(test)]
+                    {
+                        s.waiters -= 1;
+                    }
+                }
+            }
+        };
+        let _in_flight = InFlightGuard(&self.probe);
+        let health: Health = self.get("/health")?;
         if !health.features.is_empty() {
+            let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation == start_gen {
+                s.mock = Some(health.mock);
+                s.features.get_or_insert_with(|| health.features.clone());
+            }
             return Ok(health.features.iter().any(|f| f == feature));
         }
+        {
+            let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation == start_gen {
+                s.mock = Some(health.mock);
+            }
+        }
         let features = self.system()?.features;
-        let mut cache = self.probe.lock().unwrap_or_else(|e| e.into_inner());
-        let stored = cache.features.get_or_insert(features);
-        Ok(stored.iter().any(|f| f == feature))
+        let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.generation == start_gen {
+            s.features.get_or_insert_with(|| features.clone());
+        }
+        Ok(features.iter().any(|f| f == feature))
     }
 
     /// `GET /api/system` of the server.
@@ -181,7 +266,7 @@ fn multipart(fields: &[(&str, String)], image: &[u8]) -> (String, Vec<u8>) {
 
 impl Store for HttpStore {
     fn is_mock(&self) -> bool {
-        if let Some(mock) = self.probe.lock().unwrap_or_else(|e| e.into_inner()).mock {
+        if let Some(mock) = self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).mock {
             return mock;
         }
         self.probe_health().map(|h| h.mock).unwrap_or(false)
@@ -422,39 +507,75 @@ impl Store for HttpStore {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use folo_api::{ExportFormat, OnnxSwitches};
 
     use super::*;
 
-    fn start_mock_api(
-        handler: impl Fn(&str, usize) -> (&'static str, String) + Send + 'static,
-    ) -> (String, Arc<Mutex<Vec<String>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&log);
-        std::thread::spawn(move || {
-            for (idx, stream) in listener.incoming().enumerate() {
-                let Ok(mut s) = stream else { continue };
-                let req = read_request_line(&mut s);
-                recorded.lock().unwrap().push(req.clone());
-                let (status, body) = handler(&req, idx);
-                let _ = write!(
-                    s,
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: \
-                     close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = s.flush();
-            }
-        });
-        (base, log)
+    /// Loopback mock API server that drains request bodies (preventing TCP RST on close) and shuts down cleanly
+    /// on drop.
+    struct MockApi {
+        addr: SocketAddr,
+        base: String,
+        log: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
     }
 
-    fn read_request_line(s: &mut TcpStream) -> String {
+    impl MockApi {
+        fn start(handler: impl Fn(&str, usize) -> (&'static str, String) + Send + 'static) -> MockApi {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let base = format!("http://{addr}");
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let recorded = Arc::clone(&log);
+            let done = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                let mut idx = 0usize;
+                for stream in listener.incoming() {
+                    if done.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(mut s) = stream else { continue };
+                    let Some(req) = read_request(&mut s) else { continue };
+                    recorded.lock().unwrap().push(req.clone());
+                    let (status, body) = handler(&req, idx);
+                    idx += 1;
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: \
+                         close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.flush();
+                }
+            });
+            MockApi { addr, base, log, stop, handle: Some(handle) }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for MockApi {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// Reads the HTTP request head, drains any `Content-Length` body so closing the socket never triggers a TCP
+    /// `RST`, and returns `"METHOD /path"`.
+    fn read_request(s: &mut TcpStream) -> Option<String> {
         let mut buf = Vec::new();
         let mut b = [0u8; 1];
         while !buf.ends_with(b"\r\n\r\n") {
@@ -463,10 +584,40 @@ mod tests {
                 _ => break,
             }
         }
+        if buf.is_empty() {
+            return None;
+        }
         let head = String::from_utf8_lossy(&buf);
+        let content_length = head
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            let _ = s.read_exact(&mut body);
+        }
         let first = head.lines().next().unwrap_or("");
         let mut parts = first.split_whitespace();
-        format!("{} {}", parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+        Some(format!("{} {}", parts.next().unwrap_or(""), parts.next().unwrap_or("")))
+    }
+
+    fn system_json(features: &[&str]) -> String {
+        serde_json::to_string(&SystemResponse {
+            system: SystemInfo {
+                cpu: folo_api::CpuInfo { name: "test".into(), threads: 4, util: 0.1 },
+                memory: folo_api::MemoryInfo { used_bytes: 512, total_bytes: 1024 },
+                gpus: vec![],
+            },
+            data_dir: None,
+            features: features.iter().map(|s| (*s).to_string()).collect(),
+            capabilities: None,
+            gpu_pool: None,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -489,7 +640,7 @@ mod tests {
 
     #[test]
     fn feature_and_mock_probes_share_cache_across_until_and_export() {
-        let (base, log) = start_mock_api(|req, _| match req {
+        let server = MockApi::start(|req, _| match req {
             "GET /api/health" => (
                 "200 OK",
                 serde_json::json!({
@@ -500,18 +651,13 @@ mod tests {
                 })
                 .to_string(),
             ),
-            "POST /api/models/m1/export" => (
-                "200 OK",
-                serde_json::json!({
-                    "path": "/tmp/m1-f16.onnx",
-                    "bytes": 1024,
-                })
-                .to_string(),
-            ),
+            "POST /api/models/m1/export" => {
+                ("200 OK", serde_json::json!({ "path": "/tmp/m1-f16.onnx", "bytes": 1024 }).to_string())
+            }
             other => panic!("unexpected request: {other}"),
         });
 
-        let store = HttpStore::new(&base, None);
+        let store = HttpStore::new(&server.base, None);
         // `is_mock` probes `/api/health` once and populates both `mock` and `features`.
         assert!(store.is_mock());
         assert!(store.has_feature(FEATURE_EXPORT_ONNX_SWITCHES).unwrap());
@@ -536,38 +682,24 @@ mod tests {
         assert!(store.is_mock());
 
         assert_eq!(
-            *log.lock().unwrap(),
+            server.requests(),
             vec!["GET /api/health", "POST /api/models/m1/export", "GET /api/health"]
         );
     }
 
     #[test]
     fn legacy_server_falls_back_to_system_once_and_caches_missing_export_feature() {
-        let (base, log) = start_mock_api(|req, _| match req {
+        let server = MockApi::start(|req, _| match req {
             "GET /api/health" => (
                 "200 OK",
                 serde_json::json!({ "status": "ok", "version": "0.1.0", "mock": false, "features": [] })
                     .to_string(),
             ),
-            "GET /api/system" => (
-                "200 OK",
-                serde_json::to_string(&SystemResponse {
-                    system: SystemInfo {
-                        cpu: folo_api::CpuInfo { name: "test".into(), threads: 4, util: 0.1 },
-                        memory: folo_api::MemoryInfo { used_bytes: 512, total_bytes: 1024 },
-                        gpus: vec![],
-                    },
-                    data_dir: None,
-                    features: vec![folo_api::FEATURE_VISION_BENCH.into()],
-                    capabilities: None,
-                    gpu_pool: None,
-                })
-                .unwrap(),
-            ),
+            "GET /api/system" => ("200 OK", system_json(&[folo_api::FEATURE_VISION_BENCH])),
             other => panic!("unexpected request: {other}"),
         });
 
-        let store = HttpStore::new(&base, None);
+        let store = HttpStore::new(&server.base, None);
         assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
         assert!(!store.is_mock());
         let err = store
@@ -580,12 +712,12 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(*log.lock().unwrap(), vec!["GET /api/health", "GET /api/system"]);
+        assert_eq!(server.requests(), vec!["GET /api/health", "GET /api/system"]);
     }
 
     #[test]
     fn transient_health_error_is_not_cached() {
-        let (base, log) = start_mock_api(|req, idx| match (req, idx) {
+        let server = MockApi::start(|req, idx| match (req, idx) {
             ("GET /api/health", 0) => (
                 "503 Service Unavailable",
                 serde_json::json!({ "error": { "code": "internal", "message": "starting up" } }).to_string(),
@@ -603,10 +735,96 @@ mod tests {
             other => panic!("unexpected request: {other:?}"),
         });
 
-        let store = HttpStore::new(&base, None);
+        let store = HttpStore::new(&server.base, None);
         assert!(!store.is_mock(), "transient 503 returns false without poisoning the cache");
         assert!(store.is_mock(), "next probe succeeds once the server recovers");
         assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
-        assert_eq!(*log.lock().unwrap(), vec!["GET /api/health", "GET /api/health"]);
+        assert_eq!(server.requests(), vec!["GET /api/health", "GET /api/health"]);
+    }
+
+    #[test]
+    fn concurrent_legacy_feature_checks_probe_system_only_once() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let server = MockApi::start(move |req, _| match req {
+            "GET /api/health" => (
+                "200 OK",
+                serde_json::json!({ "status": "ok", "version": "0.1.0", "mock": false, "features": [] })
+                    .to_string(),
+            ),
+            "GET /api/system" => {
+                let _ = entered_tx.send(());
+                let _ = release_rx.lock().unwrap().recv();
+                ("200 OK", system_json(&[folo_api::FEATURE_VISION_BENCH]))
+            }
+            other => panic!("unexpected request: {other}"),
+        });
+
+        let store = Arc::new(HttpStore::new(&server.base, None));
+        let parent = Arc::clone(&store);
+        let child = store.until(Instant::now() + Duration::from_secs(5));
+
+        let t1 = std::thread::spawn(move || parent.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        // Wait until t1 is inside `GET /api/system`, then launch a concurrent `until` caller.
+        entered_rx.recv().unwrap();
+        let t2 = std::thread::spawn(move || child.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        // Wait deterministically until t2 is blocked on the single-flight condvar before releasing the response.
+        while store.probe.state.lock().unwrap().waiters == 0 {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        assert!(t1.join().unwrap());
+        assert!(t2.join().unwrap());
+        assert_eq!(server.requests(), vec!["GET /api/health", "GET /api/system"]);
+    }
+
+    #[test]
+    fn in_flight_probe_does_not_repopulate_after_clear_probe_cache() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let server = MockApi::start(move |req, idx| match (req, idx) {
+            ("GET /api/health", 0) => {
+                let _ = entered_tx.send(());
+                let _ = release_rx.lock().unwrap().recv();
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "status": "ok",
+                        "version": "0.1.0",
+                        "mock": false,
+                        "features": ["stale_feature"],
+                    })
+                    .to_string(),
+                )
+            }
+            ("GET /api/health", _) => (
+                "200 OK",
+                serde_json::json!({
+                    "status": "ok",
+                    "version": "0.1.0",
+                    "mock": true,
+                    "features": [folo_api::FEATURE_VISION_BENCH],
+                })
+                .to_string(),
+            ),
+            other => panic!("unexpected request: {other:?}"),
+        });
+
+        let store = Arc::new(HttpStore::new(&server.base, None));
+        let probe_store = Arc::clone(&store);
+        let t = std::thread::spawn(move || probe_store.has_feature("stale_feature").unwrap());
+        entered_rx.recv().unwrap();
+        // Clear the cache while the first probe is in flight, then let it finish.
+        store.clear_probe_cache();
+        release_tx.send(()).unwrap();
+        assert!(t.join().unwrap());
+
+        // The stale probe must not have populated the cache: the next check makes a fresh request.
+        assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
+        assert!(store.is_mock());
+        assert_eq!(server.requests(), vec!["GET /api/health", "GET /api/health"]);
     }
 }
