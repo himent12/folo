@@ -196,8 +196,8 @@ Paths are under `crates/` unless they start with `web/`, `apps/` or `site/`. Eac
 | add an optimizer | `folo-nn/src/optim/<name>.rs` (as `sgd.rs`, `adamw.rs`, `musgd.rs`) and `OptimKind` in `optim/mod.rs`; to make it selectable: `Optimizer` / `ResolvedOptimizer` in `folo-api/src/runs.rs`, `OptimizerChoice` in `folo-vision/src/train/config.rs` and the constructor match in `train/setup.rs`, the CLI's value in `folo-cli/src/cli.rs` and its match in `config_of` (`folo-cli/src/train/config.rs`), `train_command` in `folo-server/src/cli.rs`, Studio's `web/src/lib/api/types/runs.ts`, `web/src/routes/run/resolved.ts` and `web/src/routes/runnew/`, Desktop's exhaustive matches in `apps/desktop/src/api/types.rs`, `apps/desktop/src/api/mock/training.rs`, `apps/desktop/src/screens/runs/config.rs` and `charts.rs`, and `OPTIMIZERS` in `apps/desktop/src/app/forms.rs`; its state tensor names in `folo-nn/src/io/checkpoint.rs`; the exhaustive optimizer match in `apps/desktop/src/overlays/new_run/mod.rs` | `folo-nn/tests/optim.rs`; also update the exhaustive optimizer matches in `folo-cli/tests/studio_cli.rs`, `folo-nn/tests/folo_io.rs` and `folo-nn/tests/gpu/main.rs` | [NN.md](NN.md), [FORMAT.md](FORMAT.md) (`folo.optim`), [MODEL.md](MODEL.md) §8.2 |
 | add an augmentation | `folo-data/src/augment/` (the transform, its knob in `AugmentConfig` and `validate`, the chain in `pipeline.rs`); `Augment` in `folo-api/src/runs.rs`, `AugmentConfig` use in `folo-vision/src/train/config.rs`, the flag in `folo-cli/src/cli.rs` and `train/config.rs`, `folo-server/src/cli.rs` | `folo-data/tests/augment.rs`; `train_defaults_match_the_api` in `folo-cli/src/main.rs` | [DATA.md](DATA.md), [API.md](API.md), [CLI.md](CLI.md) |
 | add a dataset format | a reader in `folo-data/src/dataset/` (as `yolo.rs`, `coco.rs`), `Format` and `detect_format` in `dataset/mod.rs`, `check.rs`, `convert.rs`; `DatasetFormat` in `folo-api/src/datasets.rs`; `FormatArg` in `folo-cli/src/cli.rs` with `format_of` and `format_name` in `folo-cli/src/dataset.rs`; in folo-server, `data_format` in `index.rs` and `runs/mod.rs`, the `ds.format` match in `index.rs` (its `_ => Yolo` arm would label a new format YOLO) and the format match in `cli.rs`; the `DatasetFormat` match in `server_cli_commands_train_the_servers_config` (`folo-cli/src/train/tests.rs`); for a format that can be written, `TargetFormatArg` in `folo-cli/src/cli.rs` and its match in `convert` (`folo-cli/src/dataset.rs`); `Label for DatasetFormat` in `apps/desktop/src/api/types.rs`; Studio's `DatasetFormat` in `web/src/lib/api/types/datasets.ts` | `folo-data/tests/formats.rs` | [DATA.md](DATA.md), [API.md](API.md) |
-| change the detector | `folo-vision/src/model/` (`blocks.rs`, `head.rs`, `mod.rs`); the ONNX graph mirrors `forward` in `export/onnx/blocks.rs` | `folo-vision/tests/model.rs`; ONNX parity `folo-cli/tests/onnx.rs` | [MODEL.md](MODEL.md) (normative), [VISION.md](VISION.md) |
-| change the loss or assigner | `folo-vision/src/loss/` and `assign.rs`; the GPU path in `folo-gpu/src/detect.rs`, `kernels/detect.rs` and the `det_*` / `tal_*` shaders | `folo-vision/tests/loss_cases.rs`, `assign_cases.rs`, `gpu_loss/` | [MODEL.md](MODEL.md) §7, [VISION.md](VISION.md) |
+| change the detector | `folo-vision/src/model/` (`blocks.rs`, `head.rs`, `mod.rs`, `v2/` for FOLO v2-Iso, `quant/` for int8 inference); for `FoloModel`, the ONNX graph mirrors `forward` in `export/onnx/blocks.rs` | `folo-vision/tests/model.rs`, `model_v2.rs`, `int8.rs`; ONNX parity `folo-cli/tests/onnx.rs` | [MODEL.md](MODEL.md) (normative), [VISION.md](VISION.md) |
+| change the loss or assigner | `folo-vision/src/loss/` (`mod.rs`, `assignment.rs`, `terms.rs`, `device.rs`, `distill/`) and `assign.rs`; the GPU path in `folo-gpu/src/detect.rs` / `distill.rs`, `kernels/detect.rs` / `distill.rs` and the `det_*` / `tal_*` / `kd_*` shaders | `folo-vision/tests/loss_cases.rs`, `assign_cases.rs`, `wave7_train_algos.rs`, `distill.rs`, `gpu_loss/`, `gpu_distill.rs` | [MODEL.md](MODEL.md) §7, §8.9, [VISION.md](VISION.md) |
 | change the `.folo` format | `folo-nn/src/io/` (`safetensors.rs`, `meta.rs`, `file.rs`, `checkpoint.rs`, `export.rs`); the trainer's side in `folo-vision/src/train/checkpoint.rs` | `folo-nn/tests/folo_io.rs` | [FORMAT.md](FORMAT.md), [NN.md](NN.md) |
 | add a metric | `folo-vision/src/metrics.rs` (`Evaluator`), `cocoeval.rs` for COCOeval numbers | `folo-vision/tests/metrics_known.rs`, `coco_parity.rs` | [METRICS.md](METRICS.md) |
 | add a CLI command | a variant and `Args` in `folo-cli/src/cli.rs` (its help is the `folo describe` output), dispatch in `main.rs` `run`, a module of its own | the name in `describe_covers_every_command` (`main.rs`); `folo-cli/tests/cli.rs` | [CLI.md](CLI.md#adding-a-command) |
@@ -220,7 +220,9 @@ Paths are under `crates/` unless they start with `web/`, `apps/` or `site/`. Eac
 ### folo-core
 The tensor engine: `Tensor` is a cheap `Arc` handle over shared storage plus a `Layout`; views do not copy; ops return
 `Result` with errors that name the op and both shapes. Kernels sit behind the `Backend` trait, and the CPU backend
-(BLIS-style GEMM, im2col-free convolution, Winograd for 3x3 inference convs, a buffer cache, a dedicated rayon pool)
+(BLIS-style GEMM, im2col-free convolution, Winograd F(2×2, 3×3) and F(4×4, 3×3) for 3×3 inference convs, int8 `q8/`
+inference convs, AVX2 elementwise / softmax / pooling / upsampling / reduction / transpose and F16C cast kernels, a
+buffer cache, a dedicated rayon pool)
 is built in. Autograd is define-by-run with `Grads` keyed by tensor id; `autocast` adds f16 mixed precision on
 backends that compute in f16.
 - **Backend integration contract, in short:** implement `Backend` and register it with `register_backend`; only
@@ -238,9 +240,9 @@ The wgpu backend ([GPU.md](GPU.md)).
   bit-identically, retired when a listed tensor changes; `Predictor` turns them on for its model.
 - Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads) and native 16×16×16 f16 tensor-core cooperative
   matrices, convolution as implicit GEMM (no im2col buffer) with direct depthwise and candidate-first site kernels,
-  elementwise + fused activations, ceiling-division split-K reductions and online softmax (single global read for rows
+  elementwise + fused activations, ceiling-division split-K reductions, online softmax (single global read for rows
   `≤ 1024`, register-cached small-`D` columns; 1-barrier 32-wide subgroup reductions natively with a portable
-  shared-memory fallback), value-only inference max pooling,
+  shared-memory fallback), workgroup-parallel bitonic/selection top-k, value-only inference max pooling,
   upsample, concat, fused detection/distillation losses, and grouped Muon / multi-tensor optimizer updates. Each kernel
   is tested against the CPU reference. f16 storage and compute when the adapter supports `shader-f16`, with f32
   accumulation.
@@ -263,7 +265,8 @@ Layers and training utilities ([NN.md](NN.md)).
   for inference), `Linear`, activations (SiLU, ReLU, LeakyReLU, Sigmoid, Hardswish, ...), `MaxPool2d`, `Upsample`
   (nearest), `Concat`, `Sequential`.
 - Init: Kaiming / Xavier uniform / normal, seeded. Optimizers: SGD (momentum, Nesterov, weight decay), AdamW and
-  MuSGD, with parameter groups (no decay for BN and bias). Schedules: warmup + cosine / linear, EMA of weights.
+  MuSGD, with parameter groups (no decay for BN and bias) and non-FMA AVX2 CPU vector kernels (`optim/simd/`).
+  Schedules: warmup + linear, cosine, WSD or cosine-with-restarts decay; EMA of weights.
 - `.folo` weight files ([FORMAT.md](FORMAT.md)): a safetensors-compatible layout (u64 header length, JSON header, raw
   little-endian tensor data) with a `__metadata__` block holding the model config, class names and training info, so
   standard safetensors tools can read FOLO weights.
@@ -273,7 +276,9 @@ The data pipeline ([DATA.md](DATA.md): formats, augmentation parameters, determi
 - Formats: YOLO txt (`images/` + `labels/`, `data.yaml`), COCO JSON; auto-detected. Dataset statistics (class counts,
   box-size distribution, empty images, broken labels) for Studio and `folo dataset stats`; a line-level checker
   (`check`) for `folo dataset check` and YOLO / COCO conversion (`convert`).
-- Image IO through `image` / `zune-jpeg`, decoded straight to `u8` RGB. Letterbox resize with exact box remapping.
+- Image IO through `image` / `zune-jpeg`, decoded straight to `u8` RGB, with bit-exact AVX2/FMA SIMD resize, warp,
+  HSV and planar conversion kernels (`src/simd/`). Letterbox resize with exact box remapping, `.folo-unfinished`
+  write markers, and an optional process-wide read guard (`guard.rs`, used by `folo mcp --confine`).
 - Augmentation (all box-aware, seeded): mosaic (4-image), random affine (scale / translate / shear / rotate), HSV
   jitter, horizontal flip, mixup, copy-paste later. Closing-mosaic for the last N epochs.
 - `DataLoader`: worker threads that decode + augment ahead, a bounded channel, batches as contiguous `NCHW f32`
@@ -285,8 +290,9 @@ The data pipeline ([DATA.md](DATA.md): formats, augmentation parameters, determi
 ### folo-vision
 The detector ([VISION.md](VISION.md) for the implementation, [MODEL.md](MODEL.md) for the normative spec). A CSP-style
 backbone, SPPF, C2PSA, a PAN-FPN neck and an anchor-free decoupled head on strides 8 / 16 / 32, per scale
-`n/s/m/l/x`; `head = "o2o"` adds the NMS-free one-to-one branch. The loss is TAL + BCE + CIoU + DFL, on folo-core ops
-on the CPU and as folo-gpu kernels on a GPU. Box ops, NMS and metrics work on plain slices
+`n/s/m/l/x` (plus FOLO v2-Iso in `model/v2/`); `head = "o2o"` adds the NMS-free one-to-one branch. The loss is TAL +
+BCE + CIoU + DFL (plus optional distillation in `loss/distill/`), on folo-core ops on the CPU and as folo-gpu kernels
+on a GPU. Box ops, NMS / box fusion (`nms/`, `fusion/`) and metrics work on plain slices
 ([METRICS.md](METRICS.md) defines mAP). The `Trainer` runs MODEL.md §8 end to end and reports through docs/API.md's
 event types; the `Predictor` evaluates the head candidate-first on both devices; `export::onnx` writes an opset-17
 graph that mirrors `forward`.
