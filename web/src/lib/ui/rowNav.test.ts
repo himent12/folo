@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { forgetRows, rowNav, settleTabStop, stepRow } from './rowNav';
+import { forgetRows, navRows, rowNav, settleTabStop, stepRow } from './rowNav';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -147,6 +147,60 @@ describe('rowNav', () => {
     const again = make();
     nav = rowNav(again.t);
     expect(again.rows.map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    nav.destroy();
+  });
+
+  it('checks container visibility once in navRows instead of calling checkVisibility per row', () => {
+    const { t, rows } = table(4);
+    const rootVis = vi.fn().mockReturnValue(true);
+    const rowVis = vi.fn().mockReturnValue(true);
+    Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
+    for (const r of rows) Object.defineProperty(r, 'checkVisibility', { value: rowVis, configurable: true });
+    rows[2]!.hidden = true;
+    rows[3]!.style.display = 'none';
+
+    expect(navRows(t)).toEqual([rows[0], rows[1]]);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+    expect(rowVis).not.toHaveBeenCalled();
+
+    rootVis.mockReturnValue(false);
+    expect(navRows(t)).toEqual([]);
+    expect(rootVis).toHaveBeenCalledTimes(2);
+    expect(rowVis).not.toHaveBeenCalled();
+  });
+
+  it('skips settle when mutations only update cell contents and queries rows once per keypress', async () => {
+    const { t, rows } = table(3);
+    const rootVis = vi.fn().mockReturnValue(true);
+    Object.defineProperty(t, 'checkVisibility', { value: rootVis, configurable: true });
+
+    const nav = rowNav(t);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+
+    // Mutate a cell inside a row (e.g., live SSE metric tick): MutationObserver should ignore non-row changes.
+    const td = rows[0]!.querySelector('td')!;
+    const badge = document.createElement('span');
+    badge.textContent = 'epoch 4';
+    td.appendChild(badge);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rootVis).toHaveBeenCalledTimes(1);
+
+    // Moving with J queries navRows once (passes rows into focusRow instead of re-querying).
+    rows[0]!.focus();
+    rootVis.mockClear();
+    key(rows[0]!, 'j');
+    expect(document.activeElement).toBe(rows[1]);
+    expect(rootVis).toHaveBeenCalledTimes(1);
+
+    // Adding an actual [data-row] still triggers settle.
+    const extra = document.createElement('tr');
+    extra.setAttribute('data-row', '');
+    extra.dataset.id = 'r3';
+    t.querySelector('tbody')!.appendChild(extra);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rootVis).toHaveBeenCalledTimes(2);
+    expect(extra.tabIndex).toBe(-1);
+
     nav.destroy();
   });
 });

@@ -12,9 +12,36 @@ export interface RowNavOptions {
   toggle?: (row: HTMLElement) => void;
 }
 
-/** Rows that take part: any `[data-row]` that is rendered (phones hide the desktop table). */
+/** Rows that take part: any `[data-row]` inside a visible container (phones hide the desktop table).
+ *  Checks container visibility once instead of calling `checkVisibility()` per row to avoid O(N) layout thrash. */
 export function navRows(root: HTMLElement): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>('[data-row]')].filter((r) => r.checkVisibility?.() ?? true);
+  if (root.checkVisibility && !root.checkVisibility()) return [];
+  const list = root.querySelectorAll<HTMLElement>('[data-row]');
+  const out: HTMLElement[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i]!;
+    if (!r.hidden && r.style.display !== 'none') out.push(r);
+  }
+  return out;
+}
+
+function hasRowNode(nodes: NodeList): boolean {
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n && n.nodeType === 1) {
+      const el = n as Element;
+      if (el.hasAttribute('data-row') || el.querySelector('[data-row]')) return true;
+    }
+  }
+  return false;
+}
+
+function hasRowMutation(records: MutationRecord[]): boolean {
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i]!;
+    if (hasRowNode(rec.addedNodes) || hasRowNode(rec.removedNodes)) return true;
+  }
+  return false;
 }
 
 /** Gives exactly one row the tab stop: `keep` when it is still a row, else the first. */
@@ -73,11 +100,16 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const back = was === undefined ? undefined : rows.find((r) => rowKey(r) === was);
     current = settleTabStop(rows, back ?? current) ?? null;
   };
-  const focusRow = (row: HTMLElement | undefined) => {
+  const focusRow = (row: HTMLElement | undefined, rows?: HTMLElement[]) => {
     if (!row) return;
     remember(row);
+    const prev = current;
     current = row;
-    settleTabStop(navRows(root), row);
+    if (rows) settleTabStop(rows, row);
+    else if (prev && prev !== row && root.contains(prev) && prev.tabIndex === 0) {
+      prev.tabIndex = -1;
+      row.tabIndex = 0;
+    } else settleTabStop(navRows(root), row);
     row.focus();
     row.scrollIntoView?.({ block: 'nearest' });
   };
@@ -92,7 +124,8 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const move = MOVES[key];
     if (move !== undefined) {
       e.preventDefault();
-      focusRow(stepRow(navRows(root), row, move));
+      const rows = navRows(root);
+      focusRow(stepRow(rows, row, move), rows);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       row.click();
@@ -106,9 +139,15 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-row]');
     if (row && root.contains(row)) {
       remember(row);
-      if (row === current) return;
+      if (row === current && row.tabIndex === 0) return;
+      const prev = current;
       current = row;
-      settleTabStop(navRows(root), row);
+      if (prev && root.contains(prev) && prev.tabIndex === 0) {
+        prev.tabIndex = -1;
+        row.tabIndex = 0;
+      } else {
+        settleTabStop(navRows(root), row);
+      }
     }
   };
   // A row opened by a click counts as the one the list was on.
@@ -128,10 +167,12 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     const rows = navRows(root);
     if (!rows.length) return;
     e.preventDefault();
-    focusRow(current && rows.includes(current) ? current : rows[0]);
+    focusRow(current && rows.includes(current) ? current : rows[0], rows);
   };
 
-  const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver(settle);
+  const observer = typeof MutationObserver === 'undefined' ? null : new MutationObserver((records) => {
+    if (hasRowMutation(records)) settle();
+  });
   observer?.observe(root, { childList: true, subtree: true });
   root.addEventListener('keydown', onkeydown);
   root.addEventListener('focusin', onfocusin);
