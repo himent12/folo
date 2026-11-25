@@ -222,8 +222,11 @@ export default function Dataset() {
     const before = seen;
     seen = now ? { d: now, counts: c } : undefined;
     if (!before || !now || before.d.id !== now.id) return;
-    if (before.d !== now) untrack(() => pager.get()?.reload());
-    if (before.d !== now || (before.counts !== undefined && before.counts !== c)) changed.set((n) => n + 1);
+    const issuesChanged = before.counts !== undefined && before.counts !== c;
+    if (before.d !== now || issuesChanged) {
+      untrack(() => pager.get()?.reload());
+      changed.set((n) => n + 1);
+    }
   });
   // The folder went missing meanwhile, is no dataset now (a broken data.yaml: 400), or the dataset was removed from
   // FOLO (another tab, the CLI): say so, as on opening it, rather than keep showing what it held (its images answer 404

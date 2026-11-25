@@ -234,4 +234,111 @@ describe('Inspector labels', () => {
       if (chh) Object.defineProperty(HTMLElement.prototype, 'clientHeight', chh);
     }
   });
+
+  it('toggles bounding boxes with B and its toolbar button, and restores them when picking a label', async () => {
+    const cw = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const chh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 800 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 600 });
+    try {
+      hub.api.imageUrl = () => Promise.resolve('data:image/png;base64,');
+      const dataset = await hub.api.dataset('ds_fasteners');
+      const pager = new ImagePager(dataset.id, undefined, undefined);
+      const first = await pager.at(0);
+      c = mount(Inspector, {
+        target,
+        props: { pager, classes: dataset.classes, imageId: first!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+      });
+      const img = await vi.waitFor(() => {
+        flushSync();
+        const el = target.querySelector<HTMLImageElement>('.stage img');
+        if (!el) throw new Error('image not rendered yet');
+        return el;
+      });
+      img.dispatchEvent(new Event('load'));
+      flushSync();
+
+      const btn = () => target.querySelector<HTMLButtonElement>('.head-zoom button[aria-keyshortcuts="B"]')!;
+      expect(btn().getAttribute('aria-pressed')).toBe('true');
+      expect(btn().getAttribute('aria-label')).toBe('Hide boxes');
+      expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
+
+      // Press B: boxes hide, button updates aria-pressed/label, viewport notes boxes hidden.
+      target.querySelector<HTMLElement>('.viewport')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
+      flushSync();
+      expect(btn().getAttribute('aria-pressed')).toBe('false');
+      expect(btn().getAttribute('aria-label')).toBe('Show boxes');
+      expect(target.querySelectorAll('.stage .box')).toHaveLength(0);
+      expect(target.querySelector('.viewport')?.getAttribute('aria-label')).toContain('(boxes hidden)');
+
+      // Clicking the toolbar button restores boxes.
+      btn().click();
+      flushSync();
+      expect(btn().getAttribute('aria-pressed')).toBe('true');
+      expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
+
+      // Hiding again then clicking a label in the rail restores boxes so the picked box is visible.
+      btn().click();
+      flushSync();
+      expect(target.querySelectorAll('.stage .box')).toHaveLength(0);
+      target.querySelector<HTMLButtonElement>('.labels button')!.click();
+      flushSync();
+      expect(btn().getAttribute('aria-pressed')).toBe('true');
+      expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
+      pager.dispose();
+    } finally {
+      if (cw) Object.defineProperty(HTMLElement.prototype, 'clientWidth', cw);
+      if (chh) Object.defineProperty(HTMLElement.prototype, 'clientHeight', chh);
+    }
+  });
+
+  it('zooms in on a clean single click at Fit without breaking drag or double-click', async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const first = await pager.at(0);
+    c = mount(Inspector, {
+      target,
+      props: { pager, classes: dataset.classes, imageId: first!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.stage')) throw new Error('stage not rendered');
+    });
+    const vp = target.querySelector<HTMLElement>('.viewport')!;
+    const zoomBtn = () => target.querySelector<HTMLButtonElement>('.head-zoom button.zoom')!;
+    expect(zoomBtn().textContent).toBe('Fit');
+
+    // A drag (> 4px movement) at Fit does not trigger click-to-zoom.
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, button: 0, pointerType: 'mouse', clientX: 100, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, button: 0, pointerType: 'mouse', clientX: 120, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, button: 0, pointerType: 'mouse', clientX: 120, clientY: 100, bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).toBe('Fit');
+
+    // A touch tap does not trigger mouse click-to-zoom (touch uses pinch / double-tap).
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 2, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).toBe('Fit');
+
+    // A clean mouse click at Fit zooms in immediately.
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 3, button: 0, pointerType: 'mouse', clientX: 120, clientY: 80, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 3, button: 0, pointerType: 'mouse', clientX: 121, clientY: 81, bubbles: true }));
+    flushSync();
+    expect(vp.classList.contains('zoomed')).toBe(true);
+    const zoomedOnce = zoomBtn().textContent;
+    expect(zoomedOnce).not.toBe('Fit');
+
+    // An immediate follow-up dblclick inside the guard window does not double-zoom past 2.5x.
+    vp.dispatchEvent(new MouseEvent('dblclick', { clientX: 121, clientY: 81, bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).toBe(zoomedOnce);
+
+    // Pressing 0 returns cleanly to Fit.
+    vp.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).toBe('Fit');
+    expect(vp.classList.contains('zoomed')).toBe(false);
+    pager.dispose();
+  });
 });

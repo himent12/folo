@@ -50,7 +50,7 @@ function deferred<T>() {
 /** The fresh job's page with image `image` open in the editor (its 40 images are pending, without boxes). */
 async function openEditor(image = '1', job = 'lb_7c21') {
   const at = `#/datasets/label/${job}?image=${image}`;
-  history.replaceState(null, '', at);
+  history.replaceState(history.state, '', at);
   router.route = parse(at);
   c = mount(LabelJobPage, { target });
   await vi.waitFor(() => {
@@ -751,5 +751,98 @@ describe('the labeling editor: a linked image the job does not have', () => {
     });
     expect(editor()?.open).toBeFalsy();
     expect(info).toHaveBeenCalled();
+  });
+});
+
+describe('LabelJob editor history', () => {
+  const hash = () => decodeURIComponent(location.hash);
+
+  it('pushes a history entry when opening an image from the grid so Back and Close return to the job', async () => {
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for grid tile');
+      return el;
+    });
+    const depth = history.length;
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+    expect(history.length).toBe(depth + 1);
+
+    // Stepping to the next image replaces the entry instead of pushing another one.
+    key('j');
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('2');
+    });
+    expect(history.length).toBe(depth + 1);
+
+    // Closing goes Back to the grid entry rather than leaving a spare history entry.
+    const back = vi.spyOn(history, 'back');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(editor()?.open).toBeFalsy();
+  });
+
+  it('closes on browser Back and preserves originating view across Back and Forward', async () => {
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for grid tile');
+      return el;
+    });
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+    history.back();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(editor()?.open).toBeFalsy();
+
+    history.forward();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toContain('image=');
+      expect(editor()?.open).toBe(true);
+    });
+    const back = vi.spyOn(history, 'back');
+    const replace = vi.spyOn(history, 'replaceState');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).toHaveBeenCalledOnce();
+    expect(replace).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+  });
+
+  it('replaces in place when closing an image opened directly via link (no grid entry behind it)', async () => {
+    await openEditor('1');
+    const back = vi.spyOn(history, 'back');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
   });
 });

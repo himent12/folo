@@ -1,14 +1,15 @@
 /**
- * Full-size image inspector: zoom (wheel / pinch / + - / double-click) and pan (drag, or Shift + arrows on the
+ * Full-size image inspector: zoom (click / double-click / wheel / pinch / + -) and pan (drag, or Shift + arrows on the
  * focused canvas) over the image with its labels, a label list that highlights boxes, a class legend and image meta.
- * J/K or arrows step through the current filter; 0 fits the whole image; Esc closes. The open image lives in the URL
- * (`?image=`), so it is linkable.
+ * J/K or arrows step through the current filter; B toggles boxes; 0 fits the whole image; Esc closes. The open image
+ * lives in the URL (`?image=`), so it is linkable.
  */
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Maximize from '$icons/maximize';
 import Minus from '$icons/minus';
 import Plus from '$icons/plus';
+import Scan from '$icons/scan';
 import X from '$icons/x';
 import { computed, css, cubicOut, effect, fly, Key, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
@@ -39,6 +40,11 @@ export interface InspectorProps {
 
 /** Shift + arrows on the focused canvas pan by a tenth of the view (clamped to the image like a drag). */
 const PAN: Record<string, [number, number]> = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+const NO_BOXES: Box[] = [];
+/** Pointer travel (px) within which a press-and-release counts as a click rather than a drag. */
+const CLICK_SLOP = 4;
+/** Window (ms) after a click-to-zoom from Fit during which a follow-up dblclick does not double-zoom. */
+const DBLCLICK_GUARD_MS = 350;
 const clampAxis = (t: number, d: number, v: number) => (d <= v ? (v - d) / 2 : Math.min(0, Math.max(v - d, t)));
 
 export default function Inspector(props: InspectorProps) {
@@ -52,6 +58,13 @@ export default function Inspector(props: InspectorProps) {
   // its class fill and chip, the selected one the accent stroke above the rest, which recede.
   const hovered = signal<number | null>(null);
   const selected = signal<number | null>(null);
+  const showBoxes = signal(true);
+
+  function toggleBoxes() {
+    const next = !showBoxes.peek();
+    showBoxes.set(next);
+    if (!next) hovered.set(null);
+  }
 
   const idx = computed(() => {
     const i = id.get();
@@ -162,6 +175,11 @@ export default function Inspector(props: InspectorProps) {
       z.set(1);
       hovered.set(null);
       selected.set(null);
+      pointers.clear();
+      pinch = null;
+      downOrigin = null;
+      clickZoomAt = 0;
+      dragging.set(false);
     });
   });
 
@@ -195,6 +213,7 @@ export default function Inspector(props: InspectorProps) {
       return;
     }
     selected.set(i);
+    if (!showBoxes.peek()) showBoxes.set(true);
     zoomToBox(b);
   }
 
@@ -261,6 +280,8 @@ export default function Inspector(props: InspectorProps) {
 
   const pointers = new Map<number, { x: number; y: number }>();
   let pinch: { d: number; mx: number; my: number } | null = null;
+  let downOrigin: { id: number; x: number; y: number; moved: boolean; multi: boolean } | null = null;
+  let clickZoomAt = 0;
   const dragging = signal(false);
   /** The hint over the image (keys, gestures) fades once someone has used the viewer (a key, the wheel, a press), so
    *  it never sits on boxes in the corner for longer than it takes to read. */
@@ -280,11 +301,14 @@ export default function Inspector(props: InspectorProps) {
   }
   function onpointerdown(e: PointerEvent) {
     if (e.button !== 0) return;
+    if (e.target instanceof Element && e.target.closest('button, a')) return;
     if (pointers.size === 0) rectCache.clear();
     touched.set(true);
-    viewport.peek()!.setPointerCapture(e.pointerId);
+    viewport.peek()?.setPointerCapture?.(e.pointerId);
     const [px, py] = local(e);
     pointers.set(e.pointerId, { x: px, y: py });
+    if (pointers.size === 1) downOrigin = { id: e.pointerId, x: px, y: py, moved: false, multi: false };
+    else if (downOrigin) downOrigin.multi = true;
     pinch = pointers.size === 2 ? pinchState() : null;
     dragging.set(true);
     glide.set(false);
@@ -295,6 +319,9 @@ export default function Inspector(props: InspectorProps) {
     if (!prev) return;
     const [px, py] = local(e);
     pointers.set(e.pointerId, { x: px, y: py });
+    if (downOrigin && downOrigin.id === e.pointerId && !downOrigin.moved && Math.hypot(px - downOrigin.x, py - downOrigin.y) > CLICK_SLOP) {
+      downOrigin.moved = true;
+    }
     if (pointers.size >= 2) {
       const now = pinchState();
       if (now && pinch && pinch.d > 0) {
@@ -310,12 +337,37 @@ export default function Inspector(props: InspectorProps) {
   }
 
   function onpointerup(e: PointerEvent) {
+    const cleanClick =
+      e.pointerType !== 'touch' &&
+      downOrigin !== null &&
+      downOrigin.id === e.pointerId &&
+      !downOrigin.moved &&
+      !downOrigin.multi &&
+      pointers.size === 1;
+    pointers.delete(e.pointerId);
+    pinch = pointers.size === 2 ? pinchState() : null;
+    if (pointers.size === 0) {
+      dragging.set(false);
+      downOrigin = null;
+    }
+    // At Fit the viewport shows a zoom-in cursor: a clean click zooms in at the clicked point immediately.
+    if (cleanClick && z.peek() <= 1.001 && img.peek()) {
+      const [px, py] = local(e);
+      clickZoomAt = performance.now();
+      zoomAt(2.5, px, py);
+    }
+  }
+
+  function onpointercancel(e: PointerEvent) {
     pointers.delete(e.pointerId);
     pinch = pointers.size === 2 ? pinchState() : null;
     if (pointers.size === 0) dragging.set(false);
+    downOrigin = null;
   }
 
   function ondblclick(e: MouseEvent) {
+    if (e.target instanceof Element && e.target.closest('button, a')) return;
+    if (performance.now() - clickZoomAt < DBLCLICK_GUARD_MS) return;
     const [px, py] = local(e);
     if (z.peek() >= maxZ.peek() * 0.99) fit();
     else zoomAt(2.5, px, py);
@@ -341,10 +393,26 @@ export default function Inspector(props: InspectorProps) {
     else if (k === '+' || k === '=') zoomAt(1.5);
     else if (k === '-' || k === '_') zoomAt(1 / 1.5);
     else if (k === '0') fit();
+    else if (k === 'b' || k === 'B') toggleBoxes();
     else return;
     e.preventDefault();
     touched.set(true);
   }
+
+  const boxesTool = () => (
+    <span use:tooltip={{ text: showBoxes.get() ? 'Hide boxes' : 'Show boxes', keys: 'B' }}>
+      <Button
+        variant="ghost"
+        size="sm"
+        icon={Scan}
+        class={showBoxes.get() ? 'boxes-on' : 'boxes-off'}
+        aria-pressed={showBoxes.get()}
+        aria-label={showBoxes.get() ? 'Hide boxes' : 'Show boxes'}
+        aria-keyshortcuts="B"
+        onclick={toggleBoxes}
+      />
+    </span>
+  );
 
   const zoomTools = () => (
     <div class="group" role="group" aria-label="Zoom">
@@ -400,7 +468,11 @@ export default function Inspector(props: InspectorProps) {
           ) : null}
         </div>
         <div class="tools">
-          <div class="head-zoom">{zoomTools()}</div>
+          <div class="head-zoom">
+            {boxesTool()}
+            <span class="sep" aria-hidden="true"></span>
+            {zoomTools()}
+          </div>
           <span class="sep head-zoom" aria-hidden="true"></span>
           <div class="group" role="group" aria-label="Navigate">
             <span use:tooltip={{ text: 'Previous', keys: 'K' }}>
@@ -437,7 +509,11 @@ export default function Inspector(props: InspectorProps) {
           role="group"
           aria-roledescription="image viewer"
           tabindex={0}
-          aria-label={img.get() ? `${stem(im().file)} with ${count(im().boxes.length, 'labelled box', 'labelled boxes')}` : 'Loading image'}
+          aria-label={
+            img.get()
+              ? `${stem(im().file)} with ${count(im().boxes.length, 'labelled box', 'labelled boxes')}${showBoxes.get() ? '' : ' (boxes hidden)'}`
+              : 'Loading image'
+          }
           aria-describedby="insp-keys"
           onkeydown={onviewportkey}
           onpointerenter={onpointerenter}
@@ -445,7 +521,7 @@ export default function Inspector(props: InspectorProps) {
           onpointerdown={onpointerdown}
           onpointermove={onpointermove}
           onpointerup={onpointerup}
-          onpointercancel={onpointerup}
+          onpointercancel={onpointercancel}
           ondblclick={ondblclick}
         >
           {img.get() ? (
@@ -464,7 +540,7 @@ export default function Inspector(props: InspectorProps) {
                   rev={props.pager.revisionOf(idx.get())}
                   width={im().width}
                   height={im().height}
-                  boxes={im().boxes}
+                  boxes={showBoxes.get() ? im().boxes : NO_BOXES}
                   classes={props.classes}
                   only={props.only}
                   active={hovered.get()}
@@ -485,19 +561,26 @@ export default function Inspector(props: InspectorProps) {
               <Kbd keys="K" subtle /> step
             </span>
             <span class="fine">
-              scroll to zoom · drag or <Kbd keys="Shift" subtle /> arrows to pan
+              <Kbd keys="B" subtle /> boxes
+            </span>
+            <span class="fine">
+              click or scroll to zoom · drag or <Kbd keys="Shift" subtle /> arrows to pan
             </span>
             <span class="touch">Pinch to zoom · drag to pan</span>
           </div>
         </div>
         <p id="insp-keys" class="sr-only">
-          Left and right arrows, or J and K: previous and next image. Shift and arrows: pan. Plus and minus: zoom. 0: fit the
-          whole image.
+          Left and right arrows, or J and K: previous and next image. Shift and arrows: pan. Click, double-click, or plus and
+          minus: zoom. 0: fit the whole image. B: show or hide boxes.
         </p>
         {/* Narrow screens: the zoom controls get their own 44 px bar under the image (never over the labels), with the
             gesture hint beneath it. */}
         <div class="zoom-bar">
-          {zoomTools()}
+          <div class="bar-controls">
+            {boxesTool()}
+            <span class="sep" aria-hidden="true"></span>
+            {zoomTools()}
+          </div>
           <p class="touch-hint">Pinch to zoom · drag to pan · double-tap to zoom in</p>
         </div>
 
@@ -586,6 +669,20 @@ css`
   .tools span,
   .zoom-bar span {
     display: inline-flex;
+  }
+  .tools :global(.boxes-on),
+  .zoom-bar :global(.boxes-on) {
+    background: var(--bg-active);
+    color: var(--text-primary);
+  }
+  .tools :global(.boxes-off),
+  .zoom-bar :global(.boxes-off) {
+    color: var(--text-tertiary);
+  }
+  .bar-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
   }
   .head-zoom {
     display: contents;

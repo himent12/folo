@@ -131,4 +131,59 @@ describe('DatasetCard', () => {
     flush();
     expect(asked).toHaveBeenCalledTimes(2);
   });
+
+  it('refreshes the mosaic and busts thumbnail URLs when dataset revision or class counts change (label-coordinate edits)', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    hub.mode = 'mock';
+    vi.spyOn(api, 'imageUrl').mockImplementation(async (dsId, imgId, thumb) => `/api/datasets/${dsId}/images/${imgId}${thumb ? `?thumb=${thumb}` : ''}`);
+    const [first] = await api.datasets();
+    const asked = vi.spyOn(api, 'datasetImages');
+    const ds = signal<ListedDataset>({ ...first!, revision: 'rev-a' });
+    target = document.body.appendChild(document.createElement('div'));
+    view = render(() => <DatasetCard dataset={ds.get()} />, target);
+    flush();
+
+    await vi.waitFor(() => {
+      flush();
+      const img = target!.querySelector<HTMLImageElement>('.mosaic .dsimg img');
+      if (!img?.getAttribute('src')) throw new Error('waiting for initial mosaic');
+    });
+    expect(asked).toHaveBeenCalledTimes(1);
+    expect(target.querySelector<HTMLImageElement>('.mosaic .dsimg img')!.getAttribute('src')).not.toContain('rev=');
+
+    // Label-coordinate edit on disk: image count and box count stay identical, only server `revision` changes.
+    ds.set({ ...first!, revision: 'rev-b' });
+    flush();
+    expect(asked).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      flush();
+      const img = target!.querySelector<HTMLImageElement>('.mosaic .dsimg img');
+      if (!img?.getAttribute('src')?.includes('rev=1')) throw new Error('waiting for rev=1 thumbnail');
+    });
+
+    // Older server without `revision`: class re-assignment (same total boxes, different class_counts) still refreshes.
+    const withStats: ListedDataset = {
+      ...first!,
+      revision: undefined,
+      stats: {
+        boxes: 10,
+        empty_images: 0,
+        broken_labels: 0,
+        class_counts: [5, 5],
+        box_size_hist: { edges: [0, 1], counts: [10] },
+        boxes_per_image_hist: { edges: [0, 5], counts: [4] },
+      },
+    };
+    ds.set(withStats);
+    flush();
+    const beforeClassSwap = asked.mock.calls.length;
+    ds.set({ ...withStats, stats: { ...withStats.stats!, class_counts: [4, 6] } });
+    flush();
+    expect(asked).toHaveBeenCalledTimes(beforeClassSwap + 1);
+  });
 });

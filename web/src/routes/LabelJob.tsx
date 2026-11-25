@@ -20,6 +20,7 @@ import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { entryState } from '$lib/shell/entryMemory';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
@@ -76,15 +77,30 @@ export default function LabelJob() {
     setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: 'Label images', path: '/datasets/label' }, { label: job.get()?.name ?? id.get() });
   });
 
-  /** Replaces query params (null removes one) without adding history entries. */
-  function setQuery(patch: Record<string, string | null>) {
+  // History: opening an image from the grid pushes an entry, so Back closes the editor instead of leaving the job
+  // (matching Dataset.tsx). Stepping between images replaces the entry; closing back to the originating view goes Back
+  // so Close and Back agree and leave no spare entry. An entry reached by a direct link replaces in place on close.
+  const from = entryState<string>('labeljob.from');
+  const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
+
+  /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
+  function setQuery(patch: Record<string, string | null>, push = false) {
+    const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) q.delete(k);
       else q.set(k, v);
     }
     const s = q.toString();
-    router.go(`/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
+    if (s === before) return;
+    const at = router.route.path;
+    const path = `/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
+    if (push) {
+      const was = router.entry;
+      router.go(path);
+      if (router.entry !== was) from.set(view(at, before));
+    } else if (from.get() === view(at, s)) history.back();
+    else router.go(path, { replace: true });
   }
   const shown = computed(() => (show.get() === 'all' ? live.images : live.images.filter((i) => inFilter(i, show.get()))));
   /** Labeled images a person has checked (the job's counts do not have them: the images do). */
@@ -390,7 +406,7 @@ export default function LabelJob() {
                   show={show.get()}
                   uploads={uploads}
                   onshow={(s) => setQuery({ show: s === 'all' ? null : s })}
-                  onopen={(imageId) => setQuery({ image: imageId })}
+                  onopen={(imageId) => setQuery({ image: imageId }, !imageParam.peek())}
                   onbrowse={() => fileInput?.click()}
                   onadd={(tab) => (addTab.set(tab), addOpen.set(true))}
                 />

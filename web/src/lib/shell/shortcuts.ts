@@ -72,6 +72,7 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },
   { keys: '0', label: 'Fit image (inspector)', group: 'Datasets' },
+  { keys: 'B', label: 'Show or hide boxes (inspector)', group: 'Datasets' },
   // The labeling editor's own keys: they work while it is the topmost dialog, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (labeling editor)', group: 'Datasets' },
   { keys: '1–9', label: "Set the selected box's class (labeling editor)", group: 'Datasets' },
