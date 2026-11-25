@@ -8,9 +8,11 @@ use super::bilinear::{
 use super::box_filter::{box_hreduce_u32_to_u8, box_hreduce_u32_to_u8_scalar, sum_rows_u8_to_u32};
 use super::hsv_fused::{HsvTables, warp_interior_to_planar_fused, warp_interior_to_planar_fused_scalar};
 use super::planar::{
-    flip_lr_row, flip_lr_row_scalar, rgb_to_planar_f32_div255, rgb_to_planar_f32_div255_scalar,
-    rgb_to_planar_f32_scale, rgb_to_planar_f32_scale_scalar, rgb_to_planar_u8, rgb_to_planar_u8_scalar,
-    rgb_to_rgb0_u32, rgb_to_rgb0_u32_scalar,
+    copy_flip_lr_row, copy_flip_lr_row_scalar, flip_lr_row, flip_lr_row_scalar, luma_to_rgb,
+    luma_to_rgb_scalar, mixup_blend_u8, mixup_blend_u8_scalar, rgb_to_planar_f32_div255,
+    rgb_to_planar_f32_div255_scalar, rgb_to_planar_f32_scale, rgb_to_planar_f32_scale_scalar,
+    rgb_to_planar_u8, rgb_to_planar_u8_scalar, rgb_to_rgb0_u32, rgb_to_rgb0_u32_scalar, rgba_to_rgb,
+    rgba_to_rgb_scalar,
 };
 use super::{PlanarDst, PlanarRow};
 use crate::augment::{flip_lr, flip_ud, random_hsv};
@@ -618,5 +620,51 @@ fn box_filter_simd_matches_scalar_bit_exact() {
         if box_hreduce_u32_to_u8(&body, &mut got, 1, n) {
             assert_eq!(got, want, "exact round div failed at n={n}");
         }
+    }
+}
+
+#[test]
+fn mixup_copy_flip_rgba_and_luma_match_scalar_bit_exact() {
+    for &n in &[0usize, 1, 2, 3, 5, 6, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 193] {
+        // Mixup across boundary weights including 0, 1, 127, 128, 129, 255, 256.
+        let a = noisy_bytes(700 + n as u64, n);
+        let b = noisy_bytes(900 + n as u64, n);
+        for &wa in &[0u32, 1, 2, 63, 127, 128, 129, 192, 254, 255, 256] {
+            let (mut d0, mut d1) = (a.clone(), a.clone());
+            mixup_blend_u8_scalar(&mut d0, &b, wa);
+            mixup_blend_u8(&mut d1, &b, wa);
+            assert_eq!(d1, d0, "mixup n={n} wa={wa}");
+        }
+
+        // Single-pass copy_flip_lr_row.
+        let rgb = noisy_bytes(1100 + n as u64, n * 3);
+        let (mut f0, mut f1) = (vec![0xAAu8; n * 3], vec![0xAAu8; n * 3]);
+        copy_flip_lr_row_scalar(&rgb, &mut f0, n);
+        copy_flip_lr_row(&rgb, &mut f1);
+        assert_eq!(f1, f0, "copy_flip_lr_row w={n}");
+
+        // RGBA -> RGB.
+        let rgba = noisy_bytes(1300 + n as u64, n * 4);
+        let (mut r0, mut r1) = (vec![0x55u8; n * 3], vec![0x55u8; n * 3]);
+        rgba_to_rgb_scalar(&rgba, &mut r0);
+        rgba_to_rgb(&rgba, &mut r1);
+        assert_eq!(r1, r0, "rgba_to_rgb n={n}");
+
+        // L8 -> RGB.
+        let luma = noisy_bytes(1500 + n as u64, n);
+        let (mut l0, mut l1) = (vec![0x77u8; n * 3], vec![0x77u8; n * 3]);
+        luma_to_rgb_scalar(&luma, &mut l0);
+        luma_to_rgb(&luma, &mut l1);
+        assert_eq!(l1, l0, "luma_to_rgb n={n}");
+    }
+
+    // Exhaustive mixup corner check across extreme (a, b) pairs for every weight wa in 0..=256.
+    let a: Vec<u8> = [0u8, 1, 127, 128, 254, 255].into_iter().cycle().take(64).collect();
+    let b: Vec<u8> = [255u8, 254, 128, 127, 1, 0, 255, 0].into_iter().cycle().take(64).collect();
+    for wa in 0..=256u32 {
+        let (mut d0, mut d1) = (a.clone(), a.clone());
+        mixup_blend_u8_scalar(&mut d0, &b, wa);
+        mixup_blend_u8(&mut d1, &b, wa);
+        assert_eq!(d1, d0, "mixup exhaustive wa={wa}");
     }
 }

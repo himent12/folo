@@ -87,21 +87,87 @@ impl Image {
         }
         let (w, h) = (self.width as usize, self.height as usize);
         let (ow, oh) = if orientation >= 5 { (h, w) } else { (w, h) };
+        if w == 0 || h == 0 {
+            return Image { width: ow as u32, height: oh as u32, data: Vec::new() };
+        }
+        crate::simd::assert_image_data(self);
         let mut out = crate::buffers::scratch(ow * oh * 3);
-        for y in 0..oh {
-            for x in 0..ow {
-                let (sx, sy) = match orientation {
-                    2 => (w - 1 - x, y),
-                    3 => (w - 1 - x, h - 1 - y),
-                    4 => (x, h - 1 - y),
-                    5 => (y, x),
-                    6 => (y, h - 1 - x),
-                    7 => (w - 1 - y, h - 1 - x),
-                    _ => (w - 1 - y, x), // 8
-                };
-                let s = (sy * w + sx) * 3;
-                let d = (y * ow + x) * 3;
-                out[d..d + 3].copy_from_slice(&self.data[s..s + 3]);
+        let sstride = w * 3;
+        let ostride = ow * 3;
+        match orientation {
+            2 => crate::par::for_rows(&mut out, ostride, |y, dst_row| {
+                crate::simd::planar::copy_flip_lr_row(&self.data[y * sstride..(y + 1) * sstride], dst_row);
+            }),
+            3 => crate::par::for_rows(&mut out, ostride, |y, dst_row| {
+                let sy = h - 1 - y;
+                crate::simd::planar::copy_flip_lr_row(&self.data[sy * sstride..(sy + 1) * sstride], dst_row);
+            }),
+            4 => crate::par::for_rows(&mut out, ostride, |y, dst_row| {
+                let sy = h - 1 - y;
+                dst_row.copy_from_slice(&self.data[sy * sstride..(sy + 1) * sstride]);
+            }),
+            _ => {
+                // Orientations 5–8 transpose `(w, h) -> (h, w)`. 32x32 cache-blocked tiles keep both
+                // source and destination blocks (~3 KiB each) resident in L1d cache instead of striding
+                // across cache lines per pixel.
+                const TILE: usize = 32;
+                let src = &self.data;
+                crate::par::for_bands(&mut out, ostride, |y0, band| {
+                    let band_h = band.len() / ostride;
+                    for ty in (0..band_h).step_by(TILE) {
+                        let y_end = (ty + TILE).min(band_h);
+                        for tx in (0..ow).step_by(TILE) {
+                            let x_end = (tx + TILE).min(ow);
+                            match orientation {
+                                5 => {
+                                    for ly in ty..y_end {
+                                        let sx = y0 + ly;
+                                        let drow = &mut band[ly * ostride..][..ostride];
+                                        for x in tx..x_end {
+                                            let s = (x * w + sx) * 3;
+                                            let d = x * 3;
+                                            drow[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                                        }
+                                    }
+                                }
+                                6 => {
+                                    for ly in ty..y_end {
+                                        let sx = y0 + ly;
+                                        let drow = &mut band[ly * ostride..][..ostride];
+                                        for x in tx..x_end {
+                                            let s = ((h - 1 - x) * w + sx) * 3;
+                                            let d = x * 3;
+                                            drow[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                                        }
+                                    }
+                                }
+                                7 => {
+                                    for ly in ty..y_end {
+                                        let sx = w - 1 - (y0 + ly);
+                                        let drow = &mut band[ly * ostride..][..ostride];
+                                        for x in tx..x_end {
+                                            let s = ((h - 1 - x) * w + sx) * 3;
+                                            let d = x * 3;
+                                            drow[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // 8
+                                    for ly in ty..y_end {
+                                        let sx = w - 1 - (y0 + ly);
+                                        let drow = &mut band[ly * ostride..][..ostride];
+                                        for x in tx..x_end {
+                                            let s = (x * w + sx) * 3;
+                                            let d = x * 3;
+                                            drow[d..d + 3].copy_from_slice(&src[s..s + 3]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
             }
         }
         Image { width: ow as u32, height: oh as u32, data: out }
@@ -134,7 +200,7 @@ pub fn decode(bytes: &[u8]) -> Result<Image> {
 
 pub(crate) fn decode_with_path(bytes: &[u8], path: &Path) -> Result<Image> {
     let err = |e: image::ImageError| DataError::image(path, e.to_string().trim());
-    let img = match decode_jpeg(bytes) {
+    let img = match decode_jpeg(bytes).or_else(|| decode_png(bytes)) {
         Some(img) => img.map_err(err)?,
         None => {
             let rgb = image::load_from_memory(bytes).map_err(err)?.into_rgb8();
@@ -153,6 +219,15 @@ pub(crate) fn decode_with_path(bytes: &[u8], path: &Path) -> Result<Image> {
         }
         _ => Ok(img),
     }
+}
+
+/// Fallback conversion through `DynamicImage::from_decoder` for less-common color types.
+fn decode_dynamic(dec: impl image::ImageDecoder) -> image::ImageResult<Image> {
+    image::DynamicImage::from_decoder(dec).map(|d| {
+        let rgb = d.into_rgb8();
+        let (width, height) = rgb.dimensions();
+        Image { width, height, data: rgb.into_raw() }
+    })
 }
 
 /// `image::load_from_memory(bytes)?.into_rgb8()` for an RGB or greyscale JPEG (the same decoder, limits, bytes and
@@ -175,29 +250,85 @@ fn decode_jpeg(bytes: &[u8]) -> Option<image::ImageResult<Image>> {
         Err(e) => return Some(Err(e)),
     };
     let (width, height) = dec.dimensions();
-    let n = width as usize * height as usize;
+    let Some(n) = (width as usize).checked_mul(height as usize) else {
+        return Some(decode_dynamic(dec));
+    };
+    let Some(rgb_bytes) = n.checked_mul(3) else {
+        return Some(decode_dynamic(dec));
+    };
     Some(match dec.color_type() {
         ColorType::Rgb8 => {
-            let mut data = crate::buffers::zeroed(n * 3);
+            let mut data = crate::buffers::zeroed(rgb_bytes);
             dec.read_image(&mut data).map(|()| Image { width, height, data })
         }
         ColorType::L8 => {
             let mut luma = crate::buffers::zeroed(n);
             dec.read_image(&mut luma).map(|()| {
                 // `into_rgb8` of a greyscale image: the level in all three channels.
-                let mut data = crate::buffers::scratch(n * 3);
-                for (px, &l) in data.as_chunks_mut::<3>().0.iter_mut().zip(&luma) {
-                    *px = [l; 3];
-                }
+                let mut data = crate::buffers::scratch(rgb_bytes);
+                crate::simd::planar::luma_to_rgb(&luma, &mut data);
                 crate::buffers::recycle(luma);
                 Image { width, height, data }
             })
         }
-        _ => image::DynamicImage::from_decoder(dec).map(|d| {
-            let rgb = d.into_rgb8();
-            let (width, height) = rgb.dimensions();
-            Image { width, height, data: rgb.into_raw() }
-        }),
+        _ => decode_dynamic(dec),
+    })
+}
+
+/// `image::load_from_memory(bytes)?.into_rgb8()` for an RGB, RGBA or greyscale PNG (the same decoder, limits, bytes
+/// and errors), decoding into pooled buffers from [`crate::buffers`] with AVX2 `RGBA`/`L8` → `RGB` conversion; `None`
+/// for anything else.
+fn decode_png(bytes: &[u8]) -> Option<image::ImageResult<Image>> {
+    use image::{ColorType, ImageDecoder};
+    if image::guess_format(bytes).ok()? != image::ImageFormat::Png {
+        return None;
+    }
+    let open = || {
+        let mut limits = image::Limits::default();
+        let mut dec =
+            image::codecs::png::PngDecoder::with_limits(std::io::Cursor::new(bytes), limits.clone())?;
+        limits.reserve(dec.total_bytes())?;
+        dec.set_limits(limits)?;
+        Ok(dec)
+    };
+    let dec = match open() {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e)),
+    };
+    let (width, height) = dec.dimensions();
+    let Some(n) = (width as usize).checked_mul(height as usize) else {
+        return Some(decode_dynamic(dec));
+    };
+    let Some(rgb_bytes) = n.checked_mul(3) else {
+        return Some(decode_dynamic(dec));
+    };
+    Some(match dec.color_type() {
+        ColorType::Rgb8 => {
+            let mut data = crate::buffers::zeroed(rgb_bytes);
+            dec.read_image(&mut data).map(|()| Image { width, height, data })
+        }
+        ColorType::Rgba8 => match n.checked_mul(4) {
+            Some(rgba_bytes) => {
+                let mut rgba = crate::buffers::zeroed(rgba_bytes);
+                dec.read_image(&mut rgba).map(|()| {
+                    let mut data = crate::buffers::scratch(rgb_bytes);
+                    crate::simd::planar::rgba_to_rgb(&rgba, &mut data);
+                    crate::buffers::recycle(rgba);
+                    Image { width, height, data }
+                })
+            }
+            None => decode_dynamic(dec),
+        },
+        ColorType::L8 => {
+            let mut luma = crate::buffers::zeroed(n);
+            dec.read_image(&mut luma).map(|()| {
+                let mut data = crate::buffers::scratch(rgb_bytes);
+                crate::simd::planar::luma_to_rgb(&luma, &mut data);
+                crate::buffers::recycle(luma);
+                Image { width, height, data }
+            })
+        }
+        _ => decode_dynamic(dec),
     })
 }
 
@@ -556,5 +687,85 @@ mod tests {
         let png = encode(&img, ImageFormat::Png).unwrap();
         assert!(!jpeg_truncated(&png));
         assert!(!jpeg_truncated(b"not an image"));
+    }
+
+    #[test]
+    fn orientations_match_reference_across_sizes_and_tiles() {
+        fn ref_oriented(img: &Image, o: u8) -> Image {
+            let (w, h) = (img.width as usize, img.height as usize);
+            let (ow, oh) = if o >= 5 { (h, w) } else { (w, h) };
+            let mut out = vec![0u8; ow * oh * 3];
+            for y in 0..oh {
+                for x in 0..ow {
+                    let (sx, sy) = match o {
+                        2 => (w - 1 - x, y),
+                        3 => (w - 1 - x, h - 1 - y),
+                        4 => (x, h - 1 - y),
+                        5 => (y, x),
+                        6 => (y, h - 1 - x),
+                        7 => (w - 1 - y, h - 1 - x),
+                        _ => (w - 1 - y, x),
+                    };
+                    let s = (sy * w + sx) * 3;
+                    let d = (y * ow + x) * 3;
+                    out[d..d + 3].copy_from_slice(&img.data[s..s + 3]);
+                }
+            }
+            Image { width: ow as u32, height: oh as u32, data: out }
+        }
+        for &(w, h) in &[(1u32, 1u32), (5, 7), (31, 33), (32, 32), (97, 67), (257, 193)] {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            for (i, v) in img.data.iter_mut().enumerate() {
+                *v = (i.wrapping_mul(2654435761) >> 11) as u8;
+            }
+            for o in 1..=8u8 {
+                let got = img.oriented(o);
+                let want = if o == 1 { img.clone() } else { ref_oriented(&img, o) };
+                assert_eq!(got, want, "oriented({o}) {w}x{h}");
+                let serial = crate::par::serial(|| img.oriented(o));
+                assert_eq!(serial, want, "oriented({o}) serial {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn png_decodes_as_the_generic_path() {
+        use image::{ExtendedColorType, ImageEncoder};
+        let generic = |bytes: &[u8]| {
+            image::load_from_memory(bytes).map(|d| {
+                let rgb = d.into_rgb8();
+                (rgb.width(), rgb.height(), rgb.into_raw())
+            })
+        };
+        let (w, h) = (73u32, 41u32);
+        let n = (w * h) as usize;
+        let rgb: Vec<u8> = (0..n * 3).map(|i| (i.wrapping_mul(37) % 251) as u8).collect();
+        let rgba: Vec<u8> = (0..n * 4).map(|i| (i.wrapping_mul(53) % 251) as u8).collect();
+        let luma: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(29) % 251) as u8).collect();
+        let la: Vec<u8> = (0..n * 2).map(|i| (i.wrapping_mul(19) % 251) as u8).collect();
+        let rgb16: Vec<u8> = (0..n * 6).map(|i| (i.wrapping_mul(41) % 251) as u8).collect();
+
+        let encode_png = |buf: &[u8], ct: ExtendedColorType| {
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut out).write_image(buf, w, h, ct).unwrap();
+            out
+        };
+        let files = [
+            encode_png(&rgb, ExtendedColorType::Rgb8),
+            encode_png(&rgba, ExtendedColorType::Rgba8),
+            encode_png(&luma, ExtendedColorType::L8),
+            encode_png(&la, ExtendedColorType::La8),
+            encode_png(&rgb16, ExtendedColorType::Rgb16),
+        ];
+        for f in &files {
+            for bytes in [&f[..], &f[..f.len() * 2 / 3], &f[..12]] {
+                match (decode_png(bytes).unwrap(), generic(bytes)) {
+                    (Ok(a), Ok((gw, gh, gdata))) => assert_eq!((a.width, a.height, a.data), (gw, gh, gdata)),
+                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                    (a, b) => panic!("{} of {} bytes: {:?} vs {:?}", bytes.len(), f.len(), a.err(), b.err()),
+                }
+            }
+        }
+        assert!(decode_png(&encode(&grid(), ImageFormat::Jpeg(90)).unwrap()).is_none());
     }
 }

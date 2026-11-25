@@ -1,4 +1,5 @@
-//! Bit-exact AVX2 RGB deinterleaving (`RGB u8` → planar `u8`, planar `f32`, packed `RGB0 u32`) and horizontal row flip.
+//! Bit-exact AVX2 RGB deinterleaving (`RGB u8` → planar `u8`, planar `f32`, packed `RGB0 u32`), horizontal row flip,
+//! mixup blending, and `RGBA`/`L8` → `RGB` decode conversions.
 
 #[cfg(target_arch = "x86_64")]
 use super::{INV255_HI, INV255_LO, has_avx2, has_avx2_fma};
@@ -159,6 +160,103 @@ pub(crate) fn flip_lr_row_scalar(row: &mut [u8], w: usize) {
         row.swap(a, b);
         row.swap(a + 1, b + 1);
         row.swap(a + 2, b + 2);
+    }
+}
+
+/// Copies one interleaved RGB row `src` (`width * 3` bytes) mirrored left-to-right into `dst` (`width * 3` bytes).
+#[inline]
+pub(crate) fn copy_flip_lr_row(src: &[u8], dst: &mut [u8]) {
+    let w = src.len() / 3;
+    assert!(src.len() == w * 3 && dst.len() == src.len());
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() && w >= 6 {
+        // SAFETY: CPU supports AVX2 and both slices hold `w * 3` bytes.
+        unsafe { copy_flip_lr_row_avx2(src, dst, w) };
+        return;
+    }
+    copy_flip_lr_row_scalar(src, dst, w);
+}
+
+#[inline]
+pub(crate) fn copy_flip_lr_row_scalar(src: &[u8], dst: &mut [u8], w: usize) {
+    for x in 0..w {
+        let s = x * 3;
+        let d = (w - 1 - x) * 3;
+        dst[d] = src[s];
+        dst[d + 1] = src[s + 1];
+        dst[d + 2] = src[s + 2];
+    }
+}
+
+/// Blends `other` into `dst` in place: `dst[i] = ((dst[i] * wa + other[i] * (256 - wa) + 128) >> 8) as u8`,
+/// bit-exact for every `wa in 0..=256`.
+#[inline]
+pub(crate) fn mixup_blend_u8(dst: &mut [u8], other: &[u8], wa: u32) {
+    assert!(dst.len() == other.len() && wa <= 256);
+    if wa == 256 {
+        return;
+    }
+    if wa == 0 {
+        dst.copy_from_slice(other);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() && dst.len() >= 32 {
+        // SAFETY: CPU supports AVX2, slice lengths are equal, and `1 <= wa <= 255`.
+        unsafe { mixup_blend_u8_avx2(dst, other, wa) };
+        return;
+    }
+    mixup_blend_u8_scalar(dst, other, wa);
+}
+
+#[inline]
+pub(crate) fn mixup_blend_u8_scalar(dst: &mut [u8], other: &[u8], wa: u32) {
+    let wb = 256 - wa;
+    for (a, &b) in dst.iter_mut().zip(other) {
+        *a = ((*a as u32 * wa + b as u32 * wb + 128) >> 8) as u8;
+    }
+}
+
+/// Strips alpha from interleaved `RGBA` bytes (`n * 4`) into `RGB` bytes (`n * 3`).
+#[inline]
+pub(crate) fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
+    let n = dst.len() / 3;
+    assert!(dst.len() == n * 3 && n.checked_mul(4) == Some(src.len()));
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() && n >= 6 {
+        // SAFETY: CPU supports AVX2 and `src` holds `n * 4` bytes, `dst` holds `n * 3` bytes.
+        unsafe { rgba_to_rgb_avx2(src, dst, n) };
+        return;
+    }
+    rgba_to_rgb_scalar(src, dst);
+}
+
+#[inline]
+pub(crate) fn rgba_to_rgb_scalar(src: &[u8], dst: &mut [u8]) {
+    for (d, s) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+    }
+}
+
+/// Expands 8-bit greyscale `src` (`n` bytes) into interleaved `RGB` `dst` (`n * 3` bytes, `[l, l, l]`).
+#[inline]
+pub(crate) fn luma_to_rgb(src: &[u8], dst: &mut [u8]) {
+    assert!(src.len().checked_mul(3) == Some(dst.len()));
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() && src.len() >= 16 {
+        // SAFETY: CPU supports AVX2 and `dst.len() == src.len() * 3`.
+        unsafe { luma_to_rgb_avx2(src, dst) };
+        return;
+    }
+    luma_to_rgb_scalar(src, dst);
+}
+
+#[inline]
+pub(crate) fn luma_to_rgb_scalar(src: &[u8], dst: &mut [u8]) {
+    for (px, &l) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src) {
+        *px = [l; 3];
     }
 }
 
@@ -446,5 +544,129 @@ unsafe fn flip_lr_row_avx2(row: &mut [u8], w: usize) {
         row.swap(a + 1, b + 1);
         row.swap(a + 2, b + 2);
         x += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_flip_lr_row_avx2(src: &[u8], dst: &mut [u8], w: usize) {
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let rev4 = _mm_setr_epi8(9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2, -1, -1, -1, -1);
+    let mut x = 0usize;
+    // 16-byte load at `x * 3` needs `x * 3 + 16 <= w * 3` => `x + 6 <= w`.
+    while x + 6 <= w {
+        let d = (w - x - 4) * 3;
+        // SAFETY: `x * 3 + 16 <= src.len()` and `d + 12 <= dst.len()`. Exact 12-byte store avoids overshoot.
+        unsafe {
+            let v = _mm_shuffle_epi8(_mm_loadu_si128(sp.add(x * 3) as *const __m128i), rev4);
+            (dp.add(d) as *mut i64).write_unaligned(_mm_cvtsi128_si64(v));
+            (dp.add(d + 8) as *mut i32).write_unaligned(_mm_extract_epi32::<2>(v));
+        }
+        x += 4;
+    }
+    while x < w {
+        let s = x * 3;
+        let d = (w - 1 - x) * 3;
+        dst[d] = src[s];
+        dst[d + 1] = src[s + 1];
+        dst[d + 2] = src[s + 2];
+        x += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mixup_blend_u8_avx2(dst: &mut [u8], other: &[u8], wa: u32) {
+    let n = dst.len();
+    let dp = dst.as_mut_ptr();
+    let op = other.as_ptr();
+    let wb = 256 - wa;
+    let vwa = _mm256_set1_epi16(wa as i16);
+    let vwb = _mm256_set1_epi16(wb as i16);
+    let v128 = _mm256_set1_epi16(128);
+    let mut i = 0usize;
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n == dst.len() == other.len()`.
+        // Every lane satisfies `a * wa + b * wb + 128 <= 255 * 256 + 128 = 65408 <= u16::MAX`, so modular
+        // 16-bit multiply/add + logical `>> 8` is exact and produces values in `0..=255`.
+        unsafe {
+            let a0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(dp.add(i) as *const __m128i));
+            let b0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(op.add(i) as *const __m128i));
+            let s0 = _mm256_add_epi16(
+                _mm256_add_epi16(_mm256_mullo_epi16(a0, vwa), _mm256_mullo_epi16(b0, vwb)),
+                v128,
+            );
+            let r0 = _mm256_srli_epi16::<8>(s0);
+
+            let a1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(dp.add(i + 16) as *const __m128i));
+            let b1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(op.add(i + 16) as *const __m128i));
+            let s1 = _mm256_add_epi16(
+                _mm256_add_epi16(_mm256_mullo_epi16(a1, vwa), _mm256_mullo_epi16(b1, vwb)),
+                v128,
+            );
+            let r1 = _mm256_srli_epi16::<8>(s1);
+
+            let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi16(r0, r1));
+            _mm256_storeu_si256(dp.add(i) as *mut __m256i, packed);
+        }
+        i += 32;
+    }
+    while i < n {
+        dst[i] = ((dst[i] as u32 * wa + other[i] as u32 * wb + 128) >> 8) as u8;
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rgba_to_rgb_avx2(src: &[u8], dst: &mut [u8], n: usize) {
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let mask = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
+    let mut i = 0usize;
+    // 16-byte overshoot store at `i * 3` needs `i * 3 + 16 <= n * 3` => `i + 6 <= n`.
+    while i + 6 <= n {
+        // SAFETY: `i * 4 + 16 <= src.len()` and `i * 3 + 16 <= dst.len()`.
+        unsafe {
+            let v = _mm_loadu_si128(sp.add(i * 4) as *const __m128i);
+            _mm_storeu_si128(dp.add(i * 3) as *mut __m128i, _mm_shuffle_epi8(v, mask));
+        }
+        i += 4;
+    }
+    while i < n {
+        dst[i * 3] = src[i * 4];
+        dst[i * 3 + 1] = src[i * 4 + 1];
+        dst[i * 3 + 2] = src[i * 4 + 2];
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn luma_to_rgb_avx2(src: &[u8], dst: &mut [u8]) {
+    let n = src.len();
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let m0 = _mm_setr_epi8(0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5);
+    let m1 = _mm_setr_epi8(5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10);
+    let m2 = _mm_setr_epi8(10, 11, 11, 11, 12, 12, 12, 13, 13, 13, 14, 14, 14, 15, 15, 15);
+    let mut i = 0usize;
+    while i + 16 <= n {
+        // SAFETY: `i + 16 <= src.len()` and `(i + 16) * 3 <= dst.len()`.
+        unsafe {
+            let v = _mm_loadu_si128(sp.add(i) as *const __m128i);
+            _mm_storeu_si128(dp.add(i * 3) as *mut __m128i, _mm_shuffle_epi8(v, m0));
+            _mm_storeu_si128(dp.add(i * 3 + 16) as *mut __m128i, _mm_shuffle_epi8(v, m1));
+            _mm_storeu_si128(dp.add(i * 3 + 32) as *mut __m128i, _mm_shuffle_epi8(v, m2));
+        }
+        i += 16;
+    }
+    while i < n {
+        let l = src[i];
+        dst[i * 3] = l;
+        dst[i * 3 + 1] = l;
+        dst[i * 3 + 2] = l;
+        i += 1;
     }
 }
