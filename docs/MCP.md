@@ -11,7 +11,8 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 
 `folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878 [--token SECRET]]
 [--device auto] [--tensor-cores]`.
-`--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
+`--server` (env `FOLO_SERVER`) forwards calls to a running `folo serve`, with `--token` (env `FOLO_TOKEN`) when the
+server requires authentication. `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
 `predict_batch` and `val`; each training run has its own `device`. `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`)
 asks for the GPU's tensor cores in embedded mode, as `folo serve --tensor-cores` does: `train { amp: true }` needs
 them (`folo_info`'s `capabilities.amp` says whether they are on). They have to be asked for before the GPU is
@@ -104,8 +105,11 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
   naming an unsupported version get error `-32022` with the supported versions in `data`. `initialize` with any
   other version is answered with 2025-11-25. Methods of the other revision (`resources/subscribe` on 2026-07-28,
   `subscriptions/listen` on 2025-11-25) are `-32601`.
-- **Capabilities.** `tools` (with `listChanged: false`), `resources` (with subscriptions), `prompts`, and `logging`.
+- **Capabilities and instructions.** `tools` (with `listChanged: false`), `resources` (with subscriptions), `prompts`, and `logging`.
   `logging/setLevel` is accepted; the server currently sends no logging notifications (everything goes to stderr).
+  The server's initialization `instructions` adapt to `--read-only`: in read-only mode they state that mutating tools
+  and mutating prompts are disabled and name only read-only tools and the `diagnose_run` prompt rather than
+  advertising training, dataset registration, or `label_folder`.
 - **stdio framing.** UTF-8, one JSON-RPC message per line (newline-delimited, never pretty-printed), writes serialised
   through a single writer so concurrent responses and notifications never interleave. **stdout carries protocol messages
   only.** Background work (training after `train` has returned) logs to stderr and to the run's persisted log
@@ -121,7 +125,8 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 91 KB for all 40 tools, 13.6 KB of it the ten labeling
+meanings. Each tool's compacted input and output schemas are generated once and memoized in `OnceLock` (`Arc<JsonObject>`),
+so `tools/list` and validation reuse them without rebuilding. They are compacted for `tools/list` (about 91 KB for all 40 tools, 13.6 KB of it the ten labeling
 tools and 10.3 KB the eight benchmark tools; a test keeps the whole under 92 KiB, the labeling tools under 14
 KiB and the benchmark tools under 11 KiB): no `$schema`,
 no numeric `format` annotations, no `minimum: 0` of unsigned types (also optional ones), defaults without f32 noise
@@ -160,8 +165,10 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 
 ## Paging and size limits
 - Every list tool takes `{ cursor?: string, limit?: integer (default 50, max 200) }` (cursors are opaque; a bad
-  one is an `invalid_arguments` error) and returns
-  `{ items: [...], next_cursor: string | null, total: integer }`.
+  one or an out-of-range limit is an `invalid_arguments` error) and returns
+  `{ items: [...], next_cursor: string | null, total: integer }`. The dataset list tools (`list_datasets`,
+  `list_dataset_issues`, `list_dataset_images`) validate `cursor` and `limit` before accessing the store or proxied
+  server, and a cursor past `total` (including `u64::MAX`) returns an empty page with `next_cursor: null`.
 - List items are **summaries** (id, name, status and key numbers). Detail comes from the matching `get`/status tool
   or resource. Summaries are bounded: names are cut to 128 characters, at most 100 class names are listed (with
   `num_classes`), and run errors are cut to 500 characters, so a page always makes progress.
@@ -181,7 +188,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 |---|---|---|
 | `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir` (`/` separators; in proxy mode the server's, from `/api/system`), `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `capabilities` (what `device: auto` runs can use: `shader_f16`, `tensor_cores`, `amp` with the reason when unavailable; `/api/system`'s object, docs/API.md; `null` from an older server), `scales` with params and GFLOPs at 640 and 320 |
 | `list_datasets` | paging | page of `{ id, name, format, classes, splits }` |
-| `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues`: errors, then warnings, each `{ kind, severity, file, line, message, fix }` (first 50; infos such as `empty_image` are only counted), `issue_counts: { error, warning, info, by_kind }` and `issues_total` |
+| `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues`: errors, then warnings, each `{ kind, severity, file, line, message, fix }` (first 50; infos such as `empty_image` are only counted), `issue_counts: { error, warning, info, by_kind }` and `issues_total`. Against servers that support severity filtering and `counts`, queries the `error` bucket first (which returns dataset-wide counts), so clean, info-only, error-only and ≥50-error datasets need a single issue call and fetch `warning` only when warnings exist and room remains (against an older proxied server that ignores `severity` and omits `counts`, falls back to fetching unfiltered pages and computing counts locally when the first page is incomplete) |
 | `list_dataset_issues` | `{ dataset_id, severity?: "error"\|"warning"\|"info", kind?: string }` + paging | page of `{ kind, severity, file, line, message, fix? }` in dataset order (the `folo dataset check --fix-dry-run` objects), plus `counts` of all issues |
 | `list_dataset_images` | `{ dataset_id, split?: "train"\|"val"\|"test", class?: integer, include_boxes?: boolean (default false) }` + paging | page of `{ image_id, file, split, width, height, boxes? }` (`boxes` only with `include_boxes: true`) |
 | `register_dataset` | `{ name?, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset`; a folder registered before (same canonical path) returns that dataset (the summary says "already registered") |
@@ -272,7 +279,7 @@ and an entry's `result` are plain objects there (this table documents them).
 | `list_benchmarks` | paging | page of `{ id, name, source_name, images, num_classes, conditions, entries, best: { entry_id, name, score, partial }?, active }`, newest first |
 | `get_benchmark` | `{ benchmark_id }` | `{ id, name, description, source, source_name, classes, images, boxes, plan, seed, fingerprint, active, leaderboard }`: `leaderboard` is the entries best first (the first 50). A result that would pass the size limit has its description cut first, then its names (its own, its classes', its entries'), then rows dropped from the end, and the summary says so (`GET /api/bench/benchmarks/{id}` and `/entries` have them whole). Each row is `{ id, name, kind: "model"\|"agent"\|"external", status, score, partial, map50_95, ci95, stale }` (`stale`: graded on an earlier version of the benchmark) |
 | `create_benchmark` | `{ name, dataset_id + split?: "val" \| label_job_id, description?, max_images?: 500 (1–5000), seed?: 0, plan?: { conditions: [{ condition, severities, weight? }] } }` | the benchmark as `list_benchmarks` lists it (`get_benchmark` has the rest). The images are sampled with `seed` and frozen; the plan defaults to `bench_catalog`'s `default_plan`, and one naming an unknown condition or a severity outside 1–5 is `invalid_arguments` |
-| `delete_benchmark` | `{ benchmark_id }` | `{ benchmark_id, deleted: true }`. Removes the benchmark's folder for good: its frozen images and its entries' results (a running entry is `bench_active`). The one tool with `destructiveHint: true` |
+| `delete_benchmark` | `{ benchmark_id }` | `{ benchmark_id, deleted: true }`. Removes the benchmark's folder for good: its frozen images and its entries' results (a running entry is `bench_active`). Marked `destructiveHint: true` (along with `cloud_terminate`) |
 | `start_bench_entry` | `{ benchmark_id, model_id, name?, max_images?, conditions?: true }` or `{ benchmark_id, predictions_file, name, scored?: true }` | `{ benchmark_id, entry_id, name, status, done, total, score? }` (`score` once done; `bench_entry` has the rest). A model entry runs in the background on the server's device (`--device`), the unchanged images then each condition and severity of the plan; follow it with `bench_entry`. A predictions file is read by this `folo mcp` process, on its machine, also in proxy mode (a path absolute or relative to `--data-dir`); it is sent to the server's benchmark in parts: JSON Lines of `{ image, condition?, severity?, boxes: [{ class, score, x1, y1, x2, y2 }] }` records, `examples/bench_external.py`'s format, one record per line of at most 1 MiB and 1,000 boxes, pixel corners in the served image, `class` the index of one of the benchmark's `classes` (a number, not a name). It is scored at once (the answer is `done` with its score): every image of each pass it has must be answered (an empty `boxes` for none), a pass of the plan it leaves out is not measured (the score is `partial`). After a failed part, or a finish the server refuses with a 4xx other than `409`, the tool reads the entry and, if the server reports it still open, tries to stop and remove it. After a finish with no answer, a 5xx or a `409` it stops and removes nothing (the entry may be being scored): it reads the entry once and returns the score if that read succeeds and says scored. In every other case the error is returned and an entry may be left on the server: `get_benchmark` lists it, `bench_entry` shows it and `stop_bench_entry` ends it. `scored: false` for a detector that gives no confidences |
 | `bench_entry` | `{ benchmark_id, entry_id, wait?: 0 (0–50) }` | `{ benchmark_id, entry_id, name, status, done, total, condition?, severity?, images, conditions, missing_classes?, error?, result? }`. `wait` holds the call until the entry ends (or the seconds pass); through a server that stops answering, the call ends 5 s after `wait` with `server_unreachable`. A state that would pass the size limit has its names, error and hint cut, and the summary says so. `result` once it is done: `{ score (0–100), partial, axes: [{ axis, value, weight }] (accuracy, robustness, self_labeling, calibration, localization; value `null` when not measured), accuracy: { map50_95, ci95, map50, map75, precision, recall, best_conf }, conditions: [{ condition, weight, retention, points: [severity, map50_95, retention][] }], ece, mean_iou, self_labeling: { threshold, precision, recall, readiness }, ms_per_image? }` |
 | `stop_bench_entry` | `{ benchmark_id, entry_id }` | as `start_bench_entry` (`stopping`, then `stopped`); a finished one is `bench_entry_not_active` |
@@ -287,6 +294,13 @@ Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`,
 `cloud_instances`, `label_status`, `view_label_image`, `bench_catalog`, `get_benchmark` and `bench_entry` (`list_*`
 includes `list_label_jobs`, `list_label_images` and `list_benchmarks`). Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
 error) if called anyway.
+
+Every tool carries MCP `ToolAnnotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`):
+non-mutating tools set `readOnlyHint: true`, `idempotentHint: true`, and `destructiveHint: false`;
+`destructiveHint: true` marks `cloud_terminate` and `delete_benchmark`; `idempotentHint: true` on mutating tools
+marks `register_dataset`, `stop_run`, `stop_labeling`, `review_label_images`, and `stop_bench_entry`; and
+`openWorldHint: true` marks tools that talk to external cloud providers or coding-agent CLIs (`cloud_connections`,
+`cloud_offers`, `cloud_instances`, `cloud_terminate`, and `start_labeling`).
 
 ## Resources
 Each resource read returns a JSON snapshot, unless stated otherwise.
