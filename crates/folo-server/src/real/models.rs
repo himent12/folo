@@ -93,7 +93,7 @@ impl RealStore {
                 Err(_) => Ok((d.clone(), None)),
             };
         }
-        let list = self.entries.read().unwrap().clone();
+        let list = self.entries.read().unwrap().snapshot_vec();
         for e in list {
             if let Ok(idx) = self.fresh_index(&e)
                 && idx.classes == m.model.classes

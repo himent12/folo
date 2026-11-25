@@ -560,10 +560,12 @@ impl Index {
         let (ds, report, fingerprint) = loop {
             let fingerprint = Fingerprint::of(&watched, &excluded);
             let ds = folo_data::open_with(&p, &opts).map_err(|e| data_error(e, path))?;
-            let report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
             let now = watch_dirs(&base, &ds);
             attempt += 1;
             if now == watched || attempt == 3 {
+                // Only run the header-check pass once the watched set has stabilized so external-source datasets
+                // do not scan every image header twice.
+                let report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
                 watched = now;
                 break (ds, report, fingerprint);
             }

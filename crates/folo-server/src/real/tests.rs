@@ -560,3 +560,72 @@ fn startup_rebuilds_multiple_stale_dataset_indexes_in_parallel() {
     }
     reopened.shutdown();
 }
+
+#[test]
+fn registry_cache_avoids_redundant_disk_reads_and_detects_external_edits() {
+    let t = TestDir::new("real-registry-cache");
+    let home = t.join("home");
+    let store = RealStore::open(home.clone());
+
+    let a = synthetic(&store, "alpha");
+    let b = synthetic(&store, "beta");
+    // Open seeded the cache and each write refreshed it, so neither register nor delete re-parsed from disk.
+    store.delete_dataset_files(&a.id).unwrap();
+    store.delete_dataset(&b.id).unwrap();
+    assert_eq!(store.registry.lock().unwrap().disk_reads, 0);
+
+    // An external write to datasets.json invalidates the cached stamp immediately.
+    let external = serde_json::json!([{
+        "id": "ds_ext",
+        "name": "external",
+        "path": t.join("ext"),
+        "format": "yolo",
+        "created": "2026-11-25T00:00:00Z"
+    }]);
+    std::fs::write(home.join("datasets.json"), external.to_string()).unwrap();
+    let loaded = store.read_registry_cached().unwrap();
+    assert_eq!(loaded.datasets.len(), 1);
+    assert_eq!(loaded.datasets[0].id, "ds_ext");
+    assert_eq!(store.registry.lock().unwrap().disk_reads, 1);
+    // Repeated cached read with no file change hits memory.
+    let again = store.read_registry_cached().unwrap();
+    assert_eq!(again.datasets[0].id, "ds_ext");
+    assert_eq!(store.registry.lock().unwrap().disk_reads, 1);
+
+    // Malformed JSON on disk is never masked by a cached entry.
+    std::fs::write(home.join("datasets.json"), "{broken json").unwrap();
+    assert!(store.read_registry_cached().is_err());
+    assert_eq!(store.registry.lock().unwrap().disk_reads, 2);
+    store.shutdown();
+}
+
+#[test]
+fn dataset_thumbnail_cache_serves_hits_invalidates_on_edit_and_evicts_on_unregister() {
+    let t = TestDir::new("real-thumb-cache");
+    let home = t.join("home");
+    let store = RealStore::open(home.clone());
+    let ds = synthetic(&store, "thumbs");
+    let page =
+        store.list_images(&ds.id, &crate::store::ImageQuery { limit: 10, ..Default::default() }).unwrap();
+    let img = &page.images[0];
+
+    let first = store.image(&ds.id, &img.id, Some(32)).unwrap();
+    assert_eq!(store.thumbs.lock().unwrap().len(), 1);
+    // Remove the on-disk thumbnail cache file so the repeat request proves it is served from the in-memory LRU.
+    let _ = std::fs::remove_dir_all(store.thumbs_dir(&ds.id));
+    let second = store.image(&ds.id, &img.id, Some(32)).unwrap();
+    assert_eq!(first.bytes, second.bytes);
+    assert!(!store.thumbs_dir(&ds.id).exists(), "in-memory LRU hit skipped disk decode/write");
+
+    // Replacing the source image with different dimensions/bytes invalidates the stamp and re-renders.
+    let disk_path = Path::new(&ds.path).join(&img.file);
+    image::RgbImage::from_pixel(64, 64, image::Rgb([10, 200, 30])).save(&disk_path).unwrap();
+    let updated = store.image(&ds.id, &img.id, Some(32)).unwrap();
+    assert_ne!(updated.bytes, first.bytes);
+
+    // Unregistering the dataset evicts all of its thumbnails from the in-memory cache.
+    store.delete_dataset(&ds.id).unwrap();
+    assert_eq!(store.thumbs.lock().unwrap().len(), 0);
+    assert_eq!(store.thumbs.lock().unwrap().total_bytes(), 0);
+    store.shutdown();
+}

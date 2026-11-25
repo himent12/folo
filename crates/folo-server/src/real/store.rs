@@ -160,7 +160,7 @@ impl Store for RealStore {
         // A registry that could not be read at start loaded no dataset: that is an error to show (with how to fix
         // it), not "no datasets yet" (x3-server-7).
         self.registry_loaded()?;
-        let list = self.entries.read().unwrap().clone();
+        let list = self.entries.read().unwrap().snapshot_vec();
         Ok(list
             .iter()
             .map(|e| {
@@ -247,6 +247,39 @@ impl Store for RealStore {
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData> {
         let e = self.entry(id)?;
         let path = e.current()?.image_path(image_id)?;
+        if let Some(side) = thumb
+            && folo_data::guard::check(&path).is_ok()
+            && let Ok(md) = std::fs::metadata(&path)
+        {
+            let key = super::thumbs::ThumbKey {
+                dataset_id: id.to_string(),
+                path: path.clone(),
+                side,
+                stamp: super::thumbs::ImageStamp::from_metadata(&md),
+            };
+            if let Some(bytes) = self.thumbs.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+                return Ok(ImageData { content_type: "image/jpeg", bytes, immutable: false });
+            }
+            let cache = self.thumbs_dir(id);
+            let data = read_image_with(&path, Some(side), Some(&cache), |file, bytes| {
+                e.write_cache(|| {
+                    if let Err(err) = write_atomic(file, bytes) {
+                        tracing::warn!("caching thumbnail {}: {err}", file.display());
+                    }
+                })
+            })?;
+            // Only cache if the file did not change mid-read and the dataset was not unregistered meanwhile
+            // (preserving the `e.deleted -> self.thumbs` lock order with `unregister`).
+            if let Ok(after) = std::fs::metadata(&path)
+                && super::thumbs::ImageStamp::from_metadata(&after) == key.stamp
+            {
+                let deleted = e.deleted.lock().unwrap_or_else(|p| p.into_inner());
+                if !*deleted {
+                    self.thumbs.lock().unwrap_or_else(|p| p.into_inner()).insert(key, data.bytes.clone());
+                }
+            }
+            return Ok(data);
+        }
         let cache = thumb.map(|_| self.thumbs_dir(id));
         read_image_with(&path, thumb, cache.as_deref(), |file, bytes| {
             e.write_cache(|| {
