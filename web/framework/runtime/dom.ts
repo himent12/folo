@@ -120,13 +120,27 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
   }
 
   if (Array.isArray(value)) {
-    const array: Node[] = [];
     const currentArray = Array.isArray(current) ? (current as Node[]) : null;
-    if (normalize(array, value, currentArray, unwrap)) {
-      // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
-      let cur: Current = current;
-      renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);
-      return () => cur;
+    const len = value.length;
+    let flat = true;
+    for (let i = 0; i < len; i++) {
+      const item = value[i];
+      if (item === null || typeof item !== 'object' || (item as Node).nodeType === undefined) {
+        flat = false;
+        break;
+      }
+    }
+    let array: Node[];
+    if (flat) {
+      array = value.slice() as Node[];
+    } else {
+      array = [];
+      if (normalize(array, value, currentArray, unwrap)) {
+        // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
+        let cur: Current = current;
+        renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);
+        return () => cur;
+      }
     }
     if (array.length === 0) {
       const r = cleanChildren(parent, current, marker);
@@ -267,14 +281,20 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
       aEnd--;
       bEnd--;
     }
-    // Two rows swapped end for end (udomdiff's swap): two moves, no map.
+    // Two rows swapped end for end (udomdiff's swap): 1 move for an adjacent pair, 2 moves otherwise, no map.
     if (aEnd - aStart > 1 && bEnd - bStart > 1 && a[aStart] === b[bEnd - 1] && a[aEnd - 1] === b[bStart]) {
       if (active === undefined) active = findFocused(parent);
+      if (aEnd - aStart === 2 && bEnd - bStart === 2) {
+        move(parent, b[bStart]!, a[aStart]!, active);
+        return;
+      }
       const next = a[aEnd - 1]!.nextSibling;
       active = move(parent, b[bStart]!, a[aStart]!.nextSibling, active);
       active = move(parent, b[bEnd - 1]!, next, active);
-      a[aEnd - 1] = b[bEnd - 1]!;
-      a[aStart] = b[bStart]!;
+      aStart++;
+      bStart++;
+      aEnd--;
+      bEnd--;
       continue;
     }
     break;
@@ -290,7 +310,78 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     while (aStart < aEnd) removeNode(a[aStart++]!);
     return;
   }
+  const aLen = aEnd - aStart;
   const n = bEnd - bStart;
+  if (aLen === 1 && n === 1) {
+    // Single-node replacement: no map or typed array.
+    const oldNode = a[aStart]!;
+    const newNode = b[bStart]!;
+    if ((oldNode as Leaving).$$leave !== undefined) {
+      parent.insertBefore(newNode, oldNode.parentNode === parent ? oldNode : bEnd < b.length ? b[bEnd]! : after);
+      removeNode(oldNode);
+    } else if (oldNode.parentNode === parent) parent.replaceChild(newNode, oldNode);
+    else parent.insertBefore(newNode, bEnd < b.length ? b[bEnd]! : after);
+    return;
+  }
+  if (aLen === n && n >= 2) {
+    // Single-node rotate right (moved earlier in the list) or left (moved later): 1 move, no map or LIS.
+    if (a[aEnd - 1] === b[bStart]) {
+      let ok = true;
+      for (let k = 0; k < n - 1; k++) {
+        if (a[aStart + k] !== b[bStart + 1 + k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        if (active === undefined) active = findFocused(parent);
+        move(parent, b[bStart]!, a[aStart]!, active);
+        return;
+      }
+    }
+    if (a[aStart] === b[bEnd - 1]) {
+      let ok = true;
+      for (let k = 0; k < n - 1; k++) {
+        if (a[aStart + 1 + k] !== b[bStart + k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        if (active === undefined) active = findFocused(parent);
+        move(parent, b[bEnd - 1]!, bEnd < b.length ? b[bEnd]! : after, active);
+        return;
+      }
+    }
+  }
+  // Fast disjoint check: if every incoming node is unattached (`parentNode === null`) while every outgoing node is
+  // currently in `parent`, the two sets are guaranteed disjoint (`reused === 0`), skipping Map and Int32Array.
+  let disjoint = true;
+  for (let i = bStart; i < bEnd; i++) {
+    if (b[i]!.parentNode !== null) {
+      disjoint = false;
+      break;
+    }
+  }
+  if (disjoint) {
+    for (let i = aStart; i < aEnd; i++) {
+      if (a[i]!.parentNode !== parent) {
+        disjoint = false;
+        break;
+      }
+    }
+  }
+  if (disjoint) {
+    if (marker === undefined && aStart === 0 && aEnd === a.length && leaving === 0) {
+      parent.textContent = '';
+      appendNodes(parent, b, null);
+      return;
+    }
+    const ref = bEnd < b.length ? b[bEnd]! : after;
+    for (let i = aStart; i < aEnd; i++) removeNode(a[i]!);
+    for (let i = bStart; i < bEnd; i++) parent.insertBefore(b[i]!, ref);
+    return;
+  }
   const index = new Map<Node, number>();
   for (let i = bStart; i < bEnd; i++) index.set(b[i]!, i);
   const sources = new Int32Array(n).fill(-1);

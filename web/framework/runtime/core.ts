@@ -619,6 +619,20 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   return reader(() => c.get());
 }
 
+/** Internal: creates an attached child root owner (disposed with `parent` via `dispose(root)`). */
+export function ownedRoot(parent: Owner | null): Owner {
+  const root = new Owner();
+  attach(parent, root);
+  return root;
+}
+
+/** Internal: swaps the active owner for a zero-closure `try/finally` scope (caller must already be untracked). */
+export function swapOwner(next: Owner | null): Owner | null {
+  const prev = owner;
+  owner = next;
+  return prev;
+}
+
 /** Internal: a component's own owner (context scope), attached to the current owner. */
 export function componentOwner(): Owner {
   const o = new Owner();
@@ -685,9 +699,12 @@ interface Job {
 }
 
 let renderQueue: Job[] = [];
+let renderSpare: Job[] = [];
 let userQueue: EffectNode[] = [];
+let userSpare: EffectNode[] = [];
 let scheduled = false;
 let flushing = false;
+const MAX_SPARE_QUEUE = 256;
 
 class EffectNode extends Owner implements Target {
   _sources: Link | undefined = undefined;
@@ -734,13 +751,15 @@ class EffectNode extends Owner implements Target {
   }
 }
 
+function flushMicrotask(): void {
+  scheduled = false;
+  flush();
+}
+
 function schedule(): void {
   if (!scheduled) {
     scheduled = true;
-    queueMicrotask(() => {
-      scheduled = false;
-      flush();
-    });
+    queueMicrotask(flushMicrotask);
   }
 }
 
@@ -777,19 +796,43 @@ export function flush(): void {
         for (const e of renderQueue) e._flags &= ~NOTIFIED;
         for (const e of userQueue) e._flags &= ~NOTIFIED;
         renderQueue = [];
+        renderSpare = [];
         userQueue = [];
+        userSpare = [];
         throw new Error('fw: effects kept writing what they read (more than 1000 rounds in one flush)');
       }
       // One cycle, as Svelte's flush: the render jobs queued so far, then the user effects queued so far (those of
       // components the render jobs just created included); what they queue in turn is the next cycle. A page that goes
       // and the page that comes so settle in one cycle before anything rendered earlier re-runs over the gap between
       // them (a count one page's cleanup lowers and the next page's effect raises).
-      const q = renderQueue;
-      renderQueue = [];
-      error = run(q, error);
-      const u = userQueue;
-      userQueue = [];
-      error = run(u, error);
+      if (renderQueue.length > 0) {
+        const q = renderQueue;
+        renderQueue = renderSpare;
+        try {
+          error = run(q, error);
+        } finally {
+          if (q.length <= MAX_SPARE_QUEUE) {
+            q.length = 0;
+            renderSpare = q;
+          } else {
+            renderSpare = [];
+          }
+        }
+      }
+      if (userQueue.length > 0) {
+        const u = userQueue;
+        userQueue = userSpare;
+        try {
+          error = run(u, error);
+        } finally {
+          if (u.length <= MAX_SPARE_QUEUE) {
+            u.length = 0;
+            userSpare = u;
+          } else {
+            userSpare = [];
+          }
+        }
+      }
     }
   } finally {
     flushing = false;
@@ -847,8 +890,10 @@ export function renderEffect<T>(fn: (prev: T) => T, init?: T): void {
  * come first, and so run first.
  */
 export function effect(fn: () => void | Cleanup): void {
-  if (deferred !== null && owner === deferred.owner && listener === undefined) deferred.fns.push(fn);
-  else effectNow(fn);
+  if (deferredOwner !== undefined && owner === deferredOwner && listener === undefined) {
+    if (deferredFns === null) deferredFns = [fn];
+    else deferredFns.push(fn);
+  } else effectNow(fn);
 }
 
 /** Internal: a user effect created now, never deferred (actions and bindings, which Svelte creates in place). */
@@ -860,25 +905,60 @@ export function effectNow(fn: () => void | Cleanup): void {
   schedule();
 }
 
-/** The component being created, and the effects its body asked for (see `effect`). */
-let deferred: { owner: Owner | null; fns: (() => void | Cleanup)[] } | null = null;
+/** The component being created (`undefined` when inactive) and the effects its body asked for (lazily allocated). */
+let deferredOwner: Owner | null | undefined = undefined;
+let deferredFns: (() => void | Cleanup)[] | null = null;
 
 /**
  * Internal: runs a component's function (in its owner) and then creates the effects its body asked for, after what it
  * rendered (Svelte's `pop()`).
  */
 export function deferEffects<T>(fn: () => T): T {
-  const prev = deferred;
-  const d: { owner: Owner | null; fns: (() => void | Cleanup)[] } = { owner, fns: [] };
-  deferred = d;
+  const prevOwner = deferredOwner;
+  const prevFns = deferredFns;
+  deferredOwner = owner;
+  deferredFns = null;
   let out: T;
+  let fns: (() => void | Cleanup)[] | null;
   try {
     out = fn();
+    fns = deferredFns as (() => void | Cleanup)[] | null;
   } finally {
-    deferred = prev;
+    deferredOwner = prevOwner;
+    deferredFns = prevFns;
   }
-  for (const f of d.fns) effectNow(f);
+  if (fns !== null) for (let i = 0; i < fns.length; i++) effectNow(fns[i]!);
   return out;
+}
+
+/** Internal: creates a component's owner, runs `Comp(props)` untracked with deferred effects, with zero wrapper closures. */
+export function runComponent<P>(Comp: (props: P) => JSX.Element, props: P): JSX.Element {
+  const o = new Owner();
+  attach(owner, o);
+  const prevOwner = owner;
+  const prevListener = listener;
+  const prevDeferredOwner = deferredOwner;
+  const prevDeferredFns = deferredFns;
+  owner = o;
+  listener = undefined;
+  deferredOwner = o;
+  deferredFns = null;
+  try {
+    let out: JSX.Element;
+    let fns: (() => void | Cleanup)[] | null;
+    try {
+      out = Comp(props);
+      fns = deferredFns as (() => void | Cleanup)[] | null;
+    } finally {
+      deferredOwner = prevDeferredOwner;
+      deferredFns = prevDeferredFns;
+    }
+    if (fns !== null) for (let i = 0; i < fns.length; i++) effectNow(fns[i]!);
+    return out;
+  } finally {
+    owner = prevOwner;
+    listener = prevListener;
+  }
 }
 
 /**

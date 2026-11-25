@@ -2,7 +2,7 @@
 // getters for dynamic values (the compiler emits them), so reading `props.x` where it is used tracks it; never
 // destructure props at the top of a component (that reads them once). These helpers keep the getters intact.
 
-import { componentOwner, computed, deferEffects, runWithOwner, signal, untrack, type Signal } from './core';
+import { computed, runComponent, signal, untrack, type Signal } from './core';
 
 /** A component: called once with its props; returns what it renders. */
 export type Component<P = Record<string, never>> = (props: P) => JSX.Element;
@@ -12,7 +12,7 @@ export type ComponentProps<C> = C extends (props: infer P) => unknown ? P : neve
 
 /** Internal: calls a component untracked, in an owner of its own (its context scope). */
 export function createComponent<P>(Comp: (props: P) => JSX.Element, props: P): JSX.Element {
-  return runWithOwner(componentOwner(), () => deferEffects(() => Comp(props)));
+  return runComponent(Comp, props);
 }
 
 type AnyProps = Record<PropertyKey, unknown>;

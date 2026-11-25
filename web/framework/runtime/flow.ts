@@ -1,11 +1,11 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { createRoot, computed, getOwner, isReader, memo, onCleanup, owning, reader, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { computed, createRoot, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
 import { insert, setLeave } from './dom';
 import { spread } from './spread';
-import { inBranch, leaveBranch, type Branch } from './transition';
+import { enterBranch, exitBranch, leaveBranch, type BranchTransitions } from './transition';
 
 type Falsy = false | 0 | '' | null | undefined;
 
@@ -46,22 +46,28 @@ export function Show<T>(props: ShowProps<T>): JSX.Element {
   const value = computed(() => props.when);
   const cond = keyed ? value : computed(() => value.get(), { equals: (a, b) => !a === !b });
   let ran = false;
-  let prev: { b: Branch; v: JSX.Element } | null = null;
+  let prevT: BranchTransitions = null;
+  let prevV: JSX.Element = undefined;
   return memo(() => {
     const c = cond.get();
-    const b: Branch = { t: null };
-    if (prev !== null) leaveBranch(prev.b, prev.v);
-    const v = inBranch(b, ran, () => {
-      if (!c) return untrack(() => props.fallback);
-      const ch = props.children;
-      return untrack(() =>
-        typeof ch === 'function' && !isReader(ch)
+    if (prevT !== null) leaveBranch(prevT, prevV);
+    enterBranch(ran);
+    let v: JSX.Element;
+    let t: BranchTransitions = null;
+    try {
+      v = untrack(() => {
+        if (!c) return props.fallback;
+        const ch = props.children;
+        return typeof ch === 'function' && !isReader(ch)
           ? (ch as (v: () => unknown) => JSX.Element)(keyed ? () => c : () => value.get())
-          : (ch as JSX.Element),
-      );
-    });
+          : (ch as JSX.Element);
+      });
+    } finally {
+      t = exitBranch();
+    }
     ran = true;
-    prev = { b, v };
+    prevT = t;
+    prevV = v;
     return settle(v);
   });
 }
@@ -84,9 +90,20 @@ interface Row<T> {
   item: T;
   sig: Signal<T> | null;
   idx: Signal<number> | null;
-  dispose: () => void;
+  root: Owner;
   value: JSX.Element;
-  b: Branch;
+  t: BranchTransitions;
+}
+
+const EMPTY_KEYS: readonly unknown[] = [];
+
+/** Whether `rows[rowFrom..rowTo]` matches `keys[keyFrom..]` element-for-element with no key equal to `excluded`. */
+function matchesShifted<T>(rows: readonly Row<T>[], keys: readonly unknown[], rowFrom: number, rowTo: number, keyFrom: number, excluded: unknown): boolean {
+  for (let i = rowFrom, j = keyFrom; i <= rowTo; i++, j++) {
+    const k = rows[i]!.key;
+    if (k !== keys[j] || k === excluded) return false;
+  }
+  return true;
 }
 
 /**
@@ -99,25 +116,44 @@ export function For<T>(props: ForProps<T>): JSX.Element {
   const fn = props.children;
   const withIndex = fn.length > 1;
   let rows: Row<T>[] = [];
-  let fallback: { dispose: () => void; value: JSX.Element } | null = null;
+  let fallback: { root: Owner; value: JSX.Element } | null = null;
+  let out: JSX.Element[] = [];
   let ran = false;
 
-  const make = (item: T, i: number, key: unknown): Row<T> =>
-    createRoot((dispose) => {
-      const sig = keyFn ? signal(item) : null;
-      const idx = withIndex ? signal(i) : null;
-      const row: Row<T> = { key, item, sig, idx, dispose, value: undefined, b: { t: null } };
-      row.value = settle(
-        inBranch(row.b, ran, () =>
-          fn(sig ? () => sig.get() : () => item, idx ? () => idx.get() : () => i),
-        ),
-      );
-      return row;
-    }, parent);
+  const make = (item: T, i: number, key: unknown): Row<T> => {
+    const root = ownedRoot(parent);
+    const prevOwner = swapOwner(root);
+    enterBranch(ran);
+    const sig = keyFn ? signal(item) : null;
+    const idx = withIndex ? signal(i) : null;
+    let value: JSX.Element;
+    let t: BranchTransitions = null;
+    try {
+      value = settle(fn(sig ? () => sig.get() : () => item, idx ? () => idx.get() : () => i));
+    } finally {
+      t = exitBranch();
+      swapOwner(prevOwner);
+    }
+    return { key, item, sig, idx, root, value, t };
+  };
+
+  const makeFallback = (): { root: Owner; value: JSX.Element } => {
+    const root = ownedRoot(parent);
+    const prevOwner = swapOwner(root);
+    enterBranch(ran, false);
+    let value: JSX.Element;
+    try {
+      value = settle(props.fallback);
+    } finally {
+      exitBranch();
+      swapOwner(prevOwner);
+    }
+    return { root, value };
+  };
 
   const drop = (row: Row<T>) => {
-    leaveBranch(row.b, row.value);
-    row.dispose();
+    if (row.t !== null) leaveBranch(row.t, row.value);
+    dispose(row.root);
   };
 
   const update = (row: Row<T>, item: T, i: number) => {
@@ -128,99 +164,166 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     row.idx?.set(i);
   };
 
-  const mapped: ReadSignal<JSX.Element[]> = computed(
-    () => {
-      // The list's length and entries (and the keys) are read tracked, so a `deep()` array changed in place (`push`,
-      // `list[i] = x`) updates the rows; building, updating and dropping rows is untracked.
-      const list = props.each || [];
-      const n = list.length;
-      const keys = new Array<unknown>(n);
-      for (let j = 0; j < n; j++) keys[j] = keyFn ? keyFn(list[j]!, j) : list[j];
-      return untrack(() => {
-        if (n === 0) {
-          for (const r of rows) drop(r);
+  const mapped: ReadSignal<JSX.Element[]> = computed(() => {
+    // The list's length and entries (and the keys) are read tracked, so a `deep()` array changed in place (`push`,
+    // `list[i] = x`) updates the rows; building, updating and dropping rows is untracked.
+    const list = props.each || [];
+    const n = list.length;
+    let keys: readonly unknown[] = EMPTY_KEYS;
+    if (n > 0) {
+      const ks = new Array<unknown>(n);
+      for (let j = 0; j < n; j++) ks[j] = keyFn ? keyFn(list[j]!, j) : list[j];
+      keys = ks;
+    }
+    return untrack(() => {
+      if (n === 0) {
+        let changed = false;
+        if (rows.length > 0) {
+          for (let i = 0; i < rows.length; i++) drop(rows[i]!);
           rows = [];
-          if (fallback === null && props.fallback !== undefined) {
-            fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
-          }
-          ran = true;
-          return fallback !== null ? [fallback.value] : [];
+          changed = true;
         }
-        if (fallback !== null) {
-          fallback.dispose();
-          fallback = null;
+        if (fallback === null && props.fallback !== undefined) {
+          fallback = makeFallback();
+          changed = true;
         }
+        ran = true;
+        if (changed) out = fallback !== null ? [fallback.value] : [];
+        return out;
+      }
+      if (fallback !== null) {
+        const prevFallback = fallback;
+        fallback = null;
+        dispose(prevFallback.root);
+      }
+      const prevLen = rows.length;
+      if (prevLen === 0) {
         const next = new Array<Row<T>>(n);
-        if (rows.length === 0) {
-          for (let j = 0; j < n; j++) next[j] = make(list[j]!, j, keys[j]);
-        } else {
-          let start = 0;
-          let end = rows.length - 1;
-          let newEnd = n - 1;
-          const min = Math.min(rows.length, n);
-          for (;;) {
-            while (start < min && start <= end && start <= newEnd && rows[start]!.key === keys[start]) {
-              update((next[start] = rows[start]!), list[start]!, start);
-              start++;
-            }
-            while (end >= start && newEnd >= start && rows[end]!.key === keys[newEnd]) {
-              update((next[newEnd] = rows[end]!), list[newEnd]!, newEnd);
-              end--;
-              newEnd--;
-            }
-            // The first and last rows swapped: match them directly.
-            if (end > start && newEnd > start && rows[start]!.key === keys[newEnd] && rows[end]!.key === keys[start]) {
-              update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
-              update((next[start] = rows[end]!), list[start]!, start);
-              start++;
-              end--;
-              newEnd--;
-              continue;
-            }
-            break;
-          }
-          if (start > end) {
-            // Pure insertions (or everything matched in prefix/suffix/swap).
-            for (let j = start; j <= newEnd; j++) next[j] = make(list[j]!, j, keys[j]);
-          } else if (start > newEnd) {
-            // Pure removals.
-            for (let i = start; i <= end; i++) drop(rows[i]!);
-          } else {
-            // Middle: match the rest by key (duplicates chained in order).
-            const first = new Map<unknown, number>();
-            const chain = new Int32Array(newEnd - start + 1);
-            for (let j = newEnd; j >= start; j--) {
-              const k = keys[j];
-              const at = first.get(k);
-              chain[j - start] = at === undefined ? -1 : at;
-              first.set(k, j);
-            }
-            for (let i = start; i <= end; i++) {
-              const row = rows[i]!;
-              const j = first.get(row.key);
-              if (j !== undefined) {
-                next[j] = row;
-                const c = chain[j - start]!;
-                if (c === -1) first.delete(row.key);
-                else first.set(row.key, c);
-              } else drop(row);
-            }
-            for (let j = start; j <= newEnd; j++) {
-              const row = next[j];
-              if (row !== undefined) update(row, list[j]!, j);
-              else next[j] = make(list[j]!, j, keys[j]);
-            }
-          }
+        const nextOut = new Array<JSX.Element>(n);
+        for (let j = 0; j < n; j++) {
+          const r = make(list[j]!, j, keys[j]);
+          next[j] = r;
+          nextOut[j] = r.value;
         }
         rows = next;
         ran = true;
-        const out = new Array<JSX.Element>(n);
-        for (let j = 0; j < n; j++) out[j] = next[j]!.value;
+        return (out = nextOut);
+      }
+      // Scan common prefix before allocating `next` so identical-order updates, pure appends, and pure truncations
+      // skip full array reconciliation.
+      let start = 0;
+      const min = Math.min(prevLen, n);
+      while (start < min && rows[start]!.key === keys[start]) {
+        update(rows[start]!, list[start]!, start);
+        start++;
+      }
+      if (start === n && n === prevLen) {
+        ran = true;
         return out;
-      });
-    },
-    { equals: false },
-  );
+      }
+      if (start === prevLen) {
+        const nextOut = new Array<JSX.Element>(n);
+        for (let j = 0; j < start; j++) nextOut[j] = rows[j]!.value;
+        for (let j = start; j < n; j++) {
+          const r = make(list[j]!, j, keys[j]);
+          rows.push(r);
+          nextOut[j] = r.value;
+        }
+        ran = true;
+        return (out = nextOut);
+      }
+      if (start === n) {
+        for (let i = n; i < prevLen; i++) drop(rows[i]!);
+        rows.length = n;
+        const nextOut = new Array<JSX.Element>(n);
+        for (let j = 0; j < n; j++) nextOut[j] = rows[j]!.value;
+        ran = true;
+        return (out = nextOut);
+      }
+      const next = new Array<Row<T>>(n);
+      for (let j = 0; j < start; j++) next[j] = rows[j]!;
+      let end = prevLen - 1;
+      let newEnd = n - 1;
+      for (;;) {
+        while (start < min && start <= end && start <= newEnd && rows[start]!.key === keys[start]) {
+          update((next[start] = rows[start]!), list[start]!, start);
+          start++;
+        }
+        while (end >= start && newEnd >= start && rows[end]!.key === keys[newEnd]) {
+          update((next[newEnd] = rows[end]!), list[newEnd]!, newEnd);
+          end--;
+          newEnd--;
+        }
+        // The first and last rows swapped: match them directly.
+        if (end > start && newEnd > start && rows[start]!.key === keys[newEnd] && rows[end]!.key === keys[start]) {
+          update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
+          update((next[start] = rows[end]!), list[start]!, start);
+          start++;
+          end--;
+          newEnd--;
+          continue;
+        }
+        break;
+      }
+      if (start > end) {
+        // Pure insertions (or everything matched in prefix/suffix/swap).
+        for (let j = start; j <= newEnd; j++) next[j] = make(list[j]!, j, keys[j]);
+      } else if (start > newEnd) {
+        // Pure removals.
+        for (let i = start; i <= end; i++) drop(rows[i]!);
+      } else if (start === end && start === newEnd) {
+        // Single-row replacement: no map needed.
+        drop(rows[start]!);
+        next[start] = make(list[start]!, start, keys[start]);
+      } else if (
+        end - start === newEnd - start &&
+        rows[end]!.key === keys[start] &&
+        matchesShifted(rows, keys, start, end - 1, start + 1, keys[start])
+      ) {
+        // Single-row move earlier (rotate right), unique rotated key: exact FIFO parity without a map.
+        update((next[start] = rows[end]!), list[start]!, start);
+        for (let i = start; i < end; i++) update((next[i + 1] = rows[i]!), list[i + 1]!, i + 1);
+      } else if (
+        end - start === newEnd - start &&
+        rows[start]!.key === keys[newEnd] &&
+        matchesShifted(rows, keys, start + 1, end, start, keys[newEnd])
+      ) {
+        // Single-row move later (rotate left), unique rotated key: exact FIFO parity without a map.
+        for (let i = start; i < end; i++) update((next[i] = rows[i + 1]!), list[i]!, i);
+        update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
+      } else {
+        // Middle: match the rest by key (duplicates chained in order).
+        const first = new Map<unknown, number>();
+        const chain = new Int32Array(newEnd - start + 1);
+        for (let j = newEnd; j >= start; j--) {
+          const k = keys[j];
+          const at = first.get(k);
+          chain[j - start] = at === undefined ? -1 : at;
+          first.set(k, j);
+        }
+        for (let i = start; i <= end; i++) {
+          const row = rows[i]!;
+          const j = first.get(row.key);
+          if (j !== undefined) {
+            next[j] = row;
+            const c = chain[j - start]!;
+            if (c === -1) first.delete(row.key);
+            else first.set(row.key, c);
+          } else drop(row);
+        }
+        for (let j = start; j <= newEnd; j++) {
+          const row = next[j];
+          if (row !== undefined) update(row, list[j]!, j);
+          else next[j] = make(list[j]!, j, keys[j]);
+        }
+      }
+      rows = next;
+      ran = true;
+      const nextOut = new Array<JSX.Element>(n);
+      for (let j = 0; j < n; j++) nextOut[j] = next[j]!.value;
+      return (out = nextOut);
+    });
+  });
   owning(mapped);
   eager(mapped);
   return reader(() => mapped.get());
@@ -240,8 +343,8 @@ export interface IndexProps<T> {
 export function Index<T>(props: IndexProps<T>): JSX.Element {
   const parent = getOwner();
   const fn = props.children;
-  let rows: { sig: Signal<T>; dispose: () => void; value: JSX.Element; b: Branch }[] = [];
-  let fallback: { dispose: () => void; value: JSX.Element } | null = null;
+  let rows: { sig: Signal<T>; root: Owner; value: JSX.Element; t: BranchTransitions }[] = [];
+  let fallback: { root: Owner; value: JSX.Element } | null = null;
   let out: JSX.Element[] = [];
   let outDirty = false;
   let ran = false;
@@ -249,7 +352,7 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
     // Length and entries tracked (a `deep()` array changed in place updates the rows), the rows' upkeep untracked.
     const list = props.each || [];
     const n = list.length;
-    const items = new Array<T>(n);
+    const items = n > 0 ? new Array<T>(n) : (EMPTY_KEYS as unknown as T[]);
     for (let i = 0; i < n; i++) items[i] = list[i]!;
     return untrack(() => {
       const prevLen = rows.length;
@@ -261,30 +364,48 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
       if (n > prevLen) {
         outDirty = true;
         for (let i = prevLen; i < n; i++) {
-          rows.push(
-            createRoot((dispose) => {
-              const sig = signal<T>(items[i]!);
-              const b: Branch = { t: null };
-              return { sig, dispose, b, value: settle(inBranch(b, ran, () => fn(() => sig.get(), i))) };
-            }, parent),
-          );
+          const root = ownedRoot(parent);
+          const prevOwner = swapOwner(root);
+          enterBranch(ran);
+          let sig!: Signal<T>;
+          let value: JSX.Element;
+          let t: BranchTransitions = null;
+          try {
+            sig = signal<T>(items[i]!);
+            value = settle(fn(() => sig.get(), i));
+          } finally {
+            t = exitBranch();
+            swapOwner(prevOwner);
+          }
+          rows.push({ sig, root, t, value });
         }
       } else if (n < prevLen) {
         outDirty = true;
         for (let i = n; i < prevLen; i++) {
-          leaveBranch(rows[i]!.b, rows[i]!.value);
-          rows[i]!.dispose();
+          const row = rows[i]!;
+          if (row.t !== null) leaveBranch(row.t, row.value);
+          dispose(row.root);
         }
         rows.length = n;
       }
       if (n === 0 && fallback === null && props.fallback !== undefined) {
         outDirty = true;
-        fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
+        const root = ownedRoot(parent);
+        const prevOwner = swapOwner(root);
+        enterBranch(ran, false);
+        let value: JSX.Element;
+        try {
+          value = settle(props.fallback);
+        } finally {
+          exitBranch();
+          swapOwner(prevOwner);
+        }
+        fallback = { root, value };
       } else if (n > 0 && fallback !== null) {
         outDirty = true;
         const prevFallback = fallback;
         fallback = null;
-        prevFallback.dispose();
+        dispose(prevFallback.root);
       }
       ran = true;
       if (outDirty) {
@@ -333,21 +454,27 @@ export function Switch(props: { fallback?: JSX.Element; children: JSX.Element })
     return -1;
   });
   let ran = false;
-  let prev: { b: Branch; v: JSX.Element } | null = null;
+  let prevT: BranchTransitions = null;
+  let prevV: JSX.Element = undefined;
   return memo(() => {
     const i = which.get();
-    const b: Branch = { t: null };
-    if (prev !== null) leaveBranch(prev.b, prev.v);
-    const v = inBranch(b, ran, () =>
-      untrack(() => {
+    if (prevT !== null) leaveBranch(prevT, prevV);
+    enterBranch(ran);
+    let v: JSX.Element;
+    let t: BranchTransitions = null;
+    try {
+      v = untrack(() => {
         if (i < 0) return props.fallback;
         const m = cases[i]!;
         const ch = m.children;
         return typeof ch === 'function' && !isReader(ch) ? (ch as (v: () => unknown) => JSX.Element)(() => m.when) : (ch as JSX.Element);
-      }),
-    );
+      });
+    } finally {
+      t = exitBranch();
+    }
     ran = true;
-    prev = { b, v };
+    prevT = t;
+    prevV = v;
     return settle(v);
   });
 }
@@ -359,20 +486,26 @@ export function Switch(props: { fallback?: JSX.Element; children: JSX.Element })
 export function Key<T>(props: { when: T; children: JSX.Element }): JSX.Element {
   const key = computed(() => props.when);
   let ran = false;
-  let prev: { b: Branch; v: JSX.Element } | null = null;
+  let prevT: BranchTransitions = null;
+  let prevV: JSX.Element = undefined;
   return memo(() => {
     key.get();
-    const b: Branch = { t: null };
-    if (prev !== null) leaveBranch(prev.b, prev.v);
-    const v = inBranch(b, ran, () =>
-      untrack(() => {
+    if (prevT !== null) leaveBranch(prevT, prevV);
+    enterBranch(ran);
+    let v: JSX.Element;
+    let t: BranchTransitions = null;
+    try {
+      v = untrack(() => {
         const ch = props.children;
         // A snippet is created here, inside the branch (its intros play, its outros are this branch's).
         return typeof ch === 'function' && !isReader(ch) ? (ch as () => JSX.Element)() : ch;
-      }),
-    );
+      });
+    } finally {
+      t = exitBranch();
+    }
     ran = true;
-    prev = { b, v };
+    prevT = t;
+    prevV = v;
     return settle(v);
   });
 }
