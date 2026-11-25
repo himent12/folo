@@ -27,6 +27,26 @@ fn describe_json_is_one_object() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["name"], "folo");
     assert!(lines[0]["commands"].as_array().unwrap().len() >= 10);
+
+    // Human (pretty-printed) and `--json` (compact) `folo describe train` carry identical surface metadata,
+    // including flag aliases, enum value aliases, conflicts, and required argument groups.
+    let (code_h, stdout_h, _) = folo(&["describe", "train"]);
+    let (code_j, stdout_j, _) = folo(&["describe", "train", "--json"]);
+    assert_eq!((code_h, code_j), (0, 0));
+    assert!(stdout_h.lines().count() > 10, "without --json, describe pretty-prints");
+    assert_eq!(stdout_j.lines().count(), 1, "with --json, describe is one line");
+    let v_h: Value = serde_json::from_str(&stdout_h).unwrap();
+    let v_j: Value = serde_json::from_str(&stdout_j).unwrap();
+    assert_eq!(v_h, v_j);
+    let model = v_j["args"].as_array().unwrap().iter().find(|a| a["name"] == "model").unwrap();
+    assert_eq!(model["aliases"], serde_json::json!(["--arch"]));
+    assert_eq!(model["conflicts_with"], serde_json::json!(["--weights"]));
+    assert_eq!(
+        v_j["groups"],
+        serde_json::json!([{
+            "name": "input", "required": true, "exclusive": false, "args": ["--data", "--resume"]
+        }])
+    );
 }
 
 #[test]
