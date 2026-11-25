@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::util::{parse_rfc3339, unix_now};
 
 use super::entry::status_event;
-use super::{RunEntry, RunState, Runs, add_paused};
+use super::{RunEntry, RunState, Runs, add_paused, mark_resume};
 
 impl Runs {
     /// What `POST /api/runs` with `resume_run_id` asks of a `stopped` or `failed` run: the run, and its config with
@@ -134,6 +134,7 @@ impl Runs {
         st.tail.clear();
         st.attempt += 1;
         e.stop.store(false, Ordering::Relaxed);
+        mark_resume(&e.metrics_path());
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));
         let run = st.file.shown();

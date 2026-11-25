@@ -39,7 +39,7 @@ mod resume;
 mod train;
 
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -154,6 +154,8 @@ pub struct RunEntry {
     id: String,
     dir: PathBuf,
     state: Mutex<RunState>,
+    /// Incremental parser cache of `metrics.jsonl` (never locked while holding `state`).
+    metrics_cache: Mutex<history::MetricsCache>,
     tx: broadcast::Sender<RunEvent>,
     stop: Arc<AtomicBool>,
     /// What the throughput table learns while the run trains (set by the worker).
@@ -192,6 +194,40 @@ pub(crate) fn append_line(path: &Path, line: &str) {
         .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
     if let Err(e) = r {
         tracing::warn!("writing {}: {e}", path.display());
+    }
+}
+
+/// Appends a persisted resume boundary marker (`{"event":"resume"}`) to an existing non-empty `metrics.jsonl`,
+/// inserting a leading `\n` if the file ends with a torn line that lacks a trailing newline. Called only when the
+/// run is inactive (under `RunEntry.state`), so no trainer or cloud mirror is concurrently writing the file.
+pub(super) fn mark_resume(path: &Path) {
+    let mut f = match std::fs::OpenOptions::new().read(true).append(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!("opening {} for resume marker: {e}", path.display());
+            return;
+        }
+    };
+    let len = match f.seek(SeekFrom::End(0)) {
+        Ok(0) => return,
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("seeking {} for resume marker: {e}", path.display());
+            return;
+        }
+    };
+    let mut last = [0u8; 1];
+    let needs_newline = match f.seek(SeekFrom::Start(len - 1)).and_then(|_| f.read_exact(&mut last)) {
+        Ok(()) => last[0] != b'\n',
+        Err(e) => {
+            tracing::warn!("reading {} tail for resume marker: {e}", path.display());
+            return;
+        }
+    };
+    let record = if needs_newline { "\n{\"event\":\"resume\"}\n" } else { "{\"event\":\"resume\"}\n" };
+    if let Err(e) = f.write_all(record.as_bytes()) {
+        tracing::warn!("writing resume marker to {}: {e}", path.display());
     }
 }
 
