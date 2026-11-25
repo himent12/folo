@@ -25,14 +25,7 @@ impl Interactivity {
 
         // A focusable element takes focus on mouse down, unless a child already did (`prevent_default`).
         if let Some(focus_handle) = self.tracked_focus_handle.clone() {
-            let hitbox = hitbox.clone();
-            window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
-                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) && !window.default_prevented()
-                {
-                    window.focus(&focus_handle);
-                    window.prevent_default();
-                }
-            });
+            window.on_mouse_down_focus(hitbox.id, focus_handle);
         }
 
         for listener in self.mouse_down_listeners.drain(..) {
@@ -62,13 +55,7 @@ impl Interactivity {
 
         // Hover styles (and a cursor) redraw when the hover state changes, and only then.
         if self.hover_style.is_some() || self.base_style.mouse_cursor.is_some() {
-            let hitbox_id = hitbox.id;
-            let was_hovered = hitbox.is_hovered(window);
-            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
-                if phase == DispatchPhase::Capture && hitbox_id.is_hovered(window) != was_hovered {
-                    window.refresh();
-                }
-            });
+            window.on_hover_refresh(hitbox.id, hitbox.is_hovered(window));
         }
 
         let drop_listeners = std::mem::take(&mut self.drop_listeners);
@@ -277,12 +264,7 @@ impl Interactivity {
             .as_ref()
             .and_then(|group_hover| window.group_hitboxes.get(&group_hover.group));
         if let Some(group_hitbox) = group_hitbox {
-            let was_hovered = group_hitbox.is_hovered(window);
-            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
-                if phase == DispatchPhase::Capture && group_hitbox.is_hovered(window) != was_hovered {
-                    window.refresh();
-                }
-            });
+            window.on_hover_refresh(group_hitbox, group_hitbox.is_hovered(window));
         }
     }
 

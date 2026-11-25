@@ -486,8 +486,11 @@ fn active_style_listeners_are_skipped_without_active_styles_and_clear_when_remov
             .child(div().id("plain").w(px(60.)).h(px(30.)).bg(color(1)).hover(|s| s.bg(color(2))))
             .into_any_element()
     });
-    let listeners = with_window(&mut app, window, |window, _| window.rendered_frame.mouse_listeners.len());
-    assert_eq!(listeners, 1, "only the hover refresh listener should be registered");
+    let (down_len, move_len) = with_window(&mut app, window, |window, _| {
+        (window.rendered_frame.mouse_down_listeners.len(), window.rendered_frame.mouse_move_listeners.len())
+    });
+    assert_eq!(down_len, 0, "no active mouse-down listener should be registered");
+    assert_eq!(move_len, 1, "only the hover refresh listener should be registered");
     mouse_move(&mut app, window, 10., 10.);
     app.frame(window);
     assert!(!app.is_dirty(window));
@@ -546,4 +549,78 @@ fn active_style_listeners_are_skipped_without_active_styles_and_clear_when_remov
     mouse_up(&mut app, window, 45., 45.);
     app.frame(window);
     assert_eq!(quads_of(&mut app, window, color(4)).len(), 1, "group_active style cleared");
+}
+
+#[test]
+fn inline_focus_and_hover_refresh_respect_interleaved_listener_order() {
+    use crate::{
+        DispatchPhase, canvas,
+        window::{MouseDownEntry, MouseMoveEntry},
+    };
+
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let events = events.clone();
+        move |_, cx| {
+            let parent_focus = cx.focus_handle();
+            let child_focus = cx.focus_handle();
+            let log_down = events.clone();
+            let log_move = events.clone();
+            div()
+                .size_full()
+                .track_focus(&parent_focus)
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, (), window, _| {
+                            let log_move = log_move.clone();
+                            window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    log_move.borrow_mut().push("parent capture move".into());
+                                    cx.stop_propagation();
+                                }
+                            });
+                        },
+                    )
+                    .size_0(),
+                )
+                .child(
+                    div()
+                        .w(px(60.))
+                        .h(px(30.))
+                        .bg(color(1))
+                        .hover(|s| s.bg(color(2)))
+                        .track_focus(&child_focus)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            log_down.borrow_mut().push("child down".into());
+                            window.prevent_default();
+                        }),
+                )
+                .into_any_element()
+        }
+    });
+
+    // Verify inline variants are used (no boxed closures for focus or hover refresh).
+    with_window(&mut app, window, |window, _| {
+        let f = &window.rendered_frame;
+        assert!(f.mouse_down_listeners.iter().any(|e| matches!(e, MouseDownEntry::Focus { .. })));
+        assert!(f.mouse_move_listeners.iter().any(|e| matches!(e, MouseMoveEntry::HoverRefresh { .. })));
+    });
+
+    // Parent capture mouse-move stops propagation BEFORE the child's inline HoverRefresh runs.
+    mouse_move(&mut app, window, 150., 50.);
+    app.frame(window);
+    assert!(!app.is_dirty(window));
+    events.borrow_mut().clear();
+    mouse_move(&mut app, window, 10., 10.);
+    assert_eq!(*events.borrow(), ["parent capture move"]);
+    assert!(!app.is_dirty(window), "capture stop_propagation blocked child inline HoverRefresh");
+
+    // Child's bubble on_mouse_down runs BEFORE child's and parent's inline Focus handlers and
+    // prevents both from taking focus.
+    events.borrow_mut().clear();
+    mouse_down(&mut app, window, 10., 10.);
+    assert_eq!(*events.borrow(), ["child down"]);
+    let focused = with_window(&mut app, window, |window, cx| window.focused(cx).is_some());
+    assert!(!focused, "child on_mouse_down prevent_default blocked inline Focus handlers");
 }

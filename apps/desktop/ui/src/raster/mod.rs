@@ -16,7 +16,7 @@ mod gradient;
 mod hash;
 mod image;
 mod items;
-mod path;
+pub(crate) mod path;
 mod pool;
 mod prep;
 mod quad;

@@ -8,7 +8,7 @@ use super::gradient::{GradientSpan, Paint};
 use super::hash::{finish, mix, mix_f2};
 use super::image::{ImageCopy, ImageDraw, ImageKey};
 use super::items::shadow_bounds;
-use super::path::{PathMask, PathPaint, draw as draw_path, draw_underline, geometry_hash};
+use super::path::{PathMask, PathPaint, draw as draw_path, draw_underline};
 use super::quad::QuadPrep;
 use super::quad_eval::QuadShader;
 use super::shadow::{self, ShadowKey, ShadowMask, ShadowShape};
@@ -305,7 +305,7 @@ fn path_key(p: &Path, frame: IRect) -> (u64, IRect) {
     let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
     let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
     let [cx0, cy0, cx1, cy1] = path_clip(p);
-    let h = finish(mix_f2(mix_f2(geometry_hash(&p.path), cx0, cy0), cx1, cy1));
+    let h = finish(mix_f2(mix_f2(p.path.geometry_hash(), cx0, cy0), cx1, cy1));
     (h, IRect::new(x0, y0, x1, y1).intersect(&frame))
 }
 

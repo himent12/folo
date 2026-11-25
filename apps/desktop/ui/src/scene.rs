@@ -5,8 +5,8 @@
 use crate::{
     Background, Bounds, Corners, DevicePixels, Edges, Hsla, Point, ScaledPixels, Size, image::RenderImage,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// One id sequence for masks and paths, so ids never collide across kinds.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -323,18 +323,31 @@ pub struct PathData {
     pub kind: PathKind,
     /// For `PathKind::Triangles`: three points per triangle.
     pub triangles: Vec<Point<ScaledPixels>>,
+    /// Cached geometry hash (computed lazily once the path is rendered).
+    pub(crate) geometry_hash: OnceLock<u64>,
 }
 
 impl PathData {
     /// Wraps the geometry with a new id.
     pub fn new(contours: Vec<Contour>, kind: PathKind) -> Self {
-        Self { id: next_id(), contours, kind, triangles: Vec::new() }
+        Self { id: next_id(), contours, kind, triangles: Vec::new(), geometry_hash: OnceLock::new() }
     }
 
     /// Triangles (three points each) with a new id.
     pub fn from_triangles(triangles: Vec<Point<ScaledPixels>>) -> Self {
         debug_assert_eq!(triangles.len() % 3, 0);
-        Self { id: next_id(), contours: Vec::new(), kind: PathKind::Triangles, triangles }
+        Self {
+            id: next_id(),
+            contours: Vec::new(),
+            kind: PathKind::Triangles,
+            triangles,
+            geometry_hash: OnceLock::new(),
+        }
+    }
+
+    /// Hash of the geometry fields that affect coverage, computed once and cached.
+    pub(crate) fn geometry_hash(&self) -> u64 {
+        *self.geometry_hash.get_or_init(|| crate::raster::path::compute_geometry_hash(self))
     }
 }
 

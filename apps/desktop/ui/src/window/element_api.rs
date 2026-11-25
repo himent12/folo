@@ -15,10 +15,13 @@ use std::{
 use crate::{
     AnyElement, AnyTooltip, App, Bounds, ContentMask, CursorStyle, CursorStyleRequest, DeferredDraw,
     DispatchPhase, ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InputHandler,
-    KeyEvent, MouseEvent, Pixels, Point, TextStyle, TextStyleRefinement, TooltipId, TooltipRequest, Window,
-    WindowControlArea, WindowControlHitbox,
+    KeyEvent, MouseDownEvent, MouseEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
+    TextStyle, TextStyleRefinement, TooltipId, TooltipRequest, Window, WindowControlArea,
+    WindowControlHitbox,
     style::Refineable,
-    window::{DispatchNodeId, input_handler::InputHandlerSlot},
+    window::{
+        AnyMouseListener, DispatchNodeId, MouseDownEntry, MouseMoveEntry, input_handler::InputHandlerSlot,
+    },
 };
 
 impl Window {
@@ -216,18 +219,40 @@ impl Window {
         id
     }
 
-    /// Adds a mouse listener of event type `Event` for this frame.
+    /// Adds a mouse listener of event type `Event` for this frame, partitioned by event kind so dispatch
+    /// visits only listeners matching the incoming event.
     pub fn on_mouse_event<Event: MouseEvent>(
         &mut self,
         mut handler: impl FnMut(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
-        self.next_frame.mouse_listeners.push(Some(Box::new(
-            move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
+        let listener: AnyMouseListener =
+            Box::new(move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
                 if let Some(event) = event.downcast_ref::<Event>() {
                     handler(event, phase, window, cx)
                 }
-            },
-        )));
+            });
+        let event_type = TypeId::of::<Event>();
+        if event_type == TypeId::of::<MouseDownEvent>() {
+            self.next_frame.mouse_down_listeners.push(MouseDownEntry::Boxed(listener));
+        } else if event_type == TypeId::of::<MouseUpEvent>() {
+            self.next_frame.mouse_up_listeners.push(listener);
+        } else if event_type == TypeId::of::<MouseMoveEvent>() {
+            self.next_frame.mouse_move_listeners.push(MouseMoveEntry::Boxed(listener));
+        } else if event_type == TypeId::of::<ScrollWheelEvent>() {
+            self.next_frame.scroll_wheel_listeners.push(listener);
+        } else {
+            self.next_frame.other_mouse_listeners.push(listener);
+        }
+    }
+
+    /// Registers an inline click-to-focus handler on mouse down (no heap box).
+    pub(crate) fn on_mouse_down_focus(&mut self, hitbox_id: HitboxId, focus_handle: FocusHandle) {
+        self.next_frame.mouse_down_listeners.push(MouseDownEntry::Focus { hitbox_id, focus_handle });
+    }
+
+    /// Registers an inline hover-change refresh watcher on mouse move (no heap box).
+    pub(crate) fn on_hover_refresh(&mut self, hitbox_id: HitboxId, was_hovered: bool) {
+        self.next_frame.mouse_move_listeners.push(MouseMoveEntry::HoverRefresh { hitbox_id, was_hovered });
     }
 
     /// Adds a key listener of event type `Event` to the current dispatch node.
