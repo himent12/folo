@@ -1,5 +1,10 @@
 //! Antigravity CLI (`agy`) as a labeling [`Agent`]: `agy acp`, one turn per call over ACP v1 JSON-RPC on stdio.
 //!
+//! Files: this one holds [`Antigravity`], its [`Agent`] implementation, and `agy models` parsing; `acp/` drives the
+//! single-turn ACP v1 JSON-RPC session state machine; `process` owns the OS subprocess, bounded stdio threads, and
+//! process-tree cleanup; `protocol` holds ACP config-option parsing, usage merging, and workspace isolation; `tests/`
+//! holds unit and fake-subprocess tests.
+//!
 //! `agy -p` has no `--image` flag, rejects non-text content blocks on `--input-format stream-json`, and blocks for
 //! interactive OAuth when signed out. `agy acp` instead advertises native inline image prompts
 //! (`promptCapabilities.image`), dynamic `model` and `thought_level` configuration (`configOptions`), system-prompt

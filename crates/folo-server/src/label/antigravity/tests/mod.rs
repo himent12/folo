@@ -1,6 +1,14 @@
 //! Unit and fake-subprocess tests for the Antigravity ACP labeling driver.
+//!
+//! Files: this one holds catalog, option resolution, round-trip, usage, and isolation tests; `stdio` tests bounded
+//! stdout line reading, Condvar completion signals, and stdout framing error propagation; `session_mode` tests
+//! mode enforcement, mid-prompt drift, pre-dispatch cancel, and chatty parent-exit detection; `session_config` tests
+//! legacy model switches, default-model pinning, variant resolution, and stdout flood bounds; `subprocess` drives
+//! real fake-child subprocesses to verify process-tree and pipe cleanup.
 
-mod session;
+mod session_config;
+mod session_mode;
+mod stdio;
 mod subprocess;
 
 use std::path::{Path, PathBuf};
