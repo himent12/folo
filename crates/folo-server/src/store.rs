@@ -47,23 +47,32 @@ pub struct IssueQuery {
 }
 
 impl IssueQuery {
-    /// The page of `issues` this query selects, with the counts of all of them.
-    pub fn page<'a>(
-        &self,
-        issues: impl Iterator<Item = &'a folo_api::DatasetIssue> + Clone,
-    ) -> folo_api::IssuePage {
+    /// The page of `issues` this query selects, with the counts of all of them, computed in a single pass.
+    pub fn page<'a>(&self, issues: impl Iterator<Item = &'a folo_api::DatasetIssue>) -> folo_api::IssuePage {
         let mut total = 0u64;
         let mut page = Vec::new();
-        let keep = |i: &&folo_api::DatasetIssue| {
-            self.kind.as_ref().is_none_or(|k| *k == i.kind) && self.severity.is_none_or(|s| s == i.severity)
-        };
-        for i in issues.clone().filter(keep) {
-            if total >= self.offset && (page.len() as u64) < self.limit {
-                page.push(i.clone());
+        let mut counts = folo_api::IssueCounts::default();
+        for i in issues {
+            match i.severity {
+                folo_api::IssueSeverity::Error => counts.error += 1,
+                folo_api::IssueSeverity::Warning => counts.warning += 1,
+                folo_api::IssueSeverity::Info => counts.info += 1,
             }
-            total += 1;
+            if let Some(n) = counts.by_kind.get_mut(i.kind.as_str()) {
+                *n += 1;
+            } else {
+                counts.by_kind.insert(i.kind.clone(), 1);
+            }
+            if self.kind.as_ref().is_none_or(|k| *k == i.kind)
+                && self.severity.is_none_or(|s| s == i.severity)
+            {
+                if total >= self.offset && (page.len() as u64) < self.limit {
+                    page.push(i.clone());
+                }
+                total += 1;
+            }
         }
-        folo_api::IssuePage { total, issues: page, counts: folo_api::IssueCounts::of(issues) }
+        folo_api::IssuePage { total, issues: page, counts }
     }
 }
 
@@ -644,4 +653,51 @@ pub trait Store: Send + Sync + 'static {
 fn not_cloud() -> crate::error::Error {
     crate::error::Error::not_implemented("cloud compute")
         .hint("cloud compute needs a server with the `cloud` feature (GET /api/system lists its features)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_api::{DatasetIssue, IssueSeverity};
+
+    #[test]
+    fn issue_query_page_counts_and_pages_in_one_pass() {
+        let make = |kind: &str, severity: IssueSeverity, file: &str| DatasetIssue {
+            kind: kind.into(),
+            severity,
+            file: file.into(),
+            line: None,
+            message: String::new(),
+            fix: None,
+        };
+        let all = [
+            make("broken_label", IssueSeverity::Error, "a.txt"),
+            make("clipped_box", IssueSeverity::Warning, "b.txt"),
+            make("clipped_box", IssueSeverity::Warning, "c.txt"),
+            make("clipped_box", IssueSeverity::Warning, "d.txt"),
+            make("empty_image", IssueSeverity::Info, "e.jpg"),
+        ];
+        // Wrap in a non-`Clone` iterator to prove single-pass consumption.
+        let mut idx = 0usize;
+        let iter = std::iter::from_fn(|| {
+            let item = all.get(idx)?;
+            idx += 1;
+            Some(item)
+        });
+        let q = IssueQuery {
+            kind: Some("clipped_box".into()),
+            severity: Some(IssueSeverity::Warning),
+            offset: 1,
+            limit: 1,
+        };
+        let page = q.page(iter);
+        assert_eq!(idx, all.len(), "consumed every issue once");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.issues.len(), 1);
+        assert_eq!(page.issues[0].file, "c.txt");
+        assert_eq!((page.counts.error, page.counts.warning, page.counts.info), (1, 3, 1));
+        assert_eq!(page.counts.by_kind.get("broken_label"), Some(&1));
+        assert_eq!(page.counts.by_kind.get("clipped_box"), Some(&3));
+        assert_eq!(page.counts.by_kind.get("empty_image"), Some(&1));
+    }
 }

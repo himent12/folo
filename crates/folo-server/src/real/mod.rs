@@ -238,9 +238,8 @@ impl RealStore {
             let todo = entries.clone();
             let dir = data_dir.clone();
             let spawned = std::thread::Builder::new().name("folo-index".into()).spawn(move || {
-                for e in todo {
-                    load_or_build(&dir, &e);
-                }
+                use rayon::prelude::*;
+                todo.par_iter().for_each(|e| load_or_build(&dir, e));
             });
             if let Err(err) = spawned {
                 tracing::error!("could not start the indexing thread: {err}");

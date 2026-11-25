@@ -660,29 +660,83 @@ impl Index {
         Ok(if Path::new(&im.file).is_absolute() { PathBuf::from(&im.file) } else { self.root.join(&im.file) })
     }
 
-    /// A page of images.
-    pub fn list_images(&self, q: &ImageQuery) -> ImagePage {
-        let matches = |im: &IndexImage| {
-            q.split.is_none_or(|s| s == im.split)
-                && q.class.is_none_or(|c| im.boxes.iter().any(|b| b.class == c))
+    /// Contiguous `(base_id, slice)` for `split` when `self.images` matches `self.splits` in `[train, val, test]`
+    /// order (always true for [`Index::build`]; returns `None` only for hand-built or inconsistent indexes so
+    /// [`Index::list_images`] falls back safely without panicking).
+    fn split_slice(&self, split: Split) -> Option<(usize, &[IndexImage])> {
+        let train = usize::try_from(self.splits.train).ok()?;
+        let val = usize::try_from(self.splits.val).ok()?;
+        let test = usize::try_from(self.splits.test).ok()?;
+        if train.checked_add(val)?.checked_add(test)? != self.images.len() {
+            return None;
+        }
+        let (start, len) = match split {
+            Split::Train => (0, train),
+            Split::Val => (train, val),
+            Split::Test => (train + val, test),
         };
-        let total = self.images.iter().filter(|im| matches(im)).count() as u64;
-        let images = self
-            .images
-            .iter()
-            .enumerate()
-            .filter(|(_, im)| matches(im))
-            .skip(q.offset.min(usize::MAX as u64) as usize)
-            .take(q.limit.min(usize::MAX as u64) as usize)
-            .map(|(i, im)| ImageInfo {
-                id: i.to_string(),
-                file: im.file.clone(),
-                split: im.split,
-                width: im.width,
-                height: im.height,
-                boxes: im.boxes.clone(),
-            })
-            .collect();
+        let slice = self.images.get(start..start + len)?;
+        if slice.first().is_some_and(|im| im.split != split)
+            || slice.last().is_some_and(|im| im.split != split)
+        {
+            return None;
+        }
+        Some((start, slice))
+    }
+
+    /// A page of images: O(limit) via contiguous split slicing when no class filter is set, and a single pass
+    /// over the requested split (or all images) when filtering by class.
+    pub fn list_images(&self, q: &ImageQuery) -> ImagePage {
+        let to_info = |(i, im): (usize, &IndexImage)| ImageInfo {
+            id: i.to_string(),
+            file: im.file.clone(),
+            split: im.split,
+            width: im.width,
+            height: im.height,
+            boxes: im.boxes.clone(),
+        };
+        let sliced = match q.split {
+            None => Some((0usize, self.images.as_slice())),
+            Some(split) => self.split_slice(split),
+        };
+        if let Some((base, slice)) = sliced {
+            let Some(class) = q.class else {
+                let total = slice.len() as u64;
+                let start = usize::try_from(q.offset).unwrap_or(usize::MAX).min(slice.len());
+                let limit = usize::try_from(q.limit).unwrap_or(usize::MAX);
+                let end = start.saturating_add(limit).min(slice.len());
+                let images = slice[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, im)| to_info((base + start + j, im)))
+                    .collect();
+                return ImagePage { total, images };
+            };
+            let mut total = 0u64;
+            let mut images = Vec::new();
+            for (i, im) in slice.iter().enumerate() {
+                if im.boxes.iter().any(|b| b.class == class) {
+                    if total >= q.offset && (images.len() as u64) < q.limit {
+                        images.push(to_info((base + i, im)));
+                    }
+                    total += 1;
+                }
+            }
+            return ImagePage { total, images };
+        }
+        // Fallback when `self.images` is not laid out contiguously by `self.splits`.
+        let mut total = 0u64;
+        let mut images = Vec::new();
+        for (i, im) in self.images.iter().enumerate() {
+            if q.split.is_none_or(|s| s == im.split)
+                && q.class.is_none_or(|c| im.boxes.iter().any(|b| b.class == c))
+            {
+                if total >= q.offset && (images.len() as u64) < q.limit {
+                    images.push(to_info((i, im)));
+                }
+                total += 1;
+            }
+        }
         ImagePage { total, images }
     }
 

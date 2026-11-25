@@ -517,3 +517,46 @@ fn a_sample_set_folder_another_writer_took_is_refused_and_kept() {
         assert_eq!(std::fs::read_to_string(dir.join(theirs)).unwrap(), "theirs");
     }
 }
+
+/// Startup indexing rebuilds multiple stale datasets in parallel and leaves every cache and index consistent.
+#[test]
+fn startup_rebuilds_multiple_stale_dataset_indexes_in_parallel() {
+    let dir = TestDir::new("real-parallel-index");
+    let home = dir.join("home");
+    let store = RealStore::open(home.clone());
+    let mut ids = Vec::new();
+    for i in 0..4u64 {
+        let ds_dir = dir.join(format!("ds-{i}"));
+        let cfg = folo_data::synthetic::SyntheticConfig {
+            images: 4,
+            imgsz: 32,
+            seed: 10 + i,
+            ..Default::default()
+        };
+        folo_data::synthetic::write_yolo(&cfg, &ds_dir, folo_data::ImageFormat::Jpeg(80)).unwrap();
+        let ds = store
+            .register_dataset(folo_api::RegisterDataset {
+                name: Some(format!("set-{i}")),
+                path: ds_dir.to_string_lossy().into_owned(),
+                format: DatasetFormat::Yolo,
+            })
+            .unwrap();
+        ids.push(ds.id);
+    }
+    store.shutdown();
+    drop(store);
+
+    // Wipe cached indexes so every registered dataset is stale on restart.
+    let cache_dir = home.join("cache").join("datasets");
+    for id in &ids {
+        let _ = std::fs::remove_file(cache_dir.join(format!("{id}.json")));
+    }
+
+    let reopened = RealStore::open(home.clone());
+    for id in &ids {
+        let ds = reopened.get_dataset(id).unwrap();
+        assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, 4);
+        assert!(cache_dir.join(format!("{id}.json")).is_file(), "rebuilt cache persisted for {id}");
+    }
+    reopened.shutdown();
+}
