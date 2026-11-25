@@ -69,6 +69,10 @@ export function compareState() {
   // The legend: hover or focus a chip to bring its entry forward everywhere; a click keeps it there.
   const hovered = signal<string | null>(null);
   const pinned = signal<string | null>(null);
+  effect(() => {
+    const p = pinned.get();
+    if (p !== null && !shown.get().some((e) => e.id === p)) pinned.set(null);
+  });
   const highlight = computed(() => [hovered.get(), pinned.get()].find((x) => x !== null && shown.get().some((e) => e.id === x)) ?? null);
 
   const res = computed(() => shown.get().map((e) => results.get(e.id)));

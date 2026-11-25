@@ -231,6 +231,10 @@ export default function Benchmark() {
     if (kept.length !== sel.length) untrack(() => selected.set(kept));
   });
   const comparing = computed(() => selected.get().length >= 2);
+  function clearSelection() {
+    selected.set([]);
+    (document.getElementById(`bn-tab-${tab.peek()}`) ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
+  }
   /** The entries as the leaderboard shows them (one graded on an earlier version after the current ones): Compare's order. */
   const board = computed(() => {
     const b = bench.get();
@@ -506,6 +510,11 @@ export default function Benchmark() {
                           <span class="cmp-hint" role="status" data-gate-why>
                             {compareHint(selected.get().length)}
                           </span>
+                        ) : null}
+                        {selected.get().length > 0 ? (
+                          <Button variant="ghost" size="sm" onclick={clearSelection} aria-label="Clear selection">
+                            Clear
+                          </Button>
                         ) : null}
                         <Gate reason={compareReason(selected.get().length)}>
                           {(why) => (

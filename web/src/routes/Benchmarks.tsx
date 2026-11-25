@@ -3,7 +3,7 @@
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';
-import { computed, css, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Bench } from '$lib/api/types';
@@ -72,10 +72,25 @@ export default function Benchmarks() {
   // Polled: an entry running somewhere changes a benchmark's leader and its count.
   const benches = new Resource((s) => hub.api.benches(s), { poll: 10_000 });
   const unsupported = computed(() => cannotBench(system.data, benches.error));
+  const unavailable = computed(() => unsupported.get() || hub.lacks(BENCH_FEATURE));
 
-  // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), unless the server's health said it has no
-  // benchmarks (`folo serve --mock`): the page says so instead of a form whose Create can only fail (#324).
-  const creating = signal(untrack(() => router.route.query.get('new') === '1' && !hub.lacks(BENCH_FEATURE)));
+  // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), both on initial mount and when navigated
+  // to while already on `/benchmarks`, then strips `?new=1` so reload/Back never reopens it. Suppressed and closed
+  // whenever server health or capability checks say benchmarks are unavailable (`folo serve --mock`, #324).
+  const creating = signal(false);
+  effect(() => {
+    if (router.route.name !== 'benchmarks' || router.route.query.get('new') !== '1') return;
+    untrack(() => {
+      if (!unavailable.peek()) creating.set(true);
+      const q = new URLSearchParams(router.route.query);
+      q.delete('new');
+      const s = q.toString();
+      router.go(`/benchmarks${s ? `?${s}` : ''}`, { replace: true });
+    });
+  });
+  effect(() => {
+    if (unavailable.get() && creating.peek()) creating.set(false);
+  });
 
   // Newest first, as the server sends them.
   const sortKey = signal<Key>('created');
@@ -138,7 +153,7 @@ export default function Benchmarks() {
         subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
-            {!unsupported.get() ? (
+            {!unavailable.get() ? (
               <Gate reason={offline.get() ? OFFLINE_REASON : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
