@@ -50,7 +50,7 @@ function deferred<T>() {
 /** The fresh job's page with image `image` open in the editor (its 40 images are pending, without boxes). */
 async function openEditor(image = '1', job = 'lb_7c21') {
   const at = `#/datasets/label/${job}?image=${image}`;
-  history.replaceState(null, '', at);
+  history.replaceState(history.state, '', at);
   router.route = parse(at);
   c = mount(LabelJobPage, { target });
   await vi.waitFor(() => {
@@ -751,5 +751,215 @@ describe('the labeling editor: a linked image the job does not have', () => {
     });
     expect(editor()?.open).toBeFalsy();
     expect(info).toHaveBeenCalled();
+  });
+});
+
+describe('LabelJob editor history', () => {
+  const hash = () => decodeURIComponent(location.hash);
+
+  it('pushes a history entry when opening an image from the grid so Back and Close return to the job', async () => {
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for grid tile');
+      return el;
+    });
+    const depth = history.length;
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+    expect(history.length).toBe(depth + 1);
+
+    // Stepping to the next image replaces the entry instead of pushing another one.
+    key('j');
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('2');
+    });
+    expect(history.length).toBe(depth + 1);
+
+    // Closing goes Back to the grid entry rather than leaving a spare history entry.
+    const back = vi.spyOn(history, 'back');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(editor()?.open).toBeFalsy();
+  });
+
+  it('closes on browser Back and preserves originating view across Back and Forward', async () => {
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for grid tile');
+      return el;
+    });
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+    history.back();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(editor()?.open).toBeFalsy();
+
+    history.forward();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toContain('image=');
+      expect(editor()?.open).toBe(true);
+    });
+    const back = vi.spyOn(history, 'back');
+    const replace = vi.spyOn(history, 'replaceState');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).toHaveBeenCalledOnce();
+    expect(replace).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+  });
+
+  it('replaces in place when closing an image opened directly via link (no grid entry behind it)', async () => {
+    await openEditor('1');
+    const back = vi.spyOn(history, 'back');
+    editor()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    expect(back).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+  });
+
+  it('removes the last image in a job opened from the grid with a single Back, no bogus toast, and scrubs Forward', async () => {
+    // Only 1 image in the job so removing it leaves no next/previous image and closes the editor.
+    const realList = hub.api.labelImages.bind(hub.api);
+    let dropped = false;
+    vi.spyOn(hub.api, 'labelImages').mockImplementation(async (jobId, q) => {
+      const page = await realList(jobId, q);
+      const only = dropped ? [] : page.images.slice(0, 1);
+      return { total: only.length, images: only };
+    });
+    vi.spyOn(hub.api, 'deleteLabelImage').mockImplementation(async () => {
+      dropped = true;
+    });
+
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for sole grid tile');
+      return el;
+    });
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=1') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+
+    const back = vi.spyOn(history, 'back');
+    const info = vi.spyOn(toast, 'info');
+    click(inEditor('Remove image'));
+    const confirm = await vi.waitFor(() => {
+      flushSync();
+      const d = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((el) => el !== editor() && el.textContent?.includes('Remove'));
+      const b = d ? [...d.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Remove image') : undefined;
+      if (!b) throw new Error('waiting for Remove confirm');
+      return b;
+    });
+    confirm.click();
+
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    // Exactly one history.back() (stays on the job grid, never exits to /datasets/label) and no spurious toast.
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(info).not.toHaveBeenCalled();
+
+    // Pressing Forward into the deleted image scrubs the dead URL in place instead of bouncing back.
+    back.mockClear();
+    history.forward();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(info).toHaveBeenCalledWith('Image not in this job', '1 has been removed from it.');
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it('removes the last image even with unsaved edits without triggering a save prompt or stranding the editor', async () => {
+    const realList = hub.api.labelImages.bind(hub.api);
+    let dropped = false;
+    vi.spyOn(hub.api, 'labelImages').mockImplementation(async (jobId, q) => {
+      const page = await realList(jobId, q);
+      const only = dropped ? [] : page.images.slice(0, 1);
+      return { total: only.length, images: only };
+    });
+    vi.spyOn(hub.api, 'deleteLabelImage').mockImplementation(async () => {
+      dropped = true;
+    });
+
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for sole grid tile');
+      return el;
+    });
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=1') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+
+    // Make an unsaved edit before deleting the image.
+    click(inEditor('Add box'));
+    expect(footer()).toMatch(/Unsaved changes/);
+
+    const back = vi.spyOn(history, 'back');
+    const info = vi.spyOn(toast, 'info');
+    click(inEditor('Remove image'));
+    const confirm = await vi.waitFor(() => {
+      flushSync();
+      const d = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((el) => el !== editor() && el.textContent?.includes('Remove'));
+      const b = d ? [...d.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Remove image') : undefined;
+      if (!b) throw new Error('waiting for Remove confirm');
+      return b;
+    });
+    confirm.click();
+
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(asking()).toBeUndefined();
+    expect(editor()?.open).toBeFalsy();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(info).not.toHaveBeenCalled();
   });
 });

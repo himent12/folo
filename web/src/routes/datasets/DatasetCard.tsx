@@ -43,6 +43,8 @@ export default function DatasetCard(props: DatasetCardProps) {
   /** The first images, once the card has been in view; null while they load, [] when none could be read. */
   const images = signal<ImageInfo[] | null>(null);
   const failed = signal(false);
+  /** Bumped whenever the dataset changes after initial load so thumbnail URLs bust the browser cache. */
+  const rev = signal(0);
   let el!: HTMLElement;
 
   /** The read in flight, cancelled by the next one and when the card goes. */
@@ -70,29 +72,44 @@ export default function DatasetCard(props: DatasetCardProps) {
     seen = true;
     load();
   }
-  // What the mosaic is drawn from: when the list's refresh brings a change (a missing folder found again, images added
-  // or relabelled), a card already read reads it again, so its tiles and boxes are never the old set's; a mosaic whose
-  // read failed tries again with every refresh (the list answered, so the server is back), as well as on Retry.
-  // Initial stats arrival (`undefined` -> number) after progressive list mount does not reload an already-matching mosaic.
+  // What the mosaic is drawn from: when the list's refresh brings a change (a missing folder found again, images added,
+  // or labels/coordinates edited — via server `revision` or stats), a card already read reads it again with a bumped
+  // thumbnail `rev`, so its tiles and boxes are never stale; a mosaic whose read failed tries again on every refresh.
+  // Initial stats/revision arrival (`undefined` -> defined) after progressive list mount does not reload an already-matching mosaic.
   const baseKey = computed(() => [d().id, d().problem ?? '', imageCount(d()), d().classes.join('\n')].join('|'));
-  const boxCount = computed(() => d().stats?.boxes);
+  const revKey = computed(() => d().revision);
+  const statsKey = computed(() => {
+    const s = d().stats;
+    return s ? [s.boxes, s.empty_images, s.broken_labels, s.class_counts.join(','), s.box_size_hist.counts.join(',')].join('|') : undefined;
+  });
   let lastId: string | undefined;
   let lastBase: string | undefined;
-  let lastBoxes: number | undefined;
+  let lastRev: string | undefined;
+  let lastStats: string | undefined;
   effect(() => {
     const base = baseKey.get();
-    const boxes = boxCount.get();
+    const revision = revKey.get();
+    const stats = statsKey.get();
     const cur = d();
     untrack(() => {
-      if (lastId !== undefined && cur.id !== lastId) lastBoxes = undefined;
+      if (lastId !== undefined && cur.id !== lastId) {
+        lastRev = undefined;
+        lastStats = undefined;
+      }
       const baseChanged = lastBase !== undefined && base !== lastBase;
-      const boxesChanged = lastBoxes !== undefined && boxes !== undefined && boxes !== lastBoxes;
+      const revChanged = lastRev !== undefined && revision !== undefined && revision !== lastRev;
+      const statsChanged = lastStats !== undefined && stats !== undefined && stats !== lastStats;
       const retryFailed = failed.get() && !cur.pending && !cur.problem;
-      if (seen && (baseChanged || boxesChanged || retryFailed)) load();
+      if (seen && (baseChanged || revChanged || statsChanged || retryFailed)) {
+        if (baseChanged || revChanged || statsChanged) rev.set(rev.peek() + 1);
+        load();
+      }
       lastId = cur.id;
       lastBase = base;
-      if (boxes !== undefined) lastBoxes = boxes;
-      else if (cur.problem) lastBoxes = undefined;
+      if (revision !== undefined) lastRev = revision;
+      else if (cur.problem) lastRev = undefined;
+      if (stats !== undefined) lastStats = stats;
+      else if (cur.problem) lastStats = undefined;
     });
   });
   // Lazily: a long list reads only the mosaics in view (and a little ahead). Overview's row of at most four reads at
@@ -138,6 +155,7 @@ export default function DatasetCard(props: DatasetCardProps) {
                   <DatasetImage
                     datasetId={d().id}
                     imageId={im()!.id}
+                    rev={rev.get()}
                     width={im()!.width}
                     height={im()!.height}
                     thumb={256}

@@ -8,7 +8,7 @@ import RotateCw from '$icons/rotate-cw';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, field, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, field, For, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { isActive, LiveLabelJob } from '$lib/api/liveLabel';
 import { lastKnown, Now } from '$lib/api/freshness';
@@ -20,6 +20,7 @@ import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { entryState } from '$lib/shell/entryMemory';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
@@ -76,28 +77,68 @@ export default function LabelJob() {
     setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: 'Label images', path: '/datasets/label' }, { label: job.get()?.name ?? id.get() });
   });
 
-  /** Replaces query params (null removes one) without adding history entries. */
-  function setQuery(patch: Record<string, string | null>) {
+  // History: opening an image from the grid pushes an entry, so Back closes the editor instead of leaving the job
+  // (matching Dataset.tsx). Stepping between images replaces the entry; closing back to the originating view goes Back
+  // so Close and Back agree and leave no spare entry. An entry reached by a direct link replaces in place on close.
+  const from = entryState<string>('labeljob.from');
+  const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
+  /** Entry currently unwinding via async `history.back()`, so concurrent effects/clicks never double-back. */
+  let backingEntry: number | null = null;
+  let backTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearBacking = () => {
+    backingEntry = null;
+    clearTimeout(backTimer);
+    backTimer = undefined;
+  };
+  onCleanup(router.onEntry(clearBacking));
+  onCleanup(clearBacking);
+  // If a navigation guard vetoes `history.back()`, the router bounces back to `backingEntry` without firing `onEntry`:
+  // clearing on the return `popstate` (plus a bounded fallback) ensures `backingEntry` can never latch permanently.
+  onWindow('popstate', () => {
+    if (backingEntry !== null && router.entry === backingEntry) clearBacking();
+  });
+
+  /** Changes query params (null removes one): `push` adds a history entry; `replaceOnly` forces in-place replace. */
+  function setQuery(patch: Record<string, string | null>, push = false, replaceOnly = false) {
+    const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) q.delete(k);
       else q.set(k, v);
     }
     const s = q.toString();
-    router.go(`/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
+    if (s === before) return;
+    const at = router.route.path;
+    const path = `/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
+    if (push) {
+      clearBacking();
+      const was = router.entry;
+      router.go(path);
+      if (router.entry !== was) from.set(view(at, before));
+    } else if (!replaceOnly && from.get() === view(at, s)) {
+      if (backingEntry === router.entry) return;
+      backingEntry = router.entry;
+      clearTimeout(backTimer);
+      backTimer = setTimeout(clearBacking, 200);
+      history.back();
+    } else {
+      clearBacking();
+      if (replaceOnly && patch.image === null) from.set(undefined);
+      router.go(path, { replace: true });
+    }
   }
   const shown = computed(() => (show.get() === 'all' ? live.images : live.images.filter((i) => inFilter(i, show.get()))));
   /** Labeled images a person has checked (the job's counts do not have them: the images do). */
   const reviewed = computed(() => live.images.reduce((n, i) => n + (i.status === 'labeled' && i.reviewed ? 1 : 0), 0));
   // A linked image the job does not have (removed since, a stale link) would open the editor empty: the job holds all
-  // its images once loaded, so the link is dropped and the page says why.
+  // its images once loaded, so the link is dropped in place (scrubbing any stale Forward entry) and the page says why.
   effect(() => {
     const want = imageParam.get();
-    if (!want || live.loading || live.error || live.images.some((i) => i.id === want)) return;
+    if (!want || backingEntry === router.entry || live.loading || live.error || live.images.some((i) => i.id === want)) return;
     untrack(() => {
       // page-level: the editor never opened for it.
       toast.info('Image not in this job', `${want} has been removed from it.`);
-      setQuery({ image: null });
+      setQuery({ image: null }, false, true);
     });
   });
 
@@ -390,7 +431,7 @@ export default function LabelJob() {
                   show={show.get()}
                   uploads={uploads}
                   onshow={(s) => setQuery({ show: s === 'all' ? null : s })}
-                  onopen={(imageId) => setQuery({ image: imageId })}
+                  onopen={(imageId) => setQuery({ image: imageId }, !imageParam.peek())}
                   onbrowse={() => fileInput?.click()}
                   onadd={(tab) => (addTab.set(tab), addOpen.set(true))}
                 />

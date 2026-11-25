@@ -90,6 +90,23 @@ describe('Dataset page', () => {
     await until(() => list.mock.calls.length > reads, 'the image list read again');
   });
 
+  it('reloads images when issue counts change on focus even if dataset summary counts are unchanged', async () => {
+    const readIssues = api.datasetIssues.bind(api);
+    let extraErr = 0;
+    vi.spyOn(api, 'datasetIssues').mockImplementation(async (id, q) => {
+      const res = await readIssues(id, q);
+      return extraErr && res.counts ? { ...res, counts: { ...res.counts, error: res.counts.error + extraErr } } : res;
+    });
+    const list = vi.spyOn(api, 'datasetImages');
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    const reads = list.mock.calls.length;
+
+    extraErr = 1;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => list.mock.calls.length > reads, 'the image list reloaded after issue count changed');
+  });
+
   it("reads the check after the dataset when the window comes back, so it never answers from the server's old index", async () => {
     const read = api.dataset.bind(api);
     let hold: Promise<void> | null = null;
