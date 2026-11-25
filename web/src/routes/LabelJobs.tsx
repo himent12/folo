@@ -83,27 +83,30 @@ export default function LabelJobs() {
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
-  const hasFiltered = signal(false);
-  const justCleared = signal(false);
+  const clearSeq = signal(0);
+  const filterStatus = signal('');
+  let hasFiltered = false;
+  let lastClear = 0;
   effect(() => {
     const active = filter.get() !== 'all' || query.get().trim().length > 0;
-    if (active) {
-      if (!hasFiltered.peek()) hasFiltered.set(true);
-      if (justCleared.peek()) justCleared.set(false);
-    }
-  });
-  const filterStatus = computed(() => {
-    const all = jobs.data;
-    if (!all || !hasFiltered.get()) return '';
-    const n = shown.get().length;
-    const summary =
-      n < all.length
-        ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
-        : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
-    return justCleared.get() ? `Cleared labeling job filters. ${summary}` : summary;
+    const cleared = clearSeq.get() !== lastClear;
+    lastClear = clearSeq.peek();
+    if (active || cleared) hasFiltered = true;
+    if (!hasFiltered) return;
+    const msg = untrack(() => {
+      const all = jobs.data;
+      if (!all) return '';
+      const n = shown.get().length;
+      const summary =
+        n < all.length
+          ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
+          : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
+      return cleared ? `Cleared labeling job filters. ${summary}` : summary;
+    });
+    filterStatus.set(msg);
   });
   function clearFilters() {
-    justCleared.set(true);
+    clearSeq.set(clearSeq.peek() + 1);
     query.set('');
     filter.set('all');
     queueMicrotask(() => {

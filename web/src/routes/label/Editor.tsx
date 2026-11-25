@@ -85,6 +85,28 @@ export default function Editor(props: EditorProps) {
     return cur ? props.images.findIndex((i) => i.id === cur.id) : -1;
   });
 
+  // Announce image navigation only when the open image changes, not when background agent batches grow `props.images`.
+  const navStatus = signal('');
+  let prevNavId: string | null = null;
+  effect(() => {
+    const id = props.imageId;
+    const prev = prevNavId;
+    prevNavId = id;
+    if (id === null) {
+      navStatus.set('');
+      return;
+    }
+    if (prev === null || prev === id) return;
+    const msg = untrack(() => {
+      const cur = props.live.images.find((i) => i.id === id);
+      if (!cur) return '';
+      const i = props.images.findIndex((x) => x.id === cur.id);
+      const pos = i >= 0 ? `${num(i + 1)} of ${num(props.images.length)}` : 'Not in this filter';
+      return `${cur.file}, ${pos}`;
+    });
+    navStatus.set(msg);
+  });
+
   // The draft: the boxes as edited here, over the image's own (`base`). An image that changes on the server while it
   // is not being edited (the agent relabeled it) shows its new boxes; one that changes under unsaved edits (another
   // tab saved it) keeps the edits, takes the new boxes as what Discard goes back to, and says so: Save would replace
@@ -561,8 +583,11 @@ export default function Editor(props: EditorProps) {
                 <span use:tooltip={{ text: 'Previous', keys: 'K' }}>
                   <Button variant="ghost" size="sm" icon={ChevronLeft} aria-label="Previous image" disabled={idx.get() <= 0} onclick={() => step(-1)} />
                 </span>
-                <span class="pos num" aria-live="polite">
+                <span class="pos num">
                   {idx.get() >= 0 ? `${num(idx.get() + 1)} of ${num(props.images.length)}` : 'Not in this filter'}
+                </span>
+                <span class="sr-only" aria-live="polite" data-nav-status>
+                  {navStatus.get()}
                 </span>
                 <span use:tooltip={{ text: 'Next', keys: 'J' }}>
                   <Button

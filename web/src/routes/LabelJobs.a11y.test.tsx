@@ -6,8 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { LabelImage } from '$lib/api/types';
+import type { LiveLabelJob } from '$lib/api/liveLabel';
 import { router } from '$lib/router';
 import LabelJobs from './LabelJobs';
+import { AgentChoice } from './label/agentChoice';
+import Editor from './label/Editor';
 import ImagesArea, { type Show } from './label/ImagesArea';
 import type { Uploads } from './label/uploads';
 
@@ -112,6 +115,60 @@ describe('LabelJobs and ImagesArea filter live regions', () => {
       show.set('all');
       flush();
       expect(status().textContent).toBe('Showing all 3 images.');
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('announces image changes in label/Editor only when stepping, not on background agent image updates', async () => {
+    const img1: LabelImage = { id: 'i1', file: 'a.jpg', width: 640, height: 480, status: 'labeled', boxes: [], source: 'agent', error: null, reviewed: false };
+    const img2: LabelImage = { id: 'i2', file: 'b.jpg', width: 640, height: 480, status: 'labeled', boxes: [], source: 'agent', error: null, reviewed: false };
+    const img3: LabelImage = { id: 'i3', file: 'c.jpg', width: 640, height: 480, status: 'labeled', boxes: [], source: 'agent', error: null, reviewed: false };
+    const images = signal<LabelImage[]>([img1, img2]);
+    const imageId = signal<string | null>('i1');
+    const live = {
+      get images() {
+        return images.get();
+      },
+      inFlight: [],
+      running: true,
+      note: () => {},
+      replaceImage: () => {},
+    } as unknown as LiveLabelJob;
+    const job = (await hub.api.labelJobs())[0]!;
+    const choice = new AgentChoice(() => []);
+    const view = render(
+      () => (
+        <Editor
+          live={live}
+          job={job}
+          images={images.get()}
+          imageId={imageId.get()}
+          choice={choice}
+          onnavigate={(id) => imageId.set(id)}
+        />
+      ),
+      target,
+    );
+    try {
+      flush();
+      const pos = () => target.querySelector<HTMLElement>('.pos')!;
+      const navStatus = () => target.querySelector<HTMLElement>('[data-nav-status]')!;
+      expect(pos().getAttribute('aria-live')).toBeNull();
+      expect(pos().textContent?.trim()).toBe('1 of 2');
+      expect(navStatus().getAttribute('aria-live')).toBe('polite');
+      expect(navStatus().textContent?.trim()).toBe('');
+
+      // Background agent adds another image to the filter: visible counter updates, live region stays quiet.
+      images.set([img1, img2, img3]);
+      flush();
+      expect(pos().textContent?.trim()).toBe('1 of 3');
+      expect(navStatus().textContent?.trim()).toBe('');
+
+      // Stepping to the next image announces the new image and position.
+      imageId.set('i2');
+      flush();
+      expect(navStatus().textContent?.trim()).toBe('b.jpg, 2 of 3');
     } finally {
       view.unmount();
     }
