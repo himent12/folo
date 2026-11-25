@@ -125,7 +125,7 @@ impl FoloApp {
                 Some("icons/plug.svg"),
                 window,
                 cx,
-                act(|this, _, cx| this.switch_source(ServerMode::Local, cx)),
+                act(|this, _, cx| this.connect_server(cx)),
             )
             .into_any_element();
         let spawn = self.switch(
@@ -195,7 +195,7 @@ impl FoloApp {
                     .gap(px(8.))
                     .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
                         if ev.keystroke.key == "enter" {
-                            this.switch_source(ServerMode::Local, cx);
+                            this.connect_server(cx);
                             cx.stop_propagation();
                         }
                     }))

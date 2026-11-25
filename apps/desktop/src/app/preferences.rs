@@ -205,7 +205,7 @@ impl FoloApp {
             dark_theme: None,
             light_theme: None,
             spawn_server: Some(self.spawn_server),
-            server_url: self.saved_server_url.clone(),
+            server_url: self.saved_server_url.as_deref().and_then(super::connection::persistable_server_url),
             // Kept only when picked against the OS setting, so an untouched one keeps following it.
             reduce_motion: (self.reduce_motion != crate::ui::os_prefers_reduced_motion())
                 .then_some(self.reduce_motion),
