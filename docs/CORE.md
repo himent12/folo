@@ -12,9 +12,11 @@ dtype.rs, device.rs, storage.rs  DType, Device, Storage (CpuStorage, or a backen
 ops/                             the Tensor ops: view, copy, elementwise, reduce, nn (matmul, conv, pooling),
                                  fused, vision (detector hooks), inplace, muon, overload (+ - * /)
 backend.rs                       the Backend trait and the device registry
-cpu/                             the CPU backend: gemm/, conv/, elementwise/ (AVX2 transcendentals & 8x8 transpose),
+cpu/                             the CPU backend: gemm/, conv/ (direct, depthwise, Winograd F(2x2)/F(4x4)),
+                                 elementwise/ (AVX2 & Wasm SIMD128 transcendentals, 8x8 transpose),
                                  softmax/ (cache-tiled online softmax & fused backward), reduce, cast (F16C), index,
-                                 pool/ (pooling and 2x2 upsampling), q8/ (int8 convs), pool_alloc (the buffer cache)
+                                 pool/ (pooling and 2x2 upsampling), q8/ (int8 convs),
+                                 pool_alloc/ (two-level TLS + shared buffer cache)
 autograd.rs, autocast.rs         the tape (Grads, no_grad) and mixed precision
 rng.rs, testing.rs               Rng, grad_check
 ```
@@ -53,14 +55,18 @@ crate's code to optimise and its release build time, for one indirect call per t
 GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new kernels on these helpers.
 
 ### GEMM
-- A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel chosen at runtime, tile- or K-split
-  parallelism) backs `matmul` and conv2d.
+- A BLIS-style GEMM (`cpu::gemm`, packed panels, runtime-selected AVX2/FMA micro-kernels with 4× K-unrolling in exact
+  sequential K order and specialized `2×16`, `4×16`, and `6×16` register tiles across both packed `kernel.rs` and
+  row-pointer `rows.rs`/`arows.rs`, tile- or K-split parallelism) backs `matmul` and conv2d.
 - Each GEMM task packs the B panels of its own columns into an L2-sized buffer one `KC` block at a time, reading
   row-contiguous operands row by row so the prefetcher can follow (column tiles first, rows only when there are too
-  few columns, about three tasks per thread and none under ~1 MFLOP).
+  few columns, about three tasks per thread and none under ~1 MFLOP). Transposed operands (`sk == 1`, e.g. `X @ Wᵀ` in
+  `Linear`) pack through the cache-blocked `8×8` AVX2 transpose (`transpose_f32_2d_serial`).
 - A row-major A whose packed form fits one K super-block (16 MiB: every conv weight) is not packed at all: the
-  micro-kernels broadcast its six rows through row pointers, the same FMAs in the same order (bit for bit the packed
+  micro-kernels broadcast its rows through row pointers, the same FMAs in the same order (bit for bit the packed
   path), so a conv forward has no serial packing pass.
+- Register epilogues (`RegEpi`) fuse bias plus identity, SiLU, ReLU, LeakyReLU, or Hardswish directly onto the
+  micro-kernel accumulators before storing; other activations run as a pass over each finished row segment in cache.
 - A batched `matmul` splits the pool between its matrices.
 
 ### conv2d forward
@@ -70,16 +76,18 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   dropped columns per output row; planes are spaced an odd number of cache lines apart so the rows do not alias in
   L1; stride-2 rows are padded once and both column phases dealt out in one pass).
 - Pointwise convs pack B as a plain copy.
-- Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; with AVX2 at stride 1: the plane copied once with
-  its padding, every output vector its taps' FMAs in registers).
+- Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; at stride 1, both an AVX2/FMA path and a Wasm SIMD128
+  `f32x4 × 4` path pad the plane once, accumulate every output vector's taps in registers, and fuse bias / SiLU / ReLU
+  in registers before storing).
 - So do convs with at most 4 input channels (one group, not pointwise, `c·kh·kw <= 256`: the 3-channel stem,
   `cpu/conv/small_c.rs`): per output row the `c·kh·kw` taps are gathered into L1 (with an AVX2 stride-2 de-interleave
   fast path for `3×3 s2 p1`), and every output channel is that many FMAs per pixel in the GEMM's order with bias and
   SiLU fused in registers before storing directly to the output, bit for bit the GEMM result, without the per-channel
   phase copy.
 - Bias and activation run as an epilogue on each finished output (`Tensor::conv2d_act`, used by fused `ConvBnAct`
-  blocks and by eval-mode blocks under `no_grad`): bias and SiLU on the micro-kernel's accumulators before they are
-  stored, other activations as a pass over each finished block. SiLU there is a division-free, bit-exact scalar and
+  blocks and by eval-mode blocks under `no_grad`): bias plus identity, SiLU, ReLU, LeakyReLU, or Hardswish on the
+  micro-kernel's accumulators before they are stored, other activations as a pass over each finished block. SiLU there
+  is a division-free, bit-exact scalar and
   8-lane AVX2 `x · sigmoid(x)` (Cody-Waite reduction with `1.5·2^23` rounding, degree-5 minimax `exp(r)`, and
   bit-hack seed + 4-FMA factored Householder-6 reciprocal, zero `vdivps`/`vroundps`) with relative error below
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
@@ -97,6 +105,9 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   elsewhere neither uses nor fills it). `Tensor::derived_f32` offers the same store outside the backend (folo-vision's
   int8 plan keeps its packed convs there): unlike a check of the storage version, which a write bumps before it waits
   for the lock, a value made under the read lock never outlives the data it was made from.
+- Input (`Bᵀ d B`) and output (`Aᵀ M A`) transforms have explicit 8-tile AVX2/FMA (`cpu/conv/winograd.rs`) and 4-tile
+  Wasm SIMD128 (`cpu/conv/winograd_wasm.rs`) paths with register-fused bias + SiLU/ReLU epilogue, bit-exact with the
+  scalar transforms.
 - Tiles are cut into L2-sized blocks (transforming inputs, running 16 small GEMMs through the row-pointer micro-kernel,
   and transforming outputs while in L2) and switch to a two-pass split (`C` then `O`, keeping per-task `M` in L1/L2
   scratch) when an image has fewer than half as many blocks as threads.
@@ -112,9 +123,9 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   direct, 1.78x vs F(2x2)).
 - Uses well-conditioned interpolation points `(0, ±1/2, ±1, ∞)` rather than `(0, ±1, ±2, ∞)` so every multiplier in
   the factored `Bᵀ` and `Aᵀ` butterflies is an exact power of two (`±1, ±1/2, ±1/4, ±1/8`; unfactored `Bᵀ` has
-  `-5/4` entries), with explicit 8-tile AVX2/FMA + 4-tile SSE/FMA transforms bit-exact with the scalar path,
-  register-fused bias + SiLU/ReLU direct stores, and the same two-pass L1/L2 split and `View::derived` weight cache
-  as F(2x2).
+  `-5/4` entries), with explicit 8-tile AVX2/FMA + 4-tile SSE/FMA (`winograd4/transform.rs`) and 4-tile Wasm SIMD128
+  (`winograd4/wasm.rs`) transforms bit-exact with their scalar paths, register-fused bias + SiLU/ReLU direct stores,
+  and the same two-pass L1/L2 split and `View::derived` weight cache as F(2x2).
 - Error is bounded by `(C + 16) · 2^-23 · 140 · Σ_c D_c · G_c` (`D_c` over the 6x6 patch; tested including 512-channel
   all-ones), and results are bitwise deterministic across thread counts and batches.
 
@@ -152,8 +163,10 @@ channel slice of a tensor) in place, so `cat` + conv never writes the concatenat
 ### conv2d gradients
 - The input gradient (`cpu/conv/backward_input.rs`): pointwise convs multiply by `Wᵀ` directly (`Wᵀ · gy`). Other
   non-depthwise convs with stride 1 and `p <= d (k - 1)` on both axes run the forward kernel on the output gradient
-  with the flipped, channel-swapped kernel (no col2im); the rest use an unfolded gradient and col2im. Depthwise convs
-  have their own kernel (`cpu/conv/depthwise.rs`).
+  with the flipped, channel-swapped kernel (no col2im); the rest use an unfolded gradient and `col2im` with hoisted
+  valid-column bounds and 16-wide AVX2 row accumulation (`add_row_avx2`, bit-exact with scalar `+`). Depthwise convs
+  have their own backward kernels (`cpu/conv/depthwise.rs`) with non-FMA bit-exact AVX2 row updates
+  (`mul_add_row_avx2`) and 8-lane dot products (`dot_avx2`, plus 8-lane Wasm SIMD128 `dot_wasm`).
 - The weight gradient of a non-pointwise stride-1 conv, or of a pointwise one with `C/groups >= 64`, is
   `dWᵀ = X_unfolded · gyᵀ` with the input's shifted rows as A, read in place by a 6x16 micro-kernel through six row
   pointers (`gemm_arows`), and the output gradient transposed once per image into packed B panels (zeros in the
@@ -173,12 +186,13 @@ channel slice of a tensor) in place, so `cat` + conv never writes the concatenat
   step).
 
 ### Elementwise, softmax, reductions, transpose and casts
-- **AVX2 transcendentals (`cpu/elementwise/simd.rs`, `simd_log_tanh.rs`):** standalone `Exp`, `Sigmoid`, `Silu`,
-  `Log`, `Tanh`, `Softplus`, and their backward kernels use 8-lane non-FMA division-free AVX2 implementations (except
-  `log_bwd`, which runs 8-wide exact IEEE-754 `g / x`) paired with bit-exact scalar twins for all non-NaN inputs (and
-  preserving NaN payloads on single-operand ops). Omitting FMA guarantees identical bits across contiguous/strided
-  paths, slice boundaries, thread counts, and `avx2`-only callers such as `folo-nn`'s `BatchNorm2d`. The fused
-  conv/GEMM epilogue (`silu8` / `silu_bias_inplace`) keeps its FMA formulation.
+- **AVX2 & Wasm SIMD128 transcendentals (`cpu/elementwise/simd.rs`, `simd_log_tanh.rs`, `wasm_simd.rs`):** standalone
+  `Exp`, `Sigmoid`, `Silu`, `Log`, `Tanh`, `Softplus`, and their backward kernels use 8-lane non-FMA division-free AVX2
+  implementations on `x86_64` and 4-lane non-FMA Wasm SIMD128 implementations (plus 4-lane binary ops) on
+  `wasm32 +simd128` (except `log_bwd`, which runs exact IEEE-754 `g / x`), paired with bit-exact scalar twins for all
+  non-NaN inputs (and preserving NaN payloads on single-operand ops). Omitting FMA guarantees identical bits across
+  contiguous/strided paths, slice boundaries, thread counts, and `avx2`-only callers such as `folo-nn`'s `BatchNorm2d`.
+  The fused conv/GEMM epilogue (`silu8` / `silu_bias_inplace`) keeps its FMA formulation.
 - **Unit-stride fast paths & 8×8 AVX2 transpose (`cpu/elementwise/mod.rs`, `transpose.rs`):** `strided_update` and
   `where3` take unit-stride fast paths when operands are contiguous along the inner axis, and 2-D `f32` transposes run
   through a cache-blocked (`32×32` L1 tile) 8×8 AVX2 kernel (`transpose_f32_2d`).
@@ -222,8 +236,9 @@ these kernels:
   targets too) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output
   pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
   `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
-  the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
-  zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
+  the input planes in place; other convs read a padded, phase-split copy of each image's rows (`image_rows`, padding
+  with the zero point and rounding each channel group's phase block to a 64-byte cache line so parallel `fill` workers
+  never false-share adjacent boundary lines) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
   (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
@@ -238,8 +253,9 @@ these kernels:
   are split by pixel blocks first, so each task reads its own part once. `q8::stem_u8` runs 3-channel `u8` `[R, G, B, 0]`
   stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving.
 - **Others.** AVX2-vectorised `quantize` / `dequantize` (4 channels per C4 word read) between `f32` NCHW and C4
-  codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic), and AVX2 nearest
-  2× upsampling, all with serial fast paths below `PAR_MIN`.
+  codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic, reusing a thread-local
+  scratch buffer for small planes below `MIN_POOLED` and pooled `ScratchWords` via `for_each_init` for larger/parallel
+  planes), and AVX2 nearest 2× upsampling, all with serial fast paths below `PAR_MIN`.
 
 Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
 with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
@@ -252,9 +268,12 @@ bit, the epilogue's exact ties (to even, on both paths), `quantize_weights`' kno
 q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 
 ### The buffer cache
-`f32` buffers from 16 KiB are recycled through a size-keyed cache (`cpu/pool_alloc.rs`;
+`f32` buffers from 16 KiB (`MIN_POOLED = 4096` floats) are recycled through a two-level cache (`cpu/pool_alloc/`;
 `cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one to custom ops) so training and inference
-loops do not pay page faults every step. When it is full, lengths unused for two limits of traffic, and for twice the
+loops do not pay page faults every step: a lock-free per-thread TLS magazine (at most 8 buffers, each ≤ 4 MiB, ≤ 16 MiB
+per thread) sits in front of the shared size-keyed pool, coordinated by a shared atomic total-bytes budget and clear
+epoch so `set_buffer_cache_limit` and pressure drains bound both levels together. When the shared pool is full, lengths
+unused for two limits of traffic, and for twice the
 longest they ever went unused before coming back, are evicted for the ones now asked for, so a later workload
 (another model, another input shape) gets cached too while one that cycles through more than the cache holds keeps a
 cache-sized part.
@@ -285,10 +304,12 @@ operating systems, so two systems need not agree. The synthetic datasets ([DATA.
 benchmark variants ([BENCH.md](BENCH.md)) take no approximation from libm and are the same everywhere.
 
 ## Autograd
-- Define-by-run, reverse mode. An op whose input requires grad records a node (inputs, their storage versions, a
-  backward closure built from ordinary tensor ops) on the result.
-- `loss.backward()` returns `Grads` (keyed by tensor id, leaves only) via a topological sort; graphs are retained, so
-  backward can run twice. Graph teardown is iterative (deep graphs do not overflow the stack).
+- Define-by-run, reverse mode. An op whose input requires grad records a node (`SmallVec` storage for inputs, versions,
+  and saved cells, plus a backward closure built from ordinary tensor ops) on the result.
+- `loss.backward()` builds a dense slot-indexed post-order graph (`topo_order`, slots `0..nodes.len()`), accumulates
+  intermediate gradients in a flat `Vec<Option<Tensor>>` without `HashMap` lookups on the reverse walk, and returns
+  `Grads` (keyed by tensor id, leaves only); graphs are retained, so backward can run twice. Graph teardown is
+  iterative (deep graphs do not overflow the stack).
 - A thread-local `no_grad()` guard disables recording.
 - Fan-in gradients are summed in place when the running sum is a fresh tensor nothing else holds.
 - `testing::grad_check` compares autograd against central finite differences (f64 loss accumulation); every
