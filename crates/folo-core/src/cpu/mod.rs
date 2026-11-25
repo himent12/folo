@@ -20,12 +20,12 @@
 
 use std::borrow::Cow;
 
-use half::f16;
 use rayon::prelude::*;
 
 use crate::backend::{Backend, BinaryOp, Conv2dParams, Pool2dParams, ReduceOp, UnaryOp, View};
 use crate::{CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, with_cpu_storage};
 
+mod cast;
 mod conv;
 pub(crate) mod elementwise;
 pub mod gemm;
@@ -160,7 +160,13 @@ fn conv_part<'a>(v: &View<'a>) -> Result<Option<conv::ConvPart<'a>>> {
 }
 
 /// The elements of a view of any dtype as a contiguous slice (borrowed when already contiguous).
-fn contiguous<'a, T: Copy + Send + Sync + Default>(data: &'a [T], layout: &Layout) -> Cow<'a, [T]> {
+pub(crate) fn contiguous<'a, T: Copy + Send + Sync + Default>(
+    data: &'a [T],
+    layout: &Layout,
+) -> Cow<'a, [T]> {
+    if layout.numel() == 0 {
+        return Cow::Borrowed(&[]);
+    }
     match layout.contiguous_range() {
         Some(r) => Cow::Borrowed(&data[r]),
         None => Cow::Owned(elementwise::copy_strided(data, layout)),
@@ -178,20 +184,6 @@ fn indices(v: &View<'_>, op: &'static str, size: usize) -> Result<Vec<usize>> {
 
 fn f32_storage(v: Vec<f32>) -> Storage {
     Storage::Cpu(CpuStorage::F32(v))
-}
-
-fn cast_vec<S: Element, D: Element>(src: &[S]) -> Vec<D> {
-    src.iter().map(|&x| D::from_f64(x.to_f64())).collect()
-}
-
-fn cast_storage<S: Element>(src: &[S], dtype: DType) -> CpuStorage {
-    match dtype {
-        DType::F32 => CpuStorage::F32(cast_vec(src)),
-        DType::F16 => CpuStorage::F16(cast_vec(src)),
-        DType::U8 => CpuStorage::U8(cast_vec(src)),
-        DType::U32 => CpuStorage::U32(cast_vec(src)),
-        DType::I64 => CpuStorage::I64(cast_vec(src)),
-    }
 }
 
 fn nchw(shape: &Shape) -> (usize, usize, usize, usize) {
@@ -299,23 +291,7 @@ impl Backend for CpuBackend {
         if s.dtype() == dtype {
             return self.copy_strided(src);
         }
-        let out = match s {
-            CpuStorage::U8(v) if dtype == DType::F32 => {
-                CpuStorage::F32(elementwise::copy_strided(v, src.layout).iter().map(|&x| x as f32).collect())
-            }
-            CpuStorage::F32(v) if dtype == DType::F16 => CpuStorage::F16(
-                elementwise::copy_strided(v, src.layout).iter().map(|&x| f16::from_f32(x)).collect(),
-            ),
-            CpuStorage::F16(v) if dtype == DType::F32 => {
-                CpuStorage::F32(elementwise::copy_strided(v, src.layout).iter().map(|x| x.to_f32()).collect())
-            }
-            // Directly, not through f64: above 2^53 that would round twice.
-            CpuStorage::I64(v) if dtype == DType::F32 => {
-                CpuStorage::F32(elementwise::copy_strided(v, src.layout).iter().map(|&x| x as f32).collect())
-            }
-            s => with_cpu_storage!(s, v => cast_storage(&elementwise::copy_strided(v, src.layout), dtype)),
-        };
-        Ok(Storage::Cpu(out))
+        Ok(Storage::Cpu(cast::cast(s, src.layout, dtype)))
     }
 
     fn unary(&self, op: UnaryOp, x: View<'_>) -> Result<Storage> {
