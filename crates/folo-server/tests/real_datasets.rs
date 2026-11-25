@@ -129,17 +129,49 @@ async fn synthetic_datasets_images_and_thumbnails() {
     assert!(squares.images.iter().all(|i| i.boxes.iter().any(|b| b.class == 1)));
 
     let id = &all.images[3].id;
-    let (status, headers, bytes) = send(&app, get(&format!("/api/datasets/{}/images/{id}", ds.id))).await;
+    let img_uri = format!("/api/datasets/{}/images/{id}", ds.id);
+    let (status, headers, img_bytes) = send(&app, get(&img_uri)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
-    assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 64);
+    let img_etag = headers[header::ETAG].to_str().unwrap().to_string();
+    assert!(img_etag.starts_with('"') && img_etag.ends_with('"'), "{img_etag}");
+    let (s304, h304, b304) = send(
+        &app,
+        Request::get(&img_uri).header(header::IF_NONE_MATCH, &img_etag).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert_eq!(h304[header::ETAG], img_etag.as_str());
+    assert_eq!(h304[header::CACHE_CONTROL], "no-cache");
+    assert!(b304.is_empty());
+    assert_eq!(image::load_from_memory(&img_bytes).unwrap().width(), 64);
     let thumb = format!("/api/datasets/{}/images/{id}?thumb=32", ds.id);
     let (status, headers, bytes) = send(&app, get(&thumb)).await;
     assert_eq!((status, &headers[header::CONTENT_TYPE]), (StatusCode::OK, &"image/jpeg".parse().unwrap()));
+    let thumb_etag = headers[header::ETAG].to_str().unwrap().to_string();
+    assert_ne!(thumb_etag, img_etag);
     assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 32);
     let cached: Vec<_> = std::fs::read_dir(home.join("cache/thumbs").join(&ds.id)).unwrap().collect();
     assert_eq!(cached.len(), 1, "the thumbnail is cached");
     assert_eq!(send(&app, get(&thumb)).await.2, bytes);
+    let (s304, _, b304) = send(
+        &app,
+        Request::get(&thumb).header(header::IF_NONE_MATCH, &thumb_etag).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert!(b304.is_empty());
+    // Replacing the file on disk changes its ETag, so the old validator gets a fresh 200.
+    let disk_path = Path::new(&ds.path).join(&all.images[3].file);
+    image::RgbImage::from_pixel(64, 64, image::Rgb([12, 34, 56])).save(&disk_path).unwrap();
+    let (s200, h200, new_bytes) = send(
+        &app,
+        Request::get(&img_uri).header(header::IF_NONE_MATCH, &img_etag).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s200, StatusCode::OK);
+    assert_ne!(h200[header::ETAG].to_str().unwrap(), img_etag);
+    assert_ne!(new_bytes, img_bytes);
     // Thumbnails are never upscaled.
     let (_, _, big) = send(&app, get(&format!("/api/datasets/{}/images/{id}?thumb=2048", ds.id))).await;
     assert_eq!(image::load_from_memory(&big).unwrap().width(), 64);

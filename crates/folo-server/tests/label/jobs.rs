@@ -89,10 +89,20 @@ async fn upload_label_review_and_make_a_dataset() {
         .unwrap();
     err(app, no_parts, StatusCode::BAD_REQUEST, "invalid_body").await;
 
-    // Images and thumbnails are served.
+    // Images and thumbnails are served, with strong ETags and 304 revalidation.
     let first = &added.added[0].id;
-    let (status, bytes) = send(app, get(&format!("{uri}/images/{first}"))).await;
-    assert_eq!((status, bytes), (StatusCode::OK, png(0, 200, 100)));
+    let first_uri = format!("{uri}/images/{first}");
+    let res = tower::ServiceExt::oneshot(app.clone(), get(&first_uri)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let etag = res.headers()[header::ETAG].to_str().unwrap().to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"') && !etag.starts_with("W/"), "{etag}");
+    let bytes = http_body_util::BodyExt::collect(res.into_body()).await.unwrap().to_bytes().to_vec();
+    assert_eq!(bytes, png(0, 200, 100));
+    let (s304, b304) =
+        send(app, Request::get(&first_uri).header(header::IF_NONE_MATCH, &etag).body(Body::empty()).unwrap())
+            .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert!(b304.is_empty());
     let (status, thumb) = send(app, get(&format!("{uri}/images/{first}?thumb=64"))).await;
     assert_eq!(status, StatusCode::OK);
     let thumb = folo_data::decode(&thumb).unwrap();

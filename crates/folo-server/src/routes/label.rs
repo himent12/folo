@@ -4,7 +4,7 @@ use std::convert::Infallible;
 
 use axum::Json;
 use axum::extract::{FromRequest, Multipart, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use folo_api::{
@@ -20,7 +20,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
 
-use super::datasets::image_response;
+use super::datasets::serve_image;
 use super::inference::{field_err, is_multipart};
 use super::{
     DEFAULT_LIMIT, DEFAULT_LOG_LINES, KEEP_ALIVE, LogsParams, MAX_LIMIT, MAX_LOG_LINES, ThumbParams, blocking,
@@ -142,10 +142,10 @@ pub(super) async fn label_image(
     State(st): State<AppState>,
     ApiPath((id, image_id)): ApiPath<(String, String)>,
     ApiQuery(p): ApiQuery<ThumbParams>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let thumb = p.thumb.map(|t| t.clamp(16, 2048));
-    let img = blocking(&st, move |s| s.labeler()?.image(&id, &image_id, thumb)).await?;
-    Ok(image_response(img))
+    serve_image(&st, &headers, move |s| s.labeler()?.image(&id, &image_id, thumb)).await
 }
 
 pub(super) async fn update_label_image(
