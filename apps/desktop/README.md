@@ -22,10 +22,10 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | --- | --- |
 | `src/lib.rs` | `run`, the app: arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
 | `src/main.rs` | the `folo-desktop` binary: `fn main` calls `folo_desktop::run`, and the `bench-alloc` allocator |
-| `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data.rs`), a dataset card's first images (`previews.rs`: one small page per card, those with boxes first; a dataset's whole image list is read only when it is opened), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
+| `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data/`: core fetches, dataset paging, image queue, run streams), a dataset card's first images (`previews.rs`: one small page per card, those with boxes first; a dataset's whole image list is read only when it is opened), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
 | `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, plan and loops, an entry), `playground/`, `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
-| `src/controls/` | focusable controls, each an `impl FoloApp` method taking a stable key: buttons, segmented, tabs, chips and switches, slider, select, tooltip, scroll |
+| `src/controls/` | focusable controls, each an `impl FoloApp` method taking a stable key: buttons, segmented, tabs, chips and switches, slider, select, search, tooltip, scroll |
 | `src/ui/` | the app's stateless pieces: type, surfaces, badges and status, metrics, legends, number and text formatting, motion |
 | `src/charts/` | canvas charts: line (raw + smoothed, area, markers, hover cursor), sparkline, histogram |
 | `src/viz.rs` | images with detection boxes and label chips (the box spec of design/README.md) |
@@ -126,7 +126,7 @@ Each recipe names an existing example to copy.
   re-exports those types by name, so a new type goes into one of its `pub use folo_api::{…}` lists. Add the method
   to `Backend` (`src/api/mod.rs`), with a default that answers `not_supported` when only some servers have it;
   implement it on `HttpBackend` (`src/api/http/`, through `self.get` / `self.post`) and on `MockBackend`
-  (`src/api/mock/backend.rs`). A page calls it on the background executor with `FoloApp::fetch` (`src/app/data.rs`)
+  (`src/api/mock/backend.rs`). A page calls it on the background executor with `FoloApp::fetch` (`src/app/data/mod.rs`)
   and keeps the answer in a `Load<T>` (`src/store/mod.rs`).
   Example: `throughput`, loaded by `load_throughput` in `src/screens/settings/throughput.rs`.
 - **A control.** An `impl FoloApp` method in a file under `src/controls/` that builds a `Stateful<Div>` with the

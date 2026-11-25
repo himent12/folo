@@ -559,6 +559,7 @@ impl MockBackend {
             fail_instances: Default::default(),
             data_dir: None,
             broken: Default::default(),
+            revisions: Default::default(),
             clock,
         }
     }

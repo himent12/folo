@@ -7,6 +7,7 @@ mod focus;
 #[cfg(test)]
 mod key_tests;
 mod scroll;
+mod search;
 mod segmented;
 mod select;
 mod slider;

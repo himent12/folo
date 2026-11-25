@@ -230,6 +230,8 @@ impl FoloApp {
         self.deleted.insert(id.to_string(), name);
         self.store.dataset.remove(id);
         self.store.images.remove(id);
+        self.images_more.remove(id);
+        self.failed_pages.remove(id);
         self.store.previews.remove(id);
         self.store.issues.remove(id);
         self.issue_reads.remove(id);

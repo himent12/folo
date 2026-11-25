@@ -79,12 +79,12 @@ pub(crate) fn needs_token() -> ApiError {
 pub(super) fn status_error(status: u16) -> ApiError {
     match status {
         401 => needs_token(),
-        _ => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
+        _ => ApiError::new("http_error", format!("folo serve answered HTTP {status}")).with_status(status),
     }
 }
 
 /// FOLO's error JSON as an [`ApiError`], its words as sentences.
-pub(super) fn server_error(b: folo_api::ErrorBody) -> ApiError {
+pub(super) fn server_error(b: folo_api::ErrorBody, status: u16) -> ApiError {
     // `folo serve --token`: the server's words are for an HTTP client that can send one.
     if b.error.code == "unauthorized" {
         return needs_token();
@@ -93,6 +93,7 @@ pub(super) fn server_error(b: folo_api::ErrorBody) -> ApiError {
         code: b.error.code,
         message: sentence(&b.error.message),
         hint: b.error.hint.as_deref().map(sentence),
+        status: Some(status),
     }
 }
 
@@ -227,7 +228,7 @@ impl HttpBackend {
         if status >= 400 {
             let body: Option<folo_api::ErrorBody> = json(resp.body_mut(), BODY_LIMIT).ok();
             return Err(match body {
-                Some(b) => server_error(b),
+                Some(b) => server_error(b, status),
                 None => status_error(status),
             });
         }

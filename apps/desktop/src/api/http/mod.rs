@@ -91,7 +91,7 @@ impl Backend for HttpBackend {
         match body {
             Ok(Ok(h)) if h.status == "ok" => Ok(h),
             Ok(Ok(_)) => Err(self.not_folo(status)),
-            Ok(Err(b)) => Err(server_error(b)),
+            Ok(Err(b)) => Err(server_error(b, status)),
             // A body cut off midway was never read whole, so it has no shape to judge: as on any call.
             Err(ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed)
                 if status >= 400 =>

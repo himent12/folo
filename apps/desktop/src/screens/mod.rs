@@ -209,6 +209,8 @@ impl FoloApp {
         s.logs.clear();
         // Images that failed are asked for again (their few automatic retries may be spent).
         s.images_px.forget_failed();
+        self.images_more.clear();
+        self.failed_pages.clear();
         // The throughput table reloads too (a probe in flight keeps its own state), and the cloud.
         self.throughput = Load::Idle;
         self.clear_cloud();

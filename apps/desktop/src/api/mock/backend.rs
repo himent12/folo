@@ -118,7 +118,11 @@ impl Backend for MockBackend {
             if let Some((code, message)) = self.broken.lock().unwrap().get(id) {
                 return Err(ApiError::new(code, message.clone()));
             }
-            Ok(self.fixture(id)?.ds.clone())
+            let mut ds = self.fixture(id)?.ds.clone();
+            if let Some(rev) = self.revisions.lock().unwrap().get(id) {
+                ds.revision = Some(rev.clone());
+            }
+            Ok(ds)
         };
         // The answer as the dataset was when asked: a test may hold it past a later read.
         let r = read();
@@ -150,12 +154,16 @@ impl Backend for MockBackend {
         self.check()?;
         {
             let mut fail = self.fail_images_from.lock().unwrap();
-            if fail.is_some_and(|from| q.offset >= from) {
-                *fail = None;
-                return Err(ApiError::new(
-                    "server_unreachable",
-                    "Could not reach folo serve at 127.0.0.1:7878",
-                ));
+            if let Some((from, err, once)) = fail.as_ref()
+                && q.offset >= *from
+            {
+                let err = err.clone();
+                if *once {
+                    *fail = None;
+                }
+                drop(fail);
+                self.hold_point("images");
+                return Err(err);
             }
         }
         let f = self.fixture(id)?;
