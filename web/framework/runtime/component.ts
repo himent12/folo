@@ -20,6 +20,18 @@ type Source = AnyProps | (() => AnyProps | null | undefined) | null | undefined 
 
 /** Internal marker on reactive props proxies (`mergeProps`, `splitProps`, `defaults`). */
 export const PROXY = Symbol('fw.props');
+const DEEP = Symbol.for('fw.deep');
+
+function isProxy(o: AnyProps): boolean {
+  if (o[PROXY] || o[DEEP]) return true;
+  const proto = Object.getPrototypeOf(o);
+  return proto !== Object.prototype && proto !== null;
+}
+
+function setDataProp(target: AnyProps, key: PropertyKey, value: unknown): void {
+  if (key !== '__proto__') target[key as string] = value;
+  else Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+}
 
 function resolve(s: Source): AnyProps | null | undefined | false {
   return typeof s === 'function' ? s() : s;
@@ -31,8 +43,7 @@ function descriptor(obj: object, key: PropertyKey): PropertyDescriptor | undefin
 }
 
 /** A live descriptor for `src[key]`: a getter, and a setter only if `src` has one (a bound prop). */
-function live(src: AnyProps, key: PropertyKey): PropertyDescriptor {
-  const d = descriptor(src, key);
+function live(src: AnyProps, key: PropertyKey, d = descriptor(src, key)): PropertyDescriptor {
   return {
     configurable: true,
     enumerable: true,
@@ -109,7 +120,28 @@ export function splitProps<T extends object, K1 extends readonly (keyof T)[], K2
   keys2: K2,
 ): [Pick<T, K1[number]>, Pick<T, K2[number]>, Omit<T, K1[number] | K2[number]>];
 export function splitProps(props: AnyProps, ...lists: readonly PropertyKey[][]): AnyProps[] {
-  const excluded = new Set<PropertyKey>(lists.flat());
+  const excluded = new Set<PropertyKey>(lists.length === 1 ? lists[0] : lists.flat());
+  if (!isProxy(props)) {
+    const parts: AnyProps[] = lists.map((keys) => {
+      const part: AnyProps = {};
+      for (const key of keys) {
+        const d = descriptor(props, key);
+        if (d === undefined) setDataProp(part, key, undefined);
+        else if (d.get === undefined && d.set === undefined) setDataProp(part, key, d.value);
+        else Object.defineProperty(part, key, live(props, key, d));
+      }
+      return part;
+    });
+    const rest: AnyProps = {};
+    for (const key of Reflect.ownKeys(props)) {
+      if (key === MEMOS || excluded.has(key)) continue;
+      const d = descriptor(props, key)!;
+      if (d.get === undefined && d.set === undefined) setDataProp(rest, key, d.value);
+      else Object.defineProperty(rest, key, live(props, key, d));
+    }
+    parts.push(rest);
+    return parts;
+  }
   const parts: AnyProps[] = lists.map((keys) => {
     const part: AnyProps = {};
     for (const key of keys) Object.defineProperty(part, key, live(props, key));
@@ -136,6 +168,39 @@ type WithDefaults<T, D> = Omit<T, keyof D> & { [K in keyof D & keyof T]-?: Exclu
 export function defaults<T extends object, const D extends Partial<T>>(props: T, fallbacks: D): WithDefaults<T, D> {
   const p = props as AnyProps;
   const d = fallbacks as AnyProps;
+  if (!isProxy(p) && !isProxy(d)) {
+    const out: AnyProps = {};
+    for (const key of Reflect.ownKeys(p)) {
+      if (key === MEMOS) continue;
+      const dp = descriptor(p, key)!;
+      const hasFallback = Object.prototype.hasOwnProperty.call(d, key);
+      if (dp.get === undefined && dp.set === undefined) {
+        if (dp.value !== undefined || !hasFallback) setDataProp(out, key, dp.value);
+        else {
+          const dd = descriptor(d, key)!;
+          if (dd.get === undefined && dd.set === undefined) setDataProp(out, key, dd.value);
+          else Object.defineProperty(out, key, { configurable: true, enumerable: true, get: () => d[key as string] });
+        }
+      } else if (hasFallback) {
+        Object.defineProperty(out, key, {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            const v = p[key as string];
+            return v === undefined ? d[key as string] : v;
+          },
+          set: dp.set ? (v: unknown) => (p[key as string] = v) : undefined,
+        });
+      } else Object.defineProperty(out, key, live(p, key, dp));
+    }
+    for (const key of Reflect.ownKeys(d)) {
+      if (key === MEMOS || Object.prototype.hasOwnProperty.call(p, key)) continue;
+      const dd = descriptor(d, key)!;
+      if (dd.get === undefined && dd.set === undefined) setDataProp(out, key, dd.value);
+      else Object.defineProperty(out, key, { configurable: true, enumerable: true, get: () => d[key as string] });
+    }
+    return out as WithDefaults<T, D>;
+  }
   const read = (key: PropertyKey) => {
     const v = p[key as string];
     return v === undefined && key in d ? d[key as string] : v;
