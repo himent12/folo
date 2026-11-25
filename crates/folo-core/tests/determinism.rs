@@ -269,3 +269,36 @@ fn transpose_and_cat_are_bitwise_reproducible() {
         ]
     });
 }
+
+#[test]
+fn depthwise_s1_s2_and_strided_conv_are_bitwise_reproducible() {
+    use folo_core::{Conv2dParams, UnaryOp};
+    let mut rng = Rng::seed(20);
+    let x = Tensor::randn([2, 32, 41, 43], 0.0, 1.0, &mut rng).requires_grad_();
+    let w3 = Tensor::randn([32, 1, 3, 3], 0.0, 0.3, &mut rng).requires_grad_();
+    let w5 = Tensor::randn([32, 1, 5, 5], 0.0, 0.2, &mut rng).requires_grad_();
+    let b = Tensor::randn([32], 0.0, 0.1, &mut rng);
+    let g_s1 = Tensor::randn([2, 32, 41, 43], 0.0, 1.0, &mut rng);
+    let g_s2 = Tensor::randn([2, 32, 21, 22], 0.0, 1.0, &mut rng);
+    let p_s1 = Conv2dParams { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 32 };
+    let p_s2 = Conv2dParams { stride: [2, 2], padding: [1, 1], dilation: [1, 1], groups: 32 };
+    let p5_s2 = Conv2dParams { stride: [2, 2], padding: [2, 2], dilation: [1, 1], groups: 32 };
+    assert_reproducible("depthwise_s1_s2", &|| {
+        let y1_relu = x.detach().conv2d_act(&w3.detach(), Some(&b), &p_s1, Some(UnaryOp::Relu)).unwrap();
+        let y2_silu = x.detach().conv2d_act(&w3.detach(), Some(&b), &p_s2, Some(UnaryOp::Silu)).unwrap();
+        let y5_s2 = x.detach().conv2d_act(&w5.detach(), Some(&b), &p5_s2, Some(UnaryOp::Relu)).unwrap();
+        let y1 = x.conv2d(&w3, None, 1, 1, 1, 32).unwrap();
+        let gr1 = y1.backward_with(&g_s1).unwrap();
+        let y2 = x.conv2d(&w3, None, 2, 1, 1, 32).unwrap();
+        let gr2 = y2.backward_with(&g_s2).unwrap();
+        vec![
+            y1_relu,
+            y2_silu,
+            y5_s2,
+            gr1.get(&x).unwrap().clone(),
+            gr1.get(&w3).unwrap().clone(),
+            gr2.get(&x).unwrap().clone(),
+            gr2.get(&w3).unwrap().clone(),
+        ]
+    });
+}
