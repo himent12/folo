@@ -168,3 +168,19 @@ fn softmax_and_backward_are_bitwise_reproducible() {
         vec![s1, ls1, s2, ls2, s3, ls3, gs1, gls1, gs2, gls2, gs3, gls3]
     });
 }
+
+#[test]
+fn avg_pool_and_upsample2x2_are_bitwise_reproducible() {
+    let mut rng = Rng::seed(16);
+    let x = Tensor::randn([4, 32, 37, 41], 0.0, 1.0, &mut rng).requires_grad_();
+    let g_avg = Tensor::randn([4, 32, 18, 20], 0.0, 1.0, &mut rng);
+    let g_up = Tensor::randn([4, 32, 74, 82], 0.0, 1.0, &mut rng);
+    assert_reproducible("avg_pool_upsample", &|| {
+        let a2 = x.avg_pool2d(2, 2, 0).unwrap();
+        let a3 = x.avg_pool2d(3, 1, 1).unwrap();
+        let u2 = x.upsample_nearest2d(2).unwrap();
+        let ga2 = a2.backward_with(&g_avg).unwrap().get(&x).unwrap().clone();
+        let gu2 = u2.backward_with(&g_up).unwrap().get(&x).unwrap().clone();
+        vec![a2, a3, u2, ga2, gu2]
+    });
+}

@@ -1,0 +1,202 @@
+use super::*;
+
+/// The direct window scan the separable kernel must reproduce, argmax included.
+fn direct(x: &[f32], (np, h, w): Planes, p: &Pool2dParams, [oh, ow]: [usize; 2]) -> (Vec<f32>, Vec<i64>) {
+    let (mut v, mut ix) = (Vec::new(), Vec::new());
+    for pl in 0..np {
+        for oy in 0..oh {
+            for ox in 0..ow {
+                let (mut best, mut bi) = (f32::NEG_INFINITY, -1i64);
+                for ky in 0..p.kernel[0] {
+                    for kx in 0..p.kernel[1] {
+                        let yy = (oy * p.stride[0] + ky) as isize - p.padding[0] as isize;
+                        let xx = (ox * p.stride[1] + kx) as isize - p.padding[1] as isize;
+                        if yy < 0 || xx < 0 || yy >= h as isize || xx >= w as isize {
+                            continue;
+                        }
+                        let i = yy as usize * w + xx as usize;
+                        if beats(x[pl * h * w + i], best, bi) {
+                            best = x[pl * h * w + i];
+                            bi = i as i64;
+                        }
+                    }
+                }
+                v.push(best);
+                ix.push(bi.max(0));
+            }
+        }
+    }
+    (v, ix)
+}
+
+#[test]
+fn separable_max_pool_matches_direct_scan_with_ties_and_nans() {
+    // Few distinct values, so most windows have tied maxima; a sprinkling of NaNs.
+    let (np, h, w) = (3, 11, 9);
+    let x: Vec<f32> =
+        (0..np * h * w).map(|i| if i % 37 == 5 { f32::NAN } else { ((i * 7919) % 5) as f32 }).collect();
+    for (k, s, pad) in [([5, 5], [1, 1], [2, 2]), ([3, 2], [2, 1], [1, 1]), ([2, 3], [2, 3], [0, 1])] {
+        let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+        let ohw = p.output_hw(h, w).unwrap();
+        let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+        let (wv, wix) = direct(&x, (np, h, w), &p, ohw);
+        assert_eq!(ix, wix, "{p:?}");
+        for (a, b) in v.iter().zip(&wv) {
+            assert!(a == b || a.is_nan() && b.is_nan(), "{p:?}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn max_pool_values_are_the_indexed_values_bit_for_bit() {
+    // Ties between -0.0 and +0.0, NaNs with distinct payloads, -inf (whole windows of it), and planes
+    // narrower or shorter than the window.
+    let special = [0.0f32, -0.0, f32::NEG_INFINITY, f32::from_bits(0x7fc0_0001), f32::from_bits(0xffc0_0002)];
+    for (np, h, w) in [(3, 11, 9), (2, 2, 3), (5, 1, 1), (17, 20, 20)] {
+        let x: Vec<f32> = (0..np * h * w)
+            .map(|i| match (i * 2654435761) % 11 {
+                k @ 0..=4 => special[k],
+                k => (k as f32 - 7.0) * 0.5,
+            })
+            .collect();
+        for (k, s, pad) in [
+            ([5, 5], [1, 1], [2, 2]),
+            ([3, 2], [2, 1], [1, 1]),
+            ([2, 3], [2, 3], [0, 1]),
+            ([1, 1], [1, 1], [0, 0]),
+            ([3, 3], [3, 2], [1, 0]),
+        ] {
+            let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+            let Some(ohw) = p.output_hw(h, w) else { continue };
+            let (v, _) = max_pool2d(&x, (np, h, w), &p, ohw);
+            let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&fast), bits(&v), "{np}x{h}x{w} {p:?}");
+        }
+    }
+}
+
+/// Windows far larger than the plane (up to `usize::MAX` wide, padding half of it) and empty planes: both
+/// paths give the direct scan's values without materialising the padding, and write every output.
+#[test]
+fn max_pool_with_huge_windows_or_empty_planes() {
+    let big = |k: usize| Pool2dParams { kernel: [k, 1], stride: [1, 1], padding: [k / 2, 0] };
+    let cases = [
+        ((1, 1, 1), big(isize::MAX as usize)),
+        ((1, 1, 1), big(usize::MAX)),
+        ((2, 3, 4), Pool2dParams { kernel: [41, 5], stride: [7, 1], padding: [20, 2] }),
+        ((2, 0, 3), Pool2dParams { kernel: [2, 1], stride: [1, 1], padding: [1, 0] }),
+        ((2, 3, 0), Pool2dParams { kernel: [1, 4], stride: [1, 2], padding: [0, 2] }),
+    ];
+    for ((np, h, w), p) in cases {
+        let x: Vec<f32> = (0..np * h * w).map(|i| (i * 7 % 5) as f32 - 1.5).collect();
+        let ohw = p.output_hw(h, w).unwrap();
+        let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+        let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+        // A 1x1 plane under a window too wide to scan directly is its own maximum.
+        let (wv, wix) =
+            if p.kernel[0] > 1 << 20 { (x.clone(), vec![0; np]) } else { direct(&x, (np, h, w), &p, ohw) };
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&v), bits(&wv), "{np}x{h}x{w} {p:?}");
+        assert_eq!(bits(&fast), bits(&wv), "{np}x{h}x{w} {p:?}");
+        assert_eq!(ix, wix, "{np}x{h}x{w} {p:?}");
+    }
+}
+
+#[test]
+fn separable_avg_pool_and_backward_match_direct_including_edges() {
+    for (np, h, w) in [(3, 19, 23), (2, 16, 16), (4, 1, 1), (2, 0, 3)] {
+        let x: Vec<f32> = (0..np * h * w).map(|i| ((i as f32 * 0.37).sin()) * 3.0).collect();
+        for (k, s, pad) in [
+            ([2, 2], [2, 2], [0, 0]),
+            ([3, 3], [1, 1], [1, 1]),
+            ([5, 5], [1, 1], [2, 2]),
+            ([3, 2], [2, 3], [1, 1]),
+            ([41, 5], [7, 1], [20, 2]),
+        ] {
+            let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+            let Some([oh, ow]) = p.output_hw(h, w) else { continue };
+            let got = avg_pool2d(&x, (np, h, w), &p, [oh, ow]);
+            let inv = 1.0 / (k[0] * k[1]) as f64;
+            for pl in 0..np {
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let mut sum = 0.0f64;
+                        for ky in 0..k[0] {
+                            for kx in 0..k[1] {
+                                let yy = (oy * s[0] + ky) as isize - pad[0] as isize;
+                                let xx = (ox * s[1] + kx) as isize - pad[1] as isize;
+                                if yy >= 0 && xx >= 0 && yy < h as isize && xx < w as isize {
+                                    sum += x[(pl * h + yy as usize) * w + xx as usize] as f64;
+                                }
+                            }
+                        }
+                        let want = (sum * inv) as f32;
+                        let g = got[(pl * oh + oy) * ow + ox];
+                        assert!(
+                            (g - want).abs() <= 1e-5 * (1.0 + want.abs()),
+                            "{np}x{h}x{w} {p:?}: {g} vs {want}"
+                        );
+                    }
+                }
+            }
+            let gy: Vec<f32> = (0..np * oh * ow).map(|i| ((i as f32 * 0.19).cos()) * 2.0).collect();
+            let gx = avg_pool2d_backward(&gy, (np, h, w), &p, [oh, ow]);
+            let mut ref_gx = vec![0.0f64; np * h * w];
+            for pl in 0..np {
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let v = gy[(pl * oh + oy) * ow + ox] as f64 * inv;
+                        for ky in 0..k[0] {
+                            for kx in 0..k[1] {
+                                let yy = (oy * s[0] + ky) as isize - pad[0] as isize;
+                                let xx = (ox * s[1] + kx) as isize - pad[1] as isize;
+                                if yy >= 0 && xx >= 0 && yy < h as isize && xx < w as isize {
+                                    ref_gx[(pl * h + yy as usize) * w + xx as usize] += v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (i, (&a, &b)) in gx.iter().zip(&ref_gx).enumerate() {
+                assert!(
+                    (a as f64 - b).abs() <= 1e-5 * (1.0 + b.abs()),
+                    "bwd {np}x{h}x{w} {p:?} [{i}]: {a} vs {b}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn upsample2x2_forward_and_backward_match_reference_bit_for_bit() {
+    // Exercises AVX2 8-wide chunks + ragged tails (widths 1, 7, 8, 9, 19, 37) and parallel batching.
+    for (np, h, w) in [(2, 5, 1), (3, 7, 7), (4, 8, 8), (3, 9, 19), (64, 21, 37)] {
+        let x: Vec<f32> = (0..np * h * w).map(|i| ((i as f32 * 0.29).sin()) * 4.0).collect();
+        let up = upsample_nearest2d(&x, (np, h, w), [2, 2]);
+        let (oh, ow) = (2 * h, 2 * w);
+        for pl in 0..np {
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let got = up[(pl * oh + oy) * ow + ox];
+                    let want = x[(pl * h + oy / 2) * w + ox / 2];
+                    assert_eq!(got.to_bits(), want.to_bits(), "up {np}x{h}x{w} ({pl},{oy},{ox})");
+                }
+            }
+        }
+        let gy: Vec<f32> = (0..np * oh * ow).map(|i| ((i as f32 * 0.43).cos()) * 2.5).collect();
+        let gx = upsample_nearest2d_backward(&gy, (np, h, w), [2, 2]);
+        for pl in 0..np {
+            for y in 0..h {
+                for x0 in 0..w {
+                    let r0 = &gy[(pl * oh + 2 * y) * ow..];
+                    let r1 = &gy[(pl * oh + 2 * y + 1) * ow..];
+                    let want = (r0[2 * x0] + r0[2 * x0 + 1]) + (r1[2 * x0] + r1[2 * x0 + 1]);
+                    let got = gx[(pl * h + y) * w + x0];
+                    assert_eq!(got.to_bits(), want.to_bits(), "up_bwd {np}x{h}x{w} ({pl},{y},{x0})");
+                }
+            }
+        }
+    }
+}
