@@ -353,7 +353,7 @@ impl GpuTensor {
             shape.remove(dim);
         }
         let out = Self::empty(&self.ctx, &shape, DType::F32)?;
-        reduce::reduce(&self.ctx, op, self.raw(), out.raw(), outer, r, inner)?;
+        reduce::reduce_split(&self.ctx, op, self.raw(), out.raw(), outer, r, inner, DType::F32)?;
         Ok(out)
     }
 

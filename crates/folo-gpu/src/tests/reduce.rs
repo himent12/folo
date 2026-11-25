@@ -221,3 +221,65 @@ fn optim_norm_partials_and_unscale_subgroups_match_portable() {
         }
     }
 }
+
+#[test]
+fn reduce_split_ceil_div_and_mean_match_cpu() {
+    use crate::DType;
+    use crate::kernels::reduce::reduce_split;
+
+    let ctx = gpu!();
+    let mut rng = Rng::new(71);
+    // Prime / non-divisible `r >= 8192` across both `inner == 1` (rows) and `inner > 1` (cols), all 4 ops.
+    for &(outer, r, inner) in &[(2usize, 8193usize, 1usize), (1, 10007, 1), (2, 8193, 5), (2, 10007, 70)] {
+        let shape = [outer, r, inner];
+        let x = rng.vec(outer * r * inner, -2.0, 2.0);
+        let bx = ctx.upload(bytemuck::cast_slice(&x)).unwrap();
+        for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+            let want = cpu_reduce(op, &x, &shape, 1);
+            let by = ctx.alloc((outer * inner * 4) as u64).unwrap();
+            reduce_split(&ctx, op, bx.raw(), by.raw(), outer, r, inner, DType::F32).unwrap();
+            let got: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(by.raw(), 0, (outer * inner * 4) as u64).unwrap());
+            let atol = if op == ReduceOp::Sum { 2e-3 } else { 1e-4 };
+            assert_close(&got, &want, atol, 1e-4, &format!("reduce_split {op:?} {shape:?}"));
+        }
+        // NaN placed in the final element of the ragged last split chunk must propagate for all 4 ops.
+        let mut x_nan = x.clone();
+        let last_idx = ((outer - 1) * r + (r - 1)) * inner + (inner - 1);
+        x_nan[last_idx] = f32::NAN;
+        let bx_nan = ctx.upload(bytemuck::cast_slice(&x_nan)).unwrap();
+        for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+            let by = ctx.alloc((outer * inner * 4) as u64).unwrap();
+            reduce_split(&ctx, op, bx_nan.raw(), by.raw(), outer, r, inner, DType::F32).unwrap();
+            let got: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(by.raw(), 0, (outer * inner * 4) as u64).unwrap());
+            assert!(got[outer * inner - 1].is_nan(), "reduce_split {op:?} {shape:?} missed tail NaN");
+            if outer * inner > 1 {
+                assert!(got[0].is_finite(), "reduce_split {op:?} {shape:?} leaked NaN to output 0");
+            }
+        }
+    }
+    // F16 storage round-trip on prime-r rows & cols (Sum, Mean, Max, Min) when shader-f16 is supported.
+    if ctx.caps().shader_f16 {
+        for &(outer, r, inner) in &[(2usize, 8193usize, 1usize), (2, 8193, 5)] {
+            let shape = [outer, r, inner];
+            let x_raw = rng.vec(outer * r * inner, -1.0, 1.0);
+            let x_h: Vec<half::f16> = x_raw.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let x_f: Vec<f32> = x_h.iter().map(|v| v.to_f32()).collect();
+            let x_bytes: Vec<u8> = x_h.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let bx = ctx.upload(&x_bytes).unwrap();
+            for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+                let want: Vec<f32> = cpu_reduce(op, &x_f, &shape, 1)
+                    .into_iter()
+                    .map(|v| half::f16::from_f32(v).to_f32())
+                    .collect();
+                let by = ctx.alloc(DType::F16.bytes(outer * inner)).unwrap();
+                reduce_split(&ctx, op, bx.raw(), by.raw(), outer, r, inner, DType::F16).unwrap();
+                let raw = ctx.read(by.raw(), 0, DType::F16.bytes(outer * inner)).unwrap();
+                let got: Vec<f32> =
+                    raw.as_chunks::<2>().0.iter().map(|&c| half::f16::from_le_bytes(c).to_f32()).collect();
+                assert_close(&got, &want, 2e-2, 5e-3, &format!("reduce_split f16 {op:?} {shape:?}"));
+            }
+        }
+    }
+}
