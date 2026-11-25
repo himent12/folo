@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { flush as flushSync, tick } from 'fw';
+import { flush as flushSync, signal, tick } from 'fw';
 import { render } from '../../../framework/testing';
 import Menu, { type MenuProps } from './Menu';
 
@@ -39,6 +39,71 @@ describe('Menu', () => {
     await tick();
     target.querySelector('[role="menu"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     flushSync();
+    expect(target.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    unmount(c);
+    target.remove();
+  });
+
+  it('supports visible trigger text, blocks opening when disabled, and closes if disabled while open', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const disabled = signal(true);
+    const run = vi.fn();
+    const c = render(
+      () => <Menu label="Export benchmarks" text="Export" disabled={disabled.get()} items={[{ label: 'Export CSV', onclick: run }]} />,
+      target,
+    );
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    expect(trigger.textContent?.trim()).toBe('Export');
+    expect(trigger.classList.contains('square')).toBe(false);
+    expect(trigger.disabled).toBe(true);
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('[role="menu"]')).toBeNull();
+
+    disabled.set(false);
+    flushSync();
+    trigger.click();
+    flushSync();
+    await tick();
+    expect(target.querySelector('[role="menu"]')).not.toBeNull();
+
+    disabled.set(true);
+    flushSync();
+    expect(target.querySelector('[role="menu"]')).toBeNull();
+    unmount(c);
+    target.remove();
+  });
+
+  it('recovers keyboard focus when focused items disappear while open, and closes back to trigger if emptied', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const items = signal([
+      { label: 'Edit', onclick: () => {} },
+      { label: 'Export CSV', onclick: () => {} },
+      { label: 'Export JSON', onclick: () => {} },
+    ]);
+    const c = render(() => <Menu label="More benchmark actions" items={items.get()} />, target);
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    trigger.click();
+    flushSync();
+    await tick();
+    const menuItems = () => [...target.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    menuItems()[2]!.focus();
+    expect(document.activeElement).toBe(menuItems()[2]);
+
+    // Removing the focused export items moves focus to the remaining item instead of stranding on document.body.
+    items.set([{ label: 'Edit', onclick: () => {} }]);
+    flushSync();
+    await tick();
+    expect(target.querySelector('[role="menu"]')).not.toBeNull();
+    expect(document.activeElement).toBe(menuItems()[0]);
+
+    // Emptying all items closes the menu and restores focus to the trigger.
+    items.set([]);
+    flushSync();
+    await tick();
     expect(target.querySelector('[role="menu"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
     unmount(c);
@@ -126,6 +191,8 @@ describe('Menu on a phone', () => {
     document.body.appendChild(target);
     const run = vi.fn();
     const c = mount(Menu, { target, props: { label: 'More run actions', items: [{ label: 'Remove from queue', onclick: run }] } });
+    // Closed phone menu does not leave an inert [role="menu"] in the DOM.
+    expect(target.querySelector('[role="menu"]')).toBeNull();
     const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
     trigger.click();
     flushSync();

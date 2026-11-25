@@ -2,9 +2,10 @@
 // imported files in groups of their own). Each comparable group is ranked on its own; the published, imported and
 // unknown-split groups are not ranked. The parts are in ./models/.
 import Box from '$icons/box';
+import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, For, MediaQuery, signal } from 'fw';
+import { computed, css, effect, For, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
@@ -18,11 +19,14 @@ import Page from '$lib/shell/Page';
 import PhoneSections from '$lib/shell/PhoneSections';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { watched } from '$lib/shell/runList';
+import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
+import { modelsExport } from './models/export';
 import Versus from './models/Versus';
 import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
@@ -270,6 +274,52 @@ export default function Models() {
       </span>
     ) : null;
 
+  const canExport = computed(() => !!models.data && shownCount.get() > 0);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = dsFilter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    const all = models.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shownCount.get();
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'model' : 'models'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'model' : 'models'}.`;
+  });
+  function exportList(format: 'csv' | 'json') {
+    const list = groups.peek();
+    const total = list.reduce((a, g) => a + g.rows.length, 0);
+    if (!total) return;
+    const payload = modelsExport(list, best.peek().marks, sourceName);
+    const ok =
+      format === 'csv'
+        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+        : exportTableJson(payload.filenameBase, payload.json);
+    if (ok) announce(`Exported ${total} ${total === 1 ? 'model' : 'models'} as ${format.toUpperCase()}.`);
+  }
+  const exportItems: MenuItem[] = [
+    { label: 'Export CSV', icon: Download, onclick: () => exportList('csv') },
+    { label: 'Export JSON', icon: Download, onclick: () => exportList('json') },
+  ];
+  function clearFilters() {
+    dsFilter.set('all');
+    query.set('');
+    announce('Cleared model filters.');
+    queueMicrotask(() => searchEl.peek()?.focus());
+  }
+
   return (
     <Page
       title="Models"
@@ -277,6 +327,7 @@ export default function Models() {
       sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
       // Phones: one line, so the list starts 16 px under it.
       subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+      actions={canExport.get() ? () => <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export models" items={exportItems} /> : undefined}
     >
       {/* The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
           own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or
@@ -326,7 +377,7 @@ export default function Models() {
           )}
         </div>{' '}
         <div class="lt-search">
-          <Input bind:value={query} icon={Search} placeholder="Filter by name, architecture or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
+          <Input bind:el={searchEl} bind:value={query} icon={Search} placeholder="Filter by name, architecture or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
         </div>
       </div>{' '}
       <Panel pad="none">
@@ -456,13 +507,7 @@ export default function Models() {
                     title="No models match"
                     description="Try another dataset or search term."
                     actions={() => (
-                      <Button
-                        size="sm"
-                        onclick={() => {
-                          dsFilter.set('all');
-                          query.set('');
-                        }}
-                      >
+                      <Button size="sm" onclick={clearFilters}>
                         Clear filters
                       </Button>
                     )}
@@ -560,6 +605,12 @@ export default function Models() {
           {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>
       ) : null}{' '}
+      <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+        {filterStatus.get()}
+      </p>{' '}
+      <p class="sr-only" role="status" aria-live="polite" data-live-note>
+        {liveNote.get()}
+      </p>{' '}
       {/* Only with models to look at. The engine comparison is reference: one line until it is asked for. */}
       {models.data?.length ? (
         <details class="bench">

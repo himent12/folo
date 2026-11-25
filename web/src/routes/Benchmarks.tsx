@@ -1,5 +1,6 @@
 // The Benchmarks list (`#/benchmarks`): the server's vision benchmarks, filtered by source or by what is running, and
 // the New benchmark dialog (`?new=1`). The parts are in ./bench/.
+import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';
@@ -14,11 +15,13 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import PhoneSections from '$lib/shell/PhoneSections';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
@@ -30,6 +33,7 @@ import SortHeader from '$lib/ui/SortHeader';
 import StatusBadge from '$lib/ui/StatusBadge';
 import TableState from '$lib/ui/TableState';
 import { tooltip } from '$lib/ui/tooltip';
+import { benchmarksExport } from './bench/export';
 import NewBenchDialog from './bench/NewBenchDialog';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
@@ -146,8 +150,53 @@ export default function Benchmarks() {
   const offline = computed(() => !benches.data && isOffline(benches.error));
   const hasData = computed(() => (benches.data ? benches.data.length > 0 : !benches.error));
   const hasRows = computed(() => (benches.data ? shown.get().length > 0 : !benches.error));
+  const canExport = computed(() => !unavailable.get() && !!benches.data && shown.get().length > 0);
   const phone = new MediaQuery(media.phone, false);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const liveNote = signal('');
+  function announce(message: string) {
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => liveNote.set(message));
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const hasFiltered = signal(false);
+  effect(() => {
+    const active = filter.get() !== 'all' || query.get().trim().length > 0;
+    if (active && !hasFiltered.peek()) hasFiltered.set(true);
+  });
+  const filterStatus = computed(() => {
+    const all = benches.data;
+    if (!all || !hasFiltered.get()) return '';
+    const n = shown.get().length;
+    return n < all.length
+      ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'benchmark' : 'benchmarks'}.`
+      : `Showing all ${all.length} ${all.length === 1 ? 'benchmark' : 'benchmarks'}.`;
+  });
   const open = (b: Bench) => router.go(`/benchmarks/${b.id}`);
+
+  function exportList(format: 'csv' | 'json') {
+    const list = shown.peek();
+    if (!list.length) return;
+    const payload = benchmarksExport(list);
+    const ok =
+      format === 'csv'
+        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+        : exportTableJson(payload.filenameBase, payload.json);
+    if (ok) announce(`Exported ${list.length} ${list.length === 1 ? 'benchmark' : 'benchmarks'} as ${format.toUpperCase()}.`);
+  }
+  const exportItems: MenuItem[] = [
+    { label: 'Export CSV', icon: Download, onclick: () => exportList('csv') },
+    { label: 'Export JSON', icon: Download, onclick: () => exportList('json') },
+  ];
+  function clearFilters() {
+    query.set('');
+    filter.set('all');
+    announce('Cleared benchmark filters.');
+    queueMicrotask(() => searchEl.peek()?.focus());
+  }
 
   return (
     <>
@@ -159,6 +208,9 @@ export default function Benchmarks() {
         subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
+            {canExport.get() ? (
+              <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export benchmarks" items={exportItems} />
+            ) : null}
             {!unavailable.get() ? (
               <Gate reason={offline.get() ? OFFLINE_REASON : null}>
                 {(why) => (
@@ -198,6 +250,7 @@ export default function Benchmarks() {
               </div>{' '}
               <div class="lt-search">
                 <Input
+                  bind:el={searchEl}
                   bind:value={query}
                   icon={Search}
                   placeholder="Filter by name, source or class"
@@ -312,7 +365,7 @@ export default function Benchmarks() {
                           title="No benchmarks match"
                           description="Try another source or search term."
                           actions={() => (
-                            <Button size="sm" onclick={() => (query.set(''), filter.set('all'))}>
+                            <Button size="sm" onclick={clearFilters}>
                               Clear filters
                             </Button>
                           )}
@@ -397,6 +450,12 @@ export default function Benchmarks() {
                 {shown.get().length} of {benches.data.length} {benches.data.length === 1 ? 'benchmark' : 'benchmarks'}
               </p>
             ) : null}
+            <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+              {filterStatus.get()}
+            </p>
+            <p class="sr-only" role="status" aria-live="polite" data-live-note>
+              {liveNote.get()}
+            </p>
           </>
         )}
       </Page>{' '}
