@@ -22,6 +22,7 @@ export const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.5;
 const DBLCLICK_ZOOM = 2;
 const CLICK_SLOP = 4;
+const CLIP_FALLBACK_MS = 220;
 
 /** Clamps a center-relative pan offset so the zoomed canvas never pulls away from the stage edge. */
 export function clampPan(offset: number, size: number, scale: number): number {
@@ -42,10 +43,12 @@ export function zoomToward(
   const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.z * factor));
   if (nz <= 1.001) return { z: 1, tx: 0, ty: 0 };
   if (width <= 0 || height <= 0) return { z: nz, tx: 0, ty: 0 };
+  const curTx = clampPan(current.tx, width, current.z);
+  const curTy = clampPan(current.ty, height, current.z);
   const dx = px - width / 2;
   const dy = py - height / 2;
-  const ux = (dx - current.tx) / current.z;
-  const uy = (dy - current.ty) / current.z;
+  const ux = (dx - curTx) / current.z;
+  const uy = (dy - curTy) / current.z;
   return {
     z: nz,
     tx: clampPan(dx - ux * nz, width, nz),
@@ -62,6 +65,8 @@ export default function ZoomStage(props: ZoomStageProps) {
   const ty = signal(0);
   const glide = signal(false);
   const panning = signal(false);
+  /** Keeps overflow clipped during the eased return transition back to Fit so scaled content never flashes outside. */
+  const clipping = signal(false);
 
   const zoomed = computed(() => z.get() > 1.001);
   const zoomLabel = computed(() => (zoomed.get() ? `${Math.round(z.get() * 100)}%` : 'Fit'));
@@ -74,8 +79,10 @@ export default function ZoomStage(props: ZoomStageProps) {
   });
 
   let drag: { id: number; x: number; y: number; startTx: number; startTy: number; moved: boolean; captured: boolean } | null = null;
+  let windowDragCleanup: (() => void) | null = null;
   let suppressClick = false;
   let suppressTimer: ReturnType<typeof setTimeout> | undefined;
+  let clipTimer: ReturnType<typeof setTimeout> | undefined;
 
   function clearSuppress() {
     suppressClick = false;
@@ -85,8 +92,41 @@ export default function ZoomStage(props: ZoomStageProps) {
     }
   }
 
+  function clearClipTimer() {
+    if (clipTimer !== undefined) {
+      clearTimeout(clipTimer);
+      clipTimer = undefined;
+    }
+  }
+
+  function detachWindowDrag() {
+    windowDragCleanup?.();
+    windowDragCleanup = null;
+  }
+
+  function releaseDragCapture(pointerId: number) {
+    try {
+      viewport.peek()?.releasePointerCapture?.(pointerId);
+    } catch {
+      // Ignore if capture was already released.
+    }
+  }
+
+  function armReturnClip() {
+    clearClipTimer();
+    clipping.set(true);
+    clipTimer = setTimeout(() => {
+      clipTimer = undefined;
+      clipping.set(false);
+    }, CLIP_FALLBACK_MS);
+  }
+
   onCleanup(() => {
     clearSuppress();
+    clearClipTimer();
+    detachWindowDrag();
+    if (drag?.captured) releaseDragCapture(drag.id);
+    drag = null;
   });
 
   function stageSize(): { width: number; height: number; left: number; top: number } {
@@ -100,8 +140,17 @@ export default function ZoomStage(props: ZoomStageProps) {
   }
 
   function reset(eased = true) {
+    if (drag?.captured) releaseDragCapture(drag.id);
     drag = null;
+    detachWindowDrag();
     panning.set(false);
+    const wasZoomed = z.peek() > 1.001;
+    if (eased && wasZoomed) {
+      armReturnClip();
+    } else {
+      clearClipTimer();
+      clipping.set(false);
+    }
     glide.set(eased);
     z.set(1);
     tx.set(0);
@@ -110,9 +159,27 @@ export default function ZoomStage(props: ZoomStageProps) {
 
   function zoomAt(factor: number, px?: number, py?: number, eased = true) {
     const { width, height } = stageSize();
+    const scale = z.peek();
     const ax = px ?? width / 2;
     const ay = py ?? height / 2;
-    const next = zoomToward({ z: z.peek(), tx: tx.peek(), ty: ty.peek() }, factor, ax, ay, width, height);
+    const next = zoomToward(
+      { z: scale, tx: clampPan(tx.peek(), width, scale), ty: clampPan(ty.peek(), height, scale) },
+      factor,
+      ax,
+      ay,
+      width,
+      height,
+    );
+    if (next.z <= 1.001) {
+      if (eased && scale > 1.001) armReturnClip();
+      else {
+        clearClipTimer();
+        clipping.set(false);
+      }
+    } else {
+      clearClipTimer();
+      clipping.set(false);
+    }
     glide.set(eased);
     z.set(next.z);
     tx.set(next.tx);
@@ -127,6 +194,11 @@ export default function ZoomStage(props: ZoomStageProps) {
       const r = el.getBoundingClientRect();
       if (r.width > 0) vw.set(r.width);
       if (r.height > 0) vh.set(r.height);
+      const scale = z.peek();
+      if (scale > 1.001) {
+        tx.set(clampPan(tx.peek(), vw.peek(), scale));
+        ty.set(clampPan(ty.peek(), vh.peek(), scale));
+      }
     };
     sync();
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync);
@@ -151,6 +223,7 @@ export default function ZoomStage(props: ZoomStageProps) {
     const el = viewport.get();
     if (!el) return;
     const onwheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return;
       if (e.target instanceof Element && e.target.closest('.zoom-hud')) return;
       if (!e.ctrlKey && z.peek() <= 1.001 && e.deltaY > 0) return;
       e.preventDefault();
@@ -173,8 +246,23 @@ export default function ZoomStage(props: ZoomStageProps) {
     };
   });
 
+  function finishDrag(e: PointerEvent) {
+    if (!drag || drag.id !== e.pointerId) return;
+    const moved = drag.moved;
+    const captured = drag.captured;
+    drag = null;
+    detachWindowDrag();
+    panning.set(false);
+    if (captured) releaseDragCapture(e.pointerId);
+    if (moved) {
+      clearSuppress();
+      suppressClick = true;
+      suppressTimer = setTimeout(clearSuppress, 0);
+    }
+  }
+
   function onpointerdown(e: PointerEvent) {
-    if (e.button !== 0 || z.peek() <= 1.001) return;
+    if (drag || e.button !== 0 || z.peek() <= 1.001) return;
     if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
     const { width, height } = stageSize();
     const scale = z.peek();
@@ -187,10 +275,21 @@ export default function ZoomStage(props: ZoomStageProps) {
       moved: false,
       captured: false,
     };
+    detachWindowDrag();
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+    windowDragCleanup = () => {
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+    };
   }
 
   function onpointermove(e: PointerEvent) {
     if (!drag || drag.id !== e.pointerId) return;
+    if (e.pointerType === 'mouse' && (e.buttons & 1) === 0) {
+      finishDrag(e);
+      return;
+    }
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     if (!drag.moved) {
@@ -211,26 +310,6 @@ export default function ZoomStage(props: ZoomStageProps) {
     ty.set(clampPan(drag.startTy + dy, height, scale));
   }
 
-  function finishDrag(e: PointerEvent) {
-    if (!drag || drag.id !== e.pointerId) return;
-    const moved = drag.moved;
-    const captured = drag.captured;
-    drag = null;
-    panning.set(false);
-    if (captured) {
-      try {
-        viewport.peek()?.releasePointerCapture?.(e.pointerId);
-      } catch {
-        // Ignore if capture was already released.
-      }
-    }
-    if (moved) {
-      clearSuppress();
-      suppressClick = true;
-      suppressTimer = setTimeout(clearSuppress, 0);
-    }
-  }
-
   function ondblclick(e: MouseEvent) {
     if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
     if (z.peek() > 1.001) {
@@ -241,19 +320,28 @@ export default function ZoomStage(props: ZoomStageProps) {
     zoomAt(DBLCLICK_ZOOM, e.clientX - left, e.clientY - top, true);
   }
 
+  function oncanvastransitionend(e: TransitionEvent) {
+    if (e.propertyName === 'transform' && z.peek() <= 1.001) {
+      clearClipTimer();
+      clipping.set(false);
+    }
+  }
+
   return (
     <div
       class="zoom-stage"
       class:zoomed={zoomed.get()}
+      class:clip={zoomed.get() || clipping.get()}
       class:panning={panning.get()}
       ref={(el) => viewport.set(el)}
       onpointerdown={onpointerdown}
       onpointermove={onpointermove}
       onpointerup={finishDrag}
       onpointercancel={finishDrag}
+      onlostpointercapture={finishDrag}
       ondblclick={ondblclick}
     >
-      <div class="zoom-canvas" class:glide={glide.get()} style={canvasStyle.get()}>
+      <div class="zoom-canvas" class:glide={glide.get()} style={canvasStyle.get()} ontransitionend={oncanvastransitionend}>
         {props.children}
       </div>
       <div class="zoom-hud" role="group" aria-label="Image zoom">
@@ -267,16 +355,17 @@ export default function ZoomStage(props: ZoomStageProps) {
             onclick={() => zoomAt(1 / ZOOM_STEP)}
           />
         </span>
-        <button
-          type="button"
-          class="zoom-pct num"
-          disabled={!zoomed.get()}
-          use:tooltip={zoomed.get() ? 'Reset zoom (double-click)' : 'Double-click image to zoom'}
-          aria-label={zoomed.get() ? `Zoom ${Math.round(z.get() * 100)}%, reset to fit` : 'Zoom 100%, fitted'}
-          onclick={() => reset(true)}
-        >
-          {zoomLabel.get()}
-        </button>
+        <span class="zoom-tip" use:tooltip={zoomed.get() ? 'Reset zoom (double-click)' : 'Double-click image to zoom'}>
+          <button
+            type="button"
+            class="zoom-pct num"
+            disabled={!zoomed.get()}
+            aria-label={zoomed.get() ? `Zoom ${Math.round(z.get() * 100)}%, reset to fit` : 'Zoom 100%, fitted'}
+            onclick={() => reset(true)}
+          >
+            {zoomLabel.get()}
+          </button>
+        </span>
         <span use:tooltip={'Zoom in'}>
           <Button
             size="sm"
@@ -305,11 +394,14 @@ export default function ZoomStage(props: ZoomStageProps) {
 css`
   .zoom-stage {
     position: relative;
+    isolation: isolate;
     width: 100%;
     height: 100%;
   }
-  .zoom-stage.zoomed {
+  .zoom-stage.clip {
     overflow: hidden;
+  }
+  .zoom-stage.zoomed {
     cursor: grab;
     touch-action: none;
   }
@@ -318,6 +410,9 @@ css`
     user-select: none;
   }
   .zoom-canvas {
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
     width: 100%;
     height: 100%;
     transform-origin: center center;
@@ -344,6 +439,9 @@ css`
     border: 1px solid var(--line-default);
     box-shadow: var(--shadow-md);
   }
+  .zoom-tip {
+    display: inline-flex;
+  }
   .zoom-pct {
     min-width: 44px;
     height: var(--control-sm);
@@ -363,5 +461,10 @@ css`
   .zoom-pct:disabled {
     cursor: default;
     color: var(--text-tertiary);
+  }
+  @media (pointer: coarse) {
+    .zoom-pct {
+      height: 44px;
+    }
   }
 `;

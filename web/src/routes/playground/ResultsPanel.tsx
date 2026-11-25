@@ -64,33 +64,42 @@ export default function ResultsPanel(props: ResultsPanelProps) {
   const copied = signal(false);
   const copyStatus = signal('');
   let copyReset: ReturnType<typeof setTimeout> | undefined;
+  let copySeq = 0;
   let alive = true;
   onCleanup(() => {
     alive = false;
     clearTimeout(copyReset);
   });
 
-  // Reset the transient "Copied" check when the exported payload changes.
+  // Reset the transient "Copied" check and invalidate any in-flight copy when the exported payload changes.
   effect(() => {
     void props.json;
+    copySeq++;
     clearTimeout(copyReset);
     copied.set(false);
   });
 
   async function copyDetectionsJson() {
-    if (!props.json) return;
+    const payload = props.json;
+    if (!payload) return;
+    const seq = ++copySeq;
+    const boxes = (payload as { boxes?: unknown }).boxes;
+    const exportedCount = Array.isArray(boxes) ? boxes.length : (props.result?.boxes.length ?? 0);
+    copyStatus.set('');
     try {
-      await navigator.clipboard.writeText(jsonText(props.json));
-      if (!alive) return;
+      await navigator.clipboard.writeText(jsonText(payload));
+      if (!alive || seq !== copySeq) return;
       copied.set(true);
-      const n = props.rows.length;
-      copyStatus.set(`Copied ${n} ${n === 1 ? 'detection' : 'detections'} as JSON`);
+      copyStatus.set(`Copied ${exportedCount} ${exportedCount === 1 ? 'detection' : 'detections'} as JSON`);
       clearTimeout(copyReset);
       copyReset = setTimeout(() => {
-        if (alive) copied.set(false);
+        if (alive && seq === copySeq) {
+          copied.set(false);
+          copyStatus.set('');
+        }
       }, 1600);
     } catch {
-      if (!alive) return;
+      if (!alive || seq !== copySeq) return;
       copyStatus.set('Could not copy detections JSON');
       toast.info('Copy failed', 'Your browser blocked clipboard access.');
     }
@@ -163,6 +172,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               {summary.get() ? (
                 <div
                   class="conf-summary num"
+                  role="group"
                   aria-label={`Confidence distribution for ${summary.get()!.count} ${summary.get()!.count === 1 ? 'detection' : 'detections'}: median ${score(summary.get()!.median)}, range ${score(summary.get()!.min)} to ${score(summary.get()!.max)}, ${summary.get()!.high} high, ${summary.get()!.mid} medium, ${summary.get()!.low} low`}
                 >
                   <div class="conf-meta">

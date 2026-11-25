@@ -28,7 +28,7 @@ import Segmented from '$lib/ui/Segmented';
 import Slider from '$lib/ui/Slider';
 import DropZone from './DropZone';
 import { BACKEND_NAME, DEFAULTS, px, score } from './predict';
-import type { Source } from './source';
+import { sourceImageKey, type Source } from './source';
 import Swatch from './Swatch';
 import ZoomStage from './ZoomStage';
 
@@ -291,7 +291,7 @@ export default function ImagePanel(props: ImagePanelProps) {
             />
           ) : props.dims ? (
             <>
-              <ZoomStage resetKey={props.src ?? props.sourceName}>
+              <ZoomStage resetKey={sourceImageKey(props.source)}>
                 <DetectionView
                   src={props.src}
                   width={props.dims.width}

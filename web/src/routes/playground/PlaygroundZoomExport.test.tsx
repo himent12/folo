@@ -101,7 +101,7 @@ describe('ZoomStage', () => {
 
     // Drag beyond CLICK_SLOP pans and suppresses the trailing click
     box.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 2, clientX: 100, clientY: 100 }));
-    box.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, pointerId: 2, clientX: 140, clientY: 120 }));
+    box.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, buttons: 1, pointerId: 2, clientX: 140, clientY: 120 }));
     flushSync();
     expect(stage.classList.contains('panning')).toBe(true);
     expect(canvas.style.transform).toContain('translate(40px, 20px)');
@@ -110,12 +110,25 @@ describe('ZoomStage', () => {
     flushSync();
     expect(clicked).toHaveBeenCalledTimes(1);
 
-    // Double-click resets zoom and pan back to Fit
+    // Releasing pointer outside the stage never leaves hover-panning stuck
+    stage.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 3, clientX: 100, clientY: 100 }));
+    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 3, clientX: 500, clientY: 500 }));
+    stage.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, buttons: 0, pointerId: 3, clientX: 160, clientY: 160 }));
+    flushSync();
+    expect(stage.classList.contains('panning')).toBe(false);
+
+    // Double-click resets zoom and pan back to Fit while keeping clip active until transitionend
     stage.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 200, clientY: 150 }));
     flushSync();
     expect(pctBtn.textContent?.trim()).toBe('Fit');
     expect(stage.classList.contains('zoomed')).toBe(false);
+    expect(stage.classList.contains('clip')).toBe(true);
     expect(canvas.style.transform).toBe('');
+    const te = new Event('transitionend', { bubbles: true }) as TransitionEvent;
+    Object.defineProperty(te, 'propertyName', { value: 'transform' });
+    canvas.dispatchEvent(te);
+    flushSync();
+    expect(stage.classList.contains('clip')).toBe(false);
 
     // Double-click at Fit zooms in to 200%, wheel zooms further, then source change resets back to Fit
     stage.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: 200, clientY: 150 }));
@@ -128,6 +141,14 @@ describe('ZoomStage', () => {
     flushSync();
     expect(pctBtn.textContent?.trim()).toBe('Fit');
     expect(stage.classList.contains('zoomed')).toBe(false);
+    expect(stage.classList.contains('clip')).toBe(false);
+  });
+
+  it('clamps stale pan offset before anchoring subsequent zoom after resize', () => {
+    const next = zoomToward({ z: 2, tx: 400, ty: 0 }, 1.5, 200, 150, 400, 300);
+    // Clamped curTx at (width=400, z=2) is 200, so center-anchor zoom scales 200 * 1.5 = 300 (<= limit 400).
+    expect(next.z).toBe(3);
+    expect(next.tx).toBe(300);
   });
 });
 
@@ -172,8 +193,17 @@ describe('Playground: confidence summary and quick JSON copy', () => {
     expect(summary.textContent).toContain('0.64');
     expect(summary.textContent).toContain('0.35–0.92');
 
-    // Zoom stage HUD is mounted around the image canvas
+    // Zoom stage HUD is mounted around the image canvas and preserves selected row on zoom click
     expect(target.querySelector('.zoom-stage .zoom-hud')).not.toBeNull();
+    const firstRow = target.querySelector<HTMLTableRowElement>('#pg-panel tbody tr')!;
+    firstRow.click();
+    flushSync();
+    expect(firstRow.getAttribute('aria-selected')).toBe('true');
+    const zoomIn = target.querySelector<HTMLButtonElement>('.zoom-hud button[aria-label="Zoom in"]')!;
+    zoomIn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    zoomIn.click();
+    flushSync();
+    expect(firstRow.getAttribute('aria-selected')).toBe('true');
 
     // One-click Copy detections JSON works directly from the Detections tab
     const copyBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Copy detections JSON"]')!;
