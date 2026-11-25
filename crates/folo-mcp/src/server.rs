@@ -26,7 +26,7 @@ use rmcp::service::{RequestContext, RoleServer, SubscriptionContext};
 use serde_json::{Value, json};
 use tokio::task::AbortHandle;
 
-use crate::batch_cache::{BatchCache, BatchLookup, MAX_BATCHES};
+use crate::batch_cache::{BatchCache, BatchLookup, MAX_BATCH_BYTES, MAX_BATCHES};
 use crate::confine::Confinement;
 use crate::errors::Error;
 use crate::paths::PathPolicy;
@@ -627,7 +627,8 @@ impl ServerHandler for FoloMcp {
                         return Err(McpError::resource_not_found(
                             format!(
                                 "resource not found: {uri} (evicted from cache; at most {MAX_BATCHES} recent \
-                                 predict_batch results are kept)"
+                                 predict_batch results / {} MiB are kept)",
+                                MAX_BATCH_BYTES / (1024 * 1024)
                             ),
                             Some(json!({ "uri": uri, "evicted": true })),
                         ));

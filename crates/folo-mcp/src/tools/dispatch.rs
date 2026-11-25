@@ -8,10 +8,13 @@ use rmcp::service::{Peer, RoleServer};
 use serde_json::Value;
 
 use super::ToolDef;
-use super::arguments::{MAX_SUGGEST_CHARS, closest_named, parse_args, unknown_argument};
+use super::arguments::{closest_named, parse_args, unknown_argument, within_suggest_limit};
 use super::results::{Output, short};
 use crate::errors::{Error, read_only};
 use crate::server::Inner;
+
+/// Maximum `run_ids` array length handled by `compare_runs` (matches `CompareArgs`).
+const MAX_COMPARE_RUNS: usize = 8;
 
 /// Candidate identifier(s) supplied by a tool call or resource read for fuzzy `"did you mean ...?"`
 /// enrichment on `*_not_found` errors.
@@ -19,7 +22,9 @@ pub(crate) enum NotFoundTarget {
     Dataset(String),
     Model(String),
     Run(String),
-    Runs(Vec<String>),
+    /// Positional slots of `compare_runs.run_ids`; `None` marks an empty/overlong/non-string slot
+    /// so suggestions only target the slot whose lookup actually failed.
+    Runs(Vec<Option<String>>),
 }
 
 /// Entity IDs captured from tool arguments before dispatch so `*_not_found` errors can suggest close IDs.
@@ -27,16 +32,13 @@ struct CallIds {
     dataset_id: Option<String>,
     model_id: Option<String>,
     run_id: Option<String>,
-    run_ids: Vec<String>,
+    run_ids: Vec<Option<String>>,
 }
 
 impl CallIds {
     fn from_args(tool: &str, args: &JsonObject) -> Self {
         let take = |key: &str| {
-            args.get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty() && s.chars().count() <= MAX_SUGGEST_CHARS)
-                .map(str::to_string)
+            args.get(key).and_then(Value::as_str).filter(|s| within_suggest_limit(s)).map(str::to_string)
         };
         let dataset_id = take("dataset_id");
         let model_id = take("model_id").or_else(|| (tool == "train").then(|| take("weights")).flatten());
@@ -44,11 +46,10 @@ impl CallIds {
         let run_ids = args
             .get("run_ids")
             .and_then(Value::as_array)
+            .filter(|arr| arr.len() <= MAX_COMPARE_RUNS)
             .map(|arr| {
                 arr.iter()
-                    .filter_map(Value::as_str)
-                    .filter(|s| !s.is_empty() && s.chars().count() <= MAX_SUGGEST_CHARS)
-                    .map(str::to_string)
+                    .map(|v| v.as_str().filter(|s| within_suggest_limit(s)).map(str::to_string))
                     .collect()
             })
             .unwrap_or_default();
@@ -204,12 +205,13 @@ impl Inner {
     }
 
     /// Appends a fuzzy `"did you mean ...?"` suggestion to `e.body.hint` when `e` is a matching
-    /// `*_not_found` error. Dataset suggestions strictly respect `--confine` so hidden datasets are
-    /// never leaked. Listing failures leave `e` unchanged.
+    /// `*_not_found` error. Dataset suggestions revalidate `--confine` fresh so datasets whose
+    /// manifests changed to read outside `--data-dir` are never leaked. Listing failures leave `e`
+    /// unchanged.
     pub(crate) async fn enrich_not_found(&self, mut e: Error, target: NotFoundTarget) -> Error {
         let suggestion = match (e.body.code.as_str(), target) {
             ("dataset_not_found", NotFoundTarget::Dataset(id)) => {
-                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                if !within_suggest_limit(&id) {
                     return e;
                 }
                 let c = self.confinement.clone();
@@ -217,7 +219,7 @@ impl Inner {
                     .blocking(move |s| {
                         Ok(s.list_datasets()?
                             .into_iter()
-                            .filter(|d| c.dataset(s, &d.id).is_ok())
+                            .filter(|d| c.dataset_fresh(s, &d.id).is_ok())
                             .map(|d| (d.id, d.name))
                             .collect::<Vec<_>>())
                     })
@@ -228,7 +230,7 @@ impl Inner {
                 closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
             }
             ("model_not_found", NotFoundTarget::Model(id)) => {
-                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                if !within_suggest_limit(&id) {
                     return e;
                 }
                 let Ok(items) = self
@@ -242,7 +244,7 @@ impl Inner {
                 closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
             }
             ("run_not_found", NotFoundTarget::Run(id)) => {
-                if id.is_empty() || id.chars().count() > MAX_SUGGEST_CHARS {
+                if !within_suggest_limit(&id) {
                     return e;
                 }
                 let Ok(items) = self
@@ -254,7 +256,7 @@ impl Inner {
                 closest_named(&id, &items).map(|(cid, name)| format_suggestion(cid, name))
             }
             ("run_not_found", NotFoundTarget::Runs(ids)) => {
-                if ids.is_empty() {
+                if ids.is_empty() || ids[0].is_none() {
                     return e;
                 }
                 let Ok(items) = self
@@ -263,8 +265,18 @@ impl Inner {
                 else {
                     return e;
                 };
-                ids.iter()
-                    .find(|id| !items.iter().any(|(existing, _)| existing == *id))
+                let mut failing = None;
+                for slot in &ids {
+                    match slot {
+                        Some(id) if items.iter().any(|(existing, _)| existing == id) => continue,
+                        Some(missing) => {
+                            failing = Some(missing.as_str());
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                failing
                     .and_then(|missing| closest_named(missing, &items))
                     .map(|(cid, name)| format_suggestion(cid, name))
             }

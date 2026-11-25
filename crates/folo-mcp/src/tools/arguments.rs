@@ -49,6 +49,12 @@ const ALIASES: &[(&str, &str)] = &[
 /// Maximum input length for fuzzy suggestion matching so oversized inputs fail in O(1).
 pub(crate) const MAX_SUGGEST_CHARS: usize = 128;
 
+/// Returns `true` iff `s` is non-empty and has at most [`MAX_SUGGEST_CHARS`] Unicode scalars,
+/// inspecting at most `MAX_SUGGEST_CHARS + 1` scalars with zero allocation.
+pub(crate) fn within_suggest_limit(s: &str) -> bool {
+    !s.is_empty() && s.chars().nth(MAX_SUGGEST_CHARS).is_none()
+}
+
 /// Optimal string alignment (Damerau-Levenshtein) distance: insertion, deletion, substitution, or
 /// adjacent transposition each count as 1 edit.
 fn edit_distance(a: &[char], b: &[char]) -> usize {
@@ -82,8 +88,11 @@ fn edit_distance(a: &[char], b: &[char]) -> usize {
 /// The closest candidate to `needle` (excluding exact matches): a case-insensitive exact match,
 /// an unambiguous prefix match (at least 2 chars), or the closest match within 1-2 edits.
 pub(crate) fn closest_match<'a>(needle: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    if !within_suggest_limit(needle) || candidates.contains(&needle) {
+        return None;
+    }
     let needle_chars: Vec<char> = needle.to_lowercase().chars().collect();
-    if needle_chars.is_empty() || needle_chars.len() > MAX_SUGGEST_CHARS || candidates.contains(&needle) {
+    if needle_chars.is_empty() || needle_chars.len() > MAX_SUGGEST_CHARS {
         return None;
     }
     let needle_lc: String = needle_chars.iter().collect();
@@ -142,8 +151,7 @@ pub(crate) fn closest_match<'a>(needle: &str, candidates: &[&'a str]) -> Option<
 /// Finds the closest `(id, name)` entry for `needle`, matching IDs first and falling back to an
 /// unambiguous display name (so passing a dataset/model/run name instead of its ID suggests the ID).
 pub(crate) fn closest_named<'a>(needle: &str, items: &'a [(String, String)]) -> Option<(&'a str, &'a str)> {
-    let needle_len = needle.chars().count();
-    if needle_len == 0 || needle_len > MAX_SUGGEST_CHARS || items.is_empty() {
+    if !within_suggest_limit(needle) || items.is_empty() {
         return None;
     }
     let ids: Vec<&str> = items.iter().map(|(id, _)| id.as_str()).collect();
@@ -158,18 +166,19 @@ pub(crate) fn closest_named<'a>(needle: &str, items: &'a [(String, String)]) -> 
     if exact_names.len() == 1 {
         return Some((exact_names[0].0.as_str(), exact_names[0].1.as_str()));
     }
+    if exact_names.len() > 1 {
+        return None;
+    }
     let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut all_names: Vec<&str> = Vec::new();
     for (_, name) in items {
         if !name.is_empty() {
             *name_counts.entry(name.to_lowercase()).or_default() += 1;
+            all_names.push(name.as_str());
         }
     }
-    let unique_names: Vec<&str> = items
-        .iter()
-        .filter(|(_, name)| !name.is_empty() && name_counts.get(&name.to_lowercase()) == Some(&1))
-        .map(|(_, name)| name.as_str())
-        .collect();
-    if let Some(matched) = closest_match(needle, &unique_names)
+    if let Some(matched) = closest_match(needle, &all_names)
+        && name_counts.get(&matched.to_lowercase()) == Some(&1)
         && let Some((id, name)) = items.iter().find(|(_, name)| name == matched)
     {
         return Some((id.as_str(), name.as_str()));
@@ -179,8 +188,10 @@ pub(crate) fn closest_named<'a>(needle: &str, items: &'a [(String, String)]) -> 
 
 /// The known argument name closest to `key`: an alias, a name `key` is a prefix of, or one within two edits.
 fn did_you_mean<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
-    if let Some((_, to)) = ALIASES.iter().find(|(from, _)| from.eq_ignore_ascii_case(key)) {
-        return known.iter().copied().find(|k| k == to);
+    if let Some((_, to)) = ALIASES.iter().find(|(from, _)| from.eq_ignore_ascii_case(key))
+        && let Some(m) = known.iter().copied().find(|k| k == to)
+    {
+        return Some(m);
     }
     closest_match(key, known)
 }

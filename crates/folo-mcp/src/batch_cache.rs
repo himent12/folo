@@ -9,7 +9,7 @@ use serde_json::Value;
 pub(crate) const MAX_BATCHES: usize = 64;
 
 /// Approximate serialized-JSON byte budget across all cached `predict_batch` results.
-/// The most recently inserted batch is always kept even if it alone exceeds this budget.
+/// Any single batch larger than this budget is rejected without evicting existing entries.
 pub(crate) const MAX_BATCH_BYTES: usize = 32 * 1024 * 1024;
 
 struct Entry {
@@ -57,22 +57,35 @@ impl BatchCache {
     }
 
     /// Allocates the next `pb_<n>` ID, builds its payload, and inserts it atomically under the
-    /// cache lock so ID allocation and cache visibility never race.
-    pub(crate) fn insert_next(&mut self, build: impl FnOnce(&str) -> Value) -> String {
-        self.seq = self.seq.saturating_add(1);
-        let id = format!("pb_{}", self.seq);
+    /// cache lock. Returns `None` without advancing the ID sequence or evicting existing entries if
+    /// the built payload exceeds the cache's byte budget (or capacity is 0).
+    pub(crate) fn try_insert_next(&mut self, build: impl FnOnce(&str) -> Value) -> Option<String> {
+        if self.max_entries == 0 {
+            return None;
+        }
+        let next_seq = self.seq.saturating_add(1);
+        let id = format!("pb_{next_seq}");
         let value = Arc::new(build(&id));
-        self.insert(id.clone(), value);
-        id
+        if self.try_insert(id.clone(), value) {
+            self.seq = next_seq;
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Inserts or replaces `id` as the most recently used entry, evicting least recently used
-    /// entries until the cache fits within its bounds.
-    pub(crate) fn insert(&mut self, id: String, value: Arc<Value>) {
+    /// entries until the cache fits within both `max_entries` and `max_bytes`.
+    /// Returns `false` (leaving existing entries untouched) if `max_entries == 0` or `value` alone
+    /// exceeds `max_bytes`.
+    pub(crate) fn try_insert(&mut self, id: String, value: Arc<Value>) -> bool {
         if self.max_entries == 0 {
-            return;
+            return false;
         }
         let bytes = estimate_json_bytes(&value);
+        if bytes > self.max_bytes {
+            return false;
+        }
         if let Some(old) = self.entries.get_mut(&id) {
             self.total_bytes = self.total_bytes.saturating_sub(old.bytes).saturating_add(bytes);
             old.value = value;
@@ -83,9 +96,7 @@ impl BatchCache {
             self.entries.insert(id, Entry { value, bytes });
             self.total_bytes = self.total_bytes.saturating_add(bytes);
         }
-        while self.entries.len() > self.max_entries
-            || (self.entries.len() > 1 && self.total_bytes > self.max_bytes)
-        {
+        while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
@@ -93,6 +104,7 @@ impl BatchCache {
                 self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
             }
         }
+        true
     }
 
     /// Returns the cached payload for `id` and marks it most recently used.
@@ -184,15 +196,15 @@ mod tests {
     #[test]
     fn evicts_least_recently_used_and_promotes_on_get() {
         let mut cache = BatchCache::with_limits(3, usize::MAX);
-        cache.insert("pb_1".into(), Arc::new(json!({ "id": 1 })));
-        cache.insert("pb_2".into(), Arc::new(json!({ "id": 2 })));
-        cache.insert("pb_3".into(), Arc::new(json!({ "id": 3 })));
+        assert!(cache.try_insert("pb_1".into(), Arc::new(json!({ "id": 1 }))));
+        assert!(cache.try_insert("pb_2".into(), Arc::new(json!({ "id": 2 }))));
+        assert!(cache.try_insert("pb_3".into(), Arc::new(json!({ "id": 3 }))));
         assert_eq!(cache.len(), 3);
 
         // Accessing pb_1 promotes it to MRU, so pb_2 becomes LRU.
         assert_eq!(cache.get("pb_1").unwrap()["id"], 1);
 
-        cache.insert("pb_4".into(), Arc::new(json!({ "id": 4 })));
+        assert!(cache.try_insert("pb_4".into(), Arc::new(json!({ "id": 4 }))));
         assert_eq!(cache.len(), 3);
         assert!(cache.contains("pb_1"));
         assert!(!cache.contains("pb_2"), "pb_2 should have been evicted as LRU");
@@ -200,12 +212,12 @@ mod tests {
         assert!(cache.contains("pb_4"));
 
         // Re-inserting an existing key updates its value and promotes it without growing the cache.
-        cache.insert("pb_3".into(), Arc::new(json!({ "id": 33 })));
+        assert!(cache.try_insert("pb_3".into(), Arc::new(json!({ "id": 33 }))));
         assert_eq!(cache.len(), 3);
         assert_eq!(cache.get("pb_3").unwrap()["id"], 33);
 
         // Now order is pb_1 (LRU), pb_4, pb_3 (MRU).
-        cache.insert("pb_5".into(), Arc::new(json!({ "id": 5 })));
+        assert!(cache.try_insert("pb_5".into(), Arc::new(json!({ "id": 5 }))));
         assert!(!cache.contains("pb_1"));
         assert!(cache.contains("pb_3"));
         assert!(cache.contains("pb_4"));
@@ -213,35 +225,47 @@ mod tests {
     }
 
     #[test]
-    fn enforces_byte_budget_while_keeping_latest_entry() {
+    fn enforces_byte_budget_and_rejects_oversized_single_entry() {
         let payload = |n: usize| Arc::new(json!({ "blob": "x".repeat(n) }));
         let one_size = estimate_json_bytes(&payload(100));
-        let mut cache = BatchCache::with_limits(10, one_size * 2 + 10);
+        let budget = one_size * 2 + 10;
+        let mut cache = BatchCache::with_limits(10, budget);
 
-        cache.insert("pb_1".into(), payload(100));
-        cache.insert("pb_2".into(), payload(100));
+        assert!(cache.try_insert("pb_1".into(), payload(100)));
+        assert!(cache.try_insert("pb_2".into(), payload(100)));
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.total_bytes(), one_size * 2);
 
         // Third insert exceeds byte budget, evicting pb_1.
-        cache.insert("pb_3".into(), payload(100));
+        assert!(cache.try_insert("pb_3".into(), payload(100)));
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains("pb_1"));
         assert!(cache.contains("pb_2"));
         assert!(cache.contains("pb_3"));
         assert_eq!(cache.total_bytes(), one_size * 2);
 
-        // A single entry larger than the budget still stays cached (evicting older entries).
-        cache.insert("pb_big".into(), payload(1000));
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains("pb_big"));
-        assert_eq!(cache.get("pb_big").unwrap()["blob"].as_str().unwrap().len(), 1000);
+        // A single entry larger than the budget is rejected without evicting valid entries or
+        // leaving the cache over budget.
+        assert!(!cache.try_insert("pb_big".into(), payload(1000)));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains("pb_2"));
+        assert!(cache.contains("pb_3"));
+        assert!(!cache.contains("pb_big"));
+        assert!(cache.total_bytes() <= budget);
+
+        // Same through `try_insert_next`: rejected entry does not advance `seq` or evict entries.
+        assert!(cache.try_insert_next(|id| json!({ "batch_id": id, "blob": "x".repeat(1000) })).is_none());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains("pb_2"));
+        assert!(cache.contains("pb_3"));
+        assert_eq!(cache.try_insert_next(|id| json!({ "batch_id": id })).as_deref(), Some("pb_1"));
     }
 
     #[test]
     fn zero_capacity_never_stores_entries() {
         let mut cache = BatchCache::with_limits(0, 1024);
-        cache.insert("pb_1".into(), Arc::new(json!({ "id": 1 })));
+        assert!(!cache.try_insert("pb_1".into(), Arc::new(json!({ "id": 1 }))));
+        assert!(cache.try_insert_next(|id| json!({ "batch_id": id })).is_none());
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.total_bytes(), 0);
         assert!(cache.get("pb_1").is_none());
@@ -250,9 +274,9 @@ mod tests {
     #[test]
     fn insert_next_and_lookup_distinguish_evicted_from_unknown() {
         let mut cache = BatchCache::with_limits(2, usize::MAX);
-        let id1 = cache.insert_next(|id| json!({ "batch_id": id }));
-        let id2 = cache.insert_next(|id| json!({ "batch_id": id }));
-        let id3 = cache.insert_next(|id| json!({ "batch_id": id }));
+        let id1 = cache.try_insert_next(|id| json!({ "batch_id": id })).unwrap();
+        let id2 = cache.try_insert_next(|id| json!({ "batch_id": id })).unwrap();
+        let id3 = cache.try_insert_next(|id| json!({ "batch_id": id })).unwrap();
         assert_eq!((id1.as_str(), id2.as_str(), id3.as_str()), ("pb_1", "pb_2", "pb_3"));
         assert!(matches!(cache.lookup("pb_1"), BatchLookup::Evicted));
         assert!(matches!(cache.lookup("pb_2"), BatchLookup::Found(v) if v["batch_id"] == "pb_2"));

@@ -222,6 +222,21 @@ fn confine_checks_what_a_dataset_reads() {
             }
         }
     }
+    // Even though `mapped` was approved earlier in this same session, once its manifest points outside
+    // neither tool nor resource fuzzy suggestions may disclose its ID or name.
+    let mapped_typo = format!("{}_x", &mapped_id[..mapped_id.len().saturating_sub(1)]);
+    for probe in [mapped_typo.as_str(), "mapped"] {
+        let e = c.tool_error("get_dataset", json!({ "dataset_id": probe }), "dataset_not_found");
+        assert!(!e.to_string().contains(&mapped_id), "unconfined dataset leaked via tool: {e}");
+        assert!(!e.to_string().contains("did you mean"), "unconfined dataset suggested via tool: {e}");
+    }
+    let res_typo = c.request("resources/read", json!({ "uri": format!("folo://datasets/{mapped_typo}") }));
+    assert!(res_typo["error"]["code"].is_i64(), "{res_typo}");
+    assert!(!res_typo.to_string().contains(&mapped_id), "unconfined dataset leaked via resource: {res_typo}");
+    assert!(
+        !res_typo.to_string().contains("did you mean"),
+        "unconfined dataset suggested via resource: {res_typo}"
+    );
     let ds = c.ok("register_dataset", json!({ "path": "honest" }));
     let id = ds["id"].as_str().unwrap().to_string();
     let imgs = c.ok("list_dataset_images", json!({ "dataset_id": id }));
@@ -244,14 +259,19 @@ fn confine_checks_what_a_dataset_reads() {
     // `mapped` now reads outside (edited above) and is hidden too.
     assert_eq!(ids, [id.as_str()]);
     c.tool_error("get_dataset", json!({ "dataset_id": out_id }), "path_outside_data_dir");
-    // A typo of a confined dataset ID must never leak the confined dataset in a suggestion.
+    // Neither an ID typo nor the display name of a confined dataset may leak it in a suggestion.
     let out_typo = format!("{}_x", &out_id[..out_id.len().saturating_sub(1)]);
-    let missing_out = c.tool_error("get_dataset", json!({ "dataset_id": out_typo }), "dataset_not_found");
-    assert!(
-        !missing_out.to_string().contains(&out_id),
-        "confined dataset leaked in suggestion: {missing_out}"
-    );
-    assert!(!missing_out.to_string().contains("outside"), "confined dataset name leaked: {missing_out}");
+    for probe in [out_typo.as_str(), "outside"] {
+        let missing_out = c.tool_error("get_dataset", json!({ "dataset_id": probe }), "dataset_not_found");
+        assert!(
+            !missing_out.to_string().contains(&out_id),
+            "confined dataset leaked in suggestion: {missing_out}"
+        );
+        assert!(
+            !missing_out.to_string().contains("did you mean"),
+            "confined dataset suggested for `{probe}`: {missing_out}"
+        );
+    }
     c.tool_error("list_dataset_images", json!({ "dataset_id": out_id }), "path_outside_data_dir");
     let read = c.request("resources/read", json!({ "uri": format!("folo://datasets/{out_id}/images/0") }));
     assert!(read.get("error").is_some(), "{read}");

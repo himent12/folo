@@ -297,11 +297,25 @@ fn closest_match_and_closest_named_suggest_accurately() {
         ("ds_7c2f".into(), "traffic-cams".into()),
         ("ds_9001".into(), "dup".into()),
         ("ds_9002".into(), "dup".into()),
+        ("ds_9003".into(), "dups".into()),
     ];
     assert_eq!(closest_named("ds_5a1f", &items), Some(("ds_5a1e", "shapes")));
     assert_eq!(closest_named("shapes", &items), Some(("ds_5a1e", "shapes")));
     assert_eq!(closest_named("shapess", &items), Some(("ds_5a1e", "shapes")));
+    // Ambiguous duplicate names must not fall through to a neighboring name like `dups`.
     assert_eq!(closest_named("dup", &items), None);
+    assert_eq!(closest_named("du", &items), None);
+    assert_eq!(closest_named("dupx", &items), None);
+
+    // Case-insensitive alias that is absent from a tool's schema still falls through to closest_match.
+    let register = find("register_dataset").unwrap();
+    let e = unknown_argument(
+        "register_dataset",
+        register.input_schema(),
+        json!({ "PATH": "." }).as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e.body.message, "unknown argument `PATH`; did you mean `path`?");
 }
 
 #[tokio::test]
@@ -360,6 +374,17 @@ async fn not_found_tool_errors_and_issue_kinds_include_suggestions() {
     assert_eq!(e.body.code, "run_not_found");
     assert!(e.body.hint.as_deref().unwrap().contains("did you mean `run_2b02`"), "{:?}", e.body.hint);
 
+    // When compare_runs fails on an empty/overlong first ID, do not suggest for a later ID.
+    for first in [String::new(), "x".repeat(200)] {
+        let e = call("compare_runs", json!({ "run_ids": [first, "run_2b20"] })).await;
+        assert_eq!(e.body.code, "run_not_found");
+        assert!(
+            !e.body.hint.as_deref().unwrap_or("").contains("did you mean"),
+            "must not suggest for unreached index 1: {:?}",
+            e.body.hint
+        );
+    }
+
     // Unknown issue kind typo.
     let e = call("list_dataset_issues", json!({ "dataset_id": "ds_7c2f", "kind": "empty_iamge" })).await;
     assert_eq!(e.body.code, "invalid_arguments");
@@ -401,9 +426,26 @@ async fn predict_batch_evicts_oldest_results_past_lru_cap() {
             assert!(matches!(cache.lookup("pb_1"), BatchLookup::Found(_)));
         }
     }
-    let mut cache = server.inner.batches.lock().unwrap();
-    assert_eq!(cache.len(), MAX_BATCHES);
-    assert!(matches!(cache.lookup("pb_1"), BatchLookup::Found(_)), "promoted pb_1 must stay cached");
-    assert!(matches!(cache.lookup("pb_2"), BatchLookup::Evicted), "LRU pb_2 must be evicted");
-    assert!(matches!(cache.lookup(&format!("pb_{}", MAX_BATCHES + 1)), BatchLookup::Found(_)));
+    {
+        let mut cache = server.inner.batches.lock().unwrap();
+        assert_eq!(cache.len(), MAX_BATCHES);
+        assert!(matches!(cache.lookup("pb_1"), BatchLookup::Found(_)), "promoted pb_1 must stay cached");
+        assert!(matches!(cache.lookup("pb_2"), BatchLookup::Evicted), "LRU pb_2 must be evicted");
+        assert!(matches!(cache.lookup(&format!("pb_{}", MAX_BATCHES + 1)), BatchLookup::Found(_)));
+
+        // An oversized batch exceeding the cache byte budget returns `payload_too_large` without evicting
+        // existing cached entries.
+        *cache = crate::batch_cache::BatchCache::with_limits(MAX_BATCHES, 16);
+        assert!(cache.try_insert("pb_keep".into(), std::sync::Arc::new(json!({}))));
+    }
+    let mut p = Progress::none();
+    let e = server
+        .inner
+        .call(def, json!({ "model_id": "m_31aa", "paths": ["a.jpg"] }).as_object().unwrap().clone(), &mut p)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.body.code, "payload_too_large");
+    let cache = server.inner.batches.lock().unwrap();
+    assert!(cache.contains("pb_keep"), "oversized batch must not evict valid cached entries");
 }

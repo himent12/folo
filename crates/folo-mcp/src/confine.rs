@@ -81,6 +81,16 @@ impl Confinement {
         if let Some(r) = self.cache.lock().unwrap().get(id) {
             return r.clone();
         }
+        self.dataset_fresh(store, id)
+    }
+
+    /// Revalidates dataset `id` against `store` without trusting a cached verdict, refreshing the cache.
+    /// Used before exposing datasets in fuzzy `"did you mean ...?"` suggestions so a dataset whose
+    /// manifest changed mid-session to read outside `--data-dir` is never disclosed. Blocking.
+    pub fn dataset_fresh(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
+        if !self.policy.confine {
+            return Ok(());
+        }
         let r = self.scan(store, id).map_err(map_denied);
         // Unknown datasets are not cached: they may be registered later under that id.
         if r.as_ref().err().is_none_or(|e| e.body.code != "dataset_not_found") {
