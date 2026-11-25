@@ -31,9 +31,12 @@ produces plain buffers that the trainer wraps in tensors.
   image's path as the dataset spells it: a dataset opened as a bare `data.yaml` from inside `x/images/birds` with
   relative split paths has none in its image paths and reads the labels next to the images, mirror or not (open
   it by a path that names the `images` folder to use the mirror). A missing label file means a background image.
-- Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding
-  box is used). Coordinates may exceed `[0, 1]` by up to 0.01 (clipped, with a warning); exact duplicates are
-  removed; zero-size boxes are dropped.
+- Label lines (`dataset/labels.rs`, parsed directly from byte/str slices without intermediate per-line allocations):
+  `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding box is used).
+  Coordinates may exceed `[0, 1]` by up to 0.01 (clipped with a warning; within `1e-5` of the boundary, the clipping
+  warning is suppressed for both polygons — whose bounding boxes are still clamped to `[0, 1]` — and non-degenerate
+  5-token boxes, which also keep their original `cx cy w h`); exact duplicates are removed; zero-size boxes are
+  dropped.
 - A label file is **broken** (and its image skipped) if a value is not a finite number, a line has the wrong number of
   values, a class id is negative, fractional or `>= nc`, a size is negative, or coordinates are clearly not
   normalised.
@@ -53,10 +56,11 @@ produces plain buffers that the trainer wraps in tensors.
 - Image ids are numbers or strings; an integral float is its integer (`"image_id": 1.0` names `"id": 1`). Two
   `images` entries with one id: the first is kept with every annotation of the id, the second is left out and
   reported (`other`).
-- The annotation array is read as borrowed raw JSON, and only `image_id`, `category_id`, `bbox` and `iscrowd` are
-  parsed out of each entry (segmentation polygons are skipped unbuilt): COCO 2017's `instances_train2017.json`
-  (448 MB, 860k annotations) opens with a peak of 1.2 GB instead of 7 GB, with identical results. The official COCO
-  folder (`annotations/`, `train2017/`, `val2017/`) opens directly; see examples/coco.
+- COCO files are parsed in a single streaming pass (`dataset/coco/`: `mod.rs`, `parse.rs`, `fields.rs`) without
+  building `serde_json::Value` trees for `images` or `annotations` and without double-scanning huge `segmentation`
+  arrays — reading only `image_id`, `category_id`, `bbox` and `iscrowd`, validating UTF-8 up front across the entire
+  file, and isolating an overflowing numeric field in a single row via per-entry fallback so the rest of the split is
+  retained. The official COCO folder (`annotations/`, `train2017/`, `val2017/`) opens directly; see examples/coco.
 - `read_coco_ground_truth(json)` reads one instances file strictly, with what the loader drops (crowd regions, the
   `area` field and boxes in f64, image and category ids); `open_coco_ground_truth(path, split)` does that for a
   split's file and resolves every image's path exactly as the loader does, so dataset entries match COCO images by
@@ -254,19 +258,27 @@ the geometry.
   `[batch_idx, class, cx, cy, w, h]` normalised to the network input, `meta` has the dataset index, original size,
   letterbox ratio and pad of each image.
 - The epoch order is a shuffle seeded by `(seed, epoch)`; sample position `p` draws all its randomness from
-  `Rng::derive(&[seed, epoch, p])`. Workers claim positions from a shared counter, a collator thread restores the
-  order, so **output is bit-identical for any number of workers** (including `workers: 0`, which runs inline).
+  `Rng::derive(&[seed, epoch, p])`. Workers claim positions from a shared `Gate` (tracking one active `current_batch`
+  with batch buffer allocation outside the mutex), and a collator thread restores order in O(1) via a power-of-two
+  ring buffer (`p & ring_mask`, zero hashing), so **output is bit-identical for any number of workers** (including
+  `workers: 0`, which runs inline).
 - In-flight work is bounded (a window of positions plus `prefetch_batches` finished batches). Dropping the epoch
   iterator stops and joins every thread. `EpochIter::throughput()` reports images/s.
 - Inside workers, image kernels run single-threaded (`folo_data::par::serial`); outside, they split rows with rayon.
-- The workers and the collator reuse image-sized buffers (decoded, resized and warped images; `src/buffers.rs`): a
-  fresh buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost 0.5-1 ms
-  per buffer on our test machine against 0.05-0.1 ms reused. Buffers are zeroed where `vec![0; n]` was and otherwise
-  overwritten whole, so the bytes do not depend on the reuse. The pool keeps at most 512 MB of free buffers and is
-  emptied when the loader's threads stop.
+- The workers and the collator reuse image-sized byte buffers and small row/plan scratch (`src/buffers.rs`):
+  - Image-sized `Vec<u8>` buffers (`≥ 64 KiB`, used for decoded/resized/warped images and PNG decode) pass through a
+    per-thread TLS pool (up to 32 MiB per thread) in front of the process-wide pool, bounded together at `MAX_BYTES`
+    (512 MiB) via `TOTAL_POOLED_BYTES` and emptied when the last pooled thread leaves `pooled()`.
+  - Small per-thread scratch slots (`TLS_SCRATCH`: up to 4 × 256 KiB `u8` and 8 × 32 Ki `u32` slots per thread, kept
+    separate from `TOTAL_POOLED_BYTES` and cleared on leaving `pooled()`) back mosaic, mixup, resize, and letterbox
+    row/plan scratch with zero mutex contention.
+  A fresh buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost
+  0.5-1 ms per buffer on our test machine against 0.05-0.1 ms reused; buffers are zeroed where `vec![0; n]` was and
+  otherwise overwritten whole, so the bytes do not depend on reuse.
 - `tests/golden.rs` pins the digests of the first batches for each path of the transform (mosaic, rotation and
-  shear, mixup and up-down flips, letterbox + affine, validation), from memory and from JPEG and PNG files: a change
-  that alters a batch's bytes fails there.
+  shear, mixup — with runtime-dispatched AVX2 blending on x86-64 CPUs with AVX2 — and up-down flips, letterbox +
+  affine, validation), from memory and from JPEG and PNG files (EXIF reorientation is pinned separately in `image.rs`
+  and `tests/formats.rs`): a change that alters a batch's bytes fails there.
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`

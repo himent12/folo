@@ -34,10 +34,15 @@ are normative, this one is the map.
 | `ConvBnAct` | MODEL.md's `Conv` (§2.1): bias-free conv, BN, activation. `fuse_()` folds the BN into the conv; `new_fused` builds the fused structure for loading `folo.fused` files. Forward: fused → `Tensor::conv2d_act` (on the GPU one kernel with bias and activation in the epilogue when nothing is recorded); train → conv then `BatchNorm2d::forward_act`; eval on a non-CPU device (or on the CPU under `no_grad`) → the BN folded into the conv weights on the fly (small per-channel ops, still differentiable) then `conv2d_act`; eval on the CPU with recording → conv, BN, activation. `forward_cat(&[..])` is `forward(cat(.., 1))` that reads the parts in place when the conv runs fused (`Tensor::conv2d_act_cat`) |
 | `Linear`, `Activation` (Identity, SiLU, ReLU, LeakyReLU, Sigmoid, Tanh, Hardswish), `MaxPool2d`, `Upsample` (nearest), `Concat` (several inputs, so not a `Forward`), `Identity`, `Sequential`, `ModuleList` | |
 
-`RunningStats::capture(model)` / `restore()` / `all_finite(model)` implement the non-finite batch guard of
-MODEL.md §8.3: snapshot the running statistics before a train-mode forward and restore them if the loss or a
-statistic is not finite. Buffers on a device are checked there with a single readback (`Σ 0 · x` over all of them
-is 0 exactly when every value is finite).
+`RunningStats` (`layers/batchnorm/stats.rs`, alongside `mod.rs`, `cpu.rs`, and `tests.rs` in the split
+`layers/batchnorm/` module) implements the non-finite batch guard of MODEL.md §8.3: `RunningStats::capture(model)`
+snapshots every floating buffer, while `RunningStats::capture_training(model)` captures only active train-mode
+`BatchNorm2d` buffers once per epoch, refreshes them in place via `recapture()` without reallocating snapshot tensors,
+checks live finiteness via `all_finite_live()` without re-walking the module tree, and pairs with
+`RunningStats::all_finite_eval(model)` to validate frozen eval-mode BN buffers at epoch entry (`restore()` undoes a
+non-finite batch). Buffers on a device are checked with one readback per device via multi-tensor
+`Tensor::norm_partials_many(bufs, NormReduce::AbsMax, None)` + `max_all()` (falling back to `Σ 0 · x == 0` when
+`norm_partials_many` is unsupported).
 
 `fuse_conv_bn(w, b, γ, β, mean, var, eps)` is the reusable fusion (`k = γ / sqrt(var + eps)`, `W' = W·k`,
 `b' = β + (b − mean)·k`), in `F32`.
