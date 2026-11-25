@@ -31,12 +31,15 @@ pub struct LogHistory {
 pub struct Derived {
     pub loss: [Pts; 4],
     pub lr: Pts,
+    pub ips: Pts,
     pub map50: Pts,
     pub map50_95: Pts,
     pub precision: Pts,
     pub recall: Pts,
     /// Highest learning rate in the history (for the LR chart's scale).
     pub lr_max: f32,
+    /// Highest finite throughput (imgs/s) in the history (for the Throughput chart's scale).
+    pub ips_max: f32,
     /// Highest value of each loss part (box, cls, dfl, total), for the loss axis.
     pub loss_max: [f32; 4],
     /// Smallest positive, finite value per loss series (infinite when there is none): the floor of
@@ -103,17 +106,25 @@ impl RunData {
         let d = Derived {
             loss: [pts(&|s| s.loss.box_), pts(&|s| s.loss.cls), pts(&|s| s.loss.dfl), pts(&|s| s.loss.total)],
             lr: pts(&|s| s.lr),
+            ips: Arc::new(
+                steps
+                    .iter()
+                    .filter(|s| s.imgs_per_s.is_finite())
+                    .map(|s| (s.step as f32 / spe, s.imgs_per_s))
+                    .collect(),
+            ),
             map50: epts(&|e| e.val.map50),
             map50_95: epts(&|e| e.val.map50_95),
             precision: epts(&|e| e.val.precision),
             recall: epts(&|e| e.val.recall),
-            lr_max: steps.iter().map(|s| s.lr).fold(0f32, f32::max),
-            loss_max: [
-                steps.iter().map(|s| s.loss.box_).fold(0f32, f32::max),
-                steps.iter().map(|s| s.loss.cls).fold(0f32, f32::max),
-                steps.iter().map(|s| s.loss.dfl).fold(0f32, f32::max),
-                steps.iter().map(|s| s.loss.total).fold(0f32, f32::max),
-            ],
+            lr_max: steps.iter().map(|s| s.lr).filter(|v| v.is_finite()).fold(0f32, f32::max),
+            ips_max: steps.iter().map(|s| s.imgs_per_s).filter(|v| v.is_finite()).fold(0f32, f32::max),
+            loss_max: {
+                let max = |f: &dyn Fn(&Step) -> f32| {
+                    steps.iter().map(f).filter(|v| v.is_finite()).fold(0f32, f32::max)
+                };
+                [max(&|s| s.loss.box_), max(&|s| s.loss.cls), max(&|s| s.loss.dfl), max(&|s| s.loss.total)]
+            },
             loss_min: {
                 let min = |f: &dyn Fn(&Step) -> f32| {
                     steps.iter().map(f).filter(|v| v.is_finite() && *v > 0.).fold(f32::INFINITY, f32::min)
@@ -734,5 +745,45 @@ mod tests {
         let newer = LogLine { t: t2, level: LogLevel::Info, message: "epoch 2".into() };
         store.apply(id, RunEvent::Log(newer));
         assert_eq!(store.logs[id].ready().unwrap().lines.len(), 3);
+    }
+
+    #[test]
+    fn non_finite_throughput_and_loss_steps_do_not_poison_derived_series() {
+        let s1 = Step {
+            step: 1,
+            epoch: 1,
+            epochs: 5,
+            steps_per_epoch: 10,
+            loss: Loss { box_: 1.2, cls: 0.8, dfl: 0.5, total: 2.5 },
+            lr: 0.01,
+            imgs_per_s: 120.0,
+            eta_s: 0.0,
+        };
+        let s2 = Step {
+            step: 2,
+            epoch: 1,
+            epochs: 5,
+            steps_per_epoch: 10,
+            loss: Loss { box_: f32::INFINITY, cls: f32::NAN, dfl: 0.4, total: f32::INFINITY },
+            lr: f32::NAN,
+            imgs_per_s: f32::NAN,
+            eta_s: 0.0,
+        };
+        let s3 = Step {
+            step: 3,
+            epoch: 1,
+            epochs: 5,
+            steps_per_epoch: 10,
+            loss: Loss { box_: 0.9, cls: 0.6, dfl: 0.3, total: 1.8 },
+            lr: 0.008,
+            imgs_per_s: 145.0,
+            eta_s: 0.0,
+        };
+        let data = RunData::new(RunMetrics { steps: vec![s1, s2, s3], epochs: vec![] }, 10);
+        let d = data.derived();
+        assert_eq!(d.ips.len(), 2, "NaN throughput step is omitted from plotted series");
+        assert_eq!(d.ips_max, 145.0);
+        assert_eq!(d.lr_max, 0.01);
+        assert_eq!(d.loss_max, [1.2, 0.8, 0.5, 2.5], "inf/NaN step does not poison loss_max");
     }
 }
