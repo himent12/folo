@@ -38,7 +38,7 @@ const PASSIVE = new Set(['touchstart', 'touchmove']);
 const registered = new Set<string>();
 /** Per root (and the document): listener counts per event type. */
 const roots = new Map<EventTarget, Map<string, number>>();
-const HANDLED = Symbol('fw.handled');
+const handled = new WeakMap<Event, EventTarget>();
 
 type Handler = (this: Element, e: Event) => unknown;
 type Delegating = Element & Record<string, Handler | undefined>;
@@ -97,58 +97,61 @@ export function delegateEvents(types: string[]): void {
   }
 }
 
-let lastEvent: Event | null = null;
-let clearScheduled = false;
+function hasHigherDelegatedTarget(path: EventTarget[], handlerElement: EventTarget, type: string): boolean {
+  const idx = path.indexOf(handlerElement);
+  if (idx === -1) return false;
+  for (let i = idx + 1; i < path.length; i++) {
+    if (roots.get(path[i]!)?.has(type)) return true;
+  }
+  return false;
+}
 
 function propagate(this: EventTarget, event: Event): void {
   const handlerElement = this;
-  const ownerDocument = (handlerElement as Node).ownerDocument ?? (handlerElement as Document);
   const type = event.type;
   const path = event.composedPath?.() ?? [];
   let pathIdx = 0;
-  lastEvent = event;
-  if (!clearScheduled) {
-    clearScheduled = true;
-    setTimeout(() => {
-      clearScheduled = false;
-      lastEvent = null;
-    });
-  }
-  const handledAt = lastEvent === event && (event as unknown as Record<symbol, EventTarget | undefined>)[HANDLED];
-  if (handledAt) {
+  const handledAt = handled.get(event);
+  if (handledAt !== undefined && handledAt !== handlerElement) {
     const atIdx = path.indexOf(handledAt);
     if (atIdx !== -1 && (handlerElement === document || handlerElement === (window as EventTarget))) {
-      // The document fallback after a root already handled it: nothing to do, but reset for a re-dispatch.
-      (event as unknown as Record<symbol, EventTarget>)[HANDLED] = handlerElement;
+      // The document fallback after a root already handled it: nothing to do, clean up unless another delegated root sits above.
+      if (hasHigherDelegatedTarget(path, handlerElement, type)) handled.set(event, handlerElement);
+      else handled.delete(event);
       return;
     }
     const handlerIdx = path.indexOf(handlerElement);
     if (handlerIdx === -1) return;
-    if (atIdx <= handlerIdx) pathIdx = atIdx;
+    if (atIdx !== -1 && atIdx <= handlerIdx) pathIdx = atIdx;
   }
   let current = (path[pathIdx] ?? event.target) as Element | null;
   if (current === handlerElement) return;
-  Object.defineProperty(event, 'currentTarget', {
-    configurable: true,
-    get() {
-      return current || ownerDocument;
-    },
-  });
   const key = '$$' + type;
+  let defined = false;
   try {
     let error: unknown;
     while (current !== null) {
       if (current === handlerElement) break;
-      try {
-        const h = (current as Delegating)[key];
-        if (h != null && (!(current as HTMLButtonElement).disabled || event.target === current)) {
-          runWithOwner(null, () => h.call(current!, event));
+      const h = (current as Delegating)[key];
+      if (h != null && (!(current as HTMLButtonElement).disabled || event.target === current)) {
+        if (!defined) {
+          const ownerDocument = (handlerElement as Node).ownerDocument ?? (handlerElement as Document);
+          Object.defineProperty(event, 'currentTarget', {
+            configurable: true,
+            get() {
+              return current || ownerDocument;
+            },
+          });
+          defined = true;
         }
-      } catch (e) {
-        if (error === undefined) error = e;
-        else queueMicrotask(() => {
-          throw e;
-        });
+        try {
+          runWithOwner(null, () => h.call(current!, event));
+        } catch (e) {
+          if (error === undefined) error = e;
+          else queueMicrotask(() => {
+            throw e;
+          });
+        }
       }
       if (event.cancelBubble) break;
       pathIdx++;
@@ -156,8 +159,12 @@ function propagate(this: EventTarget, event: Event): void {
     }
     if (error !== undefined) throw error;
   } finally {
-    (event as unknown as Record<symbol, EventTarget>)[HANDLED] = handlerElement;
-    delete (event as unknown as { currentTarget?: unknown }).currentTarget;
+    if (event.cancelBubble || !event.bubbles || !hasHigherDelegatedTarget(path, handlerElement, type)) {
+      handled.delete(event);
+    } else {
+      handled.set(event, handlerElement);
+    }
+    if (defined) delete (event as unknown as { currentTarget?: unknown }).currentTarget;
   }
 }
 
