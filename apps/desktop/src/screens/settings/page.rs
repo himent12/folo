@@ -25,13 +25,32 @@ const GO_TO_KEYS: [(&str, &[&str]); 9] = [
     ("Datasets", &["Ctrl", "2"]),
     ("Runs", &["Ctrl", "3"]),
     ("Models", &["Ctrl", "4"]),
-    ("Playground", &["Ctrl", "5"]),
-    ("Benchmarks", &["Ctrl", "6"]),
+    ("Benchmarks", &["Ctrl", "5"]),
+    ("Playground", &["Ctrl", "6"]),
     ("Settings", &["Ctrl", "Comma"]),
     // Sidebar, search, page.
     ("Next region", &["F6"]),
     ("Previous region", &["Shift", "F6"]),
 ];
+
+/// Base HTTP(S) URL of FOLO Studio served by the connected `folo serve`, or `None` in Built-in demo
+/// mode, when the address is invalid, or when it embeds URL credentials.
+pub(crate) fn studio_url(
+    server_mode: ServerMode,
+    connected_url: Option<&str>,
+    input_url: &str,
+    bad_address: bool,
+) -> Option<String> {
+    if server_mode != ServerMode::Local || bad_address {
+        return None;
+    }
+    let raw = connected_url
+        .and_then(crate::app::persistable_server_url)
+        .or_else(|| crate::app::persistable_server_url(input_url))?;
+    let backend = crate::api::http::HttpBackend::new(&raw);
+    let base = backend.base();
+    (base.starts_with("http://") || base.starts_with("https://")).then(|| base.to_string())
+}
 
 /// One Settings row (UNIFIED.md §4): the name and its one-line description on the left (they take the
 /// slack and wrap), the control on the right edge; 56 px high, more when the description wraps.
@@ -161,6 +180,58 @@ impl FoloApp {
                     .child(self.connecting.clone().unwrap_or_else(|| "Connecting…".into())),
             ),
         };
+        let studio_target = studio_url(
+            self.server_mode,
+            self.connected_url.as_deref(),
+            &self.server_url.read(cx).text(),
+            self.store.bad_address(),
+        );
+        let studio_controls = if let Some(url) = studio_target {
+            let open_url = url.clone();
+            let copy_url = url;
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(self.button(
+                    "set-studio-open",
+                    "Open in browser",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/external-link.svg"),
+                    window,
+                    cx,
+                    act(move |_, _, cx| cx.open_url(&open_url)),
+                ))
+                .child(self.button(
+                    "set-studio-copy",
+                    "Copy URL",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/copy.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(copy_url.clone()));
+                        this.toast(Tone::Neutral, "Studio URL copied", Some(copy_url.clone().into()), cx);
+                    }),
+                ))
+                .into_any_element()
+        } else {
+            let reason = if self.server_mode == ServerMode::Mock {
+                "Connect to folo serve to open FOLO Studio"
+            } else {
+                "Enter a valid folo serve address to open FOLO Studio"
+            };
+            self.button_disabled(
+                "set-studio-open",
+                "Open in browser",
+                crate::controls::Btn::Secondary,
+                Some("icons/external-link.svg"),
+                reason,
+                window,
+                cx,
+            )
+            .into_any_element()
+        };
         let connection = panel(&t)
             .flex()
             .flex_col()
@@ -207,14 +278,20 @@ impl FoloApp {
                 "Start a local server automatically",
                 help("When no server is running at the address above, launch `folo serve` on a free port and stop it on exit."),
                 spawn.into_any_element(),
+            ))
+            .child(row(
+                "FOLO Studio",
+                help("Web UI served by `folo serve` for browser-only workflows like agent labeling and run comparison."),
+                studio_controls,
             ));
 
         let appearance = self.appearance_panel(window, cx);
 
-        let actions: [(&str, &[&str]); 9] = [
+        let actions: [(&str, &[&str]); 10] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
+            ("Toggle sidebar", &["Ctrl", "B"]),
             ("Switch theme", &["Ctrl", "Shift", "L"]),
             ("Full screen", &["F11"]),
             ("Back", &["Alt", "←"]),
@@ -295,11 +372,90 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
+    use super::studio_url;
+    use crate::app::{Route, ServerMode};
+
     #[test]
     fn every_page_shortcut_is_listed() {
-        // Ctrl+1–6 go to the six pages (app::bind_keys); Ctrl+6 was missing from the list.
+        // Ctrl+1–6 go to the six pages (app::bind_keys) in sidebar order: 5 = Benchmarks, 6 = Playground.
         for n in ["1", "2", "3", "4", "5", "6"] {
             assert!(super::GO_TO_KEYS.iter().any(|(_, k)| *k == ["Ctrl", n]), "Ctrl {n}");
         }
+        assert!(super::GO_TO_KEYS.iter().any(|(name, k)| *name == "Benchmarks" && *k == ["Ctrl", "5"]));
+        assert!(super::GO_TO_KEYS.iter().any(|(name, k)| *name == "Playground" && *k == ["Ctrl", "6"]));
+    }
+
+    #[test]
+    fn studio_url_requires_valid_credential_free_local_server() {
+        assert_eq!(
+            studio_url(ServerMode::Mock, Some("http://127.0.0.1:7878"), "http://127.0.0.1:7878", false),
+            None
+        );
+        assert_eq!(studio_url(ServerMode::Local, None, "http://127.0.0.1:99999", true), None);
+        assert_eq!(studio_url(ServerMode::Local, None, "https://user:pass@host:7878", false), None);
+        assert_eq!(
+            studio_url(ServerMode::Local, Some("http://127.0.0.1:54321/"), "http://127.0.0.1:7878", false),
+            Some("http://127.0.0.1:54321".into())
+        );
+        assert_eq!(
+            studio_url(ServerMode::Local, None, "10.0.0.5:7878", false),
+            Some("http://10.0.0.5:7878".into())
+        );
+    }
+
+    #[test]
+    fn sidebar_toggle_and_ctrl_5_6_shortcuts_work() {
+        use crate::app::tests::{drive, open};
+        use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+
+        let press =
+            |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<crate::app::FoloApp>, key: &str| {
+                let ks = Keystroke::parse(key).unwrap();
+                app.simulate_input(
+                    w.into(),
+                    PlatformInput::KeyDown(KeyDownEvent { keystroke: ks.clone(), is_held: false }),
+                );
+                app.run_until_idle();
+                app.frame(w.into());
+                app.simulate_input(w.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke: ks }));
+                app.run_until_idle();
+                app.frame(w.into());
+            };
+
+        let (mut app, window) = open();
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        app.frame(window.into());
+
+        // Ctrl+5 -> Benchmarks, Ctrl+6 -> Playground (matching sidebar order).
+        press(&mut app, window, "ctrl-5");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Benches);
+        press(&mut app, window, "ctrl-6");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Playground);
+
+        // Ctrl+B collapses the sidebar and expands content_width on a 1280 px window.
+        let wide_content = drive(&mut app, window, |this, w, _| {
+            assert!(!this.sidebar_collapsed);
+            assert!(!this.sidebar_compact(w));
+            this.content_width(w)
+        });
+        press(&mut app, window, "ctrl-b");
+        let collapsed_content = drive(&mut app, window, |this, w, _| {
+            assert!(this.sidebar_collapsed);
+            assert!(this.sidebar_compact(w));
+            this.content_width(w)
+        });
+        assert!(
+            collapsed_content > wide_content,
+            "collapsing sidebar widens content area ({collapsed_content} <= {wide_content})"
+        );
+        press(&mut app, window, "ctrl-b");
+        assert!(!drive(&mut app, window, |this, _, _| this.sidebar_collapsed));
+
+        // Settings renders FOLO Studio and Custom themes Open folder cleanly.
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Settings, w, cx));
+        app.frame(window.into());
     }
 }

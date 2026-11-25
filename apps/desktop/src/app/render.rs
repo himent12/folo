@@ -14,7 +14,7 @@ use super::focus::REVEAL;
 use super::{
     Back, Dismiss, FocusNext, FocusPrev, FoloApp, Forward, GoBenchmarks, GoDatasets, GoModels, GoOverview,
     GoPlayground, GoRuns, GoSettings, NewRunAction, NextRegion, OpenImage, OpenPalette, PrevRegion, Route,
-    Submit, ToggleFullscreen, ToggleTheme,
+    Submit, ToggleFullscreen, ToggleSidebar, ToggleTheme,
 };
 
 // ---------- render ----------
@@ -118,6 +118,12 @@ impl Render for FoloApp {
             )
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, w, cx| {
+                if !this.modal_open() && this.palette.is_none() && w.viewport_size().width >= px(1120.) {
+                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|_, _: &ToggleFullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &Back, w, cx| {
                 if !this.modal_open() && this.palette.is_none() {

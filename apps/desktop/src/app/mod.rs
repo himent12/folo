@@ -76,6 +76,7 @@ use crate::store::*;
 use crate::theme::{Mode, theme};
 use crate::ui::*;
 
+pub(crate) use connection::persistable_server_url;
 pub use connection::{Connector, Reason};
 pub use focus::focus_ring;
 pub use forms::{
@@ -99,6 +100,7 @@ actions!(
         GoPlayground,
         GoSettings,
         ToggleTheme,
+        ToggleSidebar,
         ToggleFullscreen,
         Back,
         Forward,
@@ -121,9 +123,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-2", GoDatasets, None),
         KeyBinding::new("ctrl-3", GoRuns, None),
         KeyBinding::new("ctrl-4", GoModels, None),
-        KeyBinding::new("ctrl-5", GoPlayground, None),
-        KeyBinding::new("ctrl-6", GoBenchmarks, None),
+        KeyBinding::new("ctrl-5", GoBenchmarks, None),
+        KeyBinding::new("ctrl-6", GoPlayground, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-left", Back, None),
@@ -590,6 +593,8 @@ pub struct FoloApp {
     /// dropped.
     pub system_seq: u64,
     pub reduce_motion: bool,
+    /// User-toggled sidebar collapse (`Ctrl+B`), remembered in `desktop.json`.
+    pub sidebar_collapsed: bool,
 
     // Overlays
     pub palette: Option<Palette>,
@@ -899,6 +904,7 @@ impl FoloApp {
             system_seq: 0,
             // Follow the OS animation setting until the user picks in Settings.
             reduce_motion: calm,
+            sidebar_collapsed: false,
             palette: None,
             new_run: None,
             new_run_draft: None,

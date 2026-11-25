@@ -359,6 +359,7 @@ pub fn run() {
                         app.apply_theme(cx);
                         app.spawn_server = spawn_server;
                         app.saved_server_url = saved.server_url.clone();
+                        app.sidebar_collapsed = saved.sidebar_collapsed.unwrap_or(false);
                         if let Some(calm) = saved.reduce_motion {
                             app.reduce_motion = calm;
                             crate::ui::set_reduce_motion(calm);

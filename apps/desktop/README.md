@@ -160,8 +160,8 @@ values, conflicting `--shot` and `--bench-frames`, or an invalid `--scenario` or
 
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
-Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image (in Playground, with the model of the model or run page it was pressed on) · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
-`Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Alt →` forward · `Esc` close (a dialog, an inline form, a delete waiting
+Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image (in Playground, with the model of the model or run page it was pressed on) · `Ctrl 1–6` screens (`Ctrl 5` benchmarks, `Ctrl 6` playground) · `Ctrl ,` settings ·
+`Ctrl B` toggle sidebar · `Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Alt →` forward · `Esc` close (a dialog, an inline form, a delete waiting
 for its second click) or go up · `Ctrl Enter` submit the open dialog or form · `Tab` / arrows move focus ·
 `F6` next region. Text fields: `Home` / `End`, `Ctrl ←/→` word, `Ctrl Backspace` / `Ctrl Delete` delete a word,
 `Shift` with any of these moves select, `Ctrl A` all.
@@ -344,7 +344,7 @@ starting and stopping it is `src/api/http/server.rs`.
 
 ## Benchmarks
 
-With a server that lists the `vision_bench` feature (docs/BENCH.md), **Benchmarks** in the sidebar (`Ctrl 6`) lists
+With a server that lists the `vision_bench` feature (docs/BENCH.md), **Benchmarks** in the sidebar (`Ctrl 5`) lists
 the server's benchmarks and makes new ones (from a dataset split, or the labeled images of a labeling job, with the
 default plan). A benchmark's page has three underline tabs, each with its count:
 

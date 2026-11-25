@@ -118,8 +118,8 @@ impl FoloApp {
             ("Datasets", "icons/images.svg", Route::Datasets, &["Ctrl", "2"]),
             ("Runs", "icons/activity.svg", Route::Runs, &["Ctrl", "3"]),
             ("Models", "icons/box.svg", Route::Models, &["Ctrl", "4"]),
-            ("Benchmarks", "icons/target.svg", Route::Benches, &["Ctrl", "6"]),
-            ("Playground", "icons/scan-eye.svg", Route::Playground, &["Ctrl", "5"]),
+            ("Benchmarks", "icons/target.svg", Route::Benches, &["Ctrl", "5"]),
+            ("Playground", "icons/scan-eye.svg", Route::Playground, &["Ctrl", "6"]),
             ("Settings", "icons/settings.svg", Route::Settings, &["Ctrl", ","]),
         ];
         items.push(PaletteItem {
@@ -155,6 +155,22 @@ impl FoloApp {
             keys: &["F11"],
             action: act(|_, w, _| w.toggle_fullscreen()),
         });
+        if !self.narrow {
+            let collapsed = self.sidebar_collapsed;
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: if collapsed { "icons/chevron-right.svg" } else { "icons/chevron-left.svg" },
+                title: if collapsed { "Expand sidebar".into() } else { "Collapse sidebar".into() },
+                detail: String::new(),
+                keys: &["Ctrl", "B"],
+                action: act(|this, w, cx| {
+                    if w.viewport_size().width >= px(1120.) {
+                        this.sidebar_collapsed = !this.sidebar_collapsed;
+                        cx.notify();
+                    }
+                }),
+            });
+        }
         if let Some(live) = self.store.live_run() {
             let id = live.id.clone();
             items.push(PaletteItem {
