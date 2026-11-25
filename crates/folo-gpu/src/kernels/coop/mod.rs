@@ -148,12 +148,13 @@ pub fn pick_config(m: usize, n: usize, batch: usize) -> CoopConfig {
 
 /// [`pick_config`] for convs (forward implicit GEMM, 1×1 GEMM, concatenation GEMM, and backward `dX`): short `M`
 /// gets the flat tiles as there, then `C64X128` for outputs of at least 128 channels and 6400 pixels (80 px and
-/// up), else `C64X64`. Never picks `C128X128` (proven 14–63% slower on Ada due to shared-memory occupancy).
+/// up) or whenever 64-column tiles would exceed the 65,535 X-workgroup limit, else `C64X64`. Never picks
+/// `C128X128` (proven 14–63% slower on Ada due to shared-memory occupancy).
 pub fn pick_config_conv(m: usize, n: usize) -> CoopConfig {
     if m <= 32 {
         return pick_config(m, n, 1);
     }
-    if m >= 128 && n >= 6400 { CoopConfig::C64X128 } else { CoopConfig::C64X64 }
+    if (m >= 128 && n >= 6400) || n.div_ceil(64) > 65_535 { CoopConfig::C64X128 } else { CoopConfig::C64X64 }
 }
 
 /// Batch-aware conv tile picker: on `batch == 1` with small spatial planes (`n <= 400`, e.g. 20×20) and

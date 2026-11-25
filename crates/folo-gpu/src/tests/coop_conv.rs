@@ -964,3 +964,34 @@ fn coop_conv_backward_large_scale_stays_finite() {
         assert!((centre / expect - 1.0).abs() < 1e-2, "{d:?}: got {centre}, expected {expect}");
     }
 }
+
+/// 1×1 `conv2d_backward_input` on tensor cores uses `TRANS_A` directly (single `coop_gemm` dispatch, no
+/// `permute` / weight-transpose allocation) across ungrouped, grouped, and odd-channel shapes.
+#[test]
+fn coop_conv_pointwise_dx_uses_trans_a_directly() {
+    let (ctx, _g) = coop!();
+    let p1 = Window2d::square(1, 1, 0);
+    for (i, d) in [
+        cdesc(1, 64, 20, 20, 64, 1, p1),
+        cdesc(2, 128, 80, 80, 64, 1, p1),
+        cdesc(2, 12, 15, 13, 24, 1, p1),
+        cdesc(2, 5, 11, 13, 7, 1, p1),
+        cdesc(3, 15, 9, 11, 21, 3, p1),
+        cdesc(2, 32, 16, 16, 48, 4, p1),
+    ]
+    .iter()
+    .enumerate()
+    {
+        run_conv_grads(&ctx, d, 600 + i as u64);
+    }
+    ctx.set_tensor_cores(true);
+    let d = cdesc(2, 64, 20, 20, 128, 2, p1);
+    let gg = GpuTensor::zeros(&ctx, &[2 * 128 * 400], DType::F16).unwrap();
+    let gw = GpuTensor::zeros(&ctx, &[128 * 32], DType::F16).unwrap();
+    let dx = GpuTensor::empty(&ctx, &[2 * 64 * 400], DType::F16).unwrap();
+    ctx.trace_begin();
+    conv::conv2d_backward_input(&ctx, &d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+    let trace = ctx.trace_end();
+    assert_eq!(trace.iter().map(|op| op.name).collect::<Vec<_>>(), ["coop_gemm"]);
+    assert!(trace[0].spec.contains("TRANS_A=1"), "expected TRANS_A=1 in {}", trace[0].spec);
+}
