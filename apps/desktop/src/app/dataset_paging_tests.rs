@@ -317,3 +317,70 @@ fn datasets_list_filters_by_format_and_search_before_loading_card_previews() {
         assert!(this.ds_search.read(cx).focus_handle(cx).is_focused(w), "ds-filter-clear restores focus");
     });
 }
+
+#[test]
+fn dataset_images_search_sort_reset_and_clickable_class_balance_bars() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api);
+    let ds_id = "ds_8f2c";
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset(ds_id.into()), w, cx);
+    });
+    let keys = drawn_keys(&mut app, window);
+    assert!(keys.iter().any(|k| k == "ds-img-sort"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "ds-img-reset"), "reset hidden when unfiltered: {keys:?}");
+
+    // Filtering by filename updates filtered_indices and surfaces the Reset button.
+    let first_file = app
+        .update(|cx| {
+            window.update(cx, |this, _, _| this.filtered_image(ds_id, 0).map(|m| m.file.clone())).unwrap()
+        })
+        .expect("dataset has images");
+    let query = crate::screens::datasets::file_name(&first_file).to_string();
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_img_search.update(cx, |i, cx| i.set_text(query.clone(), cx));
+        this.ds_img_sort = crate::screens::datasets::ImageSort::MostBoxes;
+        cx.notify();
+    });
+    let filtered_keys = drawn_keys(&mut app, window);
+    assert!(filtered_keys.iter().any(|k| k == "ds-img-reset"), "{filtered_keys:?}");
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.dataset_image_filters_active(ds_id));
+        assert!(!this.filtered_indices(ds_id).is_empty());
+    });
+
+    // Activating Reset clears search, sort, split, and class filters.
+    let press_enter = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<super::FoloApp>| {
+        let keystroke = folo_ui::Keystroke::parse("enter").unwrap();
+        app.simulate_input(
+            w.into(),
+            folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent { keystroke, is_held: false }),
+        );
+        app.run_until_idle();
+        app.frame(w.into());
+    };
+    drive(&mut app, window, |this, w, cx| this.focus_key("ds-img-reset", w, cx));
+    app.frame(window.into());
+    press_enter(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.dataset_image_filters_active(ds_id));
+        assert!(this.ds_img_search.read(cx).text().is_empty());
+        assert_eq!(this.ds_img_sort, crate::screens::datasets::ImageSort::Default);
+    });
+
+    // Statistics tab renders clickable class-balance bars that filter and jump to Images.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_tab = super::DsTab::Statistics;
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    let stats_keys = drawn_keys(&mut app, window);
+    assert!(stats_keys.iter().any(|k| k == "ds-class-bar-0"), "{stats_keys:?}");
+    drive(&mut app, window, |this, w, cx| this.focus_key("ds-class-bar-0", w, cx));
+    app.frame(window.into());
+    press_enter(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.ds_tab, super::DsTab::Images);
+        assert_eq!(this.class_filter(ds_id), Some(0));
+    });
+}

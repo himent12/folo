@@ -29,6 +29,11 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let id = ds.id.clone();
+        // Keep the cached query synced even if a caller updated the input before subscription delivery.
+        let current_query = self.ds_img_search.read(cx).text().to_string();
+        if self.ds_img_query != current_query {
+            self.ds_img_query = current_query;
+        }
         let total = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
         let count = self.filtered_indices(&id).len();
         let splits = [None, Some(Split::Train), Some(Split::Val), Some(Split::Test)];
@@ -79,7 +84,7 @@ impl FoloApp {
         let narrow = window.viewport_size().width < px(1120.);
         let picker = div()
             .id("ds-class-pick")
-            .w(px(if narrow { 160. } else { 184. }))
+            .w(px(if narrow { 112. } else { 128. }))
             .flex_none()
             .tooltip(crate::controls::tip("Show only images with a box of this class", None))
             .child(self.class_select(
@@ -231,14 +236,58 @@ impl FoloApp {
             // next Tab continues from here instead of restarting at the top of the window.
             self.passing_stop("ds-page-retry", false, cx).map(|fh| div().track_focus(&fh).into_any_element())
         };
-        // One toolbar over the grid: what is shown (the split, the class, the count) on the left,
-        // how it is drawn (Boxes, the size, Fit / Fill) on the right.
+        // One single-row toolbar over the grid: filters/search/sort/reset on the left, display
+        // options (Boxes, size, Fit / Fill) on the right; the count shrinks cleanly with full hover tip.
+        let img_search = self.search_field(
+            "ds-img-search",
+            self.ds_img_search.clone(),
+            if narrow { 104. } else { 124. },
+            window,
+            cx,
+        );
+        let sort_opts: Vec<(SharedString, Option<SharedString>)> =
+            super::ImageSort::ALL.iter().map(|s| (s.label().into(), None)).collect();
+        let sort_sel = super::ImageSort::ALL.iter().position(|s| *s == self.ds_img_sort).unwrap_or(0);
+        let img_sort = div().w(px(if narrow { 96. } else { 104. })).flex_none().child(self.compact_select(
+            "ds-img-sort",
+            self.ds_img_sort.label().into(),
+            sort_opts,
+            sort_sel,
+            window,
+            cx,
+            Rc::new(|this, i, _, cx| {
+                this.ds_img_sort = super::ImageSort::ALL[i];
+                this.ds_hover_tile = None;
+                this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                cx.notify();
+            }),
+        ));
+        let filters_active = self.dataset_image_filters_active(&id);
+        let reset_stop = self.passing_stop("ds-img-reset", filters_active, cx);
+        let reset_btn = if filters_active {
+            let reset_id = id.clone();
+            Some(
+                self.button(
+                    "ds-img-reset",
+                    "Reset",
+                    Btn::Secondary,
+                    None,
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.reset_dataset_image_filters(&reset_id, cx)),
+                )
+                .tooltip(crate::controls::tip("Reset split, class, search and sort", None))
+                .into_any_element(),
+            )
+        } else {
+            reset_stop.map(|fh| div().track_focus(&fh).into_any_element())
+        };
         let toolbar = div()
             .h(px(tsize::CONTROL_LG))
             .mb(px(12.))
             .flex()
             .items_center()
-            .gap(px(if narrow { 8. } else { 12. }))
+            .gap(px(if narrow { 6. } else { 8. }))
             .child(seg)
             // Empty images have no class, so the two filters never both apply: while "Show them"
             // (Statistics) holds the empty images, its chip takes the class picker's place.
@@ -259,6 +308,9 @@ impl FoloApp {
                     }),
                 ))
             })
+            .child(img_search)
+            .child(img_sort)
+            .children(reset_btn)
             // A count cut short says itself in full on hover.
             .child(
                 div()
@@ -297,7 +349,7 @@ impl FoloApp {
         }
         if count == 0 {
             // A dataset with no image at all is not a filter that matched nothing.
-            let (icon, title, body) = if ds.splits.total() == 0 {
+            let (icon, title, body, show_reset) = if ds.splits.total() == 0 {
                 let broken = ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0);
                 (
                     "icons/image.svg",
@@ -307,23 +359,45 @@ impl FoloApp {
                     } else {
                         "FOLO found no image in this dataset's splits."
                     },
+                    false,
                 )
             } else {
-                ("icons/list-filter.svg", "No images match", "Try another split or clear the class filter.")
+                (
+                    "icons/list-filter.svg",
+                    "No images match",
+                    "Try another split, class, or filename search.",
+                    true,
+                )
             };
+            let empty_reset = show_reset.then(|| {
+                let reset_id = id.clone();
+                self.button(
+                    "ds-img-empty-reset",
+                    "Reset filters",
+                    Btn::Secondary,
+                    None,
+                    window,
+                    cx,
+                    act(move |this, w, cx| {
+                        this.reset_dataset_image_filters(&reset_id, cx);
+                        w.focus(&folo_ui::Focusable::focus_handle(this.ds_img_search.read(cx), cx));
+                    }),
+                )
+            });
             return div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .child(toolbar)
                 .when_some(failed_banner, |d, b| d.child(b))
-                .child(panel(&t).flex_1().flex().items_center().justify_center().child(empty_state(
-                    &t,
-                    icon,
-                    title,
-                    body,
-                    Tone::Neutral,
-                )))
+                .child(
+                    panel(&t)
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(empty_state(&t, icon, title, body, Tone::Neutral).children(empty_reset)),
+                )
                 .into_any_element();
         }
         let cols = self.grid_cols();

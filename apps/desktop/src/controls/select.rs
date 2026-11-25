@@ -59,6 +59,21 @@ impl FoloApp {
         self.select_full(key, current, options, selected, disabled, &[], false, window, cx, on_select)
     }
 
+    /// A compact (28 px) dropdown trigger for toolbars, matching segmented controls beside it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compact_select(
+        &self,
+        key: &'static str,
+        current: SharedString,
+        options: Vec<(SharedString, Option<SharedString>)>,
+        selected: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> AnyElement {
+        self.select_full(key, current, options, selected, &[], &[], true, window, cx, on_select)
+    }
+
     /// A compact (28 px) select of classes, for a toolbar: `classes[i]` is option `i`'s class (its
     /// swatch before the name; `None` for an option that is no class, "All classes"), and the trigger
     /// shows the chosen one's.

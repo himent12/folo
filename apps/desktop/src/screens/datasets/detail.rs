@@ -8,6 +8,7 @@ use folo_ui::{
 };
 
 use super::health::{finding_count, health_checks};
+use super::images::file_name;
 use crate::api::SplitsExt;
 use crate::api::{ImageInfo, Label, Split};
 use crate::app::{DsTab, FoloApp, act};
@@ -16,6 +17,103 @@ use crate::screens::{detail_header, loading_rows, page_header};
 use crate::store::Load;
 use crate::theme::{theme, ty};
 use crate::ui::*;
+
+/// How a dataset's Images grid is ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ImageSort {
+    /// Original server order.
+    #[default]
+    Default,
+    /// Filename A–Z (case-insensitive).
+    NameAsc,
+    /// Filename Z–A (case-insensitive).
+    NameDesc,
+    /// Most ground-truth boxes first.
+    MostBoxes,
+    /// Fewest ground-truth boxes first.
+    FewestBoxes,
+}
+
+impl ImageSort {
+    pub const ALL: [Self; 5] =
+        [Self::Default, Self::NameAsc, Self::NameDesc, Self::MostBoxes, Self::FewestBoxes];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Order",
+            Self::NameAsc => "Filename A–Z",
+            Self::NameDesc => "Filename Z–A",
+            Self::MostBoxes => "Most boxes",
+            Self::FewestBoxes => "Fewest boxes",
+        }
+    }
+}
+
+/// Cache key and result for filtered and sorted dataset image indices.
+#[derive(Clone)]
+pub struct DatasetFilterCache {
+    dataset: String,
+    split: Option<Split>,
+    class: Option<u32>,
+    empty_only: bool,
+    query: String,
+    sort: ImageSort,
+    len: usize,
+    ptr: usize,
+    indices: Rc<Vec<usize>>,
+}
+
+/// Filters and sorts indices into `all` by split, class, empty-only, normalized filename/path query,
+/// and `sort`.
+pub fn filter_and_sort_images(
+    all: &[ImageInfo],
+    split: Option<Split>,
+    class: Option<u32>,
+    empty_only: bool,
+    query: &str,
+    sort: ImageSort,
+) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let q_slash = q.contains('\\').then(|| q.replace('\\', "/"));
+    let q_norm = q_slash.as_deref().unwrap_or(&q);
+    let mut indices: Vec<usize> = all
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| split.is_none_or(|s| m.split == s))
+        .filter(|(_, m)| class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
+        .filter(|(_, m)| !empty_only || m.boxes.is_empty())
+        .filter(|(_, m)| {
+            if q.is_empty() {
+                return true;
+            }
+            let file = m.file.to_lowercase();
+            file.contains(&q)
+                || ((q_slash.is_some() || file.contains('\\')) && file.replace('\\', "/").contains(q_norm))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if sort != ImageSort::Default {
+        let cmp_name = |a: usize, b: usize| {
+            let fa = file_name(&all[a].file);
+            let fb = file_name(&all[b].file);
+            fa.to_lowercase()
+                .cmp(&fb.to_lowercase())
+                .then_with(|| fa.cmp(fb))
+                .then_with(|| all[a].file.cmp(&all[b].file))
+                .then_with(|| a.cmp(&b))
+        };
+        indices.sort_by(|&a, &b| match sort {
+            ImageSort::Default => a.cmp(&b),
+            ImageSort::NameAsc => cmp_name(a, b),
+            ImageSort::NameDesc => cmp_name(b, a),
+            ImageSort::MostBoxes => all[b].boxes.len().cmp(&all[a].boxes.len()).then_with(|| cmp_name(a, b)),
+            ImageSort::FewestBoxes => {
+                all[a].boxes.len().cmp(&all[b].boxes.len()).then_with(|| cmp_name(a, b))
+            }
+        });
+    }
+    indices
+}
 
 impl FoloApp {
     /// A registered dataset its server can't read (folder moved away, images deleted): what is
@@ -94,30 +192,72 @@ impl FoloApp {
         self.ds_empty_of.as_deref() == Some(id)
     }
 
-    /// Indices (into the dataset's image list) that pass the split and class filters. Cached
-    /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
+    /// Whether any filter or non-default sort is active on dataset `id`'s Images tab.
+    pub fn dataset_image_filters_active(&self, id: &str) -> bool {
+        self.ds_split.is_some()
+            || self.class_filter(id).is_some()
+            || self.empty_only(id)
+            || !self.ds_img_query.trim().is_empty()
+            || self.ds_img_sort != ImageSort::Default
+    }
+
+    /// Resets split, class, empty-only, filename search, and sort on dataset `id`'s Images tab.
+    pub fn reset_dataset_image_filters(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.ds_split = None;
+        if self.ds_class.as_ref().is_some_and(|(of, _)| of == id) {
+            self.ds_class = None;
+        }
+        if self.empty_only(id) {
+            self.ds_empty_of = None;
+        }
+        self.ds_img_query.clear();
+        self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+        self.ds_img_sort = ImageSort::Default;
+        self.ds_hover_tile = None;
+        self.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// Indices (into the dataset's image list) that pass the split, class, empty-only, and filename
+    /// filters, ordered by `ds_img_sort`. Cached until the dataset, its image list, a filter, or the
+    /// sort changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
         let class = self.class_filter(id);
         let empty_only = self.empty_only(id);
         let len = all.len();
         let ptr = all.as_ptr() as usize;
-        if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
-            && (k.0.as_str(), k.1, k.2, k.3, k.4, k.5) == (id, self.ds_split, class, empty_only, len, ptr)
+        if let Some(c) = self.ds_filter_cache.borrow().as_ref()
+            && c.dataset == id
+            && c.split == self.ds_split
+            && c.class == class
+            && c.empty_only == empty_only
+            && c.query == self.ds_img_query
+            && c.sort == self.ds_img_sort
+            && c.len == len
+            && c.ptr == ptr
         {
-            return v.clone();
+            return c.indices.clone();
         }
-        let key = (id.to_string(), self.ds_split, class, empty_only, len, ptr);
-        let v: Rc<Vec<usize>> = Rc::new(
-            all.iter()
-                .enumerate()
-                .filter(|(_, m)| self.ds_split.is_none_or(|s| m.split == s))
-                .filter(|(_, m)| class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
-                .filter(|(_, m)| !empty_only || m.boxes.is_empty())
-                .map(|(i, _)| i)
-                .collect(),
-        );
-        *self.ds_filter_cache.borrow_mut() = Some((key, v.clone()));
+        let v = Rc::new(filter_and_sort_images(
+            all,
+            self.ds_split,
+            class,
+            empty_only,
+            &self.ds_img_query,
+            self.ds_img_sort,
+        ));
+        *self.ds_filter_cache.borrow_mut() = Some(DatasetFilterCache {
+            dataset: id.to_string(),
+            split: self.ds_split,
+            class,
+            empty_only,
+            query: self.ds_img_query.clone(),
+            sort: self.ds_img_sort,
+            len,
+            ptr,
+            indices: v.clone(),
+        });
         v
     }
 
@@ -347,5 +487,51 @@ impl FoloApp {
             .child(div().flex().child(tabs))
             .child(div().flex_1().min_h_0().flex().flex_col().child(content))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImageSort, filter_and_sort_images};
+    use crate::api::{BBox, ImageInfo, Split};
+
+    fn img(id: &str, file: &str, split: Split, boxes: usize) -> ImageInfo {
+        ImageInfo {
+            id: id.into(),
+            file: file.into(),
+            split,
+            width: 640,
+            height: 480,
+            boxes: (0..boxes).map(|_| BBox { class: 0, x1: 0., y1: 0., x2: 10., y2: 10. }).collect(),
+        }
+    }
+
+    #[test]
+    fn filters_by_normalized_filename_and_sorts_dataset_images() {
+        let all = vec![
+            img("0", r"images\train\zeta.jpg", Split::Train, 2),
+            img("1", "images/val/Alpha.jpg", Split::Val, 5),
+            img("2", "images/train/mid.jpg", Split::Train, 0),
+        ];
+
+        // Slash-normalized case-insensitive filename/path search.
+        assert_eq!(
+            filter_and_sort_images(&all, None, None, false, "train/ZETA", ImageSort::Default),
+            vec![0]
+        );
+        assert_eq!(
+            filter_and_sort_images(&all, None, None, false, r"val\alpha", ImageSort::Default),
+            vec![1]
+        );
+
+        // Sort orders.
+        assert_eq!(filter_and_sort_images(&all, None, None, false, "", ImageSort::Default), vec![0, 1, 2]);
+        assert_eq!(filter_and_sort_images(&all, None, None, false, "", ImageSort::NameAsc), vec![1, 2, 0]);
+        assert_eq!(filter_and_sort_images(&all, None, None, false, "", ImageSort::NameDesc), vec![0, 2, 1]);
+        assert_eq!(filter_and_sort_images(&all, None, None, false, "", ImageSort::MostBoxes), vec![1, 0, 2]);
+        assert_eq!(
+            filter_and_sort_images(&all, None, None, false, "", ImageSort::FewestBoxes),
+            vec![2, 0, 1]
+        );
     }
 }

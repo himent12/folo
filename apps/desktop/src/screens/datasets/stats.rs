@@ -40,13 +40,32 @@ impl FoloApp {
         };
         let max = s.class_counts.iter().copied().max().unwrap_or(1).max(1) as f32;
         let total: u64 = s.class_counts.iter().sum();
-        let class_rows = div().flex().flex_col().gap(px(10.)).p(px(16.)).children(
+        let active_class = self.class_filter(&ds.id);
+        let class_rows = div().flex().flex_col().gap(px(4.)).p(px(12.)).children(
             ds.classes.iter().enumerate().map(|(i, name)| {
                 let c = s.class_counts.get(i).copied().unwrap_or(0);
-                div()
+                let selected = active_class == Some(i as u32);
+                let key = format!("ds-class-bar-{i}");
+                let tip_text = if c == 0 {
+                    format!("No boxes of {name}")
+                } else if selected {
+                    format!("Showing {name} · click to show all images")
+                } else {
+                    format!("Filter images by {name}")
+                };
+                let row = div()
+                    .id(SharedString::from(key.clone()))
+                    .px(px(6.))
+                    .py(px(5.))
+                    .rounded(px(radius::SM))
                     .flex()
                     .items_center()
                     .gap(px(12.))
+                    .when(selected, |d| d.bg(t.bg_selected))
+                    .when(c > 0, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
+                    })
+                    .tooltip(crate::controls::tip(tip_text, None))
                     .child(
                         div()
                             .w(px(96.))
@@ -54,7 +73,11 @@ impl FoloApp {
                             .items_center()
                             .gap(px(8.))
                             .child(crate::ui::class_swatch(&t, i as u32, 8.))
-                            .child(text(ty::SM, t.text_secondary).ellipsis().child(name.clone())),
+                            .child(
+                                text(ty::SM, if selected { t.text_primary } else { t.text_secondary })
+                                    .ellipsis()
+                                    .child(name.clone()),
+                            ),
                     )
                     .child(
                         div().flex_1().h(px(16.)).rounded(px(3.)).bg(t.bg_inset).child(
@@ -65,14 +88,48 @@ impl FoloApp {
                                 .bg(t.class_on(i as u32, crate::theme::Surface::Panel)),
                         ),
                     )
-                    .child(text(ty::SM, t.text_primary).tnum().w(px(56.)).text_right().child(int(c)))
+                    .child(
+                        text(ty::SM, if c > 0 { t.text_primary } else { t.text_tertiary })
+                            .tnum()
+                            .w(px(56.))
+                            .text_right()
+                            .child(int(c)),
+                    )
                     .child(
                         text(ty::SM, t.text_tertiary)
                             .tnum()
                             .w(px(40.))
                             .text_right()
                             .child(format!("{:.0}%", c as f32 / total.max(1) as f32 * 100.)),
+                    );
+                if c > 0 {
+                    let id = ds.id.clone();
+                    let cls = i as u32;
+                    self.bind(
+                        row,
+                        &key,
+                        radius::SM,
+                        window,
+                        cx,
+                        crate::app::act(move |this, _, cx| {
+                            if this.class_filter(&id) == Some(cls) {
+                                this.ds_class = None;
+                            } else {
+                                this.ds_class = Some((id.clone(), cls));
+                                if this.empty_only(&id) {
+                                    this.ds_empty_of = None;
+                                }
+                            }
+                            this.ds_tab = crate::app::DsTab::Images;
+                            this.ds_hover_tile = None;
+                            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                            cx.notify();
+                        }),
                     )
+                    .into_any_element()
+                } else {
+                    row.into_any_element()
+                }
             }),
         );
         let view = cx.entity().downgrade();
@@ -145,7 +202,11 @@ impl FoloApp {
                     .child(
                         panel(&t)
                             .child(panel_header(&t, "Class balance").child(
-                                text(ty::SM, t.text_tertiary).tnum().child(counted(total, "box", "boxes")),
+                                text(ty::SM, t.text_tertiary).tnum().child(if total > 0 {
+                                    format!("Click a class to filter · {}", counted(total, "box", "boxes"))
+                                } else {
+                                    counted(total, "box", "boxes")
+                                }),
                             ))
                             .child(class_rows),
                     )
