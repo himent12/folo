@@ -6,6 +6,8 @@ import { defaultThemeId, importThemes, readStoredThemes, themeCatalog, type Cust
 
 export type ThemePref = 'dark' | 'light' | 'system';
 export type Units = 'metric' | 'binary';
+export type LossSmoothingPref = '0' | '0.6' | '0.9' | '0.98';
+export type LossScalePref = 'lin' | 'log';
 
 interface Prefs {
   /** The mode: dark, light, or the operating system's. */
@@ -18,12 +20,26 @@ interface Prefs {
   sidebarCollapsed: boolean;
   /** The agent the labeling screens asked last. */
   labelAgent: LabelAgentId | null;
+  /** Training loss chart EMA smoothing factor (Run page). */
+  lossSmoothing: LossSmoothingPref;
+  /** Training loss chart Y-axis scale (Run page). */
+  lossScale: LossScalePref;
 }
 
 const KEY = 'folo.prefs';
 /** The installed custom themes: an array of checked theme files (design/THEMES.md, Custom themes). */
 export const THEMES_KEY = 'folo.themes';
-const defaults: Prefs = { theme: 'dark', darkTheme: 'dark', lightTheme: 'light', serverUrl: '', units: 'binary', sidebarCollapsed: false, labelAgent: null };
+const defaults: Prefs = {
+  theme: 'dark',
+  darkTheme: 'dark',
+  lightTheme: 'light',
+  serverUrl: '',
+  units: 'binary',
+  sidebarCollapsed: false,
+  labelAgent: null,
+  lossSmoothing: '0.98',
+  lossScale: 'log',
+};
 /** A stored theme id: any non-empty string is kept, even one that names no theme now (it may be installed again). */
 const isThemeId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 80;
 
@@ -44,6 +60,12 @@ export function sanitize(raw: unknown): Prefs {
     units: pick(o.units, (v): v is Units => v === 'metric' || v === 'binary', defaults.units),
     sidebarCollapsed: pick(o.sidebarCollapsed, (v): v is boolean => typeof v === 'boolean', defaults.sidebarCollapsed),
     labelAgent: pick(o.labelAgent, (v): v is LabelAgentId | null => v === null || v === 'claude' || v === 'codex' || v === 'antigravity', defaults.labelAgent),
+    lossSmoothing: pick(
+      o.lossSmoothing,
+      (v): v is LossSmoothingPref => v === '0' || v === '0.6' || v === '0.9' || v === '0.98',
+      defaults.lossSmoothing,
+    ),
+    lossScale: pick(o.lossScale, (v): v is LossScalePref => v === 'lin' || v === 'log', defaults.lossScale),
   } as Prefs;
 }
 
@@ -144,6 +166,8 @@ export class PrefsStore {
       units: signal(p.units),
       sidebarCollapsed: signal(p.sidebarCollapsed),
       labelAgent: signal(p.labelAgent),
+      lossSmoothing: signal(p.lossSmoothing),
+      lossScale: signal(p.lossScale),
     };
     this.#customThemes.set(this.#current());
     if (typeof window === 'undefined') return;
@@ -161,7 +185,11 @@ export class PrefsStore {
       if (!p) return;
       this.#rest = p;
       // A change of this tab's that is not written yet (#dirty) stays: it is the newer one, and the next save writes it.
-      const follow = <K extends 'theme' | 'darkTheme' | 'lightTheme' | 'units' | 'sidebarCollapsed' | 'labelAgent'>(k: K) => {
+      const follow = <
+        K extends 'theme' | 'darkTheme' | 'lightTheme' | 'units' | 'sidebarCollapsed' | 'labelAgent' | 'lossSmoothing' | 'lossScale',
+      >(
+        k: K,
+      ) => {
         if (!this.#dirty.has(k)) this.#p[k].set(p[k]);
       };
       follow('theme');
@@ -170,6 +198,8 @@ export class PrefsStore {
       follow('units');
       follow('sidebarCollapsed');
       follow('labelAgent');
+      follow('lossSmoothing');
+      follow('lossScale');
     });
   }
 
@@ -310,6 +340,22 @@ export class PrefsStore {
   set labelAgent(v: LabelAgentId | null) {
     this.#p.labelAgent.set(v);
     this.#save('labelAgent');
+  }
+
+  get lossSmoothing() {
+    return this.#p.lossSmoothing.get();
+  }
+  set lossSmoothing(v: LossSmoothingPref) {
+    this.#p.lossSmoothing.set(v);
+    this.#save('lossSmoothing');
+  }
+
+  get lossScale() {
+    return this.#p.lossScale.get();
+  }
+  set lossScale(v: LossScalePref) {
+    this.#p.lossScale.set(v);
+    this.#save('lossScale');
   }
 
   /** Cycle dark → light → system. */

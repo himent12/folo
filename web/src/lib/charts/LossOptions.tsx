@@ -24,6 +24,10 @@ export function lossSummary(smoothing: Smoothing, scale: Scale): string {
 export interface LossOptionsProps {
   smoothing: Smoothing;
   scale: Scale;
+  /** True when all plotted values are <= 0, so log scale cannot be used and linear is shown instead. */
+  logDisabled?: boolean;
+  /** Quiet inline hint shown under the Y scale group (e.g. when non-positive points are omitted or log is disabled). */
+  logNote?: string | null;
 }
 
 const SMOOTHING: { value: Smoothing; label: string }[] = [
@@ -88,26 +92,51 @@ export default function LossOptions(props: LossOptionsProps) {
     return () => document.removeEventListener('pointerdown', away);
   });
 
-  const group = (name: string, legend: string, options: { value: string; label: string }[], value: () => string, set: (v: string) => void) => (
+  const effectiveScale = (): Scale => (props.logDisabled ? 'lin' : scale.get());
+  const scaleNote = () => (props.logDisabled ? 'Log scale requires positive values (> 0).' : (props.logNote ?? null));
+
+  const group = (
+    name: string,
+    legend: string,
+    options: { value: string; label: string; disabled?: boolean }[],
+    value: () => string,
+    set: (v: string) => void,
+    note?: () => string | null,
+  ) => (
     <fieldset>
       <legend class="group-label">{legend}</legend>
       <For each={options} key={(o) => o.value}>
         {(o) => (
-          <label class="opt" class:on={value() === o().value}>
-            <input type="radio" name={`${uid}-${name}`} value={o().value} checked={value() === o().value} onchange={() => set(o().value)} />
+          <label class="opt" class:on={value() === o().value} class:disabled={!!o().disabled}>
+            <input
+              type="radio"
+              name={`${uid}-${name}`}
+              value={o().value}
+              checked={value() === o().value}
+              disabled={!!o().disabled}
+              onchange={() => set(o().value)}
+            />
             {phone.current ? <span class="mark" aria-hidden="true"></span> : null}
             <span>{o().label}</span>
             {value() === o().value && !phone.current ? <Check size={14} aria-hidden="true" /> : null}
           </label>
         )}
       </For>
+      {note?.() ? <p class="scale-note">{note()}</p> : null}
     </fieldset>
   );
 
   const groups = () => (
     <>
       {group('smoothing', 'Smoothing', SMOOTHING, () => smoothing.get(), (v) => smoothing.set(v as Smoothing))}
-      {group('scale', 'Y scale', SCALE, () => scale.get(), (v) => scale.set(v as Scale))}
+      {group(
+        'scale',
+        'Y scale',
+        SCALE.map((o) => (o.value === 'log' && props.logDisabled ? { ...o, disabled: true } : o)),
+        effectiveScale,
+        (v) => scale.set(v as Scale),
+        scaleNote,
+      )}
     </>
   );
 
@@ -121,10 +150,10 @@ export default function LossOptions(props: LossOptionsProps) {
           aria-haspopup="dialog"
           aria-expanded={open.get()}
           aria-controls={`${uid}-panel`}
-          aria-label={`Loss view: ${lossSummary(smoothing.get(), scale.get())}`}
+          aria-label={`Loss view: ${lossSummary(smoothing.get(), effectiveScale())}`}
           onclick={() => (open.peek() ? hide() : show())}
         >
-          <span>{lossSummary(smoothing.get(), scale.get())}</span>
+          <span>{lossSummary(smoothing.get(), effectiveScale())}</span>
           <ChevronDown size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
         {open.get() && !phone.current ? (
@@ -235,6 +264,21 @@ css`
   /* The chosen option of a radio group in a menu: its check mark, in ink (the ink bar is for selected rows in lists). */
   .opt.on {
     color: var(--text-primary);
+  }
+  .opt.disabled {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  .opt.disabled:hover {
+    background: transparent;
+  }
+  .scale-note {
+    margin: 2px 0 var(--space-1);
+    padding: 0 var(--space-3);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    max-width: 200px;
   }
   @media (pointer: coarse) {
     .trigger {
