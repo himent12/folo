@@ -621,7 +621,9 @@ fn serve_mock_prints_the_url_as_json() {
     assert_eq!(v["event"], "listening");
     assert_eq!(v["mock"], true);
     assert_eq!(v["web_ready"], false);
-    assert!(v["url"].as_str().unwrap().starts_with("http://127.0.0.1:"));
+    let url = v["url"].as_str().unwrap();
+    assert!(url.starts_with("http://127.0.0.1:"), "{v}");
+    assert_eq!(v["bind"], url.trim_start_matches("http://"), "{v}");
 }
 
 /// `folo serve --mock` on loopback refuses a foreign `Host` (DNS rebinding) and answers the URL it prints (FOLO
