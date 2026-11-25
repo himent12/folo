@@ -13,6 +13,11 @@ describe('the Models list state in the URL', () => {
     expect(readState(new URLSearchParams('sort=name'))).toEqual({ ...DEFAULT_STATE, sort: 'name', dir: 'asc' });
     expect(readState(new URLSearchParams('sort=bytes'))).toEqual({ ...DEFAULT_STATE, sort: 'bytes', dir: 'desc' });
     expect(readState(new URLSearchParams('group=%20%20&sort=unknown&dir=sideways'))).toEqual(DEFAULT_STATE);
+    expect(readState(new URLSearchParams('group=%20~published%20&q=fo%0Alo'))).toEqual({
+      ...DEFAULT_STATE,
+      group: '~published',
+      q: 'folo',
+    });
   });
 
   it('summarizes active group and search filters for empty-state recovery', () => {

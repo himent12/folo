@@ -14,8 +14,12 @@ describe('the Runs list state in the URL', () => {
     expect(writeState(DEFAULT_STATE)).toBe('');
   });
 
-  it('reads what it does not know as the default, and keeps at most four ticked runs', () => {
-    expect(readState(new URLSearchParams('status=stopped&sort=name&dir=up&sel=a,b,c,d,e'))).toEqual({ ...DEFAULT_STATE, sel: ['a', 'b', 'c', 'd'] });
+  it('reads what it does not know as the default, strips CR/LF in q, and keeps at most four ticked runs', () => {
+    expect(readState(new URLSearchParams('status=stopped&sort=name&dir=up&q=bc%0Acd&sel=a,b,c,d,e'))).toEqual({
+      ...DEFAULT_STATE,
+      q: 'bccd',
+      sel: ['a', 'b', 'c', 'd'],
+    });
   });
 
   it('summarizes active status and search filters for empty-state recovery', () => {

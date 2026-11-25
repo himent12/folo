@@ -27,7 +27,7 @@ export function readState(query: URLSearchParams): DatasetListState {
   return {
     format: format && FORMATS.includes(format as Format) ? (format as Format) : 'all',
     sort: sort && SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'name',
-    q: query.get('q') ?? '',
+    q: (query.get('q') ?? '').replace(/[\r\n]+/g, ''),
   };
 }
 

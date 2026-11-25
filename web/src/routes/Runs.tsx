@@ -182,7 +182,7 @@ export default function Runs() {
   });
   effect(() => {
     const next = writeState({ filter: filter.get(), q: query.get(), sort: sortKey.get(), dir: sortDir.get(), sel: selected.get() });
-    if (next === written || untrack(() => router.route.name) !== 'runs') return;
+    if (next === written || untrack(() => router.route.name) !== 'runs' || untrack(() => router.location.name) !== 'runs') return;
     written = next;
     router.go(`/runs${next ? `?${next}` : ''}`, { replace: true });
   });
@@ -240,7 +240,7 @@ export default function Runs() {
     announce('Cleared run filters.');
     queueMicrotask(() => {
       const input = searchEl.peek();
-      if (input && !input.disabled) input.focus();
+      if (input && input.isConnected && !input.disabled) input.focus();
     });
   }
   function clearSelection() {
@@ -268,7 +268,7 @@ export default function Runs() {
   const emptySummary = computed(() => emptyFilterSummary({ filter: filter.get(), q: query.get() }));
   const filterStatus = computed(() => {
     const all = runs.data;
-    if (!all || !hasFiltered.get()) return '';
+    if (!all?.length || !hasFiltered.get()) return '';
     const n = shown.get().length;
     return n < all.length
       ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'run' : 'runs'}.`

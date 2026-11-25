@@ -235,18 +235,25 @@ export default function Datasets() {
   const first = untrack(() => addParam.get());
   const adding = signal(asked(first));
   const addMode = signal<'folder' | 'synthetic'>(first === 'synthetic' ? 'synthetic' : 'folder');
-  function add(m: 'folder' | 'synthetic') {
+  let openedFromUrl = asked(first);
+  function add(m: 'folder' | 'synthetic', fromUrl = false) {
+    openedFromUrl = fromUrl;
     addMode.set(m);
     adding.set(true);
   }
   effect(() => {
     const p = addParam.get();
-    if (asked(p)) untrack(() => add(p));
+    if (asked(p)) untrack(() => add(p, true));
+    else if (openedFromUrl && untrack(() => adding.get())) {
+      openedFromUrl = false;
+      untrack(() => adding.set(false));
+    }
   });
   effect(() => {
     if (adding.get()) return;
+    openedFromUrl = false;
     const q = untrack(() => router.route.query);
-    if (untrack(() => router.route.name) !== 'datasets' || !q.has('add')) return;
+    if (untrack(() => router.route.name) !== 'datasets' || untrack(() => router.location.name) !== 'datasets' || !q.has('add')) return;
     const rest = new URLSearchParams(q);
     rest.delete('add');
     untrack(() => router.go(`/datasets${rest.toString() ? `?${rest}` : ''}`, { replace: true }));
@@ -269,7 +276,9 @@ export default function Datasets() {
   });
   effect(() => {
     const next = writeState({ format: format.get(), sort: sort.get(), q: query.get() });
-    if (next === written || untrack(() => router.route.name) !== 'datasets') return;
+    // Guard against both `router.route` and `router.location` so a filter change while another route's chunk is still
+    // loading never overwrites that pending navigation's history entry.
+    if (next === written || untrack(() => router.route.name) !== 'datasets' || untrack(() => router.location.name) !== 'datasets') return;
     written = next;
     const full = writeState({ format: format.peek(), sort: sort.peek(), q: query.peek() }, untrack(() => router.route.query));
     router.go(`/datasets${full ? `?${full}` : ''}`, { replace: true });
@@ -303,7 +312,10 @@ export default function Datasets() {
     query.set('');
     format.set('all');
     announce('Cleared dataset filters.');
-    queueMicrotask(() => searchEl.peek()?.focus());
+    queueMicrotask(() => {
+      const input = searchEl.peek();
+      if (input && input.isConnected && !input.disabled) input.focus();
+    });
   }
 
   const formatCount = (f: Format) => (listed.data ?? []).filter((d) => f === 'all' || d.format === f).length;
@@ -334,7 +346,7 @@ export default function Datasets() {
   const emptySummary = computed(() => emptyFilterSummary({ format: format.get(), q: query.get() }));
   const filterStatus = computed(() => {
     const all = listed.data;
-    if (!all || !hasFiltered.get()) return '';
+    if (!all?.length || !hasFiltered.get()) return '';
     const n = shown.get().length;
     return n < all.length
       ? `Showing ${n} of ${count(all.length, 'dataset')}.`

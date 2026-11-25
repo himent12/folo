@@ -9,6 +9,8 @@ describe('the Datasets list state in the URL', () => {
     expect(readState(new URLSearchParams(q))).toEqual(s);
     expect(writeState(DEFAULT_STATE)).toBe('');
     expect(readState(new URLSearchParams('format=voc&sort=size'))).toEqual(DEFAULT_STATE);
+    // Embedded CR/LF in a shared search param is stripped so it matches <input type="search">.
+    expect(readState(new URLSearchParams('q=fast%0A%0Deners')).q).toBe('fasteners');
   });
 
   it('preserves transient params such as ?add=folder while replacing filter keys', () => {

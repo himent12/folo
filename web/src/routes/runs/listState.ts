@@ -50,7 +50,7 @@ export function readState(query: URLSearchParams): ListState {
   const dir = query.get('dir');
   return {
     filter: status && Object.hasOwn(groups, status) ? (status as Filter) : 'all',
-    q: query.get('q') ?? '',
+    q: (query.get('q') ?? '').replace(/[\r\n]+/g, ''),
     sort: sort && SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'created',
     dir: dir === 'asc' || dir === 'desc' ? dir : 'desc',
     sel: (query.get('sel') ?? '').split(',').filter(Boolean).slice(0, 4),

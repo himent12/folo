@@ -26,10 +26,10 @@ export function readState(query: URLSearchParams): ModelListState {
   const defaultDir: Dir = TEXT_SORTS.has(sort) ? 'asc' : 'desc';
   const dir: Dir = rawDir === 'asc' || rawDir === 'desc' ? rawDir : defaultDir;
   return {
-    group: rawGroup && rawGroup.trim() ? rawGroup : 'all',
+    group: rawGroup?.trim() || 'all',
     sort,
     dir,
-    q: query.get('q') ?? '',
+    q: (query.get('q') ?? '').replace(/[\r\n]+/g, ''),
   };
 }
 

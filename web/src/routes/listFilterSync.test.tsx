@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// URL query filter/sort sync (without history pollution) and one-click empty-state filter recovery + focus restoration
-// across Datasets, Models, and Runs.
+// URL query filter/sort sync through the real router (without history pollution), pending-navigation safety,
+// Escape-return restoration, and one-click empty-state filter recovery + focus restoration across Datasets, Models, and Runs.
 import { flush as flushSync, type Component } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../framework/testing';
@@ -32,6 +32,7 @@ afterEach(() => {
 });
 
 function mountRoute<P extends object>(comp: Component<P>, path: string) {
+  view?.unmount();
   history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   const Comp = comp as Component<Record<string, unknown>>;
@@ -53,11 +54,9 @@ function typeInto(input: HTMLInputElement, value: string) {
 }
 
 describe('URL filter/sort sync and empty-state recovery', () => {
-  it('syncs Datasets filter, sort, and search with the URL via replace without history pollution and recovers cleanly from empty states', async () => {
+  it('syncs Datasets filter, sort, and search through the real router without pushState, restores on Escape return, and recovers cleanly from empty states', async () => {
     const push = vi.spyOn(history, 'pushState');
-    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
-      router.route = parse(`#${path}`);
-    });
+    const go = vi.spyOn(router, 'go');
 
     mountRoute(Datasets, '/datasets?format=yolo&sort=images&q=fast');
     await settle();
@@ -68,50 +67,117 @@ describe('URL filter/sort sync and empty-state recovery', () => {
     expect(sort.value).toBe('images');
     expect(target.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain('YOLO');
 
-    // Typing updates the URL with replace: true (no history.pushState calls).
+    // Typing updates the real browser hash via replaceState (no history.pushState calls).
     typeInto(search, 'zebra');
     expect(go).toHaveBeenLastCalledWith('/datasets?format=yolo&sort=images&q=zebra', { replace: true });
+    expect(location.hash).toBe('#/datasets?format=yolo&sort=images&q=zebra');
     expect(push).not.toHaveBeenCalled();
 
-    // Empty state describes the exact active filters; Clear filters resets, updates URL, announces, and restores focus.
+    // Empty state describes active filters; Clear filters resets, updates URL, announces politely, and restores focus.
     expect(target.querySelector('.empty')?.textContent).toContain('No YOLO datasets match "zebra".');
+    const filterStatus = target.querySelector<HTMLElement>('[data-filter-status]')!;
+    const liveNote = target.querySelector<HTMLElement>('[data-live-note]')!;
+    expect(filterStatus.getAttribute('role')).toBe('status');
+    expect(filterStatus.getAttribute('aria-live')).toBe('polite');
+    expect(liveNote.getAttribute('role')).toBe('status');
+    expect(liveNote.getAttribute('aria-live')).toBe('polite');
+
     const clear = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Clear filters')!;
     clear.focus();
     clear.click();
     flushSync();
     await Promise.resolve();
     expect(search.value).toBe('');
-    expect(go).toHaveBeenLastCalledWith('/datasets?sort=images', { replace: true });
-    expect(target.querySelector('[data-filter-status]')?.textContent).toMatch(/^Showing all \d+ datasets\.$/);
+    expect(location.hash).toBe('#/datasets?sort=images');
+    expect(filterStatus.textContent).toMatch(/^Showing all \d+ datasets\.$/);
+    expect(liveNote.textContent).toBe('Cleared dataset filters.');
     expect(document.activeElement).toBe(search);
 
-    // Back/Forward route change updates local controls reactively.
-    router.route = parse('#/datasets?format=coco&q=shapes');
+    // Real router navigation to a detail route, unmount (recording return state), and Escape-like bare `/datasets` restores filters.
+    router.go('/datasets/ds_fasteners');
+    view!.unmount();
+    view = undefined;
+    router.go('/datasets');
+    view = render(() => <Datasets />, target);
     flushSync();
-    expect(search.value).toBe('shapes');
+    await settle();
+    expect(location.hash).toBe('#/datasets?sort=images');
+    expect(target.querySelector<HTMLSelectElement>('#datasets-sort')!.value).toBe('images');
+
+    // Back/Forward route change updates local controls reactively.
+    router.go('/datasets?format=coco&q=shapes', { replace: true });
+    flushSync();
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="Filter datasets"]')!.value).toBe('shapes');
     expect(target.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain('COCO');
   });
 
-  it('preserves ?add=folder on Datasets when filters change before the Add dialog closes', async () => {
-    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
-      router.route = parse(`#${path}`);
-    });
+  it('preserves ?add=folder when filtering, keeps filters when closing the dialog, and closes a URL-opened dialog when Back drops ?add=', async () => {
     mountRoute(Datasets, '/datasets?add=folder');
     await settle();
+    const dialog = () => target.querySelector<HTMLDialogElement>('dialog')!;
+    expect(dialog().open).toBe(true);
 
     const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter datasets"]')!;
     typeInto(search, 'fast');
-    expect(go).toHaveBeenLastCalledWith('/datasets?add=folder&q=fast', { replace: true });
+    expect(location.hash).toBe('#/datasets?add=folder&q=fast');
+
+    // Back removing ?add= closes the URL-opened dialog while keeping the filter.
+    router.go('/datasets?q=fast', { replace: true });
+    flushSync();
+    expect(dialog().open).toBe(false);
+    expect(search.value).toBe('fast');
+
+    // Reopening via URL, then closing via the dialog button drops ?add= while preserving ?q=fast.
+    router.go('/datasets?add=folder&q=fast', { replace: true });
+    flushSync();
+    expect(dialog().open).toBe(true);
+    const close = target.querySelector<HTMLButtonElement>('dialog button[aria-label="Close"]')!;
+    close.click();
+    flushSync();
+    expect(dialog().open).toBe(false);
+    expect(location.hash).toBe('#/datasets?q=fast');
   });
 
-  it('syncs Models group, sort, and search with the URL, handles unknown ?group= gracefully, and recovers focus on Clear filters', async () => {
-    const push = vi.spyOn(history, 'pushState');
-    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
-      router.route = parse(`#${path}`);
-    });
+  it('does not overwrite a pending detail navigation if a filter changes while the next chunk is held', async () => {
+    mountRoute(Datasets, '/datasets');
+    await settle();
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter datasets"]')!;
 
+    const release = router.holdWhile((to) => to.name === 'dataset');
+    try {
+      router.go('/datasets/ds_fasteners');
+      expect(router.location.name).toBe('dataset');
+      expect(router.route.name).toBe('datasets');
+      typeInto(search, 'fast');
+      expect(router.location.name).toBe('dataset');
+      expect(location.hash).toBe('#/datasets/ds_fasteners');
+    } finally {
+      release();
+    }
+  });
+
+  it('syncs Models group, sort, and search through the real router, keeps desktop & phone unknown-group controls accessible, and defers empty flash while metadata loads', async () => {
+    const push = vi.spyOn(history, 'pushState');
+
+    // 1. Slow runs/datasets metadata on a deep-linked dataset group must hold loading instead of flashing "No models match".
+    let resolveRuns!: (v: Awaited<ReturnType<MockApi['runs']>>) => void;
+    const baseApi = new MockApi('normal', 0);
+    const realRuns = await baseApi.runs();
+    vi.spyOn(baseApi, 'runs').mockImplementation(() => new Promise((r) => (resolveRuns = r)));
+    hub.api = baseApi;
+    mountRoute(Models, '/models?group=ds_fasteners:val');
+    await settle(6);
+    expect(target.querySelector('.empty')).toBeNull();
+    expect(target.querySelector('[data-filter-status]')?.textContent).toBe('');
+    resolveRuns(realRuns);
+    await settle(10);
+    expect(target.querySelectorAll('table.models tbody tr[data-row]').length).toBeGreaterThan(0);
+
+    // 2. Real router URL sync on sort/group/search without pushState.
+    hub.api = new MockApi('normal', 0);
     mountRoute(Models, '/models?group=~published&sort=bytes&dir=asc&q=coco');
     await settle(18);
+    push.mockClear();
 
     const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter models"]')!;
     expect(search.value).toBe('coco');
@@ -119,9 +185,8 @@ describe('URL filter/sort sync and empty-state recovery', () => {
     expect(sizeHead.getAttribute('aria-sort')).toBe('ascending');
     expect(target.querySelectorAll('table.models tbody tr[data-row]').length).toBe(1);
 
-    // Changing search updates URL via replace without pushState.
     typeInto(search, 'no-match-xyz');
-    expect(go).toHaveBeenLastCalledWith('/models?group=%7Epublished&q=no-match-xyz&sort=bytes&dir=asc', { replace: true });
+    expect(location.hash).toBe('#/models?group=%7Epublished&q=no-match-xyz&sort=bytes&dir=asc');
     expect(push).not.toHaveBeenCalled();
     expect(target.querySelector('.empty')?.textContent).toContain('No models in Published weights match "no-match-xyz".');
 
@@ -132,18 +197,34 @@ describe('URL filter/sort sync and empty-state recovery', () => {
     flushSync();
     await Promise.resolve();
     expect(search.value).toBe('');
-    expect(go).toHaveBeenLastCalledWith('/models?sort=bytes&dir=asc', { replace: true });
+    expect(location.hash).toBe('#/models?sort=bytes&dir=asc');
     expect(document.activeElement).toBe(search);
 
-    // Unknown group param from a stale link shows clear recovery summary and never pretends "All" is selected on phones.
+    // Desktop unknown ?group= keeps a tabbable radio option ("Unknown group") and clear empty summary.
+    router.go('/models?group=ds_deleted:val', { replace: true });
+    flushSync();
+    expect(target.querySelector('.empty')?.textContent).toContain('No models match the selected group filter.');
+    const activeDesktopRadio = target.querySelector<HTMLButtonElement>('[role="radiogroup"] button[role="radio"][tabindex="0"]');
+    expect(activeDesktopRadio).not.toBeNull();
+    expect(activeDesktopRadio!.textContent).toContain('Unknown group');
+
+    // Escape-return from /models/:id restores the filter state.
+    router.go('/models/m_fast_n');
+    view!.unmount();
+    view = undefined;
+    router.go('/models');
+    view = render(() => <Models />, target);
+    flushSync();
+    await settle(10);
+    expect(location.hash).toBe('#/models?group=ds_deleted%3Aval');
+
+    // Phone unknown ?group= shows "Unknown group · 0" in the native <select> instead of falsely showing "All".
     const win = window as unknown as { happyDOM?: { setViewport(v: { width: number }): void } };
     const prevWidth = window.innerWidth;
     win.happyDOM?.setViewport({ width: 390 });
     try {
-      router.route = parse('#/models?group=ds_deleted:val');
       flushSync();
       await Promise.resolve();
-      expect(target.querySelector('.empty')?.textContent).toContain('No models match the selected group filter.');
       const select = target.querySelector<HTMLSelectElement>('#models-ds')!;
       expect(select.value).toBe('ds_deleted:val');
       expect(select.selectedOptions[0]?.textContent).toContain('Unknown group');
@@ -152,16 +233,27 @@ describe('URL filter/sort sync and empty-state recovery', () => {
     }
   });
 
-  it('shows active filter summary on Runs empty state and restores focus + URL on Clear filters', async () => {
-    const push = vi.spyOn(history, 'pushState');
-    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
-      router.route = parse(`#${path}`);
-    });
+  it('shows active filter summary on Runs empty state, announces politely, suppresses empty-workspace announcements, and restores focus + URL on Clear filters', async () => {
+    // Empty workspace with a filtered URL must never announce "Showing all 0 runs.".
+    hub.api = new MockApi('empty', 0);
+    mountRoute(Runs, '/runs?status=failed');
+    await settle(12);
+    expect(target.querySelector('[data-filter-status]')?.textContent).toBe('');
 
+    // Normal workspace: real router sync, polite status, clear-message text, and focus restoration.
+    hub.api = new MockApi('normal', 0);
+    const push = vi.spyOn(history, 'pushState');
     mountRoute(Runs, '/runs?status=failed&q=no-such-run');
     await settle(16);
+    push.mockClear();
 
     const search = target.querySelector<HTMLInputElement>('input[aria-label="Filter runs"]')!;
+    const filterStatus = target.querySelector<HTMLElement>('[data-filter-status]')!;
+    const liveNote = target.querySelector<HTMLElement>('[data-live-note]')!;
+    expect(filterStatus.getAttribute('role')).toBe('status');
+    expect(filterStatus.getAttribute('aria-live')).toBe('polite');
+    expect(liveNote.getAttribute('role')).toBe('status');
+    expect(liveNote.getAttribute('aria-live')).toBe('polite');
     expect(search.value).toBe('no-such-run');
     expect(target.querySelector('.empty')?.textContent).toContain('No failed runs match "no-such-run".');
 
@@ -171,9 +263,10 @@ describe('URL filter/sort sync and empty-state recovery', () => {
     flushSync();
     await Promise.resolve();
     expect(search.value).toBe('');
-    expect(go).toHaveBeenLastCalledWith('/runs', { replace: true });
+    expect(location.hash).toBe('#/runs');
     expect(push).not.toHaveBeenCalled();
-    expect(target.querySelector('[data-filter-status]')?.textContent).toMatch(/^Showing all \d+ runs\.$/);
+    expect(filterStatus.textContent).toMatch(/^Showing all \d+ runs\.$/);
+    expect(liveNote.textContent).toBe('Cleared run filters.');
     expect(document.activeElement).toBe(search);
   });
 });
