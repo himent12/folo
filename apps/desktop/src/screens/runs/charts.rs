@@ -150,7 +150,7 @@ impl FoloApp {
             };
             // Values live in each panel's legend; the plot keeps only the cursor and dots.
             c.readout = false;
-            // Same x ticks in all four charts.
+            // Same x ticks in all five charts.
             c.x_ticks = Some(6);
             c.ease_key = crate::charts::ease_key(&r.id);
             if live && planned {
@@ -198,7 +198,7 @@ impl FoloApp {
             loss.y_range = Some(log_range(loss_min, loss_max));
         } else {
             loss.log_y = false;
-            loss.y_range = Some((0., linear_top(loss_max)));
+            loss.y_range = Some((0., linear_top(loss_max, 4)));
         }
         loss.end_labels = true;
         let mut map = base(
@@ -260,7 +260,7 @@ impl FoloApp {
             vec![Series::new("imgs/s", t.chart_series[4], d.ips.clone()).area().end(end)],
             secondary_h,
         );
-        ips.y_range = Some((0., linear_top(d.ips_max)));
+        ips.y_range = Some((0., linear_top(d.ips_max, 3)));
         ips.y_ticks = 3;
 
         // Legend values: at the cursor on their own chart, else the latest point.
@@ -271,7 +271,15 @@ impl FoloApp {
         // Scores at the decimals their axis's fitted top needs (#338).
         let mpv = &|x: f32| fmt_score_on(x, crate::charts::domain::unit_top(map_max));
         let prv = &|x: f32| fmt_score_on(x, crate::charts::domain::unit_top(pr_max));
-        let ipsv = &|x: f32| if x >= 100. { format!("{x:.0} imgs/s") } else { format!("{x:.1} imgs/s") };
+        let ipsv = &|x: f32| {
+            if !x.is_finite() {
+                "–".to_string()
+            } else if x >= 100. {
+                format!("{x:.0} imgs/s")
+            } else {
+                format!("{x:.1} imgs/s")
+            }
+        };
         // Loss parts are toggles; their values match the active smoothing mode.
         let mut legend = Vec::new();
         let shown = self.loss_parts.iter().filter(|b| **b).count();
@@ -587,6 +595,9 @@ impl FoloApp {
         );
         let ips_card =
             card("Throughput", "per step · images / sec", ips_legend, line_chart(&t, ips)).into_any_element();
+        // Below 1200 px the sidebar is expanded (232 px) while content is 840..920 px: give the
+        // primary pair an even 50/50 split so Training loss's header controls fit on one line.
+        let even_primary = pair_a || window.viewport_size().width < px(1200.);
         let grid = div()
             .flex()
             .flex_col()
@@ -594,8 +605,8 @@ impl FoloApp {
             .child(row(
                 map_card.into_any_element(),
                 loss_card.into_any_element(),
-                if pair_a { -0.5 } else { -0.6 },
-                if pair_a { 0.5 } else { 0.4 },
+                if even_primary { -0.5 } else { -0.6 },
+                if even_primary { 0.5 } else { 0.4 },
             ))
             .child(row(
                 card(
@@ -689,14 +700,14 @@ fn log_range(lo: f32, hi: f32) -> (f32, f32) {
     (y0, y1)
 }
 
-/// A linear y-axis ceiling for non-negative values: a nice tick at least 5% above `hi`, or `1.0`
-/// when there is no positive finite data.
-fn linear_top(hi: f32) -> f32 {
+/// A linear y-axis ceiling for non-negative values: a nice tick at least 5% above `hi` using
+/// `ticks` target divisions, or `1.0` when there is no positive finite data.
+fn linear_top(hi: f32, ticks: usize) -> f32 {
     if !hi.is_finite() || hi <= 0. {
         return 1.0;
     }
     let top = hi * 1.05;
-    let step = crate::charts::nice_step(top, 4);
+    let step = crate::charts::nice_step(top, ticks);
     if !step.is_finite() || step <= 0. {
         return top;
     }
@@ -898,11 +909,16 @@ mod tests {
 
     #[test]
     fn linear_top_picks_nice_ceiling_and_handles_empty() {
-        assert_eq!(linear_top(0.), 1.0);
-        assert_eq!(linear_top(-2.), 1.0);
-        assert_eq!(linear_top(f32::NAN), 1.0);
-        assert_eq!(linear_top(f32::INFINITY), 1.0);
-        let top = linear_top(115.);
+        assert_eq!(linear_top(0., 4), 1.0);
+        assert_eq!(linear_top(-2., 4), 1.0);
+        assert_eq!(linear_top(f32::NAN, 4), 1.0);
+        assert_eq!(linear_top(f32::INFINITY, 3), 1.0);
+        let top = linear_top(115., 4);
         assert!((115. * 1.05..=160.).contains(&top), "got {top}");
+        // 3 ticks: 700 * 1.05 = 735 -> ceiling is a multiple of nice_step(top, 3) covering peak.
+        let ips_top = linear_top(700., 3);
+        let step = crate::charts::nice_step(ips_top, 3);
+        let rem = (ips_top / step) - (ips_top / step).round();
+        assert!(ips_top >= 700. && rem.abs() < 1e-4, "top={ips_top} step={step}");
     }
 }

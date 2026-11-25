@@ -110,10 +110,60 @@ fn loss_chart_toggles_switch_smoothing_and_log_scale() {
     drive(&mut app, window, |this, _, _| {
         assert!(!this.run_chart_opts.loss_log_y, "right arrow switches to Linear scale");
     });
-    // Back to Smooth + Log.
+    // Back to Log scale.
     press(&mut app, window, "left");
     drive(&mut app, window, |this, _, _| {
         assert!(this.run_chart_opts.loss_log_y, "left arrow switches back to Log scale");
+    });
+}
+
+/// At 1120 × 620 (the exact breakpoint where the sidebar expands and short mode is active), the
+/// Training loss card's header controls fit on a single line without wrapping or clipping the title.
+#[test]
+fn training_loss_header_fits_without_wrapping_at_1120x620() {
+    use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
+    let api = Arc::new(MockBackend::new(4200, true));
+    let mut app =
+        HeadlessApp::new(HeadlessOptions { size: size(px(1120.), px(620.)), ..Default::default() })
+            .with_assets(crate::Assets);
+    let window = app.update(|cx| {
+        cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1120.), px(620.)));
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+            .expect("open window")
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(RUN.into()), w, cx));
+    settle(&mut app, window);
+    // Both Training loss toggles are mounted and clickable without overflowing the 1120 px window,
+    // and no glyph in the page clips vertically against its clip rect.
+    drive(&mut app, window, |this, w, cx| this.focus_key("run-loss-smooth", w, cx));
+    app.frame(window.into());
+    let clipped: Vec<_> = app
+        .scene(window.into())
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            Primitive::MonoSprite(s) if s.kind == SpriteKind::Glyph => {
+                let (b, clip) = (&s.bounds, &s.clip);
+                let py = |v| f64::from(v) as f32;
+                // Only inspect visible glyphs in the top band (where the primary chart headers sit).
+                (py(b.origin.y) >= 40.
+                    && py(b.bottom()) <= 300.
+                    && (py(b.origin.y) < py(clip.origin.y) - 0.5 || py(b.bottom()) > py(clip.bottom()) + 0.5))
+                .then_some((*b, *clip))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(clipped.is_empty(), "primary chart headers must not clip vertically at 1120x620: {clipped:?}");
+    press(&mut app, window, "right");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.run_chart_opts.loss_smooth, "Smooth/Raw toggle works at 1120x620");
     });
 }
 
