@@ -4,7 +4,7 @@
 // crumbs on a nested page only and never a New run, the foot's line says the data source and the version, a detail
 // header puts its status badge on the title line, and an architecture is a name (sans) where an id stays mono.
 import { flush } from 'fw';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
@@ -31,6 +31,10 @@ afterEach(() => {
   watched.runs = undefined;
   watched.since = null;
   prefs.sidebarCollapsed = false;
+  prefs.useTheme('dark');
+  prefs.useTheme('light');
+  prefs.theme = 'dark';
+  vi.useRealTimers();
 });
 
 function mount(f: () => JSX.Element) {
@@ -132,6 +136,65 @@ describe('the top bar', () => {
     expect(shell.querySelector('.crumbs')!.classList.contains('top')).toBe(false);
     expect([...shell.querySelectorAll('.crumbs li:not(.sep)')].map((li) => li.textContent?.trim())).toEqual(['Runs', 'fasteners-s']);
     expect([...shell.querySelectorAll('a, button')].some((b) => b.textContent?.includes('New run'))).toBe(false);
+  });
+
+  it('uses a custom tooltip showing the active theme name and mode on the theme toggle, updating live on keyboard activation', () => {
+    vi.useFakeTimers();
+    prefs.useTheme('midnight');
+    prefs.theme = 'dark';
+    const shell = mount(() => <Topbar onsearch={() => {}} />);
+    const wrap = shell.querySelector<HTMLElement>('.theme-wrap')!;
+    const btn = wrap.querySelector<HTMLButtonElement>('button')!;
+    expect(btn.hasAttribute('title')).toBe(false);
+    expect(btn.getAttribute('aria-label')).toBe('Cycle theme (Midnight, dark)');
+
+    // Keyboard focus opens the tooltip immediately and describes the button.
+    const visible = vi.spyOn(btn, 'matches').mockImplementation((sel: string) => sel === ':focus-visible' || Element.prototype.matches.call(btn, sel));
+    btn.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    vi.advanceTimersByTime(10);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Theme: Midnight (dark) · click to cycle');
+    expect(btn.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    // Keyboard activation (no pointerdown): the open tooltip repaints live to Light.
+    btn.click();
+    flush();
+    expect(btn.getAttribute('aria-label')).toBe('Cycle theme (Light)');
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Theme: Light · click to cycle');
+
+    // Named light theme (Paper) shows its mode too.
+    prefs.useTheme('paper');
+    flush();
+    expect(btn.getAttribute('aria-label')).toBe('Cycle theme (Paper, light)');
+    expect(tip.textContent).toBe('Theme: Paper (light) · click to cycle');
+
+    // Cycling into system mode covers both named and default themes for the resolved slot.
+    btn.click();
+    flush();
+    expect(prefs.theme).toBe('system');
+    const resolved = prefs.resolvedTheme;
+    const namedForSlot = resolved === 'dark' ? 'Midnight' : 'Paper';
+    expect(btn.getAttribute('aria-label')).toBe(`Cycle theme (${namedForSlot}, system, ${resolved})`);
+    expect(tip.textContent).toBe(`Theme: ${namedForSlot} (system, ${resolved}) · click to cycle`);
+
+    prefs.useTheme(resolved);
+    flush();
+    const defaultName = resolved === 'dark' ? 'Dark' : 'Light';
+    expect(btn.getAttribute('aria-label')).toBe(`Cycle theme (${defaultName}, system)`);
+    expect(tip.textContent).toBe(`Theme: ${defaultName} (system) · click to cycle`);
+
+    // Custom theme name appears in both aria-label and tooltip.
+    prefs.installThemes([{ file: 'sepia.json', ok: true, theme: { folo_theme: 1, id: 'sepia-test', name: 'Sepia', mode: 'light', base: 'paper' } }]);
+    prefs.useTheme('sepia-test');
+    prefs.theme = 'light';
+    flush();
+    expect(btn.getAttribute('aria-label')).toBe('Cycle theme (Sepia, light)');
+    expect(tip.textContent).toBe('Theme: Sepia (light) · click to cycle');
+    prefs.removeTheme('sepia-test');
+
+    visible.mockRestore();
   });
 });
 

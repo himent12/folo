@@ -195,6 +195,26 @@ describe('tooltip', () => {
     other.remove();
   });
 
+  it('repaints an already-open tooltip live when update() receives new options', () => {
+    vi.useFakeTimers();
+    const b = document.createElement('button');
+    document.body.appendChild(b);
+    const t = tooltip(b, { text: 'Theme: Midnight (dark)', side: 'bottom' });
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Theme: Midnight (dark)');
+
+    t.update({ text: 'Theme: Light', side: 'bottom' });
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.textContent).toBe('Theme: Light');
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+
+    t.destroy();
+    b.remove();
+  });
+
   it('dismisses on ancestor or window scroll, ignores unrelated sibling scrollers, and removes the exact listener', () => {
     vi.useFakeTimers();
     const scroller = document.createElement('div');
