@@ -57,7 +57,7 @@ fn main() -> std::process::ExitCode {
             // `folo mcp`'s stdout is the protocol's also when its arguments do not parse.
             let args: Vec<_> = std::env::args_os().collect();
             let json = args.iter().skip(1).any(|a| a == "--json") && !names_mcp(&args);
-            return usage_error(Out { json }, e);
+            return usage_error(Out { json }, &args, e);
         }
     };
     // `folo mcp`'s stdout belongs to the protocol, also with --json: its errors go to stderr only.
@@ -105,45 +105,83 @@ fn names_mcp(args: &[OsString]) -> bool {
 /// argument that is not Unicode is read lossily: a flag still starts with `-` and matches no root flag, so it is
 /// skipped as an unknown one; anything else is a subcommand token that is not `mcp`.
 fn subcommand_token<'a>(root: &clap::Command, args: &'a [OsString]) -> Option<&'a OsStr> {
+    let rest = args.get(1..)?;
+    next_subcommand_index(root, rest).map(|i| rest[i].as_os_str())
+}
+
+fn next_subcommand_index(cmd: &clap::Command, args: &[OsString]) -> Option<usize> {
     let takes_value = |arg: Option<&clap::Arg>| arg.is_some_and(|a| a.get_action().takes_values());
-    let mut rest = args.iter().skip(1).peekable();
-    while let Some(token) = rest.next() {
-        let s = token.to_string_lossy();
+    let mut i = 0;
+    while i < args.len() {
+        let s = args[i].to_string_lossy();
         let wants_next = if s == "--" {
             return None;
         } else if let Some(long) = s.strip_prefix("--") {
-            !long.contains('=') && takes_value(root.get_arguments().find(|a| a.get_long() == Some(long)))
+            !long.contains('=') && takes_value(cmd.get_arguments().find(|a| a.get_long() == Some(long)))
         } else if let Some(shorts) = s.strip_prefix('-').filter(|s| !s.is_empty()) {
             // A cluster (`-ab`): the first short that takes a value takes the rest of the token, if any.
             let mut chars = shorts.chars();
             loop {
                 match chars.next() {
                     None => break false,
-                    Some(c) if takes_value(root.get_arguments().find(|a| a.get_short() == Some(c))) => {
+                    Some(c) if takes_value(cmd.get_arguments().find(|a| a.get_short() == Some(c))) => {
                         break chars.as_str().is_empty();
                     }
                     Some(_) => {}
                 }
             }
         } else {
-            return Some(token);
+            return Some(i);
         };
+        i += 1;
         if wants_next
-            && rest.peek().is_some_and(|n| n.as_os_str() == "-" || !n.to_string_lossy().starts_with('-'))
+            && args.get(i).is_some_and(|n| n.as_os_str() == "-" || !n.to_string_lossy().starts_with('-'))
         {
-            rest.next();
+            i += 1;
         }
     }
     None
 }
 
-/// Help and version go to stdout with exit 0; real parse errors are usage errors (exit 2).
-fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
-    use clap::error::ErrorKind;
-    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
-        let _ = e.print();
-        return std::process::ExitCode::SUCCESS;
+/// Matched subcommand path (e.g. `["dataset", "stats"]`) extracted from clap's `Usage:` line.
+fn command_path_from_usage(root: &clap::Command, usage: &str) -> Vec<String> {
+    let line = usage.lines().next().unwrap_or("");
+    let rest = line.trim().strip_prefix("Usage:").unwrap_or(line).trim();
+    let mut cmd = root;
+    let mut path = Vec::new();
+    for token in rest.split_whitespace().skip(1) {
+        let Some(sub) = cmd.get_subcommands().filter(|c| !c.is_hide_set()).find(|c| c.get_name() == token)
+        else {
+            break;
+        };
+        path.push(sub.get_name().to_string());
+        cmd = sub;
     }
+    path
+}
+
+/// Matched subcommand path walked from raw `args` when clap's error omits a `Usage:` line (e.g. invalid enum value).
+fn subcommand_path(root: &clap::Command, args: &[OsString]) -> Vec<String> {
+    let mut cmd = root;
+    let mut rest = args.get(1..).unwrap_or(&[]);
+    let mut path = Vec::new();
+    while let Some(idx) = next_subcommand_index(cmd, rest) {
+        let Some(name) = rest[idx].to_str() else { break };
+        let Some(sub) = cmd.get_subcommands().filter(|c| !c.is_hide_set()).find(|c| c.get_name() == name)
+        else {
+            break;
+        };
+        path.push(sub.get_name().to_string());
+        cmd = sub;
+        rest = &rest[idx + 1..];
+    }
+    path
+}
+
+/// Builds the structured `--json` usage error for a clap parse error, preserving clap's argument /
+/// subcommand / value suggestions and scoping the help hint to the matched subcommand.
+fn usage_cli_error(root: &clap::Command, args: &[OsString], e: &clap::Error) -> CliError {
+    use clap::error::{ContextKind, ContextValue};
     let rendered = e.render().to_string();
     // The first paragraph, on one line: a missing argument's names follow "were not provided:" on their own lines.
     let message: Vec<&str> =
@@ -152,9 +190,70 @@ fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
         "" => "invalid usage".to_string(),
         m => m.to_string(),
     };
-    let err =
-        CliError::new(ExitCode::Usage, "usage", message).hint("run `folo --help` or `folo describe --json`");
+
+    let mut tips = Vec::new();
+    let mut usage_line: Option<String> = None;
+    for (kind, value) in e.context() {
+        match (kind, value) {
+            (ContextKind::SuggestedArg, ContextValue::String(s))
+            | (ContextKind::SuggestedSubcommand, ContextValue::String(s))
+            | (ContextKind::SuggestedValue, ContextValue::String(s)) => {
+                let tip = format!("did you mean `{s}`?");
+                if !tips.contains(&tip) {
+                    tips.push(tip);
+                }
+            }
+            (ContextKind::SuggestedArg, ContextValue::Strings(vs))
+            | (ContextKind::SuggestedSubcommand, ContextValue::Strings(vs))
+            | (ContextKind::SuggestedValue, ContextValue::Strings(vs))
+                if !vs.is_empty() =>
+            {
+                let formatted: Vec<String> = vs.iter().map(|s| format!("`{s}`")).collect();
+                let tip = format!("did you mean {}?", formatted.join(", "));
+                if !tips.contains(&tip) {
+                    tips.push(tip);
+                }
+            }
+            (ContextKind::Suggested, ContextValue::StyledStrs(vs)) => {
+                for s in vs {
+                    let text = s.to_string();
+                    let text = text.trim();
+                    if !text.is_empty() && !tips.iter().any(|t| t == text) {
+                        tips.push(text.to_string());
+                    }
+                }
+            }
+            (ContextKind::Usage, ContextValue::StyledStr(u)) => {
+                usage_line = Some(u.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let path = match usage_line.as_deref() {
+        Some(u) => command_path_from_usage(root, u),
+        None => subcommand_path(root, args),
+    };
+    let help = if path.is_empty() {
+        "run `folo --help` or `folo describe --json`".to_string()
+    } else {
+        let joined = path.join(" ");
+        format!("run `folo {joined} --help` or `folo describe {joined} --json`")
+    };
+    let hint = if tips.is_empty() { help } else { format!("{}; {help}", tips.join("; ")) };
+    CliError::new(ExitCode::Usage, "usage", message).hint(hint)
+}
+
+/// Help and version go to stdout with exit 0; real parse errors are usage errors (exit 2).
+fn usage_error(out: Out, args: &[OsString], e: clap::Error) -> std::process::ExitCode {
+    use clap::error::ErrorKind;
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+        let _ = e.print();
+        return std::process::ExitCode::SUCCESS;
+    }
+    let rendered = e.render().to_string();
     if out.json {
+        let err = usage_cli_error(&Cli::command(), args, &e);
         out.record(&err.to_json());
     }
     eprint!("{rendered}");
@@ -365,5 +464,61 @@ mod tests {
         // auto, sgd, adamw, musgd.
         assert_eq!(opt["possible_values"].as_array().unwrap().len(), 4);
         assert!(opt["possible_values"].to_string().contains("musgd"), "{}", opt["possible_values"]);
+    }
+
+    #[test]
+    fn usage_cli_error_preserves_suggestions_and_scopes_help() {
+        let parse_err = |argv: &[&str]| {
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let err = Cli::command().try_get_matches_from(&args).unwrap_err();
+            usage_cli_error(&Cli::command(), &args, &err)
+        };
+
+        // Flag typo on a subcommand: keeps clap's `--batch` suggestion and scopes help to `folo train`.
+        let e = parse_err(&["folo", "train", "--batc", "2", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert!(hint.contains("`--batch`"), "{hint}");
+        assert!(hint.contains("`folo train --help`"), "{hint}");
+        assert!(hint.contains("`folo describe train --json`"), "{hint}");
+
+        // Nested subcommand typo: keeps clap's `stats` suggestion and scopes help to `folo dataset`.
+        let e = parse_err(&["folo", "dataset", "stat", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert!(hint.contains("`stats`"), "{hint}");
+        assert!(hint.contains("`folo dataset --help`"), "{hint}");
+        assert!(hint.contains("`folo describe dataset --json`"), "{hint}");
+
+        // Invalid enum value (no `Usage:` line from clap): falls back to raw args for subcommand path.
+        let e = parse_err(&["folo", "train", "--data", "d", "--optimizer", "adam", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert!(hint.contains("`adamw`"), "{hint}");
+        assert!(hint.contains("`folo train --help`"), "{hint}");
+
+        // Nested subcommand missing required arg: scoped to `folo dataset stats`.
+        let e = parse_err(&["folo", "dataset", "stats", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert_eq!(hint, "run `folo dataset stats --help` or `folo describe dataset stats --json`");
+
+        // Top-level unknown subcommand typo: keeps `train` suggestion and top-level help.
+        let e = parse_err(&["folo", "trani", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert!(hint.contains("`train`"), "{hint}");
+        assert!(hint.contains("`folo --help`"), "{hint}");
+
+        // Root-level flag errors before a valid subcommand stay scoped to root, not the subcommand.
+        let e = parse_err(&["folo", "--bogus", "dataset", "stats", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert_eq!(hint, "run `folo --help` or `folo describe --json`");
+
+        let e = parse_err(&["folo", "--jso", "train", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert!(hint.contains("`--json`"), "{hint}");
+        assert!(hint.contains("`folo --help`"), "{hint}");
+        assert!(!hint.contains("folo train"), "{hint}");
+
+        // Command group missing its subcommand: scoped to that command group.
+        let e = parse_err(&["folo", "dataset", "--json"]);
+        let hint = e.hint.as_deref().unwrap();
+        assert_eq!(hint, "run `folo dataset --help` or `folo describe dataset --json`");
     }
 }
