@@ -428,10 +428,21 @@ impl ToolDef {
     pub fn tool(&self) -> Tool {
         let annotations = ToolAnnotations::new()
             .read_only(!self.mutating)
-            // The one tool that removes files: a benchmark's frozen images and its entries' results.
-            .destructive(self.name == "delete_benchmark")
-            .idempotent(!self.mutating || matches!(self.name, "stop_run" | "stop_bench_entry"))
-            .open_world(false);
+            // Removes frozen benchmark data or terminates a rented cloud instance (failing any active run on it).
+            .destructive(matches!(self.name, "delete_benchmark" | "cloud_terminate"))
+            .idempotent(
+                !self.mutating
+                    || matches!(
+                        self.name,
+                        "stop_run"
+                            | "stop_bench_entry"
+                            | "stop_labeling"
+                            | "register_dataset"
+                            | "review_label_images"
+                    ),
+            )
+            // Cloud compute tools and external LLM / coding-agent labeling.
+            .open_world(self.name.starts_with("cloud_") || self.name == "start_labeling");
         Tool::new(self.name, self.description, Arc::clone(self.input_schema()))
             .with_raw_output_schema(Arc::clone(self.output_schema()))
             .with_annotations(annotations)

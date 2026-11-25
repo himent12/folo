@@ -479,13 +479,10 @@ fn a_wait_follows_an_entry_until_it_ends() {
     assert_eq!(after_end.load(Ordering::Relaxed), 0, "the wait asked again after the entry ended");
 }
 
-/// `delete_benchmark` is the one tool that removes files, and the only one a client is told is destructive.
+/// `delete_benchmark` removes frozen files and entry results, so it is marked destructive (the full
+/// annotation table is checked in `tools::tests::tool_annotations_match_tool_semantics`).
 #[test]
-fn only_delete_benchmark_is_destructive() {
-    let destructive: Vec<&str> = super::TOOLS
-        .iter()
-        .filter(|t| t.tool().annotations.is_some_and(|a| a.destructive_hint == Some(true)))
-        .map(|t| t.name)
-        .collect();
-    assert_eq!(destructive, ["delete_benchmark"]);
+fn delete_benchmark_is_marked_destructive() {
+    let ann = find("delete_benchmark").unwrap().tool().annotations.unwrap();
+    assert_eq!(ann.destructive_hint, Some(true));
 }

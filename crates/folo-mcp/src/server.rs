@@ -349,6 +349,24 @@ fn not_found(uri: &str) -> McpError {
     McpError::resource_not_found(format!("resource not found: {uri}"), Some(json!({ "uri": uri })))
 }
 
+fn instructions(read_only: bool) -> &'static str {
+    if read_only {
+        "FOLO (read-only mode): a fast YOLO-style object detector; mutating tools and mutating prompts are \
+         disabled. Call folo_info first, then list_datasets / get_dataset, list_models, list_runs / \
+         run_status (or subscribe to folo://runs/{run_id}), compare_runs, val and predict. Labeling jobs \
+         can be inspected with list_label_jobs, label_status, list_label_images and view_label_image; use \
+         the diagnose_run prompt to inspect a run. Errors are isError results whose text is \
+         {code, message, hint}. Recipes: the folo://docs/AGENT_COOKBOOK resource."
+    } else {
+        "FOLO: a fast YOLO-style object detector. Call folo_info first, then list_datasets / \
+         create_synthetic_dataset / register_dataset, train, run_status (or subscribe to \
+         folo://runs/{run_id}), val and predict. Unlabeled images: create_label_job, start_labeling, \
+         view_label_image to check the boxes, export_label_dataset (the label_folder prompt walks \
+         through it). Errors are isError results whose text is \
+         {code, message, hint}. Recipes: the folo://docs/AGENT_COOKBOOK resource."
+    }
+}
+
 impl ServerHandler for FoloMcp {
     #[allow(deprecated)] // `enable_logging`, see `set_level`
     fn get_info(&self) -> ServerConfig {
@@ -365,14 +383,7 @@ impl ServerHandler for FoloMcp {
         ServerConfig::new(caps)
             .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_server_info(Implementation::new("folo", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "FOLO: a fast YOLO-style object detector. Call folo_info first, then list_datasets / \
-                 create_synthetic_dataset / register_dataset, train, run_status (or subscribe to \
-                 folo://runs/{run_id}), val and predict. Unlabeled images: create_label_job, start_labeling, \
-                 view_label_image to check the boxes, export_label_dataset (the label_folder prompt walks \
-                 through it). Errors are isError results whose text is \
-                 {code, message, hint}. Recipes: the folo://docs/AGENT_COOKBOOK resource.",
-            )
+            .with_instructions(instructions(self.inner.opts.read_only))
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -749,6 +760,59 @@ mod tests {
         while store.hub_state("run_3c02").0 > 0 {
             assert!(tokio::time::Instant::now() < deadline, "event streams leaked");
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Initialization instructions only name tools and prompts that are advertised in the server's mode.
+    #[test]
+    fn get_info_instructions_only_advertise_available_tools_and_prompts() {
+        use std::collections::HashSet;
+        let all_tools: HashSet<&str> = tools::TOOLS.iter().map(|t| t.name).collect();
+        let all_prompts: Vec<String> = prompts::list(false).into_iter().map(|p| p.name).collect();
+        let all_prompts_set: HashSet<&str> = all_prompts.iter().map(String::as_str).collect();
+        let home = TestDir::new("mcp-info-instructions");
+        for read_only in [false, true] {
+            let store = Arc::new(MockStore::new());
+            let opts = Options {
+                data_dir: home.to_path_buf(),
+                read_only,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            };
+            let server = FoloMcp::new(store, None, opts);
+            let info = server.get_info();
+            let text = info.instructions.as_deref().expect("server provides instructions");
+            let listed_tools: HashSet<&str> = tools::listed(read_only).map(|t| t.name).collect();
+            let listed_prompts: Vec<String> = prompts::list(read_only).into_iter().map(|p| p.name).collect();
+            let listed_prompts_set: HashSet<&str> = listed_prompts.iter().map(String::as_str).collect();
+            let mut mentioned_tools = 0usize;
+            let mut mentioned_prompts = 0usize;
+            for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                if all_tools.contains(token) {
+                    assert!(
+                        listed_tools.contains(token),
+                        "read_only={read_only} instructions mention hidden tool `{token}`"
+                    );
+                    mentioned_tools += 1;
+                }
+                if all_prompts_set.contains(token) {
+                    assert!(
+                        listed_prompts_set.contains(token),
+                        "read_only={read_only} instructions mention hidden prompt `{token}`"
+                    );
+                    mentioned_prompts += 1;
+                }
+            }
+            assert!(mentioned_tools > 0, "read_only={read_only}: expected tool mentions");
+            assert!(mentioned_prompts > 0, "read_only={read_only}: expected prompt mention");
+            if read_only {
+                assert!(text.contains("read-only"), "{text}");
+                assert!(text.contains("diagnose_run"), "{text}");
+            } else {
+                assert!(text.contains("train"), "{text}");
+                assert!(text.contains("label_folder"), "{text}");
+            }
         }
     }
 }
