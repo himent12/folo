@@ -181,6 +181,7 @@ export default function CompareTable(props: CompareTableProps) {
   const other = computed(() => others.get()[Math.min(otherAt.get(), others.get().length - 1)]);
   // B: the next run becomes the baseline (in the chips' order, wrapping), the keyboard's Swap (shell/shortcuts lists it).
   pageKeys((k) => {
+    if (document.querySelector('[aria-expanded="true"][aria-haspopup], [role="menu"]')) return false;
     const chosen = props.chosen;
     const b = base.peek();
     if (k.toLowerCase() !== 'b' || chosen.length < 2 || !b) return false;

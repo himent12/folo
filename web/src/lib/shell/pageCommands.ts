@@ -60,7 +60,7 @@ export function pageCommands(get: () => PageCommand[]) {
 export function pageKeys(handler: (key: string) => boolean) {
   effect(() => {
     const onkeydown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
+      if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
       if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
       if (handler(e.key)) e.preventDefault();
     };

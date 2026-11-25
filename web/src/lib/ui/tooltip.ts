@@ -157,9 +157,12 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     if (rest.length) el.setAttribute('aria-describedby', rest.join(' '));
     else el.removeAttribute('aria-describedby');
   };
-  // Escape dismisses a visible tooltip without moving focus (WCAG 1.4.13).
+  // Escape dismisses a visible tooltip without moving focus (WCAG 1.4.13) and consumes the event so global back-navigation does not also fire.
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') hide();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hide();
+    }
   };
   // Dismiss only when the scrolling target can actually move this anchor (ignore unrelated sibling scrollers like live logs).
   const onScroll = (e: Event) => {
