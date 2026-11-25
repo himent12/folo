@@ -180,7 +180,9 @@ pub fn flip_ud(s: &mut Sample) {
     let h = s.image.height as usize;
     let half = h / 2;
     if stride > 0 && half > 0 {
-        let (top, bot) = s.image.data.split_at_mut((h - half) * stride);
+        let total = h.checked_mul(stride).expect("flip_ud image size overflow");
+        let data = &mut s.image.data[..total];
+        let (top, bot) = data.split_at_mut((h - half) * stride);
         for (t, b) in top[..half * stride].chunks_exact_mut(stride).zip(bot.chunks_exact_mut(stride).rev()) {
             t.swap_with_slice(b);
         }
@@ -312,5 +314,21 @@ mod tests {
             }
             assert!((ud.boxes[0].cy - 0.7).abs() < 1e-6);
         }
+        // Oversized backing buffer: only the declared `height` rows are flipped; trailing bytes stay untouched.
+        let mut oversized = Sample {
+            image: Image { width: 1, height: 2, data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9] },
+            boxes: vec![BBox::new(0, 0.5, 0.25, 0.2, 0.2)],
+        };
+        flip_ud(&mut oversized);
+        assert_eq!(oversized.image.data, vec![4, 5, 6, 1, 2, 3, 7, 8, 9]);
+        // Truncated backing buffer panics before swapping any rows.
+        let truncated = std::panic::catch_unwind(|| {
+            let mut s = Sample {
+                image: Image { width: 1, height: 4, data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9] },
+                boxes: vec![],
+            };
+            flip_ud(&mut s);
+        });
+        assert!(truncated.is_err());
     }
 }
