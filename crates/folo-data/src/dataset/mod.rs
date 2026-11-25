@@ -579,8 +579,8 @@ fn parse_label(
         // A failed read is not cached.
         Err(e) => return Err(e.to_string()),
     };
-    let parsed = match String::from_utf8(bytes) {
-        Ok(text) => labels::parse_yolo(&text, num_classes)
+    let parsed = match std::str::from_utf8(&bytes) {
+        Ok(text) => labels::parse_yolo(text, num_classes)
             .map(|p| (p.boxes, p.warnings))
             .map_err(|(line, msg)| format!("line {line}: {msg}")),
         Err(_) => Err("label file is not UTF-8 text".to_string()),

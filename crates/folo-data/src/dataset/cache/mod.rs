@@ -41,7 +41,7 @@ static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 pub const MIN_FILES: usize = 256;
 
 /// Version of the cached data; part of every file's header.
-pub(crate) const FORMAT: u32 = 2;
+pub(crate) const FORMAT: u32 = 3;
 const MAGIC: &[u8; 8] = b"FOLOSCAN";
 /// A cache file larger than this is ignored (COCO train2017's entry is 24 MB).
 const MAX_CACHE_FILE: u64 = 1 << 30;

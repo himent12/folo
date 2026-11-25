@@ -1,9 +1,12 @@
 //! COCO instances JSON.
 
+mod parse;
+
 use super::{
     Candidate, FileDataset, Format, IssueKind, LabelSource, LoadReport, LoadedDataset, OpenOptions, Split,
 };
 use crate::error::{DataError, Result};
+use parse::{IdKey, ParsedBbox, ParsedImage, Sections, whole_number_value};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -113,35 +116,11 @@ fn looks_like_coco(p: &Path) -> bool {
     head.contains("\"images\"") && (head.contains("\"annotations\"") || head.contains("\"categories\""))
 }
 
-/// An image id as a map key: a string as it is, a number as JSON writes it, except that an integral float is its
-/// integer (`"image_id": 1.0` names `"id": 1`).
-fn id_key(v: &Value) -> Option<String> {
-    match v {
-        Value::Number(n) => Some(match n.as_f64() {
-            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < (1u64 << 53) as f64 => {
-                (f as i64).to_string()
-            }
-            _ => n.to_string(),
-        }),
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// A non-negative whole number as JSON may write it: `1`, or `1.0` (what pandas writes for an id column), the rule
-/// [`id_key`] has for image ids.
-fn whole_number(v: &Value) -> Option<u64> {
-    v.as_u64().or_else(|| {
-        let f = v.as_f64()?;
-        (f.fract() == 0.0 && (0.0..(1u64 << 53) as f64).contains(&f)).then_some(f as u64)
-    })
-}
-
 /// The category id of an annotation that has none, or one that is not a whole number.
 const NO_CATEGORY: u64 = u64::MAX;
 
 /// `(id key, file_name, declared size)` of a COCO image.
-type ImageRow = (String, String, Option<(u32, u32)>);
+type ImageRow = (IdKey, String, Option<(u32, u32)>);
 /// Pixel boxes of one image and the first reason its annotations are broken, if any.
 type ImageAnns = (Vec<(u32, [f32; 4])>, Option<String>);
 
@@ -150,183 +129,7 @@ struct Parsed {
     path: PathBuf,
     images: Vec<ImageRow>,
     /// `(image id key, category id, bbox)`
-    anns: Vec<(String, u64, Value)>,
-}
-
-/// The fields of one `annotations` entry the loader reads. Everything else, `segmentation` included (the bulk of an
-/// instances file), is skipped without being built.
-#[derive(Debug, Default, PartialEq, serde::Deserialize)]
-#[serde(default)]
-struct AnnFields {
-    image_id: Option<Value>,
-    category_id: Option<Value>,
-    bbox: Option<Value>,
-    iscrowd: Option<Value>,
-    /// The entry's JSON text, for messages (only kept for entries without an image id).
-    #[serde(skip)]
-    text: String,
-}
-
-impl AnnFields {
-    fn from_value(a: &Value) -> Self {
-        let field = |k: &str| a.get(k).filter(|v| !v.is_null()).cloned();
-        AnnFields {
-            image_id: field("image_id"),
-            category_id: field("category_id"),
-            bbox: field("bbox"),
-            iscrowd: field("iscrowd"),
-            text: String::new(),
-        }
-    }
-}
-
-/// The top level of a COCO file, annotations borrowed as raw JSON so they are never built as a `Value` tree
-/// (that tree is about 15x the file: 7 GB for COCO's 448 MB `instances_train2017.json`).
-#[derive(serde::Deserialize)]
-struct Top<'a> {
-    images: Option<Value>,
-    categories: Option<Value>,
-    #[serde(borrow)]
-    annotations: Option<&'a serde_json::value::RawValue>,
-}
-
-/// Whether JSON text is an object. A derived struct deserializer also accepts a positional array
-/// (`[1, 1, [0, 0, 10, 10]]` would fill `image_id`, `category_id`, `bbox`), which the `Value` reading never does.
-fn is_object(json: &[u8]) -> bool {
-    json.trim_ascii_start().first() == Some(&b'{')
-}
-
-/// What the loader reads from one COCO file.
-#[derive(Debug, PartialEq)]
-struct Sections {
-    images: Option<Value>,
-    categories: Option<Value>,
-    annotations: Vec<AnnFields>,
-}
-
-impl Sections {
-    /// Same result as reading the file as one `Value` (a non-array `annotations` means none, a non-object entry
-    /// has no fields), with a fraction of the memory.
-    fn parse(bytes: &[u8]) -> serde_json::Result<Self> {
-        if !is_object(bytes) {
-            return Self::parse_value(serde_json::from_slice(bytes)?);
-        }
-        let top: Top = match serde_json::from_slice(bytes) {
-            Ok(t) => t,
-            // Duplicate top-level keys and the like: fall back to the `Value` reading (last key wins).
-            Err(e) if !e.is_syntax() && !e.is_eof() => {
-                return Self::parse_value(serde_json::from_slice(bytes)?);
-            }
-            Err(e) => return Err(e),
-        };
-        let raws: Vec<&serde_json::value::RawValue> =
-            top.annotations.and_then(|a| serde_json::from_str(a.get()).ok()).unwrap_or_default();
-        let annotations = raws
-            .into_iter()
-            .map(|raw| {
-                let typed = if is_object(raw.get().as_bytes()) {
-                    serde_json::from_str::<AnnFields>(raw.get()).ok()
-                } else {
-                    None
-                };
-                let mut a = typed.unwrap_or_else(|| {
-                    // Not an object (no fields, as with `Value::get`), or a duplicate field (last key wins).
-                    serde_json::from_str::<Value>(raw.get())
-                        .map(|v| AnnFields::from_value(&v))
-                        .unwrap_or_default()
-                });
-                if a.image_id.is_none() {
-                    a.text = raw.get().to_string();
-                }
-                a
-            })
-            .collect();
-        Ok(Sections { images: top.images, categories: top.categories, annotations })
-    }
-
-    /// [`Sections::parse`] for a file of a split that is not opened: the categories as `parse` reads them, and
-    /// `images` only as far as whether it is an array (an empty one stands for it), no annotations.
-    fn parse_categories(bytes: &[u8]) -> serde_json::Result<Self> {
-        /// Whether a JSON value is an array, read without building it.
-        struct IsArray(bool);
-        impl<'de> serde::Deserialize<'de> for IsArray {
-            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                struct V;
-                impl<'de> serde::de::Visitor<'de> for V {
-                    type Value = IsArray;
-                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        f.write_str("any JSON value")
-                    }
-                    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<IsArray, A::Error> {
-                        while a.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-                        Ok(IsArray(true))
-                    }
-                    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> Result<IsArray, A::Error> {
-                        while a.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
-                        Ok(IsArray(false))
-                    }
-                    fn visit_bool<E>(self, _: bool) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                    fn visit_i64<E>(self, _: i64) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                    fn visit_u64<E>(self, _: u64) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                    fn visit_f64<E>(self, _: f64) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                    fn visit_str<E>(self, _: &str) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                    fn visit_unit<E>(self) -> Result<IsArray, E> {
-                        Ok(IsArray(false))
-                    }
-                }
-                d.deserialize_any(V)
-            }
-        }
-        #[derive(serde::Deserialize)]
-        struct CategoriesTop {
-            images: Option<IsArray>,
-            categories: Option<Value>,
-        }
-        let marker = |is_array: bool| is_array.then(|| Value::Array(Vec::new()));
-        let from_value = |v: Value| Sections {
-            images: marker(v.get("images").is_some_and(Value::is_array)),
-            categories: v.get("categories").cloned(),
-            annotations: Vec::new(),
-        };
-        if !is_object(bytes) {
-            return Ok(from_value(serde_json::from_slice(bytes)?));
-        }
-        match serde_json::from_slice::<CategoriesTop>(bytes) {
-            Ok(t) => Ok(Sections {
-                images: marker(t.images.is_some_and(|a| a.0)),
-                categories: t.categories,
-                annotations: Vec::new(),
-            }),
-            // Duplicate top-level keys and the like: the `Value` reading (last key wins), as `parse` does.
-            Err(e) if !e.is_syntax() && !e.is_eof() => Ok(from_value(serde_json::from_slice(bytes)?)),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn parse_value(v: Value) -> serde_json::Result<Self> {
-        let annotations = v
-            .get("annotations")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|a| AnnFields { text: a.to_string(), ..AnnFields::from_value(a) })
-            .collect();
-        Ok(Sections {
-            images: v.get("images").cloned(),
-            categories: v.get("categories").cloned(),
-            annotations,
-        })
-    }
+    anns: Vec<(IdKey, u64, ParsedBbox)>,
 }
 
 pub(crate) fn open_jsons(
@@ -349,9 +152,13 @@ pub(crate) fn open_jsons(
         let files: Vec<&str> = p.files.iter().map(String::as_str).collect();
         let base = image_base(root, &p.path, p.split, &files);
         let list = by_split.entry(p.split).or_default();
+        list.reserve(p.images.len());
         for im in p.images {
             let image = base.join(&p.files[im.row]);
-            deps.insert(crate::paths::parent_dir(&image).to_path_buf());
+            let parent = crate::paths::parent_dir(&image);
+            if !deps.contains(parent) {
+                deps.insert(parent.to_path_buf());
+            }
             list.push(Candidate {
                 image,
                 labels: LabelSource::Coco {
@@ -430,7 +237,7 @@ pub(crate) fn read_annotations(
 ) -> Result<Annotations> {
     let mut report = LoadReport::default();
     let mut categories: BTreeMap<u64, String> = BTreeMap::new();
-    let mut parsed = Vec::new();
+    let mut parsed = Vec::with_capacity(jsons.len());
     // Files of the splits not wanted, read for their categories only (every file's count for the class ids).
     let mut other_files = Vec::new();
     for (split, path) in jsons {
@@ -451,13 +258,13 @@ pub(crate) fn read_annotations(
             }
         };
         drop(bytes);
-        let Some(images) = sections.images.as_ref().and_then(Value::as_array) else {
+        let Some(raw_images) = sections.images else {
             report.push(IssueKind::BrokenLabel, &path, "no `images` array: not a COCO file");
             continue;
         };
         for c in sections.categories.as_ref().and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(name)) =
-                (c.get("id").and_then(whole_number), c.get("name").and_then(Value::as_str))
+                (c.get("id").and_then(whole_number_value), c.get("name").and_then(Value::as_str))
             else {
                 report.push(IssueKind::BrokenLabel, &path, format!("bad category {c}"));
                 continue;
@@ -476,29 +283,25 @@ pub(crate) fn read_annotations(
             other_files.push(path);
             continue;
         }
-        let mut imgs = Vec::with_capacity(images.len());
-        for im in images {
-            let (Some(id), Some(file)) =
-                (im.get("id").and_then(id_key), im.get("file_name").and_then(Value::as_str))
-            else {
-                report.push(
-                    IssueKind::BrokenLabel,
-                    &path,
-                    format!("image entry without id or file_name: {im}"),
-                );
-                continue;
-            };
-            let dim = |k| im.get(k).and_then(Value::as_u64).filter(|&d| d > 0 && d <= u32::MAX as u64);
-            let declared = dim("width").zip(dim("height")).map(|(w, h)| (w as u32, h as u32));
-            imgs.push((id, file.to_string(), declared));
+        let mut imgs = Vec::with_capacity(raw_images.len());
+        for im in raw_images {
+            match im {
+                ParsedImage::Valid { id, file_name, declared } => imgs.push((id, file_name, declared)),
+                ParsedImage::Bad(msg) => {
+                    report.push(
+                        IssueKind::BrokenLabel,
+                        &path,
+                        format!("image entry without id or file_name: {msg}"),
+                    );
+                }
+            }
         }
         let mut anns = Vec::with_capacity(sections.annotations.len());
         for a in sections.annotations {
-            // `1`, `1.0` (pandas) or `true`: pycocotools takes each as a crowd region.
-            if a.iscrowd.as_ref().is_some_and(|v| v.as_bool() == Some(true) || whole_number(v) == Some(1)) {
+            if a.iscrowd {
                 continue;
             }
-            let Some(img) = a.image_id.as_ref().and_then(id_key) else {
+            let Some(img) = a.image_id else {
                 report.push(
                     IssueKind::BrokenLabel,
                     &path,
@@ -506,8 +309,8 @@ pub(crate) fn read_annotations(
                 );
                 continue;
             };
-            let cat = a.category_id.as_ref().and_then(whole_number).unwrap_or(NO_CATEGORY);
-            anns.push((img, cat, a.bbox.unwrap_or(Value::Null)));
+            let cat = a.category_id.unwrap_or(NO_CATEGORY);
+            anns.push((img, cat, a.bbox));
         }
         parsed.push(Parsed { split, path, images: imgs, anns });
     }
@@ -522,14 +325,28 @@ pub(crate) fn read_annotations(
 
     let mut splits = Vec::with_capacity(parsed.len());
     for p in parsed {
-        let mut per_image: HashMap<&str, ImageAnns> = HashMap::new();
-        let known: HashMap<&str, ()> = p.images.iter().map(|(id, _, _)| (id.as_str(), ())).collect();
+        // Single pre-sized lookup table from image id to its first row index, avoiding three separate maps and
+        // hashing every annotation twice.
+        let mut first_row: HashMap<&IdKey, usize> = HashMap::with_capacity(p.images.len());
+        let mut dup_of: Vec<Option<usize>> = Vec::with_capacity(p.images.len());
+        for (row, (id, _, _)) in p.images.iter().enumerate() {
+            match first_row.entry(id) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(row);
+                    dup_of.push(None);
+                }
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    dup_of.push(Some(*e.get()));
+                }
+            }
+        }
+        let mut per_image: Vec<ImageAnns> = (0..p.images.len()).map(|_| (Vec::new(), None)).collect();
         for (img, cat, bbox) in &p.anns {
-            if !known.contains_key(img.as_str()) {
+            let Some(&slot) = first_row.get(img) else {
                 report.push(IssueKind::Other, &p.path, format!("annotation for unknown image id {img}"));
                 continue;
-            }
-            let entry = per_image.entry(img.as_str()).or_default();
+            };
+            let entry = &mut per_image[slot];
             let Some(&class) = remap.get(cat) else {
                 entry.1.get_or_insert_with(|| match *cat {
                     NO_CATEGORY => "category_id is missing or not a whole number".to_string(),
@@ -537,28 +354,36 @@ pub(crate) fn read_annotations(
                 });
                 continue;
             };
-            // Exactly four numbers; anything else (null, strings, extra values) makes the annotation broken.
-            let nums: Option<Vec<f64>> =
-                bbox.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(Value::as_f64).collect());
-            match nums.as_deref() {
-                Some(&[x, y, w, h])
-                    if [x, y, x + w, y + h].iter().all(|v| v.is_finite() && v.abs() < 1e9)
-                        && w >= 0.0
-                        && h >= 0.0 =>
+            match bbox {
+                ParsedBbox::Valid([x, y, w, h])
+                    if [*x, *y, x + w, y + h].iter().all(|v| v.is_finite() && v.abs() < 1e9)
+                        && *w >= 0.0
+                        && *h >= 0.0 =>
                 {
-                    entry.0.push((class, [x as f32, y as f32, (x + w) as f32, (y + h) as f32]));
+                    entry.0.push((class, [*x as f32, *y as f32, (x + w) as f32, (y + h) as f32]));
                 }
-                _ => {
-                    entry.1.get_or_insert_with(|| format!("bad bbox {bbox}"));
+                ParsedBbox::Valid([x, y, w, h]) => {
+                    entry.1.get_or_insert_with(|| {
+                        if *w < 0.0 || *h < 0.0 {
+                            format!("bad bbox [{x},{y},{w},{h}]: width and height must be non-negative")
+                        } else {
+                            format!("bad bbox [{x},{y},{w},{h}]: coordinates out of range")
+                        }
+                    });
+                }
+                ParsedBbox::Missing => {
+                    entry.1.get_or_insert_with(|| "bad bbox null".to_string());
+                }
+                ParsedBbox::Invalid(v) => {
+                    entry.1.get_or_insert_with(|| format!("bad bbox {v}"));
                 }
             }
         }
-        // Image id -> the file of its first entry: a second entry with the id is left out (its annotations cannot
-        // be told apart from the first's).
-        let mut first: HashMap<&str, &str> = HashMap::new();
-        let mut images = Vec::with_capacity(p.images.len());
+        // Second entries reusing an image id are left out (their annotations cannot be told apart from the first's).
+        let mut images = Vec::with_capacity(first_row.len());
         for (row, (id, file, declared)) in p.images.iter().enumerate() {
-            if let Some(&kept) = first.get(id.as_str()) {
+            if let Some(kept_row) = dup_of[row] {
+                let kept = &p.images[kept_row].1;
                 report.push(
                     IssueKind::Other,
                     &p.path,
@@ -566,10 +391,10 @@ pub(crate) fn read_annotations(
                 );
                 continue;
             }
-            first.insert(id, file);
-            let (boxes, broken) = per_image.remove(id.as_str()).unwrap_or_default();
+            let (boxes, broken) = std::mem::take(&mut per_image[row]);
             images.push(ImageAnnotations { row, declared: *declared, boxes, broken });
         }
+        drop(first_row);
         let files = p.images.into_iter().map(|(_, file, _)| file).collect();
         splits.push(SplitAnnotations { split: p.split, path: p.path, files, images });
     }
@@ -777,24 +602,46 @@ fn detect_coco(path: &Path) -> Result<super::Source> {
 mod tests {
     use super::*;
 
-    type Fields = (Option<Value>, Option<Value>, Option<Value>, Option<Value>);
+    type Fields = (Option<IdKey>, Option<u64>, ParsedBbox, bool);
 
     fn fields(s: &Sections) -> Vec<Fields> {
         s.annotations
             .iter()
-            .map(|a| (a.image_id.clone(), a.category_id.clone(), a.bbox.clone(), a.iscrowd.clone()))
+            .map(|a| {
+                let bbox = match &a.bbox {
+                    ParsedBbox::Missing => ParsedBbox::Missing,
+                    ParsedBbox::Valid(n) => ParsedBbox::Valid(*n),
+                    ParsedBbox::Invalid(v) => ParsedBbox::Invalid(v.clone()),
+                };
+                (a.image_id.clone(), a.category_id, bbox, a.iscrowd)
+            })
             .collect()
     }
 
-    /// The borrowed parse agrees with reading the whole file as a `Value`, including on malformed input.
+    type ImageSummary<'a> = (&'a IdKey, &'a str, Option<(u32, u32)>);
+
+    fn image_summary(s: &Sections) -> Option<Vec<Option<ImageSummary<'_>>>> {
+        s.images.as_ref().map(|imgs| {
+            imgs.iter()
+                .map(|im| match im {
+                    ParsedImage::Valid { id, file_name, declared } => {
+                        Some((id, file_name.as_str(), *declared))
+                    }
+                    ParsedImage::Bad(_) => None,
+                })
+                .collect()
+        })
+    }
+
+    /// The single-pass streaming parse agrees with reading the whole file as a `Value`, including on malformed input.
     #[test]
-    fn borrowed_parse_matches_value_parse() {
+    fn streaming_parse_matches_value_parse() {
         let cases = [
-            r#"{"images":[{"id":1,"file_name":"a.jpg"}],"annotations":[{"id":1,"image_id":1,"category_id":2,"bbox":[0,0,10,10],"segmentation":[[0,0,1,1]],"iscrowd":0}],"categories":[{"id":2,"name":"x"}]}"#,
-            // Positional arrays and scalars are not annotations.
-            r#"{"images":[],"annotations":[[1,1,[0,0,10,10],0], 7, "s", null, {"image_id":3}]}"#,
-            // Duplicate fields: the last one wins.
-            r#"{"images":[],"annotations":[{"image_id":1,"image_id":2,"bbox":null}]}"#,
+            r#"{"images":[{"id":1,"file_name":"a.jpg","width":640,"height":480,"coco_url":"http://x"}],"annotations":[{"id":1,"image_id":1,"category_id":2,"bbox":[0,0,10,10],"segmentation":[[0,0,1,1]],"iscrowd":0}],"categories":[{"id":2,"name":"x"}]}"#,
+            // Positional arrays and scalars are not annotations or images.
+            r#"{"images":[[1,"a.jpg"], 9, null, {"id":"1","file_name":"b.jpg"}],"annotations":[[1,1,[0,0,10,10],0], 7, "s", null, {"image_id":3,"bbox":[1,2,3]}, {"image_id":4,"bbox":[1,2,3,4,5]}, {"image_id":5,"bbox":[1,"x",3,4]}]}"#,
+            // Duplicate fields: the last one wins (including resetting to null/invalid).
+            r#"{"images":[{"id":1,"id":2.0,"file_name":"a.jpg","width":10,"height":20}],"annotations":[{"image_id":1,"image_id":2,"bbox":null,"iscrowd":1,"iscrowd":0}]}"#,
             // `annotations` not an array; missing sections.
             r#"{"images":[],"annotations":{"image_id":1}}"#,
             r#"{"categories":[]}"#,
@@ -803,14 +650,34 @@ mod tests {
             // The top level is not an object (an array would fill a derived struct positionally).
             r#"[[{"id":1,"file_name":"a.jpg"}], [], [{"image_id":1}]]"#,
             r#"  [1, 2, 3]"#,
-            r#"{"images":[], "annotations":[ {"image_id": "s1", "iscrowd": 1}, {"category_id": 4.5} ]}"#,
+            r#"{"images":[], "annotations":[ {"image_id": "s1", "iscrowd": 1}, {"image_id": "01", "iscrowd": 1.0}, {"image_id": "-0", "iscrowd": true}, {"category_id": 4.5, "bbox": {"x": 1}} ]}"#,
+            // Escaped keys and huge u64 ids (> i64::MAX).
+            r#"{"images":[{"\u0069d":18446744073709551615,"file_name":"big.jpg"}],"annotations":[{"\u0069mage_id":18446744073709551615,"category_id":0,"bbox":[1,2,3,4]}]}"#,
         ];
         for c in cases {
             let a = Sections::parse(c.as_bytes()).unwrap();
             let b = Sections::parse_value(serde_json::from_str(c).unwrap()).unwrap();
-            assert_eq!((&a.images, &a.categories), (&b.images, &b.categories), "{c}");
+            assert_eq!(image_summary(&a), image_summary(&b), "{c}");
+            assert_eq!(a.categories, b.categories, "{c}");
             assert_eq!(fields(&a), fields(&b), "{c}");
+            let ca = Sections::parse_categories(c.as_bytes()).unwrap();
+            assert_eq!(ca.images.is_some(), b.images.is_some(), "categories images {c}");
+            assert_eq!(ca.categories, b.categories, "categories {c}");
+            assert!(ca.annotations.is_empty());
         }
         assert!(Sections::parse(br#"{"images": ["#).is_err());
+        assert!(Sections::parse(br#"{"images": []} trailing"#).is_err());
+    }
+
+    #[test]
+    fn id_key_matches_value_equivalence_classes() {
+        assert_eq!(IdKey::from_str_id("1"), IdKey::Int(1));
+        assert_eq!(IdKey::from_f64(1.0), IdKey::Int(1));
+        assert_eq!(IdKey::from_f64(-0.0), IdKey::Int(0));
+        assert_eq!(IdKey::from_str_id("0"), IdKey::Int(0));
+        assert_ne!(IdKey::from_str_id("01"), IdKey::Int(1));
+        assert_ne!(IdKey::from_str_id("-0"), IdKey::Int(0));
+        assert_eq!(IdKey::from_u64(u64::MAX).to_string(), u64::MAX.to_string());
+        assert_eq!(IdKey::from_str_id(&u64::MAX.to_string()), IdKey::from_u64(u64::MAX));
     }
 }

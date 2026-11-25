@@ -16,11 +16,18 @@ use std::path::{Component, Path, PathBuf};
 /// becomes `.txt` (`ds/images/train/a.jpg` → `ds/labels/train/a.txt`). Without an `images` component the label sits
 /// next to the image.
 pub fn label_path_for(image: &Path) -> PathBuf {
-    let comps: Vec<Component> = image.components().collect();
-    let pos = comps.iter().rposition(|c| c.as_os_str() == OsStr::new("images"));
-    let mut out = PathBuf::new();
-    for (i, c) in comps.iter().enumerate() {
-        if Some(i) == pos && i + 1 < comps.len() {
+    let mut count = 0usize;
+    let mut last_images = None;
+    for (i, c) in image.components().enumerate() {
+        count = i + 1;
+        if c.as_os_str() == OsStr::new("images") {
+            last_images = Some(i);
+        }
+    }
+    let replace = last_images.filter(|&pos| pos + 1 < count);
+    let mut out = PathBuf::with_capacity(image.as_os_str().len() + 8);
+    for (i, c) in image.components().enumerate() {
+        if Some(i) == replace {
             out.push("labels");
         } else {
             out.push(c.as_os_str());
@@ -266,19 +273,21 @@ pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Re
     let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
     let labels = LabelPaths::new(&root);
     deps.extend(labels.mirror.clone());
-    for image in splits.values().flatten() {
-        deps.insert(crate::paths::parent_dir(image).to_path_buf());
-        deps.insert(crate::paths::parent_dir(&labels.of(image)).to_path_buf());
-    }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
     for (split, images) in splits {
-        let candidates = images
-            .into_iter()
-            .map(|image| {
-                let label = labels.of(&image);
-                Candidate { image, labels: LabelSource::Yolo(label) }
-            })
-            .collect();
+        let mut candidates = Vec::with_capacity(images.len());
+        for image in images {
+            let label = labels.of(&image);
+            let img_dir = crate::paths::parent_dir(&image);
+            if !deps.contains(img_dir) {
+                deps.insert(img_dir.to_path_buf());
+            }
+            let lbl_dir = crate::paths::parent_dir(&label);
+            if !deps.contains(lbl_dir) {
+                deps.insert(lbl_dir.to_path_buf());
+            }
+            candidates.push(Candidate { image, labels: LabelSource::Yolo(label) });
+        }
         built.insert(split, build_entries(candidates, nc, opts, &mut report));
     }
     let classes = names.unwrap_or_else(|| {
@@ -415,16 +424,18 @@ fn collect_images(src: &Path, root: &Path, out: &mut Vec<PathBuf>, report: &mut 
             }
         };
         let parent = crate::paths::parent_dir(src);
-        for line in strip_bom(&text).lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let body = strip_bom(&text);
+        let est_lines = body.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+        out.reserve(est_lines.min(body.len() / 4 + 1));
+        for line in body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let p = Path::new(line);
             let path = if p.is_absolute() {
                 p.to_path_buf()
             } else if let Some(rest) = line.strip_prefix("./") {
                 parent.join(rest)
-            } else if root.join(p).exists() {
-                root.join(p)
             } else {
-                parent.join(p)
+                let joined = root.join(p);
+                if joined.exists() { joined } else { parent.join(p) }
             };
             out.push(path);
         }
