@@ -41,7 +41,12 @@ be a worker, and a provider only has to start one.
 ## A cloud run, step by step
 `POST /api/runs` with `compute` answers at once with the run (`queued`); a thread of its own drives it from there
 (cloud runs do not wait in the local training queue and do not use the local GPU, so several can run side by side
-and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
+and next to a local run). `TrainConfig.device` must be omitted or `"auto"` (a cloud run always trains on the device
+its worker selects; any other value is `400 invalid_config`). `compute.max_hours` defaults to `12` (valid range
+`0.25..=720`, i.e. 15 minutes to 30 days) and `compute.disk_gb` is optional (`10..=4096` GB; when omitted, sized to
+twice the packed dataset size plus 20 GB, capped at 4096 GB). `Run.cloud.phase` and the SSE `cloud` event follow the
+lifecycle, and `Run.cloud.ended_in` records the phase the run was in when it entered `releasing` (so a failed or
+stopped run shows exactly where it stopped):
 
 | phase | what happens | `Run.status` |
 |---|---|---|
@@ -63,33 +68,28 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   does not answer yet, the provider is asked about the instance every few seconds: one that is gone (its setup
   failed and it terminated itself) fails the run at once, with where it installs FOLO from, instead of at the end
   of the 15 minutes.
-- **Dataset.** The dataset is sent as FOLO reads it, not as it lies on disk: a tar stream in the canonical YOLO
-  layout (`data.yaml`, `images/<split>/<n>.<ext>`, `labels/<split>/<n>.txt`, files numbered in dataset order;
-  images byte for byte, labels written from the parsed boxes), produced on the fly by `folo_data::pack` and cut
-  into upload parts. So datasets of any format and layout travel the same way, images the loader skips stay home,
-  and image ids are the same on both sides (validation samples line up). The upload carries the dataset's
-  fingerprint: a worker that already has that dataset (a `remote` server after its first run) answers with it and
+- **Dataset and starting weights.** The dataset is sent as FOLO reads it, not as it lies on disk: a tar stream in the
+  canonical YOLO layout (`data.yaml`, `images/<split>/<n>.<ext>`, `labels/<split>/<n>.txt`, files numbered in dataset
+  order; images byte for byte, labels written from the parsed boxes), produced on the fly by `folo_data::pack` and
+  cut into upload parts. So datasets of any format and layout travel the same way, images the loader skips stay home,
+  and image ids are the same on both sides (validation samples line up). Both the dataset upload and any starting
+  weights or resume checkpoint upload (`weights/last.folo`) carry an upload fingerprint: a worker that already has
+  that dataset or weights file (such as a `remote` server on later runs) answers with the existing resource and
   nothing is sent.
-- **Mirroring.** While the worker trains, the control plane polls it (about once a second; backing off to 30 s
-  while it does not answer, which the run's log says once, and again when it answers): the run, new steps and
-  epochs (`/metrics?after_step=&after_epoch=`), new log lines
-  (`/logs?after=`) and each new epoch's samples. While the worker does not answer, `Run.cloud.unanswered_since` says
-  since when (Studio: "Worker not answering"), so a page whose numbers stand still says why. They go through the
-  same sink as a local trainer's events, so
-  `metrics.jsonl`, `log.jsonl`, `samples/`, SSE and `Run` behave as for a local run (subscribers get every epoch
-  and at most the newest step of each poll). Polling, not SSE, because provider proxies cut long connections;
-  every request is short and retried.
+- **Mirroring.** While the worker trains, the control plane polls it (about once a second; backing off exponentially
+  up to 30 s while it does not answer, which the run's log says once, and again when it answers): the run, new steps
+  and epochs (`/metrics?after_step=&after_epoch=`), new log lines (`/logs?after=`, up to 5,000 lines per page) and
+  each new epoch's samples. While the worker does not answer, `Run.cloud.unanswered_since` says since when (Studio:
+  "Worker not answering"), so a page whose numbers stand still says why. They go through the same sink as a local
+  trainer's events, so `metrics.jsonl`, `log.jsonl`, `samples/`, SSE and `Run` behave as for a local run (subscribers
+  get every epoch and at most the newest step of each poll). Polling, not SSE, because provider proxies cut long
+  connections; every request is short (10 s connect, 90 s request timeout) and retried.
 - **Checkpoints.** `weights/last.folo` is copied to the run folder after an epoch when the last copy is older than
-  10 minutes (`Run.cloud.synced` is when), and both files at the end. Downloads use `Range` requests validated by
-  ETag, so a file replaced mid-download starts over instead of mixing two epochs: the first 8 MiB, which tell the
-  file's length and the link's speed, then the rest in one request when it arrives within 30 seconds (and is at
-  most 192 MiB), else in parts of 8 MiB. One request reads one version of the file, so a checkpoint that is
-  rewritten every second (a small model's epochs) still copies: a file replaced between those two requests is
-  asked for again whole, in one request. In parts it would be replaced before its last part every time. While the
-  run trains the copy has a thread of its own, so the live view, a stop and the collection at the end never wait
-  for it (a large checkpoint takes minutes on a slow link). It fetches into a staging file that only the run's
+  10 minutes (`Run.cloud.synced` is when), and both `last.folo` and `best.folo` at the end. While the run trains, the
+  copy runs on its own thread (`folo-cloud-copy-<id>`), so the live view, a stop and the collection at the end never
+  wait for it (a large checkpoint takes minutes on a slow link). It fetches into a staging file that only the run's
   own thread moves into place, so a copy that outlives its run cannot put an old checkpoint over a newer one. One
-  that fails is tried again a minute later, not at every epoch.
+  that fails is tried again at least a minute later, not at every epoch.
 - **Stopping.** `POST /api/runs/{id}/stop` stops the worker's run, collects its checkpoint and releases the
   instance; before `training` it releases at once. `Run.model_id` is set as for a local run, and a stop after the
   worker's last batch changes nothing, as for a local run: the run ends `completed` with all its results.
@@ -121,6 +121,31 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   instance, and a start does the same for one a crash left in that state. One process follows a run at a time: the
   one that holds `runs/<id>/cloud.lock`; another shows the run as it was last persisted and refuses to stop it
   (`409 run_active`).
+
+### Chunked transfer reliability
+All large transfers between the control plane and a worker go through `folo_client::transfer` in short, retried
+requests so provider proxies (such as RunPod's 100 s timeout) and transient drops cost a retry rather than the whole
+transfer, while keeping client memory around one part:
+
+- **Chunked uploads (`POST /api/uploads`, `PUT /api/uploads/{id}/parts/{n}`, `POST /api/uploads/{id}/complete`).**
+  The stream is cut into parts of at most `min(Upload.max_part_bytes, 8 MiB)` sent in order. Transient errors retry
+  up to 6 attempts with exponential backoff (`500 ms` doubling up to `8 s`). After a failed part `PUT`, the client
+  queries `GET /api/uploads/{id}` to see the server's next expected part index: if the part actually landed and only
+  its response was lost (`part == n + 1`), the client advances without resending; if still at `n`, it resends; any
+  other mismatch fails with `upload_conflict`. On `complete`, if a transient error lost the response and the retry
+  sees `404 upload_not_found`, a fingerprinted upload re-posts `POST /api/uploads` to recover the `existing` dataset
+  or model instead of failing. On cancellation or final failure, the session is deleted best-effort
+  (`DELETE /api/uploads/{id}`).
+- **ETag-validated ranged downloads (`GET /api/models/{id}/weights`).** Downloads use `Range` requests with
+  `If-Match` pinned to the first part's `ETag`, so a checkpoint overwritten mid-download (`412 Precondition Failed`)
+  restarts cleanly from byte 0 rather than mixing two epochs (up to 3 restarts — 4 attempts in all — before failing).
+  The first request fetches `8 MiB` and measures link speed: if the remaining bytes are at most `192 MiB` and fit
+  within `30 s` at that rate, the rest is fetched in one request (falling back to `8 MiB` parts on transient error).
+  Because a single request streams one open file version, a file rewritten between the first and second request (a
+  small model finishing epochs every second) is retried whole in one request when the full file fits those same
+  bounds. Bytes stream to a hidden temporary file (`*.download`) next to the destination, are flushed with
+  `sync_all`, and are atomically renamed into place (retrying briefly if another process holds the local file open,
+  e.g. on Windows); leftover `.download` files from a crash are swept up when the run is next followed.
 
 ## Instances are never left behind
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
@@ -177,17 +202,21 @@ again (as Cloudflare's `52x` are).
   (interruptible) pods are not offered, and neither are other vendors' GPUs (the worker finds its GPU through the
   NVIDIA container runtime).
 - **Instance**: an on-demand pod of the offer's GPU type with one GPU, a container disk sized for the dataset
-  (`compute.disk_gb`, default: twice the dataset plus 20 GB), port `7878/http`, and the bootstrap script as its
-  command. The script arms a watchdog before anything else: 10 minutes after the run's time limit, counted from
-  boot, the pod terminates itself with its pod-scoped key (`self_terminates`), and it does the same whenever the
-  script ends (an install that fails, a worker that exits), so a broken pod does not idle at GPU prices. One gap
-  remains: a pod whose package install fails has no `curl` to call RunPod with; it exits, and this server
+  (`compute.disk_gb`, `10..=4096`, default: twice the packed dataset plus 20 GB), port `7878/http`, and the
+  bootstrap script as its command. The script arms a watchdog before anything else: 10 minutes after the run's time
+  limit, counted from boot, the pod terminates itself with its pod-scoped key (`self_terminates`, up to 5 attempts
+  30 s apart, falling back to `runpodctl`), and it does the same 60 s after the script ends on any error or exit
+  (leaving time to read the tail of its log in RunPod's console), so a broken pod does not idle at GPU prices. One
+  gap remains: a pod whose package install fails has no `curl` to call RunPod with; it exits, and this server
   terminates it when the boot times out.
-- **Worker**: the pod starts from a stock Ubuntu image, installs `folo` for Linux from the release of this
-  server's version with `install.sh` (checksum verified) and runs `folo serve --host 0.0.0.0 --tensor-cores`
-  with its token in `FOLO_TOKEN` (set on the pod, never written into the script). `worker_base_url` (a connection field, or `FOLO_CLOUD_WORKER_BASE_URL`) names another place to
-  download `install.sh` and the release archive from: a mirror, or your own build
-  (`<url>/install.sh`, `<url>/folo-x86_64-unknown-linux-gnu.tar.gz` and its `.sha256`).
+- **Worker**: the pod starts from `ubuntu:22.04` (overridable via `FOLO_CLOUD_RUNPOD_IMAGE` for experiments — any
+  image with `bash` and `apt-get` whose entrypoint can be replaced), installs `folo` for Linux from the release of
+  this server's version with `install.sh` (checksum verified) and runs `folo serve --host 0.0.0.0 --port 7878
+  --tensor-cores` with its token in `FOLO_TOKEN` (set on the pod, never written into the script). `worker_base_url`
+  (a connection field, taking precedence over `FOLO_CLOUD_WORKER_BASE_URL`; must be `http://` or `https://` with a
+  host and no spaces or control characters) names another place to download `install.sh` and the release archive
+  from: a mirror, or your own build (`<url>/install.sh`, `<url>/folo-x86_64-unknown-linux-gnu.tar.gz` and its
+  `.sha256`).
 - **The download is checked before a pod is rented.** FOLO asks that place for `install.sh` and the archive's
   `.sha256` as a pod would, without credentials. When it answers that they are not there (`404` for a release
   that is not published or a private repository), the run fails with `cloud_boot_failed` before anything is
@@ -202,12 +231,17 @@ again (as Cloudflare's `52x` are).
   the worker check within minutes.
 
 ### `remote`
-A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on the machine with the GPU.
-- **Credentials**: its `url` and `token`. Use `https://` across networks you do not control (put the server
-  behind a TLS proxy or a tunnel); `http://` is accepted, with a warning in the connection's `note` unless the
-  host is loopback or a private address.
-- **Offers**: one, the device the server trains on (`/api/system`: its GPU, or its CPU when it has none), with no
-  price.
+A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret> --tensor-cores` on the machine with the
+GPU (add `--tensor-cores` if you want to train with `amp: true`).
+- **Credentials**: its `url` (required) and `token` (optional; required when the remote server runs with `--token` /
+  `FOLO_TOKEN`). `url` must start with `https://` or `http://`, contain no embedded `user:password@`, no query string
+  or `#fragment`, and no spaces or control characters. Use `https://` across networks you do not control (put the
+  server behind a TLS proxy or a tunnel); `http://` is accepted, with a warning in the connection's `note` unless the
+  host is `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC 1918 private IPv4, IPv4 link-local, or IPv6 unique-local
+  (`fc00::/7`) / link-local (`fe80::/10`). Pointing an `https://` URL at a plain-HTTP `folo serve` fails the TLS
+  handshake with a clear hint to use `http://` or add a TLS proxy.
+- **Offers**: one offer — id `"gpu"` for the GPU `device: auto` selects, or `"cpu"` when the remote server has no
+  usable GPU — with no price.
 - No instance is launched or terminated; runs wait in that server's own queue. What a run leaves there stays
   there: the uploaded dataset (reused by later runs of the same files) and the worker's own copy of the run, named
   `<name> (<run id>)`. A server that is too old to be a worker is refused when the connection is made
@@ -235,15 +269,75 @@ The comparison is constant-time and the token is never logged. `folo mcp --serve
 `remote` provider send it. Studio and Desktop do not sign in to a token-protected server yet: such a server is for
 API clients (Studio served by one says "Not connected" and why, instead of failing on every screen).
 
+### Security hygiene
+- **Owner-only storage**: `cloud/connections.json` (provider credentials) and `runs/<id>/cloud.json` (each provisioned
+  run's generated 256-bit random hex worker token) are written atomically with mode `0600` on Unix (and inherit the
+  user-private profile ACL under `~/.folo` on Windows). Neither file is ever served by the HTTP API.
+- **Redaction and log scrubbing**: API and CLI records return every secret field as `••••` plus its last 4 characters
+  (or `••••` alone when shorter than 8 characters). `Debug` implementations omit secret values, and provider or worker
+  responses are scrubbed (`[redacted]`) for any secret of at least 8 characters before reaching error messages, logs
+  or offer names.
+- **No secrets on the command line or in scripts**: `folo cloud connect` rejects literal secrets in `--secret` or
+  `--set` (shell history and process listings are readable) and requires `--secret KEY=env:VAR` or `--secret KEY=-`
+  (one line from stdin). Provisioned workers receive their token via the pod's `FOLO_TOKEN` environment variable,
+  never in the bootstrap script or on `folo serve`'s argv.
+- **No credentials through MCP**: `folo mcp` exposes read/inspect/terminate tools and `train` with `compute`, but
+  intentionally has no tool to create connections so API keys and tokens never enter an agent's transcript.
+
 ## Using it
-- **Studio / Desktop**: Settings → Cloud connects providers and lists instances; New run → Run on picks a
-  connection and an offer and shows what the run would cost; a cloud run's page shows its phase, instance and
-  cost.
-- **CLI**: `folo cloud providers | connect | connections | check | disconnect | offers | instances | terminate`
-  (docs/CLI.md); they work on the data dir, with or without a server running.
+
+### CLI workflow
+`folo cloud` operates directly on the data dir (`cloud/connections.json`, `cloud/instances/`) under `cloud/.lock`,
+so it works with or without `folo serve` running and a running server sees its changes immediately (docs/CLI.md,
+*Cloud*).
+
+**Connect RunPod and inspect offers:**
+```sh
+folo cloud providers
+RUNPOD_API_KEY=rpa_... folo cloud connect runpod --secret api_key=env:RUNPOD_API_KEY
+folo cloud offers cc_4d2a              # pick an offer id, e.g. NVIDIA RTX A4000@secure
+folo cloud instances                   # monitor live & recent instances and estimated cost
+folo cloud terminate ci_8a2f           # manual kill switch if needed
+```
+
+**Connect a remote FOLO server:**
+```sh
+# On the remote GPU machine (put behind TLS across untrusted networks):
+FOLO_TOKEN="$(openssl rand -hex 32)" folo serve --host 0.0.0.0 --port 7878 --tensor-cores
+
+# On your local machine:
+folo cloud connect remote --name lab-4090 \
+  --set url=https://gpu-box.example.com:7878 \
+  --secret token=- < token.txt
+folo cloud check cc_9b1c               # re-verify reachability, token and worker features
+```
+
+### Studio, Desktop, API and MCP
+- **Studio / Desktop**: **Settings → Cloud** adds connections (with masked secret inputs, live balance/status and any
+  connection `note`) and lists live/recent instances with a manual Terminate button. **New run → Run on** lets you
+  pick a connection and offer, shows the reference-based cost estimate (`est_usd` and `max_usd` from `max_hours`),
+  and launches the cloud run. The run detail page tracks `Run.cloud.phase`, upload/download `progress`,
+  `unanswered_since` ("Worker not answering"), `ended_in`, instance status and running cost.
 - **API**: docs/API.md, *Cloud compute*, *Uploads* and `TrainConfig.compute`.
 - **MCP**: `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate`, and `train` takes `compute`
   (docs/MCP.md). Credentials are never entered through MCP.
+
+## Troubleshooting and error recovery
+
+| error code / symptom | likely cause | what to do |
+|---|---|---|
+| `cloud_auth_failed` (`422`) | Invalid/revoked RunPod API key, key missing pod read+write permissions, or wrong/missing `--token` on a `remote` server. | For RunPod, verify key permissions in RunPod Console → Settings → API Keys; for `remote`, verify `--token` / `FOLO_TOKEN`. Re-test with `folo cloud check <id>`. |
+| `cloud_refused` (`409`) | RunPod out of stock (`low` stock often means none), low account balance (`402`), account pool restriction (`403`), or a `remote` server too old (missing `uploads`, `run_cursors` or `run_checkpoint`). | Pick another offer (`folo cloud offers <id>`), top up balance, or upgrade the `remote` `folo` binary. |
+| `cloud_unavailable` (`502`) | Provider API unreachable, or `remote` server down / wrong scheme (`https://` against a plain-HTTP `folo serve`). | Check network / server status. If the message notes plain HTTP on `https://`, switch to `http://` (on a private network) or add a TLS proxy. |
+| `cloud_boot_failed` (`502`) | Worker download URL answered `404` (unpublished dev version or private repo, checked before renting), pod failed setup and self-terminated, worker lacked a usable Vulkan GPU (`llvmpipe` / no adapter), or `amp: true` requested without tensor cores. | For dev builds, set `worker_base_url` or `FOLO_CLOUD_WORKER_BASE_URL` to a hosted `install.sh` + archive; check the pod log in RunPod's console; for `amp` on a `remote` server, start it with `--tensor-cores`. |
+| `cloud_sync_failed` (`502`) | Dataset/weights upload or final weight download failed after retries while the instance was still alive (e.g. prolonged network outage or worker disk full). | Check `compute.disk_gb` and link stability, then resume (`resume_run_id`) or start again; `remote` servers reuse already-uploaded fingerprinted datasets. |
+| `cloud_instance_lost` (`502`) | Instance was terminated by hand, stopped/disappeared for 10 min (`lost_grace`), `remote` worker was unreachable for 10 min, or worker restarted and lost the run (`run_not_found`). | Checkpoints already synced to `runs/<id>/weights/last.folo` stay on disk. Resume the run (`resume_run_id`) on a new instance or locally (`"compute": null`). |
+| `offer_not_found` (`404`) | Offer ID is stale or no longer in the provider catalog. | Refresh offers (`GET /api/cloud/connections/{id}/offers?refresh=true` or `folo cloud offers <id>`). |
+| `connection_in_use` (`409`) | Tried to disconnect a connection that still has live instances or active cloud runs. | Stop active runs and wait for `folo cloud instances` to show all instances `terminated` (or terminate them manually). |
+| `invalid_config` (`400`) | `device` set to something other than `auto`, `max_hours` outside `0.25..=720`, or `disk_gb` outside `10..=4096`. | Omit `device` (or pass `"auto"`) and keep limits in range. |
+| `Worker not answering` (`unanswered_since` set) | Temporary proxy blip or network drop while training continues on the worker. | Wait — the worker keeps training and polling backs off up to 30 s, then catches up gap-free via cursors when reachable again. |
+| Instance stuck `terminating` | Provider API failed to confirm termination. | The server's reaper retries every 30 s (and on restart) until confirmed; run `folo cloud terminate <ci_id>` to retry immediately or verify in the provider console. |
+| `cloud/connections.json` malformed (`internal`) | File was hand-edited into invalid JSON. FOLO never overwrites it. | Fix the JSON syntax or move the file aside so FOLO can create a fresh one. |
 
 ## Limits
 - One GPU per run; on-demand instances only.
