@@ -97,11 +97,14 @@ interface Row<T> {
 
 const EMPTY_KEYS: readonly unknown[] = [];
 
+/** SameValueZero key equality, matching `Map` (`NaN` equals `NaN`, `-0` equals `+0`). */
+const sameKey = (a: unknown, b: unknown): boolean => a === b || (a !== a && b !== b);
+
 /** Whether `rows[rowFrom..rowTo]` matches `keys[keyFrom..]` element-for-element with no key equal to `excluded`. */
 function matchesShifted<T>(rows: readonly Row<T>[], keys: readonly unknown[], rowFrom: number, rowTo: number, keyFrom: number, excluded: unknown): boolean {
   for (let i = rowFrom, j = keyFrom; i <= rowTo; i++, j++) {
     const k = rows[i]!.key;
-    if (k !== keys[j] || k === excluded) return false;
+    if (!sameKey(k, keys[j]) || sameKey(k, excluded)) return false;
   }
   return true;
 }
@@ -137,6 +140,13 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         t = exitBranch();
       }
       value = settle(raw);
+    } catch (e) {
+      try {
+        dispose(root);
+      } catch {
+        // Keep the row error.
+      }
+      throw e;
     } finally {
       swapOwner(prevOwner);
     }
@@ -156,6 +166,13 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         exitBranch();
       }
       value = settle(raw);
+    } catch (e) {
+      try {
+        dispose(root);
+      } catch {
+        // Keep the fallback error.
+      }
+      throw e;
     } finally {
       swapOwner(prevOwner);
     }
@@ -215,10 +232,23 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         outDirty = true;
         const next = new Array<Row<T>>(n);
         const nextOut = new Array<JSX.Element>(n);
-        for (let j = 0; j < n; j++) {
-          const r = make(list[j]!, j, keys[j]);
-          next[j] = r;
-          nextOut[j] = r.value;
+        let built = 0;
+        try {
+          for (let j = 0; j < n; j++) {
+            const r = make(list[j]!, j, keys[j]);
+            next[j] = r;
+            nextOut[j] = r.value;
+            built = j + 1;
+          }
+        } catch (e) {
+          for (let j = 0; j < built; j++) {
+            try {
+              dispose(next[j]!.root);
+            } catch {
+              // Keep the original row error.
+            }
+          }
+          throw e;
         }
         rows = next;
         ran = true;
@@ -229,7 +259,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       // skip full array reconciliation.
       let start = 0;
       const min = Math.min(prevLen, n);
-      while (start < min && rows[start]!.key === keys[start]) {
+      while (start < min && sameKey(rows[start]!.key, keys[start])) {
         update(rows[start]!, list[start]!, start);
         start++;
       }
@@ -247,10 +277,22 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         outDirty = true;
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < start; j++) nextOut[j] = rows[j]!.value;
-        for (let j = start; j < n; j++) {
-          const r = make(list[j]!, j, keys[j]);
-          rows.push(r);
-          nextOut[j] = r.value;
+        try {
+          for (let j = start; j < n; j++) {
+            const r = make(list[j]!, j, keys[j]);
+            rows.push(r);
+            nextOut[j] = r.value;
+          }
+        } catch (e) {
+          for (let j = prevLen; j < rows.length; j++) {
+            try {
+              dispose(rows[j]!.root);
+            } catch {
+              // Keep the original row error.
+            }
+          }
+          rows.length = prevLen;
+          throw e;
         }
         ran = true;
         outDirty = false;
@@ -271,17 +313,17 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       let end = prevLen - 1;
       let newEnd = n - 1;
       for (;;) {
-        while (start < min && start <= end && start <= newEnd && rows[start]!.key === keys[start]) {
+        while (start < min && start <= end && start <= newEnd && sameKey(rows[start]!.key, keys[start])) {
           update((next[start] = rows[start]!), list[start]!, start);
           start++;
         }
-        while (end >= start && newEnd >= start && rows[end]!.key === keys[newEnd]) {
+        while (end >= start && newEnd >= start && sameKey(rows[end]!.key, keys[newEnd])) {
           update((next[newEnd] = rows[end]!), list[newEnd]!, newEnd);
           end--;
           newEnd--;
         }
         // The first and last rows swapped: match them directly.
-        if (end > start && newEnd > start && rows[start]!.key === keys[newEnd] && rows[end]!.key === keys[start]) {
+        if (end > start && newEnd > start && sameKey(rows[start]!.key, keys[newEnd]) && sameKey(rows[end]!.key, keys[start])) {
           update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
           update((next[start] = rows[end]!), list[start]!, start);
           start++;
@@ -293,20 +335,41 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       }
       if (start > end) {
         // Pure insertions (or everything matched in prefix/suffix/swap).
-        for (let j = start; j <= newEnd; j++) next[j] = make(list[j]!, j, keys[j]);
+        let built = start;
+        try {
+          for (let j = start; j <= newEnd; j++) {
+            next[j] = make(list[j]!, j, keys[j]);
+            built = j + 1;
+          }
+        } catch (e) {
+          for (let j = start; j < built; j++) {
+            try {
+              dispose(next[j]!.root);
+            } catch {
+              // Keep the original row error.
+            }
+          }
+          throw e;
+        }
       } else if (start > newEnd) {
         // Pure removals.
         for (let i = start; i <= end; i++) drop(rows[i]!);
       } else if (start === end && start === newEnd) {
-        // Single-row slot: preserve SameValueZero parity for `NaN` keys before replacing.
-        if (Object.is(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
+        // Single-row slot: preserve SameValueZero parity before replacing.
+        if (sameKey(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
         else {
-          drop(rows[start]!);
-          next[start] = make(list[start]!, start, keys[start]);
+          try {
+            drop(rows[start]!);
+            next[start] = make(list[start]!, start, keys[start]);
+          } catch (e) {
+            rows.splice(start, 1);
+            outDirty = true;
+            throw e;
+          }
         }
       } else if (
         end - start === newEnd - start &&
-        rows[end]!.key === keys[start] &&
+        sameKey(rows[end]!.key, keys[start]) &&
         matchesShifted(rows, keys, start, end - 1, start + 1, keys[start])
       ) {
         // Single-row move earlier (rotate right), unique rotated key: exact FIFO parity without a map.
@@ -314,7 +377,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         for (let i = start; i < end; i++) update((next[i + 1] = rows[i]!), list[i + 1]!, i + 1);
       } else if (
         end - start === newEnd - start &&
-        rows[start]!.key === keys[newEnd] &&
+        sameKey(rows[start]!.key, keys[newEnd]) &&
         matchesShifted(rows, keys, start + 1, end, start, keys[newEnd])
       ) {
         // Single-row move later (rotate left), unique rotated key: exact FIFO parity without a map.
@@ -330,20 +393,40 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           chain[j - start] = at === undefined ? -1 : at;
           first.set(k, j);
         }
-        for (let i = start; i <= end; i++) {
-          const row = rows[i]!;
-          const j = first.get(row.key);
-          if (j !== undefined) {
-            next[j] = row;
-            const c = chain[j - start]!;
-            if (c === -1) first.delete(row.key);
-            else first.set(row.key, c);
-          } else drop(row);
-        }
-        for (let j = start; j <= newEnd; j++) {
-          const row = next[j];
-          if (row !== undefined) update(row, list[j]!, j);
-          else next[j] = make(list[j]!, j, keys[j]);
+        try {
+          for (let i = start; i <= end; i++) {
+            const row = rows[i]!;
+            const j = first.get(row.key);
+            if (j !== undefined) {
+              next[j] = row;
+              const c = chain[j - start]!;
+              if (c === -1) first.delete(row.key);
+              else first.set(row.key, c);
+            } else {
+              rows[i] = undefined!;
+              drop(row);
+            }
+          }
+          for (let j = start; j <= newEnd; j++) {
+            const row = next[j];
+            if (row !== undefined) update(row, list[j]!, j);
+            else next[j] = make(list[j]!, j, keys[j]);
+          }
+        } catch (e) {
+          const kept = new Set(rows);
+          for (let j = start; j <= newEnd; j++) {
+            const r = next[j];
+            if (r !== undefined && !kept.has(r)) {
+              try {
+                dispose(r.root);
+              } catch {
+                // Keep the original row error.
+              }
+            }
+          }
+          rows = rows.filter(Boolean);
+          outDirty = true;
+          throw e;
         }
       }
       rows = next;
@@ -393,25 +476,44 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
       }
       if (n > prevLen) {
         outDirty = true;
-        for (let i = prevLen; i < n; i++) {
-          const root = ownedRoot(parent);
-          const prevOwner = swapOwner(root);
-          const sig = signal<T>(items[i]!);
-          let value: JSX.Element;
-          let t: BranchTransitions = null;
-          try {
-            enterBranch(ran);
-            let raw: JSX.Element;
+        try {
+          for (let i = prevLen; i < n; i++) {
+            const root = ownedRoot(parent);
+            const prevOwner = swapOwner(root);
+            const sig = signal<T>(items[i]!);
+            let value: JSX.Element;
+            let t: BranchTransitions = null;
             try {
-              raw = fn(() => sig.get(), i);
+              enterBranch(ran);
+              let raw: JSX.Element;
+              try {
+                raw = fn(() => sig.get(), i);
+              } finally {
+                t = exitBranch();
+              }
+              value = settle(raw);
+            } catch (e) {
+              try {
+                dispose(root);
+              } catch {
+                // Keep the original row error.
+              }
+              throw e;
             } finally {
-              t = exitBranch();
+              swapOwner(prevOwner);
             }
-            value = settle(raw);
-          } finally {
-            swapOwner(prevOwner);
+            rows.push({ sig, root, t, value });
           }
-          rows.push({ sig, root, t, value });
+        } catch (e) {
+          for (let j = prevLen; j < rows.length; j++) {
+            try {
+              dispose(rows[j]!.root);
+            } catch {
+              // Keep the original row error.
+            }
+          }
+          rows.length = prevLen;
+          throw e;
         }
       } else if (n < prevLen) {
         outDirty = true;
@@ -436,6 +538,13 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
             exitBranch();
           }
           value = settle(raw);
+        } catch (e) {
+          try {
+            dispose(root);
+          } catch {
+            // Keep the original fallback error.
+          }
+          throw e;
         } finally {
           swapOwner(prevOwner);
         }

@@ -16,7 +16,7 @@ Related: [Studio's README](../README.md) (the app built on it, and how to add a 
 | Path | What it holds |
 |---|---|
 | `runtime/` | The runtime, imported as `fw` (`runtime/index.ts`, the public exports) |
-| `runtime/core.ts`, `flushOrder.ts` | Signals, lazy computeds, effects, the owner tree, context, the scheduler and tree-order job sorting without per-job path allocations |
+| `runtime/core.ts`, `links.ts`, `context.ts`, `flushOrder.ts` | Signals, lazy computeds, effects, the owner tree, dependency links, context, the scheduler and tree-order job sorting without per-job path allocations |
 | `runtime/dom.ts` | Cloned templates, `insert` with the keyed list reconciler, attribute, property, class and style setters |
 | `runtime/events.ts` | Delegated events (one listener per type on each render root and the document) and direct ones |
 | `runtime/flow.ts` | `Show`, `For`, `Index`, `Switch`/`Match`, `Key`, `Dynamic`, `Portal` |
@@ -198,7 +198,7 @@ import { ... } from 'fw';
 | Effects | `effect(fn)` (after DOM updates; `fn` may return a cleanup) · `effect.pre(fn)` · `renderEffect` (internal) · `onMount` · `onCleanup` / `onDestroy` · `untrack` · `isTracking` | `runtime/core.ts` |
 | Scheduling | `flush()` (≙ `flushSync`) · `tick()` · `batch(fn)` | `runtime/core.ts` |
 | Ownership | `createRoot((dispose) => …, parent?)` · `getOwner` · `runWithOwner` · `dispose` · `memo` | `runtime/core.ts` |
-| Context | `setContext` · `getContext` · `hasContext` · `createContext(default)` | `runtime/core.ts` |
+| Context | `setContext` · `getContext` · `hasContext` · `createContext(default)` | `runtime/context.ts` |
 | Components | `Component<P>` · `ComponentProps<C>` · `ElementProps<'button'>` · `defaults(props, {...})` · `splitProps(props, keys)` · `mergeProps(...)` · `bindable(props, key, fallback?)` · `field(obj, key)` · `createUniqueId()` (`propsId`) | `runtime/component.ts`; `ElementProps`: `runtime/index.ts` |
 | Control flow | `<Show when keyed? fallback>` · `<For each key? fallback>{(item, i) => …}` · `<Index each fallback>` · `<Switch fallback><Match when>` · `<Key when>` · `<Dynamic component={tagOrComponent} …>` · `<Portal mount?>` | `runtime/flow.ts` |
 | DOM | `render(() => <App />, el)` → unmount · `on(target, type, fn)` · `onWindow` · `onDocument` · `clsx` | `runtime/render.ts`, `runtime/events.ts`, `runtime/dom.ts` |
