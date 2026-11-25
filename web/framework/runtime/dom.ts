@@ -668,6 +668,26 @@ export function setStyle(el: Element, value: unknown, prev: Styles | undefined, 
   if (nextImportant) updateStyles(e, prevImportant, nextImportant, 'important');
 }
 
+/** Internal: sets one static `style:prop={value}` directive without an effect (ignores `null`/`undefined`/`''`). */
+export function setStyleProp(el: Element, prop: string, value: unknown, important?: boolean): void {
+  if (value != null && value !== '') (el as HTMLElement).style.setProperty(prop, String(value), important ? 'important' : undefined);
+}
+
+/** Internal: a single reactive `style:prop={fn}` directive on an element with no `style` attribute or spread. */
+export function styleProp(el: Element, prop: string, fn: () => unknown, important?: boolean): void {
+  const style = (el as HTMLElement).style;
+  const priority = important ? 'important' : undefined;
+  renderEffect<string | null>((prev) => {
+    const raw = fn();
+    const v = raw == null || raw === '' ? null : String(raw);
+    if (v !== prev) {
+      if (v === null) style.removeProperty(prop);
+      else style.setProperty(prop, v, priority);
+    }
+    return v;
+  }, null);
+}
+
 /**
  * Internal: an element's `style` (a string, an object, or `''` when it has only directives) with its `style:`
  * directives (`dirs`, and `important` for `|important` ones), as Svelte's `set_style` in one render effect.

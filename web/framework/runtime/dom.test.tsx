@@ -176,6 +176,45 @@ describe('attributes', () => {
     unmount();
   });
 
+  it('inlined style: and static class: directives handle nullish/empty/0 values, updates, and deduped templates', () => {
+    const top = signal<string | number | undefined | null>(undefined);
+    const width = signal<string | undefined>('12px');
+    const staticFlag = false;
+    const staticOn = true;
+    const staticOpacity = 0;
+    const staticEmpty = '';
+    const { container, unmount } = render(() => (
+      <div>
+        <span class="base" class:base={staticFlag} class:on={staticOn} style:top={top.get()} style:width={width.get()} />
+        <span style:color="red" style:opacity={staticOpacity} style:margin={staticEmpty} />
+        <em style:top={top.get()} />
+      </div>
+    ));
+    const [s1, s2] = container.querySelectorAll('span');
+    const em = container.querySelector('em')!;
+    expect(s1!.className).toBe('on');
+    expect(s1!.style.top).toBe('');
+    expect(s1!.style.width).toBe('12px');
+    // Unset initial dynamic style: leaves no style attribute at all.
+    expect(em.hasAttribute('style')).toBe(false);
+    expect(s2!.style.color).toBe('red');
+    expect(s2!.style.opacity).toBe('0');
+    expect(s2!.style.margin).toBe('');
+
+    top.set(0);
+    width.set('');
+    flush();
+    expect(s1!.style.top).toBe('0px');
+    expect(s1!.style.width).toBe('');
+    expect(em.style.top).toBe('0px');
+
+    top.set(null);
+    flush();
+    expect(s1!.style.top).toBe('');
+    expect(em.style.top).toBe('');
+    unmount();
+  });
+
   it('spreads props reactively, with events and class', () => {
     const extra = signal<Record<string, unknown>>({ title: 'a', 'data-x': 1 });
     const click = vi.fn();

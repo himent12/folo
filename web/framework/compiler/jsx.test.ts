@@ -126,18 +126,56 @@ describe('expressions', () => {
   it('a static style with directives is set with them, not in the template (Svelte set_style)', () => {
     const code = compile('const x = <div style="color: red" style:top={t()} style:left="1px" />;');
     expect(templates(code)).toEqual(['<div></div>']);
-    expect(code).toMatch(/_\$bindStyle\(_el\$1, "color: red", \(\) => \(\{ "top": _v\$\d+\(\), "left": _v\$\d+\(\) \}\)\)/);
+    expect(code).toMatch(/_\$bindStyle\(_el\$1, "color: red", \(\) => \(\{ "top": _v\$\d+\(\), "left": "1px" \}\)\)/);
     expect(templates(compile('const x = <div style="color: red" />;'))).toEqual(['<div style="color: red"></div>']);
   });
 
   it('directives', () => {
     const code = compile('const x = <div class:on={a()} style:top={t()} use:tip={p()} transition:fly={{ y: 8 }} ref={r} bind:value={v} />;');
     expect(code).toContain('_$toggleClass(_el$1, "on", () => (a()))');
-    expect(code).toMatch(/_\$bindStyle\(_el\$1, "", \(\) => \(\{ "top": _v\$\d+\(\) \}\)\)/);
+    expect(code).toContain('_$styleProp(_el$1, "top", () => (t()))');
     expect(code).toContain('_$use(_el$1, tip, () => (p()))');
     expect(code).toContain('_$transition(_el$1, fly, () => ({ y: 8 }), 3)');
     expect(code).toContain('_$ref(_el$1, (r))');
     expect(code).toContain('_$bindValue(_el$1, (v))');
+  });
+
+  it('deduplicates identical templates per module while keeping HTML and SVG templates distinct', () => {
+    const code = compile('const a = <span>{x()}</span>; const b = <span>{y()}</span>; const c = <a href="#">x</a>; const d = <svg>{ok() ? <a href="#">x</a> : null}</svg>;');
+    expect(templates(code)).toEqual(['<span></span>', '<a href="#">x</a>', '<svg></svg>', '<a href="#">x</a>']);
+    expect(code.match(/const _tmpl\$\d+ = /g)?.length).toBe(4);
+    expect(code.match(/_tmpl\$1\(\)/g)?.length).toBe(2);
+    expect(code).toContain('_$template("<a href=\\"#\\">x</a>");');
+    expect(code).toContain('_$template("<a href=\\"#\\">x</a>", 1);');
+  });
+
+  it('inlines simple class: and style: bindings and falls back to bindStyle on style= or duplicate style: props', () => {
+    // Static class: and style: avoid renderEffect closures.
+    const staticCode = compile('const x = <div class:on={flag} style:color="red" style:opacity={alpha} style:margin="" style:padding={null} />;');
+    expect(staticCode).toContain('_el$1.classList.toggle("on", !!(flag));');
+    expect(staticCode).toContain('_el$1.style.setProperty("color", "red");');
+    expect(staticCode).toContain('_$setStyleProp(_el$1, "opacity", (alpha));');
+    expect(staticCode).not.toContain('toggleClass');
+    expect(staticCode).not.toContain('bindStyle');
+    expect(staticCode).not.toContain('styleProp(');
+    expect(staticCode).not.toContain('"margin"');
+    expect(staticCode).not.toContain('"padding"');
+
+    // Dynamic class= with static class: avoids wrapping static directives in closures.
+    const mixedClass = compile('const x = <div class={cls()} class:a class:b={flag} class:c={dyn()} />;');
+    expect(mixedClass).toMatch(/const _v\$\d+ = \(flag\);/);
+    expect(mixedClass).toMatch(/\{ "a": true, "b": _v\$\d+, "c": _v\$\d+\(\) \}/);
+
+    // Distinct dynamic style: directives inline independently without bindStyle or intermediate wrappers.
+    const dynStyle = compile('const x = <div style:top={t()} style:left={l()} />;');
+    expect(dynStyle).toContain('_$styleProp(_el$1, "top", () => (t()));');
+    expect(dynStyle).toContain('_$styleProp(_el$1, "left", () => (l()));');
+    expect(dynStyle).not.toContain('bindStyle');
+
+    // Duplicate style: property (case-insensitive) falls back to bindStyle to preserve precedence.
+    const dupStyle = compile('const x = <div style:Color={a()} style:color={b()} />;');
+    expect(dupStyle).toContain('_$bindStyle(');
+    expect(dupStyle).not.toContain('_$styleProp(');
   });
 
   it('css`` escapes are undone', () => {
