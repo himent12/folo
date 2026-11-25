@@ -83,9 +83,12 @@ A shared graph walk (`walk.rs`) drives three executors:
 ## The loss
 - Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
-- On the CPU `folo_vision::loss` runs the assigner on the detached head outputs, then builds the terms from
-  folo-core tensor ops (fused custom ops for the full-size BCE and gather), so gradients flow into both head
-  branches.
+- On the CPU `folo_vision::loss` (`loss/assignment.rs`, `assign.rs`) runs a grid-indexed, candidate-only TAL
+  assigner on the detached head outputs: each ground-truth box directly indexes only the anchor rectangle covering its
+  centre region per feature level (`level_candidate_rect`), and `decode_masked_channel_major` lazily decodes DFL box
+  logits (streaming active runs linearly with `fast_exp`) only at anchors inside at least one GT candidate mask —
+  bit-identical to a full-grid decode while skipping background anchors. It then builds the loss terms from folo-core
+  tensor ops (fused custom ops for the full-size BCE and gather), so gradients flow into both head branches.
 - On a GPU the whole loss runs as folo-gpu kernels (`folo_gpu::detect`: assigner, fused BCE, fused CIoU + DFL with a
   hand-written backward, as one custom op) and only the reported items are read back.
 - **Opt-in Wave-7 assigner, loss & distillation options (`assign.rs`, `loss/terms.rs`, `loss/device.rs`, `loss/distill/`):**
@@ -106,6 +109,8 @@ A shared graph walk (`walk.rs`) drives three executors:
 ## Box ops, NMS and metrics
 They work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU, xywh↔xyxy, class-aware batched
 NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision / recall / F1 curves, confusion matrix.
+`Evaluator` (`metrics.rs`) and `CocoEval` (`cocoeval.rs`) reuse scratch buffers across images (packing sort keys into
+register-sized `(u64, u32)` tuples sorted in place without indirection) and accumulate AP in a single pass.
 [METRICS.md](METRICS.md) defines exactly how mAP is computed.
 
 ### Cluster box fusion and calibrated scoring (`fusion/`, `nms/mod.rs`)

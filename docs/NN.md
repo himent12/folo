@@ -30,7 +30,7 @@ are normative, this one is the map.
 | layer | notes |
 |---|---|
 | `Conv2d` | groups, stride, padding, dilation, optional bias. Init per MODEL.md §2.9: weight then bias, `U(±1/sqrt(fan_in))` |
-| `BatchNorm2d` | `eps = 1e-3`, `momentum = 0.03`. Train: batch mean and biased variance, running update with the unbiased variance under `no_grad`; `N·H·W < 2` is an error. Eval: running statistics. On the CPU, train mode is one fused kernel (`f64` statistics, hand-written backward via `Tensor::custom_op`), about 5× faster than composite ops. On the GPU, train mode is folo-gpu's fused BatchNorm kernels (Welford statistics, the running update inside the kernel, analytic backward) recorded as one `batch_norm2d_act` custom op; `forward_act(x, act)` fuses the following SiLU / ReLU in as well. Other devices compose tensor ops |
+| `BatchNorm2d` | `eps = 1e-3`, `momentum = 0.03`. Train: batch mean and biased variance, running update with the unbiased variance under `no_grad`; `N·H·W < 2` is an error. Eval: running statistics. On the CPU, train mode is one fused kernel (`f64` statistics in `256`-float L1 blocks, hand-written L1-blocked backward in `256`-float tiles — `bwd_act_and_sum` + `bwd_write_dx` — fused per channel when a channel's planes fit in `32_768` floats, via `Tensor::custom_op`), about 5× faster than composite ops. On the GPU, train mode is folo-gpu's fused BatchNorm kernels (Welford statistics, the running update inside the kernel, subgroup-reduced finalization, analytic backward) recorded as one `batch_norm2d_act` custom op; `forward_act(x, act)` fuses the following SiLU / ReLU in as well. Other devices compose tensor ops |
 | `ConvBnAct` | MODEL.md's `Conv` (§2.1): bias-free conv, BN, activation. `fuse_()` folds the BN into the conv; `new_fused` builds the fused structure for loading `folo.fused` files. Forward: fused → `Tensor::conv2d_act` (on the GPU one kernel with bias and activation in the epilogue when nothing is recorded); train → conv then `BatchNorm2d::forward_act`; eval on a non-CPU device (or on the CPU under `no_grad`) → the BN folded into the conv weights on the fly (small per-channel ops, still differentiable) then `conv2d_act`; eval on the CPU with recording → conv, BN, activation. `forward_cat(&[..])` is `forward(cat(.., 1))` that reads the parts in place when the conv runs fused (`Tensor::conv2d_act_cat`) |
 | `Linear`, `Activation` (Identity, SiLU, ReLU, LeakyReLU, Sigmoid, Tanh, Hardswish), `MaxPool2d`, `Upsample` (nearest), `Concat` (several inputs, so not a `Forward`), `Identity`, `Sequential`, `ModuleList` | |
 
@@ -51,15 +51,17 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 ## Optimizers (`folo_nn::optim`)
 - `ParamGroup`: name, `(name, tensor)` list, base LR / momentum (μ or β1) / weight decay / Nesterov / β2 / ε, plus
   the current `lr` and `momentum` the schedule writes.
-- `StandardGroups::from_module(model)` splits MODEL.md §8.2's `decay` (weights), `bn` (BatchNorm γ) and `bias`
-  (every `*.bias`) groups; `into_groups(lr, momentum, wd)` gives decay to `decay` only.
+- `StandardGroups::from_module(model)` splits MODEL.md §8.2's `decay` (weights), `bn` (BatchNorm γ plus 1-D no-decay
+  scale/gate parameters `gamma_id` and `alpha_raw` used by FOLO v2-Iso) and `bias` (every `*.bias`) groups;
+  `into_groups(lr, momentum, wd)` gives decay to `decay` only.
 - `Sgd`: L2 (coupled) decay, `buf = μ·buf + g` (zero-initialised, so the first step is `buf = g`), Nesterov
   `p −= lr·(g + μ·buf)`. `AdamW`: decoupled decay `p *= 1 − lr·wd`, bias-corrected moments, global step counter.
-  Both skip parameters without a gradient, update CPU tensors with fused per-element loops (parallel over
-  parameters for large steps), update each parameter group on the GPU with one multi-tensor call
-  (`Tensor::optimizer_step_many_`: 16 parameters per dispatch, the per-element op order of the single-parameter
-  kernel `Tensor::optimizer_step_`, which is the fallback), and fall back to tensor ops with the same arithmetic
-  elsewhere.
+  Both skip parameters without a gradient, update CPU tensors with non-FMA AVX2-vectorized fused loops (`optim/simd/`,
+  bitwise identical to scalar and also used by Muon updates, gradient accumulation/clipping, and CPU AMP
+  unscaling/norm checks; parallel over parameters for large steps), update each parameter group on the GPU with one
+  multi-tensor call (`Tensor::optimizer_step_many_`: 16 parameters per dispatch, the per-element op order of the
+  single-parameter kernel `Tensor::optimizer_step_`, which is the fallback), and fall back to tensor ops with the same
+  arithmetic elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
   adds with one multi-tensor `buf = buf + g` call (16 buffers per dispatch), and clipping stays on the device: the norm (in `f32`) and
@@ -106,12 +108,21 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `LrSchedule::new(kind, epochs, steps_per_epoch, lrf, warmup_epochs, warmup_bias_lr, warmup_momentum)` computes
   `W` with MODEL.md §8.4's formula at a floor of 100 (`warmup_iters`, the floor of runs made before
   `warmup_floor`); `LrSchedule::with_warmup_iters` takes `W` as given, e.g. from `warmup_iters_floor(.., floor)`,
-  which the trainer calls with `TrainConfig.warmup_floor` (default 0: no floor). Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at
-  iteration `t`; the `bias` group warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`.
-  `contract()` / `from_contract()` are `folo.sched`.
-- `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device) and updates every
-  parameter and floating buffer with `d = decay · (1 − exp(−updates / tau))` (on the GPU one multi-tensor
-  `a·p + b·g` call for all of them, 16 per dispatch). `ModelEma::new` takes MODEL.md §8.5's 0.9999 / 2000;
+  which the trainer calls with `TrainConfig.warmup_floor` (default 0: no floor). Supported decay shapes (`DecayKind`):
+  - `Linear` (default) and `Cosine` (`cos_lr`), decaying across the full run after warmup.
+  - `Wsd` (opt-in Warmup–Stable–Decay): holds `lf(t) = 1.0` through the stable plateau and decays over the final
+    `decay_fraction` (default `0.2`, in `(0, 1]`) down to `lrf` with `WsdTail::{Linear, Cosine, Sqrt}`.
+  - `CosineRestarts` (opt-in SGDR): after warmup, repeats cosine cycles starting at `restart_period` iterations and
+    multiplying cycle length by `restart_mult` (`T_mult >= 1`) each restart (defaults: `3` equal cycles, `T_mult = 1`).
+  Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at iteration `t`; the `bias` group
+  warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`. `contract()` / `from_contract()` are
+  `folo.sched` (optional WSD / restart fields serialize only when set).
+- `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device), caches its tracked
+  parameter and floating-buffer handles to avoid repeated module-tree walks on every step, and updates them with
+  `d = decay · (1 − exp(−updates / tau))`. On the CPU, contiguous `f32` updates run non-FMA AVX2 loops (parallelised
+  across tensors above `32_768` total elements — with storage-alias checking — and across `16_384`-element chunks
+  inside single tensors above `65_536` elements); on the GPU, all tracked tensors update in one multi-tensor
+  `a·p + b·g` call (16 per dispatch). `ModelEma::new` takes MODEL.md §8.5's 0.9999 / 2000;
   `ema_for_run(total_updates, fraction)` is the `(decay, tau)` of a window of `fraction` of a run (a fine-tune's,
   capped at the default window), for `ModelEma::with_params`.
   The object-safe `EmaState` trait is what checkpoints use.

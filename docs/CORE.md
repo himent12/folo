@@ -12,8 +12,9 @@ dtype.rs, device.rs, storage.rs  DType, Device, Storage (CpuStorage, or a backen
 ops/                             the Tensor ops: view, copy, elementwise, reduce, nn (matmul, conv, pooling),
                                  fused, vision (detector hooks), inplace, muon, overload (+ - * /)
 backend.rs                       the Backend trait and the device registry
-cpu/                             the CPU backend: gemm/, conv/, elementwise, reduce, index, pool (pooling and
-                                 upsampling), pool_alloc (the buffer cache)
+cpu/                             the CPU backend: gemm/, conv/, elementwise/ (AVX2 transcendentals & 8x8 transpose),
+                                 softmax/ (cache-tiled online softmax & fused backward), reduce, cast (F16C), index,
+                                 pool/ (pooling and 2x2 upsampling), q8/ (int8 convs), pool_alloc (the buffer cache)
 autograd.rs, autocast.rs         the tape (Grads, no_grad) and mixed precision
 rng.rs, testing.rs               Rng, grad_check
 ```
@@ -161,11 +162,39 @@ channel slice of a tensor) in place, so `cat` + conv never writes the concatenat
 - In a batch, the weight gradient makes its images' operands in waves of `lanes` images (above), each wave tiling its
   rows over the K parts it touches.
 
-### Pooling
-Max pooling is separable (row pass, then column pass; same first-maximum argmax as a direct scan). When nothing is
-recorded (`no_grad`, or an input that does not require grad) it makes no index tensor (`Backend::max_pool2d_values`,
-on the CPU a select over `-inf`-padded rows, the same bits; a window far wider than the plane takes the clipped
-indexed scan instead).
+### Pooling and upsampling
+- **Max pooling** (`cpu/pool/mod.rs`) is separable (row pass, then column pass; same first-maximum argmax as a direct
+  scan). When nothing is recorded (`no_grad`, or an input that does not require grad) it makes no index tensor
+  (`Backend::max_pool2d_values`, on the CPU a select over `-inf`-padded rows, the same bits; a window far wider than
+  the plane takes the clipped indexed scan instead).
+- **Average pooling** (`cpu/pool/mod.rs`) uses separable AVX2 row/column accumulation for contiguous `NCHW` planes.
+- **Nearest upsampling** (`cpu/pool/upsample.rs`) includes specialized AVX2 `2×2` forward and backward fast paths
+  (forward writes both output rows per input row in one pass via `unpacklo/hi` + `permute2f128`, 8 → 16 floats per
+  step).
+
+### Elementwise, softmax, reductions, transpose and casts
+- **AVX2 transcendentals (`cpu/elementwise/simd.rs`, `simd_log_tanh.rs`):** standalone `Exp`, `Sigmoid`, `Silu`,
+  `Log`, `Tanh`, `Softplus`, and their backward kernels use 8-lane non-FMA division-free AVX2 implementations (except
+  `log_bwd`, which runs 8-wide exact IEEE-754 `g / x`) paired with bit-exact scalar twins for all non-NaN inputs (and
+  preserving NaN payloads on single-operand ops). Omitting FMA guarantees identical bits across contiguous/strided
+  paths, slice boundaries, thread counts, and `avx2`-only callers such as `folo-nn`'s `BatchNorm2d`. The fused
+  conv/GEMM epilogue (`silu8` / `silu_bias_inplace`) keeps its FMA formulation.
+- **Unit-stride fast paths & 8×8 AVX2 transpose (`cpu/elementwise/mod.rs`, `transpose.rs`):** `strided_update` and
+  `where3` take unit-stride fast paths when operands are contiguous along the inner axis, and 2-D `f32` transposes run
+  through a cache-blocked (`32×32` L1 tile) 8×8 AVX2 kernel (`transpose_f32_2d`).
+- **Cache-tiled online softmax and fused backward (`cpu/softmax/`):** contiguous last-dim (`inner == 1`) rows up to
+  `4096` floats (`ROW_TILE`) stay in L1 (`log_softmax` accumulates `sum(fast_exp(v − m))` in registers; `softmax`
+  fuses `exp` + sum), using 8-wide AVX2 `fast_exp8` and the 16-lane sum order of `sum_slice`; longer rows run an
+  online `(m, s)` pass over `2048`-float L1 tiles (`ONLINE_TILE`) to avoid an extra DRAM pass. Non-last-dim
+  (`inner > 1`) softmax tiles columns in stack-allocated `256`-float strips (`COL_TILE`, zero heap allocations).
+  `Backend::softmax_backward` (`cpu/softmax/backward.rs`) is a fused single-allocation kernel eliminating 3
+  intermediate tensors and 2 full-tensor memory passes compared to the composite autograd path.
+- **AVX2 max/min reductions & bounded-k `topk` (`cpu/reduce.rs`):** `Max` and `Min` reductions run 8-wide AVX2 loops
+  preserving exact scalar NaN and signed-zero semantics. `topk` uses a zero-allocation linear scan for `k == 1`, a
+  bounded `k`-element binary heap when `1 < k <= 1024` and `4·k < d`, and `select_nth_unstable_by` otherwise.
+- **F16C casts (`cpu/cast.rs`):** CPU `f32 ↔ f16` conversions borrow contiguous inputs without copying, parallelise
+  above `PAR_MIN`, and use hardware `F16C` (`VCVTPS2PH` / `VCVTPH2PS`, round-to-nearest-even) on `x86_64` CPUs with
+  `avx + f16c`.
 
 ### BatchNorm statistics
 folo-nn's train-mode BatchNorm on the CPU (`crates/folo-nn/src/layers/batchnorm.rs`, [NN.md](NN.md)) is built on

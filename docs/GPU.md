@@ -375,7 +375,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | arg-reduce | `kernels::reduce::arg_reduce` | f32 → i64 | first max / min, NaN wins (the backend runs f16 inputs on an f32 copy) |
 | split reduce | `kernels::reduce::reduce_split` | f32, f16 | long reductions (`r ≥ 8192`, `< 256` single-pass workgroups) across sum, mean, max and min in two passes using ceiling-division chunks (nominal chunk size `≥ 1024` elements, eliminating empty tiles for prime/odd `r` while the clamped final chunk can be slightly smaller); partials between passes are f32 and pass 2 scales `Mean` by `1 / r` |
 | softmax (any dim) | `kernels::reduce::softmax_dim` | f32, f16 | online `softmax` row kernel whenever `inner == 1` (the last dim, or a non-last dim followed only by size-1 dims); `softmax_cols` otherwise (caches `D ≤ 32` columns such as DFL `reg_max = 16` in a per-thread local array for 1 global read and 1 `exp` per element, and uses 2-pass online softmax for larger `D`) |
-| top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
+| top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one 256-thread workgroup per row: single-read shared-memory bitonic sort for `d ≤ 512`, or `k` coalesced workgroup-parallel selection passes (with 32-wide subgroup reductions when available) for longer rows |
 | pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices, its backward and the upsample backward also f16, summed in f32) | max pooling with indices and its gather backward (value-only inference max pooling routes to `kernels::pooling::max_pool2d` when within its window limits), avg / adaptive avg pooling and backward, upsample backward |
 | conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight, conv2d_backward_weight_as}` | f32, f16 (f32 accumulation; the weight gradient also f16 → f32) | implicit GEMM (`CONV_MODE` 2 / 3) with tap masks, fused 2×2 sub-pixel stride-2 input gradients (`conv2d_subpixel_pack` + `SUBPIXEL` epilogue), division-free `vec4` per-image split-K `A·Bᵀ` GEMM for 1×1 weight gradients, `conv2d_wgrad_reduce` (`vec4` partial-slab reduction), a transposed-A GEMM (`TRANS_A = true`, tensor-core when enabled and accepted, else regular generator) for non-depthwise unpadded 1×1 stride-1 dilation-1 input gradients, and direct depthwise kernels (dispatched first). Non-depthwise f16 gradients run on tensor cores when enabled and accepted, else on the regular generator with f16 storage; split-K partials are f32 either way |
 | train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 or f16 data (`BnDesc::dtype`); parameters, statistics and sums f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Both reduction and finalize passes use 1-barrier 32-wide subgroup reductions (pairwise Chan `subgroupShuffleDown` forward, `subgroupAdd` backward) with a portable shared-memory tree fallback. Identity, SiLU or ReLU; 3 dispatches each way |
@@ -585,8 +585,9 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   `coopLoadT` + `coopMultiplyAdd`; one barrier per step. The K loop starts each half with a `break` check instead
   of wrapping it in an `if`, because naga treats values derived from the loop counter as non-uniform. Epilogue:
   cooperative matrices have no per-element access, so each subgroup stores one fragment at a time into its own
-  1 KiB f32 scratch slice (synchronised per subgroup with `subgroupBarrier()` instead of workgroup-wide barriers), and its 32 lanes apply `alpha`, bias and activation to 8 elements each and store them
-  with bounds checks. Configs: 128×128 (4×2 fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32`, 32×32
+  1 KiB f32 scratch slice (synchronised per subgroup with `subgroupBarrier()` instead of workgroup-wide barriers in
+  both GEMM and sub-pixel epilogues, since each subgroup owns a disjoint slice), and its 32 lanes apply `alpha`, bias
+  and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2 fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32`, 32×32
   (1×1 fragment per subgroup, 128 threads, 14 KiB) for small batch-1 planes and narrow weights, and 16×256 for
   `M ≤ 16` (folo-n's 16- and 32-channel early layers); `coop::pick_config` picks by `M` and occupancy for plain
   GEMMs, `pick_config_conv` / `pick_config_stride2_dx` pick for conv input gradients (with `C64X128` for stride-2
@@ -876,7 +877,6 @@ and folo-s from 105 to 140 / 167 to 246, on a host shared with other jobs (alter
   adds, attention, gradient accumulation and clipping) are separate memory passes.
 - Backend: strided convolution input gradients with dilation > 1 still run the transposed-conv GEMM over every
   tap (dilated strided convs keep the old path; the detector has none).
-- Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)), and top-k
-  is one thread per row (`O(k · d)`), sized for assigner-style `k`.
+- Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)).
 - Backend: `Device::Gpu(0)` only; registering further adapters as `Gpu(1..)` is a few lines with
   `GpuBackend::new` but untested.
