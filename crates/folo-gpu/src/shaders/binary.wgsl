@@ -1,9 +1,9 @@
-// out = a (op) b with NumPy broadcasting. Spec: OP (binary op code), RANK (dims after coalescing, 0 = same
-// shape fast path), VEC (vec4 elements, only for RANK == 0).
+// out = a (op) b with NumPy broadcasting. Spec: OP (binary op code), RANK (dims after coalescing, 0 = linear
+// fast path), VEC4 (vec4 output units, with optional scalar-broadcast A/B via BCAST bits 0/1).
 // Params: 0 = out elements (E units), 4..12 = out dims, 12..20 = a strides, 20..28 = b strides
 // (innermost dimension last; broadcast dims have stride 0), 28 = NaN, 29 = +inf (pow edge cases).
-@group(0) @binding(1) var<storage, read> A: array<E>;
-@group(0) @binding(2) var<storage, read> B: array<E>;
+@group(0) @binding(1) var<storage, read> A: array<TA>;
+@group(0) @binding(2) var<storage, read> B: array<TB>;
 @group(0) @binding(3) var<storage, read_write> O: array<E>;
 
 // C `powf` for one lane. NaN, infinities and signed zeros are classified by bit pattern (WGSL builtins
@@ -59,7 +59,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let i = linear_id(wid, nwg, lid, 256u);
     if (i >= pu(0u)) { return; }
     if (RANK == 0u) {
-        O[i] = OUT(binop(V4(A[i]), V4(B[i])));
+        O[i] = OUT(binop(ld_a(select(i, 0u, BCAST_A)), ld_b(select(i, 0u, BCAST_B))));
         return;
     }
     var rem = i;
@@ -73,5 +73,5 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         ia += c * pu(12u + k);
         ib += c * pu(20u + k);
     }
-    O[i] = OUT(binop(V4(A[ia]), V4(B[ib])));
+    O[i] = OUT(binop(ld_a(ia), ld_b(ib)));
 }

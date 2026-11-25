@@ -105,6 +105,22 @@ fn binary_ops_broadcast_and_compare() {
         m.where_cond(&t[0], &t[2])
     });
     check16(dev, &ins, 1e-4, 1e-3, "scalar compare", |t| t[0].gt_scalar(0.25)?.mul(&t[0]));
+    // Vec4 broadcast binary + where (f16 storage, u8 & f32 conditions, channel & scalar broadcasts).
+    let x4 = randn(&[2, 5, 8, 8], 40);
+    let y4 = randn(&[2, 5, 8, 8], 41);
+    let b4 = randn(&[1, 5, 1, 1], 42);
+    let s4 = randn(&[1], 43);
+    let ins4 = [x4, y4, b4, s4];
+    check16(dev, &ins4, 1e-4, 1e-3, "f16 vec4 nchw bcast add/mul", |t| t[0].add(&t[2])?.mul(&t[3]));
+    check16(dev, &ins4, 1e-4, 1e-3, "f16 vec4 where u8 dense", |t| {
+        t[0].gt(&t[1])?.to_dtype(DType::U8)?.where_cond(&t[0], &t[1])
+    });
+    check16(dev, &ins4, 1e-4, 1e-3, "f16 vec4 where u8 bcast cond+rhs", |t| {
+        t[2].gt_scalar(0.0)?.to_dtype(DType::U8)?.where_cond(&t[0], &t[2])
+    });
+    check16(dev, &ins4, 1e-4, 1e-3, "f16 vec4 where f32 bcast lhs", |t| {
+        t[0].gt_scalar(0.0)?.to_dtype(DType::F32)?.where_cond(&t[2], &t[1])
+    });
 }
 
 #[test]

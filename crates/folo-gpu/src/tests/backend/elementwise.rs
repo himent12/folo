@@ -122,3 +122,88 @@ fn where_and_masks() {
     });
     check(dev, &[a], 0.0, 0.0, "masked_fill", |v| v[0].masked_fill(&v[0].t()?.t()?.gt_scalar(0.5)?, -7.0));
 }
+
+#[test]
+fn broadcast_vec4_binary_and_where() {
+    let dev = dev!();
+    // NCHW bias/scale (innermost HW = 64 multiple of 4; rhs broadcast with odd offset via narrow).
+    let x = randn(&[2, 5, 8, 8], 20);
+    let bias_full = randn(&[1, 7, 1, 1], 21);
+    check(dev, &[x.clone(), bias_full.clone()], 1e-5, 1e-5, "nchw vec4 bcast odd offset", |v| {
+        let b = v[1].narrow(1, 1, 5)?;
+        v[0].add(&b)?.mul(&b)
+    });
+    // Reversed operand order (lhs broadcast, rhs contiguous vec4) and trailing-4 collapse ([5, 4] + [5, 1]).
+    check(dev, &[bias_full, x.clone()], 1e-5, 1e-5, "lhs bcast vec4", |v| v[0].narrow(1, 1, 5)?.sub(&v[1]));
+    let m4 = randn(&[5, 4], 22);
+    let col = randn(&[5, 1], 23);
+    check(dev, &[m4, col], 1e-5, 1e-5, "trailing 4 collapse", |v| v[0].add(&v[1]));
+    // 1D scalar broadcast (RANK = 0, VEC4 = true, BCAST = 0b10 and 0b01) + non-4-aligned vector offset fallback.
+    let v128 = randn(&[130], 24);
+    let s1 = randn(&[1], 25);
+    check(dev, &[v128.clone(), s1.clone()], 1e-5, 1e-5, "1d scalar bcast vec4", |v| {
+        v[0].narrow(0, 0, 128)?.add(&v[1])
+    });
+    check(dev, &[v128, s1], 1e-5, 1e-5, "1d unaligned offset fallback", |v| {
+        v[0].narrow(0, 2, 128)?.add(&v[1])
+    });
+    // Outer broadcast with contiguous vec4 inner dim ([4, 1, 16] + [1, 3, 16]).
+    let p = randn(&[4, 1, 16], 26);
+    let q = randn(&[1, 3, 16], 27);
+    check(dev, &[p, q], 1e-5, 1e-5, "outer bcast vec4", |v| v[0].mul(&v[1]));
+
+    // `where` with u8 and f32 conditions: contiguous vec4, broadcast cond, broadcast values, -0.0 and NaN conds.
+    let y = randn(&[2, 5, 8, 8], 28);
+    let c_ch = randn(&[1, 5, 1, 1], 29);
+    let val_ch = randn(&[1, 5, 1, 1], 30);
+    check(dev, &[x.clone(), y.clone(), c_ch.clone(), val_ch.clone()], 0.0, 0.0, "where u8 vec4 dense", |v| {
+        v[0].gt(&v[1])?.to_dtype(DType::U8)?.where_cond(&v[0], &v[1])
+    });
+    check(
+        dev,
+        &[x.clone(), y.clone(), c_ch.clone(), val_ch.clone()],
+        1e-5,
+        1e-5,
+        "where u8 vec4 bcast cond+rhs",
+        |v| v[2].gt_scalar(0.0)?.to_dtype(DType::U8)?.where_cond(&v[0], &v[3]),
+    );
+    check(
+        dev,
+        &[x.clone(), y.clone(), c_ch.clone(), val_ch.clone()],
+        1e-5,
+        1e-5,
+        "where f32 vec4 bcast lhs",
+        |v| v[0].gt_scalar(0.0)?.where_cond(&v[3], &v[1]),
+    );
+    check(dev, &[x, y, c_ch, val_ch], 0.0, 0.0, "where f32 vec4 bcast cond", |v| {
+        v[2].gt_scalar(0.0)?.where_cond(&v[0], &v[1])
+    });
+    // Special f32 condition bits (-0.0 is false, NaN is true) in both dense and broadcast vec4 paths.
+    let cond_spec =
+        Tensor::from_slice(&[0.0f32, -0.0, f32::NAN, 1.0, -0.0, 2.0, 0.0, f32::NAN], [2, 4]).unwrap();
+    let t_val = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 4]).unwrap();
+    let f_val = Tensor::from_slice(&[-1.0f32, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0], [2, 4]).unwrap();
+    assert_close_t(
+        &cond_spec
+            .to_device(dev)
+            .unwrap()
+            .where_cond(&t_val.to_device(dev).unwrap(), &f_val.to_device(dev).unwrap())
+            .unwrap(),
+        &cond_spec.where_cond(&t_val, &f_val).unwrap(),
+        0.0,
+        0.0,
+        "where f32 special bits vec4",
+    );
+    let cond_bcast = Tensor::from_slice(&[-0.0f32, f32::NAN], [2, 1]).unwrap();
+    assert_close_t(
+        &cond_bcast
+            .to_device(dev)
+            .unwrap()
+            .where_cond(&t_val.to_device(dev).unwrap(), &f_val.to_device(dev).unwrap())
+            .unwrap(),
+        &cond_bcast.where_cond(&t_val, &f_val).unwrap(),
+        0.0,
+        0.0,
+        "where f32 special bits bcast vec4",
+    );
+}
