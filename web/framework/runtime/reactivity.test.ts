@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { computed, createRoot, deep, effect, flush, MediaQuery, ReactiveMap, ReactiveSet, signal, snapshot, Tween } from 'fw';
+import { computed, createRoot, deep, effect, flush, MediaQuery, memo, onCleanup, ReactiveMap, ReactiveSet, renderEffect, signal, snapshot, Tween } from 'fw';
 
 const track = <T>(fn: () => T) => {
   const seen: T[] = [];
@@ -70,6 +70,395 @@ describe('ReactiveMap / ReactiveSet', () => {
     flush();
     expect(has1).toEqual([false, true, false]);
     expect(all).toEqual(['', '1', '1,2', '']);
+  });
+
+  it('prunes unsubscribed key signals in ReactiveMap and ReactiveSet when the last reader disposes', () => {
+    const deleteSpy = vi.spyOn(Map.prototype, 'delete');
+    const setSpy = vi.spyOn(Map.prototype, 'set');
+    try {
+      const m = new ReactiveMap<string, number>([['a', 1]]);
+      const s = new ReactiveSet<string>(['x']);
+
+      // Unwatched computeds do not retain entries in #keys, yet still stay fresh across mutations.
+      setSpy.mockClear();
+      const looseMap = computed(() => m.get('loose'));
+      const looseSet = computed(() => s.has('loose'));
+      expect(looseMap.get()).toBeUndefined();
+      expect(looseSet.get()).toBe(false);
+      expect(setSpy.mock.calls.filter(([k]) => k === 'loose')).toHaveLength(0);
+
+      m.set('loose', 7);
+      s.add('loose');
+      expect(looseMap.get()).toBe(7);
+      expect(looseSet.get()).toBe(true);
+
+      // Two subscribers on the same key: disposing the first keeps the key alive; disposing the second prunes it.
+      const seenA1: (number | undefined)[] = [];
+      const seenA2: (number | undefined)[] = [];
+      const seenX1: boolean[] = [];
+      const seenX2: boolean[] = [];
+      const d1 = createRoot((d) => {
+        effect(() => void seenA1.push(m.get('a')));
+        effect(() => void seenX1.push(s.has('x')));
+        return d;
+      });
+      const d2 = createRoot((d) => {
+        effect(() => void seenA2.push(m.get('a')));
+        effect(() => void seenX2.push(s.has('x')));
+        return d;
+      });
+      flush();
+
+      deleteSpy.mockClear();
+      d1();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'a' || k === 'x')).toHaveLength(0);
+
+      m.set('a', 2);
+      s.delete('x');
+      flush();
+      expect(seenA1).toEqual([1]);
+      expect(seenA2).toEqual([1, 2]);
+      expect(seenX1).toEqual([true]);
+      expect(seenX2).toEqual([true, false]);
+
+      deleteSpy.mockClear();
+      d2();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'a')).toHaveLength(1);
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'x')).toHaveLength(1);
+
+      // Re-subscribing after pruning works normally.
+      const seenA3: (number | undefined)[] = [];
+      const d3 = createRoot((d) => {
+        effect(() => void seenA3.push(m.get('a')));
+        return d;
+      });
+      flush();
+      m.set('a', 3);
+      flush();
+      expect(seenA3).toEqual([2, 3]);
+      d3();
+    } finally {
+      deleteSpy.mockRestore();
+      setSpy.mockRestore();
+    }
+  });
+
+  it('keeps computeds and owning memos fresh across watch/unwatch cycles and preserves per-key granularity', () => {
+    const deleteSpy = vi.spyOn(Map.prototype, 'delete');
+    try {
+      const m = new ReactiveMap<string, number>([['a', 1]]);
+      let cRuns = 0;
+      const c = computed(() => {
+        cRuns++;
+        return m.get('a');
+      });
+
+      // 1. Watched -> unwatched -> mutated -> unwatched read & re-watch.
+      const out1: (number | undefined)[] = [];
+      const d1 = createRoot((d) => {
+        effect(() => void out1.push(c.get()));
+        return d;
+      });
+      flush();
+      expect(out1).toEqual([1]);
+      expect(cRuns).toBe(1);
+
+      // Unrelated key does not recompute c.
+      m.set('b', 10);
+      flush();
+      expect(cRuns).toBe(1);
+
+      // Disposing unsubscribes and prunes 'a'.
+      deleteSpy.mockClear();
+      d1();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'a')).toHaveLength(1);
+
+      // Mutate while unwatched, then read unwatched and re-watch.
+      m.set('a', 2);
+      expect(c.get()).toBe(2);
+
+      // Mutate again while unwatched, then re-watch under an effect alongside a second subscriber.
+      m.set('a', 3);
+      const out2: (number | undefined)[] = [];
+      const out3: (number | undefined)[] = [];
+      const d2 = createRoot((d) => {
+        effect(() => void out2.push(m.get('a')));
+        return d;
+      });
+      const d3 = createRoot((d) => {
+        effect(() => void out3.push(c.get()));
+        return d;
+      });
+      flush();
+      expect(out2).toEqual([3]);
+      expect(out3).toEqual([3]);
+
+      m.set('a', 4);
+      flush();
+      expect(out2).toEqual([3, 4]);
+      expect(out3).toEqual([3, 4]);
+
+      // Neither prunes until both dispose.
+      deleteSpy.mockClear();
+      d2();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'a')).toHaveLength(0);
+      m.set('a', 5);
+      flush();
+      expect(out3).toEqual([3, 4, 5]);
+      d3();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'a')).toHaveLength(1);
+
+      // 2. Owning memo (JSX branch) keeps per-key granularity from mount and prunes on dispose.
+      let branchRuns = 0;
+      const outMemo: (number | undefined)[] = [];
+      const dMemo = createRoot((d) => {
+        const read = memo(() => {
+          branchRuns++;
+          return m.get('target');
+        });
+        effect(() => void outMemo.push(read()));
+        return d;
+      });
+      flush();
+      expect(branchRuns).toBe(1);
+      m.set('unrelated', 99);
+      flush();
+      expect(branchRuns).toBe(1);
+      m.set('target', 42);
+      flush();
+      expect(branchRuns).toBe(2);
+      expect(outMemo).toEqual([undefined, 42]);
+
+      deleteSpy.mockClear();
+      dMemo();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'target')).toHaveLength(1);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+  });
+
+  it('does not tear down or double-mount memos on same-key collisions and handles delete/clear and special keys', () => {
+    const deleteSpy = vi.spyOn(Map.prototype, 'delete');
+    try {
+      const m = new ReactiveMap<unknown, number>([
+        ['k', 1],
+        [Number.NaN, 10],
+        [0, 20],
+      ]);
+      const objKey = { id: 1 };
+      m.set(objKey, 30);
+
+      // 1. Single memo reading has(k) and get(k) mounts once with zero cleanups.
+      let singleMounts = 0;
+      let singleCleanups = 0;
+      const singleOut: (number | null)[] = [];
+      const dSingle = createRoot((d) => {
+        const read = memo(() => {
+          singleMounts++;
+          onCleanup(() => singleCleanups++);
+          return m.has('k') ? m.get('k')! : null;
+        });
+        renderEffect(() => {
+          singleOut.push(read());
+        });
+        return d;
+      });
+      expect(singleMounts).toBe(1);
+      expect(singleCleanups).toBe(0);
+      expect(singleOut).toEqual([1]);
+
+      // 2. Parent memo + inner renderEffect reading the same key mounts once with zero cleanups.
+      let parentMounts = 0;
+      let parentCleanups = 0;
+      const childOut: (number | undefined)[] = [];
+      const dParent = createRoot((d) => {
+        const read = memo(() => {
+          parentMounts++;
+          onCleanup(() => parentCleanups++);
+          const v = m.get('p');
+          renderEffect(() => {
+            childOut.push(m.get('p'));
+          });
+          return v;
+        });
+        renderEffect(() => {
+          read();
+        });
+        return d;
+      });
+      expect(parentMounts).toBe(1);
+      expect(parentCleanups).toBe(0);
+      expect(childOut).toEqual([undefined]);
+
+      // 3. Two sibling memos reading the same key mount once each with zero cleanups.
+      let sib1Mounts = 0;
+      let sib2Mounts = 0;
+      let sibCleanups = 0;
+      const dSibs = createRoot((d) => {
+        const r1 = memo(() => {
+          sib1Mounts++;
+          onCleanup(() => sibCleanups++);
+          return m.get('s');
+        });
+        const r2 = memo(() => {
+          sib2Mounts++;
+          onCleanup(() => sibCleanups++);
+          return m.get('s');
+        });
+        renderEffect(() => {
+          r1();
+          r2();
+        });
+        return d;
+      });
+      expect(sib1Mounts).toBe(1);
+      expect(sib2Mounts).toBe(1);
+      expect(sibCleanups).toBe(0);
+
+      // Writes update all collided readers, and disposal prunes cleanly.
+      m.set('k', 2);
+      m.set('p', 3);
+      m.set('s', 4);
+      flush();
+      expect(singleOut).toEqual([1, 2]);
+      expect(parentMounts).toBe(2);
+      expect(childOut[childOut.length - 1]).toBe(3);
+      expect(sib1Mounts).toBe(2);
+      expect(sib2Mounts).toBe(2);
+
+      deleteSpy.mockClear();
+      dSingle();
+      dParent();
+      dSibs();
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'k')).toHaveLength(1);
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 'p')).toHaveLength(1);
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 's')).toHaveLength(1);
+
+      // 4. Unrelated writes before first subscription do not tear down an eager memo,
+      // and unwatched computeds preserve per-key memoization across unrelated writes.
+      let eagerMounts = 0;
+      let eagerCleanups = 0;
+      const dEager = createRoot((d) => {
+        const read = memo(() => {
+          eagerMounts++;
+          onCleanup(() => eagerCleanups++);
+          const v = m.get('watched');
+          m.set('other', 99);
+          return v;
+        });
+        m.set('other2', 100);
+        renderEffect(() => {
+          read();
+        });
+        return d;
+      });
+      expect(eagerMounts).toBe(1);
+      expect(eagerCleanups).toBe(0);
+      dEager();
+
+      let unwatchedRuns = 0;
+      const unwatchedBox = computed(() => {
+        unwatchedRuns++;
+        return { v: m.get('watched') };
+      });
+      const firstBox = unwatchedBox.get();
+      m.set('unrelated_key', 123);
+      expect(unwatchedBox.get()).toBe(firstBox);
+      expect(unwatchedRuns).toBe(1);
+      m.set('watched', 77);
+      expect(unwatchedBox.get()).toEqual({ v: 77 });
+      expect(unwatchedRuns).toBe(2);
+
+      // 5. Disposing one of two collided siblings before any write keeps the survivor active and prunes on last dispose.
+      let survRuns = 0;
+      const dColl1 = createRoot((d) => {
+        const r = memo(() => m.get('coll'));
+        renderEffect(() => void r());
+        return d;
+      });
+      let dColl2!: () => void;
+      const dWrap = createRoot((d) => {
+        const r1 = memo(() => m.get('coll2'));
+        const r2 = memo(() => {
+          survRuns++;
+          return m.get('coll2');
+        });
+        const dA = createRoot((da) => {
+          renderEffect(() => void r1());
+          return da;
+        });
+        dColl2 = createRoot((db) => {
+          renderEffect(() => void r2());
+          return db;
+        });
+        deleteSpy.mockClear();
+        dA();
+        expect(deleteSpy.mock.calls.filter(([k]) => k === 'coll2')).toHaveLength(0);
+        m.set('coll2', 55);
+        flush();
+        expect(survRuns).toBe(2);
+        deleteSpy.mockClear();
+        dColl2();
+        expect(deleteSpy.mock.calls.filter(([k]) => k === 'coll2')).toHaveLength(1);
+        return d;
+      });
+      dColl1();
+      dWrap();
+
+      // 6. Special keys (NaN, -0/+0, object) notify independently and prune cleanly.
+      const seenNan: (number | undefined)[] = [];
+      const seenZero: (number | undefined)[] = [];
+      const seenObj: (number | undefined)[] = [];
+      const dSpec = createRoot((d) => {
+        effect(() => void seenNan.push(m.get(Number.NaN)));
+        effect(() => void seenZero.push(m.get(-0)));
+        effect(() => void seenObj.push(m.get(objKey)));
+        return d;
+      });
+      flush();
+      expect(seenNan).toEqual([10]);
+      expect(seenZero).toEqual([20]);
+      expect(seenObj).toEqual([30]);
+      m.set(Number.NaN, 11);
+      flush();
+      expect(seenNan).toEqual([10, 11]);
+      expect(seenZero).toEqual([20]);
+      expect(seenObj).toEqual([30]);
+      m.set(0, 21);
+      flush();
+      expect(seenZero).toEqual([20, 21]);
+      expect(seenObj).toEqual([30]);
+      m.set(objKey, 31);
+      flush();
+      expect(seenObj).toEqual([30, 31]);
+      deleteSpy.mockClear();
+      dSpec();
+      expect(deleteSpy.mock.calls.filter(([k]) => Number.isNaN(k as number))).toHaveLength(1);
+      expect(deleteSpy.mock.calls.filter(([k]) => k === 0)).toHaveLength(1);
+      expect(deleteSpy.mock.calls.filter(([k]) => k === objKey)).toHaveLength(1);
+
+      // 7. delete() and clear() invalidate unwatched computeds on ReactiveMap and ReactiveSet.
+      const looseMap = computed(() => m.get('k'));
+      const rs = new ReactiveSet<string>(['u', 'v']);
+      const looseSetU = computed(() => rs.has('u'));
+      const looseSetV = computed(() => rs.has('v'));
+      expect(looseMap.get()).toBe(2);
+      expect(looseSetU.get()).toBe(true);
+      expect(looseSetV.get()).toBe(true);
+      m.delete('k');
+      expect(looseMap.get()).toBeUndefined();
+      m.set('k', 9);
+      expect(looseMap.get()).toBe(9);
+      m.clear();
+      expect(looseMap.get()).toBeUndefined();
+      rs.delete('u');
+      expect(looseSetU.get()).toBe(false);
+      expect(looseSetV.get()).toBe(true);
+      rs.clear();
+      expect(looseSetV.get()).toBe(false);
+    } finally {
+      deleteSpy.mockRestore();
+    }
   });
 });
 

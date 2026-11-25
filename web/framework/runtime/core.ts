@@ -245,9 +245,14 @@ class SignalNode<T> implements Source, Signal<T> {
 /** A signal that calls `watch(true)` when it gains its first subscriber and `watch(false)` when it loses the last. */
 class WatchedSignalNode<T> extends SignalNode<T> {
   _watch: (on: boolean) => void;
-  constructor(value: T, watch: (on: boolean) => void) {
+  _check: (() => boolean) | undefined;
+  constructor(value: T, watch: (on: boolean) => void, check?: () => boolean) {
     super(value, undefined);
     this._watch = watch;
+    this._check = check;
+  }
+  override _refresh(): boolean {
+    return this._targets !== undefined || this._check === undefined || this._check();
   }
   override _subscribe(node: Link): void {
     const first = this._targets === undefined;
@@ -264,10 +269,13 @@ class WatchedSignalNode<T> extends SignalNode<T> {
 /**
  * Internal: a signal that knows whether anything subscribes to it (an effect, or a computed an effect reads): `watch`
  * runs with `true` on the first subscriber and `false` when the last one goes. A computed read outside any effect does
- * not subscribe, so it starts nothing (and so leaks nothing).
+ * not subscribe, so it starts nothing (and so leaks nothing). When `check` is given, an unsubscribed pull calls it and
+ * treats `false` as stale so unwatched computeds still recompute when the backing store changed. Note: `ComputedNode`
+ * short-circuits pulls while `globalVersion` is unchanged, so callers using `check` must also write a signal (such as a
+ * collection version counter) on every backing-store mutation.
  */
-export function watchedSignal<T>(value: T, watch: (on: boolean) => void): Signal<T> {
-  return new WatchedSignalNode(value, watch);
+export function watchedSignal<T>(value: T, watch: (on: boolean) => void, check?: () => boolean): Signal<T> {
+  return new WatchedSignalNode(value, watch, check);
 }
 
 /** A writable reactive value (port of `$state` for primitives and `$state.raw`). */

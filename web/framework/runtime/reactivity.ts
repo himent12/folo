@@ -119,25 +119,97 @@ export function snapshot<T>(value: T): T {
   return out as T;
 }
 
+const MISSING = Symbol('fw.missing');
+
+type KeySlot = Signal<number> | Set<Signal<number>>;
+
+function bumpSlot(slot: KeySlot | undefined): void {
+  if (slot === undefined) return;
+  if (slot instanceof Set) for (const s of slot) bump(s);
+  else bump(slot);
+}
+
+function slotSignal(slot: KeySlot): Signal<number> {
+  return slot instanceof Set ? slot.values().next().value! : slot;
+}
+
+/**
+ * Creates a per-key signal for `keys` that inserts itself on first subscribe and removes itself when its last
+ * subscriber leaves. Unwatched reads (e.g. an unwatched `computed` or an initial eager `memo`) do not insert into
+ * `keys`, so dead keys are never retained. Instead, each unsubscribed signal remembers `(stamp, snap)` from `read()`
+ * and re-checks `read()` only when `version` moved — preserving per-key memoization and avoiding spurious `memo()`
+ * remounts on unrelated-key writes while releasing `snap` whenever subscribed.
+ * If multiple unwatched readers subscribe to the same key before any change to that key, they share the slot in `keys`
+ * and coalesce back onto one canonical signal on the first real write.
+ */
+function keySignal<K>(
+  keys: Map<K, KeySlot>,
+  version: Signal<number>,
+  k: K,
+  read: () => unknown,
+): Signal<number> {
+  let stamp = version.peek();
+  let snap = read();
+  const unchanged = () => {
+    const v = version.peek();
+    if (v === stamp) return true;
+    if (Object.is(read(), snap)) {
+      stamp = v;
+      return true;
+    }
+    return false;
+  };
+  const s = watchedSignal(
+    0,
+    (on) => {
+      if (on) {
+        const same = unchanged();
+        snap = MISSING;
+        if (!same) {
+          bump(s);
+        } else {
+          const cur = keys.get(k);
+          if (cur === undefined) keys.set(k, s);
+          else if (cur instanceof Set) cur.add(s);
+          else if (cur !== s) keys.set(k, new Set([cur, s]));
+        }
+      } else {
+        stamp = version.peek();
+        snap = read();
+        const cur = keys.get(k);
+        if (cur === s) {
+          keys.delete(k);
+        } else if (cur instanceof Set) {
+          cur.delete(s);
+          if (cur.size === 0) keys.delete(k);
+          else if (cur.size === 1) keys.set(k, cur.values().next().value!);
+        }
+      }
+    },
+    unchanged,
+  );
+  return s;
+}
+
 /** A Map whose reads track and whose writes update readers (port of `SvelteMap`). */
 export class ReactiveMap<K, V> extends Map<K, V> {
-  #keys = new Map<K, Signal<number>>();
+  #keys = new Map<K, KeySlot>();
   #version = counter();
   constructor(entries?: Iterable<readonly [K, V]> | null) {
     super();
     if (entries) for (const [k, v] of entries) super.set(k, v);
   }
-  #key(k: K): Signal<number> {
-    let s = this.#keys.get(k);
-    if (s === undefined) this.#keys.set(k, (s = counter()));
-    return s;
+  #track(k: K): void {
+    const existing = this.#keys.get(k);
+    if (existing !== undefined) slotSignal(existing).get();
+    else keySignal(this.#keys, this.#version, k, () => (super.has(k) ? super.get(k) : MISSING)).get();
   }
   override get(k: K): V | undefined {
-    if (isTracking()) this.#key(k).get();
+    if (isTracking()) this.#track(k);
     return super.get(k);
   }
   override has(k: K): boolean {
-    if (isTracking()) this.#key(k).get();
+    if (isTracking()) this.#track(k);
     return super.has(k);
   }
   override set(k: K, v: V): this {
@@ -145,8 +217,7 @@ export class ReactiveMap<K, V> extends Map<K, V> {
     const old = super.get(k);
     super.set(k, v);
     if (!had || !Object.is(old, v)) {
-      const s = this.#keys.get(k);
-      if (s) bump(s);
+      bumpSlot(this.#keys.get(k));
       bump(this.#version);
     }
     return this;
@@ -154,8 +225,7 @@ export class ReactiveMap<K, V> extends Map<K, V> {
   override delete(k: K): boolean {
     const had = super.delete(k);
     if (had) {
-      const s = this.#keys.get(k);
-      if (s) bump(s);
+      bumpSlot(this.#keys.get(k));
       bump(this.#version);
     }
     return had;
@@ -163,7 +233,7 @@ export class ReactiveMap<K, V> extends Map<K, V> {
   override clear(): void {
     if (super.size === 0) return;
     super.clear();
-    for (const s of this.#keys.values()) bump(s);
+    for (const slot of this.#keys.values()) bumpSlot(slot);
     bump(this.#version);
   }
   override get size(): number {
@@ -193,7 +263,7 @@ export class ReactiveMap<K, V> extends Map<K, V> {
 
 /** A Set whose reads track and whose writes update readers (port of `SvelteSet`). */
 export class ReactiveSet<T> extends Set<T> {
-  #keys = new Map<T, Signal<number>>();
+  #keys = new Map<T, KeySlot>();
   #version = counter();
   constructor(values?: Iterable<T> | null) {
     super();
@@ -201,17 +271,16 @@ export class ReactiveSet<T> extends Set<T> {
   }
   override has(v: T): boolean {
     if (isTracking()) {
-      let s = this.#keys.get(v);
-      if (s === undefined) this.#keys.set(v, (s = counter()));
-      s.get();
+      const existing = this.#keys.get(v);
+      if (existing !== undefined) slotSignal(existing).get();
+      else keySignal(this.#keys, this.#version, v, () => super.has(v)).get();
     }
     return super.has(v);
   }
   override add(v: T): this {
     if (!super.has(v)) {
       super.add(v);
-      const s = this.#keys.get(v);
-      if (s) bump(s);
+      bumpSlot(this.#keys.get(v));
       bump(this.#version);
     }
     return this;
@@ -219,8 +288,7 @@ export class ReactiveSet<T> extends Set<T> {
   override delete(v: T): boolean {
     const had = super.delete(v);
     if (had) {
-      const s = this.#keys.get(v);
-      if (s) bump(s);
+      bumpSlot(this.#keys.get(v));
       bump(this.#version);
     }
     return had;
@@ -228,7 +296,7 @@ export class ReactiveSet<T> extends Set<T> {
   override clear(): void {
     if (super.size === 0) return;
     super.clear();
-    for (const s of this.#keys.values()) bump(s);
+    for (const slot of this.#keys.values()) bumpSlot(slot);
     bump(this.#version);
   }
   override get size(): number {
