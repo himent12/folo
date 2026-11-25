@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Edges, Element, ElementId, GlobalElementId, Hitbox,
     InspectorElementId, InteractiveElement, Interactivity, IntoElement, IsZero, LayoutId, Overflow, Pixels,
-    ScrollHandle, Size, StyleRefinement, Styled, Window, point, size,
+    ScrollHandle, Size, StyleRefinement, Styled, Window, point, size, window::MeasureKey,
 };
 
 /// A list of `item_count` rows; `f` renders the rows in a range.
@@ -158,22 +158,28 @@ impl Element for UniformList {
     ) -> (LayoutId, UniformListFrameState) {
         let max_items = self.item_count;
         let item_size = self.measure_item(None, window, cx);
+        let key = measure_key(max_items, item_size);
         // GPUI's `ListSizingBehavior::Infer`: as tall as all rows, capped by the space available.
         let layout_id =
             self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, _| {
                 window.with_text_style(style.text_style().cloned(), |window| {
-                    window.request_measured_layout(style, move |known, available, _, _| {
-                        let desired_height = item_size.height * max_items as f32;
-                        let width = known.width.unwrap_or(match available.width {
-                            AvailableSpace::Definite(width) => width,
-                            AvailableSpace::MinContent | AvailableSpace::MaxContent => item_size.width,
-                        });
-                        let height = match available.height {
-                            AvailableSpace::Definite(height) => desired_height.min(height),
-                            AvailableSpace::MinContent | AvailableSpace::MaxContent => desired_height,
-                        };
-                        size(width, height)
-                    })
+                    window.request_keyed_measured_layout(
+                        style,
+                        key,
+                        || {},
+                        move |known, available, _, _| {
+                            let desired_height = item_size.height * max_items as f32;
+                            let width = known.width.unwrap_or(match available.width {
+                                AvailableSpace::Definite(width) => width,
+                                AvailableSpace::MinContent | AvailableSpace::MaxContent => item_size.width,
+                            });
+                            let height = match available.height {
+                                AvailableSpace::Definite(height) => desired_height.min(height),
+                                AvailableSpace::MinContent | AvailableSpace::MaxContent => desired_height,
+                            };
+                            size(width, height)
+                        },
+                    )
                 })
             });
         (layout_id, UniformListFrameState { item_height: item_size.height, items: SmallVec::new() })
@@ -196,8 +202,7 @@ impl Element for UniformList {
             bounds.bottom_right() - point(border.right + padding.right, border.bottom + padding.bottom),
         );
 
-        let item_height = self.measure_item(None, window, cx).height;
-        frame_state.item_height = item_height;
+        let item_height = frame_state.item_height;
         let content_height = item_height * self.item_count as f32 + padding.top + padding.bottom;
         let content_size = Size { width: padded_bounds.size.width, height: content_height };
 
@@ -220,7 +225,7 @@ impl Element for UniformList {
             window,
             cx,
             |_style, mut scroll_offset, hitbox, window, cx| {
-                if item_count == 0 {
+                if item_count == 0 || item_height <= Pixels::ZERO {
                     return hitbox;
                 }
                 let list_height = padded_bounds.size.height;
@@ -291,6 +296,16 @@ impl IntoElement for UniformList {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// What `UniformList`'s measure function depends on besides the layout requests: the item count and
+/// the measured first-row size (so unchanged frames can reuse the list's layout node and ancestors).
+fn measure_key(max_items: usize, item_size: Size<Pixels>) -> MeasureKey {
+    MeasureKey::UniformList {
+        item_count: max_items,
+        width_bits: item_size.width.0.to_bits(),
+        height_bits: item_size.height.0.to_bits(),
     }
 }
 

@@ -56,14 +56,32 @@ pub(crate) type NodeMeasureFn = Box<
     ) -> crate::Size<Pixels>,
 >;
 
-/// What a measured node's result depends on besides the requests (the text element's text and font).
-/// Nodes measured without one are never reused.
+/// What a measured node's result depends on besides the requests (text content/style, or a uniform
+/// list's count and row size). Nodes measured without one are never reused.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MeasureKey {
-    /// A hash of everything the measure function reads.
-    pub(crate) hash: u64,
-    /// The text itself (compared, so a hash collision cannot reuse another text's layout).
-    pub(crate) text: crate::SharedString,
+pub(crate) enum MeasureKey {
+    /// A text element's key: a hash of everything the measure function reads, plus the text itself
+    /// (compared directly, so a hash collision cannot reuse another text's layout).
+    Text { hash: u64, text: crate::SharedString },
+    /// A `UniformList`'s key: exact item count and measured row dimensions (bit patterns).
+    UniformList { item_count: usize, width_bits: u32, height_bits: u32 },
+}
+
+impl MeasureKey {
+    fn hash_into(&self, hasher: &mut FxHasher) {
+        match self {
+            MeasureKey::Text { hash, .. } => {
+                0u8.hash(hasher);
+                hash.hash(hasher);
+            }
+            MeasureKey::UniformList { item_count, width_bits, height_bits } => {
+                1u8.hash(hasher);
+                item_count.hash(hasher);
+                width_bits.hash(hasher);
+                height_bits.hash(hasher);
+            }
+        }
+    }
 }
 
 /// A measured node: its function, its key, and how to forget the state measuring left behind.
@@ -195,7 +213,7 @@ impl LayoutTree {
         hash_style(&style, &mut hasher);
         measured.is_some().hash(&mut hasher);
         if let Some(key) = measured.as_ref().and_then(|m| m.key.as_ref()) {
-            key.hash.hash(&mut hasher);
+            key.hash_into(&mut hasher);
         }
         for child in children {
             self.nodes[usize::from(*child)].sig.hash(&mut hasher);
