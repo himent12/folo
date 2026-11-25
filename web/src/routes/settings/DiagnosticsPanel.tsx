@@ -5,20 +5,23 @@
 import Check from '$icons/check';
 import Copy from '$icons/copy';
 import RefreshCw from '$icons/refresh-cw';
-import { computed, css, For, onCleanup, signal } from 'fw';
+import { computed, css, effect, For, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { SystemInfo } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
 import { gridView } from '$lib/ui/gridView';
+import Meta from '$lib/ui/Meta';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import {
   densityLabel,
   formatDiagnosticsReport,
   formatPing,
+  isSystemInfo,
   mergeFeatures,
   resolveDeviceLabel,
+  safePingError,
   sanitizeServerUrl,
   serverSummary,
   type DiagnosticsSnapshot,
@@ -28,11 +31,11 @@ import Row from './Row';
 export interface DiagnosticsPanelProps {
   /** Latest `/api/system` payload loaded by Settings, when available. */
   system?: SystemInfo;
-  /** Error from Settings' `/api/system` load, if any. */
+  /** Latest `/api/system` error (initial failure or quiet refresh failure), if any. */
   systemError?: unknown;
   /** Round-trip latency (ms) of Settings' latest `/api/system` load. */
   initialPingMs: number | null;
-  /** Incremented each time Settings finishes a `/api/system` load, superseding older manual pings. */
+  /** Incremented each time Settings finishes a `/api/system` load or resets on reconnect. */
   initialPingSeq: number;
   /** FOLO Studio package version. */
   studioVersion: string;
@@ -40,8 +43,10 @@ export interface DiagnosticsPanelProps {
 
 interface ManualPing {
   seq: number;
+  epoch: number;
   ms: number | null;
   error: string | null;
+  errorSafe: string | null;
   system?: SystemInfo;
 }
 
@@ -54,34 +59,67 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
   const pinging = signal(false);
   const manual = signal<ManualPing | null>(null);
   const copied = signal(false);
-  const announcement = signal('');
+  const announcement = signal('', { equals: false });
 
   let unmounted = false;
   let pingToken = 0;
   let pingCtrl: AbortController | null = null;
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
-  onCleanup(() => {
-    unmounted = true;
+  function abortManualPing() {
+    pingToken++;
     pingCtrl?.abort();
     pingCtrl = null;
+    pinging.set(false);
+  }
+
+  onCleanup(() => {
+    unmounted = true;
+    abortManualPing();
     clearTimeout(copyTimer);
   });
 
-  const activeManual = computed(() => {
-    const m = manual.get();
-    return m && m.seq === props.initialPingSeq ? m : null;
+  // Invalidate any in-flight or previous manual ping whenever the active server connection changes or reconnects.
+  let prevEpoch = hub.epoch;
+  let prevConnecting = hub.mode === 'connecting';
+  effect(() => {
+    const ep = hub.epoch;
+    const connecting = hub.mode === 'connecting';
+    if (ep === prevEpoch && connecting === prevConnecting) return;
+    prevEpoch = ep;
+    prevConnecting = connecting;
+    abortManualPing();
+    manual.set(null);
   });
 
-  const activeSystem = computed(() => activeManual.get()?.system ?? props.system);
+  const activeManual = computed(() => {
+    if (hub.mode === 'connecting') return null;
+    const m = manual.get();
+    return m && m.epoch === hub.epoch && m.seq === props.initialPingSeq ? m : null;
+  });
+
+  const validPropSystem = computed(() => (hub.mode !== 'connecting' && isSystemInfo(props.system) ? props.system : undefined));
+  const activeSystem = computed(() => activeManual.get()?.system ?? validPropSystem.get());
   const pingMs = computed(() => {
+    if (hub.mode === 'connecting') return null;
     const m = activeManual.get();
     return m ? m.ms : props.initialPingMs;
   });
   const pingError = computed(() => {
+    if (hub.mode === 'connecting') return null;
     const m = activeManual.get();
     if (m) return m.error;
-    return props.systemError !== undefined && !props.system ? errorMessage(props.systemError) : null;
+    if (props.systemError !== undefined) return errorMessage(props.systemError);
+    if (props.system !== undefined && !isSystemInfo(props.system)) return 'Invalid /api/system response';
+    return null;
+  });
+  const pingErrorSafe = computed(() => {
+    if (hub.mode === 'connecting') return null;
+    const m = activeManual.get();
+    if (m) return m.errorSafe;
+    if (props.systemError !== undefined) return safePingError(props.systemError);
+    if (props.system !== undefined && !isSystemInfo(props.system)) return 'Invalid response';
+    return null;
   });
 
   const device = computed(() => resolveDeviceLabel(activeSystem.get()));
@@ -115,7 +153,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       deviceSummary: d.summary,
       features: features.peek(),
       pingMs: pingMs.peek(),
-      pingError: pingError.peek(),
+      pingErrorSafe: pingErrorSafe.peek(),
       themeMode: prefs.theme,
       resolvedTheme: prefs.resolvedTheme,
       themeName: prefs.activeTheme.name,
@@ -128,24 +166,32 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
   }
 
   async function measurePing() {
+    const isConnecting = () => hub.mode === 'connecting';
+    if (isConnecting()) return;
     pingCtrl?.abort();
     const ctrl = new AbortController();
     pingCtrl = ctrl;
     const token = ++pingToken;
-    const seq = props.initialPingSeq;
+    const ep = hub.epoch;
+    const api = hub.api;
     pinging.set(true);
     const t0 = performance.now();
     try {
-      const info = await hub.api.system(ctrl.signal);
-      if (unmounted || token !== pingToken || ctrl.signal.aborted) return;
+      const info = await api.system(ctrl.signal);
+      if (unmounted || token !== pingToken || ctrl.signal.aborted || hub.epoch !== ep || isConnecting()) return;
+      if (!isSystemInfo(info)) throw new Error('Invalid /api/system response');
       const ms = performance.now() - t0;
-      manual.set({ seq, ms, error: null, system: info });
+      const seq = props.initialPingSeq;
+      manual.set({ seq, epoch: ep, ms, error: null, errorSafe: null, system: info });
       announcement.set(`Server ping ${formatPing(ms)}`);
     } catch (e) {
-      if (unmounted || token !== pingToken || ctrl.signal.aborted) return;
+      if (unmounted || token !== pingToken || ctrl.signal.aborted || hub.epoch !== ep || isConnecting()) return;
       const msg = errorMessage(e);
-      manual.set({ seq, ms: null, error: msg });
-      announcement.set(`Server ping failed: ${msg}`);
+      const safe = safePingError(e);
+      const seq = props.initialPingSeq;
+      const prevSystem = manual.peek()?.epoch === ep ? manual.peek()?.system : undefined;
+      manual.set({ seq, epoch: ep, ms: null, error: msg, errorSafe: safe, system: prevSystem });
+      announcement.set(`Server ping failed: ${safe}`);
     } finally {
       if (!unmounted && token === pingToken) pinging.set(false);
     }
@@ -167,7 +213,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       if (unmounted) return;
       copied.set(false);
       announcement.set('Could not copy diagnostics');
-      toast.error('Could not copy diagnostics', e instanceof Error ? e.message : undefined);
+      toast.error(e, 'Could not copy diagnostics');
     }
   }
 
@@ -177,31 +223,25 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         name="Server & latency"
         desc={
           <span class="diag-sub">
-            <span>{serverLine.get()}</span>
-            <span class="sep" aria-hidden="true">
-              ·
-            </span>
-            <span class="mono endpoint">{endpoint.get()}</span>
+            <Meta>
+              <span>{serverLine.get()}</span>
+              <span class="mono endpoint">{endpoint.get()}</span>
+            </Meta>
           </span>
         }
         control={
-          <>
+          <div class="ping-ctl">
             <span class="diag-val num" class:diag-err={!!pingError.get()}>
               {pingText.get()}
             </span>
-            <Button size="sm" variant="ghost" icon={RefreshCw} loading={pinging.get()} onclick={measurePing}>
+            <Button size="sm" variant="ghost" icon={RefreshCw} loading={pinging.get()} disabled={hub.mode === 'connecting'} onclick={measurePing}>
               Ping
             </Button>
-          </>
+          </div>
         }
       />
 
-      <Row
-        fact
-        name="Compute device"
-        desc={device.get().summary}
-        control={<span class="mono diag-val">{device.get().id}</span>}
-      />
+      <Row fact name="Compute device" desc={device.get().summary} control={<span class="mono diag-val">{device.get().id}</span>} />
 
       <Row
         fact
@@ -220,16 +260,11 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         control={<span class="num diag-val">{features.get().length}</span>}
       />
 
-      <Row
-        fact
-        name="Studio environment"
-        desc={envDesc.get()}
-        control={<span class="mono diag-val">v{props.studioVersion}</span>}
-      />
+      <Row fact name="Studio environment" desc={envDesc.get()} control={<span class="mono diag-val">v{props.studioVersion}</span>} />
 
       <Row
         name="Bug report summary"
-        desc="Plain-text snapshot of server version, latency, capabilities, theme, and density. Credentials and tokens are omitted."
+        desc="Plain-text snapshot of server version, latency, capabilities, theme, and density. Credentials, paths, and raw error text are omitted."
         control={
           <Button size="sm" icon={copied.get() ? Check : Copy} onclick={copyReport}>
             {copied.get() ? 'Copied' : 'Copy diagnostics'}
@@ -246,19 +281,26 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
 
 css`
   .diag-sub {
-    display: inline-flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0 var(--space-1-5);
-  }
-  .sep {
-    color: var(--text-tertiary);
+    display: block;
+    min-width: 0;
   }
   .endpoint {
     overflow-wrap: anywhere;
     color: var(--text-secondary);
   }
+  .ping-ctl {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    min-width: 0;
+    max-width: 100%;
+  }
   .diag-val {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -271,10 +313,13 @@ css`
     flex-wrap: wrap;
     gap: var(--space-1);
     margin-top: 2px;
+    min-width: 0;
+    max-width: 100%;
   }
   .feat {
     display: inline-flex;
     align-items: center;
+    max-width: 100%;
     padding: 0 var(--space-1-5);
     border-radius: var(--radius-xs);
     border: 1px solid var(--line-subtle);
@@ -283,6 +328,6 @@ css`
     font-family: var(--font-mono);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 `;

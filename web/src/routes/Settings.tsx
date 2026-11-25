@@ -39,6 +39,7 @@ import { SCROLL_KEYS, sectionAt } from './settings/spy';
 import ConnectionPanel from './settings/ConnectionPanel';
 import Appearance from './settings/Appearance';
 import DiagnosticsPanel from './settings/DiagnosticsPanel';
+import { isSystemInfo } from './settings/diagnostics';
 
 const capMarks: Record<CapState, IconType> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 /** "Ctrl K" or "⌘ K": the one this platform uses. */
@@ -58,17 +59,33 @@ export default function Settings() {
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
   const initialPingMs = signal<number | null>(null);
   const initialPingSeq = signal(0);
+  const initialPingEpoch = signal<number | null>(null);
+  let prevHubEpoch = hub.epoch;
+  let prevConnecting = hub.mode === 'connecting';
+  effect(() => {
+    const ep = hub.epoch;
+    const connecting = hub.mode === 'connecting';
+    if (ep === prevHubEpoch && connecting === prevConnecting) return;
+    prevHubEpoch = ep;
+    prevConnecting = connecting;
+    initialPingMs.set(null);
+    if (ep !== initialPingEpoch.peek() || connecting) initialPingEpoch.set(null);
+    initialPingSeq.set(initialPingSeq.peek() + 1);
+  });
   const sys = new Resource(async (s) => {
+    const ep = hub.epoch;
     const t0 = performance.now();
     try {
       const data = await hub.api.system(s);
-      if (!s.aborted) {
+      if (!isSystemInfo(data)) throw new Error('Invalid /api/system response');
+      if (!s.aborted && hub.epoch === ep && hub.mode !== 'connecting') {
         initialPingMs.set(performance.now() - t0);
+        initialPingEpoch.set(ep);
         initialPingSeq.set(initialPingSeq.peek() + 1);
       }
       return data;
     } catch (e) {
-      if (!s.aborted) {
+      if (!s.aborted && hub.epoch === ep && hub.mode !== 'connecting') {
         initialPingMs.set(null);
         initialPingSeq.set(initialPingSeq.peek() + 1);
       }
@@ -414,8 +431,8 @@ export default function Settings() {
         ) : null}
 
         <DiagnosticsPanel
-          system={sys.data}
-          systemError={sys.error}
+          system={initialPingEpoch.get() === hub.epoch ? sys.data : undefined}
+          systemError={sys.error ?? sys.stale}
           initialPingMs={initialPingMs.get()}
           initialPingSeq={initialPingSeq.get()}
           studioVersion={pkg.version}
