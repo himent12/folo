@@ -563,4 +563,70 @@ mod tests {
             assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} must fail");
         }
     }
+
+    /// `folo describe` surfaces flag aliases, enum value aliases, env vars, symmetric conflicts, and
+    /// required/exclusive argument groups without leaking derive-generated struct groups.
+    #[test]
+    fn describe_surfaces_aliases_env_conflicts_and_groups() {
+        let arg = |cmd: &serde_json::Value, name: &str| {
+            cmd["args"].as_array().unwrap().iter().find(|a| a["name"] == name).unwrap().clone()
+        };
+
+        // `train`: `--model` alias `--arch`, symmetric `--model`/`--weights` conflict, `end2end` value alias on
+        // `--head`, and required non-exclusive `input` group (`--data`, `--resume`).
+        let train = describe::describe(&Cli::command(), &["train".into()], false).unwrap();
+        assert_eq!(arg(&train, "model")["aliases"], json!(["--arch"]));
+        assert_eq!(arg(&train, "model")["conflicts_with"], json!(["--weights"]));
+        assert_eq!(arg(&train, "weights")["conflicts_with"], json!(["--model"]));
+        let head_vals = arg(&train, "head")["possible_values"].as_array().unwrap().clone();
+        let o2o = head_vals.iter().find(|v| v["value"] == "o2o").unwrap();
+        assert_eq!(o2o["aliases"], json!(["end2end"]));
+        assert_eq!(
+            train["groups"],
+            json!([{ "name": "input", "required": true, "exclusive": false, "args": ["--data", "--resume"] }])
+        );
+
+        // `val`: symmetric `--half` <-> `--precision` conflict.
+        let val = describe::describe(&Cli::command(), &["val".into()], false).unwrap();
+        assert_eq!(arg(&val, "half")["conflicts_with"], json!(["--precision"]));
+        assert_eq!(arg(&val, "precision")["conflicts_with"], json!(["--half"]));
+        assert_eq!(val["groups"], json!([]));
+
+        // `mcp`: `FOLO_SERVER` env and symmetric `--mock` <-> `--server` conflict.
+        let mcp = describe::describe(&Cli::command(), &["mcp".into()], false).unwrap();
+        assert_eq!(arg(&mcp, "server")["env"], json!("FOLO_SERVER"));
+        assert_eq!(arg(&mcp, "server")["conflicts_with"], json!(["--mock"]));
+        assert_eq!(arg(&mcp, "mock")["conflicts_with"], json!(["--server"]));
+
+        // `bench create`: required exclusive `source` group and symmetric group conflicts.
+        let bcreate = describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();
+        assert_eq!(
+            bcreate["groups"],
+            json!([{
+                "name": "source",
+                "required": true,
+                "exclusive": true,
+                "args": ["--dataset", "--data", "--label-job"]
+            }])
+        );
+        assert_eq!(arg(&bcreate, "dataset")["conflicts_with"], json!(["--data", "--label-job"]));
+        assert_eq!(arg(&bcreate, "data")["conflicts_with"], json!(["--dataset", "--label-job"]));
+        assert_eq!(arg(&bcreate, "label_job")["conflicts_with"], json!(["--data", "--dataset"]));
+
+        // `dataset check`: `warn` alias on `warning` enum value.
+        let dcheck = describe::describe(&Cli::command(), &["dataset".into(), "check".into()], false).unwrap();
+        let sev_vals = arg(&dcheck, "min_severity")["possible_values"].as_array().unwrap().clone();
+        let warning = sev_vals.iter().find(|v| v["value"] == "warning").unwrap();
+        assert_eq!(warning["aliases"], json!(["warn"]));
+
+        // Command alias lookup works cleanly on a synthetic command tree with a visible command alias.
+        let synthetic =
+            clap::Command::new("root").subcommand(clap::Command::new("check").visible_alias("verify").arg(
+                clap::Arg::new("fast").long("fast").visible_short_alias('f').action(clap::ArgAction::SetTrue),
+            ));
+        let via_alias = describe::describe(&synthetic, &["verify".into()], false).unwrap();
+        assert_eq!(via_alias["name"], "check");
+        assert_eq!(via_alias["aliases"], json!(["verify"]));
+        assert_eq!(arg(&via_alias, "fast")["aliases"], json!(["-f"]));
+    }
 }

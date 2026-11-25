@@ -192,9 +192,10 @@ pub enum OptimizerArg {
 
 /// `folo train`. Mirrors `TrainConfig` in docs/API.md (plus the docs/MODEL.md §8.1 recipe keys).
 #[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("input").required(true).multiple(true).args(["data", "resume"])))]
 pub struct TrainArgs {
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
-    #[arg(long, required_unless_present = "resume")]
+    #[arg(long)]
     pub data: Option<String>,
     /// Format of --data: auto (detect from the files), or yolo / coco for a folder that has both.
     #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
