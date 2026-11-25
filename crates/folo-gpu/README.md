@@ -37,7 +37,7 @@ Its `source` is either `Source::Static(include_str!("../shaders/<file>.wgsl"))` 
 function that returns WGSL for a `Spec`. Generators either concatenate files with shared snippets
 (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
 `kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm.rs`,
-`kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided.rs`,
+`kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided/`,
 `kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
 `pipeline::render` then puts `Spec::header` (`enable f16;` and `enable wgpu_cooperative_matrix;` when asked,
 `alias T = f32|f16`, one `const` per specialisation constant) and `PRELUDE` (the uniform block and `pu` / `pi` /
@@ -72,8 +72,8 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
 | max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only), `kernels::pool_grad::*` | `maxpool.wgsl`; generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
 | nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d`, `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
-| index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/index.rs` |
-| copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/transfer.rs` |
+| index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/index.rs` |
+| copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/transfer.rs` |
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
 | optimizer updates, clipping, loss-scaler unscale | `optimizer_step(_many)`, `norm_partials_many`, `scale_many`, `unscale_check(_many)` | `kernels::optim::*` | `optim.wgsl`; generated `_many` kernels | folo-nn `tests/gpu/main.rs` |
 | Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` | generated in `muon/shader.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
@@ -103,7 +103,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 |---|---|
 | Add a kernel | The WGSL in `src/shaders/<name>.wgsl` (or a generator in Rust); a `KernelDef` and the entry point in `src/kernels/<area>.rs`, added to that module's `DEFS` (a new module also goes into `all_defs` in `src/kernels/mod.rs`); a bound in `src/kernels/bounds.rs` if the generated source grows with a constant; a test in `src/tests/<area>.rs`; the kernel table in `docs/GPU.md`. `docs/GPU.md`, Adding a kernel, has the steps. |
 | Run a folo-core op on the GPU | The method in `src/backend/ops.rs` (or `src/backend/sites.rs`), calling a `src/kernels/` entry point; a `check` case in `src/tests/backend/<area>.rs`; the op mapping in `docs/GPU.md`, folo-core backend. |
-| Support a new folo-core unary op | `unary_code` and the `un` (forward) / `unb` (gradient) cases of `EW_FNS` in `src/kernels/ew.rs`; the op list in `src/tests/backend/elementwise.rs`. |
+| Support a new folo-core unary op | `unary_code` and `push_ew_op` in `src/kernels/ew.rs`; the op list in `src/tests/backend/elementwise.rs`. |
 
 A kernel missing from its module's `DEFS` cannot be precompiled from a kernel list. Once such a kernel has run,
 `GpuContext::kernels_without_registry` names it, and `src/tests/precompile.rs` and GPU training tests in folo-nn and
