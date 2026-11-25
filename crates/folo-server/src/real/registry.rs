@@ -3,6 +3,7 @@
 //! dataset id is never handed to another dataset while runs still name it.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use folo_api::DatasetFormat;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use crate::index::write_atomic;
 use super::Registration;
 
 /// The registry, both files.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(super) struct RegistryFile {
     pub datasets: Vec<Registration>,
     /// Unregistered datasets whose id runs still reference: registering the same dataset again (its canonical path
@@ -157,4 +158,127 @@ pub(super) fn write_with(
         write(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))?;
     }
     Ok(())
+}
+
+/// Stat fingerprint of one registry file on disk (`None` when the file does not exist).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: (i64, i64),
+    #[cfg(windows)]
+    created: u64,
+}
+
+pub(super) type RegistryStamps = (Option<FileStamp>, Option<FileStamp>);
+
+fn stamp_file(path: &Path) -> std::io::Result<Option<FileStamp>> {
+    match std::fs::metadata(path) {
+        Ok(md) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Ok(Some(FileStamp {
+                    len: md.len(),
+                    modified: md.modified().ok(),
+                    dev: md.dev(),
+                    ino: md.ino(),
+                    ctime: (md.ctime(), md.ctime_nsec()),
+                }))
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                Ok(Some(FileStamp {
+                    len: md.len(),
+                    modified: md.modified().ok(),
+                    created: md.creation_time(),
+                }))
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                Ok(Some(FileStamp { len: md.len(), modified: md.modified().ok() }))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn registry_stamps(dir: &Path) -> std::io::Result<RegistryStamps> {
+    Ok((stamp_file(&registry_path(dir))?, stamp_file(&tombstones_path(dir))?))
+}
+
+struct CachedRegistry {
+    stamps: RegistryStamps,
+    file: RegistryFile,
+}
+
+/// Stat-validated in-memory cache of `datasets.json` and `datasets.removed.json`: avoids redundant disk reads and
+/// JSON deserialization on repeated registry operations while picking up external modifications immediately.
+#[derive(Default)]
+pub(super) struct RegistryCache {
+    cached: Option<CachedRegistry>,
+    #[cfg(test)]
+    pub(super) disk_reads: u64,
+}
+
+impl RegistryCache {
+    /// Seeds the cache with a [`RegistryFile`] just read from `dir` when its on-disk stamps remained stable.
+    pub(super) fn seed(&mut self, dir: &Path, before: Option<RegistryStamps>, file: &RegistryFile) {
+        if let (Some(before), Ok(after)) = (before, registry_stamps(dir))
+            && before == after
+        {
+            self.cached = Some(CachedRegistry { stamps: after, file: file.clone() });
+        }
+    }
+
+    /// Reads the registry, serving from memory when both files' on-disk stamps are unchanged. Never caches errors.
+    pub(super) fn read(&mut self, dir: &Path) -> Result<RegistryFile> {
+        let before = registry_stamps(dir).ok();
+        if let (Some(stamps), Some(cached)) = (&before, &self.cached)
+            && *stamps == cached.stamps
+        {
+            return Ok(cached.file.clone());
+        }
+        #[cfg(test)]
+        {
+            self.disk_reads += 1;
+        }
+        match read_registry(dir) {
+            Ok(file) => {
+                // Only cache if neither file changed while we were reading it.
+                self.cached = None;
+                self.seed(dir, before, &file);
+                Ok(file)
+            }
+            Err(e) => {
+                self.cached = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// Writes `file` atomically and refreshes the cache. Invalidates before writing so a partial/failed write
+    /// never leaves stale cached state.
+    pub(super) fn write(&mut self, dir: &Path, file: &mut RegistryFile, gains: Gains) -> Result<()> {
+        self.cached = None;
+        write_registry(dir, file, gains)?;
+        // `write_registry` always emits the plain-list `datasets.json` and separate `datasets.removed.json`.
+        file.object = false;
+        if let Ok(stamps) = registry_stamps(dir) {
+            self.cached = Some(CachedRegistry { stamps, file: file.clone() });
+        }
+        Ok(())
+    }
+
+    /// Current stamps of both registry files before an initial read at startup.
+    pub(super) fn stamps(dir: &Path) -> Option<RegistryStamps> {
+        registry_stamps(dir).ok()
+    }
 }

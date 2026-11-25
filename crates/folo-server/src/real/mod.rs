@@ -26,10 +26,11 @@
 //!
 //! Files: this one holds [`RealStore`] itself and [`RealStore::open_with_cloud`], which builds the runs, models,
 //! uploads, cloud, labeler and benches services it uses. `store` is its [`Store`](crate::Store) implementation;
-//! `datasets` (registering, loading and re-checking indexes), `registry` (`datasets.json` and its
-//! tombstones), `deletion` (`DELETE /api/datasets/{id}?files=true`), `training` (starting runs here or on a cloud
-//! connection), `models` (the models it lists), `uploads` (what finished uploads become) and `gpu_idle` (releasing
-//! inference memory when idle) hold the rest; `tests` covers dataset ids and file deletion.
+//! `datasets` (registering, loading and re-checking indexes), `registry` (`datasets.json`, its tombstones and
+//! stat-validated cache), `thumbs` (bounded LRU cache of dataset thumbnails), `deletion`
+//! (`DELETE /api/datasets/{id}?files=true`), `training` (starting runs here or on a cloud connection), `models` (the
+//! models it lists), `uploads` (what finished uploads become) and `gpu_idle` (releasing inference memory when idle)
+//! hold the rest; `tests` covers dataset ids, caches and file deletion.
 
 mod datasets;
 mod deletion;
@@ -37,9 +38,11 @@ mod gpu_idle;
 mod models;
 mod registry;
 mod store;
+mod thumbs;
 mod training;
 mod uploads;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -60,7 +63,8 @@ use crate::throughput::Throughput;
 use crate::uploads::Uploads;
 use datasets::load_or_build;
 use gpu_idle::{GpuIdle, spawn_idle_sweeper};
-use registry::read_registry;
+use registry::{RegistryCache, read_registry};
+use thumbs::ThumbCache;
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
 pub const RECHECK_EVERY: Duration = Duration::from_secs(5);
@@ -108,6 +112,8 @@ struct Slot {
 
 /// One registered dataset.
 struct Entry {
+    /// Immutable dataset id (matches `reg.id`), readable without locking `reg`.
+    id: String,
     reg: Mutex<Registration>,
     slot: Mutex<Slot>,
     ready: Condvar,
@@ -119,12 +125,18 @@ struct Entry {
 
 impl Entry {
     fn new(reg: Registration, state: State) -> Entry {
+        let id = reg.id.clone();
         Entry {
+            id,
             reg: Mutex::new(reg),
             slot: Mutex::new(Slot { state, checked: Instant::now(), checking: false }),
             ready: Condvar::new(),
             deleted: Mutex::new(false),
         }
+    }
+
+    fn id(&self) -> &str {
+        &self.id
     }
 
     /// Runs a cache write unless the dataset was unregistered (see [`Entry::deleted`]).
@@ -160,10 +172,55 @@ impl Entry {
     }
 }
 
+/// Ordered dataset entries paired with an O(1) `id -> Entry` index kept strictly in sync under [`RealStore::entries`].
+#[derive(Default)]
+struct EntryTable {
+    list: Vec<Arc<Entry>>,
+    by_id: HashMap<String, Arc<Entry>>,
+}
+
+impl EntryTable {
+    fn from_entries(list: Vec<Arc<Entry>>) -> Self {
+        let by_id = list.iter().map(|e| (e.id().to_string(), e.clone())).collect();
+        Self { list, by_id }
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<Entry>> {
+        self.by_id.get(id).cloned()
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.by_id.contains_key(id)
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, Arc<Entry>> {
+        self.list.iter()
+    }
+
+    fn snapshot_vec(&self) -> Vec<Arc<Entry>> {
+        self.list.clone()
+    }
+
+    fn insert(&mut self, entry: Arc<Entry>) {
+        self.by_id.insert(entry.id().to_string(), entry.clone());
+        self.list.push(entry);
+    }
+
+    fn remove(&mut self, id: &str) -> Option<Arc<Entry>> {
+        let removed = self.by_id.remove(id)?;
+        self.list.retain(|e| e.id() != id);
+        Some(removed)
+    }
+}
+
 /// The real store. See the module docs.
 pub struct RealStore {
     data_dir: PathBuf,
-    entries: RwLock<Vec<Arc<Entry>>>,
+    entries: RwLock<EntryTable>,
+    /// Stat-validated cache of `datasets.json` and `datasets.removed.json` (leaf lock).
+    registry: Mutex<RegistryCache>,
+    /// Bounded LRU cache of encoded dataset thumbnails (lock order: `Entry::deleted` -> `thumbs`).
+    thumbs: Mutex<ThumbCache>,
     /// Set when `datasets.json` could not be read at start, so `entries` lacks what it lists
     /// ([`RealStore::registry_loaded`]).
     registry_unread: AtomicBool,
@@ -223,14 +280,22 @@ impl RealStore {
         tuning: cloud::Tuning,
     ) -> RealStore {
         let registry_unread = AtomicBool::new(false);
-        let regs = read_registry(&data_dir).map(|f| f.datasets).unwrap_or_else(|e| {
-            tracing::error!(
-                "{e}; listing, registering and unregistering datasets is disabled until it is fixed and folo serve \
-                 started again"
-            );
-            registry_unread.store(true, Ordering::SeqCst);
-            Vec::new()
-        });
+        let mut registry_cache = RegistryCache::default();
+        let before_stamps = RegistryCache::stamps(&data_dir);
+        let regs = match read_registry(&data_dir) {
+            Ok(file) => {
+                registry_cache.seed(&data_dir, before_stamps, &file);
+                file.datasets
+            }
+            Err(e) => {
+                tracing::error!(
+                    "{e}; listing, registering and unregistering datasets is disabled until it is fixed and folo serve \
+                     started again"
+                );
+                registry_unread.store(true, Ordering::SeqCst);
+                Vec::new()
+            }
+        };
         // A dataset whose folder is gone stays listed (indexing fails with `path_not_found`), so clients can say so
         // and unregister it; it works again as soon as the folder is back.
         let entries: Vec<_> = regs.into_iter().map(|r| Arc::new(Entry::new(r, State::Pending))).collect();
@@ -270,7 +335,9 @@ impl RealStore {
         cloud.recover_and_reap(&runs);
         RealStore {
             data_dir,
-            entries: RwLock::new(entries),
+            entries: RwLock::new(EntryTable::from_entries(entries)),
+            registry: Mutex::new(registry_cache),
+            thumbs: Mutex::new(ThumbCache::default()),
             registry_unread,
             files: RwLock::new(()),
             recheck_every: RECHECK_EVERY,

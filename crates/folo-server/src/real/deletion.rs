@@ -10,7 +10,6 @@ use crate::error::{Error, Result};
 use crate::index::reads;
 
 use super::RealStore;
-use super::registry::read_registry;
 
 impl RealStore {
     /// Unregisters the dataset and deletes the folder it was written to, the one right under `<data dir>/datasets`
@@ -66,8 +65,7 @@ impl RealStore {
                 .hint(format!("fix {name} first, or unregister this dataset without files=true"))),
             }
         };
-        let others: Vec<_> =
-            self.entries.read().unwrap().iter().filter(|e| e.reg().id != id).cloned().collect();
+        let others: Vec<_> = self.entries.read().unwrap().iter().filter(|e| e.id() != id).cloned().collect();
         let mut readers = Vec::new();
         for r in others.iter().map(|e| e.reg()) {
             if reads_folder(&r.name, &r.path, r.format)? {
@@ -80,7 +78,7 @@ impl RealStore {
         }
         // A run of an unregistered dataset that keeps its id finds its files again when it is registered again.
         let kept: HashSet<String> =
-            read_registry(&self.data_dir)?.tombstones.into_iter().map(|t| t.id).collect();
+            self.read_registry_cached()?.tombstones.into_iter().map(|t| t.id).collect();
         for e in &runs {
             let ds = e.dataset();
             if kept.contains(&ds.id) && reads_folder(&ds.name, &ds.path, ds.format)? {
