@@ -58,11 +58,11 @@ impl<T: 'static> Element for Canvas<T> {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Style) {
         let mut style = Style::default();
         style.refine(&self.style);
-        let layout_id = window.request_layout(style.clone(), None, cx);
+        let layout_id = window.request_layout_ref(&style, None);
         (layout_id, style)
     }
 

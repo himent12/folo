@@ -23,11 +23,10 @@ impl Interactivity {
         cx: &mut App,
         f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
-        window.with_optional_element_state::<InteractiveElementState, _>(
+        window.with_sparse_element_state::<InteractiveElementState, _>(
             global_id,
-            |element_state, window| {
-                let mut element_state = element_state.map(|state| state.unwrap_or_default());
-
+            InteractiveElementState::is_empty,
+            |mut element_state, window| {
                 // A drag in progress cancels a pending click and the pressed state (GPUI).
                 if let Some(state) = element_state.as_ref()
                     && window.active_drag.is_some()
@@ -90,10 +89,10 @@ impl Interactivity {
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             window.set_focus_handle(focus_handle, cx);
         }
-        let result = window.with_optional_element_state::<InteractiveElementState, _>(
+        let result = window.with_sparse_element_state::<InteractiveElementState, _>(
             global_id,
-            |element_state, window| {
-                let mut element_state = element_state.map(|state| state.unwrap_or_default());
+            InteractiveElementState::is_empty,
+            |mut element_state, window| {
                 let style = self.compute_style_internal(None, element_state.as_ref(), window);
 
                 if let Some(state) = element_state.as_mut() {
@@ -203,10 +202,10 @@ impl Interactivity {
             window.set_active_dispatch_node(node);
         }
         self.hovered = hitbox.map(|hitbox| hitbox.is_hovered(window));
-        window.with_optional_element_state::<InteractiveElementState, _>(
+        window.with_sparse_element_state::<InteractiveElementState, _>(
             global_id,
-            |element_state, window| {
-                let mut element_state = element_state.map(|state| state.unwrap_or_default());
+            InteractiveElementState::is_empty,
+            |mut element_state, window| {
                 let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
                 self.paint_hover_group_handler(window);
                 if style.visibility == Visibility::Hidden {
@@ -260,11 +259,8 @@ impl Interactivity {
         window: &mut Window,
         _cx: &mut App,
     ) -> Style {
-        window.with_optional_element_state(global_id, |element_state, window| {
-            let element_state = element_state.map(|state| state.unwrap_or_default());
-            let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
-            (style, element_state)
-        })
+        let element_state = window.peek_element_state::<InteractiveElementState>(global_id);
+        self.compute_style_internal(hitbox, element_state, window)
     }
 
     /// GPUI's `compute_style_internal`: hover styles need a hitbox (so only paint sees them) and no drag;

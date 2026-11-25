@@ -149,6 +149,18 @@ pub(crate) struct InteractiveElementState {
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
 }
 
+impl InteractiveElementState {
+    /// Whether no per-element state field is populated (so nothing needs to be boxed across frames).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.focus_handle.is_none()
+            && self.clicked_state.is_none()
+            && self.hover_state.is_none()
+            && self.pending_mouse_down.is_none()
+            && self.scroll_offset.is_none()
+            && self.active_tooltip.is_none()
+    }
+}
+
 /// Everything an interactive element carries. Built by the builder methods, consumed by its phases.
 #[derive(Default)]
 pub struct Interactivity {
@@ -172,8 +184,8 @@ pub struct Interactivity {
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     /// The scroll offset cell (from the scroll handle or the element state) of a scroll container.
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
-    /// The base style.
-    pub(crate) base_style: Box<StyleRefinement>,
+    /// The base style (stored inline: elements are already boxed once inside `AnyElement`).
+    pub(crate) base_style: StyleRefinement,
     /// Applied while hovered.
     pub(crate) hover_style: Option<Box<StyleRefinement>>,
     /// Applied while a group is hovered.

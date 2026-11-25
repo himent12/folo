@@ -5,7 +5,11 @@
 //! Performance: the window keeps two frames (`rendered_frame`, `next_frame`) and swaps them after each draw;
 //! `Frame::clear` empties every list but keeps its capacity, so a steady-state frame allocates nothing a
 //! reused `Vec` avoids. Element states are moved, not cloned, from the previous frame when touched again.
-use std::any::Any;
+use std::{
+    any::{Any, TypeId},
+    borrow::Borrow,
+    hash::{Hash, Hasher},
+};
 
 use smallvec::SmallVec;
 
@@ -176,15 +180,81 @@ pub(crate) struct DeferredDraw {
     pub(crate) absolute_offset: crate::Point<Pixels>,
 }
 
+/// Owned key for `ElementStateMap`: pairs a [`GlobalElementId`] with a state [`TypeId`] while
+/// supporting zero-clone borrowed lookups via [`ElementStateKeyRef`].
+#[derive(Clone, Debug, Eq)]
+pub(crate) struct ElementStateKey(pub(crate) GlobalElementId, pub(crate) TypeId);
+
+/// Borrowed lookup key for [`ElementStateMap`] (avoids cloning `GlobalElementId`'s `Arc`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ElementStateKeyRef<'a> {
+    pub(crate) global_id: &'a GlobalElementId,
+    pub(crate) type_id: TypeId,
+}
+
+/// Trait object bridge allowing `HashMap::get` / `remove_entry` with [`ElementStateKeyRef`].
+pub(crate) trait AsElementStateKey {
+    fn as_element_state_key(&self) -> ElementStateKeyRef<'_>;
+}
+
+impl PartialEq for dyn AsElementStateKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_element_state_key() == other.as_element_state_key()
+    }
+}
+
+impl Eq for dyn AsElementStateKey + '_ {}
+
+impl Hash for dyn AsElementStateKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_element_state_key().hash(state);
+    }
+}
+
+impl AsElementStateKey for ElementStateKey {
+    fn as_element_state_key(&self) -> ElementStateKeyRef<'_> {
+        ElementStateKeyRef { global_id: &self.0, type_id: self.1 }
+    }
+}
+
+impl AsElementStateKey for ElementStateKeyRef<'_> {
+    fn as_element_state_key(&self) -> ElementStateKeyRef<'_> {
+        *self
+    }
+}
+
+impl PartialEq for ElementStateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_element_state_key() == other.as_element_state_key()
+    }
+}
+
+impl Hash for ElementStateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_element_state_key().hash(state);
+    }
+}
+
+impl<'a> Borrow<dyn AsElementStateKey + 'a> for ElementStateKey {
+    fn borrow(&self) -> &(dyn AsElementStateKey + 'a) {
+        self
+    }
+}
+
 /// Element state kept across frames, by element id path and state type (the path's hash is precomputed;
 /// the Fx hasher mixes it with the type's).
-pub(crate) type ElementStateMap =
-    crate::text::fx_hash::FxHashMap<(GlobalElementId, std::any::TypeId), Box<dyn Any>>;
+pub(crate) type ElementStateMap = crate::text::fx_hash::FxHashMap<ElementStateKey, Box<dyn Any>>;
+
+/// Interned `GlobalElementId`s touched during a frame, keyed by their path hash so steady-state frames
+/// reuse the previous frame's `Arc<[ElementId]>` instead of allocating a new slice per element.
+pub(crate) type ElementIdMap = crate::text::fx_hash::FxHashMap<u64, SmallVec<[GlobalElementId; 1]>>;
 
 /// Everything one paint produced.
 pub(crate) struct Frame {
     /// The focused element when this frame was painted.
     pub(crate) focus: Option<FocusId>,
+    /// Global element ids built or reused this frame (swapped across frames so steady frames reuse `Arc`s).
+    pub(crate) element_ids: ElementIdMap,
     /// Element states touched this frame (the rest of the previous frame's are dropped at the swap).
     pub(crate) element_states: ElementStateMap,
     /// Hit-testable rectangles, in paint order.
@@ -222,6 +292,7 @@ impl Frame {
     pub(crate) fn new() -> Self {
         Frame {
             focus: None,
+            element_ids: Default::default(),
             element_states: Default::default(),
             hitboxes: Vec::new(),
             mouse_down_listeners: Vec::new(),
@@ -244,6 +315,7 @@ impl Frame {
     /// states are the ones nothing touched this frame: they are dropped.
     pub(crate) fn clear(&mut self) {
         self.focus = None;
+        self.element_ids.clear();
         self.element_states.clear();
         self.hitboxes.clear();
         self.mouse_down_listeners.clear();

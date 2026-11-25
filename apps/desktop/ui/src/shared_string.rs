@@ -46,7 +46,7 @@ impl Deref for SharedString {
 
 impl Default for SharedString {
     fn default() -> Self {
-        Self(Repr::Owned(Arc::default()))
+        Self::new_static("")
     }
 }
 

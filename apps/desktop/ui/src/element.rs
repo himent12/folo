@@ -264,7 +264,7 @@ impl<E: Element> ElementObject for Drawable<E> {
                 window.frame_times.elements += 1;
                 let global_id = self.element.id().map(|id| {
                     window.element_id_stack.push(id);
-                    GlobalElementId::new(window.element_id_stack.as_slice())
+                    window.intern_global_id()
                 });
                 let (layout_id, request_layout) =
                     self.element.request_layout(global_id.as_ref(), None, window, cx);
@@ -691,11 +691,24 @@ impl From<(SharedString, usize)> for ElementId {
 pub struct GlobalElementId(pub(crate) Arc<[ElementId]>, u64);
 
 impl GlobalElementId {
-    /// The id of the element at the end of `path`.
-    pub(crate) fn new(path: &[ElementId]) -> Self {
+    /// Hashes `path` with the same Fx hash stored in [`GlobalElementId`].
+    #[inline]
+    pub(crate) fn hash_path(path: &[ElementId]) -> u64 {
         let mut hasher = crate::text::fx_hash::FxHasher::default();
         path.hash(&mut hasher);
-        GlobalElementId(Arc::from(path), std::hash::Hasher::finish(&hasher))
+        std::hash::Hasher::finish(&hasher)
+    }
+
+    /// Builds an id from `path` and its precomputed `hash`.
+    #[inline]
+    pub(crate) fn from_parts(path: &[ElementId], hash: u64) -> Self {
+        GlobalElementId(Arc::from(path), hash)
+    }
+
+    /// The element id path stored inside this global id.
+    #[inline]
+    pub(crate) fn path(&self) -> &[ElementId] {
+        &self.0
     }
 }
 
