@@ -34,12 +34,12 @@ export interface TileGridProps {
   /** A tile's accessible name. */
   label: (i: number) => string;
   onopen: (i: number) => void;
-  /** The items [lo, hi) of the rows in view, as they change. */
-  onrange?: (lo: number, hi: number) => void;
+  /** The items [lo, hi) of the rendered rows (overscan included) and [visLo, visHi) of the rows in the viewport. */
+  onrange?: (lo: number, hi: number, visLo: number, visHi: number) => void;
   /** The sticky toolbar above the grid: keyboard moves keep the focused row clear of it. */
   toolbar: string;
-  /** A tile's content; `i()` is its item's index (a cell's index changes when the column count does). */
-  tile: (i: () => number) => JSX.Element;
+  /** A tile's content; `i()` is its item's index and `inView()` is whether its row is inside the viewport (not overscan). */
+  tile: (i: () => number, inView: () => boolean) => JSX.Element;
   /** An item to scroll into view and focus, each time a new object is given (where a viewer over the grid closed). */
   reveal?: { i: number } | null;
 }
@@ -51,8 +51,9 @@ const OVERSCAN = 2;
 export default function TileGrid(props: TileGridProps) {
   let el: HTMLDivElement | undefined;
   const width = signal(0);
-  /** Viewport-relative top of the grid and the window height, updated on scroll / resize. */
+  /** Viewport-relative top of the grid, sticky toolbar bottom, and window height, updated on scroll / resize. */
   const top = signal(0);
+  const head = signal(0);
   const vh = signal(800);
   const focusIdx = signal(0);
 
@@ -61,33 +62,44 @@ export default function TileGrid(props: TileGridProps) {
   const cellH = computed(() => Math.round(cellW.get() / props.aspect));
   const rowH = computed(() => cellH.get() + GAP);
   const rows = computed(() => Math.ceil(props.total / cols.get()));
-  const first = computed(() => Math.max(0, Math.floor(-top.get() / rowH.get()) - OVERSCAN));
-  const last = computed(() => Math.min(rows.get(), Math.ceil((vh.get() - top.get()) / rowH.get()) + OVERSCAN));
+  /** Rows in the unobscured viewport (without overscan): integer row indices, so sub-row scrolling never moves them. */
+  const viewFirst = computed(() => Math.max(0, Math.floor((head.get() - top.get()) / rowH.get())));
+  const viewLast = computed(() => Math.min(rows.get(), Math.ceil((vh.get() - top.get()) / rowH.get())));
+  const first = computed(() => Math.max(0, viewFirst.get() - OVERSCAN));
+  const last = computed(() => Math.min(rows.get(), viewLast.get() + OVERSCAN));
   const visible = computed(() => Array.from({ length: Math.max(0, last.get() - first.get()) }, (_, k) => first.get() + k));
-  /** The cell that takes Tab focus: the focused one when rendered, else the first in view. */
+  /** The cell that takes Tab focus: the focused one when rendered and within `total`, else the first in view. */
   const tabIdx = computed(() => {
     const f = focusIdx.get();
     const c = cols.get();
-    return f >= first.get() * c && f < last.get() * c ? f : Math.min(props.total - 1, Math.max(0, Math.floor(-top.get() / rowH.get())) * c);
+    const total = props.total;
+    return f < total && f >= first.get() * c && f < last.get() * c
+      ? f
+      : Math.min(Math.max(0, total - 1), Math.min(rows.get(), viewFirst.get()) * c);
   });
 
   function measure() {
     if (!el) return;
     top.set(el.getBoundingClientRect().top);
+    const tb = document.querySelector(props.toolbar);
+    head.set(tb ? Math.max(0, tb.getBoundingClientRect().bottom) : 0);
     vh.set(window.innerHeight);
   }
 
   effect(() => {
     let raf = 0;
     const on = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(measure);
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        measure();
+      });
     };
     measure();
     window.addEventListener('scroll', on, { passive: true });
     window.addEventListener('resize', on);
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
       window.removeEventListener('scroll', on);
       window.removeEventListener('resize', on);
     };
@@ -102,7 +114,13 @@ export default function TileGrid(props: TileGridProps) {
   });
 
   effect(() => {
-    props.onrange?.(first.get() * cols.get(), last.get() * cols.get());
+    const c = cols.get();
+    const total = props.total;
+    const lo = Math.min(total, first.get() * c);
+    const hi = Math.min(total, Math.max(lo, last.get() * c));
+    const visLo = Math.min(total, Math.max(lo, viewFirst.get() * c));
+    const visHi = Math.min(hi, Math.max(visLo, Math.max(0, viewLast.get()) * c));
+    props.onrange?.(lo, hi, visLo, visHi);
   });
 
   /** Height of sticky chrome over the top of the viewport (top bar + toolbar). */
@@ -174,31 +192,34 @@ export default function TileGrid(props: TileGridProps) {
       onkeydown={onkeydown}
     >
       <For each={visible.get()}>
-        {(r) => (
-          <div class="row" role="row" aria-rowindex={r() + 1} style:top={`${r() * rowH.get()}px`} style:height={`${cellH.get()}px`} style:gap={`${GAP}px`}>
-            <Index each={cellsOf(r)}>
-              {(_, c) => {
-                const i = () => r() * cols.get() + c;
-                // The grid's keys (onkeydown above) open the focused cell.
-                return (
-                  <div
-                    class="cell"
-                    role="gridcell"
-                    data-i={i()}
-                    tabindex={i() === tabIdx.get() ? 0 : -1}
-                    aria-colindex={c + 1}
-                    aria-label={props.label(i())}
-                    style:width={`${cellW.get()}px`}
-                    onfocus={() => focusIdx.set(i())}
-                    onclick={() => props.onopen(i())}
-                  >
-                    {props.tile(i)}
-                  </div>
-                );
-              }}
-            </Index>
-          </div>
-        )}
+        {(r) => {
+          const inView = () => r() >= viewFirst.get() && r() < viewLast.get();
+          return (
+            <div class="row" role="row" aria-rowindex={r() + 1} style:top={`${r() * rowH.get()}px`} style:height={`${cellH.get()}px`} style:gap={`${GAP}px`}>
+              <Index each={cellsOf(r)}>
+                {(_, c) => {
+                  const i = () => r() * cols.get() + c;
+                  // The grid's keys (onkeydown above) open the focused cell.
+                  return (
+                    <div
+                      class="cell"
+                      role="gridcell"
+                      data-i={i()}
+                      tabindex={i() === tabIdx.get() ? 0 : -1}
+                      aria-colindex={c + 1}
+                      aria-label={props.label(i())}
+                      style:width={`${cellW.get()}px`}
+                      onfocus={() => focusIdx.set(i())}
+                      onclick={() => props.onopen(i())}
+                    >
+                      {props.tile(i, inView)}
+                    </div>
+                  );
+                }}
+              </Index>
+            </div>
+          );
+        }}
       </For>
     </div>
   );
