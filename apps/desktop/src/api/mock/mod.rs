@@ -56,8 +56,8 @@ pub struct MockBackend {
     removed: Mutex<std::collections::HashSet<String>>,
     /// Calls a test holds back once answered ([`MockBackend::hold`]).
     holds: Mutex<Vec<(&'static str, Arc<hold::Gate>)>>,
-    /// An image-list call from this offset on fails once ([`MockBackend::fail_images_once_from`]).
-    fail_images_from: Mutex<Option<u32>>,
+    /// An image-list call from this offset on fails (once when `once` is true, else until cleared).
+    fail_images_from: Mutex<Option<(u32, ApiError, bool)>>,
     /// Every image-list call made, in order ([`MockBackend::image_lists`]).
     image_lists: Mutex<Vec<(String, ImageQuery)>>,
     /// `/system` calls made ([`MockBackend::system_calls`]).
@@ -75,6 +75,8 @@ pub struct MockBackend {
     /// Datasets whose own read fails with this (code, message) until mended
     /// ([`MockBackend::break_dataset`]).
     broken: Mutex<HashMap<String, (String, String)>>,
+    /// Per-dataset revision overrides returned by `dataset(id)` ([`MockBackend::set_dataset_revision`]).
+    revisions: Mutex<HashMap<String, String>>,
     clock: Clock,
 }
 
@@ -232,7 +234,23 @@ impl MockBackend {
     /// The next image-list call at `offset` or later fails as an unreachable server would.
     #[cfg(test)]
     pub fn fail_images_once_from(&self, offset: u32) {
-        *self.fail_images_from.lock().unwrap() = Some(offset);
+        self.fail_images_from_with(
+            offset,
+            ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878"),
+            true,
+        );
+    }
+
+    /// Image-list calls at `offset` or later fail with `error` (once if `once`, else until cleared).
+    #[cfg(test)]
+    pub fn fail_images_from_with(&self, offset: u32, error: ApiError, once: bool) {
+        *self.fail_images_from.lock().unwrap() = Some((offset, error, once));
+    }
+
+    /// Stops failing image-list calls installed by [`Self::fail_images_from_with`].
+    #[cfg(test)]
+    pub fn clear_fail_images(&self) {
+        *self.fail_images_from.lock().unwrap() = None;
     }
 
     /// The image-list calls made so far (dataset id and query), oldest first.
@@ -281,6 +299,20 @@ impl MockBackend {
     #[cfg(test)]
     pub fn mend_dataset(&self, id: &str) {
         self.broken.lock().unwrap().remove(id);
+    }
+
+    /// Sets or clears the `revision` reported by `dataset(id)` for tests verifying revision checks.
+    #[cfg(test)]
+    pub fn set_dataset_revision(&self, id: &str, rev: Option<&str>) {
+        let mut map = self.revisions.lock().unwrap();
+        match rev {
+            Some(r) => {
+                map.insert(id.to_string(), r.to_string());
+            }
+            None => {
+                map.remove(id);
+            }
+        }
     }
 
     /// Lists a removed dataset (or run) again, as registering its folder again does on a server.

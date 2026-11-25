@@ -25,15 +25,22 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     pub hint: Option<String>,
+    /// HTTP status code when the failure came from an HTTP response without a structured body.
+    pub status: Option<u16>,
 }
 
 impl ApiError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), hint: None }
+        Self { code: code.into(), message: message.into(), hint: None, status: None }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
         self
     }
 

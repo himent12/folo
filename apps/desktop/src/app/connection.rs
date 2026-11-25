@@ -121,6 +121,8 @@ impl FoloApp {
         // (a restart of the same server too) rather than apply where they don't belong.
         self.ds_class = None;
         self.ds_empty_of = None;
+        self.ds_format_filter = None;
+        self.ds_search.update(cx, |i, cx| i.set_text("", cx));
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
@@ -186,7 +188,7 @@ impl FoloApp {
         }
         // A request still out now that fails later (`fetch`) failed while it was away too.
         self.reconnects += 1;
-        self.forget_unreachable_loads();
+        self.forget_unreachable_loads(cx);
         // Images that failed while it was away are asked for again (they would stay blank for good).
         self.store.images_px.forget_failed();
         // Back: read the lists now (the server may have restarted on another data dir).
@@ -198,7 +200,7 @@ impl FoloApp {
     /// model's evaluation, the benchmarks and their results) is asked for again when shown: nothing
     /// else does, and the page kept "Could not reach folo serve" until Retry (a finished benchmark
     /// result has no Retry at all).
-    pub(super) fn forget_unreachable_loads(&mut self) {
+    pub(super) fn forget_unreachable_loads(&mut self, cx: &mut Context<Self>) {
         let s = &mut self.store;
         forget_unreachable(&mut s.dataset);
         forget_unreachable(&mut s.images);
@@ -220,6 +222,17 @@ impl FoloApp {
         }
         if unreachable(&b.agents) {
             b.agents = Load::Idle;
+        }
+        // Any later image page that exhausted retries during the outage resumes now that the
+        // server answers again.
+        let retry_pages: Vec<String> = self
+            .failed_pages
+            .iter()
+            .filter(|(_, f)| f.error.code == "server_unreachable" && !f.error.is_bad_address())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in retry_pages {
+            self.retry_failed_image_page(&id, cx);
         }
     }
 

@@ -11,6 +11,7 @@ use folo_ui::{
 
 use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
 use crate::app::{FoloApp, act};
+use crate::controls::Btn;
 use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
 
@@ -161,6 +162,7 @@ impl FoloApp {
         // A large list arrives a page at a time: the grid shows what came, and the count says
         // how much of it is in (never "0 images" or a split's partial count as if final).
         let more = self.images_pending(&id);
+        let failed_page = self.failed_image_page(&id).cloned();
         let count_label = if loading {
             let total = if self.ds_split.is_none() { ds.splits.total() } else { total as u64 };
             format!("Loading {} {}…", int(total), of(total as usize))
@@ -169,10 +171,61 @@ impl FoloApp {
             let all = ds.splits.total();
             let noun = if all == 1 { "image" } else { "images" };
             format!("Loading… {} of {} {noun}", int(loaded as u64), int(all))
+        } else if failed_page.is_some() {
+            let loaded = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
+            let all = ds.splits.total();
+            let noun = if all == 1 { "image" } else { "images" };
+            format!("{} of {} {noun} loaded", int(loaded as u64), int(all))
         } else if count == total {
             format!("{} {}", int(total as u64), of(total))
         } else {
             format!("{} of {} {}", int(count as u64), int(total as u64), of(total))
+        };
+        let failed_banner = if let Some(failed) = failed_page.as_ref() {
+            self.passing_stop("ds-page-retry", true, cx);
+            let retry_id = id.clone();
+            let msg = format!(
+                "Couldn't load remaining images from offset {}: {}",
+                int(failed.offset as u64),
+                failed.error.message
+            );
+            let retry = self.button(
+                "ds-page-retry",
+                "Retry",
+                Btn::Secondary,
+                Some("icons/refresh-cw.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.retry_failed_image_page(&retry_id, cx)),
+            );
+            Some(
+                div()
+                    .mb(px(12.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .rounded(px(radius::MD))
+                    .bg(t.warning_muted)
+                    .border_1()
+                    .border_color(crate::theme::alpha(t.warning_solid, 0.35))
+                    .child(icon("icons/circle-alert.svg", 14., t.warning_text))
+                    .child(
+                        div()
+                            .id("ds-page-error")
+                            .flex_1()
+                            .min_w_0()
+                            .tooltip(crate::controls::tip(msg.clone(), None))
+                            .child(text(ty::SM, t.warning_text).ellipsis().child(msg)),
+                    )
+                    .child(retry)
+                    .into_any_element(),
+            )
+        } else {
+            // Keep the Retry button's handle in tab order as a non-stop after activation so the
+            // next Tab continues from here instead of restarting at the top of the window.
+            self.passing_stop("ds-page-retry", false, cx).map(|fh| div().track_focus(&fh).into_any_element())
         };
         // One toolbar over the grid: what is shown (the split, the class, the count) on the left,
         // how it is drawn (Boxes, the size, Fit / Fill) on the right.
@@ -233,6 +286,7 @@ impl FoloApp {
                 .flex_col()
                 .flex_1()
                 .child(toolbar)
+                .when_some(failed_banner, |d, b| d.child(b))
                 .child(div().flex_1().child(skeleton(&t, "grid")))
                 .into_any_element();
         }
@@ -257,6 +311,7 @@ impl FoloApp {
                 .flex_col()
                 .flex_1()
                 .child(toolbar)
+                .when_some(failed_banner, |d, b| d.child(b))
                 .child(panel(&t).flex_1().flex().items_center().justify_center().child(empty_state(
                     &t,
                     icon,
@@ -475,6 +530,7 @@ impl FoloApp {
             .flex_1()
             .min_h_0()
             .child(toolbar)
+            .when_some(failed_banner, |d, b| d.child(b))
             .child(
                 div()
                     .relative()

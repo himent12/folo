@@ -55,8 +55,9 @@ impl FoloApp {
                 i
             }
             // Not in yet: a large list arrives a page at a time (a run's sample can be past the
-            // first page), so wait for it rather than open another image.
-            (None, None) if self.images_pending(&ds) => return,
+            // first page), so wait for it (or keep waiting on its page error) rather than open
+            // another image.
+            (None, None) if self.images_pending(&ds) || self.failed_image_page(&ds).is_some() => return,
             (None, None) => 0,
         };
         if let Some(i) = self.inspector.as_mut() {
@@ -71,8 +72,83 @@ impl FoloApp {
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
-        // Its image not in yet (the list still arriving): the scrim, not another image.
+        // Its image not in yet (the list still arriving, or a later page failed): never fall back
+        // to an unrelated image.
         if n == 0 || insp.want.is_some() {
+            if let Some(failed) = self.failed_image_page(&ds_id).cloned() {
+                let retry_id = ds_id.clone();
+                let msg = format!(
+                    "Couldn't load remaining images from offset {}: {}",
+                    int(failed.offset as u64),
+                    failed.error.message
+                );
+                let retry = self.button(
+                    "insp-page-retry",
+                    "Retry",
+                    crate::controls::Btn::Primary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_failed_image_page(&retry_id, cx)),
+                );
+                let close = self.button(
+                    "insp-page-close",
+                    "Close",
+                    crate::controls::Btn::Secondary,
+                    None,
+                    window,
+                    cx,
+                    act(|this, w, cx| this.close_inspector(w, cx)),
+                );
+                let card = div()
+                    .id("insp-page-error")
+                    .w(px(420.))
+                    .p(px(20.))
+                    .occlude()
+                    .capture_any_mouse_down(Self::guard_presses(cx))
+                    .rounded(px(radius::XL))
+                    .bg(t.bg_overlay)
+                    .border_1()
+                    .border_color(t.line_default)
+                    .shadow(t.shadow_lg())
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(icon("icons/circle-alert.svg", 16., t.warning_text))
+                            .child(text(ty::MD, t.text_primary).child("Couldn't open this image")),
+                    )
+                    .child(text(ty::SM, t.text_secondary).whitespace_normal().child(msg))
+                    .child(div().flex().justify_end().gap(px(8.)).child(close).child(retry));
+                return div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(self.scrim(
+                        &t,
+                        "insp-scrim",
+                        window,
+                        cx,
+                        act(|this, w, cx| this.close_inspector(w, cx)),
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(card),
+                    )
+                    .into_any_element();
+            }
             // Still loading the image list (or the filter emptied it): keep the scrim up.
             if self.store.images.get(&ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(&ds_id)
             {

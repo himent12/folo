@@ -9,6 +9,8 @@ mod connection;
 mod connection_tests;
 mod data;
 #[cfg(test)]
+mod dataset_paging_tests;
+#[cfg(test)]
 mod dataset_tests;
 mod deleted;
 mod descriptions;
@@ -356,6 +358,10 @@ pub struct FoloApp {
     pub dialog_scroll: ScrollHandle,
 
     // Datasets
+    /// Format filter on the Datasets index (`None` = All).
+    pub ds_format_filter: Option<DatasetFormat>,
+    /// Live search input on the Datasets index (matches name, path, format, or id).
+    pub ds_search: Entity<TextInput>,
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
     /// The class filter and the dataset it was set on: a class index means another class in
@@ -373,6 +379,9 @@ pub struct FoloApp {
     /// Datasets whose image list is still arriving, a page at a time, with the generation of the
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
+    /// Datasets whose later-page image fetch stopped on a permanent error or exhausted retries,
+    /// surfaced inline with a Retry action while keeping loaded pages visible.
+    pub failed_pages: HashMap<String, data::FailedImagePage>,
     pub images_seq: u64,
     /// Each card preview's latest read (a number from `images_seq`): an older one is dropped.
     pub preview_reads: HashMap<String, u64>,
@@ -668,6 +677,8 @@ impl FoloApp {
             i.set_text("http://127.0.0.1:7878", cx);
             i
         });
+        let ds_search = cx.new(|cx| TextInput::new("Filter by name or path", cx));
+        let ds_search_sub = cx.subscribe(&ds_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let mut this = Self {
             store: Store::new(api),
             route: Route::Overview,
@@ -691,6 +702,8 @@ impl FoloApp {
             scroll_drag: None,
             play_side_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
+            ds_format_filter: None,
+            ds_search,
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
@@ -700,6 +713,7 @@ impl FoloApp {
             ds_fill: false,
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
+            failed_pages: HashMap::new(),
             images_seq: 0,
             preview_reads: HashMap::new(),
             ds_recheck: Default::default(),
@@ -848,7 +862,7 @@ impl FoloApp {
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),
-            _subs: Vec::new(),
+            _subs: vec![ds_search_sub],
         };
         if !frozen {
             this.start_pump(cx);
