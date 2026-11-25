@@ -315,10 +315,11 @@ builds on.
   and goes into every benchmark's fingerprint; a change the golden tests catch is a bump.
 - `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number of
   BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types. Headline
-  AP and per-image outcomes use class-indexed matching (`score.rs`) with folo-vision's `Evaluator` and chunked parallel
-  `CocoEval` for the size buckets; the 200-resample bootstrap interval (`score/bootstrap.rs`) precomputes per-image
-  greedy matching once in parallel and accumulates weighted/unweighted AP per seeded resample to reproduce `Evaluator`'s
-  `mAP@0.5:0.95` bit-identically.
+  AP uses chunked parallel `folo-vision` `Evaluator` (with chunked parallel `CocoEval` for `map75` and the size
+  buckets), while calibration, localization, self-labeling and per-image outcomes use class-indexed per-image matching
+  in `score.rs`; the 200-resample bootstrap interval (`score/bootstrap.rs`) precomputes per-image greedy matching once
+  in parallel and accumulates weighted/unweighted AP per seeded resample to reproduce `Evaluator`'s `mAP@0.5:0.95`
+  bit-identically.
 
 ### folo-wasm
 FOLO in the browser ([WASM.md](WASM.md): JS API, build and limits). `crates/folo-wasm` (wasm-bindgen) loads a `.folo`

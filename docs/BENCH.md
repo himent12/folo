@@ -90,10 +90,11 @@ Speed is reported for FOLO models (milliseconds per image on the server's device
 it depends on the machine, and an external model's cannot be measured here.
 
 ### Definitions
-All of this is computed in `crates/folo-bench` (`src/score.rs` uses class-indexed per-image matching, chunked parallel
-`CocoEval` for size buckets, and `src/score/bootstrap.rs` precomputes per-image greedy matching once in parallel so the
-200-resample bootstrap reproduces `Evaluator`'s `mAP@0.5:0.95` bit-identically); every number is tested against a
-hand-worked case.
+All of this is computed in `crates/folo-bench` (`src/score.rs` computes headline AP with chunked parallel
+`folo_vision::Evaluator`, `map75` and size buckets with chunked parallel `CocoEval`, and calibration, localization,
+self-labeling and per-image outcomes with class-indexed per-image matching; `src/score/bootstrap.rs` precomputes
+per-image greedy matching once in parallel so the 200-resample bootstrap reproduces `Evaluator`'s `mAP@0.5:0.95`
+bit-identically); every number is tested against a hand-worked case.
 
 **Matching.** Wherever "right" is used below: on the unchanged images, per image and class, detections in
 descending confidence are matched one by one to the still unmatched true box of that class with the highest IoU,
@@ -272,9 +273,10 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
    description. The plan is yours to change until the first entry.
 3. **Add entry.** A model of the server, an agent, or a file of predictions from anywhere else (Studio parses and
    validates external prediction files off the UI thread in a Web Worker, transferring bounded upload parts on demand
-   so large files stay responsive). The **leaderboard** ranks the entries by score, with the five axes and each entry's
-   mAP interval on one scale, so an overlap is visible as an overlap. The Benchmarks list, leaderboard, and Compare
-   views each export to CSV and JSON (with RFC-4180 quoting and spreadsheet formula neutralization).
+   so large files stay responsive, falling back to UI-thread parsing when a worker is unavailable or its transport
+   fails). The **leaderboard** ranks the entries by score, with the five axes and each entry's mAP interval on one
+   scale, so an overlap is visible as an overlap. The Benchmarks list, leaderboard, and Compare views each export to
+   CSV and JSON (with RFC-4180 quoting and spreadsheet formula neutralization).
 4. **Open an entry** for the whole result: where the score comes from, accuracy per class and object size, the
    accuracy kept under each condition and severity (and what that condition looks like), the reliability of its
    confidence, what its own labels would be worth, how tight its boxes are, and the images it gets most wrong
@@ -293,6 +295,6 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
   tools ([MCP.md](MCP.md#benchmarks)), make benchmarks, run models and files of predictions on them and read their
   scores; agent contestants, agent-designed plans and loops are Studio's, FOLO
   Desktop's and the HTTP API's. FOLO Desktop has the searchable/filterable/sortable benchmarks list,
-  the sortable leaderboard with baseline pinning, error details and source copy (models and agents), the plan with
-  severity preview chips and agent design, loops, and every entry's result with an entry image inspector
+  the sortable leaderboard with baseline pinning and expandable error details with error copy (models and agents), the
+  plan with severity preview chips and agent design, loops, and every entry's result with an entry image inspector
   (apps/desktop/README.md, Benchmarks); external predictions and Compare are Studio's.
