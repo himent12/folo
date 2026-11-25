@@ -13,11 +13,134 @@
 //! - Loss: `part` (BCE partial sums), `terms [B·G·K, 4]`, `stats [12]` f32 and `total [1]` (see
 //!   `shaders/det_combine.wgsl`).
 
+use super::use_subgroups;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 const COMMON: &str = include_str!("../shaders/detect_common.wgsl");
+
+const BCE_FWD_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> ACC: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let r = det_bce_thread(wid, lid);
+    if (subgroupAny(r.y != 0.0) && lane == 0u) { atomicOr(&MISC[0], 1u); }
+    let r_sg = subgroupAdd(r.x);
+    let sg = min(sgid, 7u);
+    if (lane == 0u) { ACC[sg] = r_sg; }
+    workgroupBarrier();
+    if (lid == 0u) {
+        PART[wid.y * pu(2u) + wid.x] =
+            ((ACC[0] + ACC[1]) + (ACC[2] + ACC[3])) + ((ACC[4] + ACC[5]) + (ACC[6] + ACC[7]));
+    }
+}
+"#;
+
+const BCE_FWD_MAIN_PORTABLE: &str = r#"
+var<workgroup> ACC: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let r = det_bce_thread(wid, lid);
+    if (r.y != 0.0) { atomicOr(&MISC[0], 1u); }
+    ACC[lid] = r.x;
+    workgroupBarrier();
+    for (var step = 128u; step > 0u; step = step >> 1u) {
+        if (lid < step) { ACC[lid] = ACC[lid] + ACC[lid + step]; }
+        workgroupBarrier();
+    }
+    if (lid == 0u) { PART[wid.y * pu(2u) + wid.x] = ACC[0]; }
+}
+"#;
+
+const COMBINE_MAIN_SUBGROUPS: &str = r#"
+var<workgroup> S: array<vec4<f32>, 8>;
+var<workgroup> NF: array<f32, 8>;
+var<workgroup> OT: array<vec2<f32>, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let dfl_ot_w = pf(6u);
+    let t = det_combine_thread(lid, dfl_ot_w);
+    let s_sg = vec4<f32>(
+        subgroupAdd(t.s.x),
+        subgroupAdd(t.s.y),
+        subgroupAdd(t.s.z),
+        subgroupAdd(t.s.w),
+    );
+    let nf_sg = subgroupAdd(t.nf);
+    var ot = t.ot;
+    if (dfl_ot_w > 0.0) {
+        for (var off = 16u; off > 0u; off = off >> 1u) {
+            let ox = subgroupShuffleDown(ot.x, off);
+            let oy = subgroupShuffleDown(ot.y, off);
+            if (lane < off) { ot = add_split(ot, vec2<f32>(ox, oy)); }
+        }
+    }
+    let sg = min(sgid, 7u);
+    if (lane == 0u) {
+        S[sg] = s_sg;
+        NF[sg] = nf_sg;
+        OT[sg] = ot;
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        let r = ((S[0] + S[1]) + (S[2] + S[3])) + ((S[4] + S[5]) + (S[6] + S[7]));
+        let nf_sum = ((NF[0] + NF[1]) + (NF[2] + NF[3])) + ((NF[4] + NF[5]) + (NF[6] + NF[7]));
+        var ot_sum = vec2<f32>(0.0, 0.0);
+        if (dfl_ot_w > 0.0) {
+            ot_sum = add_split(
+                add_split(add_split(OT[0], OT[1]), add_split(OT[2], OT[3])),
+                add_split(add_split(OT[4], OT[5]), add_split(OT[6], OT[7])),
+            );
+        }
+        det_combine_finish(r, nf_sum, ot_sum, dfl_ot_w);
+    }
+}
+"#;
+
+const COMBINE_MAIN_PORTABLE: &str = r#"
+var<workgroup> S: array<vec4<f32>, 256>;
+var<workgroup> NF: array<f32, 256>;
+var<workgroup> OT: array<vec2<f32>, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_index) lid: u32) {
+    let dfl_ot_w = pf(6u);
+    let t = det_combine_thread(lid, dfl_ot_w);
+    S[lid] = t.s;
+    NF[lid] = t.nf;
+    OT[lid] = t.ot;
+    workgroupBarrier();
+    for (var step = 128u; step > 0u; step = step >> 1u) {
+        if (lid < step) {
+            S[lid] = S[lid] + S[lid + step];
+            NF[lid] = NF[lid] + NF[lid + step];
+            if (dfl_ot_w > 0.0) { OT[lid] = add_split(OT[lid], OT[lid + step]); }
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u) {
+        det_combine_finish(S[0], NF[0], OT[0], dfl_ot_w);
+    }
+}
+"#;
+
+fn gen_bce_fwd(spec: &Spec) -> String {
+    let vk = v_k();
+    let main = if spec.is_subgroups() { BCE_FWD_MAIN_SUBGROUPS } else { BCE_FWD_MAIN_PORTABLE };
+    format!("const V_K: f32 = {vk:?}f;\n{COMMON}{}{main}", include_str!("../shaders/det_bce_fwd.wgsl"))
+}
+
+fn gen_combine(spec: &Spec) -> String {
+    let vk = v_k();
+    let main = if spec.is_subgroups() { COMBINE_MAIN_SUBGROUPS } else { COMBINE_MAIN_PORTABLE };
+    format!("const V_K: f32 = {vk:?}f;\n{COMMON}{}{main}", include_str!("../shaders/det_combine.wgsl"))
+}
 
 macro_rules! detect_kernel {
     ($id:ident, $name:literal, $file:literal, [$($acc:ident),*]) => {
@@ -37,10 +160,18 @@ detect_kernel!(DECODE, "tal_decode", "tal_decode.wgsl", [Read, Read, ReadWrite, 
 detect_kernel!(TOPK, "tal_topk", "tal_topk.wgsl", [Read, Read, Read, ReadWrite]);
 detect_kernel!(OWNER, "tal_owner", "tal_owner.wgsl", [Read, ReadWrite]);
 detect_kernel!(TARGETS, "tal_targets", "tal_targets.wgsl", [Read, Read, Read, ReadWrite, ReadWrite]);
-detect_kernel!(BCE_FWD, "det_bce_fwd", "det_bce_fwd.wgsl", [Read, Read, ReadWrite, ReadWrite]);
+static BCE_FWD: KernelDef = KernelDef {
+    name: "det_bce_fwd",
+    storage: &[Access::Read, Access::Read, Access::ReadWrite, Access::ReadWrite],
+    source: Source::Generated(gen_bce_fwd),
+};
 detect_kernel!(BCE_BWD, "det_bce_bwd", "det_bce_bwd.wgsl", [Read, Read, Read, Read, ReadWrite]);
 detect_kernel!(BOX, "det_box", "det_box.wgsl", [Read, Read, Read, Read, ReadWrite, Read, Read]);
-detect_kernel!(COMBINE, "det_combine", "det_combine.wgsl", [Read, Read, Read, Read, ReadWrite, ReadWrite]);
+static COMBINE: KernelDef = KernelDef {
+    name: "det_combine",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::ReadWrite],
+    source: Source::Generated(gen_combine),
+};
 
 /// Largest `reg_max` (DFL bins per side) the loss kernels take.
 pub const MAX_REG_MAX: usize = 32;
@@ -268,7 +399,7 @@ pub fn bce_forward(
     misc: &wgpu::Buffer,
 ) -> Result<()> {
     let chunks = d.a.div_ceil(BCE_CHUNK);
-    let k = ctx.kernel(&BCE_FWD, Spec::new())?;
+    let k = ctx.kernel(&BCE_FWD, Spec::new().subgroups(use_subgroups(ctx)))?;
     let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(chunks)?.uz(d.b * d.a)?.f(d.mal_gamma);
     ctx.dispatch(&k, &[cls_raw, dense, part, misc], &p, [chunks as u32, (d.b * d.nc) as u32, 1])
 }
@@ -342,7 +473,7 @@ pub fn combine(
     stats: &wgpu::Buffer,
     total: &wgpu::Buffer,
 ) -> Result<()> {
-    let k = ctx.kernel(&COMBINE, Spec::new())?;
+    let k = ctx.kernel(&COMBINE, Spec::new().subgroups(use_subgroups(ctx)))?;
     let p = Params::new()
         .uz(d.bce_partials())?
         .uz(d.slots())?

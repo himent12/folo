@@ -283,3 +283,192 @@ fn reduce_split_ceil_div_and_mean_match_cpu() {
         }
     }
 }
+
+#[test]
+fn reduce_rows_vec4_matches_cpu_and_propagates_nan() {
+    use crate::DType;
+    use crate::kernels::reduce::reduce_split;
+
+    let ctx = gpu!();
+    let mut rng = Rng::new(97);
+    // Exercises VEC4 single-pass (r = 4, 256, 1024), VEC4 split-K (r = 8192, 8196, 16388), and empty r = 0.
+    for &(outer, r) in &[(3usize, 4usize), (2, 256), (4, 1024), (2, 8192), (2, 8196), (1, 16388)] {
+        let shape = [outer, r, 1];
+        let x = rng.vec(outer * r, -2.0, 2.0);
+        let bx = ctx.upload(bytemuck::cast_slice(&x)).unwrap();
+        for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+            let want = cpu_reduce(op, &x, &shape, 1);
+            let by = ctx.alloc((outer * 4) as u64).unwrap();
+            reduce_split(&ctx, op, bx.raw(), by.raw(), outer, r, 1, DType::F32).unwrap();
+            let got: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(by.raw(), 0, (outer * 4) as u64).unwrap());
+            let atol = if op == ReduceOp::Sum { 2e-3 } else { 1e-4 };
+            assert_close(&got, &want, atol, 1e-4, &format!("reduce_rows vec4 {op:?} {shape:?}"));
+        }
+        // NaN in every lane (0, 1, 2, 3) of the last vec4 must propagate on every op.
+        for lane in 0..4 {
+            let mut x_nan = x.clone();
+            x_nan[(outer - 1) * r + (r - 4 + lane)] = f32::NAN;
+            let bx_nan = ctx.upload(bytemuck::cast_slice(&x_nan)).unwrap();
+            for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+                let by = ctx.alloc((outer * 4) as u64).unwrap();
+                reduce_split(&ctx, op, bx_nan.raw(), by.raw(), outer, r, 1, DType::F32).unwrap();
+                let got: Vec<f32> =
+                    bytemuck::pod_collect_to_vec(&ctx.read(by.raw(), 0, (outer * 4) as u64).unwrap());
+                assert!(got[outer - 1].is_nan(), "vec4 lane {lane} {op:?} {shape:?} missed NaN");
+                if outer > 1 {
+                    assert!(got[0].is_finite(), "vec4 lane {lane} {op:?} {shape:?} leaked NaN to row 0");
+                }
+            }
+        }
+    }
+    // F16 VEC4 storage round-trip (single-pass and split-K) when shader-f16 is supported.
+    if ctx.caps().shader_f16 {
+        for &(outer, r) in &[(3usize, 1024usize), (2, 8196)] {
+            let shape = [outer, r, 1];
+            let x_raw = rng.vec(outer * r, -1.0, 1.0);
+            let x_h: Vec<half::f16> = x_raw.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let x_f: Vec<f32> = x_h.iter().map(|v| v.to_f32()).collect();
+            let x_bytes: Vec<u8> = x_h.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let bx = ctx.upload(&x_bytes).unwrap();
+            for op in [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min] {
+                let want: Vec<f32> = cpu_reduce(op, &x_f, &shape, 1)
+                    .into_iter()
+                    .map(|v| half::f16::from_f32(v).to_f32())
+                    .collect();
+                let by = ctx.alloc(DType::F16.bytes(outer)).unwrap();
+                reduce_split(&ctx, op, bx.raw(), by.raw(), outer, r, 1, DType::F16).unwrap();
+                let raw = ctx.read(by.raw(), 0, (outer * 2) as u64).unwrap();
+                let got: Vec<f32> =
+                    raw.as_chunks::<2>().0.iter().map(|&c| half::f16::from_le_bytes(c).to_f32()).collect();
+                assert_close(&got, &want, 2e-2, 5e-3, &format!("reduce_rows vec4 f16 {op:?} {shape:?}"));
+            }
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty());
+}
+
+#[test]
+fn detect_cached_anchors_and_subgroup_loss_match_portable() {
+    use crate::detect::{AnchorTable, BoxLossKind, ImageGt, LossSettings, TalSettings, detection_loss};
+    use folo_core::{Device, Tensor};
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let _shared = gpu!();
+    // Private context on ordinal 8 to verify anchor cache lifecycle and release_memory cleanly.
+    let ctx = match crate::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping, no second context: {e}"),
+    };
+    let dev = Device::Gpu(8);
+    crate::register(ctx.clone(), dev).unwrap();
+
+    // 1. Anchor cache hit, distinct-table miss, LRU bound (cap 8), and release_memory clear.
+    let pts: Vec<[f32; 2]> = (0..1200).map(|i| [(i % 40) as f32 + 0.5, (i / 40) as f32 + 0.5]).collect();
+    let strides = vec![8.0f32; pts.len()];
+    let b1 = ctx.cached_anchors(&pts, &strides).unwrap();
+    let b2 = ctx.cached_anchors(&pts, &strides).unwrap();
+    assert_eq!(b1, b2, "identical anchors must hit the device cache");
+    assert_eq!(ctx.anchor_cache_len(), 1);
+    for k in 0..10 {
+        let p: Vec<[f32; 2]> = vec![[k as f32 + 0.5, 0.5]; 16];
+        let s = vec![8.0f32; 16];
+        let _ = ctx.cached_anchors(&p, &s).unwrap();
+    }
+    assert!(ctx.anchor_cache_len() <= 8, "anchor cache must stay bounded by MAX_ANCHOR_CACHE");
+    ctx.release_memory().unwrap();
+    assert_eq!(ctx.anchor_cache_len(), 0, "release_memory must clear cached anchors");
+
+    // 2. End-to-end detection_loss subgroup vs portable parity (plain BCE, MAL + OT-DFL, and non-finite logit).
+    let mut rng = Rng::new(1234);
+    let (b, a, nc, reg_max) = (2usize, pts.len(), 3usize, 16usize);
+    let box_data = rng.vec(b * 4 * reg_max * a, -1.5, 1.5);
+    let cls_data = rng.vec(b * nc * a, -2.0, 2.0);
+    let box_t = Tensor::from_slice(&box_data, [b, 4 * reg_max, a]).unwrap().to_device(dev).unwrap();
+    let cls_t = Tensor::from_slice(&cls_data, [b, nc, a]).unwrap().to_device(dev).unwrap();
+    let anchors = AnchorTable { points: &pts, strides: &strides };
+    let gt0_boxes = [[16.0f32, 16.0, 96.0, 88.0], [120.0, 40.0, 220.0, 160.0]];
+    let gt0_labels = [0u32, 2u32];
+    let gt1_boxes = [[32.0f32, 48.0, 160.0, 180.0]];
+    let gt1_labels = [1u32];
+    let gts = [
+        ImageGt { boxes: &gt0_boxes, labels: &gt0_labels },
+        ImageGt { boxes: &gt1_boxes, labels: &gt1_labels },
+    ];
+    let tal = TalSettings {
+        topk: 10,
+        topk2: None,
+        alpha: 0.5,
+        beta: 6.0,
+        eps: 1e-9,
+        min_box_size: 16.0,
+        eps_free: false,
+        nwd_weight: 0.0,
+    };
+
+    for (mal_gamma, dfl_ot_weight) in [(0.0f32, 0.0f32), (1.5, 0.25)] {
+        let settings = LossSettings {
+            reg_max,
+            gains: [7.5, 0.5, 1.5],
+            tal,
+            mal_gamma,
+            nwd_weight: 0.0,
+            box_loss: BoxLossKind::Ciou,
+            rpiou_beta: 0.5,
+            rpiou_kappa: 2.0,
+            rpiou_delta: 0.5,
+            dfl_ot_weight,
+        };
+        let run = |portable: bool| -> Vec<f32> {
+            let _g = ForceGuard::set(portable);
+            let loss = detection_loss(&box_t, &cls_t, &anchors, &gts, &settings).unwrap();
+            loss.stats.to_vec::<f32>().unwrap()
+        };
+        let sg = run(false);
+        let fb = run(true);
+        assert_close(&sg, &fb, 1e-4, 1e-5, &format!("detect sg vs fb mal={mal_gamma} ot={dfl_ot_weight}"));
+        assert!(sg[0].is_finite() && sg[4] > 0.0, "expected finite loss with positives, got {sg:?}");
+    }
+    assert_eq!(ctx.anchor_cache_len(), 1, "repeated detection_loss steps must reuse the cached anchor table");
+
+    // Non-finite logit in a non-leader lane of the second chunk must trip MISC[0] and return NaN on both paths.
+    let mut bad_cls = cls_data;
+    bad_cls[1199] = f32::INFINITY;
+    let bad_cls_t = Tensor::from_slice(&bad_cls, [b, nc, a]).unwrap().to_device(dev).unwrap();
+    let settings = LossSettings {
+        reg_max,
+        gains: [7.5, 0.5, 1.5],
+        tal,
+        mal_gamma: 0.0,
+        nwd_weight: 0.0,
+        box_loss: BoxLossKind::Ciou,
+        rpiou_beta: 0.5,
+        rpiou_kappa: 2.0,
+        rpiou_delta: 0.5,
+        dfl_ot_weight: 0.0,
+    };
+    for portable in [false, true] {
+        let _g = ForceGuard::set(portable);
+        let stats = detection_loss(&box_t, &bad_cls_t, &anchors, &gts, &settings)
+            .unwrap()
+            .stats
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(
+            stats[0].is_nan() && stats[6] == 1.0,
+            "portable={portable} missed non-finite logit: {stats:?}"
+        );
+    }
+    assert!(ctx.kernels_without_registry().is_empty());
+}

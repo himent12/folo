@@ -46,7 +46,7 @@ subgroup built-ins are enabled via `wgpu::Features::SUBGROUP` alone, while `Spec
 WGSL variant and tags the pipeline cache key. When `kernels::use_subgroups(ctx)` is true (native adapters with
 `SUBGROUP` and subgroup width `(32, 32)`; always `false` on `wasm32` / browser WebGPU), reductions (`reduce_rows`,
 `softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`), depthwise weight gradients
-(`conv2d_depthwise_grad`), and gradient-norm partials
+(`conv2d_depthwise_grad`), detection loss reductions (`det_bce_fwd`, `det_combine`), and gradient-norm partials
 (`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants (and `topk` selection passes for `d > 512`
 dispatch a 2-barrier 32-wide subgroup reduction per pass, skipping the second barrier on the final pass) with a
 portable shared-memory tree fallback otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with
@@ -66,7 +66,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | Op (folo-core) | `GpuBackend` method | Kernel entry point | WGSL | Test against the CPU |
 |---|---|---|---|---|
 | unary, binary, comparisons, `where` | `unary`, `unary_backward`, `binary`, `where_cond` (through `GpuBackend::ew` in `encode.rs`) | `kernels::ew::elementwise` | generated in `ew.rs` | `src/tests/backend/elementwise.rs` |
-| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` (ceiling-division split-K for `Sum`/`Max`/`Min` from `GpuBackend`, plus `Mean` in `reduce_split` directly; 32-wide subgroup reductions on rows) | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/reduce.rs` |
+| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` (ceiling-division split-K for `Sum`/`Max`/`Min` from `GpuBackend`, plus `Mean` in `reduce_split` directly; `vec4` loads and 32-wide subgroup reductions on rows) | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/reduce.rs` |
 | softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` (online row softmax when `inner == 1`, 1 read up to 1,024 elems / 2-pass online above; `softmax_cols` otherwise, register-cached for `D ≤ 32` and 2-pass online above) | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
 | top-k | `topk` | `kernels::reduce::topk` (workgroup-parallel bitonic sort for `d ≤ 512`; `k`-pass selection with 32-wide subgroup reductions and a portable shared-memory tree fallback above) | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
 | matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm/shader.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
@@ -82,7 +82,7 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | letterbox, packed `u8` upload/normalize | `letterbox_rgb8` | `kernels::vision::{letterbox_rgb8, u8_to_float_scale, rgb8_hwc_to_chw_norm, upload_u8_scaled, upload_rgb8_hwc_to_chw_norm}` | `letterbox.wgsl`; generated in `vision.rs` | `src/tests/vision.rs`; folo-vision `tests/gpu.rs` |
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
-| assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss/` |
+| assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` (device-cached static anchors) | `kernels::detect::*` (32-wide subgroup `det_bce_fwd` & `det_combine`) | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | `src/tests/reduce.rs`; folo-vision `tests/gpu_loss/` |
 | distillation term (not a `Backend` method) | `folo_gpu::distill::{distill_loss, distill_loss_with_context}` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
 
 `GpuTensor` (`src/tensor.rs`) has one kernel module of its own that the backend does not use: `kernels::elementwise`

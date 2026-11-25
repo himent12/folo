@@ -122,6 +122,9 @@ mod tests {
             ("letterbox", Spec::new().bool("PREFILTER", false)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
+            ("det_bce_fwd", Spec::new().subgroups(true)),
+            ("det_combine", Spec::new().subgroups(true)),
+            ("reduce_rows", Spec::new().u32("OP", 0).bool("VEC4", true).subgroups(true)),
             (
                 "muon_gemm",
                 Spec::new()

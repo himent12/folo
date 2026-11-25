@@ -141,12 +141,73 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 }
 "#;
 
+const REDUCE_ROWS_THREAD_VEC4: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<vec4<XT>>;
+
+fn reduce_rows_thread(row: u32, rows: u32, r: u32, lid: u32) -> f32 {
+    var acc4 = vec4<f32>(identity());
+    if (row < rows) {
+        if (SPLIT_K) {
+            let splits = pu(4u);
+            let chunk = pu(5u);
+            let o = row / splits;
+            let k = row % splits;
+            let start = k * chunk;
+            let len = min(chunk, r - start);
+            let base = o * r + start;
+            for (var j = lid; j < len; j += 256u) {
+                acc4 = combine4(acc4, vec4<f32>(X[base + j]));
+            }
+        } else {
+            let base = row * r;
+            for (var i = lid; i < r; i += 256u) {
+                acc4 = combine4(acc4, vec4<f32>(X[base + i]));
+            }
+        }
+    }
+    return combine(combine(acc4.x, acc4.y), combine(acc4.z, acc4.w));
+}
+"#;
+
+const REDUCE_ROWS_THREAD_SCALAR: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<XT>;
+
+fn reduce_rows_thread(row: u32, rows: u32, r: u32, lid: u32) -> f32 {
+    var acc = identity();
+    if (row < rows) {
+        if (SPLIT_K) {
+            let splits = pu(4u);
+            let chunk = pu(5u);
+            let o = row / splits;
+            let k = row % splits;
+            let start = k * chunk;
+            let len = min(chunk, r - start);
+            let base = o * r + start;
+            for (var j = lid; j < len; j += 256u) {
+                acc = combine(acc, f32(X[base + j]));
+            }
+        } else {
+            let base = row * r;
+            for (var i = lid; i < r; i += 256u) {
+                acc = combine(acc, f32(X[base + i]));
+            }
+        }
+    }
+    return acc;
+}
+"#;
+
 fn gen_rows(s: &Spec) -> String {
     let split = s.get_bool("SPLIT");
+    let vec4 = s.get_bool("VEC4");
+    let thread = if vec4 { REDUCE_ROWS_THREAD_VEC4 } else { REDUCE_ROWS_THREAD_SCALAR };
     let main = if s.is_subgroups() { REDUCE_ROWS_MAIN_SUBGROUPS } else { REDUCE_ROWS_MAIN_PORTABLE };
     typed(
         s,
-        &format!("const SPLIT_K: bool = {split};\n{}{main}", include_str!("../shaders/reduce_rows.wgsl")),
+        &format!(
+            "const SPLIT_K: bool = {split};\n{}{thread}{main}",
+            include_str!("../shaders/reduce_rows.wgsl")
+        ),
     )
 }
 fn gen_cols(s: &Spec) -> String {
@@ -263,8 +324,10 @@ fn reduce_scaled(
     }
     let spec = typed_spec(ctx, xdt, ydt, "reduce")?.u32("OP", op.code());
     if inner == 1 {
-        let k = ctx.kernel(&ROWS, spec.subgroups(use_subgroups(ctx)))?;
-        let p = Params::new().uz(outer)?.uz(r)?.f(scale).f(op.identity());
+        let vec4 = r > 0 && r.is_multiple_of(4);
+        let units_r = if vec4 { r / 4 } else { r };
+        let k = ctx.kernel(&ROWS, spec.bool("VEC4", vec4).subgroups(use_subgroups(ctx)))?;
+        let p = Params::new().uz(outer)?.uz(units_r)?.f(scale).f(op.identity());
         ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(outer as u64 * 256, 256)?)
     } else {
         let chunks = inner.div_ceil(64);
@@ -550,7 +613,10 @@ fn split_plan(outer: usize, r: usize, inner: usize) -> (usize, usize) {
     if s0 <= 1 {
         return (1, r);
     }
-    let chunk = r.div_ceil(s0);
+    let mut chunk = r.div_ceil(s0);
+    if inner == 1 && r.is_multiple_of(4) {
+        chunk = chunk.next_multiple_of(4);
+    }
     let splits = r.div_ceil(chunk);
     (splits, chunk)
 }
@@ -582,8 +648,16 @@ pub fn reduce_split(
     let pass_op = if op == ReduceOp::Mean { ReduceOp::Sum } else { op };
     let spec = typed_spec(ctx, dtype, DType::F32, "reduce")?.u32("OP", pass_op.code()).bool("SPLIT", true);
     if inner == 1 {
-        let k = ctx.kernel(&ROWS, spec.subgroups(use_subgroups(ctx)))?;
-        let p = Params::new().uz(outer_s)?.uz(r)?.f(1.0).f(pass_op.identity()).uz(splits)?.uz(chunk)?;
+        let vec4 = r > 0 && r.is_multiple_of(4) && chunk.is_multiple_of(4);
+        let (units_r, units_chunk) = if vec4 { (r / 4, chunk / 4) } else { (r, chunk) };
+        let k = ctx.kernel(&ROWS, spec.bool("VEC4", vec4).subgroups(use_subgroups(ctx)))?;
+        let p = Params::new()
+            .uz(outer_s)?
+            .uz(units_r)?
+            .f(1.0)
+            .f(pass_op.identity())
+            .uz(splits)?
+            .uz(units_chunk)?;
         ctx.dispatch(&k, &[x, tmp.raw()], &p, ctx.grid_1d(outer_s as u64 * 256, 256)?)?;
     } else {
         let chunks = inner.div_ceil(64);

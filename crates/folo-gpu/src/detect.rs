@@ -263,25 +263,23 @@ fn check(
     })
 }
 
-/// The `meta` words of [`crate::kernels::detect`]: anchors, then the gt boxes, labels and counts.
-fn meta_words(d: &DetectDesc, anchors: &AnchorTable<'_>, gts: &[ImageGt<'_>]) -> Vec<u32> {
-    let mut m = vec![0u32; d.meta_words()];
-    for (i, (p, s)) in anchors.points.iter().zip(anchors.strides).enumerate() {
-        m[3 * i] = p[0].to_bits();
-        m[3 * i + 1] = p[1].to_bits();
-        m[3 * i + 2] = s.to_bits();
-    }
+/// The per-step GT tail of `meta` (after the cached `3 * A` anchor words): boxes, labels and counts.
+fn gt_tail_words(d: &DetectDesc, gts: &[ImageGt<'_>]) -> Vec<u32> {
+    let base = d.gt_box_offset();
+    let mut tail = vec![0u32; d.meta_words() - base];
+    let label_off = d.gt_label_offset() - base;
+    let count_off = d.gt_count_offset() - base;
     for (i, g) in gts.iter().enumerate() {
         for (j, (bx, &l)) in g.boxes.iter().zip(g.labels).enumerate() {
             let slot = i * d.g + j;
             for (c, v) in bx.iter().enumerate() {
-                m[d.gt_box_offset() + 4 * slot + c] = v.to_bits();
+                tail[4 * slot + c] = v.to_bits();
             }
-            m[d.gt_label_offset() + slot] = l;
+            tail[label_off + slot] = l;
         }
-        m[d.gt_count_offset() + i] = g.boxes.len() as u32;
+        tail[count_off + i] = g.boxes.len() as u32;
     }
-    m
+    tail
 }
 
 fn assign_impl(
@@ -299,10 +297,17 @@ fn assign_impl(
     let bufs = Buffers { ctx, device };
     let (bt, box_buf) = dense(box_raw)?;
     let (ct, cls_buf) = dense(cls_raw)?;
-    let meta = meta_words(&d, anchors, gts);
-    let meta_buf = bufs.ctx.upload(bytemuck::cast_slice(&meta)).map_err(gpu)?;
+    let anchor_bytes = (d.gt_box_offset() * 4) as u64;
+    let total_words = d.meta_words();
+    let anchor_buf = bufs.ctx.cached_anchors(anchors.points, anchors.strides).map_err(gpu)?;
+    let gt_tail = gt_tail_words(&d, gts);
+    let meta_buf = bufs.ctx.alloc((total_words * 4).max(4) as u64).map_err(gpu)?;
+    if !gt_tail.is_empty() {
+        bufs.ctx.write(&meta_buf, anchor_bytes, bytemuck::cast_slice(&gt_tail)).map_err(gpu)?;
+    }
+    bufs.ctx.copy(&anchor_buf, 0, meta_buf.raw(), 0, anchor_bytes);
     let meta_raw = meta_buf.raw().clone();
-    let meta = tensor_from_buffer(device, DType::U32, [meta.len()], meta_buf)?;
+    let meta = tensor_from_buffer(device, DType::U32, [total_words], meta_buf)?;
     let (_pd, pd) = bufs.alloc(DType::F32, &[d.b, d.a, 4], false)?;
     let (picks, pick) = bufs.alloc(DType::U32, &[d.b, d.g, d.k, 3], false)?;
     let (_own, own) = bufs.alloc(DType::U32, &[2, d.b, d.a], true)?;

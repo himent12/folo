@@ -3,16 +3,14 @@
 // (max(x, 0) − x·T + ln(1 + e^-|x|)) so confident positives do not cancel against the dense sum. One workgroup
 // per (image·class row, chunk of 1024 anchors) writes its partial sum (a fixed tree, so the result does not depend
 // on scheduling). Raises MISC[0] bit 0 if a logit is not finite.
+// `kernels/detect.rs` appends either the 1-barrier 32-wide subgroup reduction or the portable 8-barrier fallback.
 // Params: 0 = A, 1 = NC, 2 = chunks per row, 3 = B·A, 4 = mal_gamma (0 = plain BCE).
 @group(0) @binding(1) var<storage, read> CLS: array<f32>;
 @group(0) @binding(2) var<storage, read> DENSE: array<u32>;
 @group(0) @binding(3) var<storage, read_write> PART: array<f32>;
 @group(0) @binding(4) var<storage, read_write> MISC: array<atomic<u32>>;
 
-var<workgroup> ACC: array<f32, 256>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+fn det_bce_thread(wid: vec3<u32>, lid: u32) -> vec2<f32> {
     let na = pu(0u);
     let nc = pu(1u);
     let gamma = pf(4u);
@@ -20,12 +18,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let b = row / nc;
     let c = row - b * nc;
     var acc = 0.0;
-    var finite = true;
+    var bad = false;
     for (var e = 0u; e < 4u; e++) {
         let a = wid.x * 1024u + e * 256u + lid;
         if (a < na) {
             let x = CLS[row * na + a];
-            finite = finite && is_finite_f(x);
+            bad = bad || !is_finite_f(x);
             let cell = b * na + a;
             let t = select(0.0, bitcast<f32>(DENSE[pu(3u) + cell]), DENSE[cell] == c + 1u);
             let sp = softplus_f(x);
@@ -36,12 +34,5 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
             acc = acc + elem;
         }
     }
-    if (!finite) { atomicOr(&MISC[0], 1u); }
-    ACC[lid] = acc;
-    workgroupBarrier();
-    for (var step = 128u; step > 0u; step = step >> 1u) {
-        if (lid < step) { ACC[lid] = ACC[lid] + ACC[lid + step]; }
-        workgroupBarrier();
-    }
-    if (lid == 0u) { PART[row * pu(2u) + wid.x] = ACC[0]; }
+    return vec2<f32>(acc, select(0.0, 1.0, bad));
 }
