@@ -205,9 +205,11 @@ describe('Playground: confidence summary and quick JSON copy', () => {
     flushSync();
     expect(firstRow.getAttribute('aria-selected')).toBe('true');
 
-    // One-click Copy detections JSON works directly from the Detections tab
+    // One-click Copy detections JSON works directly from the Detections tab (square icon button in rail)
     const copyBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Copy detections JSON"]')!;
     expect(copyBtn).not.toBeNull();
+    expect(copyBtn.classList.contains('square')).toBe(true);
+    expect(copyBtn.querySelector('.label')).toBeNull();
     copyBtn.click();
     await vi.waitFor(() => {
       flushSync();

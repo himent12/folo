@@ -321,6 +321,7 @@ export default function ZoomStage(props: ZoomStageProps) {
   }
 
   function oncanvastransitionend(e: TransitionEvent) {
+    if (e.target !== e.currentTarget) return;
     if (e.propertyName === 'transform' && z.peek() <= 1.001) {
       clearClipTimer();
       clipping.set(false);
@@ -439,7 +440,7 @@ css`
     border: 1px solid var(--line-default);
     box-shadow: var(--shadow-md);
   }
-  .zoom-tip {
+  .zoom-hud > span {
     display: inline-flex;
   }
   .zoom-pct {

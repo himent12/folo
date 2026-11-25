@@ -77,6 +77,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     copySeq++;
     clearTimeout(copyReset);
     copied.set(false);
+    copyStatus.set('');
   });
 
   async function copyDetectionsJson() {
@@ -121,15 +122,19 @@ export default function ResultsPanel(props: ResultsPanelProps) {
           />
           {props.result && props.json ? (
             <span class="copy-json" use:tooltip={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}>
-              <Button
-                size="sm"
-                variant="ghost"
-                icon={copied.get() ? Check : Copy}
-                aria-label={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}
-                onclick={copyDetectionsJson}
-              >
-                {props.rail ? null : copied.get() ? 'Copied' : 'Copy JSON'}
-              </Button>
+              {props.rail ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={copied.get() ? Check : Copy}
+                  aria-label={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}
+                  onclick={copyDetectionsJson}
+                />
+              ) : (
+                <Button size="sm" variant="ghost" icon={copied.get() ? Check : Copy} onclick={copyDetectionsJson}>
+                  {copied.get() ? 'Copied' : 'Copy JSON'}
+                </Button>
+              )}
             </span>
           ) : null}
         </div>
