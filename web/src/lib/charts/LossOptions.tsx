@@ -98,29 +98,33 @@ export default function LossOptions(props: LossOptionsProps) {
   const group = (
     name: string,
     legend: string,
-    options: { value: string; label: string; disabled?: boolean }[],
+    options: { value: string; label: string }[],
     value: () => string,
     set: (v: string) => void,
+    isDisabled?: (v: string) => boolean,
     note?: () => string | null,
   ) => (
     <fieldset>
       <legend class="group-label">{legend}</legend>
       <For each={options} key={(o) => o.value}>
-        {(o) => (
-          <label class="opt" class:on={value() === o().value} class:disabled={!!o().disabled}>
-            <input
-              type="radio"
-              name={`${uid}-${name}`}
-              value={o().value}
-              checked={value() === o().value}
-              disabled={!!o().disabled}
-              onchange={() => set(o().value)}
-            />
-            {phone.current ? <span class="mark" aria-hidden="true"></span> : null}
-            <span>{o().label}</span>
-            {value() === o().value && !phone.current ? <Check size={14} aria-hidden="true" /> : null}
-          </label>
-        )}
+        {(o) => {
+          const disabled = () => !!isDisabled?.(o().value);
+          return (
+            <label class="opt" class:on={value() === o().value} class:disabled={disabled()}>
+              <input
+                type="radio"
+                name={`${uid}-${name}`}
+                value={o().value}
+                checked={value() === o().value}
+                disabled={disabled()}
+                onchange={() => set(o().value)}
+              />
+              {phone.current ? <span class="mark" aria-hidden="true"></span> : null}
+              <span>{o().label}</span>
+              {value() === o().value && !phone.current ? <Check size={14} aria-hidden="true" /> : null}
+            </label>
+          );
+        }}
       </For>
       {note?.() ? <p class="scale-note">{note()}</p> : null}
     </fieldset>
@@ -132,9 +136,10 @@ export default function LossOptions(props: LossOptionsProps) {
       {group(
         'scale',
         'Y scale',
-        SCALE.map((o) => (o.value === 'log' && props.logDisabled ? { ...o, disabled: true } : o)),
+        SCALE,
         effectiveScale,
         (v) => scale.set(v as Scale),
+        (v) => v === 'log' && !!props.logDisabled,
         scaleNote,
       )}
     </>
@@ -300,6 +305,9 @@ css`
     gap: var(--space-1);
     margin: 0 calc(-1 * var(--space-3));
   }
+  .sheet .scale-note {
+    max-width: none;
+  }
   /* The sheet's radio mark: a ring, filled in ink when chosen (neutral, like a checked row box). */
   .opt .mark {
     flex: none;
@@ -309,6 +317,9 @@ css`
     height: 18px;
     border: 1.5px solid var(--line-strong);
     border-radius: 50%;
+  }
+  .opt.disabled .mark {
+    border-color: var(--text-disabled);
   }
   .on .mark {
     border-color: var(--text-primary);

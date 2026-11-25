@@ -340,9 +340,10 @@ export class RunModel {
     this.stepsRev();
     const a = this.alpha();
     const shown = (['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext);
+    const plotted = a > 0 ? [this.stepData.raw('total').ext, ...shown] : shown;
     const hasAny = joinExtents(shown, false) !== null;
     const hasPositive = joinExtents(shown, true) !== null;
-    const nonPositive = countNonPositive(shown);
+    const nonPositive = countNonPositive(plotted);
     const wantLog = this.scale.get() === 'log';
     return {
       hasAny,
@@ -362,16 +363,15 @@ export class RunModel {
     return held(
       () => `${this.scale.get()}|${this.lossLogStatus.get().fallbackLinear}|${this.smoothing.get()}|${height()}|${this.epochKey()}`,
       () => {
-        const log = this.scale.get() === 'log';
+        // Gate log scale on the displayed series having positive values so a ghost raw point alone never forces a log
+        // axis while all displayed smoothed curves are <= 0.
+        const log = this.scale.get() === 'log' && !this.lossLogStatus.get().fallbackLinear;
         if (log) {
           const pos = joinExtents(tracks.get(), true);
           if (pos) return { domain: logDomain(pos[0], pos[1]), ticks: [], decimals: 0, log: true };
-          // All values are <= 0: fall back safely to linear so the axis remains valid instead of dropping the fit.
-          const lin = joinExtents(tracks.get(), false);
-          return lin ? { ...niceDomain(lin[0], lin[1]), log: false } : null;
         }
         const e = joinExtents(tracks.get(), false);
-        return e ? niceDomain(e[0], e[1]) : null;
+        return e ? { ...niceDomain(e[0], e[1]), log: false } : null;
       },
     );
   }

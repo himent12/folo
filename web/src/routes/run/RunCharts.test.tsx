@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // A run's KPI strip and its four charts (design/UNIFIED.md §4 Run): the live strip in its first minute (runs F14: the
 // epoch in progress, the start's phase, no time left until it has settled), a history that failed to load (one error,
-// one Retry), a run that detected nothing yet (said in words), and a cursor that shows on the chart it is on only.
+// one Retry), a run that detected nothing yet (said in words), and a synchronized crosshair across the four charts.
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -380,6 +380,7 @@ describe('the four run charts', () => {
       c.unmount();
     } finally {
       if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
     }
   });
 
@@ -422,18 +423,48 @@ describe('the four run charts', () => {
     expect(target.querySelector('#chart-loss .meta')?.textContent).toContain('values ≤ 0');
     zero.c.unmount();
 
-    // With mixed positive and <= 0 values on Log scale, log stays active and indicates omitted non-positive points.
-    const mixedSteps = [
-      { ...step(50), loss: { box: 0, cls: 1, dfl: 1, total: 2 } },
-      { ...step(100), loss: { box: 0.5, cls: 0.8, dfl: 0.7, total: 2 } },
-    ];
-    const mixed = show(
-      { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
-      { steps: mixedSteps, epochs: [epoch(1), epoch(2)] },
-    );
-    expect(mixed.model.lossLogStatus.get().skippedNonPositive).toBe(true);
-    expect(mixed.model.lossFit(() => 266).get()?.log).toBe(true);
-    expect(target.querySelector('#chart-loss .meta')?.textContent).toContain('≤ 0 omitted');
-    mixed.c.unmount();
+    // With mixed positive and <= 0 values on Log scale (including a series ending at 0 at >= 560 px width),
+    // log stays active, indicates omitted non-positive points, and never emits NaN SVG coordinates or drops end labels.
+    const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get: () => 600,
+    });
+    try {
+      const mixedSteps = [
+        { ...step(50), loss: { box: 0.5, cls: 1, dfl: 1, total: 2.5 } },
+        { ...step(100), loss: { box: 0, cls: 0.8, dfl: 0.7, total: 1.5 } },
+      ];
+      const mixed = show(
+        { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+        { steps: mixedSteps, epochs: [epoch(1), epoch(2)] },
+      );
+      expect(mixed.model.lossLogStatus.get().skippedNonPositive).toBe(true);
+      expect(mixed.model.lossFit(() => 266).get()?.log).toBe(true);
+      expect(target.querySelector('#chart-loss .meta')?.textContent).toContain('≤ 0 omitted');
+      const lossSvg = target.querySelector('#chart-loss svg[aria-roledescription=chart]')!;
+      expect(lossSvg.innerHTML).not.toContain('NaN');
+      expect([...lossSvg.querySelectorAll('.end-label')].map((el) => el.textContent?.trim()).sort()).toEqual(['cls', 'dfl', 'total']);
+      mixed.c.unmount();
+
+      // With EMA smoothing enabled, a single positive raw step cannot force a log axis while all 4 smoothed tracks stay <= 0.
+      prefs.lossSmoothing = '0.98';
+      prefs.lossScale = 'log';
+      const ghostOnlySteps = [
+        { ...step(50), loss: { box: -10, cls: 0, dfl: 0, total: -10 } },
+        { ...step(100), loss: { box: 0, cls: 0, dfl: 0, total: 1 } },
+      ];
+      const ghostOnly = show(
+        { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+        { steps: ghostOnlySteps, epochs: [epoch(1), epoch(2)] },
+      );
+      expect(ghostOnly.model.lossLogStatus.get().fallbackLinear).toBe(true);
+      expect(ghostOnly.model.lossFit(() => 266).get()?.log).toBe(false);
+      expect(target.querySelector('#chart-loss .trigger')?.textContent).toContain('EMA 0.98 · Linear');
+      ghostOnly.c.unmount();
+    } finally {
+      if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
   });
 });

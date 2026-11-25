@@ -45,11 +45,15 @@ export function mergesOf(endDots: boolean, hasData: boolean, markers: Marker[], 
   const ends = keyed.flatMap((s) => {
     const p = s.points[s.points.length - 1];
     // Outer radii as drawn below: the mark (3 px, the live dot LIVE_GROW more) with its 0.75 px halo.
-    return p && Number.isFinite(p.y) ? [{ id: s.id, end: s.end, x: x(p.x), y: y(p.y), r: (s.end === 'live' ? 3 + LIVE_GROW : 3) + 0.75 }] : [];
+    const py = p && Number.isFinite(p.y) ? y(p.y) : NaN;
+    return p && Number.isFinite(py) ? [{ id: s.id, end: s.end, x: x(p.x), y: py, r: (s.end === 'live' ? 3 + LIVE_GROW : 3) + 0.75 }] : [];
   });
   const inDomain = (m: Marker) => m.x >= xExtent[0] && m.x <= xExtent[1];
   return mergedEnds(
-    markers.map((m) => (inDomain(m) ? { x: x(m.x), y: y(m.y) } : { x: -1e9, y: -1e9 })),
+    markers.map((m) => {
+      const my = inDomain(m) && Number.isFinite(m.y) ? y(m.y) : NaN;
+      return Number.isFinite(my) ? { x: x(m.x), y: my } : { x: -1e9, y: -1e9 };
+    }),
     ends,
   );
 }

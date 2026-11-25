@@ -41,13 +41,21 @@ export function placedEndsOf(
       const curve = visible.indexOf(s);
       const label = endShown(s)!;
       // A line that has ended short of the plot's edge (failed, stopped) is labelled beside its end like any other.
-      return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label) } : null;
+      // Non-positive values on a log scale map to non-finite coordinates and are skipped so they never poison placement.
+      const py = p && Number.isFinite(p.y) ? yTo(p.y) : NaN;
+      return p && Number.isFinite(py) ? { id: s.id, label, x: x(p.x), y: py, curve, w: textWidth(label) } : null;
     })
     .filter((e): e is NonNullable<typeof e> => e !== null)
     // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
     // easiest to lose among the others.
     .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
-  const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: yTo(p.y) })));
+  const curves = visible.map((s) =>
+    s.points.flatMap((p) => {
+      if (!Number.isFinite(p.y)) return [];
+      const py = yTo(p.y);
+      return Number.isFinite(py) ? [{ x: x(p.x), y: py }] : [];
+    }),
+  );
   const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
   return placeEnds(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD });
 }
@@ -60,7 +68,8 @@ export function endsOf(visible: Series[], placedEnds: ReturnType<typeof placedEn
   return placedEnds.map((p) => {
     // While the axis eases, each label rides with its line's end: moved as far as the end is from where it will be.
     // The column's "+N more" entry has no line, and stays where it was placed.
-    const ay = last.has(p.id) ? y(last.get(p.id)!) : p.ay;
+    const rawAy = last.has(p.id) ? y(last.get(p.id)!) : p.ay;
+    const ay = Number.isFinite(rawAy) ? rawAy : p.ay;
     const e = { ...p, y: p.y + ay - p.ay, ay };
     const s = byId.get(e.id);
     return {
