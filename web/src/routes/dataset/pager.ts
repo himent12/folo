@@ -3,7 +3,7 @@
 // per page, so landing page N never wakes tiles on page M) and are bounded by an LRU cap (`MAX_CACHED_PAGES`), until
 // `reload()` says the dataset changed on disk.
 
-import { batch, signal, type Signal } from 'fw';
+import { batch, createSubscriber, isTracking, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { DatasetImage, Split } from '$lib/api/types';
 
@@ -12,6 +12,11 @@ export const PAGE = 100;
 const SCAN = 500;
 /** Maximum pages kept cached (LRU): caps memory on large datasets while keeping nearby pages warm. */
 export const MAX_CACHED_PAGES = 50;
+
+interface PageSlot {
+  sig: Signal<number>;
+  watch: () => void;
+}
 
 export class ImagePager {
   #total = signal<number | null>(null);
@@ -29,13 +34,15 @@ export class ImagePager {
   set error(v: unknown) {
     this.#error.set(v);
   }
-  /** Per-page version signals: `get(i)` and `revisionOf(i)` wake only when their own page updates. */
-  #pageSig = new Map<number, Signal<number>>();
+  /** Per-page version signals: `get(i)` and `revisionOf(i)` wake only when their own page updates; auto-pruned on detach. */
+  #pageSlots = new Map<number, PageSlot>();
+  /** Pages currently observed by a mounted reactive reader (protected from eviction when possible and refetched on reload). */
+  #observed = new Set<number>();
   /** Bumps when `#index` changes, for `indexOf(id)` readers. */
   #indexVersion = signal(0);
   /** Insertion-ordered LRU cache of loaded pages (oldest first, most-recently-used last). */
   #pages = new Map<number, DatasetImage[]>();
-  #inflight = new Map<number, Promise<void>>();
+  #inflight = new Map<number, Promise<DatasetImage[] | undefined>>();
   #index = new Map<string, number>();
   /** Pages whose last request failed; `retry()` loads them again. */
   #failed = new Set<number>();
@@ -74,7 +81,7 @@ export class ImagePager {
   revisionOf(i: number): number {
     if (i < 0) return 0;
     const p = Math.floor(i / PAGE);
-    void this.#signalFor(p).get();
+    this.#trackPage(p);
     return this.#pageRev.get(p) ?? 0;
   }
 
@@ -97,7 +104,7 @@ export class ImagePager {
   get(i: number): DatasetImage | undefined {
     if (i < 0) return undefined;
     const p = Math.floor(i / PAGE);
-    void this.#signalFor(p).get();
+    this.#trackPage(p);
     // A stale page is read again by whoever still shows it (the grid's rows in view, the inspector's image), so only
     // what is on screen is asked for after a change; one whose read failed waits for Retry.
     if (this.#stale.has(p) && !this.#failed.has(p)) void this.#load(p);
@@ -137,10 +144,15 @@ export class ImagePager {
   async at(i: number): Promise<DatasetImage | undefined> {
     if (i < 0 || (this.total !== null && i >= this.total)) return undefined;
     const p = Math.floor(i / PAGE);
-    await this.#load(p);
+    const gen = this.#gen;
+    const loaded = await this.#load(p);
     const page = this.#pages.get(p);
-    if (page !== undefined) this.#touch(p, page);
-    return page?.[i % PAGE];
+    if (page !== undefined) {
+      this.#touch(p, page);
+      return page[i % PAGE];
+    }
+    // If another concurrent load evicted `p` before we resumed, still hand back the page this call loaded.
+    return gen === this.#gen ? loaded?.[i % PAGE] : undefined;
   }
 
   /** Finds an image id in this filter: loaded pages, then a guess from `img_<n>` ids, then a scan. -1 if absent. */
@@ -172,32 +184,46 @@ export class ImagePager {
       });
       // A reload() meanwhile: look again in the dataset as it is now.
       if (!res || gen !== this.#gen) return this.find(id);
-      for (const p of pages) this.#store(p, res.images.slice((p - off / PAGE) * PAGE, (p - off / PAGE + 1) * PAGE), res.total);
       const found = res.images.findIndex((im) => im.id === id);
       if (found >= 0) {
         const idx = off + found;
         const p = Math.floor(idx / PAGE);
-        // Ensure the matched page remains MRU even if `maxPages < SCAN / PAGE`.
-        if (!this.#pages.has(p)) this.#store(p, res.images.slice((p - off / PAGE) * PAGE, (p - off / PAGE + 1) * PAGE), res.total);
-        else this.#touch(p, this.#pages.get(p)!);
+        // Cache the matched page (leaving other cached pages untouched unless capacity is free).
+        this.#store(p, res.images.slice((p - off / PAGE) * PAGE, (p - off / PAGE + 1) * PAGE), res.total);
         return idx;
+      }
+      // Scan misses only fill spare capacity — they must never evict pages the grid or inspector already holds.
+      this.#total.set(res.total);
+      for (const p of pages) {
+        if (this.#pages.size >= this.maxPages) break;
+        this.#store(p, res.images.slice((p - off / PAGE) * PAGE, (p - off / PAGE + 1) * PAGE), res.total);
       }
     }
     return -1;
   }
 
-  #signalFor(p: number): Signal<number> {
-    let s = this.#pageSig.get(p);
-    if (!s) {
-      s = signal(0);
-      this.#pageSig.set(p, s);
+  #trackPage(p: number): void {
+    if (!isTracking()) return;
+    let slot = this.#pageSlots.get(p);
+    if (!slot) {
+      const sig = signal(0);
+      const watch = createSubscriber(() => {
+        this.#observed.add(p);
+        return () => {
+          this.#observed.delete(p);
+          if (this.#pageSlots.get(p) === slot) this.#pageSlots.delete(p);
+        };
+      });
+      slot = { sig, watch };
+      this.#pageSlots.set(p, slot);
     }
-    return s;
+    slot.watch();
+    void slot.sig.get();
   }
 
   #bumpPage(p: number): void {
-    const s = this.#pageSig.get(p);
-    if (s) s.set((v) => v + 1);
+    const slot = this.#pageSlots.get(p);
+    if (slot) slot.sig.set((v) => v + 1);
   }
 
   #touch(p: number, images: DatasetImage[]): void {
@@ -207,7 +233,14 @@ export class ImagePager {
 
   #evict(): void {
     while (this.#pages.size > this.maxPages) {
-      const oldest = this.#pages.keys().next().value;
+      let oldest: number | undefined;
+      for (const p of this.#pages.keys()) {
+        if (!this.#observed.has(p)) {
+          oldest = p;
+          break;
+        }
+      }
+      if (oldest === undefined) oldest = this.#pages.keys().next().value;
       if (oldest === undefined) break;
       const dropped = this.#pages.get(oldest);
       this.#pages.delete(oldest);
@@ -219,6 +252,7 @@ export class ImagePager {
           if (this.#index.get(im.id) === oldest * PAGE + k) this.#index.delete(im.id);
         }
       }
+      if (this.#observed.has(oldest)) this.#bumpPage(oldest);
     }
   }
 
@@ -249,10 +283,11 @@ export class ImagePager {
     });
   }
 
-  #load(p: number): Promise<void> {
+  #load(p: number): Promise<DatasetImage[] | undefined> {
     if (this.#fresh(p)) {
-      this.#touch(p, this.#pages.get(p)!);
-      return Promise.resolve();
+      const page = this.#pages.get(p)!;
+      this.#touch(p, page);
+      return Promise.resolve(page);
     }
     const pending = this.#inflight.get(p);
     if (pending) return pending;
@@ -261,16 +296,18 @@ export class ImagePager {
       .datasetImages(this.datasetId, this.#query(p * PAGE, PAGE), this.#ctrl.signal)
       .then(
         (res) => {
-          if (gen !== this.#gen) return;
+          if (gen !== this.#gen) return undefined;
           this.#failed.delete(p);
           if (this.#failed.size === 0) this.#error.set(undefined);
           this.#store(p, res.images, res.total);
+          return res.images;
         },
         (e: unknown) => {
-          if (gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return;
+          if (gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return undefined;
           // A stale page that cannot be read again keeps what it showed (still stale, so Retry reads it).
           this.#failed.add(p);
           this.#error.set(e);
+          return undefined;
         },
       )
       .finally(() => {
@@ -295,6 +332,7 @@ export class ImagePager {
     this.#inflight.clear();
     for (const p of this.#pages.keys()) this.#stale.add(p);
     for (const p of this.#failed) this.#stale.add(p);
+    for (const p of this.#observed) this.#stale.add(p);
     this.#failed.clear();
     // Readers run again and ask for their pages (`get`); with no row shown (an empty filter), nothing would ask.
     if (!this.total) void this.#load(0);

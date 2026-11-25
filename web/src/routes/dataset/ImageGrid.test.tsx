@@ -86,4 +86,54 @@ describe('ImageGrid visible-over-overscan thumbnail priority', () => {
       unmount();
     }
   });
+
+  it('keeps visible priority over leading overscan when uncached page metadata resolves asynchronously', async () => {
+    const requested: string[] = [];
+    let releasePage!: () => void;
+    const gate = new Promise<void>((r) => (releasePage = r));
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        if (off === 200) await gate;
+        return { total: 400, images: Array.from({ length: lim }, (_, k) => makeImg(off + k)) };
+      },
+      imageUrl: async (_ds, id) => {
+        requested.push(id);
+        return `data:image/png;base64,${id}`;
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_1', undefined, undefined);
+    await pager.at(0);
+    const { unmount } = render(() => (
+      <ImageGrid pager={pager} classes={['car']} density="m" boxes={false} only={null} onopen={() => {}} />
+    ));
+    try {
+      flush();
+      await vi.advanceTimersByTimeAsync(40);
+      flush();
+      requested.length = 0;
+      // Jump into uncached page 2 (rows 55..57 = items 220..231 in view; rows 53..54 = items 212..219 leading overscan).
+      gridTop = -55 * 154;
+      window.dispatchEvent(new Event('scroll'));
+      // Let multiple frames pass while page 2 is still in flight.
+      await vi.advanceTimersByTimeAsync(64);
+      flush();
+      expect(requested).toEqual([]);
+      // Now page 2 metadata resolves: visible tiles must request immediately before leading overscan tiles.
+      releasePage();
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      const immediate = [...requested];
+      expect(immediate.length).toBeGreaterThan(0);
+      expect(immediate.every((id) => Number(id.replace('img_', '')) >= 220 && Number(id.replace('img_', '')) < 232)).toBe(true);
+      // One frame later, overscan tiles warm up.
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      expect(requested.some((id) => Number(id.replace('img_', '')) < 220)).toBe(true);
+    } finally {
+      unmount();
+    }
+  });
 });

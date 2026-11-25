@@ -25,10 +25,13 @@ const NO_BOXES: never[] = [];
 const stem = (file: string) => file.split('/').pop() ?? file;
 
 export default function ImageGrid(props: ImageGridProps) {
-  /** The cells take the shape of the dataset's first 64 images (4:3 until they load). */
-  const aspect = computed(() =>
-    dominantAspect(Array.from({ length: Math.min(props.pager.total ?? 0, 64) }, (_, i) => props.pager.get(i))),
-  );
+  /** The cells take the shape of the dataset's first 64 images (4:3 until they load; latched across page-0 eviction). */
+  let lastAspect = 4 / 3;
+  const aspect = computed(() => {
+    const sample = Array.from({ length: Math.min(props.pager.total ?? 0, 64) }, (_, i) => props.pager.get(i));
+    if (sample.some(Boolean)) lastAspect = dominantAspect(sample);
+    return lastAspect;
+  });
 
   function label(i: number) {
     const img = props.pager.get(i);
@@ -38,22 +41,38 @@ export default function ImageGrid(props: ImageGridProps) {
   function open(i: number) {
     const img = props.pager.get(i);
     if (img) props.onopen(i, img.id);
+    else void props.pager.at(i).then((loaded) => loaded && props.onopen(i, loaded.id));
   }
 
   // A tile reads its image through one computed subscribed only to its own page's signal, so a page landing elsewhere
-  // never wakes this tile or re-runs its bindings. Visible tiles mount their thumbnail immediately; off-screen overscan
-  // tiles wait one animation frame so visible thumbnails claim the connection pool first (and fast-scrolled overscan
-  // tiles cancel before fetching).
+  // never wakes this tile or re-runs its bindings. Visible tiles mount their thumbnail immediately once metadata is
+  // available; off-screen overscan tiles wait one animation frame after metadata arrives so visible thumbnails claim
+  // the connection pool first (and fast-scrolled overscan tiles cancel before fetching).
   const tile = (i: () => number, inView: () => boolean) => {
     const img = computed(() => props.pager.get(i()));
-    const ready = signal(untrack(inView));
+    const initImg = untrack(() => img.get());
+    const initOn = untrack(inView) && !!initImg;
+    let readyKey = initOn ? `${initImg.id}:${untrack(() => props.pager.revisionOf(i()))}` : '';
+    const ready = signal(initOn);
     effect(() => {
-      if (ready.peek()) return;
+      const cur = img.get();
+      if (!cur) {
+        readyKey = '';
+        ready.set(false);
+        return;
+      }
+      const key = `${cur.id}:${props.pager.revisionOf(i())}`;
       if (inView() || typeof requestAnimationFrame === 'undefined') {
+        readyKey = key;
         ready.set(true);
         return;
       }
-      const id = requestAnimationFrame(() => ready.set(true));
+      if (readyKey === key && ready.peek()) return;
+      ready.set(false);
+      const id = requestAnimationFrame(() => {
+        readyKey = key;
+        ready.set(true);
+      });
       return () => cancelAnimationFrame(id);
     });
     // The image's bindings may re-run once more as it goes (before the branch that shows it is taken down: a link to an

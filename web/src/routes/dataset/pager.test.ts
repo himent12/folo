@@ -258,4 +258,89 @@ describe('ImagePager', () => {
     await vi.waitFor(() => expect(reads).toHaveLength(4));
     expect(reads).toEqual([3, 4, 2, 5]);
   });
+
+  it('keeps observed visible pages cached and responsive across a missing-image find() scan and reload()', async () => {
+    const total = 1200;
+    let ver = 'v1';
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        const end = Math.min(total, off + lim);
+        return {
+          total,
+          images: Array.from({ length: end - off }, (_, k) => ({
+            id: `img_${off + k}`,
+            file: `${ver}_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_big', undefined, 0, 0, 3);
+    let seen: string | undefined;
+    const stop = createRoot((dispose) => {
+      effect(() => {
+        seen = pager.get(0)?.file;
+      });
+      return dispose;
+    });
+    try {
+      await pager.at(0);
+      flush();
+      expect(seen).toBe('v1_0.jpg');
+      // Full scan for a missing image must not evict page 0 or break its reactive subscription.
+      expect(await pager.find('img_missing')).toBe(-1);
+      expect(pager.get(0)?.file).toBe('v1_0.jpg');
+      expect(pager.indexOf('img_0')).toBe(0);
+      // Reload updates the observed page cleanly.
+      ver = 'v2';
+      pager.reload();
+      flush();
+      await vi.waitFor(() => {
+        flush();
+        expect(seen).toBe('v2_0.jpg');
+      });
+    } finally {
+      stop();
+    }
+  });
+
+  it('returns each concurrent at() result even when another response evicts its page under a 1-page cap', async () => {
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const gateA = new Promise<void>((r) => (releaseA = r));
+    const gateB = new Promise<void>((r) => (releaseB = r));
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        if (off === 0) await gateA;
+        if (off === PAGE) await gateB;
+        return {
+          total: 500,
+          images: Array.from({ length: PAGE }, (_, k) => ({
+            id: `img_${off + k}`,
+            file: `img_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_big', undefined, undefined, 0, 1);
+    const a = pager.at(0);
+    const b = pager.at(PAGE);
+    releaseA();
+    releaseB();
+    const [imgA, imgB] = await Promise.all([a, b]);
+    expect(imgA?.id).toBe('img_0');
+    expect(imgB?.id).toBe(`img_${PAGE}`);
+  });
 });
