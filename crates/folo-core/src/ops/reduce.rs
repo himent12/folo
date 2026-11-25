@@ -195,10 +195,22 @@ impl Tensor {
         let out = Tensor::wrap(s, self.shape().clone(), name)?;
         let y = out.detach();
         Ok(out.track_saved(name, &[self], &[&y.clone()], move |g| {
-            let gx = if log {
-                g.sub(&y.exp()?.mul(&g.sum(d, true)?)?)?
-            } else {
-                y.mul(&g.sub(&g.mul(&y)?.sum(d, true)?)?)?
+            y.check_same_device(g, name)?;
+            g.check_float_like(&y, name)?;
+            let b = y.backend()?;
+            let fused = super::with_views([&y, g], [y.layout(), g.layout()], |[vy, vg]| {
+                b.softmax_backward(vy, vg, d, log)
+            });
+            let gx = match fused {
+                Ok(s) => Tensor::wrap(s, y.shape().clone(), name)?,
+                Err(Error::NotSupported { .. }) => {
+                    if log {
+                        g.sub(&y.exp()?.mul(&g.sum(d, true)?)?)?
+                    } else {
+                        y.mul(&g.sub(&g.mul(&y)?.sum(d, true)?)?)?
+                    }
+                }
+                Err(e) => return Err(e),
             };
             Ok(grads![Some(gx)])
         }))

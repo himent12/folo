@@ -141,3 +141,30 @@ fn elementwise_simd_ops_are_bitwise_reproducible() {
         vec![ye, yl, yt, ys, ysi, ysp, ge, gl, gt, gs, gsi, gsp]
     });
 }
+
+#[test]
+fn softmax_and_backward_are_bitwise_reproducible() {
+    let mut rng = Rng::seed(15);
+    // Exercises inner == 1 short, inner == 1 online (> 4096), and inner > 1 column-tiled parallel paths.
+    let x_row = Tensor::randn([64, 513], 0.0, 2.0, &mut rng).requires_grad_();
+    let g_row = Tensor::randn([64, 513], 0.0, 1.0, &mut rng);
+    let x_long = Tensor::randn([8, 5003], 0.0, 2.0, &mut rng).requires_grad_();
+    let g_long = Tensor::randn([8, 5003], 0.0, 1.0, &mut rng);
+    let x_col = Tensor::randn([2, 19, 1029], 0.0, 2.0, &mut rng).requires_grad_();
+    let g_col = Tensor::randn([2, 19, 1029], 0.0, 1.0, &mut rng);
+    assert_reproducible("softmax", &|| {
+        let s1 = x_row.softmax(-1).unwrap();
+        let ls1 = x_row.log_softmax(-1).unwrap();
+        let s2 = x_long.softmax(-1).unwrap();
+        let ls2 = x_long.log_softmax(-1).unwrap();
+        let s3 = x_col.softmax(1).unwrap();
+        let ls3 = x_col.log_softmax(1).unwrap();
+        let gs1 = s1.backward_with(&g_row).unwrap().get(&x_row).unwrap().clone();
+        let gls1 = ls1.backward_with(&g_row).unwrap().get(&x_row).unwrap().clone();
+        let gs2 = s2.backward_with(&g_long).unwrap().get(&x_long).unwrap().clone();
+        let gls2 = ls2.backward_with(&g_long).unwrap().get(&x_long).unwrap().clone();
+        let gs3 = s3.backward_with(&g_col).unwrap().get(&x_col).unwrap().clone();
+        let gls3 = ls3.backward_with(&g_col).unwrap().get(&x_col).unwrap().clone();
+        vec![s1, ls1, s2, ls2, s3, ls3, gs1, gls1, gs2, gls2, gs3, gls3]
+    });
+}

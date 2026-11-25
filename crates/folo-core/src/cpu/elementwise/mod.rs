@@ -13,9 +13,9 @@ use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
 
 pub use simd::SILU_MAX_REL_ERR;
-pub(crate) use simd::silu_bias_inplace;
+pub(crate) use simd::{exp_scalar, silu_bias_inplace};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use simd::silu8;
+pub(crate) use simd::{exp8, silu8};
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
 #[inline]

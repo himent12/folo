@@ -2,7 +2,6 @@
 
 use rayon::prelude::*;
 
-use super::elementwise::fast_exp;
 use super::{CHUNK, PAR_MIN};
 use crate::backend::ReduceOp;
 use crate::cpu::par_chunks;
@@ -182,77 +181,6 @@ pub(crate) fn reduce_arg(max: bool, x: &[f32], (outer, d, inner): (usize, usize,
         par_chunks(&mut out, inner.max(1), &|i, c| row((i, c)));
     } else {
         out.chunks_mut(inner.max(1)).enumerate().for_each(row);
-    }
-    out
-}
-
-pub(crate) fn softmax(x: &[f32], (outer, d, inner): (usize, usize, usize), log: bool) -> Vec<f32> {
-    let mut out = super::alloc_uninit(x.len());
-    if out.is_empty() {
-        return out;
-    }
-    let block = |(o, dst): (usize, &mut [f32])| {
-        let src = &x[o * d * inner..(o + 1) * d * inner];
-        if inner == 1 {
-            let m = src.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            let m = if m.is_finite() { m } else { 0.0 };
-            for (y, &v) in dst.iter_mut().zip(src) {
-                *y = fast_exp(v - m);
-            }
-            let s = sum_slice(dst);
-            if log {
-                let ls = s.ln();
-                for (y, &v) in dst.iter_mut().zip(src) {
-                    *y = (v - m) - ls;
-                }
-            } else {
-                let inv = 1.0 / s;
-                for y in dst.iter_mut() {
-                    *y *= inv;
-                }
-            }
-        } else {
-            let mut m = vec![f32::NEG_INFINITY; inner];
-            for r in 0..d {
-                for (a, &v) in m.iter_mut().zip(&src[r * inner..(r + 1) * inner]) {
-                    *a = a.max(v);
-                }
-            }
-            for a in m.iter_mut() {
-                if !a.is_finite() {
-                    *a = 0.0;
-                }
-            }
-            let mut s = vec![0f32; inner];
-            for r in 0..d {
-                let row = &mut dst[r * inner..(r + 1) * inner];
-                for (((y, &v), &mx), acc) in
-                    row.iter_mut().zip(&src[r * inner..(r + 1) * inner]).zip(&m).zip(&mut s)
-                {
-                    *y = fast_exp(v - mx);
-                    *acc += *y;
-                }
-            }
-            for r in 0..d {
-                let row = &mut dst[r * inner..(r + 1) * inner];
-                if log {
-                    for (((y, &v), &mx), &acc) in
-                        row.iter_mut().zip(&src[r * inner..(r + 1) * inner]).zip(&m).zip(&s)
-                    {
-                        *y = v - mx - acc.ln();
-                    }
-                } else {
-                    for (y, &acc) in row.iter_mut().zip(&s) {
-                        *y /= acc;
-                    }
-                }
-            }
-        }
-    };
-    if x.len() >= PAR_MIN && outer > 1 {
-        par_chunks(&mut out, d * inner, &|i, c| block((i, c)));
-    } else {
-        out.chunks_mut(d * inner).enumerate().for_each(block);
     }
     out
 }
