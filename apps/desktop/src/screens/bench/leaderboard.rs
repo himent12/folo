@@ -244,23 +244,41 @@ impl FoloApp {
             .child(score_th)
             .children(axis_ths)
             .child(div().w(px(ACTIONS_W)).flex_none());
+        let retry_anchor = match self.passing_stop("bench-board-retry", entries.error().is_some(), cx) {
+            Some(fh) if entries.error().is_none() => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let list = match entries {
             Load::Ready(l) => l.clone(),
             Load::Failed(e) => {
+                let bid = b.id.clone();
+                let retry = self.button(
+                    "bench-board-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_bench_entries(&bid, cx)),
+                );
                 return panel(&t)
                     .child(head_row)
-                    .child(empty_state(
-                        &t,
-                        "icons/circle-alert.svg",
-                        "The leaderboard didn't load",
-                        &e.message,
-                        Tone::Danger,
-                    ))
+                    .child(
+                        empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "The leaderboard didn't load",
+                            &e.message,
+                            Tone::Danger,
+                        )
+                        .child(retry),
+                    )
                     .into_any_element();
             }
             _ => {
                 return panel(&t)
                     .child(head_row)
+                    .children(retry_anchor)
                     .child(head)
                     .child(loading_rows(&t, "board", 4))
                     .into_any_element();
@@ -269,6 +287,7 @@ impl FoloApp {
         if list.is_empty() {
             return panel(&t)
                 .child(head_row)
+                .children(retry_anchor)
                 .child(empty_state(
                     &t,
                     "icons/play.svg",
@@ -335,6 +354,7 @@ impl FoloApp {
         panel(&t)
             .overflow_hidden()
             .child(head_row)
+            .children(retry_anchor)
             .child(head)
             .children(rows)
             .child(

@@ -53,17 +53,42 @@ impl FoloApp {
             .entry_images
             .get(&(b.id.clone(), e.id.clone()))
             .map(|x| (x.page.clone(), x.more, x.more_error.clone()));
+        let retry_shown = matches!(&state, Some((Load::Failed(_), _, _)));
+        let retry_anchor = match self.passing_stop("bench-entry-images-retry", retry_shown, cx) {
+            Some(fh) if !retry_shown => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let (page, loading_more, more_error) = match state {
             Some((Load::Ready(p), more, err)) => (p, more, err),
             Some((Load::Failed(err), _, _)) => {
+                let (bid, eid) = (b.id.clone(), e.id.clone());
+                let retry = self.button(
+                    "bench-entry-images-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_entry_images(&bid, &eid, cx)),
+                );
                 return panel(&t)
                     .child(header)
-                    .child(div().p(px(16.)).child(text(ty::SM, t.danger_text).child(err.message)))
+                    .child(
+                        div()
+                            .p(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(text(ty::SM, t.danger_text).flex_1().min_w_0().child(err.message))
+                            .child(retry),
+                    )
                     .into_any_element();
             }
             _ => {
                 return panel(&t)
                     .child(header)
+                    .children(retry_anchor)
                     .child(div().p(px(16.)).flex().flex_wrap().gap(px(8.)).children(
                         (0..8).map(|i| div().w(px(152.)).h(px(152.)).child(skeleton(&t, format!("eimg{i}")))),
                     ))
@@ -226,6 +251,7 @@ impl FoloApp {
             });
         panel(&t)
             .child(header)
+            .children(retry_anchor)
             .children(inspector)
             .child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
             .child(footer)

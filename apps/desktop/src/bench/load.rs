@@ -66,9 +66,29 @@ impl FoloApp {
         self.reload(id, Reload::Entries, cx);
     }
 
+    /// Retries a failed benchmark leaderboard load.
+    pub fn retry_bench_entries(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.bench_on() {
+            return;
+        }
+        self.bench.entries.insert(id.to_string(), Load::Loading);
+        self.load_bench_entries(id, cx);
+        cx.notify();
+    }
+
     /// (Re)loads a benchmark's loops, merged with what the stream said meanwhile.
     pub fn load_bench_loops(&mut self, id: &str, cx: &mut Context<Self>) {
         self.reload(id, Reload::Loops, cx);
+    }
+
+    /// Retries a failed benchmark loops load.
+    pub fn retry_bench_loops(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.bench_on() {
+            return;
+        }
+        self.bench.loops.insert(id.to_string(), Load::Loading);
+        self.load_bench_loops(id, cx);
+        cx.notify();
     }
 
     /// Reloads the benchmark list in place (no loading state once it has one).
@@ -234,6 +254,13 @@ impl FoloApp {
                 this.bench.results.insert(key, r.into());
             },
         );
+    }
+
+    /// Retries a failed benchmark entry result load.
+    pub fn retry_bench_result(&mut self, bench: &str, entry: &str, cx: &mut Context<Self>) {
+        self.bench.results.remove(&(bench.to_string(), entry.to_string()));
+        self.ensure_bench_result(bench, entry, cx);
+        cx.notify();
     }
 
     /// Forgets everything benchmark (a new data source, or Retry).

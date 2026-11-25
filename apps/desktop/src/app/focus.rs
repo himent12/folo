@@ -48,6 +48,14 @@ impl FoloApp {
         window.focus(&fh);
     }
 
+    /// Focuses `key` in keyboard mode and schedules a focus-ring scroll reveal on `page_scroll`.
+    pub fn focus_key_and_reveal(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.kb = true;
+        self.focus_key(key, window, cx);
+        REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
+        cx.notify();
+    }
+
     /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
     /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
     /// Only a capture-phase listener: it never prevents the press's default.

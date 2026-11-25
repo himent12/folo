@@ -189,9 +189,10 @@ impl FoloApp {
         self.retry_all(cx);
     }
 
-    /// The server answers again after it was unreachable: an open dialog's "could not reach"
-    /// error is out of date (its next try may well work), and the estimate is asked for again.
-    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+    /// Clears stale "could not reach" errors from open dialogs and estimates once the server
+    /// answers again (both on reconnect and when an earlier in-flight call returns
+    /// `server_unreachable` late).
+    pub(super) fn clear_unreachable_dialogs(&mut self) {
         let stale = |e: &Option<ApiError>| e.as_ref().is_some_and(|e| e.code == "server_unreachable");
         if let Some(f) = self.new_run.as_mut()
             && stale(&f.error)
@@ -211,6 +212,8 @@ impl FoloApp {
             self.bench.new_bench.as_mut().map(|f| &mut f.error),
             self.bench.new_loop.as_mut().map(|f| &mut f.error),
             self.bench.design.as_mut().map(|f| &mut f.error),
+            self.cloud.disconnect.as_mut().map(|c| &mut c.error),
+            self.cloud.terminate.as_mut().map(|c| &mut c.error),
         ]
         .into_iter()
         .flatten()
@@ -219,6 +222,17 @@ impl FoloApp {
                 *e = None;
             }
         }
+        if let Some(f) = self.cloud.connect.as_mut()
+            && matches!(&f.error, Some(crate::cloud::ConnectError::Dialog(e)) if e.code == "server_unreachable")
+        {
+            f.error = None;
+        }
+    }
+
+    /// The server answers again after it was unreachable: an open dialog's "could not reach"
+    /// error is out of date (its next try may well work), and the estimate is asked for again.
+    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+        self.clear_unreachable_dialogs();
         // The Playground's prediction that couldn't reach it runs again, as Retry would.
         if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
             self.rerun_predict(cx);
@@ -234,9 +248,9 @@ impl FoloApp {
     }
 
     /// What a page asked for while the server was away (a dataset and its images, a run's history, a
-    /// model's evaluation, the benchmarks and their results) is asked for again when shown: nothing
-    /// else does, and the page kept "Could not reach folo serve" until Retry (a finished benchmark
-    /// result has no Retry at all).
+    /// model's evaluation, throughput, cloud lists/offers, the benchmarks and their results/images)
+    /// is asked for again when shown: nothing else does, and the page would otherwise keep
+    /// "Could not reach folo serve" until Retry.
     pub(super) fn forget_unreachable_loads(&mut self, cx: &mut Context<Self>) {
         let s = &mut self.store;
         forget_unreachable(&mut s.dataset);
@@ -247,10 +261,32 @@ impl FoloApp {
         forget_unreachable(&mut s.run_data);
         forget_unreachable(&mut s.samples);
         forget_unreachable(&mut s.logs);
+        if unreachable(&self.throughput) {
+            self.throughput = Load::Idle;
+        }
+        if unreachable(&self.cloud.providers) {
+            self.cloud.providers = Load::Idle;
+        }
+        if unreachable(&self.cloud.connections) {
+            self.cloud.connections = Load::Idle;
+        }
+        if unreachable(&self.cloud.instances) {
+            self.cloud.instances = Load::Idle;
+        }
+        forget_unreachable(&mut self.cloud.offers);
+        let refresh_cloud_instances =
+            std::mem::take(&mut self.cloud.instances_failed) && self.cloud.instances.ready().is_some();
         let b = &mut self.bench;
         forget_unreachable(&mut b.entries);
         forget_unreachable(&mut b.loops);
         forget_unreachable(&mut b.results);
+        forget_unreachable(&mut b.previews);
+        b.entry_images.retain(|_, x| !unreachable(&x.page));
+        for x in b.entry_images.values_mut() {
+            if x.more_error.as_ref().is_some_and(|e| e.code == "server_unreachable") {
+                x.more_error = None;
+            }
+        }
         if unreachable(&b.list) {
             b.list = Load::Idle;
         }
@@ -259,6 +295,15 @@ impl FoloApp {
         }
         if unreachable(&b.agents) {
             b.agents = Load::Idle;
+        }
+        if unreachable(&b.jobs) {
+            b.jobs = Load::Idle;
+        }
+        if refresh_cloud_instances && self.cloud_on() {
+            self.refresh_instances(cx);
+        }
+        if self.cloud_on() && self.new_run.as_ref().and_then(|f| f.run_on.as_ref()).is_some() {
+            self.sync_compute(cx);
         }
         // Any later image page that exhausted retries during the outage resumes now that the
         // server answers again.
@@ -554,5 +599,156 @@ mod url_persist_tests {
         assert_eq!(persistable_server_url("http://token@127.0.0.1:7878"), None);
         assert_eq!(persistable_server_url("http://127.0.0.1:99999"), None);
         assert_eq!(persistable_server_url("   "), None);
+    }
+}
+
+#[cfg(test)]
+mod reconnect_recovery_tests {
+    use super::super::tests::{drive, open};
+    use crate::api::{ApiError, BenchEntryImagePage};
+    use crate::bench::{EntryImages, ImageSort};
+    use crate::cloud::{Confirm, ConnectError, ConnectForm};
+    use crate::input::TextInput;
+    use crate::store::Load;
+    use folo_ui::AppContext;
+
+    fn unreachable_err() -> ApiError {
+        ApiError {
+            status: None,
+            code: "server_unreachable".into(),
+            message: "Could not reach folo serve".into(),
+            hint: None,
+        }
+    }
+
+    fn server_err() -> ApiError {
+        ApiError { status: Some(500), code: "internal".into(), message: "Internal error".into(), hint: None }
+    }
+
+    #[test]
+    fn reconnected_clears_unreachable_throughput_cloud_and_bench_loads_and_dialog_errors() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, _, cx| {
+            this.throughput = Load::Failed(unreachable_err());
+            this.cloud.providers = Load::Failed(unreachable_err());
+            this.cloud.connections = Load::Failed(unreachable_err());
+            this.cloud.instances = Load::Failed(unreachable_err());
+            this.cloud.offers.insert("c_unreach".into(), Load::Failed(unreachable_err()));
+            this.cloud.offers.insert("c_other".into(), Load::Failed(server_err()));
+            this.cloud.connect = Some(ConnectForm {
+                id: 1,
+                provider: 0,
+                fields: Vec::new(),
+                name: cx.new(|cx| TextInput::new("", cx)),
+                submitting: false,
+                error: Some(ConnectError::Dialog(unreachable_err())),
+            });
+            this.cloud.disconnect =
+                Some(Confirm { id: "c1".into(), busy: false, error: Some(unreachable_err()) });
+            this.cloud.terminate = Some(Confirm { id: "i1".into(), busy: false, error: Some(server_err()) });
+            this.bench.jobs = Load::Failed(unreachable_err());
+            this.bench.previews.insert("b_unreach".into(), Load::Failed(unreachable_err()));
+            this.bench.previews.insert("b_other".into(), Load::Failed(server_err()));
+            this.bench.entry_images.insert(
+                ("b1".into(), "e_fail".into()),
+                EntryImages {
+                    sort: ImageSort::Worst,
+                    page: Load::Failed(unreachable_err()),
+                    more: false,
+                    more_error: None,
+                    seq: 1,
+                },
+            );
+            this.bench.entry_images.insert(
+                ("b1".into(), "e_more".into()),
+                EntryImages {
+                    sort: ImageSort::Worst,
+                    page: Load::Ready(BenchEntryImagePage { images: Vec::new(), total: 10, conf: None }),
+                    more: false,
+                    more_error: Some(unreachable_err()),
+                    seq: 2,
+                },
+            );
+
+            this.reconnected(cx);
+
+            assert!(matches!(this.throughput, Load::Idle));
+            assert!(matches!(this.cloud.providers, Load::Idle));
+            assert!(matches!(this.cloud.connections, Load::Idle));
+            assert!(matches!(this.cloud.instances, Load::Idle));
+            assert!(!this.cloud.offers.contains_key("c_unreach"));
+            assert!(this.cloud.offers.contains_key("c_other"), "non-unreachable offer error preserved");
+            assert_eq!(this.cloud.connect.as_ref().unwrap().error, None);
+            assert_eq!(this.cloud.disconnect.as_ref().unwrap().error, None);
+            assert!(
+                this.cloud.terminate.as_ref().unwrap().error.is_some(),
+                "non-unreachable dialog error preserved"
+            );
+            assert!(matches!(this.bench.jobs, Load::Idle));
+            assert!(!this.bench.previews.contains_key("b_unreach"));
+            assert!(this.bench.previews.contains_key("b_other"), "non-unreachable preview error preserved");
+            assert!(!this.bench.entry_images.contains_key(&("b1".into(), "e_fail".into())));
+            let more_entry = this.bench.entry_images.get(&("b1".into(), "e_more".into())).unwrap();
+            assert!(more_entry.more_error.is_none(), "stale unreachable more_error cleared");
+        });
+
+        // When instances were Ready but a later refresh failed (`instances_failed = true`), reconnect
+        // clears the stale failure flag and refreshes the instance list.
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.instances = Load::Ready(Vec::new());
+            this.cloud.instances_failed = true;
+            this.reconnected(cx);
+        });
+        drive(&mut app, window, |this, _, _| {
+            assert!(!this.cloud.instances_failed, "instances_failed cleared after reconnect refresh");
+            assert!(this.cloud.instances.ready().is_some());
+        });
+    }
+
+    #[test]
+    fn late_unreachable_fetch_after_reconnect_clears_cloud_dialog_errors() {
+        let (mut app, window) = open();
+
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.disconnect = Some(Confirm { id: "c1".into(), busy: true, error: None });
+            this.cloud.connect = Some(ConnectForm {
+                id: 1,
+                provider: 0,
+                fields: Vec::new(),
+                name: cx.new(|cx| TextInput::new("", cx)),
+                submitting: true,
+                error: None,
+            });
+            // Captures `reconnects` before `reconnected()` bumps it; resolves during `drive`'s
+            // `run_until_idle()` after the reconnect has already run.
+            this.fetch(
+                cx,
+                |_| Err::<(), ApiError>(unreachable_err()),
+                |this, r, _| {
+                    if let Err(e) = r {
+                        if let Some(d) = this.cloud.disconnect.as_mut() {
+                            d.busy = false;
+                            d.error = Some(e.clone());
+                        }
+                        if let Some(c) = this.cloud.connect.as_mut() {
+                            c.submitting = false;
+                            c.error = Some(ConnectError::Dialog(e));
+                        }
+                    }
+                },
+            );
+            // Server reconnects while the request is still in flight.
+            this.reconnected(cx);
+        });
+
+        drive(&mut app, window, |this, _, _| {
+            let d = this.cloud.disconnect.as_ref().expect("disconnect dialog stays open");
+            assert!(!d.busy, "disconnect becomes available for manual retry");
+            assert_eq!(d.error, None, "late server_unreachable error is cleared after reconnect");
+
+            let c = this.cloud.connect.as_ref().expect("connect dialog stays open");
+            assert!(!c.submitting, "connect becomes available for manual retry");
+            assert_eq!(c.error, None, "late connect server_unreachable error is cleared after reconnect");
+        });
     }
 }

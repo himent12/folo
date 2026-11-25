@@ -520,4 +520,140 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn benchmark_error_panels_render_and_trigger_retry() {
+        use std::sync::Arc;
+
+        use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+        use crate::api::mock::MockBackend;
+        use crate::api::{ApiError, BenchEntryStatus};
+        use crate::app::Route;
+        use crate::app::tests::{drive, open_with};
+        use crate::bench::{BenchTab, EntryImages, ImageSort};
+        use crate::store::Load;
+
+        let send_enter = |app: &mut folo_ui::HeadlessApp,
+                          window: folo_ui::WindowHandle<crate::app::FoloApp>| {
+            app.simulate_input(
+                window.into(),
+                PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke: Keystroke { key: "enter".into(), ..Default::default() },
+                    is_held: false,
+                }),
+            );
+        };
+        let err = || ApiError {
+            status: Some(500),
+            code: "internal".into(),
+            message: "Temporary failure".into(),
+            hint: None,
+        };
+        let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true)));
+        let bid = "bn_3c90";
+
+        // 1. Leaderboard failed -> `bench-board-retry` reloads entries.
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Bench(bid.into()), w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, cx| {
+            this.bench.entries.insert(bid.into(), Load::Failed(err()));
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("bench-board-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        // While reloading (button replaced by passing_stop anchor), focus stays anchored in place.
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("bench-board-retry", cx).is_focused(w),
+                "board retry keeps its focus anchor while loading"
+            );
+        });
+        app.run_until_idle();
+        app.frame(window.into());
+        let eid = drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("bench-board-retry", cx).is_focused(w),
+                "board retry keeps its focus anchor after reload"
+            );
+            w.focus_next();
+            assert!(
+                this.fh("bench-sort-score", cx).is_focused(w),
+                "Tab after board retry continues into the reloaded leaderboard instead of restarting"
+            );
+            let list = this.bench.entries.get(bid).and_then(|l| l.ready()).expect("entries reloaded");
+            list.iter().find(|e| e.status == BenchEntryStatus::Done).unwrap().id.clone()
+        });
+
+        // 2. Loops tab failed -> `bench-loops-retry` reloads loops.
+        drive(&mut app, window, |this, _, cx| {
+            this.bench.tab = BenchTab::Loops;
+            this.bench.loops.insert(bid.into(), Load::Failed(err()));
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("bench-loops-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.bench.loops.get(bid).and_then(|l| l.ready()).is_some(), "loops reloaded");
+        });
+
+        // 3. Entry result failed -> `bench-result-retry` reloads result.
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::BenchEntry(bid.into(), eid.clone()), w, cx)
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, cx| {
+            this.bench.results.insert((bid.into(), eid.clone()), Load::Failed(err()));
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("bench-result-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, _| {
+            assert!(
+                this.bench.results.get(&(bid.into(), eid.clone())).and_then(|l| l.ready()).is_some(),
+                "entry result reloaded"
+            );
+        });
+
+        // 4. Entry images failed -> `bench-entry-images-retry` reloads images.
+        drive(&mut app, window, |this, _, cx| {
+            this.bench.entry_images.insert(
+                (bid.into(), eid.clone()),
+                EntryImages {
+                    sort: ImageSort::Worst,
+                    page: Load::Failed(err()),
+                    more: false,
+                    more_error: None,
+                    seq: 999,
+                },
+            );
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("bench-entry-images-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, _| {
+            assert!(
+                this.bench
+                    .entry_images
+                    .get(&(bid.into(), eid.clone()))
+                    .and_then(|x| x.page.ready())
+                    .is_some(),
+                "entry images reloaded"
+            );
+        });
+    }
 }
