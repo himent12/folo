@@ -3,7 +3,7 @@
 
 import { isTracking, signal, untrack, watchedSignal, type Signal } from './core';
 
-const STATE = Symbol('fw.deep');
+const STATE = Symbol.for('fw.deep');
 
 /** A change counter: `read()` tracks it, `bump()` notifies. */
 function counter(): Signal<number> {
