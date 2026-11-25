@@ -57,19 +57,30 @@ impl FoloApp {
         };
         // In the header, or the empty state's one action.
         let mut connect = Some(connect);
-        let providers_retry =
-            (self.cloud.providers.error().is_some() && self.cloud.connections.error().is_none()).then(|| {
-                self.button(
-                    "cloud-providers-retry",
-                    "Retry",
-                    crate::controls::Btn::Secondary,
-                    Some("icons/refresh-cw.svg"),
-                    window,
-                    cx,
-                    act(|this, _, cx| this.retry_cloud(cx)),
-                )
-                .into_any_element()
-            });
+        let show_providers_retry =
+            self.cloud.providers.error().is_some() && self.cloud.connections.error().is_none();
+        let providers_retry_anchor =
+            match self.passing_stop("cloud-providers-retry", show_providers_retry, cx) {
+                Some(fh) if !show_providers_retry => Some(div().track_focus(&fh)),
+                _ => None,
+            };
+        let providers_retry = show_providers_retry.then(|| {
+            self.button(
+                "cloud-providers-retry",
+                "Retry",
+                crate::controls::Btn::Secondary,
+                Some("icons/refresh-cw.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.retry_cloud(cx)),
+            )
+            .into_any_element()
+        });
+        let show_cloud_retry = self.cloud.connections.error().is_some();
+        let cloud_retry_anchor = match self.passing_stop("cloud-retry", show_cloud_retry, cx) {
+            Some(fh) if !show_cloud_retry => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let connections = self.cloud.connections.ready().cloned();
         let body = match &self.cloud.connections {
             Load::Failed(e) => div()
@@ -119,7 +130,9 @@ impl FoloApp {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .children(providers_retry_anchor)
             .child(panel_header(&t, "Cloud").children(header_actions))
+            .children(cloud_retry_anchor)
             .child(body)
             .into_any_element()
     }
@@ -550,10 +563,31 @@ mod tests {
         drive(&mut app, window, |this, w, cx| this.focus_key("cloud-retry", w, cx));
         app.frame(window.into());
         send_enter(&mut app, window);
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("cloud-retry", cx).is_focused(w),
+                "cloud-retry keeps its focus anchor while reloading"
+            );
+        });
         app.run_until_idle();
-        drive(&mut app, window, |this, _, _| {
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("cloud-retry", cx).is_focused(w),
+                "cloud-retry keeps its focus anchor after reload"
+            );
             assert!(this.cloud.providers.ready().is_some(), "cloud-retry also reloads failed providers");
-            assert!(this.cloud.connections.ready().is_some(), "cloud-retry reloads failed connections");
+            let conns = this.cloud.connections.ready().expect("cloud-retry reloads failed connections");
+            let next_key = conns
+                .first()
+                .map(|c| format!("cloud-check-{}", c.id))
+                .unwrap_or_else(|| "cloud-connect".into());
+            w.focus_next();
+            assert!(
+                this.fh(next_key, cx).is_focused(w),
+                "Tab after cloud-retry continues in the Cloud panel instead of restarting at the top"
+            );
         });
 
         // Providers failed alone (connections ready): header offers `cloud-providers-retry`.

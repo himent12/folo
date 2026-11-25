@@ -565,8 +565,26 @@ mod tests {
         drive(&mut app, window, |this, w, cx| this.focus_key("bench-board-retry", w, cx));
         app.frame(window.into());
         send_enter(&mut app, window);
+        // While reloading (button replaced by passing_stop anchor), focus stays anchored in place.
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("bench-board-retry", cx).is_focused(w),
+                "board retry keeps its focus anchor while loading"
+            );
+        });
         app.run_until_idle();
-        let eid = drive(&mut app, window, |this, _, _| {
+        app.frame(window.into());
+        let eid = drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("bench-board-retry", cx).is_focused(w),
+                "board retry keeps its focus anchor after reload"
+            );
+            w.focus_next();
+            assert!(
+                this.fh("bench-sort-score", cx).is_focused(w),
+                "Tab after board retry continues into the reloaded leaderboard instead of restarting"
+            );
             let list = this.bench.entries.get(bid).and_then(|l| l.ready()).expect("entries reloaded");
             list.iter().find(|e| e.status == BenchEntryStatus::Done).unwrap().id.clone()
         });

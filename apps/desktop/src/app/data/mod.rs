@@ -50,6 +50,7 @@ impl FoloApp {
                 apply(this, r, cx);
                 this.trace_first_data();
                 if late && !this.store.unreachable() {
+                    this.clear_unreachable_dialogs();
                     this.forget_unreachable_loads(cx);
                 }
                 cx.notify();

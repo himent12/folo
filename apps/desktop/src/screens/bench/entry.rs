@@ -126,6 +126,10 @@ impl FoloApp {
         self.ensure_bench_result(bench, entry, cx);
         let result =
             self.bench.results.get(&(bench.to_string(), entry.to_string())).cloned().unwrap_or_default();
+        let retry_anchor = match self.passing_stop("bench-result-retry", result.error().is_some(), cx) {
+            Some(fh) if result.error().is_none() => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let body = match result {
             Load::Ready(r) => {
                 let images = self.entry_images_panel(&t, &b, &e, &r.accuracy, window, cx);
@@ -133,7 +137,7 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(16.))
-                    .child(self.entry_result(&t, &b, &r))
+                    .child(div().children(retry_anchor).child(self.entry_result(&t, &b, &r)))
                     .child(images)
                     .into_any_element()
             }
@@ -161,7 +165,7 @@ impl FoloApp {
                     )
                     .into_any_element()
             }
-            _ => panel(&t).child(loading_rows(&t, "result", 6)).into_any_element(),
+            _ => panel(&t).children(retry_anchor).child(loading_rows(&t, "result", 6)).into_any_element(),
         };
         self.page_frame(&t, header, body, cx)
     }

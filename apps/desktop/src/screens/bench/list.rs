@@ -344,14 +344,13 @@ impl FoloApp {
                         )
                         .into_any_element()
                 } else {
-                    let ids: Vec<String> = shown.iter().map(|b| b.id.clone()).collect();
-                    let rows: Vec<AnyElement> = shown
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, b)| {
+                    let rows: Vec<AnyElement> = (0..shown.len())
+                        .map(|i| {
+                            let b = shown[i];
                             let key = format!("bench-row-{}", b.id);
                             let id = b.id.clone();
-                            let ids_k = ids.clone();
+                            let prev_id = i.checked_sub(1).map(|j| shown[j].id.clone());
+                            let next_id = shown.get(i + 1).map(|x| x.id.clone());
                             // The leader: its score (what the board ranks by), then its name.
                             let leader = match &b.best {
                                 Some(best) => div()
@@ -424,13 +423,13 @@ impl FoloApp {
                                 .hover(|s| s.bg(t.bg_hover))
                                 .active(|s| s.bg(t.bg_active))
                                 .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
-                                    let next = match ev.keystroke.key.as_str() {
-                                        "down" => i + 1,
-                                        "up" if i > 0 => i - 1,
+                                    let target = match ev.keystroke.key.as_str() {
+                                        "down" => next_id.as_deref(),
+                                        "up" => prev_id.as_deref(),
                                         _ => return,
                                     };
-                                    if let Some(id) = ids_k.get(next) {
-                                        this.focus_key(&format!("bench-row-{id}"), w, cx);
+                                    if let Some(id) = target {
+                                        this.focus_key_and_reveal(&format!("bench-row-{id}"), w, cx);
                                         cx.stop_propagation();
                                     }
                                 }))
@@ -697,6 +696,40 @@ mod tests {
             assert!(
                 this.fh(format!("bench-row-{first}"), cx).is_focused(w),
                 "up arrow moves focus back to previous benchmark row"
+            );
+        });
+
+        // A tall list scrolls `page_scroll` as Down moves focus past the viewport.
+        let last_id = drive(&mut app, window, |this, _, cx| {
+            let base = this.bench.list.ready().unwrap()[0].clone();
+            let list: Vec<Bench> = (0..30)
+                .map(|i| {
+                    let mut b = base.clone();
+                    b.id = format!("bn_tall_{i:02}");
+                    b.name = format!("Benchmark {i:02}");
+                    b
+                })
+                .collect();
+            let last = list.last().unwrap().id.clone();
+            this.bench.list = Load::Ready(list);
+            cx.notify();
+            last
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("bench-row-bn_tall_00", w, cx));
+        app.frame(window.into());
+        for _ in 0..29 {
+            send_key(&mut app, "down");
+            app.frame(window.into());
+        }
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh(format!("bench-row-{last_id}"), cx).is_focused(w),
+                "down arrow reaches the last benchmark row"
+            );
+            assert!(
+                this.page_scroll.offset().y < folo_ui::px(0.),
+                "arrow navigation scrolls the page to keep the focused row in view"
             );
         });
     }

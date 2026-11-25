@@ -1,6 +1,6 @@
 //! A benchmark's Loops tab and its table.
 
-use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::{name_with_badges, num_cell};
 use super::format::loop_trend;
@@ -57,6 +57,10 @@ impl FoloApp {
                 )
                 .children(new_btn),
         );
+        let retry_anchor = match self.passing_stop("bench-loops-retry", loops.error().is_some(), cx) {
+            Some(fh) if loops.error().is_none() => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let list = match loops {
             Load::Ready(l) => l.clone(),
             Load::Failed(e) => {
@@ -84,11 +88,18 @@ impl FoloApp {
                     )
                     .into_any_element();
             }
-            _ => return panel(&t).child(header).child(loading_rows(&t, "loops", 3)).into_any_element(),
+            _ => {
+                return panel(&t)
+                    .child(header)
+                    .children(retry_anchor)
+                    .child(loading_rows(&t, "loops", 3))
+                    .into_any_element();
+            }
         };
         if list.is_empty() {
             return panel(&t)
                 .child(header)
+                .children(retry_anchor)
                 .child(empty_state(
                     &t,
                     "icons/repeat.svg",
@@ -228,6 +239,6 @@ impl FoloApp {
                     .into_any_element()
             })
             .collect();
-        panel(&t).overflow_hidden().child(header).children(rows).into_any_element()
+        panel(&t).overflow_hidden().child(header).children(retry_anchor).children(rows).into_any_element()
     }
 }

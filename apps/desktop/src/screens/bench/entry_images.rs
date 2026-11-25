@@ -53,6 +53,11 @@ impl FoloApp {
             .entry_images
             .get(&(b.id.clone(), e.id.clone()))
             .map(|x| (x.page.clone(), x.more, x.more_error.clone()));
+        let retry_shown = matches!(&state, Some((Load::Failed(_), _, _)));
+        let retry_anchor = match self.passing_stop("bench-entry-images-retry", retry_shown, cx) {
+            Some(fh) if !retry_shown => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let (page, loading_more, more_error) = match state {
             Some((Load::Ready(p), more, err)) => (p, more, err),
             Some((Load::Failed(err), _, _)) => {
@@ -83,6 +88,7 @@ impl FoloApp {
             _ => {
                 return panel(&t)
                     .child(header)
+                    .children(retry_anchor)
                     .child(div().p(px(16.)).flex().flex_wrap().gap(px(8.)).children(
                         (0..8).map(|i| div().w(px(152.)).h(px(152.)).child(skeleton(&t, format!("eimg{i}")))),
                     ))
@@ -245,6 +251,7 @@ impl FoloApp {
             });
         panel(&t)
             .child(header)
+            .children(retry_anchor)
             .children(inspector)
             .child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
             .child(footer)

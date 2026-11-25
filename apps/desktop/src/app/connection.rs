@@ -189,9 +189,10 @@ impl FoloApp {
         self.retry_all(cx);
     }
 
-    /// The server answers again after it was unreachable: an open dialog's "could not reach"
-    /// error is out of date (its next try may well work), and the estimate is asked for again.
-    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+    /// Clears stale "could not reach" errors from open dialogs and estimates once the server
+    /// answers again (both on reconnect and when an earlier in-flight call returns
+    /// `server_unreachable` late).
+    pub(super) fn clear_unreachable_dialogs(&mut self) {
         let stale = |e: &Option<ApiError>| e.as_ref().is_some_and(|e| e.code == "server_unreachable");
         if let Some(f) = self.new_run.as_mut()
             && stale(&f.error)
@@ -226,6 +227,12 @@ impl FoloApp {
         {
             f.error = None;
         }
+    }
+
+    /// The server answers again after it was unreachable: an open dialog's "could not reach"
+    /// error is out of date (its next try may well work), and the estimate is asked for again.
+    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+        self.clear_unreachable_dialogs();
         // The Playground's prediction that couldn't reach it runs again, as Retry would.
         if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
             self.rerun_predict(cx);
@@ -695,6 +702,53 @@ mod reconnect_recovery_tests {
         drive(&mut app, window, |this, _, _| {
             assert!(!this.cloud.instances_failed, "instances_failed cleared after reconnect refresh");
             assert!(this.cloud.instances.ready().is_some());
+        });
+    }
+
+    #[test]
+    fn late_unreachable_fetch_after_reconnect_clears_cloud_dialog_errors() {
+        let (mut app, window) = open();
+
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.disconnect = Some(Confirm { id: "c1".into(), busy: true, error: None });
+            this.cloud.connect = Some(ConnectForm {
+                id: 1,
+                provider: 0,
+                fields: Vec::new(),
+                name: cx.new(|cx| TextInput::new("", cx)),
+                submitting: true,
+                error: None,
+            });
+            // Captures `reconnects` before `reconnected()` bumps it; resolves during `drive`'s
+            // `run_until_idle()` after the reconnect has already run.
+            this.fetch(
+                cx,
+                |_| Err::<(), ApiError>(unreachable_err()),
+                |this, r, _| {
+                    if let Err(e) = r {
+                        if let Some(d) = this.cloud.disconnect.as_mut() {
+                            d.busy = false;
+                            d.error = Some(e.clone());
+                        }
+                        if let Some(c) = this.cloud.connect.as_mut() {
+                            c.submitting = false;
+                            c.error = Some(ConnectError::Dialog(e));
+                        }
+                    }
+                },
+            );
+            // Server reconnects while the request is still in flight.
+            this.reconnected(cx);
+        });
+
+        drive(&mut app, window, |this, _, _| {
+            let d = this.cloud.disconnect.as_ref().expect("disconnect dialog stays open");
+            assert!(!d.busy, "disconnect becomes available for manual retry");
+            assert_eq!(d.error, None, "late server_unreachable error is cleared after reconnect");
+
+            let c = this.cloud.connect.as_ref().expect("connect dialog stays open");
+            assert!(!c.submitting, "connect becomes available for manual retry");
+            assert_eq!(c.error, None, "late connect server_unreachable error is cleared after reconnect");
         });
     }
 }
