@@ -134,6 +134,18 @@ fn no_truncation_returns_the_text_and_a_copy_of_the_runs() {
     let (text, cut_runs) = wrapper.truncate_line("abcde".into(), px(200.), "…", &element_runs);
     assert_eq!(text, "abcde");
     assert_eq!(cut_runs, element_runs);
+
+    // Borrowed variant avoids cloning the runs slice when the line already fits.
+    let (cow_text, cow_runs) = wrapper.truncate_line_cow("abcde".into(), px(200.), "…", &element_runs);
+    assert_eq!(cow_text, "abcde");
+    assert!(matches!(cow_runs, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(cow_runs.as_ref(), element_runs.as_slice());
+
+    let (trunc_text, trunc_runs) = wrapper.truncate_line_cow("abcde".into(), px(20.), "…", &element_runs);
+    assert!(matches!(trunc_runs, std::borrow::Cow::Owned(_)));
+    let (expected_text, expected_runs) = wrapper.truncate_line("abcde".into(), px(20.), "…", &element_runs);
+    assert_eq!(trunc_text, expected_text);
+    assert_eq!(trunc_runs.as_ref(), expected_runs.as_slice());
 }
 
 #[test]

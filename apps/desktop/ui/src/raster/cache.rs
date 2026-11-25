@@ -72,6 +72,31 @@ impl<K: Hash + Eq + Clone, V: Clone> ByteCache<K, V> {
         v
     }
 
+    /// Looks up `key` in a single hash probe, marking it used this frame and returning a reference
+    /// without cloning `V`. On a miss, `make` receives `&K` and produces `Some((value, bytes))` to
+    /// insert and borrow.
+    pub fn get_or_try_insert_ref<E>(
+        &mut self,
+        key: K,
+        make: impl FnOnce(&K) -> std::result::Result<Option<(V, usize)>, E>,
+    ) -> std::result::Result<Option<&V>, E> {
+        let frame = self.frame;
+        match self.map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+                entry.used = frame;
+                Ok(Some(&entry.value))
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let Some((value, bytes)) = make(entry.key())? else {
+                    return Ok(None);
+                };
+                self.bytes += bytes;
+                Ok(Some(&entry.insert(Entry { value, bytes, used: frame }).value))
+            }
+        }
+    }
+
     /// Ends a frame: evicts as described on the type, then starts the next frame.
     pub fn end_frame(&mut self) {
         let frame = self.frame;
@@ -285,6 +310,22 @@ impl<K: Hash + Eq + Clone, V: CachedMask> MaskCache<K, V> {
         let bytes = mask.byte_size() + std::mem::size_of::<K>() + 64;
         self.inner.insert(make_key(), mask.clone(), bytes);
         Ok(Some(mask))
+    }
+
+    /// Like [`Self::get_or_insert_with`], returning a reference to the cached value in a single hash
+    /// probe so callers can inspect metadata (or cull against a clip rect) before cloning an `Arc`.
+    pub(crate) fn get_or_insert_with_ref(
+        &mut self,
+        key: K,
+        make: impl FnOnce(&K) -> Result<Option<V>>,
+    ) -> Result<Option<&V>> {
+        self.inner.get_or_try_insert_ref(key, |key| {
+            let Some(mask) = make(key)? else {
+                return Ok(None);
+            };
+            let bytes = mask.byte_size() + std::mem::size_of::<K>() + 64;
+            Ok(Some((mask, bytes)))
+        })
     }
 
     /// Starts a frame (a no-op kept for symmetry with `end_frame`).

@@ -66,7 +66,7 @@ impl WindowTextSystem {
     ) -> ShapedLine {
         debug_assert!(text.find('\n').is_none(), "text argument should not contain newlines");
 
-        let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+        let mut decoration_runs = SmallVec::<[DecorationRun; 2]>::new();
         for run in runs {
             if let Some(last_run) = decoration_runs.last_mut()
                 && last_run.color == run.color
@@ -101,8 +101,44 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
-        let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
-        let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
+        struct RunCursor<'a> {
+            runs: &'a [TextRun],
+            index: usize,
+            remaining: usize,
+        }
+        impl<'a> RunCursor<'a> {
+            fn new(runs: &'a [TextRun]) -> Self {
+                let mut cursor = Self { runs, index: 0, remaining: 0 };
+                cursor.advance_to_nonempty();
+                cursor
+            }
+            fn advance_to_nonempty(&mut self) {
+                while self.index < self.runs.len() {
+                    let len = self.runs[self.index].len;
+                    if len > 0 {
+                        self.remaining = len;
+                        return;
+                    }
+                    self.index += 1;
+                }
+                self.remaining = 0;
+            }
+            fn current(&self) -> Option<(usize, &'a TextRun, usize)> {
+                (self.remaining > 0).then(|| (self.index, &self.runs[self.index], self.remaining))
+            }
+            fn consume(&mut self, amount: usize) {
+                debug_assert!(amount <= self.remaining);
+                self.remaining -= amount;
+                if self.remaining == 0 {
+                    self.index += 1;
+                    self.advance_to_nonempty();
+                }
+            }
+        }
+
+        let mut cursor = RunCursor::new(runs);
+        let mut last_resolved: Option<(usize, FontId)> = None;
+        let mut font_runs = SmallVec::<[FontRun; 4]>::new();
         let font_generation = self.text_system.font_generation();
 
         let mut lines = SmallVec::new();
@@ -113,14 +149,14 @@ impl WindowTextSystem {
             font_runs.clear();
             let line_end = line_start + line_text.len();
 
-            let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+            let mut decoration_runs = SmallVec::<[DecorationRun; 2]>::new();
             let mut run_start = line_start;
             while run_start < line_end {
-                let Some(run) = runs.peek_mut() else {
+                let Some((run_ix, run, remaining)) = cursor.current() else {
                     break;
                 };
 
-                let run_len_within_line = cmp::min(line_end, run_start + run.len) - run_start;
+                let run_len_within_line = cmp::min(line_end - run_start, remaining);
 
                 let decoration_changed = if let Some(last_run) = decoration_runs.last_mut()
                     && last_run.color == run.color
@@ -141,7 +177,14 @@ impl WindowTextSystem {
                     true
                 };
 
-                let font_id = self.resolve_font(&run.font);
+                let font_id = match last_resolved {
+                    Some((idx, id)) if idx == run_ix => id,
+                    _ => {
+                        let id = self.resolve_font(&run.font);
+                        last_resolved = Some((run_ix, id));
+                        id
+                    }
+                };
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
                     && !decoration_changed
@@ -151,12 +194,7 @@ impl WindowTextSystem {
                     font_runs.push(FontRun { len: run_len_within_line, font_id });
                 }
 
-                if run_len_within_line == run.len {
-                    runs.next();
-                } else {
-                    // Keep the rest of the run for the next line.
-                    run.len -= run_len_within_line;
-                }
+                cursor.consume(run_len_within_line);
                 run_start += run_len_within_line;
             }
 
@@ -168,7 +206,7 @@ impl WindowTextSystem {
                 wrap_width,
                 // The lines this one may still use (GPUI passes `usize::MAX` less the lines so far
                 // when there is no clamp, which limits nothing).
-                line_clamp.map(|max_lines| max_lines - wrapped_lines),
+                line_clamp.map(|max_lines| max_lines.saturating_sub(wrapped_lines)),
                 font_generation,
             );
             wrapped_lines += layout.wrap_boundaries.len();
@@ -177,11 +215,8 @@ impl WindowTextSystem {
 
             // Skip the `\n`.
             line_start = line_end + 1;
-            if let Some(run) = runs.peek_mut() {
-                run.len -= 1;
-                if run.len == 0 {
-                    runs.next();
-                }
+            if cursor.current().is_some() {
+                cursor.consume(1);
             }
         };
 
@@ -203,7 +238,71 @@ impl WindowTextSystem {
             process_line(text);
         }
 
-        self.font_runs_pool.lock().push(font_runs);
+        Ok(lines)
+    }
+
+    /// Single-style fast path for plain text elements: avoids allocating a `Vec<TextRun>` or cloning
+    /// `Font` while producing the exact same `WrappedLine`s as `shape_text` with `[style.to_run(text.len())]`.
+    pub(crate) fn shape_text_with_style(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        style: &crate::TextStyle,
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+    ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        let font_generation = self.text_system.font_generation();
+        let mut font_id: Option<FontId> = None;
+
+        let mut lines = SmallVec::new();
+        let mut wrapped_lines = 0;
+
+        let mut process_line = |line_text: SharedString| {
+            let mut decoration_runs = SmallVec::<[DecorationRun; 2]>::new();
+            let mut font_runs = SmallVec::<[FontRun; 1]>::new();
+            if !line_text.is_empty() {
+                let font_id = *font_id.get_or_insert_with(|| self.resolve_font_key(style.font_key_ref()));
+                decoration_runs.push(DecorationRun {
+                    len: line_text.len() as u32,
+                    color: style.color,
+                    background_color: style.background_color,
+                    underline: style.underline,
+                    strikethrough: style.strikethrough,
+                });
+                font_runs.push(FontRun { len: line_text.len(), font_id });
+            }
+
+            let layout = self.line_layout_cache.layout_wrapped_line(
+                &line_text,
+                || line_text.clone(),
+                font_size,
+                &font_runs,
+                wrap_width,
+                line_clamp.map(|max_lines| max_lines.saturating_sub(wrapped_lines)),
+                font_generation,
+            );
+            wrapped_lines += layout.wrap_boundaries.len();
+
+            lines.push(WrappedLine { layout, decoration_runs, text: line_text });
+        };
+
+        let mut split_lines = text.split('\n');
+        let mut processed = false;
+
+        if let Some(first_line) = split_lines.next()
+            && let Some(second_line) = split_lines.next()
+        {
+            processed = true;
+            process_line(first_line.to_string().into());
+            process_line(second_line.to_string().into());
+            for line_text in split_lines {
+                process_line(line_text.to_string().into());
+            }
+        }
+
+        if !processed {
+            process_line(text);
+        }
 
         Ok(lines)
     }
@@ -234,8 +333,7 @@ impl WindowTextSystem {
     ) -> Arc<LineLayout> {
         let mut last_run = None::<&TextRun>;
         let mut last_font: Option<FontId> = None;
-        let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
-        font_runs.clear();
+        let mut font_runs = SmallVec::<[FontRun; 4]>::new();
         let font_generation = self.text_system.font_generation();
 
         for run in runs.iter() {
@@ -263,17 +361,13 @@ impl WindowTextSystem {
             }
         }
 
-        let layout = self.line_layout_cache.layout_line(
+        self.line_layout_cache.layout_line(
             text,
             into_shared,
             font_size,
             &font_runs,
             force_width,
             font_generation,
-        );
-
-        self.font_runs_pool.lock().push(font_runs);
-
-        layout
+        )
     }
 }

@@ -157,20 +157,20 @@ impl Window {
             scale_factor,
             is_emoji: false,
         };
-        let Some((raster_bounds, mask)) =
-            self.glyph_mask(&params, |size, bytes| Arc::new(AlphaMask::new(size, bytes)).into())?
-        else {
+        let clip = self.scaled_clip();
+        let entry =
+            self.glyph_mask_ref(params, |size, bytes| Arc::new(AlphaMask::new(size, bytes)).into())?;
+        let Some(GlyphMask::Present { raster_bounds, mask: Mask::Alpha(mask) }) = entry else {
             return Ok(());
         };
-        let Some(mask) = mask.into_alpha() else { return Ok(()) };
         let bounds = Bounds {
             origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
             size: mask.size.map(Into::into),
         };
-        let clip = self.scaled_clip();
         if bounds.intersect(&clip).is_empty() {
             return Ok(());
         }
+        let mask = Arc::clone(mask);
         let color = color.opacity(self.element_opacity);
         self.next_frame.scene.push_mono_sprite(MonoSprite {
             bounds,
@@ -200,47 +200,44 @@ impl Window {
             scale_factor,
             is_emoji: true,
         };
-        let Some((raster_bounds, mask)) =
-            self.glyph_mask(&params, |size, bytes| Arc::new(ColorMask::new(size, bytes)).into())?
-        else {
+        let clip = self.scaled_clip();
+        let entry =
+            self.glyph_mask_ref(params, |size, bytes| Arc::new(ColorMask::new(size, bytes)).into())?;
+        let Some(GlyphMask::Present { raster_bounds, mask: Mask::Color(mask) }) = entry else {
             return Ok(());
         };
-        let Some(mask) = mask.into_color() else { return Ok(()) };
         let bounds = Bounds {
             origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
             size: mask.size.map(Into::into),
         };
-        let clip = self.scaled_clip();
         if bounds.intersect(&clip).is_empty() {
             return Ok(());
         }
+        let mask = Arc::clone(mask);
         let opacity = self.element_opacity;
         self.next_frame.scene.push_color_sprite(ColorSprite { bounds, clip, mask, opacity });
         Ok(())
     }
 
-    /// The raster bounds and the cached mask of a glyph; `None` when it has no pixels.
+    /// Borrows the cached glyph entry from `Window::glyph_masks` without cloning its `Arc`, so
+    /// zero-area glyphs and glyphs culled by the clip rect avoid atomic reference-count traffic.
     ///
     /// Both `raster_bounds` and empty (zero-area) glyphs are stored in `Window::glyph_masks`, so a
     /// steady-frame glyph hit does a single lock-free cache lookup instead of acquiring
     /// `TextSystem::raster_bounds`'s `RwLock` and hashing `RenderGlyphParams` twice.
-    fn glyph_mask(
+    fn glyph_mask_ref(
         &mut self,
-        params: &RenderGlyphParams,
+        params: RenderGlyphParams,
         make: impl FnOnce(Size<crate::DevicePixels>, Vec<u8>) -> Mask,
-    ) -> anyhow::Result<Option<(Bounds<crate::DevicePixels>, Mask)>> {
+    ) -> anyhow::Result<Option<&GlyphMask>> {
         let text_system = &self.text_system;
-        let entry = self.glyph_masks.get_or_insert_with(params, || {
+        self.glyph_masks.get_or_insert_with_ref(params, |params| {
             let raster_bounds = text_system.raster_bounds(params)?;
             if raster_bounds.size.width.0 <= 0 || raster_bounds.size.height.0 <= 0 {
                 return Ok(Some(GlyphMask::Empty));
             }
             let (size, bytes) = text_system.rasterize_glyph(params)?;
             Ok(Some(GlyphMask::Present { raster_bounds, mask: make(size, bytes) }))
-        })?;
-        Ok(match entry {
-            Some(GlyphMask::Present { raster_bounds, mask }) => Some((raster_bounds, mask)),
-            Some(GlyphMask::Empty) | None => None,
         })
     }
 

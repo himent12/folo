@@ -85,6 +85,9 @@ impl LineLayout {
         max_lines: Option<usize>,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
+        if max_lines.is_some_and(|max_lines| max_lines <= 1) {
+            return boundaries;
+        }
         let mut first_non_whitespace_ix = None;
         let mut last_candidate_ix = None;
         let mut last_candidate_x = px(0.);

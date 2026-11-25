@@ -125,6 +125,17 @@ impl TextStyle {
         }
     }
 
+    /// Borrowed key view of the font this style selects (zero clones).
+    pub(crate) fn font_key_ref(&self) -> crate::text::FontKeyRef<'_> {
+        crate::text::FontKeyRef {
+            family: self.font_family.as_str(),
+            features: &self.font_features,
+            fallbacks: self.font_fallbacks.as_ref(),
+            weight: self.font_weight,
+            style: self.font_style,
+        }
+    }
+
     /// The line height in pixels, rounded (GPUI rounds it to whole logical pixels).
     pub fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
         self.line_height.to_pixels(self.font_size, rem_size).round()

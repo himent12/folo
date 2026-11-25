@@ -77,9 +77,8 @@ impl TextLayout {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let line_height = text_style.line_height.to_pixels(font_size.into(), window.rem_size());
-        let runs = runs.unwrap_or_else(|| vec![text_style.to_run(text.len())]);
         let element_state = self.clone();
-        let key = measure_key(&text, font_size, line_height, &runs, &text_style);
+        let key = measure_key(&text, font_size, line_height, runs.as_deref(), &text_style);
         let reset_state = self.clone();
         let reset = move || *reset_state.0.borrow_mut() = None;
 
@@ -97,15 +96,15 @@ impl TextLayout {
                 } else {
                     None
                 };
-                let (truncate_width, suffix) = match &text_style.text_overflow {
+                let (truncate_width, suffix): (Option<Pixels>, &str) = match &text_style.text_overflow {
                     Some(TextOverflow::Truncate(suffix)) => {
                         let width = known.width.or(definite_width.map(|width| match text_style.line_clamp {
                             Some(max_lines) => width * max_lines as f32,
                             None => width,
                         }));
-                        (width, suffix.clone())
+                        (width, suffix.as_str())
                     }
-                    None => (None, SharedString::default()),
+                    None => (None, ""),
                 };
 
                 if let Some(layout) = element_state.0.borrow().as_ref()
@@ -115,20 +114,45 @@ impl TextLayout {
                     return size;
                 }
 
-                let (text, runs) = match truncate_width {
-                    Some(width) => {
-                        let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                        wrapper.truncate_line(text.clone(), width, &suffix, &runs)
+                let shaped = match runs.as_deref() {
+                    None => {
+                        let text = match truncate_width {
+                            Some(width) => {
+                                let mut wrapper = cx
+                                    .text_system()
+                                    .line_wrapper_for_key(text_style.font_key_ref(), font_size);
+                                wrapper.truncate_line_text(text.clone(), width, suffix).0
+                            }
+                            None => text.clone(),
+                        };
+                        window.text_system().shape_text_with_style(
+                            text,
+                            font_size,
+                            &text_style,
+                            wrap_width,
+                            text_style.line_clamp,
+                        )
                     }
-                    None => (text.clone(), runs.clone()),
+                    Some(explicit_runs) => {
+                        let (text, run_slice) = match truncate_width {
+                            Some(width) => {
+                                let mut wrapper = cx
+                                    .text_system()
+                                    .line_wrapper_for_key(text_style.font_key_ref(), font_size);
+                                wrapper.truncate_line_cow(text.clone(), width, suffix, explicit_runs)
+                            }
+                            None => (text.clone(), std::borrow::Cow::Borrowed(explicit_runs)),
+                        };
+                        window.text_system().shape_text(
+                            text,
+                            font_size,
+                            run_slice.as_ref(),
+                            wrap_width,
+                            text_style.line_clamp,
+                        )
+                    }
                 };
-                let lines = match window.text_system().shape_text(
-                    text,
-                    font_size,
-                    &runs,
-                    wrap_width,
-                    text_style.line_clamp,
-                ) {
+                let lines = match shaped {
                     Ok(lines) => lines,
                     Err(error) => {
                         eprintln!("folo-ui: shaping text failed: {error:#}");
@@ -206,7 +230,7 @@ fn measure_key(
     text: &SharedString,
     font_size: Pixels,
     line_height: Pixels,
-    runs: &[TextRun],
+    runs: Option<&[TextRun]>,
     style: &crate::TextStyle,
 ) -> MeasureKey {
     use std::hash::{Hash, Hasher};
@@ -214,11 +238,20 @@ fn measure_key(
     text.as_str().hash(&mut h);
     h.write_u32(font_size.0.to_bits());
     h.write_u32(line_height.0.to_bits());
-    for run in runs {
-        h.write_usize(run.len);
-        run.font.hash(&mut h);
+    let style_font = style.font_key_ref();
+    match runs {
+        Some(runs) => {
+            for run in runs {
+                h.write_usize(run.len);
+                run.font.as_key_ref().hash(&mut h);
+            }
+        }
+        None => {
+            h.write_usize(text.len());
+            style_font.hash(&mut h);
+        }
     }
-    style.font().hash(&mut h);
+    style_font.hash(&mut h);
     (style.white_space == WhiteSpace::Normal).hash(&mut h);
     match &style.text_overflow {
         Some(TextOverflow::Truncate(suffix)) => suffix.as_str().hash(&mut h),
