@@ -35,6 +35,7 @@ import Tabs from '$lib/ui/Tabs';
 import type { Density } from '$lib/ui/TileGrid';
 import { toast } from '$lib/ui/toast';
 import ToggleButton from '$lib/ui/ToggleButton';
+import ClassFilterStrip from './dataset/ClassFilterStrip';
 import ClassPicker from './dataset/ClassPicker';
 import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
@@ -428,7 +429,15 @@ export default function Dataset() {
               {tab.get() === 'stats' ? (
                 <>
                   {dd().stats ? (
-                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} version={changed.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())} />
+                    <StatsTab
+                      dataset={dd()}
+                      stats={dd().stats!}
+                      counts={counts.get()}
+                      version={changed.get()}
+                      activeClass={cls.get()}
+                      onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())}
+                      onclearclass={() => setFilter({ class: null })}
+                    />
                   ) : (
                     <Panel>
                       <EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." />
@@ -504,6 +513,15 @@ export default function Dataset() {
                     )}
                   </div>
 
+                  {dd().stats?.class_counts?.length ? (
+                    <ClassFilterStrip
+                      classes={dd().classes}
+                      counts={dd().stats!.class_counts}
+                      value={cls.get()}
+                      onchange={(c) => setFilter({ class: c === undefined ? null : String(c) })}
+                    />
+                  ) : null}
+
                   {pager.get()?.error && pager.get()!.total !== null ? (
                     /* Later pages failed: keep what loaded and offer a retry for the rest. */
                     <ErrorState error={pg().error} title="Some images could not be loaded" retry={() => pager.get()?.retry()} compact />
@@ -522,7 +540,14 @@ export default function Dataset() {
                             ? `No ${split.get() === 'all' ? '' : `${split.get()} `}image contains a ${dd().classes[cls.get()!]}.`
                             : `The ${split.get()} split is empty.`
                         }
-                        actions={() => <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>}
+                        actions={() => (
+                          <>
+                            <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>
+                            {cls.get() !== undefined && split.get() !== 'all' ? (
+                              <Button onclick={() => setFilter({ class: null })}>All classes in {split.get()}</Button>
+                            ) : null}
+                          </>
+                        )}
                       />
                     </Panel>
                   ) : pager.get() ? (
@@ -570,6 +595,7 @@ css`
   }
   .panel {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-3);
     min-width: 0;
   }
