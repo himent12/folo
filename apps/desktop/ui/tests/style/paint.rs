@@ -179,3 +179,34 @@ fn a_shadow_is_culled_by_its_unblurred_box_as_gpui_culls_it() {
     );
     assert_eq!(paint_one(blurred(0., 2.)).len(), 1);
 }
+
+#[test]
+fn offscreen_element_keeps_offset_shadow_but_culls_background_and_borders() {
+    let style = Style::default().refined(
+        StyleRefinement::default().bg(red()).border_1().border_color(blue()).rounded(px(4.)).shadow(vec![
+            BoxShadow {
+                color: shadow_color(),
+                offset: point(px(-10.), px(0.)),
+                blur_radius: px(4.),
+                spread_radius: px(0.),
+            },
+        ]),
+    );
+    let mut clipped = cx(1., 1.);
+    clipped.content_mask = ContentMask { bounds: lbounds(0., 0., 100., 100.) };
+    // Element starts at x = 105 (outside the mask), while its shadow shifted by -10 reaches x = 95.
+    let scene = paint(&style, lbounds(105., 10., 20., 20.), &clipped);
+    assert_eq!(scene.len(), 1, "only the shadow reaches into the mask");
+    assert!(matches!(scene.primitives[0], Primitive::Shadow(_)));
+}
+
+#[test]
+fn fractional_scale_border_band_touching_mask_is_not_dropped() {
+    // At scale 1.25, scaling the mask before intersecting rounds its right edge down to the
+    // element's left edge, while the per-band logical intersection stays non-empty after scaling.
+    let style = Style::default().refined(StyleRefinement::default().border_1().border_color(blue()));
+    let mut clipped = cx(1.25, 1.);
+    clipped.content_mask = ContentMask { bounds: lbounds(0.23456796, 0., 0.9669945, 20.) };
+    let scene = paint(&style, lbounds(1.2015624, 0., 20., 20.), &clipped);
+    assert!(!scene.is_empty(), "per-band scaled intersection must not be culled early");
+}

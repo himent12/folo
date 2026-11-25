@@ -79,6 +79,16 @@ impl Hitbox {
     }
 }
 
+/// Compact hit-test entry stored in `Frame::hitboxes` with its precomputed `bounds ∩ content_mask`
+/// rectangle, avoiding repeated intersections and scanning of disjoint clipped hitboxes during
+/// `Frame::hit_test`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HitboxEntry {
+    pub(crate) id: HitboxId,
+    pub(crate) clipped: Bounds<Pixels>,
+    pub(crate) behavior: HitboxBehavior,
+}
+
 /// The result of hit testing the mouse position against the rendered frame: hovered hitboxes, topmost
 /// first, up to and including the first blocking one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -257,8 +267,8 @@ pub(crate) struct Frame {
     pub(crate) element_ids: ElementIdMap,
     /// Element states touched this frame (the rest of the previous frame's are dropped at the swap).
     pub(crate) element_states: ElementStateMap,
-    /// Hit-testable rectangles, in paint order.
-    pub(crate) hitboxes: Vec<Hitbox>,
+    /// Hit-testable rectangles (with precomputed clipped bounds), in paint order.
+    pub(crate) hitboxes: Vec<HitboxEntry>,
     /// Mouse-down listeners, in paint order (dispatched topmost first in bubble).
     pub(crate) mouse_down_listeners: Vec<MouseDownEntry>,
     /// Mouse-up listeners, in paint order.
@@ -340,7 +350,7 @@ impl Frame {
         let mut hit_test = HitTest::default();
         let mut hover_count_set = false;
         for hitbox in self.hitboxes.iter().rev() {
-            if !hitbox.bounds.intersect(&hitbox.content_mask.bounds).contains(&position) {
+            if !hitbox.clipped.contains(&position) {
                 continue;
             }
             hit_test.ids.push(hitbox.id);

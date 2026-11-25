@@ -74,28 +74,49 @@ pub(crate) fn shadow_bounds(b: &Bounds<ScaledPixels>, blur: f32) -> Bounds<Scale
 }
 
 /// The pixels primitives may write: their bounds' pixels inside their clip's and the frame's. Runs of
-/// primitives share a clip, so the last clip's pixel rectangle is kept.
+/// primitives share a clip, so the last clip's raw and frame-clipped pixel rectangles are kept.
 struct Clips {
     frame: IRect,
-    last: Option<([u32; 4], IRect)>,
+    last: Option<([u32; 4], IRect, IRect)>,
 }
 
 impl Clips {
+    /// Resolves `clip` to `(raw_clip_rect, clip_rect ∩ frame)`, reusing the cached entry when
+    /// consecutive primitives share the same clip bounds.
+    #[inline]
+    fn resolve_clip(&mut self, clip: &Bounds<ScaledPixels>) -> (IRect, IRect) {
+        let key = [clip.origin.x.0, clip.origin.y.0, clip.size.width.0, clip.size.height.0].map(f32::to_bits);
+        match self.last {
+            Some((k, raw, clipped)) if k == key => (raw, clipped),
+            _ => {
+                let raw = clip_rect(clip);
+                let clipped = raw.intersect(&self.frame);
+                self.last = Some((key, raw, clipped));
+                (raw, clipped)
+            }
+        }
+    }
+
     /// `pixel_rect(bounds, clip)` inside the frame.
     #[inline]
     fn rect(&mut self, bounds: &Bounds<ScaledPixels>, clip: &Bounds<ScaledPixels>) -> IRect {
-        let key = [clip.origin.x.0, clip.origin.y.0, clip.size.width.0, clip.size.height.0].map(f32::to_bits);
-        let clip = match self.last {
-            Some((k, r)) if k == key => r,
-            _ => {
-                let r = clip_rect(clip).intersect(&self.frame);
-                self.last = Some((key, r));
-                r
-            }
-        };
+        self.rect_with_raw(bounds, clip).0
+    }
+
+    /// Like [`Self::rect`], also returning the un-intersected `clip_rect(clip)` for paths.
+    #[inline]
+    fn rect_with_raw(
+        &mut self,
+        bounds: &Bounds<ScaledPixels>,
+        clip: &Bounds<ScaledPixels>,
+    ) -> (IRect, IRect) {
+        let (raw, clipped) = self.resolve_clip(clip);
+        if clipped.is_empty() {
+            return (IRect::EMPTY, raw);
+        }
         let (x0, x1) = raster_span(bounds.origin.x.0, bounds.origin.x.0 + bounds.size.width.0);
         let (y0, y1) = raster_span(bounds.origin.y.0, bounds.origin.y.0 + bounds.size.height.0);
-        IRect::new(x0, y0, x1, y1).intersect(&clip)
+        (IRect::new(x0, y0, x1, y1).intersect(&clipped), raw)
     }
 }
 
@@ -189,7 +210,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if invisible(&p.paint) {
                     continue;
                 }
-                let rect = clips.rect(&p.bounds, &p.clip);
+                let (rect, raw_clip) = clips.rect_with_raw(&p.bounds, &p.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -197,7 +218,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 let mut h = mix_rect(6, &rect);
                 h = mix_bounds(h, &p.bounds);
                 // A gradient spans the clipped bounds, so the clip matters beyond `rect`.
-                h = mix_rect(h, &clip_rect(&p.clip));
+                h = mix_rect(h, &raw_clip);
                 h = mix_bounds(h, &p.clip);
                 h = mix(h, geometry);
                 h = mix_background(h, &p.paint);

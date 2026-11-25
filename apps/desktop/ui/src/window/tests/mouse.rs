@@ -711,3 +711,77 @@ fn inline_focus_and_hover_refresh_respect_interleaved_listener_order() {
     app2.simulate_input(window2, PlatformInput::FileDrop(crate::FileDropEvent::Exited));
     assert_eq!(*other_log.borrow(), ["exit", "drop-exit"]);
 }
+
+#[test]
+fn clipped_offscreen_hitboxes_are_dropped_while_edge_touching_remains_hittable() {
+    let clicks = log();
+    let (mut app, window) = open(size(px(100.), px(100.)), 1.0, {
+        let clicks = clicks.clone();
+        move |_, _| {
+            let off = clicks.clone();
+            let edge = clicks.clone();
+            div()
+                .id("clip-box")
+                .w(px(50.))
+                .h(px(50.))
+                .overflow_hidden()
+                .child(
+                    // Strictly outside the 50x50 clip box: clipped size is negative, dropped from Frame::hitboxes.
+                    div()
+                        .id("offscreen")
+                        .absolute()
+                        .left(px(60.))
+                        .top(px(10.))
+                        .w(px(20.))
+                        .h(px(20.))
+                        .on_click(move |_, _, _| off.borrow_mut().push("off".into())),
+                )
+                .child(
+                    // Touching x = 50: clipped width is 0, height is 20 -> inclusive `contains` matches x = 50.
+                    div()
+                        .id("edge")
+                        .absolute()
+                        .left(px(50.))
+                        .top(px(10.))
+                        .w(px(20.))
+                        .h(px(20.))
+                        .on_click(move |_, _, _| edge.borrow_mut().push("edge".into())),
+                )
+                .into_any_element()
+        }
+    });
+
+    let stored_hitboxes = with_window(&mut app, window, |w, _| w.last_frame_times().hitboxes);
+    // Only the edge-touching hitbox survives into Frame::hitboxes (clip-box has no interactivity;
+    // offscreen is strictly disjoint from the clip mask).
+    assert_eq!(stored_hitboxes, 1);
+
+    mouse_down(&mut app, window, 65., 15.);
+    mouse_up(&mut app, window, 65., 15.);
+    assert!(clicks.borrow().is_empty(), "strictly clipped hitbox must not fire");
+
+    mouse_down(&mut app, window, 50., 15.);
+    mouse_up(&mut app, window, 50., 15.);
+    assert_eq!(*clicks.borrow(), ["edge"], "edge-touching zero-width intersection remains clickable");
+}
+
+#[test]
+fn signed_zero_hitbox_intersection_remains_hittable() {
+    let mask_bounds = Bounds::new(point(px(-0.0), px(0.0)), size(px(-0.0), px(20.0)));
+    let box_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(10.0), px(20.0)));
+    let clipped = box_bounds.intersect(&mask_bounds);
+    assert!(clipped.size.width.0.is_sign_negative() && clipped.size.width.0 == 0.0);
+
+    let recorded = std::rc::Rc::new(std::cell::Cell::new(None));
+    let recorded_in_view = recorded.clone();
+    let (mut app, window) = open(size(px(100.), px(100.)), 1.0, move |w, _| {
+        let id = w.with_content_mask(Some(crate::ContentMask { bounds: mask_bounds }), |w| {
+            w.insert_hitbox(box_bounds, crate::HitboxBehavior::Normal).id
+        });
+        recorded_in_view.set(Some(id));
+        div().into_any_element()
+    });
+    let expected = recorded.get().unwrap();
+    let hits = with_window(&mut app, window, |w, _| w.rendered_frame.hit_test(point(px(0.0), px(5.0))).ids);
+    assert!(hits.contains(&expected), "signed-zero width intersection must remain hittable at x = 0");
+}

@@ -63,6 +63,38 @@ pub fn paint_line(
     if layout.runs.is_empty() {
         return Ok(());
     }
+    let mut max_glyph_size = size(px(0.), px(0.));
+    let mut last_font_id: Option<FontId> = None;
+    let has_line_decorations =
+        decoration_runs.iter().any(|run| run.underline.is_some() || run.strikethrough.is_some());
+    if !has_line_decorations
+        && line_height.0.is_finite()
+        && line_height.0 >= 0.0
+        && origin.y.0.is_finite()
+        && content_mask.origin.y.0.is_finite()
+        && content_mask.size.height.0.is_finite()
+    {
+        let first_font = layout.runs[0].font_id;
+        if layout.runs.iter().all(|run| run.font_id == first_font) {
+            max_glyph_size = text_system.bounding_box(first_font, layout.font_size).size;
+            last_font_id = Some(first_font);
+            if max_glyph_size.height.0.is_finite() {
+                // Accumulate `line_height` with the exact same rounded additions as the glyph loop
+                // so wrapped lines near the top of `content_mask` cannot drift below the loop's y.
+                let mut last_line_y = origin.y;
+                for _ in wrap_boundaries {
+                    last_line_y += line_height;
+                }
+                let min_y = origin.y;
+                let max_bottom = last_line_y + max_glyph_size.height;
+                if max_bottom.0.is_finite()
+                    && !(min_y < content_mask.bottom() && max_bottom > content_mask.top())
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
     let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
     let baseline_offset = point(px(0.), padding_top + layout.ascent);
     let mut decoration_runs = decoration_runs.iter();
@@ -76,8 +108,6 @@ pub fn paint_line(
         origin.y,
     );
     let mut prev_glyph_position = Point::default();
-    let mut max_glyph_size = size(px(0.), px(0.));
-    let mut last_font_id: Option<FontId> = None;
     let mut first_glyph_x = origin.x;
     for (run_ix, run) in layout.runs.iter().enumerate() {
         if last_font_id != Some(run.font_id) {

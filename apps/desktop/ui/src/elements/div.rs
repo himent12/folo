@@ -100,8 +100,11 @@ impl Element for Div {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // The children's bounding box: the scrollable content size (and the handle's child bounds).
-        let content_size = if request_layout.child_layout_ids.is_empty() {
+        // The children's bounding box is only read by scroll containers (`clamp_scroll_position`)
+        // and tracked scroll handles (`child_bounds`); skip the per-child bounds query otherwise.
+        let needs_content_size =
+            self.interactivity.scroll_offset.is_some() || self.interactivity.tracked_scroll_handle.is_some();
+        let content_size = if !needs_content_size || request_layout.child_layout_ids.is_empty() {
             bounds.size
         } else {
             let mut child_min = point(Pixels::MAX, Pixels::MAX);

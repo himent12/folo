@@ -21,7 +21,7 @@ use crate::{
     style::Refineable,
     window::{
         AnyMouseListener, AsElementStateKey, DispatchNodeId, ElementStateKey, ElementStateKeyRef,
-        MouseDownEntry, MouseMoveEntry, input_handler::InputHandlerSlot,
+        HitboxEntry, MouseDownEntry, MouseMoveEntry, input_handler::InputHandlerSlot,
     },
 };
 
@@ -268,9 +268,16 @@ impl Window {
     pub fn insert_hitbox(&mut self, bounds: Bounds<Pixels>, behavior: HitboxBehavior) -> Hitbox {
         let id = HitboxId(self.next_hitbox_id);
         self.next_hitbox_id = self.next_hitbox_id.wrapping_add(1);
-        let hitbox = Hitbox { id, bounds, content_mask: self.content_mask(), behavior };
-        self.next_frame.hitboxes.push(hitbox.clone());
-        hitbox
+        let content_mask = self.content_mask();
+        let clipped = bounds.intersect(&content_mask.bounds);
+        // Under `Pixels`'s total order (`f32::total_cmp`), `clipped.contains(p)` can match some
+        // point if and only if both reconstructed intervals are non-inverted (`left <= right` and
+        // `top <= bottom`), preserving edge-touching and signed-zero intersections while dropping
+        // strictly disjoint hitboxes.
+        if clipped.left() <= clipped.right() && clipped.top() <= clipped.bottom() {
+            self.next_frame.hitboxes.push(HitboxEntry { id, clipped, behavior });
+        }
+        Hitbox { id, bounds, content_mask, behavior }
     }
 
     /// Adds a window control area (caption, minimize, maximize, close) for the platform's hit test.

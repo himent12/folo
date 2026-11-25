@@ -332,3 +332,62 @@ fn paint_line_handles_empty_runs_and_caches_font_bounds_across_same_font_runs() 
     line.paint_with(point(px(0.), px(0.)), px(20.), &window, everywhere(), &mut rec).unwrap();
     assert_eq!(rec.glyphs().len(), 6);
 }
+
+#[test]
+fn vertically_culled_lines_skip_glyphs_but_preserve_decorations() {
+    let window = window_text_system();
+    let text = "aa bbb cccc ddddd";
+    let wrapped = window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), None).unwrap();
+    let line = &wrapped[0];
+    assert!(!line.wrap_boundaries().is_empty());
+
+    // Mask strictly above and strictly below the wrapped line's vertical span.
+    let mut rec = Recorder::default();
+    let mask_below = Bounds::new(point(px(0.), px(200.)), size(px(200.), px(50.)));
+    line.paint_with(point(px(0.), px(0.)), px(20.), TextAlign::Left, None, &window, mask_below, &mut rec)
+        .unwrap();
+    assert!(rec.0.is_empty());
+
+    let mask_above = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(10.)));
+    line.paint_with(point(px(0.), px(100.)), px(20.), TextAlign::Left, None, &window, mask_above, &mut rec)
+        .unwrap();
+    assert!(rec.0.is_empty());
+
+    // An underlined line outside the mask still forwards its underline to the painter (which clips it).
+    let mut decorated = runs(&[4]);
+    decorated[0].underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
+    let ul = window.shape_line("abcd".into(), px(16.), &decorated, None);
+    ul.paint_with(point(px(0.), px(100.)), px(20.), &window, mask_above, &mut rec).unwrap();
+    assert!(rec.glyphs().is_empty());
+    assert!(rec.0.iter().any(|op| matches!(op, Op::Underline { .. })));
+
+    // Wrapped line accumulation rounding: repeated `+= 20.3` from y = 50 across 2 wraps reaches
+    // 106.600006 (above mask top 106.6), whereas `20.3 * 2.0` would round down to 106.599998.
+    let two_wrap_text = "aa bb cc";
+    let two_wrap = window
+        .shape_text(two_wrap_text.into(), px(16.), &runs(&[two_wrap_text.len()]), Some(px(30.)), None)
+        .unwrap();
+    assert_eq!(two_wrap[0].wrap_boundaries().len(), 2);
+    let mut wrap_rec = Recorder::default();
+    let edge_mask = Bounds::new(point(px(0.), px(106.6)), size(px(200.), px(50.)));
+    two_wrap[0]
+        .paint_with(
+            point(px(0.), px(50.)),
+            px(20.3),
+            TextAlign::Left,
+            None,
+            &window,
+            edge_mask,
+            &mut wrap_rec,
+        )
+        .unwrap();
+    assert!(!wrap_rec.glyphs().is_empty(), "last wrapped row reaching past mask.top must still paint");
+
+    // Non-finite `line_height` (+Inf) on an unwrapped line must not cull via `Inf * 0.0 = NaN`.
+    let single = window.shape_line("abcd".into(), px(16.), &runs(&[4]), None);
+    let mut inf_rec = Recorder::default();
+    single
+        .paint_with(point(px(0.), px(10.)), px(f32::INFINITY), &window, everywhere(), &mut inf_rec)
+        .unwrap();
+    assert_eq!(inf_rec.glyphs().len(), 4);
+}
