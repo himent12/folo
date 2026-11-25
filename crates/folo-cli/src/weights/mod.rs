@@ -165,9 +165,14 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
             )
             .hint("download again; nothing was installed"));
         }
-        // Check it is a FOLO file before atomically installing it into the cache.
+        // Check it is a FOLO file, flush it to disk (covering both HTTPS and `gh`), then atomically install it.
         folo_nn::io::ModelFile::open(&file)
             .map_err(|e| CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {e}", p.asset)))?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io(&format!("cannot sync {}", folo_api::json::path(&file)), e))?;
         folo_nn::io::rename_over(&file, &dest)
             .map_err(|e| io(&format!("cannot move into {}", folo_api::json::path(&dest)), e))?;
         Ok((got, via))

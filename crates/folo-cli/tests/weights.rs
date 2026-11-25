@@ -328,6 +328,25 @@ fn non_retryable_client_error_fails_immediately_without_retries() {
 }
 
 #[test]
+fn malformed_mirror_url_fails_immediately_without_retries() {
+    let root = TestDir::new("weights-bad-url");
+    let cache = root.join("cache");
+
+    // Human mode prints retry notices to stderr; a malformed URL must emit none.
+    let out = folo_cmd()
+        .args(["weights", "pull", NAME])
+        .env("FOLO_WEIGHTS_DIR", &cache)
+        .env("FOLO_WEIGHTS_BASE_URL", "http://127.0.0.1/bad mirror")
+        .env("FOLO_GH", NO_GH)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("retrying"), "unexpected retry notice: {stderr}");
+    assert_eq!(cached(&cache), Vec::<String>::new());
+}
+
+#[test]
 fn failed_force_repull_preserves_existing_cached_weights() {
     let (bytes, sha) = model();
     let ok =

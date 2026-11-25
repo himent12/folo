@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::output::{CliError, ExitCode, Out};
 
@@ -126,12 +126,114 @@ fn is_retryable_status(status: u16) -> bool {
 }
 
 fn is_retryable_transport(err: &ureq::Error) -> bool {
-    !matches!(err, ureq::Error::BadUri(_) | ureq::Error::TooManyRedirects)
+    matches!(
+        err,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::BodyStalled
+    )
 }
 
-fn parse_retry_after(raw: Option<&str>) -> Option<Duration> {
-    let secs: u64 = raw?.trim().parse().ok()?;
-    Some(Duration::from_secs(secs))
+fn parse_retry_after(raw: Option<&str>, now: SystemTime) -> Option<Duration> {
+    let raw = raw?.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = parse_http_date(raw)?;
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+/// Parses RFC 9110 §5.6.7 HTTP-date formats (IMF-fixdate, RFC 850, and asctime) as UTC `SystemTime`.
+fn parse_http_date(raw: &str) -> Option<SystemTime> {
+    let (day, month, year, hms) = if let Some((_, rest)) = raw.split_once(", ") {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        match parts.as_slice() {
+            // IMF-fixdate: "06 Nov 1994 08:49:37 GMT"
+            [d, mon, y, hms, "GMT"] => {
+                (d.parse::<u32>().ok()?, parse_month(mon)?, y.parse::<i64>().ok()?, *hms)
+            }
+            // RFC 850: "06-Nov-94 08:49:37 GMT"
+            [dmy, hms, "GMT"] => {
+                let mut segs = dmy.split('-');
+                let d = segs.next()?.parse::<u32>().ok()?;
+                let mon = parse_month(segs.next()?)?;
+                let y2 = segs.next()?.parse::<i64>().ok()?;
+                if segs.next().is_some() || !(0..=99).contains(&y2) {
+                    return None;
+                }
+                let y = if y2 >= 70 { 1900 + y2 } else { 2000 + y2 };
+                (d, mon, y, *hms)
+            }
+            _ => return None,
+        }
+    } else {
+        // asctime: "Sun Nov  6 08:49:37 1994"
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+        match parts.as_slice() {
+            [_, mon, d, hms, y] => (d.parse::<u32>().ok()?, parse_month(mon)?, y.parse::<i64>().ok()?, *hms),
+            _ => return None,
+        }
+    };
+    let mut t = hms.split(':');
+    let hour: u32 = t.next()?.parse().ok()?;
+    let min: u32 = t.next()?.parse().ok()?;
+    let sec: u32 = t.next()?.parse().ok()?;
+    if t.next().is_some() || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let max_day = days_in_month(year, month)?;
+    if day == 0 || day > max_day {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return Some(UNIX_EPOCH);
+    }
+    let total_secs = (days as u64)
+        .checked_mul(86_400)?
+        .checked_add(u64::from(hour) * 3600 + u64::from(min) * 60 + u64::from(sec.min(59)))?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(total_secs))
+}
+
+fn parse_month(s: &str) -> Option<u32> {
+    match s {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 => Some(if leap { 29 } else { 28 }),
+        _ => None,
+    }
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's civil-to-days algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let m = u64::from(month);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
 }
 
 fn retry_delay_base() -> Duration {
@@ -224,7 +326,10 @@ fn fetch_once(agent: &ureq::Agent, url: &str, name: &str, dest: &Path, out: Out)
         return Attempt::Refused(Refused { url: url.to_string(), status });
     }
     if !res.status().is_success() {
-        let retry_after = parse_retry_after(res.headers().get("retry-after").and_then(|v| v.to_str().ok()));
+        let retry_after = parse_retry_after(
+            res.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            SystemTime::now(),
+        );
         let err = CliError::new(ExitCode::Runtime, "download_failed", format!("{url} answered {status}"))
             .hint(format!(
                 "the server's trouble: try again later; {BASE_URL_ENV} downloads from a mirror instead"
@@ -298,15 +403,6 @@ fn fetch_once(agent: &ureq::Agent, url: &str, name: &str, dest: &Path, out: Out)
             summary: format!("incomplete download ({done}/{t} bytes)"),
             retry_after: None,
         };
-    }
-    if let Err(e) = file.sync_all() {
-        drop(file);
-        let _ = std::fs::remove_file(dest);
-        return Attempt::Fatal(CliError::new(
-            ExitCode::Runtime,
-            "io_error",
-            format!("cannot sync {}: {e}", folo_api::json::path(dest)),
-        ));
     }
     Attempt::Done
 }
@@ -393,6 +489,42 @@ fn format_progress(name: &str, done: u64, total: Option<u64>, elapsed: Duration)
     line
 }
 
+/// Maximum single-row width for progress updates (leaves one column free so the cursor never auto-wraps).
+fn progress_max_width() -> usize {
+    let cols = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(80);
+    cols.saturating_sub(1).max(1)
+}
+
+fn fit_progress_line(line: &str, max_width: usize) -> String {
+    let max_width = max_width.max(1);
+    if line.chars().count() <= max_width {
+        return line.to_string();
+    }
+    if max_width <= 3 {
+        return line.chars().take(max_width).collect();
+    }
+    let mut truncated: String = line.chars().take(max_width - 3).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+fn render_progress_frame(line: &str, prev_width: usize, max_width: usize) -> (String, usize) {
+    let max_width = max_width.max(1);
+    let fitted = fit_progress_line(line, max_width);
+    let width = fitted.chars().count();
+    let pad = prev_width.min(max_width).saturating_sub(width);
+    (format!("\r{fitted}{:pad$}", ""), width)
+}
+
+fn render_progress_clear(prev_width: usize, max_width: usize) -> String {
+    let width = prev_width.min(max_width.max(1));
+    format!("\r{:width$}\r", "")
+}
+
 /// A download's progress line for people: on a terminal, not with `--json`, for files of a MB or more.
 struct Progress {
     name: String,
@@ -401,13 +533,22 @@ struct Progress {
     started: Instant,
     last: Option<Instant>,
     last_width: usize,
+    max_width: usize,
 }
 
 impl Progress {
     fn new(out: Out, name: &str, total: Option<u64>) -> Progress {
         let show =
             !out.json && std::io::stderr().is_terminal() && total.is_none_or(|t| t >= PROGRESS_MIN_BYTES);
-        Progress { name: name.to_string(), total, show, started: Instant::now(), last: None, last_width: 0 }
+        Progress {
+            name: name.to_string(),
+            total,
+            show,
+            started: Instant::now(),
+            last: None,
+            last_width: 0,
+            max_width: progress_max_width(),
+        }
     }
 
     fn update(&mut self, done: u64) {
@@ -417,20 +558,19 @@ impl Progress {
         }
         self.last = Some(now);
         let line = format_progress(&self.name, done, self.total, now.duration_since(self.started));
-        let width = line.chars().count();
-        let pad = self.last_width.saturating_sub(width);
+        let (frame, width) = render_progress_frame(&line, self.last_width, self.max_width);
         self.last_width = width;
         let mut e = std::io::stderr().lock();
-        let _ = write!(e, "\r{line}{:pad$}", "");
+        let _ = write!(e, "{frame}");
         let _ = e.flush();
     }
 
     fn finish(&mut self) {
         if self.show && self.last.take().is_some() {
-            let width = self.last_width.max(72);
+            let clear = render_progress_clear(self.last_width, self.max_width);
             self.last_width = 0;
             let mut e = std::io::stderr().lock();
-            let _ = write!(e, "\r{:width$}\r", "");
+            let _ = write!(e, "{clear}");
             let _ = e.flush();
         }
     }
@@ -451,6 +591,21 @@ mod tests {
     }
 
     #[test]
+    fn retryable_transport_classification() {
+        assert!(is_retryable_transport(&ureq::Error::HostNotFound));
+        assert!(is_retryable_transport(&ureq::Error::ConnectionFailed));
+        assert!(is_retryable_transport(&ureq::Error::BodyStalled));
+        assert!(is_retryable_transport(&ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "eof"
+        ))));
+        assert!(!is_retryable_transport(&ureq::Error::BadUri("bad".into())));
+        assert!(!is_retryable_transport(&ureq::Error::TooManyRedirects));
+        assert!(!is_retryable_transport(&ureq::Error::InvalidProxyUrl));
+        assert!(!is_retryable_transport(&ureq::Error::Tls("cert rejected")));
+    }
+
+    #[test]
     fn backoff_delay_grows_exponentially_and_caps() {
         let base = Duration::from_millis(500);
         assert_eq!(backoff_delay(0, base, None), Duration::from_millis(500));
@@ -464,13 +619,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_retry_after_handles_seconds_and_ignores_non_integers() {
-        assert_eq!(parse_retry_after(Some("3")), Some(Duration::from_secs(3)));
-        assert_eq!(parse_retry_after(Some(" 12 ")), Some(Duration::from_secs(12)));
-        assert_eq!(parse_retry_after(Some("0")), Some(Duration::ZERO));
-        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
-        assert_eq!(parse_retry_after(Some("-1")), None);
-        assert_eq!(parse_retry_after(None), None);
+    fn parse_retry_after_handles_seconds_and_http_dates() {
+        // RFC 9110 §5.6.7 canonical example: Sun, 06 Nov 1994 08:49:37 GMT == 784_111_777.
+        let base_ts = UNIX_EPOCH + Duration::from_secs(784_111_767); // 10s earlier
+        assert_eq!(parse_retry_after(Some("3"), base_ts), Some(Duration::from_secs(3)));
+        assert_eq!(parse_retry_after(Some(" 12 "), base_ts), Some(Duration::from_secs(12)));
+        assert_eq!(parse_retry_after(Some("0"), base_ts), Some(Duration::ZERO));
+        assert_eq!(
+            parse_retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), base_ts),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            parse_retry_after(Some("Sunday, 06-Nov-94 08:49:37 GMT"), base_ts),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            parse_retry_after(Some("Sun Nov  6 08:49:37 1994"), base_ts),
+            Some(Duration::from_secs(10))
+        );
+        // Past dates clamp to zero rather than failing.
+        let later_ts = UNIX_EPOCH + Duration::from_secs(784_111_800);
+        assert_eq!(parse_retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), later_ts), Some(Duration::ZERO));
+        // Invalid values return None.
+        assert_eq!(parse_retry_after(Some("not-a-date"), base_ts), None);
+        assert_eq!(parse_retry_after(Some("Sun, 31 Feb 1994 08:49:37 GMT"), base_ts), None);
+        assert_eq!(parse_retry_after(Some("-1"), base_ts), None);
+        assert_eq!(parse_retry_after(None, base_ts), None);
     }
 
     #[test]
@@ -509,6 +683,27 @@ mod tests {
             format_progress("m.folo", 12_000_000, Some(10_000_000), Duration::from_secs(2)),
             "m.folo: 12.0 MB / 10.0 MB (100%), 6.0 MB/s"
         );
+    }
+
+    #[test]
+    fn progress_frames_fit_narrow_terminals_and_clear_trailing_chars() {
+        let max_w = 36;
+        let long = "folo-n-coco-v2.folo: 12.5 MB / 50.0 MB (25%), 6.2 MB/s, eta 1m05s";
+        let (frame1, w1) = render_progress_frame(long, 0, max_w);
+        assert_eq!(w1, max_w);
+        assert!(frame1.starts_with('\r') && frame1.ends_with("..."));
+        assert_eq!(frame1.chars().count() - 1, max_w);
+
+        let short = "m.folo: 5.0 MB (50%)";
+        let (frame2, w2) = render_progress_frame(short, w1, max_w);
+        assert_eq!(w2, short.chars().count());
+        // Padded to previous width to overwrite leftover characters, never wider than max_w.
+        assert_eq!(frame2.chars().count() - 1, w1);
+        assert_eq!(frame2, format!("\r{short}{}", " ".repeat(w1 - w2)));
+
+        // Clearing never exceeds max_w and matches the last drawn width.
+        let clear = render_progress_clear(w2, max_w);
+        assert_eq!(clear, format!("\r{}\r", " ".repeat(w2)));
     }
 
     #[test]
