@@ -194,6 +194,53 @@ fn nchw(shape: &Shape) -> (usize, usize, usize, usize) {
     (d[0], d[1], d[2], d[3])
 }
 
+/// Validate view bounds and cross-operand shapes for direct `CpuBackend` norm entry points.
+fn check_norm_views(
+    op: &'static str,
+    x: &View<'_>,
+    grad: Option<&View<'_>>,
+    weight: Option<&View<'_>>,
+    bias: Option<&View<'_>>,
+    mean: Option<&View<'_>>,
+    rstd: Option<&View<'_>>,
+) -> Result<(usize, usize)> {
+    let check_fits = |v: &View<'_>| -> Result<()> {
+        let data = f32s(v, op)?;
+        if !v.layout.fits(data.len()) {
+            return Err(Error::invalid_shape(op, v.shape(), "layout reaches outside its storage"));
+        }
+        Ok(())
+    };
+    check_fits(x)?;
+    if x.shape().rank() == 0 {
+        return Err(Error::invalid_shape(op, x.shape(), "needs rank >= 1"));
+    }
+    let d = *x.shape().dims().last().expect("rank >= 1");
+    if d == 0 {
+        return Err(Error::invalid_shape(op, x.shape(), "last dimension must be non-zero"));
+    }
+    let outer = x.layout.numel() / d;
+    if let Some(g) = grad {
+        check_fits(g)?;
+        if g.shape() != x.shape() {
+            return Err(Error::ShapeMismatch { op, lhs: x.shape().clone(), rhs: g.shape().clone() });
+        }
+    }
+    for param in [weight, bias].into_iter().flatten() {
+        check_fits(param)?;
+        if param.shape().dims() != [d] {
+            return Err(Error::ShapeMismatch { op, lhs: Shape::new(&[d]), rhs: param.shape().clone() });
+        }
+    }
+    for stat in [mean, rstd].into_iter().flatten() {
+        check_fits(stat)?;
+        if stat.layout.numel() != outer {
+            return Err(Error::ShapeMismatch { op, lhs: Shape::new(&[outer]), rhs: stat.shape().clone() });
+        }
+    }
+    Ok((outer, d))
+}
+
 /// Element offset of each batch matrix for a layout `[B.., r, c]`.
 fn batch_offsets(layout: &Layout) -> Vec<usize> {
     let r = layout.rank();
@@ -357,11 +404,14 @@ impl Backend for CpuBackend {
         bias: Option<View<'_>>,
         eps: f32,
     ) -> Result<(Storage, Storage, Storage)> {
-        let xd = contiguous_f32(&x, "layer_norm")?;
-        let wd = weight.map(|w| contiguous_f32(&w, "layer_norm")).transpose()?;
-        let bd = bias.map(|b| contiguous_f32(&b, "layer_norm")).transpose()?;
-        let d = *x.shape().dims().last().unwrap_or(&0);
-        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        const OP: &str = "layer_norm";
+        let (outer, d) = check_norm_views(OP, &x, None, weight.as_ref(), bias.as_ref(), None, None)?;
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(Error::invalid_arg(OP, format!("eps must be finite and >= 0 (got {eps})")));
+        }
+        let xd = contiguous_f32(&x, OP)?;
+        let wd = weight.map(|w| contiguous_f32(&w, OP)).transpose()?;
+        let bd = bias.map(|b| contiguous_f32(&b, OP)).transpose()?;
         let (y, m, r) = norm::layer_norm(&xd, wd.as_deref(), bd.as_deref(), outer, d, eps);
         Ok((f32_storage(y), f32_storage(m), f32_storage(r)))
     }
@@ -376,23 +426,27 @@ impl Backend for CpuBackend {
         need_weight: bool,
         need_bias: bool,
     ) -> Result<(Storage, Option<Storage>, Option<Storage>)> {
-        let xd = contiguous_f32(&x, "layer_norm_backward")?;
-        let gd = contiguous_f32(&grad, "layer_norm_backward")?;
-        let wd = weight.map(|w| contiguous_f32(&w, "layer_norm_backward")).transpose()?;
-        let md = contiguous_f32(&mean, "layer_norm_backward")?;
-        let rd = contiguous_f32(&rstd, "layer_norm_backward")?;
-        let d = *x.shape().dims().last().unwrap_or(&0);
-        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        const OP: &str = "layer_norm_backward";
+        let (outer, d) =
+            check_norm_views(OP, &x, Some(&grad), weight.as_ref(), None, Some(&mean), Some(&rstd))?;
+        let xd = contiguous_f32(&x, OP)?;
+        let gd = contiguous_f32(&grad, OP)?;
+        let wd = weight.map(|w| contiguous_f32(&w, OP)).transpose()?;
+        let md = contiguous_f32(&mean, OP)?;
+        let rd = contiguous_f32(&rstd, OP)?;
         let (dx, dw, db) =
             norm::layer_norm_backward(&xd, &gd, wd.as_deref(), &md, &rd, outer, d, need_weight, need_bias);
         Ok((f32_storage(dx), dw.map(f32_storage), db.map(f32_storage)))
     }
 
     fn rms_norm(&self, x: View<'_>, weight: Option<View<'_>>, eps: f32) -> Result<(Storage, Storage)> {
-        let xd = contiguous_f32(&x, "rms_norm")?;
-        let wd = weight.map(|w| contiguous_f32(&w, "rms_norm")).transpose()?;
-        let d = *x.shape().dims().last().unwrap_or(&0);
-        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        const OP: &str = "rms_norm";
+        let (outer, d) = check_norm_views(OP, &x, None, weight.as_ref(), None, None, None)?;
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(Error::invalid_arg(OP, format!("eps must be finite and >= 0 (got {eps})")));
+        }
+        let xd = contiguous_f32(&x, OP)?;
+        let wd = weight.map(|w| contiguous_f32(&w, OP)).transpose()?;
         let (y, r) = norm::rms_norm(&xd, wd.as_deref(), outer, d, eps);
         Ok((f32_storage(y), f32_storage(r)))
     }
@@ -405,12 +459,12 @@ impl Backend for CpuBackend {
         rstd: View<'_>,
         need_weight: bool,
     ) -> Result<(Storage, Option<Storage>)> {
-        let xd = contiguous_f32(&x, "rms_norm_backward")?;
-        let gd = contiguous_f32(&grad, "rms_norm_backward")?;
-        let wd = weight.map(|w| contiguous_f32(&w, "rms_norm_backward")).transpose()?;
-        let rd = contiguous_f32(&rstd, "rms_norm_backward")?;
-        let d = *x.shape().dims().last().unwrap_or(&0);
-        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        const OP: &str = "rms_norm_backward";
+        let (outer, d) = check_norm_views(OP, &x, Some(&grad), weight.as_ref(), None, None, Some(&rstd))?;
+        let xd = contiguous_f32(&x, OP)?;
+        let gd = contiguous_f32(&grad, OP)?;
+        let wd = weight.map(|w| contiguous_f32(&w, OP)).transpose()?;
+        let rd = contiguous_f32(&rstd, OP)?;
         let (dx, dw) = norm::rms_norm_backward(&xd, &gd, wd.as_deref(), &rd, outer, d, need_weight);
         Ok((f32_storage(dx), dw.map(f32_storage)))
     }

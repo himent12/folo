@@ -146,7 +146,9 @@ impl Tensor {
                         let scale = 2.0 / denom as f32;
                         return Ok(out.track("var", &[self], move |g| {
                             let mean = x_saved.mean(d_vec.clone(), true)?;
-                            let gx = x_saved.sub(&mean)?.mul(&g.reshape(&keep_shape)?.mul_scalar(scale)?)?;
+                            let diff = x_saved.sub(&mean)?;
+                            let raw = diff.mul(&g.reshape(&keep_shape)?.mul_scalar(scale)?)?;
+                            let gx = raw.sub(&raw.mean(d_vec.clone(), true)?)?;
                             Ok(grads![Some(gx)])
                         }));
                     }

@@ -38,8 +38,9 @@ impl Tensor {
     /// Layer normalisation over the last dimension `d` of `self` (`[.., d]`):
     /// `y = ((x - mean) / sqrt(var + eps)) * weight + bias` with biased variance.
     ///
-    /// `weight` and `bias`, when given, have shape `[d]` and match `self`'s device and dtype. `F16` inputs are
-    /// normalised in `F32` and rounded back to `F16`.
+    /// `weight` and `bias`, when given, have shape `[d]` and match `self`'s device and dtype. `F16` inputs (on
+    /// backends whose [`crate::backend::Backend::computes_f16`] is true, like [`Tensor::mean`]) are normalised in
+    /// `F32` and rounded back to `F16`.
     pub fn layer_norm(&self, weight: Option<&Tensor>, bias: Option<&Tensor>, eps: f32) -> Result<Tensor> {
         let (outer, d) = check_norm_args(self, weight, bias, eps, "layer_norm")?;
         if self.dtype() == DType::F16 {
@@ -70,21 +71,22 @@ impl Tensor {
                 let mean = Tensor::wrap(ms, Shape::new(&[outer]), "layer_norm")?;
                 let rstd = Tensor::wrap(rs, Shape::new(&[outer]), "layer_norm")?;
                 let x = self.detach();
-                let w = weight.map(Tensor::detach);
-                let need_w = weight.is_some_and(Tensor::requires_grad);
-                let need_b = bias.is_some_and(Tensor::requires_grad);
-                let has_w = weight.is_some();
-                let has_b = bias.is_some();
+                let w_inp = weight.cloned();
+                let b_inp = bias.cloned();
                 Ok(out.track_saved("layer_norm", &ts, &[&mean.clone(), &rstd.clone()], move |g| {
                     x.check_same_device(g, "layer_norm")?;
                     g.check_float_like(&x, "layer_norm")?;
+                    let has_w = w_inp.is_some();
+                    let has_b = b_inp.is_some();
+                    let need_w = w_inp.as_ref().is_some_and(Tensor::requires_grad);
+                    let need_b = b_inp.as_ref().is_some_and(Tensor::requires_grad);
                     let b = x.backend()?;
                     let mut bts: SmallVec<[&Tensor; 5]> = SmallVec::new();
                     bts.push(&x);
                     bts.push(g);
                     bts.push(&mean);
                     bts.push(&rstd);
-                    let wi = w.as_ref().map(|wt| {
+                    let wi = w_inp.as_ref().map(|wt| {
                         let i = bts.len();
                         bts.push(wt);
                         i
@@ -113,7 +115,7 @@ impl Tensor {
                         Err(Error::NotSupported { .. }) => layer_norm_backward_composite(
                             &x,
                             g,
-                            w.as_ref(),
+                            w_inp.as_ref(),
                             &mean,
                             &rstd,
                             has_w,
@@ -128,8 +130,7 @@ impl Tensor {
             Err(Error::NotSupported { .. }) => {
                 let mean = self.mean(-1, true)?;
                 let diff = self.sub(&mean)?;
-                let var = diff.square()?.mean(-1, true)?;
-                let mut y = diff.mul(&var.add_scalar(eps)?.rsqrt()?)?;
+                let mut y = scaled_normalize(&diff, eps)?;
                 if let Some(w) = weight {
                     y = y.mul(w)?;
                 }
@@ -145,8 +146,9 @@ impl Tensor {
     /// Root-mean-square normalisation over the last dimension `d` of `self` (`[.., d]`):
     /// `y = (x / sqrt(mean(x^2) + eps)) * weight`.
     ///
-    /// `weight`, when given, has shape `[d]` and matches `self`'s device and dtype. `F16` inputs are normalised
-    /// in `F32` and rounded back to `F16`.
+    /// `weight`, when given, has shape `[d]` and matches `self`'s device and dtype. `F16` inputs (on backends
+    /// whose [`crate::backend::Backend::computes_f16`] is true, like [`Tensor::mean`]) are normalised in `F32`
+    /// and rounded back to `F16`.
     pub fn rms_norm(&self, weight: Option<&Tensor>, eps: f32) -> Result<Tensor> {
         let (outer, d) = check_norm_args(self, weight, None, eps, "rms_norm")?;
         if self.dtype() == DType::F16 {
@@ -169,18 +171,18 @@ impl Tensor {
                 let out = Tensor::wrap(ys, self.shape().clone(), "rms_norm")?;
                 let rstd = Tensor::wrap(rs, Shape::new(&[outer]), "rms_norm")?;
                 let x = self.detach();
-                let w = weight.map(Tensor::detach);
-                let need_w = weight.is_some_and(Tensor::requires_grad);
-                let has_w = weight.is_some();
+                let w_inp = weight.cloned();
                 Ok(out.track_saved("rms_norm", &ts, &[&rstd.clone()], move |g| {
                     x.check_same_device(g, "rms_norm")?;
                     g.check_float_like(&x, "rms_norm")?;
+                    let has_w = w_inp.is_some();
+                    let need_w = w_inp.as_ref().is_some_and(Tensor::requires_grad);
                     let b = x.backend()?;
                     let mut bts: SmallVec<[&Tensor; 4]> = SmallVec::new();
                     bts.push(&x);
                     bts.push(g);
                     bts.push(&rstd);
-                    let wi = w.as_ref().map(|wt| {
+                    let wi = w_inp.as_ref().map(|wt| {
                         let i = bts.len();
                         bts.push(wt);
                         i
@@ -200,15 +202,14 @@ impl Tensor {
                             Ok(out_grads)
                         }
                         Err(Error::NotSupported { .. }) => {
-                            rms_norm_backward_composite(&x, g, w.as_ref(), &rstd, has_w, need_w)
+                            rms_norm_backward_composite(&x, g, w_inp.as_ref(), &rstd, has_w, need_w)
                         }
                         Err(e) => Err(e),
                     }
                 }))
             }
             Err(Error::NotSupported { .. }) => {
-                let ms = self.square()?.mean(-1, true)?;
-                let mut y = self.mul(&ms.add_scalar(eps)?.rsqrt()?)?;
+                let mut y = scaled_normalize(self, eps)?;
                 if let Some(w) = weight {
                     y = y.mul(w)?;
                 }
@@ -217,6 +218,25 @@ impl Tensor {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Composite `u / sqrt(mean(u^2) + eps)` scaled by `s = max(max(|u|), sqrt(eps))` per row so large (`1e20`) and
+/// tiny (`1e-23`, `eps == 0`) inputs never overflow or underflow when squared.
+fn scaled_normalize(u: &Tensor, eps: f32) -> Result<Tensor> {
+    if u.numel() == 0 {
+        return Ok(u.clone());
+    }
+    let eps_sqrt = eps.sqrt();
+    let s = {
+        let _ng = crate::no_grad();
+        let raw = u.abs()?.max(-1, true)?.maximum_scalar(eps_sqrt)?;
+        let ok = raw.gt_scalar(0.0)?.mul(&raw.lt_scalar(f32::INFINITY)?)?;
+        ok.where_cond(&raw, &u.scalar_like(1.0)?)?
+    };
+    let us = u.div(&s)?;
+    let eps_scaled = s.rdiv_scalar(eps_sqrt)?.square()?;
+    let ms = us.square()?.mean(-1, true)?;
+    us.mul(&ms.add(&eps_scaled)?.rsqrt()?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,7 +261,9 @@ fn layer_norm_backward_composite(
     };
     let c1 = gw.mean(-1, true)?;
     let c2 = gw.mul(&xh)?.mean(-1, true)?;
-    let dx = r.mul(&gw.sub(&c1.add(&xh.mul(&c2)?)?)?)?;
+    let xh_mean = xh.mean(-1, true)?;
+    let c1_adj = c1.sub(&xh_mean.mul(&c2)?)?;
+    let dx = r.mul(&gw.sub(&c1_adj.add(&xh.mul(&c2)?)?)?)?;
     let mut out: SmallVec<[Option<Tensor>; 2]> = SmallVec::new();
     out.push(Some(dx));
     let reduce_dims: Vec<usize> = (0..x.rank() - 1).collect();
@@ -376,5 +398,70 @@ mod tests {
         for (a, b) in got_rms.iter().zip(&ref_rms) {
             assert!((a - b).abs() < 1e-5, "rms {a} vs {b}");
         }
+    }
+
+    #[test]
+    fn norm_and_var_rounding_extreme_scale_dynamic_grad_and_backend_checks() {
+        use crate::backend::{Backend, View};
+        use crate::cpu::CpuBackend;
+        use crate::{CpuStorage, Layout, Storage};
+
+        // 1. Direct safe Backend calls reject mismatched operand shapes cleanly (no OOB reads).
+        let x8 = Storage::Cpu(CpuStorage::F32(vec![1.0; 8]));
+        let w1 = Storage::Cpu(CpuStorage::F32(vec![1.0; 1]));
+        let s1 = Storage::Cpu(CpuStorage::F32(vec![1.0; 1]));
+        let lx8 = Layout::contiguous([8]);
+        let lw1 = Layout::contiguous([1]);
+        let ls1 = Layout::contiguous([1]);
+        assert!(CpuBackend.rms_norm(View::new(&x8, &lx8), Some(View::new(&w1, &lw1)), 1e-5).is_err());
+        assert!(CpuBackend.layer_norm(View::new(&x8, &lx8), Some(View::new(&w1, &lw1)), None, 1e-5).is_err());
+        assert!(
+            CpuBackend
+                .rms_norm_backward(
+                    View::new(&x8, &lx8),
+                    View::new(&w1, &lw1),
+                    None,
+                    View::new(&s1, &ls1),
+                    false,
+                )
+                .is_err()
+        );
+
+        // 2. Dynamic `set_requires_grad(true)` after forward still produces `dweight` and `dbias`.
+        let x = Tensor::randn([3, 8], 0.0, 1.0, &mut Rng::seed(103)).requires_grad_();
+        let w = Tensor::ones([8]);
+        let b = Tensor::zeros([8]);
+        let y_ln = x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap();
+        let y_rms = x.rms_norm(Some(&w), 1e-5).unwrap();
+        w.set_requires_grad(true);
+        b.set_requires_grad(true);
+        let g_ln = y_ln.sum_all().unwrap().backward().unwrap();
+        assert!(g_ln.get(&w).is_some() && g_ln.get(&b).is_some());
+        let g_rms = y_rms.sum_all().unwrap().backward().unwrap();
+        assert!(g_rms.get(&w).is_some());
+
+        // 3. Large-offset translation invariance for `var` and `layer_norm` backward.
+        let big = Tensor::from_slice(&[100_000_000.0f32, 100_000_008.0], [2]).unwrap().requires_grad_();
+        let g_var = big.var(0, false, false).unwrap().backward().unwrap();
+        assert_eq!(g_var.get(&big).unwrap().to_vec::<f32>().unwrap(), vec![-4.0, 4.0]);
+        let g_ln_big = big.layer_norm(None, None, 0.0).unwrap().sum_all().unwrap().backward().unwrap();
+        let dx = g_ln_big.get(&big).unwrap().to_vec::<f32>().unwrap();
+        assert!((dx[0] + dx[1]).abs() < 1e-6, "translation invariance broken: {dx:?}");
+        assert!((dx[0] - 0.088_388_35).abs() < 1e-5, "{dx:?}");
+
+        // 4. Extreme-magnitude finite inputs (`1e20`, `1e-23`, `eps = 0`) stay finite and normalized.
+        let hi = Tensor::from_slice(&[1e20f32], [1]).unwrap();
+        assert!((hi.rms_norm(None, 0.0).unwrap().item::<f32>().unwrap() - 1.0).abs() < 1e-6);
+        let lo = Tensor::from_slice(&[1e-23f32], [1]).unwrap();
+        assert!((lo.rms_norm(None, 0.0).unwrap().item::<f32>().unwrap() - 1.0).abs() < 1e-6);
+        let hi_ln = Tensor::from_slice(&[1e20f32, -1e20], [2]).unwrap();
+        let y_hi = hi_ln.layer_norm(None, None, 0.0).unwrap().to_vec::<f32>().unwrap();
+        assert!((y_hi[0] - 1.0).abs() < 1e-6 && (y_hi[1] + 1.0).abs() < 1e-6, "{y_hi:?}");
+        let lo_ln = Tensor::from_slice(&[1e-23f32, -1e-23], [2]).unwrap();
+        let y_lo = lo_ln.layer_norm(None, None, 0.0).unwrap().to_vec::<f32>().unwrap();
+        assert!((y_lo[0] - 1.0).abs() < 1e-6 && (y_lo[1] + 1.0).abs() < 1e-6, "{y_lo:?}");
+        // Composite scaled helper matches on extreme values too.
+        assert!((super::scaled_normalize(&hi, 0.0).unwrap().item::<f32>().unwrap() - 1.0).abs() < 1e-6);
+        assert!((super::scaled_normalize(&lo, 0.0).unwrap().item::<f32>().unwrap() - 1.0).abs() < 1e-6);
     }
 }

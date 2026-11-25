@@ -43,6 +43,58 @@ pub(super) fn tree_sum_vecs(mut parts: Vec<Vec<f32>>) -> Vec<f32> {
     parts.pop().unwrap_or_default()
 }
 
+/// Pairwise binary-tree sum of `f64` partials in a fixed order (deterministic cold-path fallback).
+pub(super) fn tree_sum_f64(mut v: Vec<f64>) -> f64 {
+    while v.len() > 1 {
+        let half = v.len().div_ceil(2);
+        for i in 0..half {
+            v[i] = if 2 * i + 1 < v.len() { v[2 * i] + v[2 * i + 1] } else { v[2 * i] };
+        }
+        v.truncate(half);
+    }
+    v.pop().unwrap_or(0.0)
+}
+
+/// Cold-path `f64` LayerNorm statistics when `f32` mean/variance overflows or underflows near `eps == 0`.
+#[cold]
+fn ln_stats_f64(row: &[f32], eps: f32) -> (f32, f32) {
+    let inv_d = 1.0 / row.len() as f64;
+    let sum_f64 = |f: fn(&[f32], f64) -> f64, m: f64| -> f64 {
+        if row.len() <= REDUCE_BLOCK {
+            return f(row, m);
+        }
+        let parts: Vec<f64> = row.chunks(REDUCE_BLOCK).map(|c| f(c, m)).collect();
+        tree_sum_f64(parts)
+    };
+    let m64 = sum_f64(|c, _| c.iter().map(|&v| v as f64).sum(), 0.0) * inv_d;
+    let m32 = m64 as f32;
+    // Measure squared deviations around the actual rounded `f32` mean used by `ln_apply` and backward.
+    let m_use = if m32.is_finite() { m32 as f64 } else { m64 };
+    let v64 = sum_f64(
+        |c, m| {
+            c.iter()
+                .map(|&v| {
+                    let df = v as f64 - m;
+                    df * df
+                })
+                .sum()
+        },
+        m_use,
+    ) * inv_d;
+    let r = (1.0 / (v64 + eps as f64).sqrt()) as f32;
+    (m32, r)
+}
+
+#[inline]
+fn ln_row_stats(row: &[f32], inv_d: f32, eps: f32) -> (f32, f32) {
+    let m = sum_row(row) * inv_d;
+    let v = sum_sq_diff_row(row, m) * inv_d;
+    if !m.is_finite() || !v.is_finite() || (v < 1e-30 && eps < 1e-30) {
+        return ln_stats_f64(row, eps);
+    }
+    (m, 1.0 / (v + eps).sqrt())
+}
+
 // ---------- LayerNorm forward ----------
 
 #[inline]
@@ -85,6 +137,13 @@ unsafe fn ln_apply_avx2_fma(
 ) {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(y.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
+    if let Some(b) = b {
+        assert_eq!(b.len(), n);
+    }
     let mut i = 0usize;
     // SAFETY: every vector load/store accesses `i..i+8` (or `i..i+16`) within `0..n`, and AVX2+FMA are enabled.
     unsafe {
@@ -207,6 +266,13 @@ pub(crate) fn layer_norm(
     d: usize,
     eps: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    assert_eq!(x.len(), outer.checked_mul(d).expect("layer_norm: outer * d overflow"));
+    if let Some(w) = weight {
+        assert_eq!(w.len(), d, "layer_norm: weight length");
+    }
+    if let Some(b) = bias {
+        assert_eq!(b.len(), d, "layer_norm: bias length");
+    }
     if outer == 0 || d == 0 {
         return (Vec::new(), Vec::new(), Vec::new());
     }
@@ -216,9 +282,7 @@ pub(crate) fn layer_norm(
     let inv_d = 1.0 / d as f32;
 
     if outer == 1 {
-        let m = sum_row(x) * inv_d;
-        let v = sum_sq_diff_row(x, m) * inv_d;
-        let r = 1.0 / (v + eps).sqrt();
+        let (m, r) = ln_row_stats(x, inv_d, eps);
         mean[0] = m;
         rstd[0] = r;
         if d >= PAR_MIN {
@@ -239,9 +303,7 @@ pub(crate) fn layer_norm(
 
     let do_row = |o: usize, yd: &mut [f32]| -> (f32, f32) {
         let row = &x[o * d..(o + 1) * d];
-        let m = sum_row(row) * inv_d;
-        let v = sum_sq_diff_row(row, m) * inv_d;
-        let r = 1.0 / (v + eps).sqrt();
+        let (m, r) = ln_row_stats(row, inv_d, eps);
         ln_apply(row, yd, weight, bias, m, r);
         (m, r)
     };
@@ -276,10 +338,13 @@ pub(crate) fn layer_norm(
 
 // ---------- LayerNorm backward ----------
 
+/// Compute `(sum(gw), sum(gw * x_hat), sum(x_hat))` over a block. Tracking `sum(x_hat)` preserves exact
+/// translation invariance `sum(dx) == 0` even when the forward `mean` rounded in `f32`.
 #[inline]
-fn ln_bwd_c1_c2_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32) -> (f32, f32) {
+fn ln_bwd_sums_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32) -> (f32, f32, f32) {
     let mut a1 = [0.0f32; 16];
     let mut a2 = [0.0f32; 16];
+    let mut a3 = [0.0f32; 16];
     let n = x.len();
     let mut i = 0usize;
     match w {
@@ -290,6 +355,7 @@ fn ln_bwd_c1_c2_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd:
                     let gw = g[i + k] * w[i + k];
                     a1[k] += gw;
                     a2[k] += gw * xh;
+                    a3[k] += xh;
                 }
                 i += 16;
             }
@@ -298,6 +364,7 @@ fn ln_bwd_c1_c2_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd:
                 let gw = g[i + k] * w[i + k];
                 a1[k] += gw;
                 a2[k] += gw * xh;
+                a3[k] += xh;
             }
         }
         None => {
@@ -307,6 +374,7 @@ fn ln_bwd_c1_c2_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd:
                     let gw = g[i + k];
                     a1[k] += gw;
                     a2[k] += gw * xh;
+                    a3[k] += xh;
                 }
                 i += 16;
             }
@@ -315,28 +383,41 @@ fn ln_bwd_c1_c2_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd:
                 let gw = g[i + k];
                 a1[k] += gw;
                 a2[k] += gw * xh;
+                a3[k] += xh;
             }
         }
     }
-    let (mut c1, mut c2) = (0.0f32, 0.0f32);
+    let (mut c1, mut c2, mut c3) = (0.0f32, 0.0f32, 0.0f32);
     for k in 0..16 {
         c1 += a1[k];
         c2 += a2[k];
+        c3 += a3[k];
     }
-    (c1, c2)
+    (c1, c2, c3)
 }
 
 /// # Safety
 /// The CPU supports AVX2 and FMA.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32) -> (f32, f32) {
+unsafe fn ln_bwd_sums_avx2_fma(
+    x: &[f32],
+    g: &[f32],
+    w: Option<&[f32]>,
+    mean: f32,
+    rstd: f32,
+) -> (f32, f32, f32) {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(g.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
     let mut a1 = [0.0f32; 16];
     let mut a2 = [0.0f32; 16];
+    let mut a3 = [0.0f32; 16];
     let mut i = 0usize;
-    // SAFETY: loops check `i + 16 <= n`, `a1`/`a2` hold 16 floats, and AVX2+FMA are enabled.
+    // SAFETY: slice lengths asserted above, loops check `i + 16 <= n`, `a1..a3` hold 16 floats, AVX2+FMA enabled.
     unsafe {
         let vm = _mm256_set1_ps(mean);
         let vr = _mm256_set1_ps(rstd);
@@ -344,6 +425,8 @@ unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f
         let mut s1_1 = _mm256_setzero_ps();
         let mut s2_0 = _mm256_setzero_ps();
         let mut s2_1 = _mm256_setzero_ps();
+        let mut s3_0 = _mm256_setzero_ps();
+        let mut s3_1 = _mm256_setzero_ps();
         match w {
             Some(w) => {
                 while i + 16 <= n {
@@ -359,6 +442,8 @@ unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f
                     s1_1 = _mm256_add_ps(s1_1, gw1);
                     s2_0 = _mm256_fmadd_ps(gw0, xh0, s2_0);
                     s2_1 = _mm256_fmadd_ps(gw1, xh1, s2_1);
+                    s3_0 = _mm256_add_ps(s3_0, xh0);
+                    s3_1 = _mm256_add_ps(s3_1, xh1);
                     i += 16;
                 }
             }
@@ -372,6 +457,8 @@ unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f
                     s1_1 = _mm256_add_ps(s1_1, gw1);
                     s2_0 = _mm256_fmadd_ps(gw0, xh0, s2_0);
                     s2_1 = _mm256_fmadd_ps(gw1, xh1, s2_1);
+                    s3_0 = _mm256_add_ps(s3_0, xh0);
+                    s3_1 = _mm256_add_ps(s3_1, xh1);
                     i += 16;
                 }
             }
@@ -380,6 +467,8 @@ unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f
         _mm256_storeu_ps(a1.as_mut_ptr().add(8), s1_1);
         _mm256_storeu_ps(a2.as_mut_ptr(), s2_0);
         _mm256_storeu_ps(a2.as_mut_ptr().add(8), s2_1);
+        _mm256_storeu_ps(a3.as_mut_ptr(), s3_0);
+        _mm256_storeu_ps(a3.as_mut_ptr().add(8), s3_1);
     }
     for k in 0..(n - i) {
         let xh = (x[i + k] - mean) * rstd;
@@ -389,56 +478,81 @@ unsafe fn ln_bwd_c1_c2_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f
         };
         a1[k] += gw;
         a2[k] += gw * xh;
+        a3[k] += xh;
     }
-    let (mut c1, mut c2) = (0.0f32, 0.0f32);
+    let (mut c1, mut c2, mut c3) = (0.0f32, 0.0f32, 0.0f32);
     for k in 0..16 {
         c1 += a1[k];
         c2 += a2[k];
+        c3 += a3[k];
     }
-    (c1, c2)
+    (c1, c2, c3)
 }
 
 #[inline]
-fn ln_bwd_c1_c2_block(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32) -> (f32, f32) {
+fn ln_bwd_sums_block(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32) -> (f32, f32, f32) {
     #[cfg(target_arch = "x86_64")]
     if x.len() >= 16 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
-        return unsafe { ln_bwd_c1_c2_avx2_fma(x, g, w, mean, rstd) };
+        return unsafe { ln_bwd_sums_avx2_fma(x, g, w, mean, rstd) };
     }
-    ln_bwd_c1_c2_scalar(x, g, w, mean, rstd)
+    ln_bwd_sums_scalar(x, g, w, mean, rstd)
 }
 
-fn ln_bwd_c1_c2_row(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f32, par: bool) -> (f32, f32) {
+/// Returns `(c1_adj, c2_d)` where `c1_adj = mean(gw) - mean(x_hat) * mean(gw * x_hat)` and
+/// `c2_d = mean(gw * x_hat)`, so `dx = rstd * (gw - (c1_adj + x_hat * c2_d))` preserves exact centering.
+fn ln_bwd_coeffs_row(
+    x: &[f32],
+    g: &[f32],
+    w: Option<&[f32]>,
+    mean: f32,
+    rstd: f32,
+    inv_d: f32,
+    par: bool,
+) -> (f32, f32) {
     let d = x.len();
-    if d <= REDUCE_BLOCK {
-        return ln_bwd_c1_c2_block(x, g, w, mean, rstd);
-    }
-    let n_chunks = d.div_ceil(REDUCE_BLOCK);
-    let mut p1 = vec![0.0f32; n_chunks];
-    let mut p2 = vec![0.0f32; n_chunks];
-    if par {
-        let p1_ptr = SendPtr(p1.as_mut_ptr());
-        let p2_ptr = SendPtr(p2.as_mut_ptr());
-        par_for(n_chunks, &|c| {
-            let s = c * REDUCE_BLOCK;
-            let e = (s + REDUCE_BLOCK).min(d);
-            let (c1, c2) = ln_bwd_c1_c2_block(&x[s..e], &g[s..e], w.map(|w| &w[s..e]), mean, rstd);
-            // SAFETY: each `c` writes a distinct slot in `0..n_chunks`.
-            unsafe {
-                *p1_ptr.ptr().add(c) = c1;
-                *p2_ptr.ptr().add(c) = c2;
-            }
-        });
+    let (c1, c2, c3) = if d <= REDUCE_BLOCK {
+        ln_bwd_sums_block(x, g, w, mean, rstd)
     } else {
-        for c in 0..n_chunks {
-            let s = c * REDUCE_BLOCK;
-            let e = (s + REDUCE_BLOCK).min(d);
-            let (c1, c2) = ln_bwd_c1_c2_block(&x[s..e], &g[s..e], w.map(|w| &w[s..e]), mean, rstd);
-            p1[c] = c1;
-            p2[c] = c2;
+        let n_chunks = d.div_ceil(REDUCE_BLOCK);
+        let mut p1 = vec![0.0f32; n_chunks];
+        let mut p2 = vec![0.0f32; n_chunks];
+        let mut p3 = vec![0.0f32; n_chunks];
+        if par {
+            let p1_ptr = SendPtr(p1.as_mut_ptr());
+            let p2_ptr = SendPtr(p2.as_mut_ptr());
+            let p3_ptr = SendPtr(p3.as_mut_ptr());
+            par_for(n_chunks, &|c| {
+                let s = c * REDUCE_BLOCK;
+                let e = (s + REDUCE_BLOCK).min(d);
+                let (c1, c2, c3) = ln_bwd_sums_block(&x[s..e], &g[s..e], w.map(|w| &w[s..e]), mean, rstd);
+                // SAFETY: each `c` writes a distinct slot in `0..n_chunks`.
+                unsafe {
+                    *p1_ptr.ptr().add(c) = c1;
+                    *p2_ptr.ptr().add(c) = c2;
+                    *p3_ptr.ptr().add(c) = c3;
+                }
+            });
+        } else {
+            for c in 0..n_chunks {
+                let s = c * REDUCE_BLOCK;
+                let e = (s + REDUCE_BLOCK).min(d);
+                let (c1, c2, c3) = ln_bwd_sums_block(&x[s..e], &g[s..e], w.map(|w| &w[s..e]), mean, rstd);
+                p1[c] = c1;
+                p2[c] = c2;
+                p3[c] = c3;
+            }
         }
-    }
-    (tree_combine(p1, |a, b| a + b).unwrap_or(0.0), tree_combine(p2, |a, b| a + b).unwrap_or(0.0))
+        (
+            tree_combine(p1, |a, b| a + b).unwrap_or(0.0),
+            tree_combine(p2, |a, b| a + b).unwrap_or(0.0),
+            tree_combine(p3, |a, b| a + b).unwrap_or(0.0),
+        )
+    };
+    let c1_d = c1 * inv_d;
+    let c2_d = c2 * inv_d;
+    let xh_mean = c3 * inv_d;
+    (c1_d - xh_mean * c2_d, c2_d)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -491,6 +605,17 @@ unsafe fn ln_bwd_write_avx2_fma(
 ) {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(g.len(), n);
+    assert_eq!(dx.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
+    if let Some(ref dw) = dw {
+        assert_eq!(dw.len(), n);
+    }
+    if let Some(ref db) = db {
+        assert_eq!(db.len(), n);
+    }
     let mut i = 0usize;
     // SAFETY: loops check `i + 8 <= n`, all slices have length `n`, and AVX2+FMA are enabled.
     unsafe {
@@ -571,18 +696,25 @@ pub(crate) fn layer_norm_backward(
     need_weight: bool,
     need_bias: bool,
 ) -> (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>) {
+    let total = outer.checked_mul(d).expect("layer_norm_backward: outer * d overflow");
+    assert_eq!(x.len(), total, "layer_norm_backward: x length");
+    assert_eq!(grad.len(), total, "layer_norm_backward: grad length");
+    assert_eq!(mean.len(), outer, "layer_norm_backward: mean length");
+    assert_eq!(rstd.len(), outer, "layer_norm_backward: rstd length");
+    if let Some(w) = weight {
+        assert_eq!(w.len(), d, "layer_norm_backward: weight length");
+    }
     if outer == 0 || d == 0 {
         return (Vec::new(), need_weight.then(|| alloc_zeroed(d)), need_bias.then(|| alloc_zeroed(d)));
     }
-    let mut dx = alloc_uninit(outer * d);
+    let mut dx = alloc_uninit(total);
     let inv_d = 1.0 / d as f32;
 
     if outer == 1 {
         let m = mean[0];
         let r = rstd[0];
         let par = d >= PAR_MIN;
-        let (c1, c2) = ln_bwd_c1_c2_row(x, grad, weight, m, r, par);
-        let (c1_d, c2_d) = (c1 * inv_d, c2 * inv_d);
+        let (c1_adj, c2_d) = ln_bwd_coeffs_row(x, grad, weight, m, r, inv_d, par);
         let mut dw = need_weight.then(|| alloc_zeroed(d));
         let mut db = need_bias.then(|| alloc_zeroed(d));
         if par {
@@ -606,12 +738,12 @@ pub(crate) fn layer_norm_backward(
                     dbs,
                     m,
                     r,
-                    c1_d,
+                    c1_adj,
                     c2_d,
                 );
             });
         } else {
-            ln_bwd_write(x, grad, weight, &mut dx, dw.as_deref_mut(), db.as_deref_mut(), m, r, c1_d, c2_d);
+            ln_bwd_write(x, grad, weight, &mut dx, dw.as_deref_mut(), db.as_deref_mut(), m, r, c1_adj, c2_d);
         }
         return (dx, dw, db);
     }
@@ -624,7 +756,7 @@ pub(crate) fn layer_norm_backward(
             let s = o * d;
             let (rx, rg) = (&x[s..s + d], &grad[s..s + d]);
             let (m, r) = (mean[o], rstd[o]);
-            let (c1, c2) = ln_bwd_c1_c2_row(rx, rg, weight, m, r, false);
+            let (c1_adj, c2_d) = ln_bwd_coeffs_row(rx, rg, weight, m, r, inv_d, false);
             ln_bwd_write(
                 rx,
                 rg,
@@ -634,8 +766,8 @@ pub(crate) fn layer_norm_backward(
                 db.as_deref_mut(),
                 m,
                 r,
-                c1 * inv_d,
-                c2 * inv_d,
+                c1_adj,
+                c2_d,
             );
         }
         return (dx, dw, db);
@@ -660,20 +792,9 @@ pub(crate) fn layer_norm_backward(
             let s = o * d;
             let (rx, rg) = (&x[s..s + d], &grad[s..s + d]);
             let (m, r) = (mean[o], rstd[o]);
-            let (c1, c2) = ln_bwd_c1_c2_row(rx, rg, weight, m, r, false);
+            let (c1_adj, c2_d) = ln_bwd_coeffs_row(rx, rg, weight, m, r, inv_d, false);
             let dxs = unsafe { std::slice::from_raw_parts_mut(dx_ptr.ptr().add(s), d) };
-            ln_bwd_write(
-                rx,
-                rg,
-                weight,
-                dxs,
-                dw_b.as_deref_mut(),
-                db_b.as_deref_mut(),
-                m,
-                r,
-                c1 * inv_d,
-                c2 * inv_d,
-            );
+            ln_bwd_write(rx, rg, weight, dxs, dw_b.as_deref_mut(), db_b.as_deref_mut(), m, r, c1_adj, c2_d);
         }
     };
 

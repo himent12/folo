@@ -1,11 +1,35 @@
 //! Fused AVX2+FMA `rms_norm` forward and backward CPU kernels.
 
-use super::{bwd_row_blocks, tree_sum_vecs};
+use super::{bwd_row_blocks, tree_sum_f64, tree_sum_vecs};
 use crate::cpu::elementwise::SendPtr;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu::reduce::has_avx2_fma;
 use crate::cpu::reduce::{REDUCE_BLOCK, sum_sq_row, tree_combine};
 use crate::cpu::{CHUNK, PAR_MIN, alloc_uninit, alloc_zeroed, par_for};
+
+/// Cold-path `f64` RMS statistic when `f32` mean-square overflows or underflows near `eps == 0`.
+#[cold]
+fn rms_rstd_f64(row: &[f32], eps: f32) -> f32 {
+    let inv_d = 1.0 / row.len() as f64;
+    let sum_sq = if row.len() <= REDUCE_BLOCK {
+        row.iter().map(|&v| (v as f64) * (v as f64)).sum()
+    } else {
+        let parts: Vec<f64> =
+            row.chunks(REDUCE_BLOCK).map(|c| c.iter().map(|&v| (v as f64) * (v as f64)).sum()).collect();
+        tree_sum_f64(parts)
+    };
+    let ms64 = sum_sq * inv_d;
+    (1.0 / (ms64 + eps as f64).sqrt()) as f32
+}
+
+#[inline]
+fn rms_row_rstd(row: &[f32], inv_d: f32, eps: f32) -> f32 {
+    let ms = sum_sq_row(row) * inv_d;
+    if !ms.is_finite() || (ms < 1e-30 && eps < 1e-30) {
+        return rms_rstd_f64(row, eps);
+    }
+    1.0 / (ms + eps).sqrt()
+}
 
 #[inline]
 fn rms_apply_scalar(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
@@ -30,6 +54,10 @@ fn rms_apply_scalar(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
 unsafe fn rms_apply_avx2_fma(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(y.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
     let mut i = 0usize;
     // SAFETY: loops check `i + 16 <= n` / `i + 8 <= n` within `0..n`, and AVX2+FMA are enabled.
     unsafe {
@@ -104,6 +132,10 @@ pub(crate) fn rms_norm(
     d: usize,
     eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(x.len(), outer.checked_mul(d).expect("rms_norm: outer * d overflow"));
+    if let Some(w) = weight {
+        assert_eq!(w.len(), d, "rms_norm: weight length");
+    }
     if outer == 0 || d == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -112,8 +144,7 @@ pub(crate) fn rms_norm(
     let inv_d = 1.0 / d as f32;
 
     if outer == 1 {
-        let ms = sum_sq_row(x) * inv_d;
-        let r = 1.0 / (ms + eps).sqrt();
+        let r = rms_row_rstd(x, inv_d, eps);
         rstd[0] = r;
         if d >= PAR_MIN {
             let n_chunks = d.div_ceil(REDUCE_BLOCK);
@@ -133,8 +164,7 @@ pub(crate) fn rms_norm(
 
     let do_row = |o: usize, yd: &mut [f32]| -> f32 {
         let row = &x[o * d..(o + 1) * d];
-        let ms = sum_sq_row(row) * inv_d;
-        let r = 1.0 / (ms + eps).sqrt();
+        let r = rms_row_rstd(row, inv_d, eps);
         rms_apply(row, yd, weight, r);
         r
     };
@@ -206,6 +236,10 @@ fn rms_bwd_c_scalar(x: &[f32], g: &[f32], w: Option<&[f32]>, rstd: f32) -> f32 {
 unsafe fn rms_bwd_c_avx2_fma(x: &[f32], g: &[f32], w: Option<&[f32]>, rstd: f32) -> f32 {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(g.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
     let mut acc = [0.0f32; 16];
     let mut i = 0usize;
     // SAFETY: loops check `i + 16 <= n`, `acc` holds 16 floats, and AVX2+FMA are enabled.
@@ -332,6 +366,14 @@ unsafe fn rms_bwd_write_avx2_fma(
 ) {
     use std::arch::x86_64::*;
     let n = x.len();
+    assert_eq!(g.len(), n);
+    assert_eq!(dx.len(), n);
+    if let Some(w) = w {
+        assert_eq!(w.len(), n);
+    }
+    if let Some(ref dw) = dw {
+        assert_eq!(dw.len(), n);
+    }
     let mut i = 0usize;
     // SAFETY: loops check `i + 8 <= n`, all slices have length `n`, and AVX2+FMA are enabled.
     unsafe {
@@ -395,10 +437,17 @@ pub(crate) fn rms_norm_backward(
     d: usize,
     need_weight: bool,
 ) -> (Vec<f32>, Option<Vec<f32>>) {
+    let total = outer.checked_mul(d).expect("rms_norm_backward: outer * d overflow");
+    assert_eq!(x.len(), total, "rms_norm_backward: x length");
+    assert_eq!(grad.len(), total, "rms_norm_backward: grad length");
+    assert_eq!(rstd.len(), outer, "rms_norm_backward: rstd length");
+    if let Some(w) = weight {
+        assert_eq!(w.len(), d, "rms_norm_backward: weight length");
+    }
     if outer == 0 || d == 0 {
         return (Vec::new(), need_weight.then(|| alloc_zeroed(d)));
     }
-    let mut dx = alloc_uninit(outer * d);
+    let mut dx = alloc_uninit(total);
     let inv_d = 1.0 / d as f32;
 
     if outer == 1 {
