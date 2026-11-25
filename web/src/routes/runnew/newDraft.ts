@@ -1,9 +1,7 @@
 // Draft persistence for New run: reads the tab's stored draft for the active server/query, debounces edits into
 // sessionStorage, flushes pending writes on unmount/pagehide, and clears only this form's draft on Start.
 import { effect, onCleanup, onWindow } from 'fw';
-import { clearOwnDraft, readDraft, saveDraft, type Draft } from './draft';
-
-const KEY = 'folo.runNew.draft';
+import { clearOwnDraft, DRAFT_KEY, readDraft, saveDraft, type Draft } from './draft';
 
 /** Delay before persisting edits to storage so fast typing writes once instead of on every keystroke. */
 export const DRAFT_DEBOUNCE_MS = 300;
@@ -39,7 +37,7 @@ export interface DraftPersistence {
 
 function readRaw(store: () => Storage): string | null {
   try {
-    return store().getItem(KEY);
+    return store().getItem(DRAFT_KEY);
   } catch {
     return null;
   }

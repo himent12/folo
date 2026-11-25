@@ -9,7 +9,8 @@
 
 import type { Arch, Augment, Optimizer } from '$lib/api/types';
 
-const KEY = 'folo.runNew.draft';
+export const DRAFT_KEY = 'folo.runNew.draft';
+const KEY = DRAFT_KEY;
 const ARCHS: readonly string[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'] satisfies Arch[];
 const OPTIMIZERS: readonly string[] = ['auto', 'sgd', 'adamw', 'musgd'] satisfies Optimizer[];
 

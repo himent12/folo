@@ -666,6 +666,28 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
     expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
   });
 
+  it('surfaces an error toast with retry when /api/models fails on a ?weights= link, and rejects fused weights', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    toast.items = [];
+    hub.api = api = new MockApi('normal', 0);
+    const realModels = api.models.bind(api);
+    let fail = true;
+    vi.spyOn(api, 'models').mockImplementation(async () => {
+      if (fail) throw new ApiError(503, 'unavailable', 'models catalog down');
+      return (await realModels()).map((m) => (m.id === 'm_fast_n' ? { ...m, fused: true } : m));
+    });
+    await open('?weights=m_fast_n');
+    const errToast = await until(() => toast.items.find((t) => t.title === 'Could not load linked weights'), 'load error toast');
+    expect(errToast.action?.label).toBe('Retry');
+    expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
+
+    // Retrying after recovery sees fused weights and explains why they cannot be fine-tuned.
+    fail = false;
+    errToast.action!.run();
+    await until(() => toast.items.some((t) => t.title === 'Cannot fine-tune from fused weights'), 'fused weights toast');
+    expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
+  });
+
   it('skips redundant /api/runs/estimate calls when only the run name changes, while updating server CLI --name', async () => {
     hub.api = api = new MockApi('normal', 0);
     const real = api.estimateRun.bind(api);
@@ -677,18 +699,23 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
     await until(() => target.querySelector('.cli code')?.textContent?.includes('D:/x'), "the server's command");
     const callsBefore = ask.mock.calls.length;
 
-    const nameInput = target.querySelector<HTMLInputElement>('input#name')!;
-    nameInput.value = 'renamed-only';
-    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const nameInput = target.querySelector<HTMLInputElement>('input#name')!;
+      nameInput.value = 'renamed-only';
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
 
-    await new Promise((r) => setTimeout(r, 360));
-    flushSync();
-    expect(ask.mock.calls.length).toBe(callsBefore);
-    expect(target.querySelector('.cli code')?.textContent).toContain('--name renamed-only');
+      await vi.advanceTimersByTimeAsync(400);
+      flushSync();
+      expect(ask.mock.calls.length).toBe(callsBefore);
+      expect(target.querySelector('.cli code')?.textContent).toContain('--name renamed-only');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('returns to /runs on Escape when no nested dialog or select is active, and stays put otherwise', async () => {
+  it('returns to /runs on Escape when no nested dialog, tooltip, popover, or select is active, and stays put otherwise', async () => {
     hub.api = api = new MockApi('normal', 0);
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     try {
@@ -707,6 +734,28 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
         expect(go).not.toHaveBeenCalled();
       } finally {
         dlg.remove();
+      }
+
+      // Escape while a visible tooltip or info popover is open must not leave the page.
+      const tip = document.createElement('div');
+      tip.id = 'folo-tooltip';
+      tip.dataset.show = '';
+      document.body.appendChild(tip);
+      try {
+        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        expect(go).not.toHaveBeenCalled();
+      } finally {
+        tip.remove();
+      }
+
+      const pop = document.createElement('span');
+      pop.className = 'info-pop open';
+      document.body.appendChild(pop);
+      try {
+        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        expect(go).not.toHaveBeenCalled();
+      } finally {
+        pop.remove();
       }
 
       // Otherwise Escape returns cleanly to /runs.

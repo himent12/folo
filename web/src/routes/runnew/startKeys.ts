@@ -10,11 +10,20 @@ export interface StartKeysOptions {
   onCancel?: () => void;
 }
 
+/** True when a native Popover API element (e.g. InfoButton's Class balance popover) is currently open. */
+function hasOpenPopover(): boolean {
+  try {
+    return !!document.querySelector('[popover]:popover-open');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Enter in a field commits its value and never starts a run (a run may queue, or rent a cloud GPU): the browser's
  * implicit submission is turned off for the form's inputs. Mod+Enter (Ctrl, ⌘ on Apple) starts it from anywhere on
  * the page, as the Start button does, unless another dialog (the command palette) has the keyboard. Escape cancels
- * and returns cleanly when no nested dialog, popup, or select is open.
+ * and returns cleanly when no nested dialog, popup, tooltip, or select is open.
  */
 export function startKeys(form: () => HTMLFormElement | undefined, opts?: StartKeysOptions) {
   onDocument('keydown', (e) => {
@@ -23,7 +32,12 @@ export function startKeys(form: () => HTMLFormElement | undefined, opts?: StartK
     const el = e.target as HTMLElement | null;
     if (e.key === 'Escape') {
       if (!opts?.onCancel || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-      if (document.querySelector('dialog[open]') || document.querySelector('[aria-expanded="true"][aria-haspopup]')) return;
+      if (
+        document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], #folo-tooltip[data-show], .info-pop.open') ||
+        hasOpenPopover()
+      ) {
+        return;
+      }
       if (el?.tagName === 'SELECT' || el?.closest?.('select, [role="dialog"], [role="listbox"], [role="menu"]')) return;
       e.preventDefault();
       opts.onCancel();

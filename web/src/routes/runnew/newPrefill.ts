@@ -4,7 +4,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, Model, Optimizer, Run } from '$lib/api/types';
 import { IMGSZ_STEPS } from '$lib/oom';
-import { toast } from '$lib/ui/toast';
+import { errorDetail, toast } from '$lib/ui/toast';
 import type { CloudPick } from './cloudPick';
 import { canonicalDevice } from './device';
 import type { Draft } from './draft';
@@ -45,7 +45,9 @@ export function parseInitialQuery(q: URLSearchParams, own: Draft | null, draft: 
   const imgszChosen = queryImgsz || !!draft?.imgszChosen;
   const rawWeights = !own ? q.get('weights')?.trim() || null : null;
   const queryWeights = rawWeights && rawWeights !== 'none' ? rawWeights : null;
-  const weights = queryWeights ?? draft?.weights ?? 'none';
+  // Keep `weights` at 'none' while `queryWeights` awaits the model catalog (or when `?weights=none` is explicit)
+  // so validation does not flash an arch-mismatch error before the target model's architecture is known.
+  const weights = rawWeights === 'none' || queryWeights ? 'none' : (draft?.weights ?? 'none');
   return { fromId, datasetId, queryImgsz, imgsz, imgszChosen, queryWeights, weights };
 }
 
@@ -104,7 +106,8 @@ export function useRunPrefill(o: RunPrefillOptions) {
     o.e2e.set(c.head === 'o2o');
     o.lr0.set(c.lr0);
     o.seedCopy.copy(c.seed);
-    o.weights.set(o.queryWeights ?? c.weights ?? 'none');
+    // When `?weights=` is also present, leave weights at 'none' until the pendingWeights effect resolves it.
+    o.weights.set(o.queryWeights ? 'none' : (c.weights ?? 'none'));
     o.cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
     o.augment.set(deep(structuredClone(c.augment)));
     o.closeEdited.set(true);
@@ -136,6 +139,19 @@ export function useRunPrefill(o: RunPrefillOptions) {
     if (!id || !prefilled.get()) return;
     if (o.models.error && !o.models.data) {
       o.weights.set('none');
+      toast.show({
+        tone: 'error',
+        title: 'Could not load linked weights',
+        detail: `${errorDetail(o.models.error)} Starting from scratch unless retried.`,
+        action: {
+          label: 'Retry',
+          run: () => {
+            pendingWeights.set(id);
+            void o.models.refresh();
+          },
+        },
+        key: WEIGHTS_TOAST,
+      });
       pendingWeights.set(null);
       return;
     }

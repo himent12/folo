@@ -415,7 +415,7 @@ function RunNewForm() {
   const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = computed(() => firstError(errors.get()));
-  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get());
+  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get() && !pendingWeights.get());
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = computed(() => (errors.get().epochs ? null : shortRun(dataset.get()?.splits.train ?? 0, epochs.get(), batchN.get(), weights.get() === 'none')));
   const selArch = computed(() => arches.find((a) => a.arch === arch.get()));
@@ -444,7 +444,12 @@ function RunNewForm() {
 
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
   const estKey = computed(() => estimateKey(config.get()));
-  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute), ampEstimated);
+  const { served, estimating } = serverEstimate(
+    config,
+    estKey,
+    () => canEstimate.get() && prefilled.get() && !pendingWeights.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute),
+    ampEstimated,
+  );
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so

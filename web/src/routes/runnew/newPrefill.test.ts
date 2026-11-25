@@ -55,7 +55,7 @@ describe('runnew/newPrefill', () => {
       imgsz: '960',
       imgszChosen: true,
       queryWeights: 'm_fast_n',
-      weights: 'm_fast_n',
+      weights: 'none',
     });
 
     // When reopening the exact same link (`own` draft), saved edits win over query params.
@@ -69,8 +69,11 @@ describe('runnew/newPrefill', () => {
       weights: 'm_old',
     });
 
-    // Blank or "none" ?weights= does not schedule a weights lookup.
-    expect(parseInitialQuery(new URLSearchParams('weights=none'), null, null).queryWeights).toBeNull();
+    // Explicit ?weights=none overrides an earlier draft's weights without scheduling a lookup.
+    expect(parseInitialQuery(new URLSearchParams('weights=none'), null, sampleDraft)).toMatchObject({
+      queryWeights: null,
+      weights: 'none',
+    });
     expect(parseInitialQuery(new URLSearchParams('weights=   '), null, null).queryWeights).toBeNull();
   });
 
