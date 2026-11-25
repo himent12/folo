@@ -36,6 +36,11 @@ struct CacheState {
     frame: u64,
     lines: FxHashMap<Arc<CacheKey>, CacheEntry<LineLayout>>,
     wrapped_lines: FxHashMap<Arc<CacheKey>, CacheEntry<WrappedLineLayout>>,
+    /// Exact count of entries in `lines` touched during `frame` (so `finish_frame` can skip
+    /// `retain` on steady frames when every cached entry was reused).
+    lines_used_this_frame: usize,
+    /// Exact count of entries in `wrapped_lines` touched during `frame`.
+    wrapped_lines_used_this_frame: usize,
     previous_used_lines: Vec<Arc<CacheKey>>,
     previous_used_wrapped_lines: Vec<Arc<CacheKey>>,
     current_used_lines: Vec<Arc<CacheKey>>,
@@ -72,8 +77,11 @@ impl LineLayoutCache {
         let frame = state.frame;
 
         for key in &state.previous_used_lines[range.start.lines_index..range.end.lines_index] {
-            if let Some(entry) = state.lines.get_mut(key) {
+            if let Some(entry) = state.lines.get_mut(key)
+                && entry.last_used_frame != frame
+            {
                 entry.last_used_frame = frame;
+                state.lines_used_this_frame += 1;
             }
             state.current_used_lines.push(key.clone());
         }
@@ -81,8 +89,11 @@ impl LineLayoutCache {
         for key in
             &state.previous_used_wrapped_lines[range.start.wrapped_lines_index..range.end.wrapped_lines_index]
         {
-            if let Some(entry) = state.wrapped_lines.get_mut(key) {
+            if let Some(entry) = state.wrapped_lines.get_mut(key)
+                && entry.last_used_frame != frame
+            {
                 entry.last_used_frame = frame;
+                state.wrapped_lines_used_this_frame += 1;
             }
             state.current_used_wrapped_lines.push(key.clone());
         }
@@ -98,8 +109,22 @@ impl LineLayoutCache {
         let mut guard = self.state.lock();
         let state = &mut *guard;
         let frame = state.frame;
-        state.lines.retain(|_, entry| entry.last_used_frame == frame);
-        state.wrapped_lines.retain(|_, entry| entry.last_used_frame == frame);
+        debug_assert_eq!(
+            state.lines_used_this_frame,
+            state.lines.values().filter(|entry| entry.last_used_frame == frame).count()
+        );
+        debug_assert_eq!(
+            state.wrapped_lines_used_this_frame,
+            state.wrapped_lines.values().filter(|entry| entry.last_used_frame == frame).count()
+        );
+        if state.lines_used_this_frame < state.lines.len() {
+            state.lines.retain(|_, entry| entry.last_used_frame == frame);
+        }
+        if state.wrapped_lines_used_this_frame < state.wrapped_lines.len() {
+            state.wrapped_lines.retain(|_, entry| entry.last_used_frame == frame);
+        }
+        state.lines_used_this_frame = 0;
+        state.wrapped_lines_used_this_frame = 0;
         std::mem::swap(&mut state.previous_used_lines, &mut state.current_used_lines);
         state.current_used_lines.clear();
         std::mem::swap(&mut state.previous_used_wrapped_lines, &mut state.current_used_wrapped_lines);
@@ -129,6 +154,7 @@ impl LineLayoutCache {
             if let Some(entry) = state.wrapped_lines.get_mut(key) {
                 if entry.last_used_frame != state.frame {
                     entry.last_used_frame = state.frame;
+                    state.wrapped_lines_used_this_frame += 1;
                     state.current_used_wrapped_lines.push(entry.key.clone());
                 }
                 return entry.layout.clone();
@@ -159,6 +185,7 @@ impl LineLayoutCache {
         if let Some(entry) = state.wrapped_lines.get_mut(key.as_ref() as &dyn AsCacheKeyRef) {
             if entry.last_used_frame != state.frame {
                 entry.last_used_frame = state.frame;
+                state.wrapped_lines_used_this_frame += 1;
                 state.current_used_wrapped_lines.push(entry.key.clone());
             }
             return entry.layout.clone();
@@ -167,6 +194,7 @@ impl LineLayoutCache {
             key.clone(),
             CacheEntry { key: key.clone(), layout: layout.clone(), last_used_frame: state.frame },
         );
+        state.wrapped_lines_used_this_frame += 1;
         state.current_used_wrapped_lines.push(key);
         layout
     }
@@ -196,6 +224,7 @@ impl LineLayoutCache {
             if let Some(entry) = state.lines.get_mut(key) {
                 if entry.last_used_frame != state.frame {
                     entry.last_used_frame = state.frame;
+                    state.lines_used_this_frame += 1;
                     state.current_used_lines.push(entry.key.clone());
                 }
                 return entry.layout.clone();
@@ -234,6 +263,7 @@ impl LineLayoutCache {
         if let Some(entry) = state.lines.get_mut(key.as_ref() as &dyn AsCacheKeyRef) {
             if entry.last_used_frame != state.frame {
                 entry.last_used_frame = state.frame;
+                state.lines_used_this_frame += 1;
                 state.current_used_lines.push(entry.key.clone());
             }
             return entry.layout.clone();
@@ -242,6 +272,7 @@ impl LineLayoutCache {
             key.clone(),
             CacheEntry { key: key.clone(), layout: layout.clone(), last_used_frame: state.frame },
         );
+        state.lines_used_this_frame += 1;
         state.current_used_lines.push(key);
         layout
     }

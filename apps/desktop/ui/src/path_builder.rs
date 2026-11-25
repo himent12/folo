@@ -311,13 +311,13 @@ impl PathBuilder {
     /// equal to one built recently on this thread gets a copy of that result (`path_cache`), which is the
     /// same path.
     pub fn build(self) -> anyhow::Result<BuiltPath<Pixels>> {
-        crate::path_cache::cached(self.key(), || self.build_uncached())
+        crate::path_cache::cached(|k| self.write_key(k), || self.build_uncached())
     }
 
     /// Every input of [`PathBuilder::build`] as words, each float by its bits: builders with equal keys
     /// build equal paths. Each part says its kind and length, so no two inputs give the same words.
-    fn key(&self) -> Vec<u32> {
-        // Exactly the words pushed below, so the key the cache keeps needs no shrinking.
+    fn write_key(&self, k: &mut Vec<u32>) {
+        // Reserve the exact word count so a fresh or smaller scratch buffer grows at most once.
         let style = match self.style {
             PathStyle::Stroke(_) => 6,
             PathStyle::Fill(_) => 3,
@@ -341,7 +341,16 @@ impl PathBuilder {
             })
             .sum();
         let len = style + transform + dashes + subpaths;
-        let mut k = Vec::with_capacity(len);
+        k.clear();
+        if k.capacity() < len {
+            if len <= crate::path_cache::MAX_SCRATCH_WORDS
+                && k.capacity().saturating_mul(2) > crate::path_cache::MAX_SCRATCH_WORDS
+            {
+                k.reserve_exact(len);
+            } else {
+                k.reserve(len);
+            }
+        }
         match self.style {
             PathStyle::Stroke(o) => k.extend([
                 0,
@@ -372,29 +381,28 @@ impl PathBuilder {
         };
         for subpath in &self.subpaths {
             k.extend([2, u32::from(subpath.closed), subpath.segments.len() as u32]);
-            point(&mut k, subpath.start);
+            point(k, subpath.start);
             for segment in &subpath.segments {
                 match *segment {
                     Segment::Line(to) => {
                         k.push(0);
-                        point(&mut k, to);
+                        point(k, to);
                     }
                     Segment::Quadratic { ctrl, to } => {
                         k.push(1);
-                        point(&mut k, ctrl);
-                        point(&mut k, to);
+                        point(k, ctrl);
+                        point(k, to);
                     }
                     Segment::Cubic { ctrl1, ctrl2, to } => {
                         k.push(2);
-                        point(&mut k, ctrl1);
-                        point(&mut k, ctrl2);
-                        point(&mut k, to);
+                        point(k, ctrl1);
+                        point(k, ctrl2);
+                        point(k, to);
                     }
                 }
             }
         }
-        debug_assert_eq!((k.len(), k.capacity()), (len, len));
-        k
+        debug_assert_eq!(k.len(), len);
     }
 
     /// [`PathBuilder::build`] without the cache: always tessellates.

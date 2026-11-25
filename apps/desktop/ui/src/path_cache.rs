@@ -20,6 +20,8 @@ const BUDGET: usize = 8 << 20;
 const LOW_WATER: usize = BUDGET / 4 * 3;
 /// A path whose entry alone is bigger is never kept.
 const MAX_ENTRY: usize = BUDGET / 8;
+/// Maximum scratch key capacity kept across `PathBuilder::build` calls on a thread (64 KB).
+pub(crate) const MAX_SCRATCH_WORDS: usize = 16_384;
 
 /// One slot of the table: the hash and the entry, and the slot's control byte.
 const SLOT: usize = std::mem::size_of::<(u64, Entry)>() + 1;
@@ -94,8 +96,15 @@ pub(crate) struct PathCache {
     evictions: u64,
 }
 
+#[derive(Default)]
+struct ThreadPathCache {
+    cache: PathCache,
+    /// Reused key scratch buffer so steady-frame `PathBuilder::build` cache hits allocate nothing.
+    key_scratch: Vec<u32>,
+}
+
 thread_local! {
-    static CACHE: RefCell<PathCache> = RefCell::new(PathCache::default());
+    static CACHE: RefCell<ThreadPathCache> = RefCell::new(ThreadPathCache::default());
 }
 
 /// A fixed hasher (FxHash's step): the key is already a list of words, and the map needs no
@@ -144,18 +153,24 @@ impl PathCache {
     }
 
     /// Keeps `path` as what `key` builds, dropping the least recently used paths beyond the budget.
+    #[cfg(test)]
     fn insert(&mut self, key: Vec<u32>, path: &mut BuiltPath<Pixels>) {
+        self.insert_slice(&key, path);
+    }
+
+    /// Keeps `path` as what `key` builds, only allocating a boxed key copy when the entry fits
+    /// within [`MAX_ENTRY`].
+    fn insert_slice(&mut self, key: &[u32], path: &mut BuiltPath<Pixels>) {
         // Measured before anything is copied: a path too big to keep costs no copy.
         let bytes = entry_bytes(key.len(), path.triangles.len());
         if bytes + SLOT > MAX_ENTRY {
             return;
         }
         self.clock += 1;
-        let h = hash(&key);
+        let h = hash(key);
         path.cache_hash = Some(h);
-        // `Arc<[Point<Pixels>]>` has no spare capacity; the key is cut to its length.
-        let entry =
-            Entry { key: key.into_boxed_slice(), path: path.clone(), scaled: None, last_used: self.clock };
+        // `Arc<[Point<Pixels>]>` has no spare capacity; the boxed key has exact length too.
+        let entry = Entry { key: Box::from(key), path: path.clone(), scaled: None, last_used: self.clock };
         if let Some(old) = self.entries.insert(h, entry) {
             self.heap -= old.bytes();
         }
@@ -228,25 +243,51 @@ impl PathCache {
     }
 }
 
-/// `build(key)`'s result, from this thread's cache when `key` was built recently; a result that is an
-/// error is never kept. While the thread is torn down and its cache already gone (a path built by another
-/// thread local's destructor), the path is built without the cache.
+/// Returns the thread's scratch buffer to `CACHE` on drop (including early returns and panics),
+/// trimming buffers that grew past [`MAX_SCRATCH_WORDS`].
+struct ScratchGuard(Vec<u32>);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if self.0.capacity() > MAX_SCRATCH_WORDS {
+            self.0 = Vec::new();
+            return;
+        }
+        let _ = CACHE.try_with(|c| {
+            if let Ok(mut state) = c.try_borrow_mut()
+                && self.0.capacity() > state.key_scratch.capacity()
+            {
+                state.key_scratch = std::mem::take(&mut self.0);
+            }
+        });
+    }
+}
+
+/// `build()`'s result, from this thread's cache when `write_key` produces a key built recently; a
+/// result that is an error is never kept. While the thread is torn down and its cache already gone
+/// (a path built by another thread local's destructor), the path is built without the cache.
 pub(crate) fn cached<E>(
-    key: Vec<u32>,
+    write_key: impl FnOnce(&mut Vec<u32>),
     build: impl FnOnce() -> Result<BuiltPath<Pixels>, E>,
 ) -> Result<BuiltPath<Pixels>, E> {
-    if let Some(hit) = CACHE.try_with(|c| c.borrow_mut().get(&key)).ok().flatten() {
+    let Ok(scratch) = CACHE.try_with(|c| std::mem::take(&mut c.borrow_mut().key_scratch)) else {
+        return build();
+    };
+    let mut guard = ScratchGuard(scratch);
+    guard.0.clear();
+    write_key(&mut guard.0);
+    if let Some(hit) = CACHE.try_with(|c| c.borrow_mut().cache.get(&guard.0)).ok().flatten() {
         return Ok(hit);
     }
     let mut path = build()?;
-    let _ = CACHE.try_with(|c| c.borrow_mut().insert(key, &mut path));
+    let _ = CACHE.try_with(|c| c.borrow_mut().cache.insert_slice(&guard.0, &mut path));
     Ok(path)
 }
 
 /// Device-pixel [`PathData`] for `path` at `scale_factor`, reusing the thread-local cache's scaled
 /// geometry when `path` came from it.
 pub(crate) fn scaled_path_data(path: &BuiltPath<Pixels>, scale_factor: f32) -> Arc<PathData> {
-    CACHE.try_with(|c| c.borrow_mut().scaled_path_data(path, scale_factor)).unwrap_or_else(|_| {
+    CACHE.try_with(|c| c.borrow_mut().cache.scaled_path_data(path, scale_factor)).unwrap_or_else(|_| {
         let scaled: Vec<Point<ScaledPixels>> = path.triangles.iter().map(|p| p.scale(scale_factor)).collect();
         Arc::new(PathData::from_triangles(scaled))
     })
@@ -255,13 +296,13 @@ pub(crate) fn scaled_path_data(path: &BuiltPath<Pixels>, scale_factor: f32) -> A
 /// This thread's cache: (entries, bytes, hits so far). For tests.
 #[cfg(test)]
 pub(crate) fn stats() -> (usize, usize, u64) {
-    CACHE.with_borrow(|c| (c.entries.len(), c.bytes(), c.hits))
+    CACHE.with_borrow(|c| (c.cache.entries.len(), c.cache.bytes(), c.cache.hits))
 }
 
-/// Empties this thread's cache. For tests.
+/// Empties this thread's cache and releases its scratch buffer. For tests.
 #[cfg(test)]
 pub(crate) fn clear() {
-    CACHE.with_borrow_mut(|c| *c = PathCache::default());
+    CACHE.with_borrow_mut(|c| *c = ThreadPathCache::default());
 }
 
 /// The allocator of this crate's unit tests: the system's, counting per thread the bytes allocated and not
@@ -666,5 +707,49 @@ mod tests {
         assert_eq!(stats().2, hits + 1);
         let _ = chart_line(800, 0., 1.5, false).build().unwrap();
         assert_eq!(stats().2, hits + 1);
+    }
+
+    #[test]
+    fn repeated_path_build_hit_allocates_zero_bytes() {
+        clear();
+        let builder = chart_line(200, 0., 1.5, false);
+        let first = builder.clone().build().unwrap();
+        let (_, _, hits) = stats();
+        let before = counting::live();
+        counting::reset_peak();
+        let second = builder.build().unwrap();
+        let peak = (counting::peak() - before) as usize;
+        assert_eq!(peak, 0, "steady-frame cache hit must not allocate a key buffer (peak {peak} bytes)");
+        assert_eq!(stats().2, hits + 1);
+        assert!(Arc::ptr_eq(&first.triangles, &second.triangles));
+    }
+
+    #[test]
+    fn oversized_key_scratch_is_trimmed_after_build() {
+        clear();
+        // Each `line_to` adds 3 words, so 6000 segments exceed `MAX_SCRATCH_WORDS` (16_384).
+        let _ = chart_line(6000, 0., 1.5, false).build().unwrap();
+        let cap = CACHE.with_borrow(|c| c.key_scratch.capacity());
+        assert_eq!(cap, 0, "oversized scratch buffer should not stay resident in TLS (cap {cap})");
+    }
+
+    #[test]
+    fn alternating_large_keys_within_cap_allocate_zero_bytes() {
+        clear();
+        // ~10,000 words and ~12,000 words: both fit under `MAX_SCRATCH_WORDS` (16_384), so
+        // growing from the smaller to the larger must not overshoot the cap and discard scratch.
+        let small = chart_line(3_330, 0., 1.5, false);
+        let large = chart_line(4_000, 0., 1.5, false);
+        let _ = small.clone().build().unwrap();
+        let _ = large.clone().build().unwrap();
+        let cap = CACHE.with_borrow(|c| c.key_scratch.capacity());
+        assert!(cap > 0 && cap <= MAX_SCRATCH_WORDS, "cap {cap} should stay within MAX_SCRATCH_WORDS");
+
+        let before = counting::live();
+        counting::reset_peak();
+        let _ = small.build().unwrap();
+        let _ = large.build().unwrap();
+        let peak = (counting::peak() - before) as usize;
+        assert_eq!(peak, 0, "alternating hits under MAX_SCRATCH_WORDS must allocate nothing (peak {peak})");
     }
 }

@@ -93,14 +93,28 @@ impl Window {
         bounds: Bounds<Pixels>,
         path: SharedString,
         color: Hsla,
+        cx: &App,
+    ) -> anyhow::Result<()> {
+        self.paint_svg_ref(bounds, &path, color, cx)
+    }
+
+    /// Borrowed-path variant of [`Self::paint_svg`] that avoids cloning `path` on icon cache hits.
+    pub(crate) fn paint_svg_ref(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        path: &SharedString,
+        color: Hsla,
         _cx: &App,
     ) -> anyhow::Result<()> {
         let bounds = bounds.scale(self.scale_factor);
-        let params = RenderSvgParams::for_bounds(path, &bounds);
+        let size = RenderSvgParams::size_for_bounds(&bounds);
+        let key = crate::svg::RenderSvgParamsRef { path: path.as_str(), size };
         let renderer = &self.svg_renderer;
-        let mask = self.icon_masks.get_or_insert_with(&params, || {
-            Ok(renderer.render(&params)?.map(|mask| Mask::from(Arc::new(mask))))
-        })?;
+        let mask = self.icon_masks.get_or_insert_with_by(
+            &key as &dyn crate::svg::AsRenderSvgKeyRef,
+            || RenderSvgParams { path: path.clone(), size },
+            || Ok(renderer.render_ref(path, size)?.map(|mask| Mask::from(Arc::new(mask)))),
+        )?;
         let Some(mask) = mask.and_then(Mask::into_alpha) else { return Ok(()) };
         let bounds = svg_sprite_bounds(bounds, mask.size);
         let clip = self.scaled_clip();

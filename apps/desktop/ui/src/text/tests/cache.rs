@@ -79,8 +79,11 @@ fn reused_ranges_survive_frames_without_being_laid_out() {
     window.finish_frame();
     let shaped = platform.layout_calls();
 
-    // Frame 2 reuses the element without laying it out.
+    // Frame 2 reuses the element without laying it out (including a duplicate reuse and a direct
+    // hit in the same frame to verify per-frame counter deduplication in `finish_frame`).
     window.reuse_layouts(start.clone()..end.clone());
+    window.reuse_layouts(start..end);
+    shape(&window, "cached element", 13.);
     window.finish_frame();
 
     // Frame 3 lays it out again: still cached.
