@@ -362,24 +362,31 @@ fn pipeline_dedup_skips_redundant_set_pipeline_within_pass() {
     ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(2.0), [1, 1, 1]).unwrap();
     assert_eq!(ctx.pipeline_sets() - before, 2, "k2, k2 (deduped), k1");
 
-    // 3. `copy` ends the open compute pass and clears `last_pipeline`, so the next `k1` sets it again.
+    // 3. `copy` and `clear` each end the open compute pass and clear `last_pipeline`, so the next `k1` sets it again.
     let before = ctx.pipeline_sets();
     ctx.copy(a.raw(), 0, b.raw(), 16, 16);
     ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(3.0), [1, 1, 1]).unwrap();
     assert_eq!(ctx.pipeline_sets() - before, 1, "copy clears pass pipeline state");
+
+    let before = ctx.pipeline_sets();
+    ctx.clear(b.raw(), 16);
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    assert_eq!(ctx.pipeline_sets() - before, 1, "clear clears pass pipeline state");
 
     // 4. `flush` ends the pass and clears `last_pipeline`, so the next `k1` sets it again.
     let before = ctx.pipeline_sets();
     ctx.flush();
     ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(4.0), [1, 1, 1]).unwrap();
     assert_eq!(ctx.pipeline_sets() - before, 1, "flush clears pass pipeline state");
-    assert_eq!(a.to_vec().unwrap(), vec![14.0; 64]);
+    assert_eq!(a.to_vec().unwrap(), vec![15.0; 64]);
     let bv = b.to_vec().unwrap();
-    assert_eq!((bv[0], bv[1], bv[4]), (7.0, 9.0, 7.0));
+    assert_eq!((bv[0], bv[1], bv[4]), (0.0, 0.0, 7.0));
 
-    // 5. Frozen replay deduplicates consecutive pipelines identically inside its pass.
+    // 5. Frozen replay deduplicates consecutive pipelines identically inside its pass and re-sets after `clear`.
     ctx.trace_begin();
     ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    ctx.clear(b.raw(), 8);
     ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
     ctx.dispatch(&k2, &[b.raw()], &Params::new().u(2).f(42.0), [1, 1, 1]).unwrap();
     ctx.dispatch(&k2, &[b.raw()], &Params::new().u(3).f(43.0), [1, 1, 1]).unwrap();
@@ -388,8 +395,8 @@ fn pipeline_dedup_skips_redundant_set_pipeline_within_pass() {
 
     let before = ctx.pipeline_sets();
     ctx.replay_frozen(&frozen);
-    assert_eq!(ctx.pipeline_sets() - before, 2, "frozen replay: k1, k1 (deduped), k2, k2 (deduped)");
-    assert_eq!(a.to_vec().unwrap(), vec![18.0; 64]);
+    assert_eq!(ctx.pipeline_sets() - before, 3, "frozen replay: k1, k1 (dedup), clear, k1, k2, k2 (dedup)");
+    assert_eq!(a.to_vec().unwrap(), vec![21.0; 64]);
     let bv = b.to_vec().unwrap();
     assert_eq!((bv[2], bv[3]), (42.0, 43.0));
 }

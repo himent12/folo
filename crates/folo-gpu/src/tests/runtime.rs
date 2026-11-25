@@ -517,11 +517,17 @@ fn letterbox_rgb8_vec3_prefilter_matches_cpu_exact() {
             out_offset: 0,
             taps: 0,
         };
-        let src_buf = ctx.upload(&src_bytes).unwrap();
+        let src_buf = ctx.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("letterbox tight src"),
+            size: padded_bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue().write_buffer(&src_buf, 0, &src_bytes);
         let taps_buf = ctx.upload(bytemuck::cast_slice(&taps)).unwrap();
         let out_elems = 3 * out_wh[0] * out_wh[1];
         let out_buf = ctx.alloc((out_elems * 4) as u64).unwrap();
-        letterbox_rgb8(&ctx, src_buf.raw(), taps_buf.raw(), out_buf.raw(), &desc, DType::F32).unwrap();
+        letterbox_rgb8(&ctx, &src_buf, taps_buf.raw(), out_buf.raw(), &desc, DType::F32).unwrap();
         let got: Vec<f32> =
             bytemuck::cast_slice(&ctx.read(out_buf.raw(), 0, (out_elems * 4) as u64).unwrap()).to_vec();
         let want = cpu_ref(&src_bytes, &desc, &tx, &ty);
