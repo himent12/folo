@@ -92,12 +92,26 @@ fn kernel_epilogue_is_bitwise_the_row_pass() {
     let bias = [0.0f32, -0.75, 1.5, 0.0, -2.0, 0.25];
     let kernels: [Kernel; 2] = [kernel_generic, kernel()];
     for kern in kernels {
-        for (mr, nr) in [(MR, NR), (4, NR), (MR, 11), (1, 3)] {
+        for (mr, nr) in [(MR, NR), (5, NR), (4, NR), (3, 11), (2, NR), (1, 3)] {
             for acc in [false, true] {
-                for act in [None, Some(UnaryOp::Silu)] {
+                for act in [
+                    None,
+                    Some(UnaryOp::Silu),
+                    Some(UnaryOp::Relu),
+                    Some(UnaryOp::LeakyRelu(0.1)),
+                    Some(UnaryOp::Hardswish),
+                ] {
                     for with_bias in [false, true] {
                         let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
-                        let prior = data(MR * NR, 7);
+                        let mut prior = data(MR * NR, 7);
+                        // Include edge values for Relu/LeakyRelu/Hardswish: -0.0, 0.0, ±3.0, ±10.0, NaN.
+                        prior[0] = -0.0;
+                        prior[1] = 0.0;
+                        prior[2] = -3.0;
+                        prior[3] = 3.0;
+                        prior[4] = -10.0;
+                        prior[5] = 10.0;
+                        prior[6] = f32::NAN;
                         let (mut fused, mut want) = (prior.clone(), prior.clone());
                         let re = epi.kernel_rows(0, mr);
                         // SAFETY: the panels and blocks are sized as the kernels require.
@@ -108,7 +122,10 @@ fn kernel_epilogue_is_bitwise_the_row_pass() {
                         for i in 0..mr {
                             epi.apply(i, &mut want[i * NR..i * NR + nr]);
                         }
-                        let same = fused.iter().zip(&want).all(|(x, y)| x.to_bits() == y.to_bits());
+                        let same = fused
+                            .iter()
+                            .zip(&want)
+                            .all(|(x, y)| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits());
                         assert!(same, "mr {mr} nr {nr} acc {acc} act {act:?} bias {with_bias}");
                     }
                 }
@@ -133,7 +150,13 @@ fn a_in_place_is_bitwise_the_packed_path() {
         let b = data(k * n, 2);
         let (rowmaj, colmaj) = (Strided::lhs(&a, 0, k, 1), Strided::lhs(&at, 0, 1, m));
         assert!(rowmaj.rows_in_place().is_some() && colmaj.rows_in_place().is_none());
-        for act in [None, Some(UnaryOp::Silu)] {
+        for act in [
+            None,
+            Some(UnaryOp::Silu),
+            Some(UnaryOp::Relu),
+            Some(UnaryOp::LeakyRelu(0.1)),
+            Some(UnaryOp::Hardswish),
+        ] {
             let epi = BiasAct { bias: Some(&bias[..m]), act };
             for threads in [1, 8] {
                 let (mut c1, mut c2) = (vec![0f32; m * n], vec![0f32; m * n]);
@@ -161,39 +184,42 @@ fn a_in_place_is_bitwise_the_packed_path() {
 fn a_rows_kernels_are_bitwise_the_packed_kernel() {
     use super::arows::{arows_kernel, arows_kernel_generic};
     use super::rows::{RowsAKernel, rows_a_kernel, rows_a_kernel_generic};
-    let kc = 41;
-    let arows = data(MR * kc, 11);
-    let b = data(kc * NR, 12);
     let bias = [0.5f32, -1.0, 0.0, 2.0, -0.25, 1.0];
-    let brows: Vec<*const f32> = (0..kc).map(|p| b[p * NR..].as_ptr()).collect();
     let pairs: [(Kernel, RowsAKernel, super::arows::ARowsKernel); 2] = [
         (kernel_generic, rows_a_kernel_generic, arows_kernel_generic),
         (kernel(), rows_a_kernel(), arows_kernel()),
     ];
     for (kern, rakern, akern) in pairs {
-        for mr in [MR, 4, 1] {
-            // The packed panel of rows 0..mr (zeros past them); the row pointers repeat row 0 past them.
-            let mut pa = vec![0f32; kc * MR];
-            for p in 0..kc {
-                for i in 0..mr {
-                    pa[p * MR + i] = arows[i * kc + p];
+        for kc in [0, 1, 2, 3, 4, 5, 41] {
+            let arows = data(MR * kc, 11);
+            let b = data(kc * NR, 12);
+            let brows: Vec<*const f32> = (0..kc).map(|p| b[p * NR..].as_ptr()).collect();
+            for mr in [MR, 5, 4, 3, 2, 1] {
+                // The packed panel of rows 0..mr (zeros past them); the row pointers repeat row 0 past them.
+                let mut pa = vec![0f32; kc * MR];
+                for p in 0..kc {
+                    for i in 0..mr {
+                        pa[p * MR + i] = arows[i * kc + p];
+                    }
                 }
-            }
-            let ap: [*const f32; MR] =
-                std::array::from_fn(|i| arows[if i < mr { i } else { 0 } * kc..].as_ptr());
-            for silu in [false, true] {
-                let re = RegEpi { bias, silu };
-                let prior = data(MR * NR, 13);
-                let (mut want, mut got_r, mut got_a) = (prior.clone(), prior.clone(), prior.clone());
-                // SAFETY: the panels, row pointers and blocks are sized as the kernels require.
-                unsafe {
-                    kern(kc, pa.as_ptr(), b.as_ptr(), want.as_mut_ptr(), NR, mr, NR, true, Some(&re));
-                    rakern(kc, &ap, brows.as_ptr(), 0, got_r.as_mut_ptr(), NR, mr, true, Some(&re));
-                    akern(kc, &ap, b.as_ptr(), got_a.as_mut_ptr(), NR, mr, NR, true, Some(&re));
+                let ap: [*const f32; MR] =
+                    std::array::from_fn(|i| arows[if i < mr { i } else { 0 } * kc..].as_ptr());
+                for act in
+                    [RegAct::None, RegAct::Silu, RegAct::Relu, RegAct::LeakyRelu(0.1), RegAct::Hardswish]
+                {
+                    let re = RegEpi { bias, act };
+                    let prior = data(MR * NR, 13);
+                    let (mut want, mut got_r, mut got_a) = (prior.clone(), prior.clone(), prior.clone());
+                    // SAFETY: the panels, row pointers and blocks are sized as the kernels require.
+                    unsafe {
+                        kern(kc, pa.as_ptr(), b.as_ptr(), want.as_mut_ptr(), NR, mr, NR, true, Some(&re));
+                        rakern(kc, &ap, brows.as_ptr(), 0, got_r.as_mut_ptr(), NR, mr, true, Some(&re));
+                        akern(kc, &ap, b.as_ptr(), got_a.as_mut_ptr(), NR, mr, NR, true, Some(&re));
+                    }
+                    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&got_r), bits(&want), "rows-A kernel, kc {kc}, mr {mr}, act {act:?}");
+                    assert_eq!(bits(&got_a), bits(&want), "A-rows kernel, kc {kc}, mr {mr}, act {act:?}");
                 }
-                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-                assert_eq!(bits(&got_r), bits(&want), "rows-A kernel, mr {mr}, silu {silu}");
-                assert_eq!(bits(&got_a), bits(&want), "A-rows kernel, mr {mr}, silu {silu}");
             }
         }
     }

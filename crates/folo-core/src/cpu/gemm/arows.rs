@@ -78,7 +78,8 @@ unsafe fn arows_kernel_avx2_entry(
     unsafe { arows_kernel_avx2(kc, a, b, c, ldc, mr, nr, acc, epi) }
 }
 
-/// AVX2/FMA [`ARowsKernel`]: `kernel_avx2` with the six A values of each K step broadcast from six rows.
+/// AVX2/FMA [`ARowsKernel`]: 4x K-unrolled (exact sequential K order) with specialized 2x16, 4x16, and 6x16
+/// register tiles.
 ///
 /// # Safety
 /// As [`arows_kernel_generic`], and the CPU supports AVX2 and FMA.
@@ -97,44 +98,131 @@ unsafe fn arows_kernel_avx2(
     epi: Option<&RegEpi>,
 ) {
     use std::arch::x86_64::*;
-    let mut c00 = _mm256_setzero_ps();
-    let mut c01 = _mm256_setzero_ps();
-    let mut c10 = _mm256_setzero_ps();
-    let mut c11 = _mm256_setzero_ps();
-    let mut c20 = _mm256_setzero_ps();
-    let mut c21 = _mm256_setzero_ps();
-    let mut c30 = _mm256_setzero_ps();
-    let mut c31 = _mm256_setzero_ps();
-    let mut c40 = _mm256_setzero_ps();
-    let mut c41 = _mm256_setzero_ps();
-    let mut c50 = _mm256_setzero_ps();
-    let mut c51 = _mm256_setzero_ps();
+    if mr == 0 || nr == 0 {
+        return;
+    }
     let [a0p, a1p, a2p, a3p, a4p, a5p] = *a;
     let mut bp = b;
-    // SAFETY: the caller guarantees kc floats at every `a[i]` and kc * NR at `b`, and owns the block at `c`.
+    let k4 = kc / 4 * 4;
+    // SAFETY: the caller guarantees `kc` floats at every `a[i]` and `kc * NR` at `b`, and owns `mr x nr` at `c`.
     unsafe {
-        for p in 0..kc {
-            let b0 = _mm256_loadu_ps(bp);
-            let b1 = _mm256_loadu_ps(bp.add(8));
-            let a0 = _mm256_broadcast_ss(&*a0p.add(p));
-            c00 = _mm256_fmadd_ps(a0, b0, c00);
-            c01 = _mm256_fmadd_ps(a0, b1, c01);
-            let a1 = _mm256_broadcast_ss(&*a1p.add(p));
-            c10 = _mm256_fmadd_ps(a1, b0, c10);
-            c11 = _mm256_fmadd_ps(a1, b1, c11);
-            let a2 = _mm256_broadcast_ss(&*a2p.add(p));
-            c20 = _mm256_fmadd_ps(a2, b0, c20);
-            c21 = _mm256_fmadd_ps(a2, b1, c21);
-            let a3 = _mm256_broadcast_ss(&*a3p.add(p));
-            c30 = _mm256_fmadd_ps(a3, b0, c30);
-            c31 = _mm256_fmadd_ps(a3, b1, c31);
-            let a4 = _mm256_broadcast_ss(&*a4p.add(p));
-            c40 = _mm256_fmadd_ps(a4, b0, c40);
-            c41 = _mm256_fmadd_ps(a4, b1, c41);
-            let a5 = _mm256_broadcast_ss(&*a5p.add(p));
-            c50 = _mm256_fmadd_ps(a5, b0, c50);
-            c51 = _mm256_fmadd_ps(a5, b1, c51);
+        if mr <= 2 {
+            let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            macro_rules! step2 {
+                ($p:expr, $k:expr) => {{
+                    let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                    let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                    let a0 = _mm256_broadcast_ss(&*a0p.add($p));
+                    c00 = _mm256_fmadd_ps(a0, b0, c00);
+                    c01 = _mm256_fmadd_ps(a0, b1, c01);
+                    let a1 = _mm256_broadcast_ss(&*a1p.add($p));
+                    c10 = _mm256_fmadd_ps(a1, b0, c10);
+                    c11 = _mm256_fmadd_ps(a1, b1, c11);
+                }};
+            }
+            let mut p = 0;
+            while p < k4 {
+                step2!(p, 0);
+                step2!(p + 1, 1);
+                step2!(p + 2, 2);
+                step2!(p + 3, 3);
+                bp = bp.add(4 * NR);
+                p += 4;
+            }
+            while p < kc {
+                step2!(p, 0);
+                bp = bp.add(NR);
+                p += 1;
+            }
+            let rows = [[c00, c01], [c10, c11]];
+            store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);
+            return;
+        }
+        if mr <= 4 {
+            let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c20, mut c21) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            let (mut c30, mut c31) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            macro_rules! step4 {
+                ($p:expr, $k:expr) => {{
+                    let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                    let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                    let a0 = _mm256_broadcast_ss(&*a0p.add($p));
+                    c00 = _mm256_fmadd_ps(a0, b0, c00);
+                    c01 = _mm256_fmadd_ps(a0, b1, c01);
+                    let a1 = _mm256_broadcast_ss(&*a1p.add($p));
+                    c10 = _mm256_fmadd_ps(a1, b0, c10);
+                    c11 = _mm256_fmadd_ps(a1, b1, c11);
+                    let a2 = _mm256_broadcast_ss(&*a2p.add($p));
+                    c20 = _mm256_fmadd_ps(a2, b0, c20);
+                    c21 = _mm256_fmadd_ps(a2, b1, c21);
+                    let a3 = _mm256_broadcast_ss(&*a3p.add($p));
+                    c30 = _mm256_fmadd_ps(a3, b0, c30);
+                    c31 = _mm256_fmadd_ps(a3, b1, c31);
+                }};
+            }
+            let mut p = 0;
+            while p < k4 {
+                step4!(p, 0);
+                step4!(p + 1, 1);
+                step4!(p + 2, 2);
+                step4!(p + 3, 3);
+                bp = bp.add(4 * NR);
+                p += 4;
+            }
+            while p < kc {
+                step4!(p, 0);
+                bp = bp.add(NR);
+                p += 1;
+            }
+            let rows = [[c00, c01], [c10, c11], [c20, c21], [c30, c31]];
+            store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);
+            return;
+        }
+        let (mut c00, mut c01) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c10, mut c11) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c20, mut c21) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c30, mut c31) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c40, mut c41) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let (mut c50, mut c51) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        macro_rules! step6 {
+            ($p:expr, $k:expr) => {{
+                let b0 = _mm256_loadu_ps(bp.add($k * NR));
+                let b1 = _mm256_loadu_ps(bp.add($k * NR + 8));
+                let a0 = _mm256_broadcast_ss(&*a0p.add($p));
+                c00 = _mm256_fmadd_ps(a0, b0, c00);
+                c01 = _mm256_fmadd_ps(a0, b1, c01);
+                let a1 = _mm256_broadcast_ss(&*a1p.add($p));
+                c10 = _mm256_fmadd_ps(a1, b0, c10);
+                c11 = _mm256_fmadd_ps(a1, b1, c11);
+                let a2 = _mm256_broadcast_ss(&*a2p.add($p));
+                c20 = _mm256_fmadd_ps(a2, b0, c20);
+                c21 = _mm256_fmadd_ps(a2, b1, c21);
+                let a3 = _mm256_broadcast_ss(&*a3p.add($p));
+                c30 = _mm256_fmadd_ps(a3, b0, c30);
+                c31 = _mm256_fmadd_ps(a3, b1, c31);
+                let a4 = _mm256_broadcast_ss(&*a4p.add($p));
+                c40 = _mm256_fmadd_ps(a4, b0, c40);
+                c41 = _mm256_fmadd_ps(a4, b1, c41);
+                let a5 = _mm256_broadcast_ss(&*a5p.add($p));
+                c50 = _mm256_fmadd_ps(a5, b0, c50);
+                c51 = _mm256_fmadd_ps(a5, b1, c51);
+            }};
+        }
+        let mut p = 0;
+        while p < k4 {
+            step6!(p, 0);
+            step6!(p + 1, 1);
+            step6!(p + 2, 2);
+            step6!(p + 3, 3);
+            bp = bp.add(4 * NR);
+            p += 4;
+        }
+        while p < kc {
+            step6!(p, 0);
             bp = bp.add(NR);
+            p += 1;
         }
         let rows = [[c00, c01], [c10, c11], [c20, c21], [c30, c31], [c40, c41], [c50, c51]];
         store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);

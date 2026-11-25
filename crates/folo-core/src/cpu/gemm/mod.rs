@@ -166,6 +166,9 @@ impl Operand for Strided<'_> {
         if w < width {
             dst.fill(0.0);
         }
+        if w == 0 || kc == 0 {
+            return;
+        }
         let base = self.offset + o0 * self.so + k0 * self.sk;
         if self.so == 1 {
             for kk in 0..kc {
@@ -173,12 +176,9 @@ impl Operand for Strided<'_> {
                 dst[kk * width..kk * width + w].copy_from_slice(&self.data[s..s + w]);
             }
         } else if self.sk == 1 {
-            for ii in 0..w {
-                let row = &self.data[base + ii * self.so..base + ii * self.so + kc];
-                for (kk, &v) in row.iter().enumerate() {
-                    dst[kk * width + ii] = v;
-                }
-            }
+            // `w` rows of length `kc` (stride `so`) transposed into `kc × width`: uses 8x8 AVX2 blocks when
+            // `w >= 8 && kc >= 8` (e.g. transposed `B` in Linear `X @ W^T`) and L1-blocked scalar otherwise.
+            super::elementwise::transpose_f32_2d_serial(&self.data[base..], self.so, dst, width, w, kc);
         } else {
             for kk in 0..kc {
                 for ii in 0..w {
@@ -205,22 +205,38 @@ impl Operand for Strided<'_> {
     }
 }
 
+/// Activations fused directly into the micro-kernel register epilogue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum RegAct {
+    None,
+    Silu,
+    Relu,
+    LeakyRelu(f32),
+    Hardswish,
+}
+
 /// What a micro-kernel applies to a finished block before storing it (see [`BiasAct`]): row `i` gets
-/// `+ bias[i]`, then SiLU if `silu`.
+/// `+ bias[i]`, then `act`.
 #[derive(Clone, Copy, Debug)]
 struct RegEpi {
     bias: [f32; MR],
-    silu: bool,
+    act: RegAct,
 }
 
 impl RegEpi {
     /// Row `i` of a finished block, on the scalar path: [`super::elementwise::bias_act_inplace`]'s arithmetic.
     #[inline]
     fn apply_row(&self, i: usize, v: &mut [f32]) {
-        if self.silu {
-            super::elementwise::silu_bias_inplace(v, self.bias[i]);
-        } else {
-            v.iter_mut().for_each(|x| *x += self.bias[i]);
+        match self.act {
+            RegAct::None => v.iter_mut().for_each(|x| *x += self.bias[i]),
+            RegAct::Silu => super::elementwise::silu_bias_inplace(v, self.bias[i]),
+            RegAct::Relu => super::elementwise::bias_act_inplace(Some(UnaryOp::Relu), self.bias[i], v),
+            RegAct::LeakyRelu(a) => {
+                super::elementwise::bias_act_inplace(Some(UnaryOp::LeakyRelu(a)), self.bias[i], v)
+            }
+            RegAct::Hardswish => {
+                super::elementwise::bias_act_inplace(Some(UnaryOp::Hardswish), self.bias[i], v)
+            }
         }
     }
 }
@@ -251,9 +267,9 @@ pub fn gemm<A: Operand, B: Operand>(
 /// Bias and activation applied to every finished element of C, once, after its last K block: row `i` becomes
 /// `act(C[i, j] + bias[i])`, exactly as [`super::elementwise::bias_act_inplace`] computes it (no bias: 0).
 ///
-/// The identity and SiLU are applied by the micro-kernel to its accumulators before they are stored (through
-/// the same lanes as the row pass, so bit for bit its result); other activations run as a pass over each
-/// finished row segment while it is in cache.
+/// The identity, SiLU, ReLU, LeakyReLU, and Hardswish are applied by the micro-kernel to its accumulators
+/// before they are stored (through the same lanes as the row pass, so bit for bit its result); other activations
+/// run as a pass over each finished row segment while it is in cache.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BiasAct<'a> {
     /// One value per row of C.
@@ -274,22 +290,32 @@ impl BiasAct<'_> {
 
     /// True if the micro-kernels apply it (else it is a pass over the finished rows).
     fn in_kernel(&self) -> bool {
-        matches!(self.act, None | Some(UnaryOp::Silu))
+        matches!(
+            self.act,
+            None | Some(UnaryOp::Silu | UnaryOp::Relu | UnaryOp::LeakyRelu(_) | UnaryOp::Hardswish)
+        )
     }
 
     /// The micro-kernel form for the `mr` rows from `i` (only if [`BiasAct::in_kernel`]).
     fn kernel_rows(&self, i: usize, mr: usize) -> RegEpi {
-        let silu = self.act == Some(UnaryOp::Silu);
+        let act = match self.act {
+            None => RegAct::None,
+            Some(UnaryOp::Silu) => RegAct::Silu,
+            Some(UnaryOp::Relu) => RegAct::Relu,
+            Some(UnaryOp::LeakyRelu(a)) => RegAct::LeakyRelu(a),
+            Some(UnaryOp::Hardswish) => RegAct::Hardswish,
+            _ => unreachable!("BiasAct::kernel_rows called when !in_kernel()"),
+        };
         let mut bias = [0f32; MR];
         if let Some(b) = self.bias {
             bias[..mr].copy_from_slice(&b[i..i + mr]);
         }
-        if !silu {
+        if act == RegAct::None {
             // `bias_act_inplace` skips a zero bias when there is no activation, and `x + -0.0` is `x` bit for
             // bit (`-0.0 + 0.0` would be `+0.0`).
             bias.iter_mut().filter(|v| **v == 0.0).for_each(|v| *v = -0.0);
         }
-        RegEpi { bias, silu }
+        RegEpi { bias, act }
     }
 }
 
