@@ -10,6 +10,21 @@ use super::{Load, Store};
 
 pub type Pts = Arc<Vec<(f32, f32)>>;
 
+/// Maximum log lines retained in memory per run before older head lines are dropped.
+pub const LOG_BUFFER_CAP: usize = 2000;
+
+/// A run's loaded log lines plus how many earlier lines were omitted (server `limit` or client cap).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogHistory {
+    pub lines: Vec<LogLine>,
+    /// Earlier lines omitted before `lines[0]` (from the server's `total > lines.len()` or client head trimming).
+    pub dropped: u64,
+    /// Latest timestamp from the installed snapshot; used to reconcile overlapping SSE lines that
+    /// arrive in the first drain after installation without suppressing genuinely repeated lines.
+    snapshot_cutoff: Option<String>,
+    snapshot_overlap: std::collections::HashMap<(String, String), usize>,
+}
+
 /// Chart-ready series derived from a run's metric history. x is fractional epochs for steps and
 /// the epoch number for validation results.
 #[derive(Clone, Default)]
@@ -150,20 +165,45 @@ impl Store {
     }
 
     /// Install a run's log history, appending live lines that arrived while it loaded.
-    pub fn install_logs(&mut self, run_id: &str, lines: ApiResult<Vec<LogLine>>) {
-        let mut load: Load<Vec<LogLine>> = lines.into();
-        if let Load::Ready(lines) = &mut load {
-            let mut seen: std::collections::HashSet<(String, String)> =
-                lines.iter().map(|l| (l.t.clone(), l.message.clone())).collect();
+    pub fn install_logs(&mut self, run_id: &str, logs: ApiResult<RunLogs>) {
+        let mut load: Load<LogHistory> = logs
+            .map(|l| {
+                let dropped = l.total.saturating_sub(l.lines.len() as u64);
+                let snapshot_cutoff = l.lines.iter().map(|x| x.t.as_str()).max().map(str::to_string);
+                let mut snapshot_overlap: std::collections::HashMap<(String, String), usize> =
+                    std::collections::HashMap::new();
+                for x in &l.lines {
+                    *snapshot_overlap.entry((x.t.clone(), x.message.clone())).or_insert(0) += 1;
+                }
+                LogHistory { lines: l.lines, dropped, snapshot_cutoff, snapshot_overlap }
+            })
+            .into();
+        if let Load::Ready(hist) = &mut load {
             for ev in self.pending.get(run_id).into_iter().flatten() {
-                if let RunEvent::Log(l) = ev
-                    && seen.insert((l.t.clone(), l.message.clone()))
-                {
-                    lines.push(l.clone());
+                if let RunEvent::Log(l) = ev {
+                    let key = (l.t.clone(), l.message.clone());
+                    if let Some(count) = hist.snapshot_overlap.get_mut(&key)
+                        && *count > 0
+                    {
+                        *count -= 1;
+                        if *count == 0 {
+                            hist.snapshot_overlap.remove(&key);
+                        }
+                    } else {
+                        hist.lines.push(l.clone());
+                    }
                 }
             }
             // RFC 3339 UTC timestamps sort lexically; stable, so equal times keep arrival order.
-            lines.sort_by(|a, b| a.t.cmp(&b.t));
+            hist.lines.sort_by(|a, b| a.t.cmp(&b.t));
+            if hist.lines.len() > LOG_BUFFER_CAP {
+                let cut = hist.lines.len() - LOG_BUFFER_CAP;
+                hist.lines.drain(..cut);
+                hist.dropped = hist.dropped.saturating_add(cut as u64);
+            }
+            if hist.snapshot_overlap.is_empty() {
+                hist.snapshot_cutoff = None;
+            }
         }
         self.logs.insert(run_id.to_string(), load);
         self.log_rev += 1;
@@ -280,10 +320,32 @@ impl Store {
                 }
             }
             RunEvent::Log(l) => {
-                if let Some(Load::Ready(lines)) = self.logs.get_mut(run_id) {
-                    lines.push(l);
-                    if lines.len() > 2000 {
-                        lines.drain(..lines.len() - 2000);
+                if let Some(Load::Ready(hist)) = self.logs.get_mut(run_id) {
+                    if let Some(cutoff) = &hist.snapshot_cutoff {
+                        if l.t.as_str() > cutoff.as_str() {
+                            hist.snapshot_cutoff = None;
+                            hist.snapshot_overlap.clear();
+                        } else {
+                            let key = (l.t.clone(), l.message.clone());
+                            if let Some(count) = hist.snapshot_overlap.get_mut(&key)
+                                && *count > 0
+                            {
+                                *count -= 1;
+                                if *count == 0 {
+                                    hist.snapshot_overlap.remove(&key);
+                                    if hist.snapshot_overlap.is_empty() {
+                                        hist.snapshot_cutoff = None;
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    hist.lines.push(l);
+                    if hist.lines.len() > LOG_BUFFER_CAP {
+                        let cut = hist.lines.len() - LOG_BUFFER_CAP;
+                        hist.lines.drain(..cut);
+                        hist.dropped = hist.dropped.saturating_add(cut as u64);
                     }
                     self.log_rev += 1;
                 }
@@ -577,10 +639,10 @@ mod tests {
         store.run_data.insert(id.into(), Load::Loading);
         store.logs.insert(id.into(), Load::Loading);
         store.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
-        store.install_logs(id, Ok(vec![]));
+        store.install_logs(id, Ok(RunLogs { lines: vec![], total: 0 }));
         let last = store.run_data[id].ready().unwrap().last_step().unwrap().step;
         assert_eq!(last, history.steps.last().unwrap().step, "source A's step leaked into B");
-        assert!(store.logs[id].ready().unwrap().is_empty(), "source A's log leaked into B");
+        assert!(store.logs[id].ready().unwrap().lines.is_empty(), "source A's log leaked into B");
     }
 
     #[test]
@@ -601,8 +663,8 @@ mod tests {
         // The snapshot was taken before the event: the event must not be lost.
         store.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
         assert_eq!(store.run_data[id].ready().unwrap().last_step().unwrap().step, late.step);
-        store.install_logs(id, Ok(vec![]));
-        assert_eq!(store.logs[id].ready().unwrap(), &vec![line]);
+        store.install_logs(id, Ok(RunLogs { lines: vec![], total: 0 }));
+        assert_eq!(store.logs[id].ready().unwrap().lines, vec![line]);
         // Duplicates of events already in the snapshot are ignored.
         let mut store2 = Store::new(Arc::new(MockBackend::new(4200, true)));
         store2.run_data.insert(id.into(), Load::Loading);
@@ -625,9 +687,52 @@ mod tests {
         for i in 40..120 {
             store.apply(id, RunEvent::Log(line(i)));
         }
-        store.install_logs(id, Ok((0..100).map(line).collect()));
-        let got = store.logs[id].ready().unwrap();
+        store.install_logs(id, Ok(RunLogs { lines: (0..100).map(line).collect(), total: 100 }));
+        let got = &store.logs[id].ready().unwrap().lines;
         assert_eq!(got.len(), 120);
+        assert_eq!(store.logs[id].ready().unwrap().dropped, 0);
         assert!(got.windows(2).all(|w| w[0].t <= w[1].t));
+    }
+
+    #[test]
+    fn log_history_tracks_server_and_ring_buffer_drops() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_cap";
+        let line = |i: i64| LogLine {
+            t: crate::api::time::format(1_000 + i),
+            level: LogLevel::Info,
+            message: format!("line {i}"),
+        };
+        // Server truncated 250 earlier lines (total = 2250, returned = 2000).
+        let initial: Vec<LogLine> = (0..LOG_BUFFER_CAP as i64).map(line).collect();
+        store.install_logs(id, Ok(RunLogs { lines: initial, total: LOG_BUFFER_CAP as u64 + 250 }));
+        assert_eq!(store.logs[id].ready().unwrap().dropped, 250);
+        // Streaming 5 more pushes past LOG_BUFFER_CAP and increments dropped by 5.
+        for i in 0..5 {
+            store.apply(id, RunEvent::Log(line(LOG_BUFFER_CAP as i64 + i)));
+        }
+        let hist = store.logs[id].ready().unwrap();
+        assert_eq!(hist.lines.len(), LOG_BUFFER_CAP);
+        assert_eq!(hist.dropped, 255);
+    }
+
+    #[test]
+    fn post_install_overlapping_sse_log_is_not_duplicated_while_repeated_lines_are_kept() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_overlap";
+        let t1 = crate::api::time::format(1_000);
+        let t2 = crate::api::time::format(1_001);
+        let snap_line = LogLine { t: t1.clone(), level: LogLevel::Info, message: "epoch 1".into() };
+        store.install_logs(id, Ok(RunLogs { lines: vec![snap_line.clone()], total: 1 }));
+        // An SSE event that was already in the snapshot arrives in the next drain: skipped.
+        store.apply(id, RunEvent::Log(snap_line.clone()));
+        assert_eq!(store.logs[id].ready().unwrap().lines.len(), 1);
+        // A genuinely repeated line with the same timestamp/message after overlap is consumed: kept.
+        store.apply(id, RunEvent::Log(snap_line));
+        assert_eq!(store.logs[id].ready().unwrap().lines.len(), 2);
+        // A newer event advances past the snapshot cutoff and is kept.
+        let newer = LogLine { t: t2, level: LogLevel::Info, message: "epoch 2".into() };
+        store.apply(id, RunEvent::Log(newer));
+        assert_eq!(store.logs[id].ready().unwrap().lines.len(), 3);
     }
 }

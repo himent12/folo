@@ -158,7 +158,7 @@ pub trait Backend: Send + Sync + 'static {
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics>;
     fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples>;
     /// Log history of a run (`GET /api/runs/{id}/logs`); the SSE stream only carries new lines.
-    fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>>;
+    fn logs(&self, id: &str) -> ApiResult<RunLogs>;
     /// Live events for a run. The producer stops when the [`Subscription`] is dropped or the run
     /// finishes.
     fn events(&self, id: &str) -> ApiResult<Subscription>;

@@ -119,6 +119,7 @@ impl FoloApp {
         self.menu_open = None;
         self.run_x_fit = None;
         self.log_filter = crate::app::LogFilter::All;
+        self.log_search.update(cx, |i, cx| i.set_text("", cx));
         // An earlier epoch's samples were picked: the next run page starts on the latest again, and a
         // request for the picked epoch still on its way is dropped when it lands.
         if self.sample_epoch.take().is_some() {

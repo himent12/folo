@@ -526,7 +526,7 @@ impl Backend for MockBackend {
         Ok(RunSamples { epoch, samples })
     }
 
-    fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>> {
+    fn logs(&self, id: &str) -> ApiResult<RunLogs> {
         self.check()?;
         let mut runs = self.runs.lock().unwrap();
         let f = runs
@@ -540,14 +540,13 @@ impl Backend for MockBackend {
         let trains_at = created + 10;
         let done = (Self::current_step(f) / f.run.steps_per_epoch) as u32;
         let per_epoch = (f.run.steps_per_epoch as f64 * STEP_DT) as i64 + 1;
-        let from = done.saturating_sub(60) + 1;
         // A cloud run's epochs on its own step clock, as its stream stamps them, so its last one
         // comes before the weights are copied.
         let stamp = |e: u32| match &f.cloud {
             Some(sim) => sim.at(sim.step_at(e as u64 * f.run.steps_per_epoch)),
             None => time::format(trains_at + e as i64 * per_epoch),
         };
-        let mut lines: Vec<LogLine> = (from..=done)
+        let mut lines: Vec<LogLine> = (1..=done)
             .map(|e| LogLine {
                 t: stamp(e),
                 level: LogLevel::Info,
@@ -557,11 +556,16 @@ impl Backend for MockBackend {
         // Stable: an epoch and a fixture line in the same second keep that order.
         lines.extend(f.logs.iter().cloned());
         lines.sort_by(|a, b| a.t.cmp(&b.t));
+        let total = lines.len() as u64;
+        const MOCK_LOG_LIMIT: usize = 1000;
+        if lines.len() > MOCK_LOG_LIMIT {
+            lines.drain(..lines.len() - MOCK_LOG_LIMIT);
+        }
         let read = (f.logs.len(), done);
         if let Some(sim) = f.cloud.as_mut() {
             sim.read = read;
         }
-        Ok(lines)
+        Ok(RunLogs { lines, total })
     }
 
     fn events(&self, id: &str) -> ApiResult<Subscription> {

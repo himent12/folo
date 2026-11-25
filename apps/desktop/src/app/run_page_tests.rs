@@ -342,3 +342,123 @@ fn validation_samples_start_at_every_prediction_the_server_keeps() {
         assert_eq!(this.sample_conf, 0.25);
     });
 }
+
+#[test]
+fn log_search_filters_and_copy_log_copies_only_matching_lines() {
+    use crate::api::{LogLevel, LogLine, RunLogs};
+    use crate::app::{LogFilter, Route};
+
+    let (mut app, window) = open();
+    let id = "run_52e8";
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(id.into()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+
+    let sample_lines = vec![
+        LogLine { t: "2026-11-10T10:00:00Z".into(), level: LogLevel::Info, message: "loaded dataset".into() },
+        LogLine {
+            t: "2026-11-10T10:00:01Z".into(),
+            level: LogLevel::Warn,
+            message: "slow dataloader".into(),
+        },
+        LogLine {
+            t: "2026-11-10T10:00:02Z".into(),
+            level: LogLevel::Error,
+            message: "CUDA out of memory".into(),
+        },
+        LogLine {
+            t: "2026-11-10T10:00:03Z".into(),
+            level: LogLevel::Info,
+            message: "memory check ok".into(),
+        },
+    ];
+    drive(&mut app, window, |this, _, cx| {
+        this.store.install_logs(id, Ok(RunLogs { lines: sample_lines.clone(), total: 4 }));
+        cx.notify();
+    });
+    app.frame(window.into());
+
+    // Unfiltered copy copies all 4 lines.
+    drive(&mut app, window, |this, _, cx| {
+        this.copy_log(id, cx);
+        let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        assert_eq!(clip.lines().count(), 4);
+        assert!(clip.contains("loaded dataset"));
+        assert!(clip.contains("CUDA out of memory"));
+        assert_eq!(this.toasts.last().unwrap().title.as_ref(), "Copied 4 log lines");
+    });
+
+    // Search "memory" matches 2 lines (Error + Info); copy copies only those 2.
+    drive(&mut app, window, |this, _, cx| {
+        this.log_search.update(cx, |i, cx| i.set_text("MEMORY", cx));
+        this.copy_log(id, cx);
+        let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        assert_eq!(clip.lines().count(), 2);
+        assert!(clip.contains("CUDA out of memory"));
+        assert!(clip.contains("memory check ok"));
+        assert!(!clip.contains("loaded dataset"));
+        assert_eq!(this.toasts.last().unwrap().title.as_ref(), "Copied 2 matching log lines");
+    });
+
+    // Combine Error level + search "memory" -> 1 matching line.
+    drive(&mut app, window, |this, _, cx| {
+        this.log_filter = LogFilter::Error;
+        this.copy_log(id, cx);
+        let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        assert_eq!(clip.lines().count(), 1);
+        assert!(clip.contains("ERR CUDA out of memory"));
+        assert_eq!(this.toasts.last().unwrap().title.as_ref(), "Copied 1 matching log line");
+    });
+
+    // Unmatched search shows Clear filters control and disables copy.
+    drive(&mut app, window, |this, _, cx| {
+        this.log_search.update(cx, |i, cx| i.set_text("no-such-token", cx));
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("log-clear-filters"), "filtered-empty log offers Clear filters");
+        assert!(!drawn.contains_key("log-copy"), "copy button is disabled when 0 lines match");
+    });
+
+    // Navigating away clears both log_filter and log_search.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Runs, w, cx));
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.log_filter, LogFilter::All);
+        assert_eq!(this.log_search.read(cx).text(), "");
+    });
+}
+
+#[test]
+fn empty_run_log_hides_clear_and_copy_and_reset_clears_log_search_on_backend_switch() {
+    use crate::api::RunLogs;
+    use crate::app::{LogFilter, Route, ServerMode};
+
+    let (mut app, window) = open();
+    let id = "run_52e8";
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(id.into()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+
+    drive(&mut app, window, |this, _, cx| {
+        this.store.install_logs(id, Ok(RunLogs { lines: Vec::new(), total: 0 }));
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        {
+            let drawn = this.focus.borrow();
+            assert!(!drawn.contains_key("log-clear-filters"), "0-line log is not a filtered empty state");
+            assert!(!drawn.contains_key("log-copy"), "0-line log has no copy button");
+        }
+        // Set search + filter and verify set_backend resets both.
+        this.log_filter = LogFilter::Warn;
+        this.log_search.update(cx, |i, cx| i.set_text("spike", cx));
+        this.set_backend(Arc::new(MockBackend::new(4200, true)), ServerMode::Mock, cx);
+        assert_eq!(this.log_filter, LogFilter::All);
+        assert_eq!(this.log_search.read(cx).text(), "");
+    });
+}
