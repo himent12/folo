@@ -192,4 +192,74 @@ describe('ImageGrid visible-over-overscan thumbnail priority', () => {
       mounted.unmount();
     }
   });
+
+  it('defers overscan thumbnail mounts across continuous rapid scroll, sets fetchpriority, and avoids page-0 reload when scrolled deep', async () => {
+    const requested: string[] = [];
+    const pageLoads: number[] = [];
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        pageLoads.push(off);
+        return { total: 400, images: Array.from({ length: lim }, (_, k) => makeImg(off + k)) };
+      },
+      imageUrl: async (_ds, id) => {
+        requested.push(id);
+        return `data:image/png;base64,${id}`;
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_1', undefined, undefined);
+    await pager.at(0);
+    await pager.at(100);
+    await pager.at(200);
+    const { container, unmount } = render(() => (
+      <ImageGrid pager={pager} classes={['car']} density="m" boxes={false} only={null} onopen={() => {}} />
+    ));
+    try {
+      flush();
+      await vi.advanceTimersByTimeAsync(40);
+      flush();
+      requested.length = 0;
+
+      // Continuous rapid scroll across rows 20 -> 26 -> 32 (next scroll arrives 8 ms after each frame, BEFORE
+      // the previous frame's overscan warm-up rAF fires): ONLY visible rows of each frame may request thumbnails;
+      // zero intermediate or trailing/leading overscan tiles (e.g. 76..79, 92..103, 116..127, 140..151) may mount
+      // until scrolling pauses.
+      const visibleOf = (row: number) => new Set(Array.from({ length: 12 }, (_, k) => row * 4 + k));
+      const allowedDuringFling = new Set([...visibleOf(20), ...visibleOf(26), ...visibleOf(32)]);
+      for (const row of [20, 26, 32]) {
+        gridTop = -row * 154;
+        window.dispatchEvent(new Event('scroll'));
+        await vi.advanceTimersByTimeAsync(16);
+        flush();
+      }
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((id) => allowedDuringFling.has(Number(id.replace('img_', ''))))).toBe(true);
+      expect(requested.some((id) => Number(id.replace('img_', '')) >= 140)).toBe(false);
+      // Visible tiles carry fetchpriority="high".
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      const visibleImg = container.querySelector<HTMLImageElement>('[data-i="128"] img');
+      expect(visibleImg?.getAttribute('fetchpriority')).toBe('high');
+
+      // Once scrolling pauses for 1 frame, overscan tiles warm up with fetchpriority="low".
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      expect(requested.some((id) => Number(id.replace('img_', '')) >= 140)).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      const overscanImg = container.querySelector<HTMLImageElement>('[data-i="140"] img');
+      expect(overscanImg?.getAttribute('fetchpriority')).toBe('low');
+
+      // Reloading while scrolled to page 1 (items 128..151) must NOT trigger an unneeded page-0 reload for aspect sampling.
+      pageLoads.length = 0;
+      pager.reload();
+      flush();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pageLoads).not.toContain(0);
+    } finally {
+      unmount();
+    }
+  });
 });
