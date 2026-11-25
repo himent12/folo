@@ -9,6 +9,7 @@ import ChevronsUp from '$icons/chevrons-up';
 import X from '$icons/x';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
+import { runsChanged } from '$lib/api/runs';
 import type { QueueRequest, Run } from '$lib/api/types';
 import { toast } from '$lib/ui/toast';
 import type { IconType } from '$lib/ui/types';
@@ -47,6 +48,7 @@ export async function moveQueued(
   const undo = apply();
   try {
     const r = await hub.api.moveRun(run.id, req);
+    runsChanged();
     if ('action' in req && req.action === 'start') {
       if (r.queue_position == null) toast.success(`Starting ${r.name}`);
       else toast.success(`${r.name} starts next`, training ? `When ${training.name} finishes.` : undefined);
@@ -87,8 +89,13 @@ export function removedToast(run: Pick<Run, 'id' | 'name'>): void {
 
 /** Removes a waiting run from the queue: deleted when it never started (null), stopped otherwise (the stopped run). */
 export async function removeQueued(run: Pick<Run, 'id' | 'started'>): Promise<Run | null> {
-  if (run.started) return hub.api.stopRun(run.id);
+  if (run.started) {
+    const r = await hub.api.stopRun(run.id);
+    runsChanged();
+    return r;
+  }
   await hub.api.deleteRun(run.id);
+  runsChanged();
   return null;
 }
 

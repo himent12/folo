@@ -7,6 +7,7 @@ import { computed, css, deep, effect, Key, onCleanup, signal, tick, untrack } fr
 import { ApiError, hub } from '$lib/api/index';
 import { followedDatasets, listedName } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
+import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { sentence } from '$lib/format';
@@ -140,7 +141,7 @@ function RunNewForm() {
   /** A connection is chosen: the run trains on its GPU, not this machine's. */
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   // While another run holds this machine, a new one waits in the queue: the Summary says so and Start reads "Queue run".
   // The shell's list (polled every 2 s) is the current one; this page's own stands in until it arrives.
   const ahead = computed(() => aheadOf(watched.runs ?? runs.data, onCloud.get()));
@@ -555,6 +556,7 @@ function RunNewForm() {
     };
     try {
       const run = await hub.api.createRun(config.get());
+      runsChanged();
       draftStore.markStarted();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).

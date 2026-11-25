@@ -112,6 +112,8 @@ export class Resource<T> {
   #loadingRead: Promise<T> | null = null;
   /** The fetch that is waiting on another Resource's read (`startFrom`), by its controller. */
   #following: AbortController | null = null;
+  /** Set by `invalidate()` until a fresh fetch settles, so `#lend()` never hands out pre-mutation data. */
+  #invalidated = false;
 
   constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions<T> = {}) {
     this.#fetcher = fetcher;
@@ -121,6 +123,7 @@ export class Resource<T> {
       const first = this.#epoch === null;
       if (epoch !== this.#epoch) {
         this.#epoch = epoch;
+        this.#invalidated = false;
         untrack(() => {
           this.data = undefined;
           this.stale = undefined;
@@ -185,6 +188,15 @@ export class Resource<T> {
   }
 
   /**
+   * Marks the current snapshot ineligible for `startFrom` lending until a fresh read succeeds, and starts that read.
+   * Keeps `data` and `updated` intact so consumers (and offline freshness timestamps) do not flicker.
+   */
+  invalidate(): Promise<void> {
+    this.#invalidated = true;
+    return this.refresh();
+  }
+
+  /**
    * A poll: quiet whatever is shown. A known error stays on screen until a poll succeeds, so a page whose server is
    * offline shows the error (and keeps its actions gated) the whole time, never a loading skeleton at every poll.
    */
@@ -200,7 +212,7 @@ export class Resource<T> {
 
   /** What another Resource's first fetch can start from (`startFrom`), for the server in use; null when nothing. */
   #lend(): { read: Promise<T> } | { data: T; updated: number } | null {
-    if (this.#epoch !== hub.epoch) return null;
+    if (this.#epoch !== hub.epoch || this.#invalidated) return null;
     if (this.#loadingRead) return { read: this.#loadingRead };
     const data = this.#data.peek();
     const updated = this.#updated.peek();
@@ -239,6 +251,7 @@ export class Resource<T> {
       this.data = reuse(this.#data.peek(), v);
       this.error = undefined;
       this.stale = undefined;
+      this.#invalidated = false;
       this.updated = Date.now();
     } catch (e) {
       if (seq !== this.#seq || (e instanceof DOMException && e.name === 'AbortError')) return;

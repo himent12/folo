@@ -73,14 +73,26 @@ export default function DatasetCard(props: DatasetCardProps) {
   // What the mosaic is drawn from: when the list's refresh brings a change (a missing folder found again, images added
   // or relabelled), a card already read reads it again, so its tiles and boxes are never the old set's; a mosaic whose
   // read failed tries again with every refresh (the list answered, so the server is back), as well as on Retry.
-  const source = computed(() => [d().problem ?? '', imageCount(d()), d().stats?.boxes ?? '', d().classes.join('\n')].join('|'));
-  let last: string | undefined;
+  // Initial stats arrival (`undefined` -> number) after progressive list mount does not reload an already-matching mosaic.
+  const baseKey = computed(() => [d().id, d().problem ?? '', imageCount(d()), d().classes.join('\n')].join('|'));
+  const boxCount = computed(() => d().stats?.boxes);
+  let lastId: string | undefined;
+  let lastBase: string | undefined;
+  let lastBoxes: number | undefined;
   effect(() => {
-    const key = source.get();
-    d();
+    const base = baseKey.get();
+    const boxes = boxCount.get();
+    const cur = d();
     untrack(() => {
-      if (seen && (key !== last || failed.get())) load();
-      last = key;
+      if (lastId !== undefined && cur.id !== lastId) lastBoxes = undefined;
+      const baseChanged = lastBase !== undefined && base !== lastBase;
+      const boxesChanged = lastBoxes !== undefined && boxes !== undefined && boxes !== lastBoxes;
+      const retryFailed = failed.get() && !cur.pending && !cur.problem;
+      if (seen && (baseChanged || boxesChanged || retryFailed)) load();
+      lastId = cur.id;
+      lastBase = base;
+      if (boxes !== undefined) lastBoxes = boxes;
+      else if (cur.problem) lastBoxes = undefined;
     });
   });
   // Lazily: a long list reads only the mosaics in view (and a little ahead). Overview's row of at most four reads at
@@ -155,6 +167,8 @@ export default function DatasetCard(props: DatasetCardProps) {
           <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
         ) : d().stats ? (
           <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} />
+        ) : d().pending ? (
+          <Skeleton h="4px" r="999px" />
         ) : (
           <span class="no-strip"></span>
         )}

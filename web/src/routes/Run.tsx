@@ -27,6 +27,7 @@ import { LiveRun } from '$lib/api/live';
 import { modelsResource } from '$lib/api/models';
 import { settledEta, trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
+import { runsChanged } from '$lib/api/runs';
 import { hasFeature, queuePlace } from '$lib/api/queue';
 import { media } from '$lib/design/tokens';
 import { ago, deviceName, eta } from '$lib/format';
@@ -35,6 +36,7 @@ import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import { href, router } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
+import { watched } from '$lib/shell/runList';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -126,7 +128,7 @@ export default function Run() {
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: crumbName.get() });
   });
 
-  const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  const others = new Resource((s) => hub.api.runs(s), { poll: 5000, startFrom: () => watched.source });
   const stepCount = computed(() => {
     void live.version;
     return live.steps.length;
@@ -257,6 +259,7 @@ export default function Run() {
       }
       // The run as the view now has it: the stream may have said it ended while the stop was on its way.
       const r = await live.stop(() => hub.api.stopRun(cur.id));
+      runsChanged();
       if (!r) return;
       stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
@@ -342,6 +345,7 @@ export default function Run() {
       const id = cur.id;
       const r = await live.resume(() => hub.api.resumeRun(id));
       toast.success(r.epoch > 0 ? `Resuming ${r.name}` : `Starting ${r.name} again`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
+      runsChanged();
     } catch (e) {
       // page-level: as above.
       toast.error(e, 'Could not resume the run');

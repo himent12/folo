@@ -19,6 +19,7 @@ import { isOom } from '$lib/oom';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -125,7 +126,7 @@ export default function Playground() {
   const models = modelsResource();
   // What each model's score is on (lib/scoreSummary): the picker groups models by dataset and split, best first within
   // a group (on a tie the earlier checkpoint), and never ranks one group against another.
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const noDatasets = computed(() => noDatasetsYet(datasets.data));

@@ -102,4 +102,33 @@ describe('DatasetCard', () => {
     });
     expect(target.querySelector('.mosaic .none')).toBeNull();
   });
+
+  it('does not refetch its mosaic when initial stats arrive on a progressive card, but reloads if box count changes later', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    hub.mode = 'mock';
+    const [first] = await api.datasets();
+    const detail = await api.dataset(first!.id);
+    const asked = vi.spyOn(api, 'datasetImages');
+    const ds = signal<ListedDataset>({ ...first!, stats: undefined, pending: true });
+    target = document.body.appendChild(document.createElement('div'));
+    view = render(() => <DatasetCard dataset={ds.get()} />, target);
+    flush();
+    expect(asked).toHaveBeenCalledTimes(1);
+    expect(target.querySelector('.foot [aria-hidden="true"]')).not.toBeNull();
+
+    // Initial detail arrival adds stats without changing image count or classes: no duplicate mosaic fetch.
+    ds.set({ ...detail });
+    flush();
+    expect(asked).toHaveBeenCalledTimes(1);
+
+    // Later refresh changes box count (e.g., relabeling): mosaic reloads.
+    ds.set({ ...detail, stats: { ...detail.stats!, boxes: detail.stats!.boxes + 3 } });
+    flush();
+    expect(asked).toHaveBeenCalledTimes(2);
+  });
 });

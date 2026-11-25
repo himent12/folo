@@ -8,6 +8,7 @@ import Trash from '$icons/trash-2';
 import { computed, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { modelsChanged } from '$lib/api/models';
+import { runsChanged } from '$lib/api/runs';
 import type { Model, Run } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -52,6 +53,7 @@ export default function DeleteRun(props: DeleteRunProps) {
     busy.set(true);
     try {
       await hub.api.deleteRun(r.id);
+      runsChanged();
       props.onclose();
       // page-level: the confirm closed on the line above.
       toast.success(`Deleted ${r.name}`, gone ? `Its weights and ${gone === 1 ? 'model are' : `${gone} models are`} gone too.` : undefined);
