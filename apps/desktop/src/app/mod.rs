@@ -434,6 +434,8 @@ pub struct FoloApp {
     pub log_filter: LogFilter,
     /// Live search input for a run's Logs panel.
     pub log_search: Entity<TextInput>,
+    /// Cached filtered log indices and level counts for the active run's Logs panel.
+    pub(crate) log_cache: crate::screens::runs::LogFilterCache,
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
     /// The run page's Per class list, scrolled inside its panel.
@@ -774,6 +776,7 @@ impl FoloApp {
             sample_conf: crate::screens::runs::SAMPLE_CONF.0,
             log_filter: LogFilter::All,
             log_search,
+            log_cache: crate::screens::runs::LogFilterCache::default(),
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             per_class_scroll: ScrollHandle::new(),

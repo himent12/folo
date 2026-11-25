@@ -11,6 +11,7 @@ mod samples;
 
 #[cfg(test)]
 pub(crate) use list::filter_runs;
+pub(crate) use logs::LogFilterCache;
 pub(crate) use samples::SAMPLE_CONF;
 
 use crate::api::{Run, time};

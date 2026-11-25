@@ -131,6 +131,7 @@ impl FoloApp {
         self.model_classes_expanded.clear();
         self.log_filter = super::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));
+        self.log_cache.clear();
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
