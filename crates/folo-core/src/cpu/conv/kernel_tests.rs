@@ -784,6 +784,21 @@ fn depthwise_simd_matches_scalar_parity() {
             got_b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             want_b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         );
+
+        // Large vertical padding + dilation must not overflow `isize` row-index arithmetic on 32-bit wasm.
+        let g_vert = geom(1, 2, [3, 1], 2, [2, 1], params([1, 1], [1 << 30, 0], [(1 << 31) - 1, 1], 2));
+        let x_v = vec![1.0f32; 2 * 3];
+        let wt_v = [1.0f32, 2.0, 3.0, 4.0];
+        let part_v = [ConvPart::contiguous(&x_v, 2, 3)];
+        let input_v = ConvInput { parts: &part_v };
+        let mut got_v = vec![f32::NAN; 2 * g_vert.ohw()];
+        let mut want_v = vec![f32::NAN; 2 * g_vert.ohw()];
+        depthwise_forward(input_v, &wt_v, &mut got_v, &g_vert, false, None);
+        super::depthwise::depthwise_forward_scalar(input_v, &wt_v, &mut want_v, &g_vert, false, None);
+        assert_eq!(
+            got_v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
     }
 
     // Fused ReLU and Hardswish with NaN and -0.0 bias across SIMD prefix and scalar tail lanes.

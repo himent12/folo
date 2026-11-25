@@ -346,11 +346,15 @@ fn depthwise_s1_wasm(
             let nv = ((owp - x0) / 4).min(4);
             let mut acc = [zero; 4];
             for ky in 0..g.kh {
-                let iy = (oy + ky * dh) as isize - ph as isize;
-                if iy < 0 || iy >= h as isize {
+                let Some(iy) =
+                    ky.checked_mul(dh).and_then(|v| oy.checked_add(v)).and_then(|v| v.checked_sub(ph))
+                else {
+                    continue;
+                };
+                if iy >= h {
                     continue;
                 }
-                let prow = &pad[iy as usize * wpd..(iy as usize + 1) * wpd];
+                let prow = &pad[iy * wpd..(iy + 1) * wpd];
                 for kx in 0..g.kw {
                     let wv = f32x4_splat(wk[ky * g.kw + kx]);
                     let base = x0 + kx * dw;
@@ -482,11 +486,15 @@ unsafe fn depthwise_s1_avx2(
                 }
             }
             for ky in 0..g.kh {
-                let iy = (oy + ky * dh) as isize - ph as isize;
-                if iy < 0 || iy >= h as isize {
+                let Some(iy) =
+                    ky.checked_mul(dh).and_then(|v| oy.checked_add(v)).and_then(|v| v.checked_sub(ph))
+                else {
+                    continue;
+                };
+                if iy >= h {
                     continue;
                 }
-                let prow = &pad[iy as usize * wpd..(iy as usize + 1) * wpd];
+                let prow = &pad[iy * wpd..(iy + 1) * wpd];
                 for kx in 0..g.kw {
                     let wv = _mm256_set1_ps(wk[ky * g.kw + kx]);
                     let base = x0 + kx * dw;
