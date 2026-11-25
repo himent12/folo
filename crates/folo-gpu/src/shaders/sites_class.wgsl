@@ -26,15 +26,31 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let j = i % hw;
     let cb = b * nc * hw + j;
     var best = 0u;
-    var bs = sig(f32(CLS[cb]));
+    var bx = f32(CLS[cb]);
+    // Bit-test c = 0 for NaN: compilers may lower `if (x > bx)` to `maxNum` (which drops a NaN in `bx`,
+    // notably for f16), whereas evaluating `sig(c = 0)` keeps `bs = NaN` and drops the pixel.
+    if ((bitcast<u32>(bx) & 0x7fffffffu) > 0x7f800000u) { return; }
+    var prev_bx = bx;
     for (var c = 1u; c < nc; c++) {
-        let s = sig(f32(CLS[cb + c * hw]));
-        if (s > bs) {
+        let x = f32(CLS[cb + c * hw]);
+        if (x > bx) {
+            prev_bx = bx;
             best = c;
-            bs = s;
+            bx = x;
         }
     }
+    let bs = sig(bx);
     if (!(bs > pf(3u))) { return; }
+    // Sigmoid is non-decreasing but can tie in f32 (saturation to 1.0 / 0.0 or rounding); `prev_bx` is the
+    // max non-NaN logit in `0..best`, so rescan `0..best` only if an earlier class could tie `bs`.
+    if (best > 0u && sig(prev_bx) >= bs) {
+        for (var c = 0u; c < best; c++) {
+            if (sig(f32(CLS[cb + c * hw])) >= bs) {
+                best = c;
+                break;
+            }
+        }
+    }
     let cap = pu(6u);
     let slot = atomicAdd(&SITES[b * (cap + 1u)], 1u);
     if (slot >= cap) { return; }
