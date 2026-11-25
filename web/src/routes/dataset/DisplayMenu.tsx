@@ -38,8 +38,9 @@ export default function DisplayMenu(props: DisplayMenuProps) {
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
+    if (open.peek() && e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       hide();
     }
   }
@@ -55,10 +56,12 @@ export default function DisplayMenu(props: DisplayMenuProps) {
   });
 
   // Focus leaving the control (Tab past its last field) closes the popover; moving between its fields does not.
+  // Escape on the whole control (including after Shift+Tab back to the trigger) closes it and returns focus to the trigger.
   return (
     <div
       class="display"
       ref={root}
+      onkeydown={onkeydown}
       onfocusout={(e) => {
         const r = root.get();
         if (open.get() && !(r && e.relatedTarget instanceof Node && r.contains(e.relatedTarget))) hide(false);
@@ -77,7 +80,7 @@ export default function DisplayMenu(props: DisplayMenuProps) {
         <SlidersHorizontal size={14} strokeWidth={1.75} aria-hidden="true" />
       </button>
       {open.get() ? (
-        <div class="pop" id={`${uid}-pop`} role="dialog" tabindex={-1} aria-label="Display options" ref={pop} onkeydown={onkeydown}>
+        <div class="pop" id={`${uid}-pop`} role="dialog" tabindex={-1} aria-label="Display options" ref={pop}>
           <Switch label="Boxes" hint="Draw the labelled boxes" checked={props.boxes} onchange={props.onboxes} />
           <div class="row">
             <span class="label">Thumbnail size</span>

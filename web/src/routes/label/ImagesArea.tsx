@@ -8,7 +8,7 @@ import ImageOff from '$icons/image-off';
 import ImagePlus from '$icons/image-plus';
 import Scan from '$icons/scan';
 import Upload from '$icons/upload';
-import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, type Signal } from 'fw';
+import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, untrack, type Signal } from 'fw';
 import type { LabelImage } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { count, num } from '$lib/format';
@@ -80,6 +80,21 @@ export default function ImagesArea(props: ImagesAreaProps) {
     return c;
   });
   const shown = computed(() => (props.show === 'all' ? props.images : props.images.filter((i) => inFilter(i, props.show))));
+  // Announce filter counts only when the active filter changes, never on live agent SSE image updates.
+  const filterStatus = signal('');
+  let prevShow = untrack(() => props.show);
+  effect(() => {
+    const cur = props.show;
+    if (cur === prevShow) return;
+    prevShow = cur;
+    const total = untrack(() => props.images.length);
+    if (!total) {
+      filterStatus.set('');
+      return;
+    }
+    const n = shown.peek().length;
+    filterStatus.set(n < total ? `Showing ${num(n)} of ${count(total, 'image')}.` : `Showing all ${count(total, 'image')}.`);
+  });
   const options = computed(() => FILTERS.map(([value, label]) => ({ value, label, meta: num(counts.get()[value]) })));
   // The cells take the job's commonest image shape (ui/TileGrid).
   const aspect = computed(() => dominantAspect(props.images.slice(0, 64)));
@@ -244,6 +259,9 @@ export default function ImagesArea(props: ImagesAreaProps) {
       </div>
 
       <UploadStatus uploads={props.uploads} />
+      <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+        {filterStatus.get()}
+      </p>
 
       {props.images.length === 0 ? (
         <div class="zone" class:dragging={dragging.get()}>

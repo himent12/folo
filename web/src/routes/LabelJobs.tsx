@@ -82,6 +82,43 @@ export default function LabelJobs() {
   const hasData = computed(() => (jobs.data ? jobs.data.length > 0 : !jobs.error));
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);
+  const searchEl = signal<HTMLInputElement | undefined>(undefined);
+  const clearSeq = signal(0);
+  const filterStatus = signal('');
+  const jobsReady = computed(() => jobs.data !== undefined);
+  let hasFiltered = false;
+  let lastClear = 0;
+  effect(() => {
+    const f = filter.get();
+    const q = query.get().trim();
+    const c = clearSeq.get();
+    const ready = jobsReady.get();
+    const active = f !== 'all' || q.length > 0;
+    const cleared = c !== lastClear;
+    lastClear = c;
+    if (active || cleared) hasFiltered = true;
+    if (!hasFiltered || !ready) return;
+    const msg = untrack(() => {
+      const all = jobs.data;
+      if (!all) return '';
+      const n = shown.get().length;
+      const summary =
+        n < all.length
+          ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`
+          : `Showing all ${all.length} ${all.length === 1 ? 'labeling job' : 'labeling jobs'}.`;
+      return cleared ? `Cleared labeling job filters. ${summary}` : summary;
+    });
+    filterStatus.set(msg);
+  });
+  function clearFilters() {
+    clearSeq.set(clearSeq.peek() + 1);
+    query.set('');
+    filter.set('all');
+    queueMicrotask(() => {
+      const input = searchEl.peek();
+      if (input && input.isConnected && !input.disabled) input.focus();
+    });
+  }
   const open = (j: LabelJob) => router.go(`/datasets/label/${j.id}`);
 
   return (
@@ -125,6 +162,7 @@ export default function LabelJobs() {
               <div class="lt-search">
                 <Input
                   bind:value={query}
+                  bind:el={searchEl}
                   icon={Search}
                   placeholder="Filter by name or class"
                   aria-label="Filter labeling jobs"
@@ -237,7 +275,7 @@ export default function LabelJobs() {
                           title="No labeling jobs match"
                           description="Try another status or search term."
                           actions={() => (
-                            <Button size="sm" onclick={() => (query.set(''), filter.set('all'))}>
+                            <Button size="sm" onclick={clearFilters}>
                               Clear filters
                             </Button>
                           )}
@@ -331,6 +369,9 @@ export default function LabelJobs() {
                 </Meta>
               </p>
             ) : null}
+            <p class="sr-only" role="status" aria-live="polite" data-filter-status>
+              {filterStatus.get()}
+            </p>
           </>
         )}
       </Page>

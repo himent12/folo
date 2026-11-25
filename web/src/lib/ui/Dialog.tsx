@@ -7,7 +7,7 @@
  * (`ui/sheetDrag`), and the labelled Close as ever.
  */
 import X from '$icons/x';
-import { bindable, createUniqueId, css, defaults, effect, MediaQuery } from 'fw';
+import { bindable, createUniqueId, css, defaults, effect, MediaQuery, onCleanup } from 'fw';
 import { media } from '$lib/design/tokens';
 import { backdropClose } from './backdrop';
 import Button from './Button';
@@ -48,6 +48,7 @@ export default function Dialog(props: DialogProps) {
 
   // Focus returns to the opener on close (browsers that restore it themselves are left alone).
   let restore: (() => void) | null = null;
+  let alive = true;
   effect(() => {
     if (open.get() && !el.open) {
       restore = rememberFocus();
@@ -60,12 +61,22 @@ export default function Dialog(props: DialogProps) {
     } else if (!open.get() && el.open) el.close();
   });
 
+  onCleanup(() => {
+    alive = false;
+    const r = restore;
+    restore = null;
+    if (el?.open) el.close();
+    r?.();
+  });
+
   function onDialogClose() {
+    if (!alive) return;
     open.set(false);
     status.clear();
     p.onclose?.();
-    restore?.();
+    const r = restore;
     restore = null;
+    r?.();
   }
 
   /** Closes the dialog unless `onbeforeclose` keeps it open. */

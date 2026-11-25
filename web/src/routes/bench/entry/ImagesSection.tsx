@@ -139,7 +139,8 @@ export default function ImagesSection(props: ImagesSectionProps) {
     if (next < images.peek().length) open.set(next);
   }
   function onkeydown(e: KeyboardEvent) {
-    if (open.peek() === null) return;
+    if (open.peek() === null || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (document.querySelectorAll('dialog[open]').length > 1) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, select, textarea')) return;
     if (e.key === 'ArrowRight') {
@@ -291,7 +292,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
             </ul>
             {total.get() !== null ? (
               <div class="foot">
-                <span class="count num">
+                <span class="count num" role="status" aria-live="polite">
                   {num(images.get().length)} of {num(total.get()!)}
                 </span>
                 {images.get().length < total.get()! ? (
@@ -313,7 +314,9 @@ export default function ImagesSection(props: ImagesSectionProps) {
         class="viewer"
         footer={() => (
           <>
-            <span class="v-pos num">{open.get() !== null ? `${num(open.get()! + 1)} of ${num(total.get() ?? images.get().length)}` : ''}</span>
+            <span class="v-pos num" aria-live="polite">
+              {open.get() !== null ? `${num(open.get()! + 1)} of ${num(total.get() ?? images.get().length)}` : ''}
+            </span>
             <Button icon={ChevronLeft} disabled={!open.get()} onclick={() => step(-1)}>
               Previous
             </Button>

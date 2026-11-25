@@ -456,4 +456,66 @@ describe('Inspector labels', () => {
     expect(onnavigate).not.toHaveBeenCalled();
     pager.dispose();
   });
+
+  it('restores focus to the opener on close and announces image steps and box toggles via its live region', async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const img0 = (await pager.at(0))!;
+    const img1 = (await pager.at(1))!;
+
+    const opener = document.createElement('button');
+    opener.textContent = 'Tile 0';
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    const imageId = signal<string | null>(img0.id);
+    c = render(
+      () => (
+        <Inspector
+          pager={pager}
+          classes={dataset.classes}
+          imageId={imageId.get()}
+          only={null}
+          onnavigate={(nextId) => imageId.set(nextId)}
+          onclose={() => imageId.set(null)}
+          onmissing={() => {}}
+        />
+      ),
+      target,
+    );
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.viewport')) throw new Error('waiting for inspector');
+    });
+
+    const dialog = target.querySelector<HTMLDialogElement>('dialog')!;
+    const status = () => target.querySelector<HTMLElement>('[data-inspector-status]')!;
+    expect(status().getAttribute('role')).toBe('status');
+    expect(status().getAttribute('aria-live')).toBe('polite');
+    // Quiet on initial open (the dialog aria-label speaks first).
+    expect(status().textContent?.trim()).toBe('');
+
+    // Toggling boxes announces state.
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
+    flushSync();
+    expect(status().textContent).toBe('Boxes hidden.');
+
+    // Stepping to next image via J key announces file, position, boxes, and hidden state.
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(imageId.peek()).toBe(img1.id);
+      expect(status().textContent).toContain('image 2 of');
+    });
+    expect(status().textContent).toContain('boxes hidden');
+
+    // Closing restores focus to the opener.
+    dialog.open = false;
+    dialog.dispatchEvent(new Event('close'));
+    flushSync();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+    pager.dispose();
+  });
 });
