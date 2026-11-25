@@ -15,7 +15,7 @@ use crate::ram_cache::{CacheMode, RamCache};
 use crate::rng::Rng;
 use crate::simd::PlanarDst;
 use crossbeam_channel::{Receiver, bounded, unbounded};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -445,7 +445,9 @@ struct Gate {
 struct GateState {
     next: usize,
     done: usize,
-    batches: HashMap<usize, BatchEntry>,
+    /// Active batch currently being handed out; positions are issued strictly monotonically, so at most one
+    /// batch is ever partially claimed at a time.
+    current_batch: Option<BatchEntry>,
 }
 
 impl Gate {
@@ -456,16 +458,16 @@ impl Gate {
                 if self.stop.load(Ordering::Acquire) || st.next >= total {
                     return None;
                 }
-                if st.next < st.done + window {
+                if st.next < st.done.saturating_add(window) {
                     let pos = st.next;
                     st.next += 1;
                     let b = pos / self.batch_size;
                     let lo = b * self.batch_size;
                     let batch_len = (lo + self.batch_size).min(total) - lo;
-                    let entry = st.batches.entry(b).or_insert_with(|| BatchEntry::new(batch_len));
+                    let entry = st.current_batch.get_or_insert_with(|| BatchEntry::new(batch_len));
                     let (cell, slot_idx, last) = entry.take_slot();
                     if last {
-                        st.batches.remove(&b);
+                        st.current_batch = None;
                     }
                     break (pos, batch_len, cell, slot_idx);
                 }
@@ -492,7 +494,7 @@ impl Gate {
     fn shutdown(&self) {
         self.stop.store(true, Ordering::Release);
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.batches.clear();
+        st.current_batch = None;
         self.cv.notify_all();
     }
 }
@@ -516,9 +518,16 @@ fn spawn(
 ) -> Inner {
     let cfg = &shared.cfg;
     let total = order.len();
-    let window = cfg.batch_size * (cfg.prefetch_batches + 1) + cfg.workers;
+    let window = cfg
+        .batch_size
+        .saturating_mul(cfg.prefetch_batches.saturating_add(1))
+        .saturating_add(cfg.workers)
+        .min(total.max(1))
+        .max(1);
+    let ring_cap = window.next_power_of_two();
+    let ring_mask = ring_cap - 1;
     let gate = Arc::new(Gate {
-        state: Mutex::new(GateState { next: 0, done: 0, batches: HashMap::new() }),
+        state: Mutex::new(GateState { next: 0, done: 0, current_batch: None }),
         cv: Condvar::new(),
         stop: false.into(),
         batch_size: cfg.batch_size,
@@ -558,20 +567,58 @@ fn spawn(
                 buffers::pooled(|| {
                     let bs = shared.cfg.batch_size;
                     let s = shared.cfg.imgsz as usize;
-                    let mut pending: HashMap<usize, Result<DoneSample>> = HashMap::new();
+                    // Every in-flight sample satisfies `lo <= p < lo + window` and `ring_cap >= window`, so
+                    // `p & ring_mask` gives each active position a unique O(1) slot with zero hashing.
+                    let mut pending: Vec<Option<Result<DoneSample>>> = (0..ring_cap).map(|_| None).collect();
+                    let mut batch_buf: Vec<DoneSample> = Vec::with_capacity(bs);
                     for b in 0..num_batches {
                         let (lo, hi) = (b * bs, ((b + 1) * bs).min(total));
-                        while (lo..hi).any(|p| !pending.contains_key(&p)) {
+                        let need = hi - lo;
+                        let mut ready = 0usize;
+                        for p in lo..hi {
+                            if pending[p & ring_mask].is_some() {
+                                ready += 1;
+                            }
+                        }
+                        while ready < need {
                             match sample_rx.recv() {
-                                Ok((p, s)) => {
-                                    pending.insert(p, s);
+                                Ok((p, sample)) => {
+                                    debug_assert!(
+                                        p >= lo && p < lo.saturating_add(window),
+                                        "sample position {p} outside active window {lo}..{}",
+                                        lo.saturating_add(window)
+                                    );
+                                    let slot = &mut pending[p & ring_mask];
+                                    debug_assert!(slot.is_none(), "duplicate sample position {p}");
+                                    *slot = Some(sample);
+                                    if p >= lo && p < hi {
+                                        ready += 1;
+                                    }
                                 }
                                 Err(_) => return, // workers stopped
                             }
                         }
-                        let items: Vec<Result<DoneSample>> =
-                            (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
-                        let batch = finish_batch(items, s);
+                        // Drain every slot in `lo..hi` unconditionally before advancing the gate so no `Slot`
+                        // remains in `pending` even if an item in this batch failed.
+                        batch_buf.clear();
+                        let mut first_err: Option<DataError> = None;
+                        for p in lo..hi {
+                            match pending[p & ring_mask].take().expect("batch slot ready") {
+                                Ok(item) => batch_buf.push(item),
+                                Err(e) => {
+                                    if first_err.is_none() {
+                                        first_err = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        let batch = match first_err {
+                            Some(e) => {
+                                batch_buf.clear();
+                                Err(e)
+                            }
+                            None => Ok(finish_batch(&mut batch_buf, s)),
+                        };
                         gate.advance(hi);
                         if batch_tx.send(batch).is_err() {
                             return;
@@ -586,13 +633,13 @@ fn spawn(
 }
 
 /// Assembles a [`Batch`] from completed [`DoneSample`]s without copying pixel data.
-fn finish_batch(items: Vec<Result<DoneSample>>, s: usize) -> Result<Batch> {
-    let items: Vec<DoneSample> = items.into_iter().collect::<Result<_>>()?;
+fn finish_batch(items: &mut Vec<DoneSample>, s: usize) -> Batch {
     let n = items.len();
-    let mut targets = Vec::new();
+    let total_boxes: usize = items.iter().map(|item| item.meta.boxes.len()).sum();
+    let mut targets = Vec::with_capacity(total_boxes);
     let mut meta = Vec::with_capacity(n);
     let mut last_alloc: Option<Arc<BatchAlloc>> = None;
-    for (k, item) in items.into_iter().enumerate() {
+    for (k, item) in items.drain(..).enumerate() {
         for b in &item.meta.boxes {
             targets.push([k as f32, b.class as f32, b.cx, b.cy, b.w, b.h]);
         }
@@ -608,7 +655,7 @@ fn finish_batch(items: Vec<Result<DoneSample>>, s: usize) -> Result<Batch> {
         .expect("all batch slots finished before finish_batch");
     let (images, images_u8) = alloc.buf.into_vecs();
     debug_assert_eq!(images.len().max(images_u8.len()), n * 3 * s * s);
-    Ok(Batch { images, images_u8, shape: [n, 3, s, s], targets, meta })
+    Batch { images, images_u8, shape: [n, 3, s, s], targets, meta }
 }
 
 /// Iterator over one epoch's batches. Dropping it stops the workers and joins them.

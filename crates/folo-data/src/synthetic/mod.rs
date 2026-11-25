@@ -377,9 +377,9 @@ fn layout(cfg: &SyntheticConfig, kinds: &[usize], index: usize) -> Scene {
     Scene { width, height, background, objects, boxes, grain_seed }
 }
 
-fn render(scene: &Scene, grain: f32) -> Sample {
-    let mut canvas = Canvas::new(scene.width as usize, scene.height as usize);
-    scene.background.paint(&mut canvas);
+fn render_into(scene: &Scene, grain: f32, canvas: &mut Canvas) -> Sample {
+    canvas.resize_for_paint(scene.width as usize, scene.height as usize);
+    scene.background.paint(canvas);
     let mut rng = Rng::new(scene.grain_seed ^ 0xC010_0125);
     for o in &scene.objects {
         let b = bounds_of(&o.prims);
@@ -404,6 +404,11 @@ fn render(scene: &Scene, grain: f32) -> Sample {
         canvas.draw(&o.prims, &paint);
     }
     Sample { image: canvas.to_image(grain, scene.grain_seed), boxes: scene.boxes.clone() }
+}
+
+fn render(scene: &Scene, grain: f32) -> Sample {
+    let mut canvas = Canvas::new(0, 0);
+    render_into(scene, grain, &mut canvas)
 }
 
 /// Generates image `index` (global index over train + val) of the dataset described by `cfg`.
@@ -516,22 +521,25 @@ pub fn write_yolo_with_progress(
     let ntrain = cfg.train_count();
     let boxes: Vec<usize> = (0..cfg.images)
         .into_par_iter()
-        .map(|i| -> Result<usize> {
-            let split = if i < ntrain { "train" } else { "val" };
-            let s = render(&layout(cfg, &kinds, i), cfg.grain);
-            let name = format!("{i:06}");
-            let img_path = dir.join("images").join(split).join(format!("{name}.{}", format.extension()));
-            write_image(&s.image, &img_path, format)?;
-            let mut text = String::with_capacity(s.boxes.len() * 40);
-            for b in &s.boxes {
-                use std::fmt::Write;
-                let _ = writeln!(text, "{} {:.6} {:.6} {:.6} {:.6}", b.class, b.cx, b.cy, b.w, b.h);
-            }
-            let lbl = dir.join("labels").join(split).join(format!("{name}.txt"));
-            std::fs::write(&lbl, text).map_err(|e| DataError::io(&lbl, e))?;
-            progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
-            Ok(s.boxes.len())
-        })
+        .map_init(
+            || Canvas::new(0, 0),
+            |canvas, i| -> Result<usize> {
+                let split = if i < ntrain { "train" } else { "val" };
+                let s = render_into(&layout(cfg, &kinds, i), cfg.grain, canvas);
+                let name = format!("{i:06}");
+                let img_path = dir.join("images").join(split).join(format!("{name}.{}", format.extension()));
+                write_image(&s.image, &img_path, format)?;
+                let mut text = String::with_capacity(s.boxes.len() * 40);
+                for b in &s.boxes {
+                    use std::fmt::Write;
+                    let _ = writeln!(text, "{} {:.6} {:.6} {:.6} {:.6}", b.class, b.cx, b.cy, b.w, b.h);
+                }
+                let lbl = dir.join("labels").join(split).join(format!("{name}.txt"));
+                std::fs::write(&lbl, text).map_err(|e| DataError::io(&lbl, e))?;
+                progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+                Ok(s.boxes.len())
+            },
+        )
         .collect::<Result<_>>()?;
     let mut yaml = format!(
         "# FOLO synthetic shapes dataset: {} images, seed {}, imgsz {}\ntrain: images/train\nval: images/val\nnames:\n",
