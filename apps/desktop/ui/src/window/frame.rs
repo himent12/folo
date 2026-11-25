@@ -197,7 +197,7 @@ pub(crate) struct Frame {
     pub(crate) mouse_move_listeners: Vec<MouseMoveEntry>,
     /// Scroll-wheel listeners, in paint order.
     pub(crate) scroll_wheel_listeners: Vec<AnyMouseListener>,
-    /// Listeners for less-common `MouseEvent` types (`MouseExitEvent`, `FileDropEvent`, custom).
+    /// Listeners for less-common `MouseEvent` types (`MouseExitEvent`, `FileDropEvent`).
     pub(crate) other_mouse_listeners: Vec<AnyMouseListener>,
     /// The key dispatch tree: key contexts, key / action listeners, focus ids, tab stops.
     pub(crate) dispatch_tree: DispatchTree,

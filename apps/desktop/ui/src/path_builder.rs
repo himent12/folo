@@ -85,6 +85,13 @@ pub struct BuiltPath<P: Clone + Debug + Default + PartialEq = Pixels> {
     pub(crate) cache_hash: Option<u64>,
 }
 
+impl<P: Clone + Debug + Default + PartialEq> BuiltPath<P> {
+    /// Wraps pre-tessellated triangles (three points per triangle) and their bounding box.
+    pub fn new(triangles: impl Into<Arc<[Point<P>]>>, bounds: Bounds<P>) -> Self {
+        Self { triangles: triangles.into(), bounds, cache_hash: None }
+    }
+}
+
 impl<P: Clone + Debug + Default + PartialEq> PartialEq for BuiltPath<P> {
     fn eq(&self, other: &Self) -> bool {
         self.triangles == other.triangles && self.bounds == other.bounds

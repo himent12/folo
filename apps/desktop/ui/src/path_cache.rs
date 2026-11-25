@@ -85,7 +85,8 @@ impl Entry {
 #[derive(Default)]
 pub(crate) struct PathCache {
     entries: HashMap<u64, Entry>,
-    /// What the entries allocate (keys and triangles); the table is counted by its capacity.
+    /// What the entries allocate (keys, logical triangles, and cached scaled `PathData`); the table is
+    /// counted by its capacity.
     heap: usize,
     clock: u64,
     hits: u64,
@@ -127,7 +128,8 @@ impl Hasher for WordHasher {
 }
 
 impl PathCache {
-    /// What the cache holds: its entries' keys and triangles, and its table at its allocated size.
+    /// What the cache holds: its entries' keys, triangles, cached scaled `PathData`, and its table at
+    /// its allocated size.
     fn bytes(&self) -> usize {
         self.heap + table_bytes(self.entries.capacity())
     }
@@ -561,6 +563,63 @@ mod tests {
         let dm = scaled_path_data(&mutated, 2.0);
         assert!(!Arc::ptr_eq(&d3, &dm));
         assert_eq!(dm.triangles.len(), 3);
+    }
+
+    /// Attaching scaled `PathData` tracks exact heap bytes (verified by the counting allocator), refuses
+    /// to cache scaled geometry when base + scaled exceeds [`MAX_ENTRY`], and evicts oldest entries when
+    /// attaching scaled geometry pushes total usage past [`BUDGET`].
+    #[test]
+    fn scaled_path_data_obeys_max_entry_budget_and_allocator_accounting() {
+        // 1. Exact allocator accounting for scaled attachment and scale replacement.
+        let base = counting::live();
+        let mut c = PathCache::default();
+        let mut p = triangles(1, 50);
+        c.insert(vec![1], &mut p);
+        let d1 = c.scaled_path_data(&p, 1.5);
+        assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
+        let d2 = c.scaled_path_data(&p, 2.0);
+        assert!(!Arc::ptr_eq(&d1, &d2));
+        drop(d1);
+        drop(d2);
+        drop(p);
+        let held = (counting::live() - base) as usize;
+        assert!(held <= c.bytes(), "{held} bytes allocated, {} counted", c.bytes());
+        assert!(c.bytes() - held <= 64, "{held} bytes allocated, {} counted", c.bytes());
+        drop(c);
+        assert_eq!(counting::live(), base, "all scaled and logical allocations freed");
+
+        // 2. MAX_ENTRY guard: base fits (> MAX_ENTRY/2), but base + scaled > MAX_ENTRY.
+        let mut c = PathCache::default();
+        let pts_per_tri = 3 * std::mem::size_of::<Point<Pixels>>();
+        let n_tris = (MAX_ENTRY * 3 / 4) / pts_per_tri;
+        let mut large = triangles(7, n_tris);
+        c.insert(vec![7], &mut large);
+        assert_eq!(c.entries.len(), 1, "base entry fits under MAX_ENTRY");
+        let heap_before = c.heap;
+        let _scaled = c.scaled_path_data(&large, 1.5);
+        assert!(
+            c.entries.values().next().unwrap().scaled.is_none(),
+            "scaled data exceeding MAX_ENTRY must not be retained"
+        );
+        assert_eq!(c.heap, heap_before);
+
+        // 3. BUDGET eviction when attaching scaled data pushes total bytes over BUDGET.
+        let mut c = PathCache::default();
+        let mut kept = Vec::new();
+        let mut i = 0u32;
+        while c.bytes() + 32_768 < BUDGET {
+            let mut path = triangles(i, 500);
+            c.insert(vec![i], &mut path);
+            kept.push(path);
+            i += 1;
+        }
+        assert_eq!(c.evictions, 0);
+        for path in &kept {
+            let _ = c.scaled_path_data(path, 1.5);
+            assert!(c.bytes() <= BUDGET, "{} bytes > BUDGET", c.bytes());
+            assert_eq!(c.heap, c.entries.values().map(Entry::bytes).sum::<usize>());
+        }
+        assert!(c.evictions >= 1, "attaching scaled data near BUDGET must evict");
     }
 
     /// A path built while the thread is torn down, by the destructor of a thread local destroyed after
