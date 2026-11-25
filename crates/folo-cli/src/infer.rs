@@ -145,8 +145,73 @@ fn check_fusion_iou(v: f32) -> Result<(), CliError> {
     Err(CliError::new(ExitCode::Usage, "usage", format!("--fusion-iou must be in 0..=1, got {v}")))
 }
 
+fn invalid_config(command: &str, message: impl Into<String>) -> CliError {
+    CliError::new(ExitCode::Usage, "invalid_config", message)
+        .hint(format!("see `folo describe {command} --json` for the accepted ranges"))
+}
+
+/// Validates `--conf`, `--iou`, `--max-det`, `--imgsz`, and (for `val`) `--batch` before any model or dataset is
+/// opened, matching the engine's accepted ranges so typos fail immediately with exit code 2 (`invalid_config`).
+fn check_infer_args(
+    command: &str,
+    conf: f32,
+    iou: f32,
+    max_det: u32,
+    imgsz: Option<u32>,
+    max_imgsz: Option<u32>,
+    batch: Option<u32>,
+) -> Result<(), CliError> {
+    if !(0.0..=1.0).contains(&conf) {
+        return Err(invalid_config(command, format!("--conf must be in 0..=1, got {conf}")));
+    }
+    if !(0.0..=1.0).contains(&iou) {
+        return Err(invalid_config(command, format!("--iou must be in 0..=1, got {iou}")));
+    }
+    if max_det == 0 {
+        return Err(invalid_config(command, "--max-det must be at least 1"));
+    }
+    if let Some(s) = imgsz {
+        if let Some(max) = max_imgsz {
+            if s == 0 || !s.is_multiple_of(32) || s > max {
+                return Err(invalid_config(
+                    command,
+                    format!("--imgsz must be a multiple of 32 in 32..={max}, got {s}"),
+                ));
+            }
+        } else if s == 0 || !s.is_multiple_of(32) {
+            return Err(invalid_config(
+                command,
+                format!("--imgsz must be a positive multiple of 32, got {s}"),
+            ));
+        }
+    }
+    if batch == Some(0) {
+        return Err(invalid_config(command, "--batch must be at least 1"));
+    }
+    Ok(())
+}
+
+/// Refuses an empty `--save` path or an existing non-directory before loading the model.
+fn check_save_dir(save: Option<&Path>) -> Result<(), CliError> {
+    let Some(save) = save else { return Ok(()) };
+    if save.as_os_str().is_empty() {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--save folder path must not be empty")
+            .hint("pass a folder path to --save; each annotated image is written inside it"));
+    }
+    if std::fs::metadata(save).is_ok_and(|m| !m.is_dir()) {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--save {} is a file, not a folder", folo_api::json::path(save)),
+        )
+        .hint("pass a folder path to --save; each annotated image is written inside it"));
+    }
+    Ok(())
+}
+
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
+    check_infer_args("val", args.conf, args.iou, args.max_det, args.imgsz, None, Some(args.batch))?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model =
         open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
@@ -183,7 +248,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         nms: NmsConfig {
             conf: args.conf,
             iou: args.iou,
-            max_det: args.max_det.max(1) as usize,
+            max_det: args.max_det as usize,
             fusion: args.fusion.into(),
             fusion_iou: args.fusion_iou,
             score: args.score.into(),
@@ -193,7 +258,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
         keep_detections: coco_gt.is_some(),
         head: args.head.map(Into::into),
-        ..ValConfig::new(imgsz, args.batch.max(1) as usize)
+        ..ValConfig::new(imgsz, args.batch as usize)
     };
     let device = model.device().to_string();
     let precision = precision_of(&model);
@@ -390,15 +455,41 @@ fn save_paths(dir: &Path, images: &[(PathBuf, PathBuf)]) -> Result<Vec<(PathBuf,
     Ok(out)
 }
 
-/// Write `bytes` to `dst` through a fresh temporary file renamed over it, so an existing `dst` (even a hard link
-/// to a source image) is replaced as a directory entry, never overwritten in place.
+/// Write `bytes` to `dst` through a fresh short-named temporary file in `dst`'s folder renamed over it, so an
+/// existing `dst` (even a hard link to a source image) is replaced atomically as a directory entry, never
+/// overwritten in place, failed writes leave no temporary files behind, and filenames up to the filesystem's
+/// component limit still succeed.
 fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    write_new_with(dst, bytes, &NEXT)
+}
+
+fn write_new_with(dst: &Path, bytes: &[u8], next: &std::sync::atomic::AtomicU64) -> Result<(), String> {
     use std::io::Write;
-    let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(dst).map_err(|e| e.to_string())?;
-    let r = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| {
+    use std::sync::atomic::Ordering;
+    let dir = dst.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dst_name = dst.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    let (tmp, mut f) = loop {
+        let n = next.fetch_add(1, Ordering::Relaxed);
+        let name = format!("{}{}-{n}.tmp", folo_nn::io::TEMP_PREFIX, std::process::id());
+        // Skip before creating so we never briefly publish an empty file at `dst`.
+        if Some(name.to_lowercase()) == dst_name {
+            continue;
+        }
+        let candidate = dir.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let r = (|| -> std::io::Result<()> {
+        f.write_all(bytes)?;
+        f.sync_all()?;
         drop(f);
         folo_nn::io::rename_over(&tmp, dst)
-    });
+    })();
     if let Err(e) = r {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
@@ -450,6 +541,8 @@ fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), Cl
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
+    check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, Some(8192), None)?;
+    check_save_dir(args.save.as_deref())?;
     check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model(
@@ -465,7 +558,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
         conf: args.conf,
         iou: args.iou,
-        max_det: args.max_det.max(1) as usize,
+        max_det: args.max_det as usize,
         rect: true,
         head: args.head.map(Into::into),
         fusion: args.fusion.into(),
@@ -523,7 +616,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
                     format!("cannot write {}: {e}", folo_api::json::path(dst)),
                 )
             };
-            if let Some(parent) = dst.parent() {
+            if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent).map_err(|e| io(e.to_string()))?;
             }
             write_new(dst, &folo_data::encode(&canvas, *fmt).map_err(|e| io(e.to_string()))?)
@@ -581,7 +674,6 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
 }
 
 pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
-    args.model = crate::weights::resolve(&args.model)?;
     let onnx = args.format == ExportFormatArg::Onnx;
     if !onnx {
         let given = [
@@ -608,6 +700,20 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     if args.batch == Some(0) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--batch must be at least 1"));
     }
+    if args.max_det == 0 {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--max-det must be at least 1"));
+    }
+    if let Some(imgsz) = args.imgsz
+        && onnx
+        && (imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192)
+    {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
+        ));
+    }
+    args.model = crate::weights::resolve(&args.model)?;
     // A decoded graph is named apart from the raw one: `<name>-decoded.onnx` (`-decoded-f16` with --half).
     let (dtype, suffix, ext) = match args.format {
         ExportFormatArg::FoloF16 => (FloatDType::F16, "-f16", "folo"),
@@ -654,7 +760,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             dynamic: args.dynamic,
             half: args.half,
             decode: args.decode,
-            max_det: args.max_det.max(1),
+            max_det: args.max_det,
             head: args.head.map(Into::into),
             // The source's other keys (folo.metrics, folo.created, unknown folo.* keys) travel along.
             metadata: meta.for_weights().to_map(),
@@ -759,7 +865,18 @@ fn image_line(path: &str, boxes: usize, shown: &[String], ms: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use folo_test_support::TestDir;
+
     use super::*;
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
 
     #[test]
     fn an_image_line_counts_its_boxes_and_lists_none_for_none() {
@@ -768,5 +885,100 @@ mod tests {
         assert_eq!(image_line("a.jpg", 1, &two[..1], 9.0), "a.jpg: 1 box (cat 0.91) 9.0 ms");
         assert_eq!(image_line("a.jpg", 0, &[], 14.7), "a.jpg: 0 boxes 14.7 ms");
         assert_eq!(image_line("a.jpg", 9, &two, 1.0), "a.jpg: 9 boxes (cat 0.91, dog 0.40, +7 more) 1.0 ms");
+    }
+
+    #[test]
+    fn check_infer_args_validates_thresholds_and_sizes() {
+        // Boundary valid values pass (`val` has no 8192 upper bound, matching `val::check_config`).
+        check_infer_args("predict", 0.0, 0.0, 1, Some(32), Some(8192), None).unwrap();
+        check_infer_args("predict", 1.0, 1.0, 300, Some(8192), Some(8192), None).unwrap();
+        check_infer_args("val", 1.0, 1.0, 300, Some(8224), None, Some(1)).unwrap();
+
+        for (conf, iou, max_det, imgsz, max_imgsz, batch, flag) in [
+            (-0.01, 0.5, 10, None, Some(8192), None, "--conf"),
+            (1.01, 0.5, 10, None, Some(8192), None, "--conf"),
+            (f32::NAN, 0.5, 10, None, Some(8192), None, "--conf"),
+            (f32::INFINITY, 0.5, 10, None, Some(8192), None, "--conf"),
+            (0.25, -0.1, 10, None, Some(8192), None, "--iou"),
+            (0.25, 1.5, 10, None, Some(8192), None, "--iou"),
+            (0.25, f32::NAN, 10, None, Some(8192), None, "--iou"),
+            (0.25, 0.7, 0, None, Some(8192), None, "--max-det"),
+            (0.25, 0.7, 10, Some(0), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(8224), Some(8192), None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), None, Some(1), "--imgsz"),
+            (0.25, 0.7, 10, Some(64), None, Some(0), "--batch"),
+        ] {
+            let e = check_infer_args("predict", conf, iou, max_det, imgsz, max_imgsz, batch).unwrap_err();
+            assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "invalid_config"), "{flag}: {e:?}");
+            assert!(e.message.contains(flag), "expected {flag} in {}", e.message);
+            assert!(e.hint.as_deref().is_some_and(|h| h.contains("folo describe predict --json")));
+        }
+    }
+
+    #[test]
+    fn check_save_dir_rejects_empty_and_existing_file() {
+        let dir = TestDir::new("infer-save-dir");
+        let file = dir.join("not-a-dir.png");
+        std::fs::write(&file, b"png").unwrap();
+
+        check_save_dir(None).unwrap();
+        check_save_dir(Some(dir.path())).unwrap();
+        check_save_dir(Some(&dir.join("new-folder"))).unwrap();
+
+        let empty = check_save_dir(Some(Path::new(""))).unwrap_err();
+        assert_eq!((empty.exit, empty.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(empty.message.contains("--save"));
+
+        let is_file = check_save_dir(Some(&file)).unwrap_err();
+        assert_eq!((is_file.exit, is_file.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(is_file.message.contains("not a folder"), "{}", is_file.message);
+    }
+
+    #[test]
+    fn write_new_replaces_atomically_handles_long_names_and_cleans_up_on_error() {
+        let dir = TestDir::new("infer-write-new");
+
+        // Fresh write + atomic overwrite leave no `.tmp` files behind.
+        let dst = dir.join("out.png");
+        write_new(&dst, b"first").unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"first");
+        write_new(&dst, b"second").unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"second");
+        assert_eq!(dir_names(dir.path()), ["out.png"]);
+
+        // Hard-linked destination is replaced as a directory entry without touching the original link.
+        let src = dir.join("source.png");
+        let linked = dir.join("linked.png");
+        std::fs::write(&src, b"original").unwrap();
+        std::fs::hard_link(&src, &linked).unwrap();
+        write_new(&linked, b"annotated").unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), b"original");
+        assert_eq!(std::fs::read(&linked).unwrap(), b"annotated");
+
+        // Long filename near the filesystem's 255-byte single-component limit still succeeds.
+        let long_name = format!("{}.png", "a".repeat(246));
+        let long_dst = dir.join(&long_name);
+        write_new(&long_dst, b"long").unwrap();
+        assert_eq!(std::fs::read(&long_dst).unwrap(), b"long");
+
+        // Destination matching the next candidate temp name skips that slot before creation.
+        let colliding_name = format!("{}{}-0.tmp", folo_nn::io::TEMP_PREFIX, std::process::id());
+        let colliding = dir.join(&colliding_name);
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        write_new_with(&colliding, b"exact", &counter).unwrap();
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(std::fs::read(&colliding).unwrap(), b"exact");
+
+        // Failed rename (directory in destination's place) cleans up the temporary file and leaves no leftovers.
+        let existing_dir = dir.join("taken");
+        std::fs::create_dir(&existing_dir).unwrap();
+        assert!(write_new(&existing_dir, b"nope").is_err());
+        assert!(existing_dir.is_dir());
+        assert!(
+            dir_names(dir.path()).iter().all(|n| n == &colliding_name || !n.ends_with(".tmp")),
+            "leftover temp file: {:?}",
+            dir_names(dir.path())
+        );
     }
 }
