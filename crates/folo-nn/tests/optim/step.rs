@@ -231,3 +231,90 @@ fn boosted_groups_and_bias_warmup() {
     assert_eq!(sched.lr_at(0, &gs[4]), 0.1);
     assert_eq!(sched.lr_at(0, &gs[1]), 0.0);
 }
+
+#[test]
+fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
+    let mut rng = Rng::seed(77);
+    // Exceeds PAR_THRESHOLD (65,536) across 3 groups (decay, bn, bias) to exercise ParamPlan's parallel reuse
+    // (8 * 9,216 + 12 * 512 = 79,872 >= 65,536).
+    let make_params = |rng: &mut Rng| -> Vec<Vec<(String, Tensor)>> {
+        vec![
+            (0..8)
+                .map(|i| (format!("w{i}"), Tensor::randn([32, 32, 3, 3], 0.0, 0.5, rng).requires_grad_()))
+                .collect(),
+            (0..6)
+                .map(|i| (format!("bn{i}"), Tensor::randn([512], 1.0, 0.1, rng).requires_grad_()))
+                .collect(),
+            (0..6).map(|i| (format!("b{i}"), Tensor::randn([512], 0.0, 0.1, rng).requires_grad_())).collect(),
+        ]
+    };
+    let ps_sgd = make_params(&mut rng);
+    let total_numel: usize = ps_sgd.iter().flat_map(|g| g.iter()).map(|(_, t)| t.numel()).sum();
+    assert!(total_numel >= 65_536, "fixture must exceed PAR_THRESHOLD: {total_numel}");
+    let ps_adam = make_params(&mut rng);
+    let mk_groups = |ps: &[Vec<(String, Tensor)>]| {
+        vec![
+            ParamGroup::new("decay", ps[0].clone()).lr(0.01).momentum(0.9).weight_decay(5e-4),
+            ParamGroup::new("bn", ps[1].clone()).lr(0.01).momentum(0.9),
+            ParamGroup::new("bias", ps[2].clone()).lr(0.01).momentum(0.9),
+        ]
+    };
+    let mut sgd = Sgd::new(mk_groups(&ps_sgd)).unwrap();
+    let mut adam = AdamW::new(mk_groups(&ps_adam)).unwrap();
+    // Clone initial values for single-threaded reference comparison.
+    let clone_ps = |ps: &[Vec<(String, Tensor)>]| -> Vec<Vec<(String, Tensor)>> {
+        ps.iter()
+            .map(|g| {
+                g.iter()
+                    .map(|(n, t)| {
+                        (
+                            n.clone(),
+                            Tensor::from_vec(t.to_vec::<f32>().unwrap(), t.shape().clone())
+                                .unwrap()
+                                .requires_grad_(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let ref_sgd_ps = clone_ps(&ps_sgd);
+    let ref_adam_ps = clone_ps(&ps_adam);
+    let mut ref_sgd = Sgd::new(mk_groups(&ref_sgd_ps)).unwrap();
+    let mut ref_adam = AdamW::new(mk_groups(&ref_adam_ps)).unwrap();
+
+    let pool_par = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let pool_ser = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    for _ in 0..3 {
+        let mut gs_sgd = folo_core::Grads::default();
+        let mut gs_ref_sgd = folo_core::Grads::default();
+        for (g, rg) in ps_sgd.iter().zip(&ref_sgd_ps) {
+            for ((_, p), (_, rp)) in g.iter().zip(rg) {
+                let gv = Tensor::randn(p.shape().clone(), 0.0, 0.1, &mut rng);
+                gs_sgd.insert(p, gv.clone());
+                gs_ref_sgd.insert(rp, gv);
+            }
+        }
+        pool_par.install(|| sgd.step(&gs_sgd).unwrap());
+        pool_ser.install(|| ref_sgd.step(&gs_ref_sgd).unwrap());
+
+        let mut gs_adam = folo_core::Grads::default();
+        let mut gs_ref_adam = folo_core::Grads::default();
+        for (g, rg) in ps_adam.iter().zip(&ref_adam_ps) {
+            for ((_, p), (_, rp)) in g.iter().zip(rg) {
+                let gv = Tensor::randn(p.shape().clone(), 0.0, 0.1, &mut rng);
+                gs_adam.insert(p, gv.clone());
+                gs_ref_adam.insert(rp, gv);
+            }
+        }
+        pool_par.install(|| adam.step(&gs_adam).unwrap());
+        pool_ser.install(|| ref_adam.step(&gs_ref_adam).unwrap());
+    }
+    for (g, rg) in ps_sgd.iter().zip(&ref_sgd_ps).chain(ps_adam.iter().zip(&ref_adam_ps)) {
+        for ((n, p), (_, rp)) in g.iter().zip(rg) {
+            let a: Vec<u32> = p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+            let b: Vec<u32> = rp.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+            assert_eq!(a, b, "parallel ParamPlan diverged on `{n}`");
+        }
+    }
+}

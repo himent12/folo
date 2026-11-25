@@ -1,6 +1,6 @@
 //! Exponential moving average of model weights (docs/MODEL.md §8.5).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor, no_grad};
@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::module::{Module, TensorKind};
+use crate::optim::storage_key;
 use crate::{Error, Result};
 
 /// Minimum total elements across tracked CPU tensors before parallelizing across tensors with rayon.
@@ -16,8 +17,6 @@ const EMA_PAR_THRESHOLD: usize = 32_768;
 const EMA_CHUNK_PAR_THRESHOLD: usize = 65_536;
 /// Chunk size (in `f32` elements) when parallelizing within a single large tensor.
 const EMA_CHUNK_SIZE: usize = 16_384;
-/// Maximum number of tracked tensors for which the O(N²) cross-storage alias check enables cross-tensor rayon.
-const MAX_CROSS_TENSOR_PAR_CHECK: usize = 1024;
 
 /// docs/MODEL.md §8.5: `decay = 0.9999`.
 pub const EMA_DECAY: f64 = 0.9999;
@@ -93,6 +92,8 @@ pub struct ModelEma<M: Module> {
     /// [`is_tracked`] on demand avoids module walks and `String` allocations while honoring in-place
     /// dtype changes on buffers.
     cached: Vec<CachedTensor>,
+    /// Precomputed storage keys of `self.cached` for O(N) zero-allocation cross-storage alias checks.
+    cached_keys: HashSet<usize>,
     /// True when all entries in `cached` have pairwise distinct underlying storages.
     cached_disjoint: bool,
     /// Reusable dotted-name buffer for zero-allocation traversal of `source`.
@@ -132,6 +133,7 @@ impl<M: Module> ModelEma<M> {
         let mut ema = ModelEma {
             module,
             cached: Vec::new(),
+            cached_keys: HashSet::new(),
             cached_disjoint: true,
             prefix: String::new(),
             pair_scratch: Vec::new(),
@@ -159,9 +161,13 @@ impl<M: Module> ModelEma<M> {
             .into_iter()
             .map(|t| CachedTensor { name: t.name, tensor: t.tensor, kind: t.kind })
             .collect();
-        self.cached_disjoint = self.cached.len() <= MAX_CROSS_TENSOR_PAR_CHECK
-            && (0..self.cached.len())
-                .all(|i| self.cached[i + 1..].iter().all(|b| !self.cached[i].tensor.same_storage(&b.tensor)));
+        self.cached_keys.clear();
+        self.cached_keys.reserve(self.cached.len());
+        let mut disjoint = true;
+        for c in &self.cached {
+            disjoint &= self.cached_keys.insert(storage_key(&c.tensor));
+        }
+        self.cached_disjoint = disjoint;
         let max_name = self.cached.iter().map(|c| c.name.len()).max().unwrap_or(0);
         self.prefix.clear();
         self.prefix.reserve(max_name);
@@ -207,7 +213,7 @@ impl<M: Module> ModelEma<M> {
     pub fn update(&mut self, source: &dyn Module) -> Result<()> {
         let d = self.decay_at(self.updates + 1);
         let (d32, w) = (d as f32, (1.0 - d) as f32);
-        let Self { cached, cached_disjoint, prefix, pair_scratch, updates, .. } = self;
+        let Self { cached, cached_keys, cached_disjoint, prefix, pair_scratch, updates, .. } = self;
         let guard = ClearGuard(pair_scratch);
         collect_matching_source(source, cached, prefix, guard.0)?;
         let pairs: &[(usize, Tensor)] = guard.0;
@@ -231,8 +237,7 @@ impl<M: Module> ModelEma<M> {
             let can_par_tensors = *cached_disjoint
                 && total_numel >= EMA_PAR_THRESHOLD
                 && pairs.len() > 1
-                && pairs.len() <= MAX_CROSS_TENSOR_PAR_CHECK
-                && cross_disjoint(cached, pairs);
+                && pairs.iter().all(|(_, m)| !cached_keys.contains(&storage_key(m)));
             if can_par_tensors {
                 folo_core::cpu::in_pool(|| {
                     pairs.par_iter().try_for_each(|(idx, m)| {
@@ -305,14 +310,6 @@ impl Drop for ClearGuard<'_> {
     fn drop(&mut self) {
         self.0.clear();
     }
-}
-
-/// True when no destination EMA tensor shares storage with any source tensor in `pairs`.
-fn cross_disjoint(cached: &[CachedTensor], pairs: &[(usize, Tensor)]) -> bool {
-    pairs.iter().all(|&(idx, _)| {
-        let e = &cached[idx].tensor;
-        pairs.iter().all(|(_, m)| !e.same_storage(m))
-    })
 }
 
 fn snapshot_tensor(t: &Tensor) -> Result<Tensor> {

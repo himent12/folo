@@ -10,7 +10,7 @@ use super::simd::{
     ScaledSumSq, axpby_slice, check_finite_slice, check_sum_sq_f64_slice, scale_slice, scale2_slice,
     sum_sq_f64_slice, unscale_check_slice, unscale_check_sum_sq_slice,
 };
-use super::{GradSource, PAR_THRESHOLD, cpu_fast};
+use super::{GradSource, PAR_THRESHOLD, cpu_fast, storage_key};
 use crate::Result;
 
 struct Slot {
@@ -21,12 +21,6 @@ struct Slot {
     /// private accumulator buffer; [`GradAccumulator::zero`] drops adopted buffers immediately so they return to
     /// the CPU/GPU buffer pool before the next forward/backward pass.
     adopted: bool,
-}
-
-/// Stable storage identity key while `t` is alive (two live tensors share storage iff their keys match).
-#[inline]
-fn storage_key(t: &Tensor) -> usize {
-    t.with_view(|v| v.storage as *const folo_core::Storage as usize)
 }
 
 /// Sums the gradients of a fixed set of parameters over several backward passes (docs/MODEL.md §8.3

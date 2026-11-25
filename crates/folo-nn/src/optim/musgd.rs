@@ -2,7 +2,7 @@
 //! `MuSGD` (docs/MODEL.md §8.2), with optional Polar-FOLO per-step minimax Remez orthogonalisation schedules and
 //! step-0 Schatten-4 spectral rescaling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::backend::{MuonSettings, OptimStep};
 use folo_core::{DType, Device, Tensor};
@@ -14,8 +14,8 @@ use super::simd::{
     axpby_slice, muon_dw_polar_fused_slice, muon_dw_polar_step_slice, muon_momentum_nesterov_slice,
 };
 use super::{
-    GradSource, OptimContract, OptimKind, Optimizer, PAR_THRESHOLD, ParamGroup, Sgd, apply_group_contract,
-    cpu_fast, group_contract, is_depthwise_conv_shape, take_state,
+    GradRef, GradSource, OptimContract, OptimKind, Optimizer, PAR_THRESHOLD, ParamGroup, Sgd,
+    apply_group_contract, cpu_fast, group_contract, is_depthwise_conv_shape, storage_key, take_state,
 };
 use crate::{Error, Result};
 
@@ -192,7 +192,7 @@ impl MuSgd {
             ps: Vec<&'a Tensor>,
             bs: Vec<&'a Tensor>,
             dws: Vec<bool>,
-            gs: Vec<Tensor>,
+            gs: Vec<GradRef<'a>>,
         }
         let mut active: Vec<Active<'_>> = Vec::new();
         for (gi, g) in self.sgd.groups().iter().enumerate() {
@@ -211,7 +211,7 @@ impl MuSgd {
                 ps.push(p);
                 bs.push(b);
                 dws.push(dw);
-                gs.push(gr.to_dtype(DType::F32)?);
+                gs.push(GradRef::as_f32(gr)?);
             }
             if !ps.is_empty() {
                 active.push(Active {
@@ -241,25 +241,25 @@ impl MuSgd {
         let same_lr = active.iter().all(|a| a.lr.to_bits() == active[0].lr.to_bits());
         let (step_lr, fold_lr) = if same_lr { (active[0].lr, false) } else { (1.0, true) };
         let no_alias = |active: &[Active<'_>]| -> bool {
-            let mut ps: Vec<&Tensor> = Vec::new();
-            let mut bs: Vec<&Tensor> = Vec::new();
-            let mut gs: Vec<&Tensor> = Vec::new();
+            let total: usize = active.iter().map(|a| a.ps.len()).sum();
+            let mut written: HashSet<usize> = HashSet::with_capacity(total * 2);
             for a in active {
-                ps.extend(a.ps.iter().copied());
-                bs.extend(a.bs.iter().copied());
-                gs.extend(a.gs.iter());
-            }
-            for (i, p) in ps.iter().enumerate() {
-                if ps[i + 1..].iter().any(|q| p.same_storage(q))
-                    || bs.iter().any(|b| p.same_storage(b))
-                    || gs.iter().any(|g| p.same_storage(g))
-                {
-                    return false;
+                for &p in &a.ps {
+                    if !written.insert(storage_key(p)) {
+                        return false;
+                    }
+                }
+                for &b in &a.bs {
+                    if !written.insert(storage_key(b)) {
+                        return false;
+                    }
                 }
             }
-            for (i, b) in bs.iter().enumerate() {
-                if bs[i + 1..].iter().any(|q| b.same_storage(q)) || gs.iter().any(|g| b.same_storage(g)) {
-                    return false;
+            for a in active {
+                for g in &a.gs {
+                    if written.contains(&storage_key(g.as_tensor())) {
+                        return false;
+                    }
                 }
             }
             true
@@ -304,7 +304,7 @@ impl MuSgd {
                 ps.extend_from_slice(&a.ps);
                 bs.extend_from_slice(&a.bs);
                 dws.extend_from_slice(&a.dws);
-                gr.extend(a.gs.iter());
+                gr.extend(a.gs.iter().map(GradRef::as_tensor));
             }
             let (mu, nesterov) = (active[0].mu, active[0].nesterov);
             axpby_many(&bs, &gr, mu, 1.0 - mu)?;
@@ -323,7 +323,7 @@ impl MuSgd {
                 muon_step_cpu(&a.ps, &a.bs, &a.gs, &a.dws, a.mu, a.nesterov, a.lr, self.ortho, self.geo)?;
                 continue;
             }
-            let gr: Vec<&Tensor> = a.gs.iter().collect();
+            let gr: Vec<&Tensor> = a.gs.iter().map(GradRef::as_tensor).collect();
             axpby_many(&a.bs, &gr, a.mu, 1.0 - a.mu)?;
             let scales: Vec<f32> = a.ps.iter().zip(&a.dws).map(|(p, &dw)| scale_of(p, dw)).collect();
             if muon_fused_with_scales(&a.ps, &a.bs, &gr, &scales, &a.dws, a.mu, a.nesterov, a.lr, self.ortho)?
@@ -342,7 +342,7 @@ impl MuSgd {
 fn muon_step_cpu(
     ps: &[&Tensor],
     bs: &[&Tensor],
-    gs: &[Tensor],
+    gs: &[GradRef<'_>],
     dws: &[bool],
     mu: f32,
     nesterov: bool,
@@ -353,40 +353,32 @@ fn muon_step_cpu(
     use rayon::prelude::*;
 
     let one_minus_mu = 1.0 - mu;
-    // Check cross-parameter storage aliasing across `ps`, `bs`, and `gs`: if any gradient aliases any
+    // Check cross-parameter storage aliasing across `ps`, `bs`, and `gs` in O(N): if any gradient aliases any
     // parameter or momentum buffer in this group (e.g. a caller passing another parameter's buffer as a
     // gradient), fall back to the staged path so an in-place update neither deadlocks nor mutates a
     // later parameter's gradient before it is read.
-    let grad_clean = (0..ps.len()).all(|i| {
-        let (pi, bi) = (ps[i], bs[i]);
-        gs.iter().all(|g| !pi.same_storage(g) && !bi.same_storage(g))
-    });
+    let mut written: HashSet<usize> = HashSet::with_capacity(ps.len() * 2);
+    let mut all_written_unique = true;
+    for (&p, &b) in ps.iter().zip(bs) {
+        all_written_unique &= written.insert(storage_key(p));
+        all_written_unique &= written.insert(storage_key(b));
+    }
+    let grad_clean = gs.iter().all(|g| !written.contains(&storage_key(g.as_tensor())));
     if !grad_clean {
-        let gr: Vec<&Tensor> = gs.iter().collect();
+        let gr: Vec<&Tensor> = gs.iter().map(GradRef::as_tensor).collect();
         axpby_many(bs, &gr, mu, one_minus_mu)?;
         return muon_step_tensor_ops(ps, bs, gs, dws, mu, nesterov, lr, ortho, geo);
     }
     let is_fast = |i: usize| -> bool {
-        let (p, b, g) = (ps[i], bs[i], &gs[i]);
+        let (p, b, g) = (ps[i], bs[i], gs[i].as_tensor());
         cpu_fast(&[p, b]) && g.device().is_cpu() && g.dtype() == DType::F32 && !p.same_storage(b)
     };
     let all_fast = (0..ps.len()).all(is_fast);
     let total_numel: usize = ps.iter().map(|p| p.numel()).sum();
-    let can_par = all_fast
-        && total_numel >= PAR_THRESHOLD
-        && ps.len() > 1
-        && (0..ps.len()).all(|i| {
-            let (pi, bi) = (ps[i], bs[i]);
-            (i + 1..ps.len()).all(|j| {
-                !pi.same_storage(ps[j])
-                    && !pi.same_storage(bs[j])
-                    && !bi.same_storage(ps[j])
-                    && !bi.same_storage(bs[j])
-            })
-        });
+    let can_par = all_fast && total_numel >= PAR_THRESHOLD && ps.len() > 1 && all_written_unique;
 
     let prepare_one = |i: usize| -> Result<Option<(&Tensor, Tensor)>> {
-        let (p, b, g, dw) = (ps[i], bs[i], &gs[i], dws[i]);
+        let (p, b, g, dw) = (ps[i], bs[i], gs[i].as_tensor(), dws[i]);
         if dw {
             let rows = p.dims()[0];
             let cols = p.numel() / rows.max(1);
@@ -433,7 +425,7 @@ fn muon_step_cpu(
                     mat_us.push(u);
                 }
             } else {
-                axpby_many(&[bs[i]], &[&gs[i]], mu, one_minus_mu)?;
+                axpby_many(&[bs[i]], &[gs[i].as_tensor()], mu, one_minus_mu)?;
                 muon_step_tensor_ops(
                     &[ps[i]],
                     &[bs[i]],
@@ -495,7 +487,7 @@ fn muon_dw_step_tensor(p: &Tensor, u: &Tensor, lr: f32) -> Result<()> {
 fn muon_step_tensor_ops(
     ps: &[&Tensor],
     bs: &[&Tensor],
-    gs: &[Tensor],
+    gs: &[GradRef<'_>],
     dws: &[bool],
     mu: f32,
     nesterov: bool,
@@ -504,7 +496,8 @@ fn muon_step_tensor_ops(
     geo: MuonGeoMode,
 ) -> Result<()> {
     let us = if nesterov {
-        let us = gs.iter().map(|x| x.mul_scalar(1.0 - mu)).collect::<folo_core::Result<Vec<_>>>()?;
+        let us =
+            gs.iter().map(|x| x.as_tensor().mul_scalar(1.0 - mu)).collect::<folo_core::Result<Vec<_>>>()?;
         let ur: Vec<&Tensor> = us.iter().collect();
         axpby_many(&ur, bs, 1.0, mu)?;
         us
@@ -566,12 +559,13 @@ fn axpby_many(ps: &[&Tensor], gs: &[&Tensor], a: f32, b: f32) -> Result<()> {
         .all(|(p, g)| cpu_fast(&[p]) && g.device().is_cpu() && g.dtype() == DType::F32 && !p.same_storage(g));
     if all_cpu {
         let total: usize = ps.iter().map(|p| p.numel()).sum();
-        let disjoint = ps.len() > 1
-            && total >= PAR_THRESHOLD
-            && (0..ps.len()).all(|i| {
-                (i + 1..ps.len()).all(|j| !ps[i].same_storage(ps[j]))
-                    && gs.iter().all(|g| !ps[i].same_storage(g))
-            });
+        let disjoint = if ps.len() > 1 && total >= PAR_THRESHOLD {
+            let mut written: HashSet<usize> = HashSet::with_capacity(ps.len());
+            ps.iter().all(|p| written.insert(storage_key(p)))
+                && gs.iter().all(|g| !written.contains(&storage_key(g)))
+        } else {
+            false
+        };
         if disjoint {
             return folo_core::cpu::in_pool(|| {
                 ps.par_iter().zip(gs.par_iter()).try_for_each(|(p, g)| -> Result<()> {

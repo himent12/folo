@@ -15,7 +15,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 | `src/module.rs` | `Module` (named parameters and buffers, train / eval mode, traversal), `Forward`, `Layer` |
 | `src/layers/` | `conv.rs` (`Conv2d`), `batchnorm/` (`mod.rs`: `BatchNorm2d`, `cpu.rs`: fused CPU training kernel, `stats.rs`: `RunningStats`, `tests.rs`), `conv_bn_act.rs` (`ConvBnAct`, MODEL.md's `Conv`, and `fuse_conv_bn`), `simple.rs` (`Linear`, `Activation`, `MaxPool2d`, `Upsample`, `Concat`, `Identity`), `container.rs` (`Sequential`, `ModuleList`) |
 | `src/init.rs` | Seeded Kaiming / Xavier initialisation and the head bias priors (MODEL.md §2.9, §6.5) |
-| `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `sgd.rs`, `adamw.rs`, `musgd.rs` (`MuSgd`), `ortho.rs` (Newton–Schulz `orthogonalize` and Polar-FOLO `MuonOrtho` / `orthogonalize_with`), `grads.rs` (`GradAccumulator`, clipping), `simd/` (`mod.rs`, `norm.rs`, `vec_ops.rs`, `tests.rs`: non-FMA AVX2 / scalar CPU optimizer, 1-pass rescaled norm/clipping, and AMP unscale kernels) |
+| `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `dispatch.rs` (zero-allocation CPU parameter scheduling, O(1) storage identity, and multi-group GPU coalescing), `sgd.rs`, `adamw.rs`, `musgd.rs` (`MuSgd`), `ortho.rs` (Newton–Schulz `orthogonalize` and Polar-FOLO `MuonOrtho` / `orthogonalize_with`), `grads.rs` (`GradAccumulator`, clipping), `simd/` (`mod.rs`, `norm.rs`, `vec_ops.rs`, `tests.rs`: non-FMA AVX2 / scalar CPU optimizer, 1-pass rescaled norm/clipping, and AMP unscale kernels) |
 | `src/sched.rs` | `LrSchedule`: warmup, then linear, cosine, WSD, or cosine-with-restarts decay (MODEL.md §8.4, `folo.sched` in FORMAT.md) |
 | `src/ema.rs` | `ModelEma`, `ema_for_run` (a fine-tune's EMA window; MODEL.md §8.5) |
 | `src/amp.rs` | `GradScaler`, dynamic loss scaling for mixed-precision training (`folo.amp` in FORMAT.md) |
@@ -24,7 +24,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 | `tests/modules.rs` | Layers and `Module`: names, modes, gradient checks, hand-computed BatchNorm values, fusion |
 | `tests/optim/` | `main.rs` + topic files (`step.rs`, `grads.rs`, `muon.rs`, `ema.rs`): optimizers, groups, accumulation, clipping, schedule application, MuSGD/orthogonalisation, and EMA against hand-computed values |
 | `tests/folo_io/` | `main.rs` + topic files (`format.rs`, `checkpoint.rs`, `musgd_resume.rs`): `.folo` files, safetensors compatibility both ways, loading rules, export, and checkpoint resume |
-| `tests/gpu/` | `main.rs`: modules, optimizer state and EMAs moved between devices, the fused BatchNorm and Conv paths on the GPU; `muon.rs`: MuSGD's fused Muon step |
+| `tests/gpu/` | `main.rs`: modules, optimizer state and EMAs moved between devices, the fused BatchNorm and Conv paths on the GPU; `muon.rs`: MuSGD's fused Muon step; `optim.rs`: multi-group coalesced GPU optimizer steps and cross-group alias fallback |
 | `benches/nn.rs` | BatchNorm train forward + backward, optimizer and EMA steps, `.folo` save / load |
 | `benches/train_step.rs` | One CPU training step of a folo-n-sized network |
 

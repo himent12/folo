@@ -7,8 +7,8 @@ use folo_core::{DType, Device, Tensor};
 
 use super::simd::{sgd_coupled_slice, sgd_decoupled_slice};
 use super::{
-    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
-    validate_groups,
+    GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
+    take_state, validate_groups,
 };
 use crate::{Error, Result};
 
@@ -22,6 +22,7 @@ use crate::{Error, Result};
 pub struct Sgd {
     groups: Vec<ParamGroup>,
     bufs: Vec<Vec<Option<Tensor>>>,
+    plan: ParamPlan,
     step: u64,
 }
 
@@ -29,8 +30,9 @@ impl Sgd {
     /// An optimizer over `groups` (no parameter in two groups; all `F32`).
     pub fn new(groups: Vec<ParamGroup>) -> Result<Self> {
         validate_groups(&groups)?;
+        let plan = ParamPlan::from_groups(&groups);
         let mut s =
-            Sgd { bufs: groups.iter().map(|g| vec![None; g.params.len()]).collect(), groups, step: 0 };
+            Sgd { bufs: groups.iter().map(|g| vec![None; g.params.len()]).collect(), groups, plan, step: 0 };
         s.ensure_buffers(|g| g.base_momentum > 0.0)?;
         Ok(s)
     }
@@ -63,7 +65,8 @@ impl Sgd {
         lr_scales: Option<&[f64]>,
     ) -> Result<()> {
         self.ensure_buffers(|g| g.momentum > 0.0)?;
-        let (groups, bufs) = (&self.groups, &self.bufs);
+        self.plan.sync(&self.groups);
+        let (groups, bufs, plan) = (&self.groups, &self.bufs, &self.plan);
         let scale_of = |gi: usize| lr_scales.map_or(1.0, |s| s[gi]);
         let sgd = |gi: usize| {
             let g = &groups[gi];
@@ -90,37 +93,39 @@ impl Sgd {
             bufs[gi][pi].as_ref().filter(|_| groups[gi].momentum as f32 != 0.0).into_iter().collect()
         };
         let done = step_many("sgd", groups, grads, sgd, state)?;
-        for_each_param(groups, |gi, pi| {
-            if done[gi] {
-                return Ok(());
-            }
-            let grp = &groups[gi];
-            let (name, p) = &grp.params[pi];
-            let Some(g) = grads.grad(p) else { return Ok(()) };
-            if g.shape() != p.shape() {
-                return Err(Error::Invalid(format!(
-                    "sgd: gradient of `{name}` is {:?}, parameter is {:?}",
-                    g.dims(),
-                    p.dims()
-                )));
-            }
-            let eff_lr = (grp.lr * scale_of(gi)) as f32;
-            let mu = grp.momentum as f32;
-            if grp.decoupled_wd || grp.cautious_wd {
-                update_decoupled(
-                    p,
-                    g,
-                    bufs[gi][pi].as_ref(),
-                    eff_lr,
-                    mu,
-                    (grp.lr * grp.weight_decay) as f32,
-                    grp.nesterov,
-                    grp.cautious_wd,
-                )
-            } else {
-                update(p, g, bufs[gi][pi].as_ref(), eff_lr, mu, grp.weight_decay as f32, grp.nesterov)
-            }
-        })?;
+        if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
+            for_each_param_planned(plan, groups, |gi, pi| {
+                if done.as_ref().is_some_and(|d| d[gi]) {
+                    return Ok(());
+                }
+                let grp = &groups[gi];
+                let (name, p) = &grp.params[pi];
+                let Some(g) = grads.grad(p) else { return Ok(()) };
+                if g.shape() != p.shape() {
+                    return Err(Error::Invalid(format!(
+                        "sgd: gradient of `{name}` is {:?}, parameter is {:?}",
+                        g.dims(),
+                        p.dims()
+                    )));
+                }
+                let eff_lr = (grp.lr * scale_of(gi)) as f32;
+                let mu = grp.momentum as f32;
+                if grp.decoupled_wd || grp.cautious_wd {
+                    update_decoupled(
+                        p,
+                        g,
+                        bufs[gi][pi].as_ref(),
+                        eff_lr,
+                        mu,
+                        (grp.lr * grp.weight_decay) as f32,
+                        grp.nesterov,
+                        grp.cautious_wd,
+                    )
+                } else {
+                    update(p, g, bufs[gi][pi].as_ref(), eff_lr, mu, grp.weight_decay as f32, grp.nesterov)
+                }
+            })?;
+        }
         self.step += 1;
         Ok(())
     }
