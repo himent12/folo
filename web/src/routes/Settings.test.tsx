@@ -6,6 +6,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
+import { buildPaletteItems } from '$lib/shell/commandPalette/providers';
 import { installEntryMemory, restoringScroll } from '$lib/shell/entryMemory';
 import { focusRoute } from '$lib/shell/routeFocus';
 import { tabHistory } from '$lib/tabHistory.testing';
@@ -38,6 +39,7 @@ async function until<T>(get: () => T | null | undefined | false, what = 'the con
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
+  history.replaceState(history.state, '', '#/settings');
   router.route = parse('#/settings');
   hub.mode = 'mock';
 });
@@ -133,6 +135,116 @@ describe('Settings', () => {
     expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
     expect(jump.querySelector('a.on')?.textContent).toBe('System');
     expect(jump.querySelector('a.on')?.getAttribute('aria-current')).toBe('location');
+    expect(location.hash).toBe('#/settings?section=system');
+    expect(router.route.query.get('section')).toBe('system');
+  });
+
+  it('syncs ?section= in place when a jump link is explicitly activated, and leaves the URL alone on passive scroll', async () => {
+    hub.api = new MockApi('normal', 0);
+    history.replaceState(history.state, '', '#/settings?section=cloud');
+    router.route = parse('#/settings?section=cloud');
+    const entryBefore = router.entry;
+    const go = vi.spyOn(router, 'go');
+    try {
+      c = mount(Settings, { target });
+      const jump = target.querySelector<HTMLElement>('nav.jump')!;
+      await until(() => jump.textContent?.includes('Cloud'), 'the Cloud section');
+      const about = target.querySelector<HTMLElement>('#about')!;
+      const aboutHeading = target.querySelector<HTMLElement>('#about-title')!;
+      const scroll = vi.fn();
+      about.scrollIntoView = scroll;
+      const focus = vi.spyOn(aboutHeading, 'focus');
+
+      // Explicit click on About updates ?section=about in place, scrolls once, and focuses #about-title.
+      [...jump.querySelectorAll('a')].find((a) => a.textContent === 'About')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+      flushSync();
+      await new Promise((r) => requestAnimationFrame(r));
+      flushSync();
+      expect(location.hash).toBe('#/settings?section=about');
+      expect(router.route.query.get('section')).toBe('about');
+      expect(router.entry).toBe(entryBefore);
+      expect(go).toHaveBeenCalledTimes(1);
+      expect(go).toHaveBeenCalledWith('/settings?section=about', { replace: true });
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll).toHaveBeenCalledWith({ block: 'start' });
+      expect(document.activeElement).toBe(aboutHeading);
+      expect(focus).toHaveBeenLastCalledWith({ preventScroll: true, focusVisible: false });
+
+      // Passive scroll releases scroll-spy without rewriting the URL.
+      window.dispatchEvent(new Event('wheel'));
+      window.dispatchEvent(new Event('scroll'));
+      await new Promise((r) => requestAnimationFrame(r));
+      flushSync();
+      expect(go).toHaveBeenCalledTimes(1);
+      expect(location.hash).toBe('#/settings?section=about');
+
+      // Keyboard activation (Enter) on another section preserves keyboard focus ring (no focusVisible: false) after RAF.
+      const unitsHeading = target.querySelector<HTMLElement>('#units-title')!;
+      const unitsEl = target.querySelector<HTMLElement>('#units')!;
+      const unitsScroll = vi.fn();
+      unitsEl.scrollIntoView = unitsScroll;
+      const unitsFocus = vi.spyOn(unitsHeading, 'focus');
+      [...jump.querySelectorAll('a')].find((a) => a.textContent === 'Units')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }));
+      flushSync();
+      await new Promise((r) => requestAnimationFrame(r));
+      flushSync();
+      expect(location.hash).toBe('#/settings?section=units');
+      expect(document.activeElement).toBe(unitsHeading);
+      expect(unitsFocus).toHaveBeenCalledTimes(1);
+      expect(unitsFocus).toHaveBeenLastCalledWith({ preventScroll: true });
+
+      // After scrolling away from Units, picking Units again in the command palette still jumps back to it.
+      window.dispatchEvent(new Event('wheel'));
+      unitsHeading.blur();
+      const paletteUnits = buildPaletteItems({
+        pageCommands: [],
+        runs: [],
+        datasets: [],
+        models: [],
+        benches: [],
+        benchesOk: true,
+        labelJobs: [],
+        loops: [],
+        cloud: true,
+        lacksLabel: false,
+        touchOnly: false,
+        onshortcuts: () => {},
+      }).find((item) => item.id === 'settings-units')!;
+      paletteUnits.run();
+      await new Promise((r) => requestAnimationFrame(r));
+      flushSync();
+      expect(unitsScroll).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(unitsHeading);
+    } finally {
+      go.mockRestore();
+    }
+  });
+
+  it('does not overwrite a pending navigation when a jump link is clicked while Settings is held on display', async () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    await until(() => jump.textContent?.includes('About'), 'the About section');
+    const release = router.holdWhile((to) => to.name !== 'settings');
+    try {
+      router.go('/runs');
+      expect(router.route.name).toBe('settings');
+      expect(router.location.name).toBe('runs');
+      expect(location.hash).toBe('#/runs');
+
+      const go = vi.spyOn(router, 'go');
+      try {
+        [...jump.querySelectorAll('a')].find((a) => a.textContent === 'About')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+        flushSync();
+        expect(go).not.toHaveBeenCalled();
+        expect(router.location.name).toBe('runs');
+        expect(location.hash).toBe('#/runs');
+      } finally {
+        go.mockRestore();
+      }
+    } finally {
+      release();
+    }
   });
 
   it('keeps a chosen section current until the person scrolls, and opens on ?section=', async () => {

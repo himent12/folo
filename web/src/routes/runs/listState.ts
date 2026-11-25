@@ -4,6 +4,7 @@
 
 import { runProgress, trainingSeconds } from '$lib/api/progress';
 import type { Run, RunStatus } from '$lib/api/types';
+import { COMPARE_MAX } from './compareHint';
 
 export type Filter = 'all' | 'active' | 'completed' | 'failed';
 export const groups: Record<Filter, RunStatus[]> = {
@@ -43,6 +44,11 @@ export function emptyFilterSummary(s: Pick<ListState, 'filter' | 'q'>): string {
   return 'Try another status filter or search term.';
 }
 
+/** Distinct run ids in insertion order, capped at `COMPARE_MAX`. */
+function uniqueSelection(ids: readonly string[]): string[] {
+  return [...new Set(ids.filter(Boolean))].slice(0, COMPARE_MAX);
+}
+
 /** The state a query holds; anything it does not name (or names wrongly, `?status=stopped`) is the default. */
 export function readState(query: URLSearchParams): ListState {
   const status = query.get('status');
@@ -53,7 +59,7 @@ export function readState(query: URLSearchParams): ListState {
     q: (query.get('q') ?? '').replace(/[\r\n]+/g, ''),
     sort: sort && SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'created',
     dir: dir === 'asc' || dir === 'desc' ? dir : 'desc',
-    sel: (query.get('sel') ?? '').split(',').filter(Boolean).slice(0, 4),
+    sel: uniqueSelection((query.get('sel') ?? '').split(',')),
   };
 }
 
@@ -66,7 +72,8 @@ export function writeState(s: ListState): string {
     q.set('sort', s.sort);
     q.set('dir', s.dir);
   }
-  if (s.sel.length) q.set('sel', s.sel.join(','));
+  const sel = uniqueSelection(s.sel);
+  if (sel.length) q.set('sel', sel.join(','));
   // Commas in run ids lists read better unescaped.
   return q.toString().replaceAll('%2C', ',');
 }

@@ -296,6 +296,7 @@ export default function Runs() {
   });
 
   function toggle(id: string) {
+    if (!id) return;
     const cur = selected.get();
     selected.set(cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= COMPARE_MAX ? cur : [...cur, id]);
   }

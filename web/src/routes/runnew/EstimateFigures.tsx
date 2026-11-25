@@ -104,7 +104,7 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
                 class="steps"
                 trigger={() => (
                   <>
-                    {num(props.sched.stepsPerEpoch)} optimizer steps <span class="faint">/ epoch</span>
+                    {count(props.sched.stepsPerEpoch, 'optimizer step')} <span class="faint">/ epoch</span>
                   </>
                 )}
               />
@@ -256,10 +256,10 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
             <TriangleAlert size={14} aria-hidden="true" />
             <span>
               {props.short.scratch ? (
-                <>Too short to learn: {num(props.short.steps)} optimizer steps.</>
+                <>Too short to learn: {count(props.short.steps, 'optimizer step')}.</>
               ) : (
                 <>
-                  Mostly warmup: {num(props.short.warmup)} of {num(props.short.steps)} optimizer steps.
+                  Mostly warmup: {num(props.short.warmup)} of {count(props.short.steps, 'optimizer step')}.
                 </>
               )}
             </span>
@@ -278,17 +278,17 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
               {props.short.scratch ? (
                 // Two short sentences: the batches behind the steps open under the Schedule row.
                 <p>
-                  {num(epochs.get())} epochs × {num(props.short.stepsPerEpoch)} optimizer steps. From scratch, a detector needs a few hundred, so
+                  {count(epochs.get(), 'epoch', 'epochs')} × {count(props.short.stepsPerEpoch, 'optimizer step')}. From scratch, a detector needs a few hundred, so
                   expect an mAP near&nbsp;0.
                 </p>
               ) : null}
               {props.short.warmupHeavy ? (
                 <p>
-                  Warmup takes {num(props.short.warmup)} of the {num(props.short.steps)} optimizer steps, so the learning rate peaks late.
+                  Warmup takes {num(props.short.warmup)} of the {count(props.short.steps, 'optimizer step')}, so the learning rate peaks late.
                 </p>
               ) : null}
               <button type="button" class="fix" onclick={() => epochs.set(props.short!.epochs)}>
-                Train {num(props.short.epochs)} epochs
+                Train {count(props.short.epochs, 'epoch', 'epochs')}
               </button>
             </div>
           ) : null}

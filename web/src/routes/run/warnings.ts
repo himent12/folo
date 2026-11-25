@@ -3,9 +3,10 @@
 // the API does not serve), so the run page finds them in the log.
 
 import type { LogLine } from '$lib/api/types';
+import { count, num } from '$lib/format';
 
 /** How each schedule warning starts, as the engine words it. */
-const SCHEDULE = [/^this run takes only \d+ optimizer steps\b/, /^warmup takes \d+ of the run's \d+ optimizer steps\b/];
+const SCHEDULE = [/^this run takes only \d+ optimizer steps?\b/, /^warmup takes \d+ of the run's \d+ optimizer steps?\b/];
 
 /** The schedule warnings among `logs`, once each, in the order the trainer wrote them. */
 export function scheduleWarnings(logs: readonly LogLine[]): string[] {
@@ -18,9 +19,9 @@ export function scheduleWarnings(logs: readonly LogLine[]): string[] {
 export const SHORT_RUN_STEPS = 200;
 
 /** The short-run warning's numbers: "this run takes only 125 optimizer steps (5 epochs × 25: …)". */
-const SHORT = /^this run takes only (\d+) optimizer steps \((\d+) epochs × (\d+):/;
+const SHORT = /^this run takes only (\d+) optimizer steps? \((\d+) epochs? × (\d+):/;
 /** The warmup warning's numbers: "warmup takes 75 of the run's 125 optimizer steps". */
-const WARMUP = /^warmup takes (\d+) of the run's (\d+) optimizer steps\b/;
+const WARMUP = /^warmup takes (\d+) of the run's (\d+) optimizer steps?\b/;
 
 /**
  * The epochs that clear the short-run warning: ⌈200 / optimizer steps per epoch⌉, the engine's rule
@@ -30,7 +31,7 @@ export function minimumEpochs(warnings: readonly string[]): number | null {
   for (const w of warnings) {
     const s = SHORT.exec(w);
     if (s && Number(s[3]) > 0) return Math.ceil(SHORT_RUN_STEPS / Number(s[3]));
-    const m = /\bTrain for at least (\d+) epochs\b/i.exec(w);
+    const m = /\bTrain for at least (\d+) epochs?\b/i.exec(w);
     if (m) return Number(m[1]);
   }
   return null;
@@ -71,11 +72,11 @@ export function scheduleTitle(warnings: readonly string[], learned = false): str
 export function shortCause(warnings: readonly string[]): string {
   for (const w of warnings) {
     const s = SHORT.exec(w);
-    if (s) return `${s[1]} optimizer steps`;
+    if (s) return count(Number(s[1]), 'optimizer step');
   }
   for (const w of warnings) {
     const m = WARMUP.exec(w);
-    if (m) return `warmup takes ${m[1]} of ${m[2]} optimizer steps`;
+    if (m) return `warmup takes ${num(Number(m[1]))} of ${count(Number(m[2]), 'optimizer step')}`;
   }
   return '';
 }
@@ -87,7 +88,8 @@ export function shortCause(warnings: readonly string[]): string {
  */
 export function plain(message: string, learned = false): string {
   const text = (learned ? message.replace(/\bto learn anything, so expect an mAP near 0\b/, 'before it stops improving') : message)
-    .replace(/\(\d+ epochs × (\d+): /, (_, spe: string) => `(${spe} per epoch: `)
+    .replace(/\b1 optimizer steps\b/g, '1 optimizer step')
+    .replace(/\(\d+ epochs? × (\d+): /, (_, spe: string) => `(${spe} per epoch: `)
     .replace(/\bthe learning rate reaches lr0\b/g, 'the learning rate reaches its initial value')
     .replace(/\blr0\b/g, 'the initial learning rate')
     .replace(/\blower warmup_epochs \(now ([\d.]+)\)/g, (_, n: string) => `shorten the warmup (now ${n} ${n === '1' ? 'epoch' : 'epochs'})`)

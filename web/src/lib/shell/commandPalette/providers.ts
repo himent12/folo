@@ -113,7 +113,15 @@ export function buildPaletteItems(src: PaletteItemSources): Item[] {
     match: x.match,
     scoped: true,
     icon: SettingsIcon,
-    run: go(`/settings?section=${x.id}`),
+    run: () => {
+      const path = `/settings?section=${x.id}`;
+      if (router.route.name === 'settings' && router.location.name === 'settings' && router.route.query.get('section') === x.id) {
+        if (location.hash !== `#${path}`) router.go(path, { replace: true });
+        window.dispatchEvent(new CustomEvent('folo:settings-section', { detail: x.id }));
+        return;
+      }
+      router.go(path);
+    },
   }));
 
   const runs: Item[] = src.runs.map((x) => ({

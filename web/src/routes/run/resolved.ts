@@ -80,7 +80,7 @@ export function warmupEpochs(resolved: ResolvedTrain): number {
 export function warmupSetting(resolved: ResolvedTrain): Setting {
   if (resolved.warmup_iters <= 0) return { value: 'None' };
   const e = warmupEpochs(resolved);
-  return { value: `${resolved.warmup_iters} optimizer steps`, note: `(${e} ${e === 1 ? 'epoch' : 'epochs'})` };
+  return { value: `${resolved.warmup_iters} ${resolved.warmup_iters === 1 ? 'optimizer step' : 'optimizer steps'}`, note: `(${e} ${e === 1 ? 'epoch' : 'epochs'})` };
 }
 
 /** "Linear to 1%": the decay over the run, to `lrf` of the initial LR at the last step. */
