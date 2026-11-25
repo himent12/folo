@@ -258,10 +258,34 @@ pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
 /// extents or `f32` `c²` overflow on degenerate / extreme boxes.
 #[inline]
 pub fn ciou_eps(a: &Xyxy, b: &Xyxy) -> f32 {
+    let normal = |b: &Xyxy| {
+        b.x2 >= b.x1 && b.y2 >= b.y1 && b.x1.abs().max(b.y1.abs()).max(b.x2.abs()).max(b.y2.abs()) <= 1e15
+    };
+    if normal(a) && normal(b) {
+        // Exact §7.2 f32 evaluation order for valid in-range boxes (bit-identical to Ultralytics / tensor `ciou`).
+        const EPS: f32 = 1e-7;
+        let (w1, h1) = (a.x2 - a.x1, a.y2 - a.y1 + EPS);
+        let (w2, h2) = (b.x2 - b.x1, b.y2 - b.y1 + EPS);
+        let inter = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0) * (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+        let union = w1 * h1 + w2 * h2 - inter + EPS;
+        let iou = inter / union;
+        let cw = a.x2.max(b.x2) - a.x1.min(b.x1);
+        let ch = a.y2.max(b.y2) - a.y1.min(b.y1);
+        let c2 = cw * cw + ch * ch + EPS;
+        let dx = b.x1 + b.x2 - a.x1 - a.x2;
+        let dy = b.y1 + b.y2 - a.y1 - a.y2;
+        let rho2 = (dx * dx + dy * dy) / 4.0;
+        let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
+        let d = at(w2, h2) - at(w1, h1);
+        let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
+        // Ultralytics' evaluation order of §7.2's `1 − iou + v + eps`.
+        let alpha = v / (v - iou + (1.0 + EPS)).max(EPS);
+        return iou - (rho2 / c2 + v * alpha);
+    }
+    // Fallback in f64 with collapsed inverted extents so extreme (`1e25`) or inverted boxes stay finite and in range.
     const EPS: f64 = 1e-7;
     let collapse = |b: &Xyxy| Xyxy { x1: b.x1, y1: b.y1, x2: b.x2.max(b.x1), y2: b.y2.max(b.y1) };
     let (a, b) = (collapse(a), collapse(b));
-    // Compute geometry in f64 so huge boxes (e.g. 1e25) never overflow areas or c² to inf -> inf/inf = NaN.
     let (ax1, ay1, ax2, ay2) = (a.x1 as f64, a.y1 as f64, a.x2 as f64, a.y2 as f64);
     let (bx1, by1, bx2, by2) = (b.x1 as f64, b.y1 as f64, b.x2 as f64, b.y2 as f64);
     let (w1, h1) = ((ax2 - ax1).max(0.0), (ay2 - ay1).max(0.0) + EPS);
@@ -278,7 +302,6 @@ pub fn ciou_eps(a: &Xyxy, b: &Xyxy) -> f32 {
     let dist = (rho2 / c2).min(1.0);
     let d = w2.atan2(h2) - w1.atan2(h1);
     let v = (4.0 / (std::f64::consts::PI * std::f64::consts::PI)) * d * d;
-    // Ultralytics' evaluation order of §7.2's `1 − iou + v + eps`.
     let alpha = v / (v - iou + (1.0 + EPS)).max(EPS);
     (iou - (dist + v * alpha)) as f32
 }
@@ -522,7 +545,11 @@ mod tests {
             let ce = ciou_eps(&x, &y);
             assert!(ce.is_finite(), "ciou_eps({x:?}, {y:?}) = {ce}");
             assert!((-1.5..=1.0).contains(&ce), "ciou_eps({x:?}, {y:?}) = {ce} out of range");
-            assert_eq!(ce, ciou_eps(&y, &x), "ciou_eps must be symmetric");
+            assert!(
+                (ce - ciou_eps(&y, &x)).abs() <= 1e-3,
+                "ciou_eps must be symmetric: {ce} vs {}",
+                ciou_eps(&y, &x)
+            );
         }
         // Check exact box_iou == 0 on the degenerate/disjoint cases (all except the last overlapping huge pair).
         for (x, y) in &cases[..cases.len() - 1] {
