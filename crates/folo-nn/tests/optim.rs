@@ -163,6 +163,56 @@ fn standard_groups_and_schedule_application() {
 }
 
 #[test]
+fn standard_groups_puts_v2_scale_and_gate_params_in_no_decay_bn_group() {
+    struct V2Like {
+        w3x3: Tensor,
+        gamma_id: Tensor,
+        alpha_raw: Tensor,
+        gamma_id_extra: Tensor,
+        bias: Tensor,
+    }
+    impl Module for V2Like {
+        fn visit_tensors(&self, f: &mut dyn FnMut(&str, &Tensor, TensorKind)) {
+            f("block.w3x3", &self.w3x3, TensorKind::Parameter);
+            f("block.gamma_id", &self.gamma_id, TensorKind::Parameter);
+            f("head.o2o_cls.0.suppress.alpha_raw", &self.alpha_raw, TensorKind::Parameter);
+            f("block.gamma_id_extra", &self.gamma_id_extra, TensorKind::Parameter);
+            f("head.bias", &self.bias, TensorKind::Parameter);
+        }
+    }
+    let m = V2Like {
+        w3x3: Tensor::ones([4, 4, 3, 3]).requires_grad_(),
+        gamma_id: Tensor::ones([4]).requires_grad_(),
+        alpha_raw: Tensor::full([3], -2.0).requires_grad_(),
+        gamma_id_extra: Tensor::ones([4, 4]).requires_grad_(),
+        bias: Tensor::zeros([3]).requires_grad_(),
+    };
+    let sg = StandardGroups::from_module(&m);
+    let names = |v: &[(String, Tensor)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&sg.bn), ["block.gamma_id", "head.o2o_cls.0.suppress.alpha_raw"]);
+    assert_eq!(names(&sg.decay), ["block.w3x3", "block.gamma_id_extra"]);
+    assert_eq!(names(&sg.bias), ["head.bias"]);
+    // Top-level parameter names without dots match too.
+    struct TopScale(Tensor, Tensor, Tensor);
+    impl Module for TopScale {
+        fn visit_tensors(&self, f: &mut dyn FnMut(&str, &Tensor, TensorKind)) {
+            f("gamma_id", &self.0, TensorKind::Parameter);
+            f("alpha_raw", &self.1, TensorKind::Parameter);
+            // Rank-2 tensor with an exact scale name must keep weight decay.
+            f("proj.gamma_id", &self.2, TensorKind::Parameter);
+        }
+    }
+    let top = StandardGroups::from_module(&TopScale(
+        Tensor::ones([4]).requires_grad_(),
+        Tensor::ones([4]).requires_grad_(),
+        Tensor::ones([4, 4]).requires_grad_(),
+    ));
+    assert_eq!(names(&top.bn), ["gamma_id", "alpha_raw"]);
+    assert_eq!(names(&top.decay), ["proj.gamma_id"]);
+    assert!(top.bias.is_empty());
+}
+
+#[test]
 fn accumulation_and_clipping() {
     let (p, q) = (param(&[1.0, 2.0]), param(&[3.0]));
     let mut acc = GradAccumulator::new(&[p.clone(), q.clone()]);

@@ -277,46 +277,93 @@ fn train_cpu<const ACT: u8>(
     let (nb, c, h, w) = x.dims4()?;
     let hw = h * w;
     let n = (nb * hw) as f64;
+    let g = gamma.to_vec::<f32>()?;
+    let bv = beta.to_vec::<f32>()?;
+    // Channel-parallel fuses the two passes per channel while its `nb` planes stay hot in L1/L2; only use it
+    // when there are enough channels to load-balance all threads and one channel fits comfortably in cache.
+    const CHANNEL_CACHE_FLOATS: usize = 32_768;
+    let channel_par =
+        hw > 0 && c >= 4 * rayon::current_num_threads() && nb.saturating_mul(hw) <= CHANNEL_CACHE_FLOATS;
     // One read of x: each plane's sum and moments (`plane_stats`), combined per channel in image order: the
     // sums added (the mean is `Σ / n`), the moments merged with Chan's formula (the variance is `M2 / n`).
-    // Deterministic for any thread count. Planes are the parallel unit, so a layer with few channels still uses
-    // every thread.
-    let (mean, inv, var) = x.with_f32_slice(|xs| {
-        let planes: Vec<(f64, Moments)> = if hw == 0 {
-            vec![(0.0, Moments::default()); nb * c]
-        } else {
-            xs.par_chunks(hw).map(|p| with_avx2(|| plane_stats(p))).collect()
-        };
-        let stats: Vec<(f64, Moments)> = (0..c)
-            .map(|ch| {
-                (0..nb)
-                    .map(|b| planes[b * c + ch])
-                    .fold((0.0, Moments::default()), |a, p| (a.0 + p.0, Moments::merge(a.1, p.1)))
-            })
-            .collect();
-        let var: Vec<f64> = stats.iter().map(|s| s.1.m2 / n).collect();
-        let inv: Vec<f32> = var.iter().map(|v| (1.0 / (v + eps).sqrt()) as f32).collect();
-        let mean: Vec<f32> = stats.iter().map(|s| (s.0 / n) as f32).collect();
-        (mean, inv, var.iter().map(|&v| v as f32).collect::<Vec<f32>>())
-    })?;
-    let g = gamma.to_vec::<f32>()?;
-    let scale: Vec<f32> = inv.iter().zip(&g).map(|(i, g)| i * g).collect();
-    let bv = beta.to_vec::<f32>()?;
-    let y = x.with_f32_slice(|xs| {
+    // Deterministic for any thread count. When there are enough channels to saturate the thread pool, each
+    // channel runs stats + normalise back-to-back so its `nb` planes stay hot in L2/L3; otherwise planes are
+    // the parallel unit so a narrow layer still uses every thread.
+    let (y, mean, inv, var, scale) = x.with_f32_slice(|xs| {
         // Every element is written below.
         let mut y = folo_core::cpu::take_buffer(xs.len());
-        if hw > 0 {
-            y.par_chunks_mut(hw).zip(xs.par_chunks(hw)).enumerate().for_each(|(p, (o, xp))| {
-                let ch = p % c;
-                let (m, s, b) = (mean[ch], scale[ch], bv[ch]);
-                with_avx2(|| {
-                    for (o, &v) in o.iter_mut().zip(xp) {
-                        *o = act_fwd::<ACT>((v - m) * s + b);
-                    }
+        if channel_par {
+            let ch_planes = split_planes_by_channel(&mut y, nb, c, hw);
+            let ch_stats: Vec<(f32, f32, f32, f32)> = ch_planes
+                .into_par_iter()
+                .enumerate()
+                .map(|(ch, mut planes)| {
+                    let (g_ch, b_ch) = (g[ch], bv[ch]);
+                    with_avx2(|| {
+                        let mut sum = 0.0f64;
+                        let mut mom = Moments::default();
+                        for b in 0..nb {
+                            let base = (b * c + ch) * hw;
+                            let (ps, pm) = plane_stats(&xs[base..base + hw]);
+                            sum += ps;
+                            mom = Moments::merge(mom, pm);
+                        }
+                        let v = mom.m2 / n;
+                        let inv_ch = (1.0 / (v + eps).sqrt()) as f32;
+                        let mean_ch = (sum / n) as f32;
+                        let scale_ch = inv_ch * g_ch;
+                        for (b, o) in planes.iter_mut().enumerate() {
+                            let base = (b * c + ch) * hw;
+                            for (dst, &val) in o.iter_mut().zip(&xs[base..base + hw]) {
+                                *dst = act_fwd::<ACT>((val - mean_ch) * scale_ch + b_ch);
+                            }
+                        }
+                        (mean_ch, inv_ch, v as f32, scale_ch)
+                    })
+                })
+                .collect();
+            let mut mean = Vec::with_capacity(c);
+            let mut inv = Vec::with_capacity(c);
+            let mut var = Vec::with_capacity(c);
+            let mut scale = Vec::with_capacity(c);
+            for (m, i, v, s) in ch_stats {
+                mean.push(m);
+                inv.push(i);
+                var.push(v);
+                scale.push(s);
+            }
+            (y, mean, inv, var, scale)
+        } else {
+            let planes: Vec<(f64, Moments)> = if hw == 0 {
+                vec![(0.0, Moments::default()); nb * c]
+            } else {
+                xs.par_chunks(hw).map(|p| with_avx2(|| plane_stats(p))).collect()
+            };
+            let stats: Vec<(f64, Moments)> = (0..c)
+                .map(|ch| {
+                    (0..nb)
+                        .map(|b| planes[b * c + ch])
+                        .fold((0.0, Moments::default()), |a, p| (a.0 + p.0, Moments::merge(a.1, p.1)))
+                })
+                .collect();
+            let var_f64: Vec<f64> = stats.iter().map(|s| s.1.m2 / n).collect();
+            let inv: Vec<f32> = var_f64.iter().map(|v| (1.0 / (v + eps).sqrt()) as f32).collect();
+            let mean: Vec<f32> = stats.iter().map(|s| (s.0 / n) as f32).collect();
+            let var: Vec<f32> = var_f64.iter().map(|&v| v as f32).collect();
+            let scale: Vec<f32> = inv.iter().zip(&g).map(|(i, g)| i * g).collect();
+            if hw > 0 {
+                y.par_chunks_mut(hw).zip(xs.par_chunks(hw)).enumerate().for_each(|(p, (o, xp))| {
+                    let ch = p % c;
+                    let (m, s, b) = (mean[ch], scale[ch], bv[ch]);
+                    with_avx2(|| {
+                        for (o, &v) in o.iter_mut().zip(xp) {
+                            *o = act_fwd::<ACT>((v - m) * s + b);
+                        }
+                    });
                 });
-            });
+            }
+            (y, mean, inv, var, scale)
         }
-        y
     })?;
     let y = Tensor::from_vec(y, x.shape().clone())?;
     let (mean_t, var_t) = (Tensor::from_slice(&mean, [c])?, Tensor::from_vec(var, [c])?);
@@ -337,56 +384,92 @@ fn train_cpu<const ACT: u8>(
         let gy = gy.contiguous()?;
         let (dx, dg, db) = gy.with_f32_slice(|gs| {
             xd.with_f32_slice(|xs| {
-                // Every element is written below. With an activation, the first pass stores each plane's
-                // `g' = g · act'(z)` here (one vectorised f32 loop) and sums it while it is in cache; the
-                // second pass turns it into dx in place. (Recomputing `g'` in the second pass instead of storing
-                // it measured slower: the pass is compute-bound, not memory-bound.)
+                // Every element is written below. With an activation, the first pass computes each plane's
+                // `g' = g · act'(z)` and reduces it in L1-resident tiles (`bwd_act_and_sum`); the second pass
+                // turns it into dx in place. When `channel_par` holds, both passes run back-to-back per
+                // channel so `xs` and `dx`/`gs` stay hot in L2/L3 across the two passes.
                 let mut dx = folo_core::cpu::take_buffer(xs.len());
-                let planes: Vec<(f64, f64)> = if hw == 0 {
-                    vec![(0.0, 0.0); nb * c]
-                } else {
-                    dx.par_chunks_mut(hw)
-                        .zip(gs.par_chunks(hw))
-                        .zip(xs.par_chunks(hw))
+                let sums: Vec<(f64, f64)> = if channel_par {
+                    let ch_planes = split_planes_by_channel(&mut dx, nb, c, hw);
+                    ch_planes
+                        .into_par_iter()
                         .enumerate()
-                        .map(|(p, ((o, gp), xp))| {
-                            let ch = p % c;
-                            let (m, i, s, b) = (mean[ch], inv[ch], scale[ch], bv[ch]);
+                        .map(|(ch, mut planes)| {
+                            let (m, i, s, b_val) = (mean[ch], inv[ch], scale[ch], bv[ch]);
+                            let k = g[ch] * i / n as f32;
                             with_avx2(|| {
-                                let gp = if ACT == ACT_NONE {
-                                    gp
-                                } else {
-                                    for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
-                                        *o = act_bwd::<ACT>((v - m) * s + b, gv);
-                                    }
-                                    &*o
-                                };
-                                sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                                let (mut sum0, mut sum1) = (0.0f64, 0.0f64);
+                                for (b, o) in planes.iter_mut().enumerate() {
+                                    let base = (b * c + ch) * hw;
+                                    let gp = &gs[base..base + hw];
+                                    let xp = &xs[base..base + hw];
+                                    let (p0, p1) = if ACT == ACT_NONE {
+                                        sum2_f64(gp, xp, |gv, v| {
+                                            (gv as f64, gv as f64 * ((v - m) * i) as f64)
+                                        })
+                                    } else {
+                                        bwd_act_and_sum::<ACT>(o, gp, xp, m, i, s, b_val)
+                                    };
+                                    sum0 += p0;
+                                    sum1 += p1;
+                                }
+                                let (sg, sgx) = (sum0 as f32, sum1 as f32);
+                                for (b, o) in planes.iter_mut().enumerate() {
+                                    let base = (b * c + ch) * hw;
+                                    bwd_write_dx::<ACT>(
+                                        o,
+                                        &gs[base..base + hw],
+                                        &xs[base..base + hw],
+                                        m,
+                                        i,
+                                        k,
+                                        n as f32,
+                                        sg,
+                                        sgx,
+                                    );
+                                }
+                                (sum0, sum1)
                             })
                         })
                         .collect()
-                };
-                let sums = per_channel(&planes);
-                if hw > 0 {
-                    dx.par_chunks_mut(hw).enumerate().for_each(|(p, o)| {
-                        let ch = p % c;
-                        let (m, i) = (mean[ch], inv[ch]);
-                        let k = g[ch] * i / n as f32;
-                        let (sg, sgx) = (sums[ch].0 as f32, sums[ch].1 as f32);
-                        let r = p * hw..(p + 1) * hw;
-                        with_avx2(|| {
-                            if ACT == ACT_NONE {
-                                for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
-                                    *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
-                                }
-                            } else {
-                                for (o, &v) in o.iter_mut().zip(&xs[r]) {
-                                    *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
-                                }
-                            }
+                } else {
+                    let planes: Vec<(f64, f64)> = if hw == 0 {
+                        vec![(0.0, 0.0); nb * c]
+                    } else {
+                        dx.par_chunks_mut(hw)
+                            .zip(gs.par_chunks(hw))
+                            .zip(xs.par_chunks(hw))
+                            .enumerate()
+                            .map(|(p, ((o, gp), xp))| {
+                                let ch = p % c;
+                                let (m, i, s, b_val) = (mean[ch], inv[ch], scale[ch], bv[ch]);
+                                with_avx2(|| {
+                                    if ACT == ACT_NONE {
+                                        sum2_f64(gp, xp, |gv, v| {
+                                            (gv as f64, gv as f64 * ((v - m) * i) as f64)
+                                        })
+                                    } else {
+                                        bwd_act_and_sum::<ACT>(o, gp, xp, m, i, s, b_val)
+                                    }
+                                })
+                            })
+                            .collect()
+                    };
+                    let sums = per_channel(&planes);
+                    if hw > 0 {
+                        dx.par_chunks_mut(hw).enumerate().for_each(|(p, o)| {
+                            let ch = p % c;
+                            let (m, i) = (mean[ch], inv[ch]);
+                            let k = g[ch] * i / n as f32;
+                            let (sg, sgx) = (sums[ch].0 as f32, sums[ch].1 as f32);
+                            let r = p * hw..(p + 1) * hw;
+                            with_avx2(|| {
+                                bwd_write_dx::<ACT>(o, &gs[r.clone()], &xs[r], m, i, k, n as f32, sg, sgx);
+                            });
                         });
-                    });
-                }
+                    }
+                    sums
+                };
                 let dg: Vec<f32> = sums.iter().map(|s| s.1 as f32).collect();
                 let db: Vec<f32> = sums.iter().map(|s| s.0 as f32).collect();
                 (dx, dg, db)
@@ -496,6 +579,92 @@ fn plane_stats(p: &[f32]) -> (f64, Moments) {
     }
     let tail: f64 = tail.iter().map(|&v| v as f64).sum();
     (acc.iter().sum::<f64>() + tail, m)
+}
+
+/// Split a flat `[N, C, H, W]` buffer (`hw = H·W > 0`) into per-channel lists of `N` disjoint plane slices,
+/// ordered by batch index `0..nb`.
+fn split_planes_by_channel(buf: &mut [f32], nb: usize, c: usize, hw: usize) -> Vec<Vec<&mut [f32]>> {
+    let mut by_ch: Vec<Vec<&mut [f32]>> = (0..c).map(|_| Vec::with_capacity(nb)).collect();
+    for (p, plane) in buf.chunks_mut(hw).enumerate() {
+        by_ch[p % c].push(plane);
+    }
+    by_ch
+}
+
+/// Floats per L1-resident backward tile: a multiple of 8 (AVX2 width) and 4 (`sum2_f64` lanes), 1 KiB per
+/// slice so `o`, `gp` and `xp` (3 KiB total) stay in L1d between `act_bwd` and the reduction.
+const BWD_BLOCK: usize = 256;
+const _: () = assert!(BWD_BLOCK.is_multiple_of(4));
+
+/// Compute `o = g · act'(z)` and accumulate `(Σ g', Σ g' · x̂)` in `f64` in [`BWD_BLOCK`]-float L1 tiles.
+/// Because `BWD_BLOCK` is a multiple of 4, every 4-lane accumulator sees the same elements in the same order
+/// as an unblocked pass followed by [`sum2_f64`], keeping the result bit-for-bit identical.
+#[inline]
+fn bwd_act_and_sum<const ACT: u8>(
+    o: &mut [f32],
+    gp: &[f32],
+    xp: &[f32],
+    m: f32,
+    i: f32,
+    s: f32,
+    b: f32,
+) -> (f64, f64) {
+    let (mut s0, mut s1) = ([0f64; 4], [0f64; 4]);
+    let mut tail_o = [0.0f32; 3];
+    let mut tail_x = [0.0f32; 3];
+    let mut tail_len = 0usize;
+    for ((ob, gpb), xpb) in o.chunks_mut(BWD_BLOCK).zip(gp.chunks(BWD_BLOCK)).zip(xp.chunks(BWD_BLOCK)) {
+        for ((dst, &gv), &v) in ob.iter_mut().zip(gpb).zip(xpb) {
+            *dst = act_bwd::<ACT>((v - m) * s + b, gv);
+        }
+        let (co, ro) = ob.as_chunks::<4>();
+        let (cx, rx) = xpb.as_chunks::<4>();
+        for (g4, x4) in co.iter().zip(cx) {
+            for k in 0..4 {
+                let g = g4[k] as f64;
+                s0[k] += g;
+                s1[k] += g * ((x4[k] - m) * i) as f64;
+            }
+        }
+        if !ro.is_empty() {
+            tail_len = ro.len();
+            tail_o[..tail_len].copy_from_slice(ro);
+            tail_x[..tail_len].copy_from_slice(rx);
+        }
+    }
+    let (mut t0, mut t1) = (s0.iter().sum::<f64>(), s1.iter().sum::<f64>());
+    for k in 0..tail_len {
+        let g = tail_o[k] as f64;
+        t0 += g;
+        t1 += g * ((tail_x[k] - m) * i) as f64;
+    }
+    (t0, t1)
+}
+
+/// Write `dx = k · (n · g' − Σg' − x̂ · Σ(g' · x̂))` for one plane (`g'` is `gp` when `ACT == ACT_NONE`,
+/// else already stored in `o`).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn bwd_write_dx<const ACT: u8>(
+    o: &mut [f32],
+    gp: &[f32],
+    xp: &[f32],
+    m: f32,
+    i: f32,
+    k: f32,
+    n: f32,
+    sg: f32,
+    sgx: f32,
+) {
+    if ACT == ACT_NONE {
+        for ((dst, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
+            *dst = k * (n * gv - sg - (v - m) * i * sgx);
+        }
+    } else {
+        for (dst, &v) in o.iter_mut().zip(xp) {
+            *dst = k * (n * *dst - sg - (v - m) * i * sgx);
+        }
+    }
 }
 
 /// The two sums `(sum f(a, b).0, sum f(a, b).1)` in `f64` with 4 independent accumulator pairs.
@@ -636,7 +805,7 @@ mod tests {
     fn fused_activation_is_bitwise_bn_then_act() {
         let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         for act in [Activation::Silu, Activation::Relu] {
-            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8], [2, 3, 33, 17]] {
+            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8], [2, 3, 33, 17], [2, 128, 19, 17]] {
                 let mut rng = Rng::seed(11);
                 let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
                 let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
@@ -764,7 +933,9 @@ mod tests {
             }
         }
         let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-        for dims in [[3, 2, 1, 1], [2, 3, 5, 7], [2, 2, 16, 16], [1, 2, 17, 19], [2, 3, 33, 17]] {
+        for dims in
+            [[3, 2, 1, 1], [2, 3, 5, 7], [2, 2, 16, 16], [1, 2, 17, 19], [2, 3, 33, 17], [2, 128, 19, 17]]
+        {
             let mut rng = Rng::seed(13);
             let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
             let gamma = Tensor::rand_uniform([dims[1]], 0.5, 1.5, &mut rng).requires_grad_();
@@ -779,6 +950,38 @@ mod tests {
                 (bits(&y), bits(&m), bits(&v), grads)
             };
             assert_eq!(run(false), run(true), "{dims:?}");
+        }
+    }
+
+    /// Channel-parallel (`c >= 4 * threads`) and plane-parallel (`c < 4 * threads`) match bit for bit on
+    /// forward output, batch stats, and all three gradients across all fused activations, `nb == 1`, and
+    /// ragged multi-tile planes (`hw > BWD_BLOCK`, `hw % 4 != 0`).
+    #[test]
+    fn channel_par_matches_plane_par_bitwise() {
+        let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let p1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let p8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+        for dims in [[2, 16, 19, 17], [1, 16, 17, 15]] {
+            let mut rng = Rng::seed(29);
+            let x = Tensor::randn(dims, 0.2, 1.4, &mut rng).requires_grad_();
+            let gamma = Tensor::rand_uniform([dims[1]], 0.5, 1.5, &mut rng).requires_grad_();
+            let beta = Tensor::rand_uniform([dims[1]], -0.5, 0.5, &mut rng).requires_grad_();
+            let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
+            let eval = |pool: &rayon::ThreadPool, act: u8| {
+                pool.install(|| {
+                    let (y, m, v) = match act {
+                        ACT_SILU => train_cpu::<ACT_SILU>(&x, &gamma, &beta, BN_EPS).unwrap(),
+                        ACT_RELU => train_cpu::<ACT_RELU>(&x, &gamma, &beta, BN_EPS).unwrap(),
+                        _ => train_cpu::<ACT_NONE>(&x, &gamma, &beta, BN_EPS).unwrap(),
+                    };
+                    let gr = y.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
+                    let grads = [&x, &gamma, &beta].map(|t| bits(gr.get(t).unwrap()));
+                    (bits(&y), bits(&m), bits(&v), grads)
+                })
+            };
+            for act in [ACT_NONE, ACT_SILU, ACT_RELU] {
+                assert_eq!(eval(&p1, act), eval(&p8, act), "{dims:?} act={act}");
+            }
         }
     }
 }

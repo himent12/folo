@@ -9,7 +9,7 @@ use folo_core::rng::Rng;
 use folo_core::{Grads, Tensor};
 use folo_nn::io::{FileKind, LoadOptions, Metadata, ModelConfig, ModelFile, Purpose, save_weights};
 use folo_nn::optim::{AdamW, GradAccumulator, MuSgd, Optimizer, ParamGroup, Sgd};
-use folo_nn::{BatchNorm2d, Conv2d, Conv2dConfig, Forward, ModelEma, ModuleList};
+use folo_nn::{Activation, BatchNorm2d, Conv2d, Conv2dConfig, Forward, ModelEma, ModuleList};
 
 fn bench(budget: Duration, mut f: impl FnMut()) -> Duration {
     f();
@@ -51,13 +51,17 @@ fn main() {
         let fused = bench(budget, || {
             let _ = bn.forward(&x).unwrap().sum_all().unwrap().backward().unwrap();
         });
+        let fused_silu = bench(budget, || {
+            let _ = bn.forward_act(&x, Activation::Silu).unwrap().sum_all().unwrap().backward().unwrap();
+        });
         let comp = bench(budget, || {
             let _ = bn_composite(&x, &bn).sum_all().unwrap().backward().unwrap();
         });
         let gb = (n * c * hw * hw * 4) as f64 / 1e9;
         println!(
-            "  [{n}, {c}, {hw}, {hw}] ({gb:.2} GB): fused {:.2} ms, composite {:.2} ms ({:.1}x)",
+            "  [{n}, {c}, {hw}, {hw}] ({gb:.2} GB): fused {:.2} ms, fused+SiLU {:.2} ms, composite {:.2} ms ({:.1}x)",
             ms(fused),
+            ms(fused_silu),
             ms(comp),
             comp.as_secs_f64() / fused.as_secs_f64()
         );
