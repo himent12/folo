@@ -145,8 +145,8 @@ pub fn gemm_cat(
         }
         _ => return Err(shape_err("gemm_cat: only a row bias is supported")),
     };
-    let bufs: Vec<&wgpu::Buffer> =
-        (1..MAX_CAT_PARTS).map(|i| parts.get(i).map_or(ctx.dummy(), |p| p.buf)).collect();
+    let bufs: [&wgpu::Buffer; MAX_CAT_PARTS - 1] =
+        std::array::from_fn(|i| parts.get(i + 1).map_or(ctx.dummy(), |p| p.buf));
     let mut p = gemm_params(d)?.at(CAT_WORD);
     for v in table {
         p = p.u(v);
@@ -186,7 +186,6 @@ pub fn gemm_cat(
         d.m.div_ceil(cfg.bm as usize) as u32,
         u32::try_from(d.batch.0).map_err(|_| GpuError::Limit("gemm_cat batch too large".into()))?,
     ];
-    let mut all = vec![a, parts[0].buf, bias_buf, c];
-    all.extend(bufs);
+    let all = [a, parts[0].buf, bias_buf, c, bufs[0], bufs[1], bufs[2]];
     ctx.dispatch(&k, &all, &p, groups)
 }

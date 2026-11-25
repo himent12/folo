@@ -212,3 +212,47 @@ fn gemm_rejects_bad_configs_and_sizes() {
     let d = GemmDesc::new(128, 128, 128, false, false, 1);
     assert!(gemm::gemm(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw()).is_err());
 }
+
+/// `K == 0` produces `act(bias)` (or `act(0)` without bias) without reading `A` or `B`, for both
+/// tile-aligned (`CHECK=false`) and ragged (`CHECK=true`) shapes and in f16 when supported.
+#[test]
+fn gemm_k_zero_skips_loads_and_applies_epilogue() {
+    let ctx = gpu!();
+    let mut rng = Rng::new(71);
+    let dtypes: &[DType] = if ctx.caps().shader_f16 { &[DType::F32, DType::F16] } else { &[DType::F32] };
+    for &dtype in dtypes {
+        for (m, n, cfg) in [(64, 64, Some(TileConfig::SMALL)), (13, 17, None)] {
+            let mut bias = rng.vec(m, -1.0, 1.0);
+            if dtype == DType::F16 {
+                bias = f16_round(&bias);
+            }
+            let mut d = GemmDesc::new(m, n, 0, false, false, 2);
+            d.dtype = dtype;
+            d.bias = GemmBias::Row;
+            d.act = UnaryOp::Silu;
+            let gb = match dtype {
+                DType::F32 => GpuTensor::from_slice(&ctx, &bias, &[m]).unwrap(),
+                DType::F16 => GpuTensor::from_f16(&ctx, &to_f16(&bias), &[m]).unwrap(),
+            };
+            let gc = GpuTensor::empty(&ctx, &[2 * m * n], dtype).unwrap();
+            // Dummy buffers for A and B: K == 0 must not read them even when CHECK == false.
+            match cfg {
+                Some(cfg) => {
+                    gemm::gemm_with_config(&ctx, &d, ctx.dummy(), ctx.dummy(), Some(gb.raw()), gc.raw(), cfg)
+                        .unwrap();
+                }
+                None => gemm::gemm(&ctx, &d, ctx.dummy(), ctx.dummy(), Some(gb.raw()), gc.raw()).unwrap(),
+            }
+            let got = gc.to_vec().unwrap();
+            let mut want = vec![0f32; 2 * m * n];
+            for b in 0..2 {
+                for r in 0..m {
+                    let v = d.act.apply(bias[r]);
+                    want[b * m * n + r * n..b * m * n + (r + 1) * n].fill(v);
+                }
+            }
+            let (atol, rtol) = if dtype == DType::F16 { (2e-3, 2e-3) } else { (1e-5, 1e-5) };
+            assert_close(&got, &want, atol, rtol, &format!("gemm k=0 {m}x{n} {dtype:?}"));
+        }
+    }
+}
