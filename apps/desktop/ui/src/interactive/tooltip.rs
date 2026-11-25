@@ -182,9 +182,10 @@ fn check_visible_and_update(
 impl TooltipId {
     /// Whether the mouse is over the tooltip shown this frame with this id.
     pub fn is_hovered(&self, window: &Window) -> bool {
-        window
-            .tooltip_bounds
-            .as_ref()
-            .is_some_and(|(id, bounds)| id == self && bounds.contains(&window.mouse_position()))
+        window.hovered.get()
+            && window
+                .tooltip_bounds
+                .as_ref()
+                .is_some_and(|(id, bounds)| id == self && bounds.contains(&window.mouse_position()))
     }
 }

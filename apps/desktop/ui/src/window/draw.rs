@@ -235,7 +235,7 @@ impl Window {
                 bounds.origin.x = if new_x >= Pixels::ZERO {
                     new_x
                 } else {
-                    Pixels::ZERO.max(bounds.origin.x - bounds.right() - window_bounds.right())
+                    Pixels::ZERO.max(window_bounds.right() - bounds.size.width)
                 };
             }
             if bounds.bottom() > window_bounds.bottom() {
@@ -243,7 +243,7 @@ impl Window {
                 bounds.origin.y = if new_y >= Pixels::ZERO {
                     new_y
                 } else {
-                    Pixels::ZERO.max(bounds.origin.y - bounds.bottom() - window_bounds.bottom())
+                    Pixels::ZERO.max(window_bounds.bottom() - bounds.size.height)
                 };
             }
             if !(request.tooltip.check_visible_and_update)(bounds, self, cx) {

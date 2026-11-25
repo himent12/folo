@@ -49,6 +49,11 @@ impl Chrome {
         }
     }
 
+    /// Disarms any pending caption button (for example when the window loses focus).
+    pub fn cancel(&mut self) {
+        self.armed = None;
+    }
+
     /// A left release over `area`, `handled` by the app or not.
     pub fn release(&mut self, area: Option<WindowControlArea>, handled: bool) -> ChromeAction {
         let armed = self.armed.take();
@@ -96,5 +101,9 @@ mod tests {
         assert_eq!(chrome.release(Some(Close), false), ChromeAction::None);
         chrome.press(Some(Close), false, 1);
         assert_eq!(chrome.release(Some(Close), true), ChromeAction::None);
+        // Cancelled before release (for example on window deactivation): disarmed.
+        chrome.press(Some(Close), false, 1);
+        chrome.cancel();
+        assert_eq!(chrome.release(Some(Close), false), ChromeAction::None);
     }
 }

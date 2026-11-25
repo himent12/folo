@@ -72,6 +72,10 @@ impl WindowInner {
             WM_MOUSEWHEEL => self.handle_mouse_wheel(hwnd, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel(hwnd, wparam, lparam),
             WM_CAPTURECHANGED => self.handle_capture_changed(hwnd, lparam),
+            WM_CANCELMODE => {
+                self.end_presses(hwnd);
+                None
+            }
             WM_SYSKEYDOWN => self.handle_syskeydown(hwnd, wparam, lparam),
             WM_SYSKEYUP => self.handle_syskeyup(hwnd, wparam, lparam),
             WM_SYSCOMMAND => self.handle_system_command(wparam),
@@ -421,10 +425,16 @@ impl WindowInner {
         Some(0)
     }
 
-    /// Ends the buttons pressed in the window: lets go of the capture if we hold it (whose
-    /// `WM_CAPTURECHANGED` releases them), and releases any still pressed.
+    /// Ends the buttons pressed in the window: clears any armed non-client caption button, lets go of
+    /// the capture if we hold it (whose `WM_CAPTURECHANGED` releases them), and releases any still
+    /// pressed.
     fn end_presses(&self, hwnd: HWND) {
-        if self.state.borrow().pressed_buttons.is_empty() {
+        let empty = {
+            let mut state = self.state.borrow_mut();
+            state.nc_button_pressed = None;
+            state.pressed_buttons.is_empty()
+        };
+        if empty {
             return;
         }
         // SAFETY: plain capture calls for our own window.
@@ -459,6 +469,7 @@ impl WindowInner {
     fn cancel_presses(&self, hwnd: HWND) {
         let (buttons, click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
+            state.nc_button_pressed = None;
             (std::mem::take(&mut state.pressed_buttons), state.click_state.current_count, state.scale_factor)
         };
         if buttons.is_empty() {

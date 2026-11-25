@@ -116,7 +116,9 @@ impl Interactivity {
                 let pending_mouse_down = pending_mouse_down.clone();
                 let source_bounds = hitbox.bounds;
                 move |window: &Window| {
-                    pending_mouse_down.borrow().is_none() && source_bounds.contains(&window.mouse_position())
+                    window.hovered.get()
+                        && pending_mouse_down.borrow().is_none()
+                        && source_bounds.contains(&window.mouse_position())
                 }
             });
             let check_is_hovered = Rc::new({

@@ -124,8 +124,9 @@ impl Window {
 
     /// Clears focus.
     pub fn blur(&mut self) {
-        self.focus = None;
-        self.refresh();
+        if self.focus.take().is_some() {
+            self.refresh();
+        }
     }
 
     /// The focused handle, if any (and still alive).

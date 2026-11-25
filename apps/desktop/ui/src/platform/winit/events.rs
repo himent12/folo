@@ -54,6 +54,9 @@ impl WindowInner {
             WindowEvent::CloseRequested => self.request_close(),
             WindowEvent::Focused(active) => {
                 self.state.borrow_mut().active = active;
+                if !active {
+                    self.cancel_presses();
+                }
                 call(&self.callbacks.active_status_change, |callback| callback(active));
             }
             WindowEvent::ThemeChanged(_) => {
@@ -149,6 +152,28 @@ impl WindowInner {
     pub fn request_close(&self) {
         if call(&self.callbacks.should_close, |callback| callback()).unwrap_or(true) {
             self.close();
+        }
+    }
+
+    /// Releases any buttons still pressed when the window loses focus, outside the client area so a
+    /// cancelled press clears pressed state without firing a click or drop.
+    fn cancel_presses(&self) {
+        let (buttons, position, modifiers, click_count) = {
+            let mut state = self.state.borrow_mut();
+            state.chrome.cancel();
+            (
+                std::mem::take(&mut state.pressed_buttons),
+                state.mouse_position,
+                state.modifiers,
+                state.clicks.count(),
+            )
+        };
+        if buttons.is_empty() {
+            return;
+        }
+        let position = cancelled_release_position(position, self.content_size());
+        for button in buttons {
+            self.dispatch(PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count }));
         }
     }
 
@@ -321,6 +346,19 @@ pub(crate) fn utf16_range(text: &str, bytes: Range<usize>) -> Range<usize> {
     units(bytes.start)..units(bytes.end)
 }
 
+/// Keeps a cancelled press's release outside `[0..=width, 0..=height]` so it clears pressed state
+/// without landing on an in-window click or drop target.
+fn cancelled_release_position(
+    position: crate::Point<crate::Pixels>,
+    size: crate::Size<crate::Pixels>,
+) -> crate::Point<crate::Pixels> {
+    if position.x >= px(0.) && position.x <= size.width && position.y >= px(0.) && position.y <= size.height {
+        point(px(-1.), px(-1.))
+    } else {
+        position
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +430,15 @@ mod tests {
         // With no composition it changes nothing.
         cancel_composition(&mut field);
         assert_eq!((field.text.as_str(), field.selection.clone()), ("ab", 2..2));
+    }
+
+    #[test]
+    fn cancelled_release_position_moves_in_client_coordinates_outside() {
+        let viewport = crate::size(px(200.), px(100.));
+        assert_eq!(cancelled_release_position(point(px(50.), px(50.)), viewport), point(px(-1.), px(-1.)));
+        assert_eq!(cancelled_release_position(point(px(0.), px(0.)), viewport), point(px(-1.), px(-1.)));
+        assert_eq!(cancelled_release_position(point(px(200.), px(100.)), viewport), point(px(-1.), px(-1.)));
+        let outside = point(px(240.), px(40.));
+        assert_eq!(cancelled_release_position(outside, viewport), outside);
     }
 }

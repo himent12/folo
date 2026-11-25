@@ -620,3 +620,42 @@ fn off_screen_the_backend_launches_no_dialog_explorer_or_browser() {
     );
     assert_eq!(recorder.0.borrow().len(), 4);
 }
+
+/// Deactivating the window or cancelling mode disarms a held caption button (`HTCLOSE`) so a later
+/// non-client release does not close the window.
+#[test]
+fn deactivation_and_cancel_mode_disarm_caption_button_press() {
+    let platform = platform();
+    let window = platform.open_windows_window(hidden_params()).unwrap();
+    let hwnd = window.hwnd();
+    let close_asks = Rc::new(std::cell::Cell::new(0usize));
+    window.on_should_close(Box::new({
+        let close_asks = close_asks.clone();
+        move || {
+            close_asks.set(close_asks.get() + 1);
+            false
+        }
+    }));
+
+    // Baseline: pressing and releasing HTCLOSE triggers WM_CLOSE -> should_close.
+    send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
+    send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
+    pump();
+    assert_eq!(close_asks.replace(0), 1, "press+release on HTCLOSE asks to close");
+
+    // Deactivating while HTCLOSE is held disarms it.
+    send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
+    send(hwnd, WM_ACTIVATE, WA_INACTIVE as usize, 0);
+    send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
+    pump();
+    assert_eq!(close_asks.replace(0), 0, "deactivation disarms HTCLOSE");
+
+    // WM_CANCELMODE while HTCLOSE is held also disarms it.
+    send(hwnd, WM_NCLBUTTONDOWN, HTCLOSE as usize, 0);
+    send(hwnd, WM_CANCELMODE, 0, 0);
+    send(hwnd, WM_NCLBUTTONUP, HTCLOSE as usize, 0);
+    pump();
+    assert_eq!(close_asks.replace(0), 0, "WM_CANCELMODE disarms HTCLOSE");
+
+    destroy(hwnd);
+}
