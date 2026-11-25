@@ -7,7 +7,7 @@ import { AppendLog } from '$lib/api/appendLog';
 import { stepsPerEpoch } from '$lib/api/progress';
 import type { Epoch, Step } from '$lib/api/types';
 import { smooth, type Pt } from '$lib/charts/downsample';
-import { EpochSeries, joinExtents, liveHorizon, Smoother, StepSeries, type StepField } from './metricSeries';
+import { countNonPositive, EpochSeries, joinExtents, liveHorizon, Smoother, StepSeries, type StepField } from './metricSeries';
 
 /** A seeded PRNG (mulberry32): the same series every run. */
 function rng(seed: number) {
@@ -149,6 +149,21 @@ describe('StepSeries', () => {
     const before = series.rev;
     series.sync(40);
     expect(series.rev).toBe(before);
+  });
+
+  it('counts finite non-positive values per track for log-scale safety', () => {
+    const log = new AppendLog<Step>();
+    const series = new StepSeries(log);
+    log.push(
+      { step: 1, epoch: 1, loss: { total: 0, box: -0.5, cls: 1, dfl: NaN }, lr: 1e-3, imgs_per_s: 10, eta_s: null } as unknown as Step,
+      { step: 2, epoch: 1, loss: { total: 1.5, box: 0, cls: 0.5, dfl: 0.2 }, lr: 1e-3, imgs_per_s: 10, eta_s: null } as unknown as Step,
+    );
+    series.sync(10);
+    expect(series.raw('total').ext.nonPos).toBe(1);
+    expect(series.raw('box').ext.nonPos).toBe(2);
+    expect(series.raw('cls').ext.nonPos).toBe(0);
+    expect(series.raw('dfl').ext.nonPos).toBe(0);
+    expect(countNonPositive([series.raw('total').ext, series.raw('box').ext, series.raw('cls').ext, series.raw('dfl').ext])).toBe(3);
   });
 });
 

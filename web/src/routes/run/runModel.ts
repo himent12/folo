@@ -3,13 +3,13 @@
  * series in the series hues (mAP50-95 sky with the page's one area fill, mAP50 amber dashed, precision magenta, recall
  * teal dashed, the learning rate neutral, the loss terms in their README hues), their fitted y domains, the one x axis
  * the charts share (the planned run while it trains, its future shaded with the ETA over the boundary; "So far" fits
- * every chart to the epochs trained). Each chart keeps its own cursor (run/RunChart).
+ * every chart to the epochs trained) and a synchronized crosshair cursor (run/RunChart).
  *
  * Streaming cost: the points come from the run's append logs through ./metricSeries, so a new step maps and smooths
  * that step alone, the per-epoch series change only when an epoch finishes (not on every step), and the loss y extent
  * is a running bound instead of a loop over every point.
  */
-import { computed, effect, signal, untrack } from 'fw';
+import { computed, effect, signal, untrack, type Signal } from 'fw';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
 import { etaSettled, heldResults, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
@@ -18,9 +18,10 @@ import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } fr
 import type { Pt } from '$lib/charts/downsample';
 import { runHorizon } from '$lib/charts/horizon';
 import type { Future, Marker, Series, XMark } from '$lib/charts/LineChart';
-import { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions';
+import type { Scale, Smoothing } from '$lib/charts/LossOptions';
 import { axisMetric, eta } from '$lib/format';
-import { EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
+import { prefs } from '$lib/prefs';
+import { countNonPositive, EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
 import { failedEpoch } from './failure';
 import { mosaicOffText, stepEpoch, epochsDone } from './readings';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
@@ -108,9 +109,23 @@ export class RunModel {
   });
 
   // ---- what the charts' controls set ----
-  /** The loss lines' EMA and y scale (LossOptions). Log by default: the total starts near 8, the terms near 0.4–3. */
-  readonly smoothing = signal<Smoothing>(DEFAULT_SMOOTHING);
-  readonly scale = signal<Scale>('log');
+  /** The loss lines' EMA and y scale (LossOptions), persisted in prefs. Log by default: total starts near 8, terms 0.4–3. */
+  readonly smoothing: Signal<Smoothing> = {
+    get: () => prefs.lossSmoothing,
+    peek: () => untrack(() => prefs.lossSmoothing),
+    set: (v) => {
+      prefs.lossSmoothing = typeof v === 'function' ? v(untrack(() => prefs.lossSmoothing)) : v;
+    },
+  };
+  readonly scale: Signal<Scale> = {
+    get: () => prefs.lossScale,
+    peek: () => untrack(() => prefs.lossScale),
+    set: (v) => {
+      prefs.lossScale = typeof v === 'function' ? v(untrack(() => prefs.lossScale)) : v;
+    },
+  };
+  /** Shared crosshair position (data x, epochs) synchronized across the run's stacked metric charts. */
+  readonly cursor = signal<number | null>(null);
   /** "So far / All N" in the first chart's header, for every chart of the page. While a run trains: the plan. */
   readonly horizon = signal<'observed' | 'full'>('full');
 
@@ -320,6 +335,25 @@ export class RunModel {
       },
     );
   }
+  /** Safety status for plotting the active loss series on a log Y scale (handles <= 0 values cleanly). */
+  readonly lossLogStatus = computed(() => {
+    this.stepsRev();
+    const a = this.alpha();
+    const shown = (['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext);
+    const plotted = a > 0 ? [this.stepData.raw('total').ext, ...shown] : shown;
+    const hasAny = joinExtents(shown, false) !== null;
+    const hasPositive = joinExtents(shown, true) !== null;
+    const nonPositive = countNonPositive(plotted);
+    const wantLog = this.scale.get() === 'log';
+    return {
+      hasAny,
+      hasPositive,
+      nonPositive,
+      fallbackLinear: wantLog && hasAny && !hasPositive,
+      skippedNonPositive: wantLog && hasPositive && nonPositive > 0,
+    };
+  });
+
   lossFit(height: () => number) {
     const tracks = computed(() => {
       this.stepsRev();
@@ -327,12 +361,17 @@ export class RunModel {
       return [...(a > 0 ? [this.stepData.raw('total').ext] : []), ...(['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext)];
     });
     return held(
-      () => `${this.scale.get()}|${this.smoothing.get()}|${height()}|${this.epochKey()}`,
+      () => `${this.scale.get()}|${this.lossLogStatus.get().fallbackLinear}|${this.smoothing.get()}|${height()}|${this.epochKey()}`,
       () => {
-        const log = this.scale.get() === 'log';
-        const e = joinExtents(tracks.get(), log);
-        if (!e) return null;
-        return log ? { domain: logDomain(e[0], e[1]), ticks: [], decimals: 0, log: true } : niceDomain(e[0], e[1]);
+        // Gate log scale on the displayed series having positive values so a ghost raw point alone never forces a log
+        // axis while all displayed smoothed curves are <= 0.
+        const log = this.scale.get() === 'log' && !this.lossLogStatus.get().fallbackLinear;
+        if (log) {
+          const pos = joinExtents(tracks.get(), true);
+          if (pos) return { domain: logDomain(pos[0], pos[1]), ticks: [], decimals: 0, log: true };
+        }
+        const e = joinExtents(tracks.get(), false);
+        return e ? { ...niceDomain(e[0], e[1]), log: false } : null;
       },
     );
   }

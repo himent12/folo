@@ -2,11 +2,10 @@
  * One of a run's four charts (design/UNIFIED.md §3, §4 Run): Validation mAP, Training loss, Precision / Recall and
  * Learning rate (or, picked in its header, the throughput over the whole run), each a panel whose header holds the
  * title, the qualifier (what x is, what the values are) and the chart's controls, then the legend as the readout and
- * the plot in its inset well. They share one x axis (./runModel), and "So far / All N", in the first chart's header
- * while the run trains, fits all of them; each has its own cursor: hovering or arrowing through one reads that chart
- * only, the others keep their latest values.
+ * the plot in its inset well. They share one x axis and synchronized crosshair cursor (./runModel), and "So far / All N",
+ * in the first chart's header while the run trains, fits all of them.
  */
-import { computed, css, For, MediaQuery, signal } from 'fw';
+import { computed, css, For, MediaQuery } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import LineChart from '$lib/charts/LineChart';
 import LossOptions from '$lib/charts/LossOptions';
@@ -38,8 +37,6 @@ const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
 export default function RunChart(props: RunChartProps) {
   const m = props.model;
-  /** This chart's cursor (data x, epochs): the pointer or the arrows on this chart move it, no other chart's. */
-  const cursor = signal<number | null>(null);
   const kind = props.kind;
   const height = () => props.height;
   const unit = kind === 'map' || kind === 'pr';
@@ -74,9 +71,13 @@ export default function RunChart(props: RunChartProps) {
     if (kind === 'lr') return m.lrExp.get() ? `${m.schedule.get()} · × ${pow10(m.lrExp.get())}` : m.schedule.get();
     const raw = m.lastStep.get()?.loss.total;
     const sl = m.smoothedLast.get();
+    const logStatus = m.lossLogStatus.get();
     // The scale and the smoothing are the options button's own label ("EMA 0.98 · Log"), beside this.
     if (raw === undefined) return 'by epoch';
-    return sl !== undefined && !tight() ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)}` : `raw ${num(raw, 3)}`;
+    const base = sl !== undefined && !tight() ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)}` : `raw ${num(raw, 3)}`;
+    if (logStatus.fallbackLinear) return `${base} · values ≤ 0`;
+    if (logStatus.skippedNonPositive && !tight()) return `${base} · ≤ 0 omitted`;
+    return base;
   });
   const empty = computed(() =>
     props.queued
@@ -127,7 +128,12 @@ export default function RunChart(props: RunChartProps) {
                 // one segmented group; the ⓘ says what the terms mean (on phones it opens in place under the heading).
                 <>
                   <InfoButton chart label="What the loss terms mean" text="What training lowers: total, the weighted sum of box (placement), cls (class) and dfl (edges)." how={lossHow} />
-                  <LossOptions bind:smoothing={m.smoothing} bind:scale={m.scale} />
+                  <LossOptions
+                    bind:smoothing={m.smoothing}
+                    bind:scale={m.scale}
+                    logDisabled={m.lossLogStatus.get().hasAny && !m.lossLogStatus.get().hasPositive}
+                    logNote={m.lossLogStatus.get().skippedNonPositive ? 'Values ≤ 0 are omitted on a log scale.' : null}
+                  />
                 </>
               )
             : kind === 'lr'
@@ -158,7 +164,7 @@ export default function RunChart(props: RunChartProps) {
             height={height()}
             xDomain={m.xDomain.get()}
             xInteger
-            bind:cursor={cursor}
+            bind:cursor={m.cursor}
             band
             future={m.future.get() && kind === 'map' ? m.future.get() : m.future.get() ? { x: m.future.get()!.x } : undefined}
             yDomain={fit.get()?.domain}

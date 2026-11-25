@@ -17,9 +17,11 @@ export interface Extent {
   hi: number;
   loPos: number;
   hiPos: number;
+  /** Count of finite non-positive values (y <= 0), which cannot be plotted on a log axis. */
+  nonPos: number;
 }
 
-const noExtent = (): Extent => ({ lo: Infinity, hi: -Infinity, loPos: Infinity, hiPos: -Infinity });
+const noExtent = (): Extent => ({ lo: Infinity, hi: -Infinity, loPos: Infinity, hiPos: -Infinity, nonPos: 0 });
 
 function widen(e: Extent, y: number) {
   if (!Number.isFinite(y)) return;
@@ -28,7 +30,16 @@ function widen(e: Extent, y: number) {
   if (y > 0) {
     if (y < e.loPos) e.loPos = y;
     if (y > e.hiPos) e.hiPos = y;
+  } else {
+    e.nonPos++;
   }
+}
+
+/** Total count of finite non-positive (`y <= 0`) values across the given track extents. */
+export function countNonPositive(list: readonly Extent[]): number {
+  let total = 0;
+  for (const e of list) total += e.nonPos;
+  return total;
 }
 
 /**

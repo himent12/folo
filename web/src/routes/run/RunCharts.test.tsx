@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // A run's KPI strip and its four charts (design/UNIFIED.md §4 Run): the live strip in its first minute (runs F14: the
 // epoch in progress, the start's phase, no time left until it has settled), a history that failed to load (one error,
-// one Retry), a run that detected nothing yet (said in words), and a cursor that shows on the chart it is on only.
+// one Retry), a run that detected nothing yet (said in words), and a synchronized crosshair across the four charts.
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,7 +9,9 @@ import { AppendLog } from '$lib/api/appendLog';
 import { MockApi } from '$lib/api/mock';
 import { ETA_PENDING } from '$lib/api/progress';
 import type { Epoch, Run, Step } from '$lib/api/types';
+import { DEFAULT_SMOOTHING } from '$lib/charts/LossOptions';
 import type { EvalSource } from '$lib/evaluated';
+import { prefs } from '$lib/prefs';
 import RunCharts from './RunCharts';
 import { RunModel } from './runModel';
 
@@ -32,6 +34,9 @@ beforeEach(async () => {
 afterEach(() => {
   window.matchMedia = real;
   target.remove();
+  prefs.lossSmoothing = DEFAULT_SMOOTHING;
+  prefs.lossScale = 'log';
+  localStorage.clear();
 });
 
 const step = (n: number, spe = 50): Step => ({
@@ -334,7 +339,7 @@ describe('the four run charts', () => {
     done.c.unmount();
   });
 
-  it('keep each cursor to its own chart: arrowing through one reads that one only', async () => {
+  it('synchronizes the crosshair cursor and legend readout across all four charts', async () => {
     // happy-dom lays nothing out: every plot is 600 px wide from its first read.
     const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
@@ -354,18 +359,112 @@ describe('the four run charts', () => {
         },
         {
           steps: [step(50), step(100), step(150)],
-          epochs: [epoch(1), epoch(2), epoch(3)],
+          epochs: [epoch(1, 0.1), epoch(2, 0.2), epoch(3, 0.3)],
         },
       );
       const svg = target.querySelector<SVGSVGElement>('#chart-map svg[aria-roledescription=chart]')!;
-      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
       flushSync();
       await tick();
-      expect(target.querySelector('#chart-map line.cursor')).not.toBeNull();
-      for (const id of ['chart-loss', 'chart-pr', 'chart-lr']) expect(target.querySelector(`#${id} line.cursor`), id).toBeNull();
+      for (const id of ['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']) {
+        expect(target.querySelector(`#${id} line.cursor`), id).not.toBeNull();
+        expect(target.querySelector(`#${id} .legend`)?.textContent, id).toContain('Epoch 1');
+      }
+      // Blurring clears the shared cursor across all four charts.
+      svg.dispatchEvent(new FocusEvent('blur'));
+      flushSync();
+      await tick();
+      for (const id of ['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']) {
+        expect(target.querySelector(`#${id} line.cursor`), id).toBeNull();
+      }
       c.unmount();
     } finally {
       if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+  });
+
+  it('persists loss smoothing and Y scale across RunModel instances and safely falls back on <= 0 values', async () => {
+    const first = show(
+      { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+      { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] },
+    );
+    first.model.smoothing.set('0');
+    first.model.scale.set('lin');
+    flushSync();
+    expect(prefs.lossSmoothing).toBe('0');
+    expect(prefs.lossScale).toBe('lin');
+    first.c.unmount();
+
+    // A fresh RunModel picks up the persisted choices.
+    const second = show(
+      { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+      { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] },
+    );
+    expect(second.model.smoothing.get()).toBe('0');
+    expect(second.model.scale.get()).toBe('lin');
+    second.c.unmount();
+
+    // With Log selected and all loss values <= 0, lossFit safely falls back to linear instead of dropping the fit.
+    prefs.lossScale = 'log';
+    const zeroSteps = [
+      { ...step(50), loss: { box: 0, cls: 0, dfl: 0, total: 0 } },
+      { ...step(100), loss: { box: -0.2, cls: 0, dfl: 0, total: -0.2 } },
+    ];
+    const zero = show(
+      { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+      { steps: zeroSteps, epochs: [epoch(1), epoch(2)] },
+    );
+    expect(zero.model.lossLogStatus.get().fallbackLinear).toBe(true);
+    const fit = zero.model.lossFit(() => 266).get();
+    expect(fit).not.toBeNull();
+    expect(fit?.log).toBe(false);
+    expect(target.querySelector('#chart-loss .trigger')?.textContent).toContain('Raw · Linear');
+    expect(target.querySelector('#chart-loss .meta')?.textContent).toContain('values ≤ 0');
+    zero.c.unmount();
+
+    // With mixed positive and <= 0 values on Log scale (including a series ending at 0 at >= 560 px width),
+    // log stays active, indicates omitted non-positive points, and never emits NaN SVG coordinates or drops end labels.
+    const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get: () => 600,
+    });
+    try {
+      const mixedSteps = [
+        { ...step(50), loss: { box: 0.5, cls: 1, dfl: 1, total: 2.5 } },
+        { ...step(100), loss: { box: 0, cls: 0.8, dfl: 0.7, total: 1.5 } },
+      ];
+      const mixed = show(
+        { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+        { steps: mixedSteps, epochs: [epoch(1), epoch(2)] },
+      );
+      expect(mixed.model.lossLogStatus.get().skippedNonPositive).toBe(true);
+      expect(mixed.model.lossFit(() => 266).get()?.log).toBe(true);
+      expect(target.querySelector('#chart-loss .meta')?.textContent).toContain('≤ 0 omitted');
+      const lossSvg = target.querySelector('#chart-loss svg[aria-roledescription=chart]')!;
+      expect(lossSvg.innerHTML).not.toContain('NaN');
+      expect([...lossSvg.querySelectorAll('.end-label')].map((el) => el.textContent?.trim()).sort()).toEqual(['cls', 'dfl', 'total']);
+      mixed.c.unmount();
+
+      // With EMA smoothing enabled, a single positive raw step cannot force a log axis while all 4 smoothed tracks stay <= 0.
+      prefs.lossSmoothing = '0.98';
+      prefs.lossScale = 'log';
+      const ghostOnlySteps = [
+        { ...step(50), loss: { box: -10, cls: 0, dfl: 0, total: -10 } },
+        { ...step(100), loss: { box: 0, cls: 0, dfl: 0, total: 1 } },
+      ];
+      const ghostOnly = show(
+        { ...base, status: 'completed', epoch: 2, epochs: 2, step: 100, steps_per_epoch: 50 },
+        { steps: ghostOnlySteps, epochs: [epoch(1), epoch(2)] },
+      );
+      expect(ghostOnly.model.lossLogStatus.get().fallbackLinear).toBe(true);
+      expect(ghostOnly.model.lossFit(() => 266).get()?.log).toBe(false);
+      expect(target.querySelector('#chart-loss .trigger')?.textContent).toContain('EMA 0.98 · Linear');
+      ghostOnly.c.unmount();
+    } finally {
+      if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
     }
   });
 });

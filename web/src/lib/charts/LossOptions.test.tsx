@@ -48,6 +48,41 @@ describe('LossOptions', () => {
     unmount(c);
   });
 
+  it('disables Log scale and displays Linear with an inline explanation when logDisabled is true', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LossOptions, { target, props: { smoothing: '0.98', scale: 'log', logDisabled: true } });
+    flushSync();
+    const button = target.querySelector<HTMLButtonElement>('button.trigger')!;
+    expect(button.textContent).toContain('EMA 0.98 · Linear');
+    button.click();
+    flushSync();
+    await tick();
+    const logRadio = target.querySelector<HTMLInputElement>('input[value="log"]')!;
+    const linRadio = target.querySelector<HTMLInputElement>('input[value="lin"]')!;
+    expect(logRadio.disabled).toBe(true);
+    expect(linRadio.checked).toBe(true);
+    expect(target.querySelector('.scale-note')?.textContent).toContain('positive values');
+    unmount(c);
+    target.remove();
+  });
+
+  it('shows logNote under Y scale when partial non-positive values are omitted', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LossOptions, {
+      target,
+      props: { smoothing: '0', scale: 'log', logNote: 'Values ≤ 0 are omitted on a log scale.' },
+    });
+    flushSync();
+    target.querySelector<HTMLButtonElement>('button.trigger')!.click();
+    flushSync();
+    await tick();
+    expect(target.querySelector('.scale-note')?.textContent).toBe('Values ≤ 0 are omitted on a log scale.');
+    unmount(c);
+    target.remove();
+  });
+
   describe('on phones', () => {
     const width = window.innerWidth;
     const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });

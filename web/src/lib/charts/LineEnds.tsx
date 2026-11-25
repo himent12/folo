@@ -64,7 +64,7 @@ export default function LineEnds(props: LineEndsProps) {
             const py = () => props.y(p()!.y);
             return (
               <>
-                {p() && Number.isFinite(p()!.y) ? (
+                {p() && Number.isFinite(p()!.y) && Number.isFinite(py()) ? (
                   <>
                     {best() ? (
                       // The best is the line's end: its ink ring around the end mark, one mark (./endMarks).

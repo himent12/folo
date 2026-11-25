@@ -79,6 +79,24 @@ describe('preferences across tabs', () => {
     expect(read()).toMatchObject({ labelAgent: 'antigravity', units: 'metric' });
   });
 
+  it('persists loss smoothing and Y scale across stores, syncs across tabs, and sanitizes invalid values', () => {
+    const a = new PrefsStore();
+    expect([a.lossSmoothing, a.lossScale]).toEqual(['0.98', 'log']);
+    a.lossSmoothing = '0';
+    a.lossScale = 'lin';
+    expect(read()).toMatchObject({ lossSmoothing: '0', lossScale: 'lin' });
+
+    const b = new PrefsStore();
+    expect([b.lossSmoothing, b.lossScale]).toEqual(['0', 'lin']);
+
+    fromOtherTab(KEY, JSON.stringify({ ...read(), lossSmoothing: '0.6', lossScale: 'log' }));
+    expect([b.lossSmoothing, b.lossScale]).toEqual(['0.6', 'log']);
+
+    localStorage.setItem(KEY, JSON.stringify({ lossSmoothing: '0.5', lossScale: 'exp' }));
+    const c = new PrefsStore();
+    expect([c.lossSmoothing, c.lossScale]).toEqual(['0.98', 'log']);
+  });
+
   it('turns single-key shortcuts off and on as another tab does', () => {
     fromOtherTab('folo.singleKeys', 'off');
     expect(keyPrefs.singleKeys).toBe(false);
