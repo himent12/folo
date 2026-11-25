@@ -59,6 +59,9 @@ pub struct Engine {
     pub hold: AtomicBool,
     /// How long an open external entry waits for its next part, in milliseconds.
     pub open_timeout_ms: std::sync::atomic::AtomicU64,
+    /// Coordinates the open-entry expiry sweeper's condvar sleep and instant wakeup on shutdown/timeout update.
+    pub sweep_lock: Mutex<u64>,
+    pub sweep_wake: Condvar,
 }
 
 /// A model entry waiting for (or taken by) the worker.
@@ -143,6 +146,8 @@ impl Engine {
             open_timeout_ms: std::sync::atomic::AtomicU64::new(
                 super::external::OPEN_TIMEOUT.as_millis() as u64
             ),
+            sweep_lock: Mutex::new(0),
+            sweep_wake: Condvar::new(),
         }
     }
 
@@ -190,6 +195,13 @@ impl Engine {
     pub fn wake(&self) {
         let _queue = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ready.notify_all();
+    }
+
+    /// Wakes the open-entry expiry sweeper (on shutdown or when `open_timeout_ms` changes).
+    pub fn wake_sweeper(&self) {
+        let mut epoch = self.sweep_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *epoch = epoch.wrapping_add(1);
+        self.sweep_wake.notify_all();
     }
 
     fn next(&self) -> Option<Job> {

@@ -47,6 +47,36 @@ pub struct Uploads {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     idle_ms: AtomicU64,
     known: Fingerprints,
+    sweeper: Arc<SweeperGate>,
+    sweeper_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct SweeperState {
+    closed: bool,
+    generation: u64,
+}
+
+/// Coordinates the upload expiry sweeper so it sleeps with zero idle wakeups and exits immediately on shutdown.
+#[derive(Default)]
+struct SweeperGate {
+    state: Mutex<SweeperState>,
+    wake: Condvar,
+}
+
+impl SweeperGate {
+    fn notify(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.generation = st.generation.wrapping_add(1);
+        self.wake.notify_all();
+    }
+
+    fn close(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.closed = true;
+        st.generation = st.generation.wrapping_add(1);
+        self.wake.notify_all();
+    }
 }
 
 /// One session. Its folder is removed when the session is dropped.
@@ -152,19 +182,25 @@ impl Uploads {
         {
             tracing::warn!("removing the leftover uploads in {}: {e}", dir.display());
         }
+        let sweeper = Arc::new(SweeperGate::default());
         let uploads = Arc::new(Uploads {
             dir,
             sessions: Mutex::default(),
             idle_ms: AtomicU64::new(UPLOAD_IDLE.as_millis() as u64),
-            known: Fingerprints { path: data_dir.join("uploads.json"), lock: Mutex::default() },
+            known: Fingerprints::new(data_dir.join("uploads.json")),
+            sweeper: sweeper.clone(),
+            sweeper_thread: Mutex::default(),
         });
-        spawn_sweeper(Arc::downgrade(&uploads));
+        if let Some(handle) = spawn_sweeper(Arc::downgrade(&uploads), sweeper) {
+            *uploads.sweeper_thread.lock().unwrap() = Some(handle);
+        }
         uploads
     }
 
     /// Changes how long a session may go without a part before it expires (default [`UPLOAD_IDLE`]).
     pub fn set_idle(&self, idle: Duration) {
         self.idle_ms.store(idle.as_millis() as u64, Ordering::Relaxed);
+        self.sweeper.notify();
     }
 
     fn idle(&self) -> Duration {
@@ -223,6 +259,8 @@ impl Uploads {
         });
         let upload = session.upload(&session.state.lock().unwrap(), self.idle());
         sessions.insert(id, session);
+        drop(sessions);
+        self.sweeper.notify();
         tracing::info!(upload = %upload.id, kind = ?req.kind, name = %upload.name, "upload started");
         Ok(upload)
     }
@@ -314,11 +352,21 @@ impl Uploads {
         Ok(())
     }
 
-    /// Drops every session (ending their threads and removing their folders).
+    /// Stops the sweeper thread and drops every session (ending their threads and removing their folders).
     pub fn shutdown(&self) {
+        self.stop_sweeper();
         let sessions: Vec<_> = self.sessions.lock().unwrap().drain().map(|(_, s)| s).collect();
         for s in sessions {
             s.close(&mut lock(&s.state));
+        }
+    }
+
+    fn stop_sweeper(&self) {
+        self.sweeper.close();
+        if let Some(handle) = self.sweeper_thread.lock().unwrap_or_else(|p| p.into_inner()).take()
+            && handle.thread().id() != std::thread::current().id()
+        {
+            let _ = handle.join();
         }
     }
 
@@ -363,12 +411,18 @@ impl Uploads {
 
     /// What a finished upload of `kind` with `fingerprint` became (a dataset or model id), if one was remembered.
     pub fn known(&self, kind: UploadKind, fingerprint: &str) -> Option<String> {
-        self.known.read().into_iter().find(|k| k.kind == kind && k.fingerprint == fingerprint).map(|k| k.id)
+        self.known.find(kind, fingerprint)
     }
 
     /// Remembers that the upload of `kind` with `fingerprint` became `id`.
     pub fn remember(&self, kind: UploadKind, fingerprint: &str, id: &str) {
         self.known.write(Known { kind, fingerprint: fingerprint.to_string(), id: id.to_string() });
+    }
+}
+
+impl Drop for Uploads {
+    fn drop(&mut self) {
+        self.stop_sweeper();
     }
 }
 
@@ -415,33 +469,56 @@ fn lock(m: &Mutex<Progress>) -> MutexGuard<'_, Progress> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Expires idle sessions every half idle limit (at least every minute) while `uploads` lives.
-fn spawn_sweeper(uploads: Weak<Uploads>) {
+/// Expires idle sessions every half idle limit (at most every minute) while `uploads` lives, parking on
+/// `gate`'s condvar when no sessions are open and exiting immediately on shutdown or drop.
+fn spawn_sweeper(uploads: Weak<Uploads>, gate: Arc<SweeperGate>) -> Option<JoinHandle<()>> {
     let spawned = std::thread::Builder::new().name("folo-uploads".into()).spawn(move || {
+        let mut since = Instant::now();
+        let mut st = gate.state.lock().unwrap_or_else(|p| p.into_inner());
         loop {
-            // The idle limit is read again while waiting, so one set after the start applies at once.
-            let since = Instant::now();
-            loop {
-                let tick = match uploads.upgrade() {
-                    Some(u) => (u.idle() / 2).clamp(Duration::from_millis(10), Duration::from_secs(60)),
-                    None => return,
-                };
-                let left = tick.saturating_sub(since.elapsed());
-                if left.is_zero() {
-                    break;
-                }
-                std::thread::sleep(left.min(Duration::from_millis(100)));
+            if st.closed {
+                return;
             }
-            match uploads.upgrade() {
-                Some(u) => u.expire(),
-                None => return,
+            let epoch = st.generation;
+            drop(st);
+            let Some(u) = uploads.upgrade() else { return };
+            let has_sessions = !u.sessions.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+            let tick = (u.idle() / 2).clamp(Duration::from_millis(10), Duration::from_secs(60));
+            drop(u);
+
+            st = gate.state.lock().unwrap_or_else(|p| p.into_inner());
+            if st.closed {
+                return;
             }
+            if st.generation != epoch {
+                continue;
+            }
+            if !has_sessions {
+                st = gate.wake.wait(st).unwrap_or_else(|p| p.into_inner());
+                since = Instant::now();
+                continue;
+            }
+            let left = tick.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                drop(st);
+                let Some(u) = uploads.upgrade() else { return };
+                u.expire();
+                drop(u);
+                since = Instant::now();
+                st = gate.state.lock().unwrap_or_else(|p| p.into_inner());
+                continue;
+            }
+            st = gate.wake.wait_timeout(st, left).unwrap_or_else(|p| p.into_inner()).0;
         }
     });
-    if let Err(e) = spawned {
-        tracing::warn!(
-            "could not start the upload sweeper (idle uploads expire when they are next used): {e}"
-        );
+    match spawned {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                "could not start the upload sweeper (idle uploads expire when they are next used): {e}"
+            );
+            None
+        }
     }
 }
 
@@ -456,41 +533,73 @@ struct Known {
     id: String,
 }
 
-/// `<data dir>/uploads.json`. A missing or malformed file remembers nothing (the next upload sends its content).
+/// `<data dir>/uploads.json`, cached in memory after its first read and updated atomically on write. A missing or
+/// malformed file remembers nothing (the next upload sends its content).
 struct Fingerprints {
     path: PathBuf,
-    /// Held while the file is rewritten.
-    lock: Mutex<()>,
+    cache: Mutex<Option<Vec<Known>>>,
+    #[cfg(test)]
+    disk_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Fingerprints {
-    fn read(&self) -> Vec<Known> {
+    fn new(path: PathBuf) -> Fingerprints {
+        Fingerprints {
+            path,
+            cache: Mutex::default(),
+            #[cfg(test)]
+            disk_reads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Reads `uploads.json` from disk: `Some(Vec::new())` when missing or malformed (safe to cache/replace),
+    /// `None` on transient I/O errors so callers retry later and never overwrite from an unknown baseline.
+    fn read_disk(&self) -> Option<Vec<Known>> {
+        #[cfg(test)]
+        self.disk_reads.fetch_add(1, Ordering::Relaxed);
         let bytes = match std::fs::read(&self.path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
             Err(e) => {
                 tracing::warn!("reading {}: {e}", self.path.display());
-                return Vec::new();
+                return None;
             }
         };
-        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        Some(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             tracing::warn!(
                 "{} is malformed ({e}); it is replaced on the next finished upload",
                 self.path.display()
             );
             Vec::new()
-        })
+        }))
+    }
+
+    fn load<'a>(&self, cache: &'a mut Option<Vec<Known>>) -> Option<&'a mut Vec<Known>> {
+        if cache.is_none() {
+            *cache = self.read_disk();
+        }
+        cache.as_mut()
+    }
+
+    fn find(&self, kind: UploadKind, fingerprint: &str) -> Option<String> {
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let list = self.load(&mut cache)?;
+        list.iter().find(|k| k.kind == kind && k.fingerprint == fingerprint).map(|k| k.id.clone())
     }
 
     /// Records `k`, replacing an older record of its kind and fingerprint.
     fn write(&self, k: Known) {
-        let _guard = self.lock.lock().unwrap();
-        let mut all = self.read();
-        all.retain(|x| x.kind != k.kind || x.fingerprint != k.fingerprint);
-        all.push(k);
-        let bytes = serde_json::to_vec_pretty(&all).expect("fingerprints serialize");
-        if let Err(e) = write_atomic(&self.path, &bytes) {
-            tracing::warn!("writing {}: {e}", self.path.display());
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(list) = self.load(&mut cache) else {
+            return;
+        };
+        let mut next = list.clone();
+        next.retain(|x| x.kind != k.kind || x.fingerprint != k.fingerprint);
+        next.push(k);
+        let bytes = serde_json::to_vec_pretty(&next).expect("fingerprints serialize");
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => *list = next,
+            Err(e) => tracing::warn!("writing {}: {e}", self.path.display()),
         }
     }
 }
@@ -839,4 +948,51 @@ fn write_entry(entry: &mut tar::Entry<impl Read>, path: &Path, name: &str, buf: 
         left = left.saturating_sub(n as u64);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_test_support::TestDir;
+
+    /// `Fingerprints` reads `uploads.json` at most once and serves subsequent lookups and updates from memory.
+    #[test]
+    fn fingerprints_cache_reads_uploads_json_once() {
+        let dir = TestDir::new("uploads-fp-cache");
+        let uploads = Uploads::open(dir.path());
+        assert_eq!(uploads.known(UploadKind::Model, "fp1"), None);
+        assert_eq!(uploads.known.disk_reads.load(Ordering::Relaxed), 1);
+
+        uploads.remember(UploadKind::Model, "fp1", "m_1");
+        assert_eq!(uploads.known(UploadKind::Model, "fp1").as_deref(), Some("m_1"));
+        uploads.remember(UploadKind::Model, "fp1", "m_2");
+        assert_eq!(uploads.known(UploadKind::Model, "fp1").as_deref(), Some("m_2"));
+        assert_eq!(uploads.known.disk_reads.load(Ordering::Relaxed), 1, "no repeat disk reads after warmup");
+
+        // Fresh instance loads persisted state on first lookup.
+        uploads.shutdown();
+        let reopened = Uploads::open(dir.path());
+        assert_eq!(reopened.known(UploadKind::Model, "fp1").as_deref(), Some("m_2"));
+        assert_eq!(reopened.known.disk_reads.load(Ordering::Relaxed), 1);
+        reopened.shutdown();
+
+        // A transient non-NotFound read error (e.g. a directory in place of `uploads.json`) is not cached.
+        let bad = TestDir::new("uploads-fp-ioerr");
+        std::fs::create_dir(bad.join("uploads.json")).unwrap();
+        let fp = Fingerprints::new(bad.join("uploads.json"));
+        assert_eq!(fp.find(UploadKind::Model, "fp1"), None);
+        assert_eq!(fp.find(UploadKind::Model, "fp1"), None);
+        assert_eq!(fp.disk_reads.load(Ordering::Relaxed), 2, "transient I/O error is retried, not latched");
+    }
+
+    /// `Uploads::shutdown` wakes the condvar sweeper and joins it immediately (no 100 ms sleep-loop lag).
+    #[test]
+    fn upload_sweeper_wakes_and_shuts_down_promptly() {
+        let dir = TestDir::new("uploads-sweeper-wake");
+        let uploads = Uploads::open(dir.path());
+        let t0 = Instant::now();
+        uploads.shutdown();
+        assert!(t0.elapsed() < Duration::from_secs(2), "shutdown stalled: {:?}", t0.elapsed());
+        assert!(uploads.sweeper_thread.lock().unwrap().is_none());
+    }
 }

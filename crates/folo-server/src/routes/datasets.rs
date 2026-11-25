@@ -16,7 +16,8 @@ use super::{DEFAULT_LIMIT, MAX_LIMIT, ThumbParams, blocking};
 // ---- datasets ----------------------------------------------------------------------------------------------------
 
 pub(super) async fn list_datasets(State(st): State<AppState>) -> Result<Json<DatasetList>> {
-    Ok(Json(DatasetList { datasets: st.store.list_datasets()? }))
+    let datasets = blocking(&st, |s| s.list_datasets()).await?;
+    Ok(Json(DatasetList { datasets }))
 }
 
 pub(super) async fn register_dataset(
