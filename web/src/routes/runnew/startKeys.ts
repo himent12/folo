@@ -1,12 +1,13 @@
-// The keys of New run: Mod+Enter starts the run, Enter in a field never does, and Escape returns when no nested
-// dialog, popup, or select is active.
+// The keys of New run: Mod+Enter starts the run, Enter in a field never does, and Escape returns when no field,
+// dialog, tooltip, or popup owns the key.
 import { onDocument } from 'fw';
+import { isTyping } from '$lib/keys';
 
 /** The shortcut that starts the run, as the Start buttons' tooltip and the shortcuts reference name it. */
 export const START_KEYS = 'Mod+Enter';
 
 export interface StartKeysOptions {
-  /** Called on Escape when no nested dialog, menu/popup, or native select owns the key. */
+  /** Called on Escape when no field, nested dialog, tooltip, or popup owns the key. */
   onCancel?: () => void;
 }
 
@@ -23,7 +24,7 @@ function hasOpenPopover(): boolean {
  * Enter in a field commits its value and never starts a run (a run may queue, or rent a cloud GPU): the browser's
  * implicit submission is turned off for the form's inputs. Mod+Enter (Ctrl, ⌘ on Apple) starts it from anywhere on
  * the page, as the Start button does, unless another dialog (the command palette) has the keyboard. Escape cancels
- * and returns cleanly when no nested dialog, popup, tooltip, or select is open.
+ * and returns cleanly when no text/select field, nested dialog, popup, or tooltip is active.
  */
 export function startKeys(form: () => HTMLFormElement | undefined, opts?: StartKeysOptions) {
   onDocument('keydown', (e) => {
@@ -32,13 +33,14 @@ export function startKeys(form: () => HTMLFormElement | undefined, opts?: StartK
     const el = e.target as HTMLElement | null;
     if (e.key === 'Escape') {
       if (!opts?.onCancel || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (isTyping(e)) return;
       if (
         document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], #folo-tooltip[data-show], .info-pop.open') ||
         hasOpenPopover()
       ) {
         return;
       }
-      if (el?.tagName === 'SELECT' || el?.closest?.('select, [role="dialog"], [role="listbox"], [role="menu"]')) return;
+      if (el?.closest?.('[role="dialog"], [role="listbox"], [role="menu"]')) return;
       e.preventDefault();
       opts.onCancel();
       return;

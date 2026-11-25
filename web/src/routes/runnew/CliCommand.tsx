@@ -26,6 +26,8 @@ export interface CliCommandProps {
   cliParts: string[];
   cli: string;
   cliPlaceholder: string | null;
+  /** Prefill or linked weights still loading: hold the command until the run's real settings are resolved. */
+  pending?: string | null;
   /** The Seed field holds no seed: held as Start is (lib/seed), never a command that would run with another seed. */
   seedMissing?: boolean;
 }
@@ -51,7 +53,9 @@ export default function CliCommand(props: CliCommandProps) {
         <ChevronRight size={14} aria-hidden="true" />
         CLI command <span class="faint">the same run from a terminal</span>
       </summary>
-      {props.seedMissing ? (
+      {props.pending ? (
+        <p class="cli-note">{props.pending}</p>
+      ) : props.seedMissing ? (
         <p class="cli-note">Enter a seed first: the command needs one.</p>
       ) : (
         <>

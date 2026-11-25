@@ -106,8 +106,9 @@ export function useRunPrefill(o: RunPrefillOptions) {
     o.e2e.set(c.head === 'o2o');
     o.lr0.set(c.lr0);
     o.seedCopy.copy(c.seed);
-    // When `?weights=` is also present, leave weights at 'none' until the pendingWeights effect resolves it.
-    o.weights.set(o.queryWeights ? 'none' : (c.weights ?? 'none'));
+    // When `?weights=` is also present (including explicit `?weights=none`), keep weights at 'none'
+    // instead of restoring the source run's checkpoint.
+    o.weights.set(o.queryWeights || o.q.get('weights')?.trim() === 'none' ? 'none' : (c.weights ?? 'none'));
     o.cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
     o.augment.set(deep(structuredClone(c.augment)));
     o.closeEdited.set(true);
@@ -119,16 +120,18 @@ export function useRunPrefill(o: RunPrefillOptions) {
   effect(() => {
     if (source.error && !untrack(() => prefilled.get())) {
       const e = source.error;
-      if (e instanceof ApiError && e.code === 'run_not_found') {
-        toast.show({
-          tone: 'error',
-          title: 'Run to copy not found',
-          detail: 'It was deleted or the link is wrong. The form starts from the defaults.',
-          key: FROM_TOAST,
-        });
-      } else {
-        toast.error(e, 'Could not load the run to copy', { key: FROM_TOAST });
-      }
+      untrack(() => {
+        if (e instanceof ApiError && e.code === 'run_not_found') {
+          toast.show({
+            tone: 'error',
+            title: 'Run to copy not found',
+            detail: 'It was deleted or the link is wrong. The form starts from the defaults.',
+            key: FROM_TOAST,
+          });
+        } else {
+          toast.error(e, 'Could not load the run to copy', { key: FROM_TOAST });
+        }
+      });
       prefilled.set(true);
     }
   });
@@ -137,48 +140,50 @@ export function useRunPrefill(o: RunPrefillOptions) {
   effect(() => {
     const id = pendingWeights.get();
     if (!id || !prefilled.get()) return;
-    if (o.models.error && !o.models.data) {
-      o.weights.set('none');
-      toast.show({
-        tone: 'error',
-        title: 'Could not load linked weights',
-        detail: `${errorDetail(o.models.error)} Starting from scratch unless retried.`,
-        action: {
-          label: 'Retry',
-          run: () => {
-            pendingWeights.set(id);
-            void o.models.refresh();
+    const err = o.models.error;
+    const all = o.models.data;
+    if (err && !all) {
+      untrack(() => {
+        toast.show({
+          tone: 'error',
+          title: 'Could not load linked weights',
+          detail: `${errorDetail(err)} Retry to load the linked checkpoint.`,
+          timeout: 0,
+          action: {
+            label: 'Retry',
+            run: () => void o.models.refresh(),
           },
-        },
-        key: WEIGHTS_TOAST,
+          key: WEIGHTS_TOAST,
+        });
       });
-      pendingWeights.set(null);
       return;
     }
-    const all = o.models.data;
     if (!all) return;
     const match = o.startable.get().find((m) => m.id === id);
     if (match) {
+      untrack(() => toast.clear(WEIGHTS_TOAST));
       if (untrack(() => o.arch.get()) !== match.arch) o.arch.set(match.arch);
       o.weights.set(match.id);
     } else {
       const raw = all.find((m) => m.id === id);
       o.weights.set('none');
-      if (raw?.fused === true) {
-        toast.show({
-          tone: 'info',
-          title: 'Cannot fine-tune from fused weights',
-          detail: `${raw.name} is an exported inference model. Starting from scratch instead.`,
-          key: WEIGHTS_TOAST,
-        });
-      } else {
-        toast.show({
-          tone: 'info',
-          title: 'Linked weights not found',
-          detail: 'That model was deleted or the link is wrong. Starting from scratch instead.',
-          key: WEIGHTS_TOAST,
-        });
-      }
+      untrack(() => {
+        if (raw?.fused === true) {
+          toast.show({
+            tone: 'info',
+            title: 'Cannot fine-tune from fused weights',
+            detail: `${raw.name} is an exported inference model. Starting from scratch instead.`,
+            key: WEIGHTS_TOAST,
+          });
+        } else {
+          toast.show({
+            tone: 'info',
+            title: 'Linked weights not found',
+            detail: 'That model was deleted or the link is wrong. Starting from scratch instead.',
+            key: WEIGHTS_TOAST,
+          });
+        }
+      });
     }
     pendingWeights.set(null);
   });

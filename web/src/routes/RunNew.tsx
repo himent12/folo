@@ -492,7 +492,7 @@ function RunNewForm() {
   const fitted = signal<{ key: string; fix: OomFix | null } | null>(null);
   effect(() => {
     const key = estKey.get();
-    if (!noFit.get() || estimating.get() || untrack(() => fitted.get()?.key) === key) return;
+    if (!prefilled.get() || !!pendingWeights.get() || !noFit.get() || estimating.get() || untrack(() => fitted.get()?.key) === key) return;
     const ctrl = new AbortController();
     const c = untrack(() => config.get());
     const forecaster = vramForecaster(
@@ -812,7 +812,13 @@ function RunNewForm() {
                     </span>
                     <Why id="start-why" />
                   </div>
-                  <CliCommand cliParts={cli.parts.get()} cli={cli.line.get()} cliPlaceholder={cli.placeholder.get()} seedMissing={!!errors.get().seed} />
+                  <CliCommand
+                    cliParts={cli.parts.get()}
+                    cli={cli.line.get()}
+                    cliPlaceholder={cli.placeholder.get()}
+                    pending={!prefilled.get() ? 'Loading run settings…' : pendingWeights.get() ? 'Waiting for linked weights to load…' : null}
+                    seedMissing={!!errors.get().seed}
+                  />
                 </div>
               </div>
             </Panel>

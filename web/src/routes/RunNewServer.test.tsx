@@ -666,25 +666,55 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
     expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
   });
 
-  it('surfaces an error toast with retry when /api/models fails on a ?weights= link, and rejects fused weights', async () => {
+  it('holds Start, draft writes, estimates, and CLI when /api/models fails on ?weights=, and recovers on Retry (and rejects fused)', async () => {
     const { toast } = await import('$lib/ui/toast');
     toast.items = [];
+    sessionStorage.clear();
     hub.api = api = new MockApi('normal', 0);
     const realModels = api.models.bind(api);
-    let fail = true;
+    const estSpy = vi.spyOn(api, 'estimateRun');
+    let mode: 'fail' | 'ok' | 'fused' = 'fail';
     vi.spyOn(api, 'models').mockImplementation(async () => {
-      if (fail) throw new ApiError(503, 'unavailable', 'models catalog down');
-      return (await realModels()).map((m) => (m.id === 'm_fast_n' ? { ...m, fused: true } : m));
+      if (mode === 'fail') throw new ApiError(503, 'unavailable', 'models catalog down');
+      const list = await realModels();
+      return mode === 'fused' ? list.map((m) => (m.id === 'm_fast_n' ? { ...m, fused: true } : m)) : list;
     });
     await open('?weights=m_fast_n');
     const errToast = await until(() => toast.items.find((t) => t.title === 'Could not load linked weights'), 'load error toast');
     expect(errToast.action?.label).toBe('Retry');
-    expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
+    expect(errToast.timeout).toBe(0);
+    // Pending weights stay unresolved: Start is disabled, no draft is written, no estimate or runnable CLI is emitted.
+    expect(target.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    expect(sessionStorage.length).toBe(0);
+    expect(estSpy).not.toHaveBeenCalled();
+    expect(target.querySelector('.cli code')).toBeNull();
+    expect(target.querySelector('.cli .cli-note')?.textContent).toMatch(/linked weights/i);
 
-    // Retrying after recovery sees fused weights and explains why they cannot be fine-tuned.
-    fail = false;
+    // Retrying after recovery selects the linked checkpoint, switches arch, clears the error toast, and unlocks Start.
+    mode = 'ok';
     errToast.action!.run();
+    await until(() => target.querySelector<HTMLSelectElement>('select#weights')!.value === 'm_fast_n', 'recovered weights');
+    expect(target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-n');
+    expect(toast.items.some((t) => t.title === 'Could not load linked weights')).toBe(false);
+    expect(target.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false);
+
+    // Reopening against fused weights explains why they cannot be fine-tuned and falls back to scratch.
+    unmount(c!);
+    c = undefined;
+    sessionStorage.clear();
+    toast.items = [];
+    mode = 'fused';
+    await open('?weights=m_fast_n');
     await until(() => toast.items.some((t) => t.title === 'Cannot fine-tune from fused weights'), 'fused weights toast');
+    expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
+  });
+
+  it('honors explicit ?weights=none over the source run weights when copying with ?from=', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const base = (await api.run('run_a2f0')).config;
+    const made = await api.createRun({ ...base, name: 'shapes-ft', arch: 'folo-n', weights: 'm_fast_n', device: 'cpu' });
+    await open(`?from=${made.id}&weights=none`);
+    await until(() => target.querySelector<HTMLInputElement>('input#name')!.value.includes('shapes-ft'), 'copied run');
     expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
   });
 
@@ -715,14 +745,17 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
     }
   });
 
-  it('returns to /runs on Escape when no nested dialog, tooltip, popover, or select is active, and stays put otherwise', async () => {
+  it('returns to /runs on page-level Escape when no field, dialog, tooltip, or popover is active, and stays put otherwise', async () => {
     hub.api = api = new MockApi('normal', 0);
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     try {
       await open();
-      // Escape while a native <select> has focus must not leave the page.
-      const select = target.querySelector<HTMLSelectElement>('select#device')!;
-      select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const pageEl = target.querySelector('form')!;
+      // Escape while a text input or native <select> has focus must not leave the page.
+      target.querySelector<HTMLInputElement>('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(go).not.toHaveBeenCalled();
+
+      target.querySelector<HTMLSelectElement>('select#device')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       expect(go).not.toHaveBeenCalled();
 
       // Escape while an open <dialog> is present must not leave the page.
@@ -730,7 +763,7 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
       dlg.setAttribute('open', '');
       document.body.appendChild(dlg);
       try {
-        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        pageEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         expect(go).not.toHaveBeenCalled();
       } finally {
         dlg.remove();
@@ -742,7 +775,7 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
       tip.dataset.show = '';
       document.body.appendChild(tip);
       try {
-        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        pageEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         expect(go).not.toHaveBeenCalled();
       } finally {
         tip.remove();
@@ -752,14 +785,14 @@ describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel
       pop.className = 'info-pop open';
       document.body.appendChild(pop);
       try {
-        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        pageEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         expect(go).not.toHaveBeenCalled();
       } finally {
         pop.remove();
       }
 
-      // Otherwise Escape returns cleanly to /runs.
-      target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      // Otherwise page-level Escape returns cleanly to /runs.
+      pageEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       expect(go).toHaveBeenCalledWith('/runs');
     } finally {
       go.mockRestore();
