@@ -390,4 +390,31 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     expect(tail).toBe(14);
     expect(boxEl.scrollTop).toBe(320);
   });
+
+  it('offers Clear filters in the 0-match filtered empty state and restores all lines', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(line(1, 'info'), line(2, 'warn'));
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+
+    // Filter to Error (0 matches) + search query -> empty state renders Clear filters.
+    const errOpt = [...target.querySelectorAll<HTMLElement>('[aria-label="Log level"] button, [aria-label="Log level"] [role="radio"]')].find((b) =>
+      b.textContent?.trim().startsWith('Error'),
+    )!;
+    errOpt.click();
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    search.value = 'missing';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    const clearBtn = [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find((b) => b.textContent?.trim() === 'Clear filters');
+    expect(clearBtn).toBeTruthy();
+
+    clearBtn!.click();
+    flushSync();
+    expect(search.value).toBe('');
+    expect(target.querySelector('.empty')).toBeNull();
+    expect(target.querySelectorAll('.line')).toHaveLength(2);
+    expect(document.activeElement).toBe(target.querySelector('.log'));
+  });
 });

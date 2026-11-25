@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -360,6 +360,84 @@ describe('Inspector labels', () => {
     flushSync();
     expect(zoomBtn().textContent).toBe('Fit');
     expect(vp.classList.contains('zoomed')).toBe(false);
+    pager.dispose();
+  });
+
+  it('accumulates rapid J/K presses across uncached async pages and discards stale or post-close resolutions', async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const img0 = (await pager.at(0))!;
+    const img1 = (await pager.at(1))!;
+    const img2 = (await pager.at(2))!;
+
+    const resolvers = new Map<number, (v: typeof img0) => void>();
+    vi.spyOn(pager, 'at').mockImplementation((i: number) => {
+      return new Promise((resolve) => {
+        resolvers.set(i, resolve);
+      });
+    });
+
+    const imageId = signal<string | null>(img0.id);
+    const onnavigate = vi.fn((nextId: string) => imageId.set(nextId));
+    c = render(
+      () => (
+        <Inspector
+          pager={pager}
+          classes={dataset.classes}
+          imageId={imageId.get()}
+          only={null}
+          onnavigate={onnavigate}
+          onclose={() => imageId.set(null)}
+          onmissing={() => {}}
+        />
+      ),
+      target,
+    );
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.viewport')) throw new Error('waiting for inspector');
+    });
+    const dialog = target.querySelector<HTMLDialogElement>('dialog')!;
+
+    // Two rapid J presses before any page responds accumulate 0 -> 1 -> 2.
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    expect(resolvers.has(1)).toBe(true);
+    expect(resolvers.has(2)).toBe(true);
+
+    // Resolve the newer target (2) first, then the stale earlier one (1): only img2 navigates.
+    resolvers.get(2)!(img2);
+    await Promise.resolve();
+    flushSync();
+    expect(onnavigate).toHaveBeenCalledTimes(1);
+    expect(onnavigate).toHaveBeenLastCalledWith(img2.id);
+
+    resolvers.get(1)!(img1);
+    await Promise.resolve();
+    flushSync();
+    expect(onnavigate).toHaveBeenCalledTimes(1);
+
+    // Stepping K then immediately J back to img2 cancels the pending fetch for img1.
+    onnavigate.mockClear();
+    resolvers.clear();
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true }));
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    expect(resolvers.has(1)).toBe(true);
+    resolvers.get(1)!(img1);
+    await Promise.resolve();
+    flushSync();
+    expect(onnavigate).not.toHaveBeenCalled();
+
+    // Closing the inspector while a step is in flight discards the late resolution.
+    resolvers.clear();
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true }));
+    expect(resolvers.has(1)).toBe(true);
+    imageId.set(null);
+    flushSync();
+    resolvers.get(1)!(img1);
+    await Promise.resolve();
+    flushSync();
+    expect(onnavigate).not.toHaveBeenCalled();
     pager.dispose();
   });
 });

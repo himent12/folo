@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { router } from '$lib/router';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import { rowNav } from '$lib/ui/rowNav';
-import { backPath, G_CHORD_MS, gChord, installShortcuts, showShortcuts } from './shortcuts';
+import { backPath, G_CHORD_MS, gChord, installShortcuts, shortcutList, showShortcuts } from './shortcuts';
 
 const key = (k: string, init: KeyboardEventInit = {}, el: EventTarget = window) =>
   el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
@@ -212,5 +212,17 @@ describe('G-chord navigation state and guards', () => {
     key('g');
     expect(gChord.get()).toBe(false);
     expect(onGChord).not.toHaveBeenCalled();
+  });
+});
+
+describe('shortcutList reference', () => {
+  it('documents BenchCompare 1–4 pin, Escape unpin, and updated B baseline wording', () => {
+    expect(shortcutList).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ keys: 'B', group: 'Charts', label: 'Make the next run or entry the baseline (Compare)', single: true }),
+        expect.objectContaining({ keys: '1–4', group: 'Charts', label: 'Pin or unpin an entry across charts (Benchmark compare)', single: true }),
+        expect.objectContaining({ keys: 'Escape', group: 'Charts', label: 'Unpin the highlighted entry (Benchmark compare)', single: true }),
+      ]),
+    );
   });
 });

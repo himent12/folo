@@ -24,7 +24,7 @@ import Copy from '$icons/copy';
 import Search from '$icons/search';
 import Volume2 from '$icons/volume-2';
 import VolumeOff from '$icons/volume-off';
-import { computed, css, effect, For, signal, untrack } from 'fw';
+import { batch, computed, css, effect, For, signal, untrack } from 'fw';
 import type { AppendLog, LogCursor } from '$lib/api/appendLog';
 import type { LogLevel, LogLine } from '$lib/api/types';
 import { clock } from '$lib/format';
@@ -448,15 +448,31 @@ export default function Logs(props: LogsProps) {
                 each={shown.get()}
                 key={(l) => l}
                 fallback={
-                  <p class="empty">
-                    {needle.get()
-                      ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
-                          counts.get().earlier
-                            ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
-                            : ''
-                        }.`
-                      : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
-                  </p>
+                  <div class="empty">
+                    <p>
+                      {needle.get()
+                        ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
+                            counts.get().earlier
+                              ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
+                              : ''
+                          }.`
+                        : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
+                    </p>
+                    {needle.get() || level.get() !== 'all' ? (
+                      <Button
+                        size="sm"
+                        onclick={() => {
+                          batch(() => {
+                            query.set('');
+                            level.set('all');
+                          });
+                          box.peek()?.focus({ preventScroll: true });
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    ) : null}
+                  </div>
                 }
               >
                 {(l) => {
@@ -624,6 +640,10 @@ css`
     color: var(--text-tertiary);
   }
   .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
     padding: var(--space-4);
     color: var(--text-tertiary);
     font-family: var(--font-sans);

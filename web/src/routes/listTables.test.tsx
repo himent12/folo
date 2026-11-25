@@ -15,6 +15,7 @@ import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Datasets from './Datasets';
 import Models from './Models';
+import Benchmarks from './Benchmarks';
 
 // Each side of the .hide-lg (< 1280) and .hide-md (< 1024) boundaries, and a tablet (820).
 const WIDTHS = [1280, 1279, 1024, 1023, 820];
@@ -365,5 +366,82 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
   it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
     await loaded('train-split');
     expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');
+  });
+
+  it('keeps missing mAP50-95, mAP50, and Source run values last in both ascending and descending sort', async () => {
+    const api = new MockApi('normal', 0);
+    const base = (await api.models()).find((m) => m.id === 'm_fast_n')!;
+    const mk = (id: string, name: string, map95: number | null, map50: number | null, runId: string | null) => ({
+      ...base,
+      id,
+      name,
+      run_id: runId,
+      metrics: map95 === null || map50 === null ? null : { ...base.metrics!, map50_95: map95, map50 },
+    });
+    api.runs = async () => [
+      { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_a', name: 'run-alpha', dataset_id: 'ds_fasteners' },
+      { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_z', name: 'run-zebra', dataset_id: 'ds_fasteners' },
+    ];
+    // Put all three in the same group (imported files) so they sort together.
+    api.models = async () => [
+      { ...mk('m_none', 'alpha-missing', null, null, null), dataset_id: null, source: 'file' as const },
+      { ...mk('m_low', 'beta-low', 0.4, 0.6, 'run_z'), dataset_id: null, source: 'file' as const },
+      { ...mk('m_high', 'gamma-high', 0.9, 0.95, 'run_a'), dataset_id: null, source: 'file' as const },
+    ];
+    await open(Models, '/models', api);
+    await table('table.models', (t) => t.querySelectorAll('tbody tr[data-row]').length === 3, 'three models');
+
+    const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table.models tbody tr[data-row] a.name')].map((a) => a.textContent!);
+    const clickCol = (label: string) => {
+      const th = [...target.querySelectorAll('table.models thead th')].find((x) => x.textContent?.trim() === label)!;
+      th.querySelector('button')!.click();
+      flushSync();
+    };
+
+    // Default sort is mAP50-95 desc -> missing last; clicking toggles asc -> missing STILL last.
+    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    clickCol('mAP50-95');
+    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+
+    // mAP50 desc -> asc -> missing last in both directions.
+    clickCol('mAP50');
+    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    clickCol('mAP50');
+    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+
+    // Source run asc -> desc -> missing last in both directions.
+    clickCol('Source run');
+    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    clickCol('Source run');
+    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+  });
+});
+
+describe('Benchmarks sort missing values last', () => {
+  it('keeps benchmarks without a leader last in both descending and ascending Leader sort', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.benches();
+    const base = list[0]!;
+    api.benches = async () => [
+      { ...base, id: 'bn_none', name: 'alpha-no-leader', best: null },
+      { ...base, id: 'bn_low', name: 'beta-low', best: { entry_id: 'e1', name: 'low', score: 0.45, partial: false } },
+      { ...base, id: 'bn_high', name: 'gamma-high', best: { entry_id: 'e2', name: 'high', score: 0.91, partial: false } },
+    ];
+    await open(Benchmarks, '/benchmarks', api);
+    await table('table', (t) => t.querySelectorAll('tbody tr[data-row]').length === 3, 'three benchmarks');
+
+    const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table tbody tr[data-row] a.name')].map((a) => a.textContent!);
+    const clickLeader = () => {
+      const th = [...target.querySelectorAll('table thead th')].find((x) => x.textContent?.trim() === 'Leader')!;
+      th.querySelector('button')!.click();
+      flushSync();
+    };
+
+    // First click: Leader desc -> missing last.
+    clickLeader();
+    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-no-leader']);
+    // Second click: Leader asc -> missing STILL last.
+    clickLeader();
+    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-no-leader']);
   });
 });
