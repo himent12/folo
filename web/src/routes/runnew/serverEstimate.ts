@@ -3,6 +3,40 @@ import { effect, signal, untrack, type ReadSignal, type Signal } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import type { RunEstimate, TrainConfig } from '$lib/api/types';
 import { withoutInexactSeed } from '$lib/seed';
+import { quote } from '$lib/trainCli';
+
+/** Serializes the estimate-relevant fields of `config` (omitting `name`, which never affects time or memory). */
+export function estimateKey(config: TrainConfig): string {
+  const { name: _name, ...rest } = config;
+  return JSON.stringify(rest);
+}
+
+/** Formats a `--name` argument the same way `trainCommand` does (attaching `-`-prefixed values). */
+function formatNameFlag(name: string): string {
+  if (name.startsWith('-')) return quote(`--name=${name}`);
+  return `--name ${quote(name)}`;
+}
+
+/**
+ * Updates the `--name` flag in a server-built CLI command when the user edits the run name after the estimate arrived,
+ * avoiding a redundant `POST /api/runs/estimate` roundtrip.
+ */
+export function withServerCliName(cli: string, sentName: string, currentName: string): string {
+  const want = currentName.trim();
+  const sent = sentName.trim();
+  if (want === sent) return cli;
+  const oldFlag = sent ? formatNameFlag(sent) : null;
+  const newFlag = want ? formatNameFlag(want) : '';
+  if (oldFlag) {
+    const idx = cli.lastIndexOf(oldFlag);
+    if (idx !== -1 && (idx === 0 || cli[idx - 1] === ' ') && (idx + oldFlag.length === cli.length || cli[idx + oldFlag.length] === ' ')) {
+      const before = cli.slice(0, idx).trimEnd();
+      const after = cli.slice(idx + oldFlag.length).trimStart();
+      return [before, newFlag, after].filter(Boolean).join(' ');
+    }
+  }
+  return newFlag ? `${cli} ${newFlag}` : cli;
+}
 
 /**
  * The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
@@ -18,23 +52,25 @@ export function serverEstimate(
   possible: () => boolean,
   ampRefusal: Signal<{ device: string; message: string } | null>,
 ) {
-  const served = signal<{ key: string; est: RunEstimate } | null>(null);
+  const served = signal<{ key: string; est: RunEstimate; name: string } | null>(null);
   /** Whether the latest request is still out: set by the run of the effect that owns it, cleared by every other. */
   const estimating = signal(false);
   /** Whether an estimate has been asked for yet (not state: it only sets the next one's delay). */
   let asked = false;
   /** The latest request's number: an answer to an older (cancelled) one never touches the state. */
   let estSeq = 0;
-  // The name is part of the request: the server's command (`cli`) names the run.
+  // Track only `estKey` (which excludes `name`) and `possible()`, so typing in the Run name field never triggers a
+  // redundant `/api/runs/estimate` request.
   effect(() => {
     const key = estKey.get();
-    const c = config.get();
+    const canAsk = possible();
+    const c = untrack(() => config.get());
     // A Seed field that holds no seed is left out (lib/seed, rule B): the estimate does not depend on it.
     const body = withoutInexactSeed({ ...c, name: c.name || 'estimate' });
     const seq = ++estSeq;
     // No request for these settings (none possible, or the answer is already in): none is pending either, even where
     // the one this replaced (since cancelled) was.
-    if (!possible()) {
+    if (!canAsk) {
       served.set(null);
       estimating.set(false);
       return;
@@ -51,7 +87,7 @@ export function serverEstimate(
         hub.api.estimateRun(body, ctrl.signal).then(
           (e) => {
             if (ctrl.signal.aborted || seq !== estSeq) return;
-            served.set({ key, est: e });
+            served.set({ key, est: e, name: body.name });
             estimating.set(false);
             ampRefusal.set(null);
           },

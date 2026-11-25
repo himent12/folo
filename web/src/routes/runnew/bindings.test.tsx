@@ -350,8 +350,10 @@ describe('New run: Start while the user moves on (round s2-runs)', () => {
     type('input#name', 'second-form');
     await answered(answer);
     expect(wentToRun()).toBe(false);
-    const draft = sessionStorage.getItem('folo.runNew.draft');
-    expect(draft && JSON.parse(draft).name).toBe('second-form');
+    await until(() => {
+      const draft = sessionStorage.getItem('folo.runNew.draft');
+      return draft && JSON.parse(draft).name === 'second-form';
+    }, 'the second form’s debounced draft');
   });
 
   it('clears its own draft once started', async () => {

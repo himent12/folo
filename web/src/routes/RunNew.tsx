@@ -11,7 +11,7 @@ import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/a
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { sentence } from '$lib/format';
 import { hasCloud } from '$lib/cloud';
-import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
+import { fitFix, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
 import { REF_CPU, REF_GPU } from '$lib/reference';
 import { hasFeature } from '$lib/throughput';
 import { href, router } from '$lib/router';
@@ -36,8 +36,9 @@ import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } 
 import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage, missingDevice, canonicalDevice } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
-import { serverEstimate } from './runnew/serverEstimate';
-import { clearOwnDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
+import { estimateKey, serverEstimate, withServerCliName } from './runnew/serverEstimate';
+import { initialDraftState, useDraftPersistence } from './runnew/newDraft';
+import { DEFAULT_AUGMENT, IMGSZ_OPTIONS, parseInitialQuery, useRunPrefill } from './runnew/newPrefill';
 import { clipName, MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
@@ -54,9 +55,6 @@ import EstimateFigures from './runnew/EstimateFigures';
 import CliCommand, { cliOf } from './runnew/CliCommand';
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
-
-/** The toast of a `?from=` run that could not be loaded (Toast.key). */
-const FROM_TOAST = 'runnew-from';
 
 /**
  * New run follows its own URL while open (v-data-runs N1): a link that changes it (the palette's "New run on X", a
@@ -76,20 +74,16 @@ function RunNewForm() {
   ownCreateAction();
 
   const q = untrack(() => router.route.query);
-  const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
-  const fromId = q.get('from');
-  // The tab's draft (runnew/draft): whole when it was made under this link (Back, a reload), else under the fields this
-  // link sets. A copy of a run (?from=) sets them all, so it starts from the run, not the draft.
   const query = q.toString();
-  const stored = readDraft(hub.server);
-  const own = stored?.query === query ? stored : null;
-  const draft = own ?? (fromId ? null : stored);
+  const fromId = q.get('from');
+  const { own, draft } = initialDraftState(query, hub.server, fromId);
+  const init = parseInitialQuery(q, own, draft);
 
-  const datasetId = signal<string>((own ? own.datasetId : q.get('dataset')) ?? draft?.datasetId ?? '');
+  const datasetId = signal<string>(init.datasetId);
   // The dock repeats the summary's Start button for narrow screens; it steps aside while that button is on screen.
   const startEl = signal<HTMLElement>();
   const formEl = signal<HTMLFormElement>();
-  startKeys(() => formEl.get());
+  startKeys(() => formEl.get(), { onCancel: () => router.go('/runs') });
   const startVisible = signal(false);
   effect(() => {
     const el = startEl.get();
@@ -102,12 +96,8 @@ function RunNewForm() {
   /** Number inputs bind `null` when cleared (the form's errors say so). */
   const epochs = signal<number>(draft ? (draft.epochs as number) : 100);
   const batch = signal(draft?.batch ?? '16');
-  const IMGSZ = IMGSZ_STEPS.map(String);
-  // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size. Until one is chosen
-  // (there, by hand or by a retry) the size follows the dataset (see `defaultImgsz`).
-  const queryImgsz = !own && IMGSZ.includes(q.get('imgsz') ?? '');
-  const imgsz = signal(queryImgsz ? q.get('imgsz')! : (draft?.imgsz ?? '640'));
-  const imgszChosen = signal(queryImgsz || !!draft?.imgszChosen);
+  const imgsz = signal(init.imgsz);
+  const imgszChosen = signal(init.imgszChosen);
   const device = signal<string>(canonicalDevice(draft?.device ?? 'auto'));
   const optimizer = signal<Optimizer>(draft?.optimizer ?? 'auto');
   /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
@@ -117,11 +107,11 @@ function RunNewForm() {
   const lr0 = signal(draft ? (draft.lr0 as number) : 0.01);
   const seed = signal(draft?.seed ?? '0'); // as typed (lib/seed)
   const seedCopy = copiedSeed(seed, draft?.seedOver ?? false);
-  const weights = signal<string>(draft?.weights ?? 'none');
+  const weights = signal<string>(init.weights);
   const name = signal(draft?.name ?? '');
   const nameEdited = signal(draft?.nameEdited ?? false);
   // Edited in place by the controls (a `deep` object, as Svelte's `$state`), replaced whole by a prefill or Defaults.
-  const augment = signal<Augment>(deep(structuredClone({ ...defaults, ...draft?.augment })));
+  const augment = signal<Augment>(deep(structuredClone({ ...DEFAULT_AUGMENT, ...draft?.augment })));
   // Close mosaic follows the epoch count (default 10, never more than half the run, the trainer's own cap) until it is
   // set by hand; the trainer caps a hand-set value the same way, so a short run always trains with mosaic.
   const closeEdited = signal(draft?.closeEdited ?? false);
@@ -160,56 +150,37 @@ function RunNewForm() {
   // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
   const tp = new Resource((s) => (hasFeature(system.data, 'throughput') ? hub.api.throughput(s).catch(() => null) : Promise.resolve(null)));
 
-  // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
-  // the real server instead of asking the mock that answers before the connection settles.
-  const source = new Resource((s) => (fromId ? hub.api.run(fromId, s) : Promise.resolve(null)));
-  // A draft of this same link already holds the copy, and the edits since.
-  const prefilled = signal(!fromId || !!own);
-  effect(() => {
-    const r = source.data;
-    // The runs too (or their error), so the copy's name is a new one.
-    if (!r || (!runs.data && !runs.error) || untrack(() => prefilled.get())) return;
-    const c = r.config;
-    // A retry's fix comes in the query (?batch=, ?imgsz=, ?arch=, ?device=; see $lib/oom) and wins over the run's.
-    // A value the trainer would reject is ignored (the run's own stays), never offered with Start enabled.
-    const whole = (k: string, lo: number, hi: number, step = 1) => {
-      const v = Number(q.get(k));
-      return Number.isInteger(v) && v >= lo && v <= hi && v % step === 0 ? String(v) : null;
-    };
-    datasetId.set(c.dataset_id);
-    arch.set(arches.find((a) => a.arch === q.get('arch'))?.arch ?? c.arch);
-    epochs.set(Number(whole('epochs', 1, 10000) ?? c.epochs)); // e.g. a short run's "Train N epochs"
-    batch.set(whole('batch', 1, 1024) ?? String(c.batch));
-    imgsz.set(whole('imgsz', 64, 4096, 32) ?? String(c.imgsz)); // the trainer's limits (docs/API.md, runs)
-    imgszChosen.set(true);
-    device.set(q.get('device') === 'cpu' ? 'cpu' : canonicalDevice(c.device));
-    optimizer.set(c.optimizer);
-    amp.set(c.amp ?? false);
-    e2e.set(c.head === 'o2o');
-    lr0.set(c.lr0);
-    seedCopy.copy(c.seed); // over 2^53 − 1 it arrived rounded: left out, and the field says so
-    weights.set(c.weights ?? 'none');
-    // A cloud run's connection, GPU and limit, where they still exist (else this machine, and Run on says why).
-    cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
-    augment.set(deep(structuredClone(c.augment)));
-    closeEdited.set(true);
-    name.set(uniqueName(`${runName(c.name)}-retry`, taken.get()));
-    nameEdited.set(true);
-    prefilled.set(true);
+  // Fused weights (an export) load for inference only, so they are never a starting point.
+  const startable = computed(() => (models.data ?? []).filter((m) => m.fused !== true));
+
+  const { source, prefilled, pendingWeights } = useRunPrefill({
+    q,
+    fromId,
+    own,
+    queryWeights: init.queryWeights,
+    runs,
+    models,
+    startable,
+    taken,
+    datasetId,
+    arch,
+    epochs,
+    batch,
+    imgsz,
+    imgszChosen,
+    device,
+    optimizer,
+    amp,
+    e2e,
+    lr0,
+    seedCopy,
+    weights,
+    cloudPick,
+    augment,
+    closeEdited,
+    name,
+    nameEdited,
   });
-  effect(() => {
-    if (source.error && !untrack(() => prefilled.get())) {
-      // page-level: loading the run to copy, before any dialog opens. A run that does not exist says so in the user's
-      // words (stress s2-runs-7: the server's hint is written for agents).
-      const e = source.error;
-      if (e instanceof ApiError && e.code === 'run_not_found')
-        toast.show({ tone: 'error', title: 'Run to copy not found', detail: 'It was deleted or the link is wrong. The form starts from the defaults.', key: FROM_TOAST });
-      else toast.error(e, 'Could not load the run to copy', { key: FROM_TOAST });
-      prefilled.set(true);
-    }
-  });
-  // The toast is about this link: it goes with the form (another link, another page).
-  effect(() => () => toast.clear(FROM_TOAST));
 
   // The first dataset until one is picked. One a draft or a link asked for that is gone is not swapped for another in
   // silence: none is picked, and the picker says which one went (by the name its runs recorded, where one has).
@@ -224,17 +195,13 @@ function RunNewForm() {
     return `${was ?? 'The dataset asked for'} was removed: pick a dataset.`;
   });
 
-  // The draft follows every edit, once the form holds what the link asked for; a start clears it (below).
-  let started = false;
   // Gone (the user went elsewhere while Start was answered, or the link changed): the start then reports by its toast
   // and leaves the user where they went.
   let mounted = true;
   onCleanup(() => (mounted = false));
-  // The draft as this form last wrote it: a start clears only that one, never a newer form's (a start answered after
-  // the user left and opened New run again).
-  let mine: string | null = null;
-  effect(() => {
-    const d: Draft = {
+  const draftStore = useDraftPersistence({
+    ready: () => prefilled.get() && !pendingWeights.get(),
+    build: () => ({
       server: hub.server,
       query,
       datasetId: datasetId.get(),
@@ -258,8 +225,7 @@ function RunNewForm() {
       advancedOpen: advancedOpen.get(),
       augOpen: augOpen.get(),
       cloud: cloudPick.draft,
-    };
-    if (prefilled.get() && !started) mine = saveDraft(d);
+    }),
   });
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
@@ -267,8 +233,7 @@ function RunNewForm() {
   // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed first are
   // the chosen size's and switching size drops another size's choice. Trained models of the other sizes follow, a
   // group per size, and published weights (`folo weights pull`, `source: published`) in a group of their own: picking
-  // either sets the size to theirs. Fused weights (an export) load for inference only, so they are never a starting point.
-  const startable = computed(() => (models.data ?? []).filter((m) => m.fused !== true));
+  // either sets the size to theirs.
   const weightOptions = computed(() => startable.get().filter((m) => !isPublished(m) && m.arch === arch.get()));
   const publishedOptions = computed(() => startable.get().filter(isPublished));
   // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
@@ -292,7 +257,7 @@ function RunNewForm() {
   effect(() => {
     const a = arch.get();
     const list = startable.get();
-    if (!models.data) return;
+    if (!models.data || pendingWeights.get() !== null) return;
     const w = untrack(() => weights.get());
     if (w === 'none') return;
     const m = list.find((x) => x.id === w);
@@ -441,7 +406,7 @@ function RunNewForm() {
       cloudPick,
     )),
   );
-  const valid = computed(() => prefilled.get() && Object.values(errors.get()).every((e) => e === null));
+  const valid = computed(() => prefilled.get() && !pendingWeights.get() && Object.values(errors.get()).every((e) => e === null));
   /**
    * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
    * out of range. The Summary shows dashes (never "0 optimizer steps", "under 1 min" or "24–55 h" for 99,999 epochs),
@@ -450,7 +415,7 @@ function RunNewForm() {
   const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = computed(() => firstError(errors.get()));
-  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get());
+  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get() && !pendingWeights.get());
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = computed(() => (errors.get().epochs ? null : shortRun(dataset.get()?.splits.train ?? 0, epochs.get(), batchN.get(), weights.get() === 'none')));
   const selArch = computed(() => arches.find((a) => a.arch === arch.get()));
@@ -478,8 +443,13 @@ function RunNewForm() {
   );
 
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
-  const estKey = computed(() => JSON.stringify(config.get()));
-  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute), ampEstimated);
+  const estKey = computed(() => estimateKey(config.get()));
+  const { served, estimating } = serverEstimate(
+    config,
+    estKey,
+    () => canEstimate.get() && prefilled.get() && !pendingWeights.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute),
+    ampEstimated,
+  );
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
@@ -522,7 +492,7 @@ function RunNewForm() {
   const fitted = signal<{ key: string; fix: OomFix | null } | null>(null);
   effect(() => {
     const key = estKey.get();
-    if (!noFit.get() || estimating.get() || untrack(() => fitted.get()?.key) === key) return;
+    if (!prefilled.get() || !!pendingWeights.get() || !noFit.get() || estimating.get() || untrack(() => fitted.get()?.key) === key) return;
     const ctrl = new AbortController();
     const c = untrack(() => config.get());
     const forecaster = vramForecaster(
@@ -561,7 +531,12 @@ function RunNewForm() {
     () => config.get(),
     () => dataset.get()?.path ?? datasetId.get(),
     () => models.data?.find((m) => m.id === weights.get()),
-    () => (served.get()?.key === estKey.get() ? serverCommand(served.get()!.est) : null),
+    () => {
+      const s = served.get();
+      if (!s || s.key !== estKey.get()) return null;
+      const cmd = serverCommand(s.est);
+      return cmd ? withServerCliName(cmd, s.name, config.get().name) : null;
+    },
   );
 
   async function submit(e: SubmitEvent) {
@@ -580,8 +555,7 @@ function RunNewForm() {
     };
     try {
       const run = await hub.api.createRun(config.get());
-      started = true;
-      if (mine !== null) clearOwnDraft(mine);
+      draftStore.markStarted();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
       const t = startedToast(run, before);
@@ -764,7 +738,7 @@ function RunNewForm() {
               oomRun={oomRun.get()}
               dataset={dataset.get()}
               datasetImgsz={datasetImgsz.get()}
-              IMGSZ={IMGSZ}
+              IMGSZ={IMGSZ_OPTIONS}
               cloudOn={cloudOn.get()}
               onCloud={onCloud.get()}
               cloudPick={cloudPick}
@@ -782,7 +756,7 @@ function RunNewForm() {
               bind:augment={augment}
               bind:augOpen={augOpen}
               bind:closeEdited={closeEdited}
-              defaults={defaults}
+              defaults={DEFAULT_AUGMENT}
               errors={errors.get()}
               closeEff={closeEff.get()}
               epochs={epochs.get()}
@@ -838,7 +812,13 @@ function RunNewForm() {
                     </span>
                     <Why id="start-why" />
                   </div>
-                  <CliCommand cliParts={cli.parts.get()} cli={cli.line.get()} cliPlaceholder={cli.placeholder.get()} seedMissing={!!errors.get().seed} />
+                  <CliCommand
+                    cliParts={cli.parts.get()}
+                    cli={cli.line.get()}
+                    cliPlaceholder={cli.placeholder.get()}
+                    pending={!prefilled.get() ? 'Loading run settings…' : pendingWeights.get() ? 'Waiting for linked weights to load…' : null}
+                    seedMissing={!!errors.get().seed}
+                  />
                 </div>
               </div>
             </Panel>
