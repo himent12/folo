@@ -9,7 +9,8 @@
 //! implements the forward and `*_backward` kernels.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::marker::PhantomData;
 
 use std::sync::Arc;
@@ -136,25 +137,57 @@ impl std::fmt::Debug for Grads {
     }
 }
 
+/// Sentinel slot for an op input that does not require grad.
+const NO_GRAD_SLOT: usize = usize::MAX;
+
+/// Reachable autograd graph indexed by dense slots `0..nodes.len()`, built once before backward so the reverse
+/// walk accumulates into a flat `Vec<Option<Tensor>>` with no `HashMap` lookups.
+struct Graph {
+    /// Reachable tensors that require grad (`nodes[0]` is the backward root).
+    nodes: Vec<Tensor>,
+    /// For each slot `u`, the dense slot of each input of `nodes[u].node()`, or [`NO_GRAD_SLOT`] if that input
+    /// did not require grad (empty for leaves).
+    child_slots: Vec<SmallVec<[usize; 2]>>,
+    /// Post-order of dense slot indices (inputs before ops that use them; `0` is last).
+    order: Vec<usize>,
+}
+
 /// Post-order of the graph reachable from `root` (inputs before the ops that use them).
-fn topo_order(root: &Tensor) -> Vec<Tensor> {
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    let mut stack: Vec<(Tensor, usize)> = vec![(root.clone(), 0)];
-    seen.insert(root.id());
-    while let Some((t, i)) = stack.pop() {
-        let next = t.node().and_then(|n| n.inputs.get(i).cloned());
-        match next {
-            Some(child) => {
-                stack.push((t, i + 1));
-                if child.requires_grad() && seen.insert(child.id()) {
-                    stack.push((child, 0));
+fn topo_order(root: &Tensor) -> Graph {
+    let mut nodes: Vec<Tensor> = vec![root.clone()];
+    let mut child_slots: Vec<SmallVec<[usize; 2]>> = vec![SmallVec::new()];
+    let mut order: Vec<usize> = Vec::new();
+    let mut ids: HashMap<TensorId, usize> = HashMap::new();
+    ids.insert(root.id(), 0);
+
+    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
+    while let Some((u, i)) = stack.pop() {
+        let child_info = nodes[u].node().and_then(|n| n.inputs.get(i)).map(|c| (c.id(), c.requires_grad()));
+        match child_info {
+            Some((cid, req)) => {
+                stack.push((u, i + 1));
+                if req {
+                    let v = match ids.entry(cid) {
+                        Entry::Occupied(e) => *e.get(),
+                        Entry::Vacant(e) => {
+                            let idx = nodes.len();
+                            let child = nodes[u].node().expect("node present above").inputs[i].clone();
+                            e.insert(idx);
+                            nodes.push(child);
+                            child_slots.push(SmallVec::new());
+                            stack.push((idx, 0));
+                            idx
+                        }
+                    };
+                    child_slots[u].push(v);
+                } else {
+                    child_slots[u].push(NO_GRAD_SLOT);
                 }
             }
-            None => order.push(t),
+            None => order.push(u),
         }
     }
-    order
+    Graph { nodes, child_slots, order }
 }
 
 /// `acc + g`, in place when nothing else can observe `acc` (a fresh, contiguous gradient that no node saved and
@@ -180,12 +213,13 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
         });
     }
     let _guard = no_grad();
-    let order = topo_order(root);
-    let mut pending: HashMap<TensorId, Tensor> = HashMap::new();
-    pending.insert(root.id(), seed);
+    let graph = topo_order(root);
+    let mut pending: Vec<Option<Tensor>> = vec![None; graph.nodes.len()];
+    pending[0] = Some(seed);
     let mut out = Grads::default();
-    for t in order.iter().rev() {
-        let Some(g) = pending.remove(&t.id()) else { continue };
+    for &u in graph.order.iter().rev() {
+        let Some(g) = pending[u].take() else { continue };
+        let t = &graph.nodes[u];
         let Some(node) = t.node() else {
             out.0.insert(t.id(), g);
             continue;
@@ -206,9 +240,9 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
                 node.inputs.len()
             )));
         }
-        for (inp, gi) in node.inputs.iter().zip(gins) {
+        for ((inp, &inp_slot), gi) in node.inputs.iter().zip(graph.child_slots[u].iter()).zip(gins) {
             let Some(gi) = gi else { continue };
-            if !inp.requires_grad() {
+            if inp_slot == NO_GRAD_SLOT || !inp.requires_grad() {
                 continue;
             }
             if gi.shape() != inp.shape() || gi.dtype() != inp.dtype() || gi.device() != inp.device() {
@@ -223,12 +257,12 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
                     inp.device()
                 )));
             }
-            match pending.remove(&inp.id()) {
+            match pending[inp_slot].take() {
                 Some(acc) => {
-                    pending.insert(inp.id(), accumulate(acc, &gi)?);
+                    pending[inp_slot] = Some(accumulate(acc, &gi)?);
                 }
                 None => {
-                    pending.insert(inp.id(), gi);
+                    pending[inp_slot] = Some(gi);
                 }
             }
         }

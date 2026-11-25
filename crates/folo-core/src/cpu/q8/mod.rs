@@ -609,9 +609,35 @@ unsafe fn max_pool_plane_avx2(src: &[u32], h: usize, w: usize, r: usize, tmp: &m
     }
 }
 
+thread_local! {
+    /// Per-thread scratch for small serial [`max_pool`] planes (`hw < MIN_POOLED`), avoiding a heap allocation
+    /// per call on e.g. YOLO's `20×20` SPPF blocks.
+    static MAX_POOL_TMP: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII wrapper that obtains `n` scratch `u32` words from the CPU buffer cache and recycles them on drop.
+struct ScratchWords(Vec<u32>);
+
+impl ScratchWords {
+    fn new(n: usize) -> Self {
+        Self(words(n))
+    }
+}
+
+impl Drop for ScratchWords {
+    fn drop(&mut self) {
+        let v = std::mem::take(&mut self.0);
+        if !v.is_empty() {
+            recycle(v);
+        }
+    }
+}
+
 /// `k × k` max pool, stride 1, padding `k / 2` (padding never wins), of C4 codes into a contiguous C4 `out`
 /// (`[n][c / 4][h · w]`). Exact: max commutes with a monotone quantiser (per-tensor or per-channel).
 pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u32]) {
+    use rayon::prelude::*;
+
     let hw = h.checked_mul(w).expect("q8::max_pool: h * w overflow");
     x.check(n, hw);
     let groups = x.c / 4;
@@ -622,20 +648,40 @@ pub fn max_pool(x: C4<'_>, n: usize, h: usize, w: usize, k: usize, out: &mut [u3
     }
     let r = k / 2;
     if total < crate::cpu::PAR_MIN {
-        let mut tmp = vec![0u32; hw];
-        for (ig, o) in out[..total].chunks_exact_mut(hw).enumerate() {
-            let (img, g) = (ig / groups, ig % groups);
-            let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
-            max_pool_plane(src, h, w, r, &mut tmp, o);
+        let mut run_serial = |tmp: &mut [u32]| {
+            for (ig, o) in out[..total].chunks_exact_mut(hw).enumerate() {
+                let (img, g) = (ig / groups, ig % groups);
+                let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
+                max_pool_plane(src, h, w, r, tmp, o);
+            }
+        };
+        if hw < crate::cpu::pool_alloc::MIN_POOLED {
+            let ran = MAX_POOL_TMP.try_with(|cell| {
+                let Ok(mut tmp) = cell.try_borrow_mut() else { return false };
+                if tmp.len() < hw {
+                    tmp.resize(hw, 0);
+                }
+                run_serial(&mut tmp[..hw]);
+                true
+            });
+            if !matches!(ran, Ok(true)) {
+                let mut tmp = vec![0u32; hw];
+                run_serial(&mut tmp);
+            }
+        } else {
+            let mut tmp = ScratchWords::new(hw);
+            run_serial(&mut tmp.0);
         }
         return;
     }
-    crate::cpu::par_chunks(&mut out[..total], hw, &|ig, o| {
-        let (img, g) = (ig / groups, ig % groups);
-        let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
-        let mut tmp = vec![0u32; hw];
-        max_pool_plane(src, h, w, r, &mut tmp, o);
-    });
+    out[..total].par_chunks_exact_mut(hw).enumerate().for_each_init(
+        || ScratchWords::new(hw),
+        |tmp, (ig, o)| {
+            let (img, g) = (ig / groups, ig % groups);
+            let src = &x.data[x.offset + img * x.img_stride + g * hw..][..hw];
+            max_pool_plane(src, h, w, r, &mut tmp.0, o);
+        },
+    );
 }
 
 fn upsample2_plane(src: &[u32], h: usize, w: usize, o: &mut [u32]) {

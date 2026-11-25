@@ -422,14 +422,15 @@ impl Tensor {
         F: Fn(&Tensor) -> Result<Vec<Option<Tensor>>> + Send + Sync + 'static,
     {
         let out = output.detach();
-        let saved = out.clone();
-        Ok(out.track_saved(name, inputs, &[&saved], move |g| Ok(SmallVec::from_vec(backward(g)?))))
+        // `output` shares `out`'s `StorageCell` without bumping `out`'s `Arc<TensorInner>` count, so `track_saved`
+        // can attach the node in place on `out` while still version-checking `output`'s storage.
+        Ok(out.track_saved(name, inputs, &[&output], move |g| Ok(SmallVec::from_vec(backward(g)?))))
     }
 
     /// [`Tensor::track`] for a backward closure that also reads `saved` tensors that are not differentiable
     /// inputs (indices, masks, the op's own output). Their storage versions are checked like the inputs'.
     pub(crate) fn track_saved<F>(
-        self,
+        mut self,
         op: &'static str,
         inputs: &[&Tensor],
         saved: &[&Tensor],
@@ -448,6 +449,15 @@ impl Tensor {
             saved: saved.iter().map(|t| (t.cell().clone(), t.storage_version())).collect(),
             backward: Box::new(backward) as BackwardFn,
         };
+        // Fast path: `self` is a freshly constructed, unshared tensor (the common case for every op's output), so
+        // attach `node` in place instead of allocating a second `Arc<TensorInner>` and cloning `Layout` / `Arc`.
+        if let Some(inner) = Arc::get_mut(&mut self.0)
+            && inner.node.is_none()
+            && !*inner.requires_grad.get_mut()
+        {
+            inner.node = Some(node);
+            return self;
+        }
         let inner = &self.0;
         Tensor(Arc::new(TensorInner {
             id: TensorId::next(),
