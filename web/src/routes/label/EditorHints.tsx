@@ -30,8 +30,10 @@ export default function EditorHints(props: EditorHintsProps) {
   const stripEl = signal<HTMLDivElement | null>(null);
   const keepStrip = (el: HTMLDivElement) => {
     stripEl.set(el);
-    return () => {
-      if (stripEl.peek() === el) stripEl.set(null);
+    return {
+      destroy() {
+        if (stripEl.peek() === el) stripEl.set(null);
+      },
     };
   };
 

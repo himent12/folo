@@ -751,7 +751,8 @@ css`
   .stage {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    align-self: start;
+    align-content: start;
     gap: var(--space-2);
     min-width: 0;
   }
