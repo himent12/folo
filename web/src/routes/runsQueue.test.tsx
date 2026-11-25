@@ -156,8 +156,23 @@ describe('a cloud run in its hand-over', () => {
     document.body.click();
     flushSync();
     // Phones: the status word leads the row's meta line.
-    const phone = target.querySelector(`ul.rows a[href$="/runs/run_c9e4"] .r-meta`);
-    expect(phone?.textContent).toMatch(/^Uploading data/);
+    const realMatch = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 767px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+    try {
+      unmount(c!);
+      c = undefined;
+      target.remove();
+      await show(Runs, '/runs', api);
+      const phone = await vi.waitFor(() => {
+        flushSync();
+        const el = target.querySelector(`ul.rows a[href$="/runs/run_c9e4"] .r-meta`);
+        if (!el) throw new Error('phone row not loaded');
+        return el;
+      });
+      expect(phone.textContent).toMatch(/^Uploading data/);
+    } finally {
+      window.matchMedia = realMatch;
+    }
   });
 
   it("titles its own page's header with the phase, not Queued", async () => {

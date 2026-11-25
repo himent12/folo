@@ -167,24 +167,47 @@ describe('the Datasets list', () => {
       flushSync();
     };
 
-    // Name: case-insensitive A-Z, breaking equal names by id.
+    // Name: case-insensitive A-Z, breaking equal names by id (desktop mounts only cards).
     expect(cardIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
-    expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+    expect(phoneIds()).toEqual([]);
 
     // Most images: beta (100) > alpha/Alpha (50, tie broken by id) > missing (sunk despite 999 registered).
     pick('images');
     expect(cardIds()).toEqual(['ds_b', 'ds_a1', 'ds_a2', 'ds_miss']);
-    expect(phoneIds()).toEqual(['ds_b', 'ds_a1', 'ds_a2', 'ds_miss']);
 
     // Most boxes: alpha/Alpha (500) > beta (100) > missing (-1), distinct from image order.
     pick('boxes');
     expect(cardIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
-    expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
 
     // Most classes: Alpha (4) > missing (3) > alpha/beta (2, tie broken by name).
     pick('classes');
     expect(cardIds()).toEqual(['ds_a2', 'ds_miss', 'ds_a1', 'ds_b']);
-    expect(phoneIds()).toEqual(['ds_a2', 'ds_miss', 'ds_a1', 'ds_b']);
+
+    // On phones, only the phone list mounts and obeys the same sort order.
+    const realMatch = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 767px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+    try {
+      c!.unmount();
+      target.remove();
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('.phone-list .m-row'), 'loaded phone rows');
+      expect(cardIds()).toEqual([]);
+      const phoneSelect = target.querySelector<HTMLSelectElement>('#datasets-sort')!;
+      const pickPhone = (v: string) => {
+        phoneSelect.value = v;
+        phoneSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        flushSync();
+      };
+      expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+      pickPhone('images');
+      expect(phoneIds()).toEqual(['ds_b', 'ds_a1', 'ds_a2', 'ds_miss']);
+      pickPhone('boxes');
+      expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+      pickPhone('classes');
+      expect(phoneIds()).toEqual(['ds_a2', 'ds_miss', 'ds_a1', 'ds_b']);
+    } finally {
+      window.matchMedia = realMatch;
+    }
   });
 
   it('hides Label images actions when the server lacks agent_labeling, and disables Sort on empty or failed lists', async () => {

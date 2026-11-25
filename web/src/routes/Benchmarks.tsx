@@ -202,7 +202,65 @@ export default function Benchmarks() {
               </div>
             </div>{' '}
             <Panel pad="none">
-              <div class="scroll" class:state={!hasRows.get()}>
+              {phone.current && hasRows.get() ? (
+                shown.get().length ? (
+                  /* Phones: the name, then where its images came from and how many; the leader's score on the right. */
+                  <ul class="rows" aria-label="Benchmarks">
+                    <For each={shown.get()} key={(b) => b.id}>
+                      {(b) => (
+                        <li>
+                          <a href={href(`/benchmarks/${b().id}`)}>
+                            <span class="m-main">
+                              <span class="nm-row">
+                                <span class="name truncate">{b().name}</span>
+                                {b().active ? <StatusBadge plain dotOnly state={entryStatus({ status: 'running' })} /> : null}
+                              </span>{' '}
+                              <span class="m-meta num">
+                                <Meta>
+                                  <span>{b().source_name}</span>
+                                  <span>{imagesText(b().images)}</span>
+                                  <span>{entriesText(b().entries)}</span>
+                                </Meta>
+                              </span>
+                            </span>{' '}
+                            <span class="m-side">
+                              {b().best ? (
+                                <>
+                                  <span class="num m-score">
+                                    <span class="sr-only">Leader's score</span>
+                                    {b().best!.partial ? <span class="partial">partial</span> : null}
+                                    {scoreText(b().best!.score)}
+                                  </span>
+                                  <span class="m-who truncate">{b().best!.name}</span>
+                                </>
+                              ) : (
+                                <NoValue label="no entries yet" />
+                              )}
+                            </span>
+                          </a>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                ) : (
+                  <ul class="rows" aria-hidden="true">
+                    <For each={[0, 1, 2]} key={(i) => i}>
+                      {() => (
+                        <li>
+                          <span class="row-sk">
+                            <span class="m-main">
+                              <Skeleton w="55%" h="14px" />
+                              <Skeleton w="70%" h="10px" />
+                            </span>
+                            <Skeleton w="40px" h="14px" />
+                          </span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                )
+              ) : (
+                <div class="scroll" class:state={!hasRows.get()}>
                 <table class="table benches" aria-busy={!benches.data} aria-label="Benchmarks" use:rowNav>
                   {hasRows.get() ? (
                     <thead>
@@ -324,63 +382,8 @@ export default function Benchmarks() {
                     )}
                   </tbody>
                 </table>
-              </div>{' '}
-              {/* Phones: the name, then where its images came from and how many; the leader's score on the right. */}
-              {shown.get().length ? (
-                <ul class="rows" aria-label="Benchmarks">
-                  <For each={shown.get()} key={(b) => b.id}>
-                    {(b) => (
-                      <li>
-                        <a href={href(`/benchmarks/${b().id}`)}>
-                          <span class="m-main">
-                            <span class="nm-row">
-                              <span class="name truncate">{b().name}</span>
-                              {b().active ? <StatusBadge plain dotOnly state={entryStatus({ status: 'running' })} /> : null}
-                            </span>{' '}
-                            <span class="m-meta num">
-                              <Meta>
-                                <span>{b().source_name}</span>
-                                <span>{imagesText(b().images)}</span>
-                                <span>{entriesText(b().entries)}</span>
-                              </Meta>
-                            </span>
-                          </span>{' '}
-                          <span class="m-side">
-                            {b().best ? (
-                              <>
-                                <span class="num m-score">
-                                  <span class="sr-only">Leader's score</span>
-                                  {b().best!.partial ? <span class="partial">partial</span> : null}
-                                  {scoreText(b().best!.score)}
-                                </span>
-                                <span class="m-who truncate">{b().best!.name}</span>
-                              </>
-                            ) : (
-                              <NoValue label="no entries yet" />
-                            )}
-                          </span>
-                        </a>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              ) : !benches.data && !benches.error ? (
-                <ul class="rows" aria-hidden="true">
-                  <For each={[0, 1, 2]} key={(i) => i}>
-                    {() => (
-                      <li>
-                        <span class="row-sk">
-                          <span class="m-main">
-                            <Skeleton w="55%" h="14px" />
-                            <Skeleton w="70%" h="10px" />
-                          </span>
-                          <Skeleton w="40px" h="14px" />
-                        </span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              ) : null}
+              </div>
+              )}
             </Panel>{' '}
             {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
             {benches.data && shown.get().length < benches.data.length ? (

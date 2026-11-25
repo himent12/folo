@@ -9,11 +9,12 @@ import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
-import { computed, css, effect, For, onCleanup, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Model, QueueRequest, Run } from '$lib/api/types';
+import { media } from '$lib/design/tokens';
 import { runDatasetLabel } from '$lib/runDataset';
 import RunSpark from '$lib/charts/RunSpark';
 import { ago, duration, metric } from '$lib/format';
@@ -276,6 +277,7 @@ export default function Runs() {
   const filterable = computed(() => (runs.data ? runs.data.length > 0 : !runs.error));
   /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */
   const rowsOrLoading = computed(() => (runs.data ? shown.get().length > 0 : !runs.error));
+  const phone = new MediaQuery(media.phone, false);
 
   const compareButton = (why: () => string | undefined) => (
     <Button
@@ -355,9 +357,27 @@ export default function Runs() {
           </div>
         </div>{' '}
         <Panel pad="none">
-          {/* One table frame for every state: with no rows (empty, no match, an error) it drops its column heads and
-              says so inside it, so no header row of eleven columns sits over a one-line message. */}
-          <div class="scroll" class:state={!rowsOrLoading.get()}>
+          {/* Mount only the active responsive list tree (phone rows below 768 px when loaded/loading; the desktop table
+              otherwise, and the single .state frame for empty/error/no-match at all widths). */}
+          {phone.current && rowsOrLoading.get() ? (
+            <RunRows
+              runs={shown.get()}
+              loading={!runs.data && !runs.error}
+              selected={selected.get()}
+              toggle={toggle}
+              choosing={choosing.get()}
+              onpick={() => picking.set(true)}
+              oncancel={() => (picking.set(false), selected.set([]))}
+              compare={() => <Gate reason={offline.get() ? OFFLINE_REASON : compareReason(selected.get().length)}>{compareButton}</Gate>}
+              hint={!offline.get() ? compareHint(selected.get().length) : null}
+              menuSlot={menuSlot.get()}
+              items={rowItems}
+              placeOf={placeOf}
+              datasetName={datasetName}
+              now={now.get()}
+            />
+          ) : (
+            <div class="scroll" class:state={!rowsOrLoading.get()}>
             {/* Row checkboxes show on a hovered or focused row, and on every row once one is ticked (picking):
                 design/UNIFIED.md §4, Runs. */}
             <table
@@ -558,23 +578,8 @@ export default function Runs() {
                 )}
               </tbody>
             </table>
-          </div>{' '}
-          <RunRows
-            runs={shown.get()}
-            loading={!runs.data && !runs.error}
-            selected={selected.get()}
-            toggle={toggle}
-            choosing={choosing.get()}
-            onpick={() => picking.set(true)}
-            oncancel={() => (picking.set(false), selected.set([]))}
-            compare={() => <Gate reason={offline.get() ? OFFLINE_REASON : compareReason(selected.get().length)}>{compareButton}</Gate>}
-            hint={!offline.get() ? compareHint(selected.get().length) : null}
-            menuSlot={menuSlot.get()}
-            items={rowItems}
-            placeOf={placeOf}
-            datasetName={datasetName}
-            now={now.get()}
-          />
+          </div>
+          )}
         </Panel>{' '}
         {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
         {runs.data && shown.get().length < runs.data.length ? (

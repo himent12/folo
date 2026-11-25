@@ -6,10 +6,11 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { computed, css, effect, For, onCleanup, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Dataset } from '$lib/api/types';
+import { media } from '$lib/design/tokens';
 import ClassStrip from '$lib/detect/ClassStrip';
 import { ago, count } from '$lib/format';
 import { LABEL_FEATURE } from '$lib/label';
@@ -289,6 +290,7 @@ export default function Datasets() {
   const hasRows = computed(() => (listed.data ? shown.get().length > 0 : !listed.error));
   /** Agent labeling is hidden when the server's health explicitly reports it is unavailable (e.g. `folo serve --mock`). */
   const canLabel = computed(() => !hub.lacks(LABEL_FEATURE));
+  const phone = new MediaQuery(media.phone, false);
 
   // Labeling images (agent labeling) lives under Datasets: a secondary action beside Add dataset (the ⋯ on phones).
   return (
@@ -335,22 +337,8 @@ export default function Datasets() {
           </div>
         </div>{' '}
         {hasRows.get() ? (
-          <>
-            {/* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, as Desktop's: three
-                at 1440 px, four on a wide content column; a short last row keeps the columns' width. */}
-            <ul class="cards" aria-label="Datasets" aria-busy={!listed.data}>
-              {listed.data ? (
-                <For each={shown.get()} key={(d) => d.id}>
-                  {(d) => <DatasetCard dataset={d()} />}
-                </For>
-              ) : (
-                <For each={[0, 1, 2]} key={(i) => i}>
-                  {() => <DatasetCardSkeleton />}
-                </For>
-              )}
-            </ul>{' '}
-            {/* Phones: the same parts as rows (DESIGN_DIRECTION §12, one list concept): the name, its images and
-                classes, the format tag, the class balance on the right. */}
+          phone.current ? (
+            /* Phones: the same parts as rows (DESIGN_DIRECTION §12, one list concept); desktop cards stay unmounted. */
             <div class="phone-list">
               <Panel pad="none">
               {listed.data ? (
@@ -411,7 +399,21 @@ export default function Datasets() {
               )}
               </Panel>
             </div>
-          </>
+          ) : (
+            /* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, as Desktop's: three
+               at 1440 px, four on a wide content column; a short last row keeps the columns' width. */
+            <ul class="cards" aria-label="Datasets" aria-busy={!listed.data}>
+              {listed.data ? (
+                <For each={shown.get()} key={(d) => d.id}>
+                  {(d) => <DatasetCard dataset={d()} />}
+                </For>
+              ) : (
+                <For each={[0, 1, 2]} key={(i) => i}>
+                  {() => <DatasetCardSkeleton />}
+                </For>
+              )}
+            </ul>
+          )
         ) : (
           // No cards (an error, no datasets, none that match): one panel holds the state where the grid would be.
           <Panel pad="none">
