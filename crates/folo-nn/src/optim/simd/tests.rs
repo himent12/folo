@@ -1,6 +1,8 @@
-use super::vec_ops::{
-    axpby_scalar, muon_momentum_nesterov_scalar, unscale_check_scalar, unscale_check_sum_sq_scalar,
+use super::norm::{
+    check_finite_scalar, check_sum_sq_f64_scalar, scale2_scalar, unscale_check_scalar,
+    unscale_check_sum_sq_scalar,
 };
+use super::vec_ops::{axpby_scalar, muon_momentum_nesterov_scalar};
 use super::*;
 
 #[cfg(target_arch = "x86_64")]
@@ -153,12 +155,29 @@ fn avx2_kernels_match_scalar_bitwise() {
         assert!((sqs - sqv).abs() <= 1e-12 * (1.0 + sqs.abs()), "unscale_sum_sq n={n}: {sqs} vs {sqv}");
         let sq_only = sum_sq_f64_slice(&av);
         assert!((sqs - sq_only).abs() <= 1e-12 * (1.0 + sqs.abs()), "sum_sq_f64 n={n}: {sqs} vs {sq_only}");
+
+        let (mut s2s, mut s2v) = (p0.clone(), p0.clone());
+        scale2_scalar(&mut s2s, 1e-19, 2.5e-20);
+        scale2_slice(&mut s2v, 1e-19, 2.5e-20);
+        assert_eq!(
+            s2s.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            s2v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "scale2 n={n}"
+        );
+
+        assert_eq!(check_finite_scalar(&p0), check_finite_slice(&p0), "check_finite n={n}");
+        let (cfs, csqs) = check_sum_sq_f64_scalar(&p0);
+        let (cfv, csqv) = check_sum_sq_f64_slice(&p0);
+        assert_eq!(cfs, cfv, "check_sum_sq finite n={n}");
+        assert!((csqs - csqv).abs() <= 1e-12 * (1.0 + csqs.abs()), "check_sum_sq n={n}: {csqs} vs {csqv}");
     }
 
     for pos in [0usize, 7, 8, 15, 31, 32, 34] {
         for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
             let mut v = vec![1.0f32; 35];
             v[pos] = bad;
+            assert!(!check_finite_slice(&v), "check_finite pos={pos} bad={bad}");
+            assert!(!check_sum_sq_f64_slice(&v).0, "check_sum_sq pos={pos} bad={bad}");
             let mut v2 = v.clone();
             assert!(!unscale_check_slice(&mut v, 0.5), "unscale pos={pos} bad={bad}");
             let (ok, _) = unscale_check_sum_sq_slice(&mut v2, 0.5);
@@ -171,4 +190,45 @@ fn avx2_kernels_match_scalar_bitwise() {
     let mut ov2 = vec![1.0f32; 35];
     ov2[17] = f32::MAX;
     assert!(!unscale_check_sum_sq_slice(&mut ov2, 2.0).0);
+}
+
+#[test]
+fn scaled_sum_sq_extreme_and_nonfinite() {
+    // Huge f32 values: 4 copies of f32::MAX -> norm = 2 * f32::MAX without overflow.
+    let big = ScaledSumSq::from_sq_f64(sum_sq_f64_slice(&[f32::MAX; 4]));
+    let want_big = 2.0 * (f32::MAX as f64);
+    assert!((big.norm() - want_big).abs() <= 1e-12 * want_big);
+
+    // Subnormal f32 values: 4 copies of min positive subnormal -> norm = 2 * subnormal without underflow.
+    let tiny_val = f32::from_bits(1);
+    let tiny = ScaledSumSq::from_sq_f64(sum_sq_f64_slice(&[tiny_val; 4]));
+    let want_tiny = 2.0 * (tiny_val as f64);
+    assert!((tiny.norm() - want_tiny).abs() <= 1e-12 * want_tiny);
+
+    // Huge scales near f64::MAX via merge: no overflow.
+    let huge = ScaledSumSq { scale: f64::MAX / 4.0, ssq: 1.0 };
+    let a = huge.merge(huge).merge(huge).merge(huge);
+    let want_f64 = f64::MAX / 2.0;
+    assert!((a.norm() - want_f64).abs() <= 1e-12 * want_f64);
+
+    // Tiny scales near f64::MIN_POSITIVE via merge: no underflow.
+    let small = ScaledSumSq { scale: f64::MIN_POSITIVE, ssq: 1.0 };
+    let b = small.merge(small).merge(small).merge(small);
+    assert!((b.norm() - 2.0 * f64::MIN_POSITIVE).abs() <= 1e-12 * f64::MIN_POSITIVE);
+
+    // Merge combines different scales accurately and preserves zero identity.
+    assert_eq!(ScaledSumSq::ZERO.merge(big).norm(), big.norm());
+    assert_eq!(big.merge(ScaledSumSq::ZERO).norm(), big.norm());
+    let c1 = ScaledSumSq::from_sq_f64(9.0);
+    let c2 = ScaledSumSq::from_sq_f64(16.0);
+    assert!((c1.merge(c2).norm() - 5.0).abs() <= 1e-12);
+    assert!((c2.merge(c1).norm() - 5.0).abs() <= 1e-12);
+
+    // Non-finite propagation: NaN dominates +Inf, +Inf dominates finite.
+    let inf = ScaledSumSq::from_sq_f64(f64::INFINITY);
+    let nan = ScaledSumSq::from_sq_f64(f64::NAN);
+    assert_eq!(inf.merge(big).norm(), f64::INFINITY);
+    assert_eq!(big.merge(inf).norm(), f64::INFINITY);
+    assert!(nan.merge(inf).norm().is_nan());
+    assert!(inf.merge(nan).norm().is_nan());
 }
