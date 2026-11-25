@@ -249,6 +249,83 @@ describe('For', () => {
     list.set(['a', 'a', 'b', 'a']);
     flush();
     expect(text(container)).toBe('aaba');
+    // Reorder duplicates past a shared prefix so `chain` offsets (`j - start`) are exercised,
+    // and assert surviving duplicate nodes keep their exact DOM identities in order.
+    list.set(['a', 'x', 'a', 'b', 'y', 'a']);
+    flush();
+    expect(text(container)).toBe('axabya');
+    const before = [...container.querySelectorAll('i')];
+    list.set(['a', 'b', 'a', 'x', 'a', 'y']);
+    flush();
+    expect(text(container)).toBe('abaxay');
+    const after = [...container.querySelectorAll('i')];
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[3]);
+    expect(after[2]).toBe(before[2]);
+    expect(after[3]).toBe(before[1]);
+    expect(after[4]).toBe(before[5]);
+    expect(after[5]).toBe(before[4]);
+    unmount();
+  });
+
+  it('fast-paths pure append, prepend, middle insert, and pure removals while keeping surviving nodes', () => {
+    const mk = (id: number) => ({ id, label: `L${id}` });
+    const { list, lis, container, unmount } = setup([mk(2), mk(3)]);
+    const orig = lis();
+
+    // Pure append
+    list.set([mk(2), mk(3), mk(5), mk(6)]);
+    flush();
+    expect(lis().slice(0, 2)).toEqual(orig);
+    expect(text(container)).toBe('0:L21:L32:L53:L6');
+
+    // Pure prepend
+    const beforePrepend = lis();
+    list.set([mk(0), mk(1), mk(2), mk(3), mk(5), mk(6)]);
+    flush();
+    expect(lis().slice(2)).toEqual(beforePrepend);
+    expect(text(container)).toBe('0:L01:L12:L23:L34:L55:L6');
+
+    // Pure middle insert
+    const beforeMid = lis();
+    list.set([mk(0), mk(1), mk(2), mk(3), mk(4), mk(5), mk(6)]);
+    flush();
+    expect(lis().slice(0, 4)).toEqual(beforeMid.slice(0, 4));
+    expect(lis().slice(5)).toEqual(beforeMid.slice(4));
+    expect(text(container)).toBe('0:L01:L12:L23:L34:L45:L56:L6');
+
+    // Pure removals (middle, start, end)
+    const beforeRemove = lis();
+    list.set([mk(0), mk(1), mk(5), mk(6)]);
+    flush();
+    expect(lis()).toEqual([beforeRemove[0], beforeRemove[1], beforeRemove[5], beforeRemove[6]]);
+    expect(text(container)).toBe('0:L01:L12:L53:L6');
+
+    list.set([mk(5)]);
+    flush();
+    expect(lis()).toEqual([beforeRemove[5]]);
+    expect(text(container)).toBe('0:L5');
+    unmount();
+  });
+
+  it('stores function items in keyed For without invoking them as signal updaters', () => {
+    const f1 = vi.fn(() => 'one');
+    const f2 = vi.fn(() => 'two');
+    const list = signal<Array<() => string>>([f1]);
+    const { container, unmount } = render(() => (
+      <p>
+        <For each={list.get()} key={(_, i) => i}>
+          {(fn) => <i>{fn()()}</i>}
+        </For>
+      </p>
+    ));
+    expect(text(container)).toBe('one');
+    expect(f1).toHaveBeenCalledTimes(1);
+    list.set([f2]);
+    flush();
+    expect(text(container)).toBe('two');
+    expect(f1).toHaveBeenCalledTimes(1);
+    expect(f2).toHaveBeenCalledTimes(1);
     unmount();
   });
 });
@@ -269,6 +346,127 @@ describe('Index', () => {
     list.set(['q']);
     flush();
     expect(text(container)).toBe('0q');
+    unmount();
+  });
+
+  it('skips DOM reconciliation on same-length updates and handles function items and fallback transitions', () => {
+    const f1 = vi.fn(() => 'f1');
+    const f2 = vi.fn(() => 'f2');
+    const list = signal<Array<() => string>>([]);
+    const disposed: number[] = [];
+    const { container, unmount } = render(() => (
+      <p>
+        <Index each={list.get()} fallback={<em>empty</em>}>
+          {(fn, i) => {
+            onCleanup(() => disposed.push(i));
+            return <i>{fn()()}</i>;
+          }}
+        </Index>
+      </p>
+    ));
+    const p = container.querySelector('p')!;
+    expect(text(p)).toBe('empty');
+
+    // Empty -> empty keeps fallback without DOM churn.
+    const insertSpy = vi.spyOn(p, 'insertBefore');
+    list.set([]);
+    flush();
+    expect(insertSpy).not.toHaveBeenCalled();
+
+    // Empty -> populated
+    list.set([f1, f2]);
+    flush();
+    expect(text(p)).toBe('f1f2');
+    expect(f1).toHaveBeenCalledTimes(1);
+    expect(f2).toHaveBeenCalledTimes(1);
+
+    // Same-length update: updates row signals in place without reconciling `p`'s children.
+    insertSpy.mockClear();
+    const removeSpy = vi.spyOn(p, 'removeChild');
+    list.set([f2, f1]);
+    flush();
+    expect(text(p)).toBe('f2f1');
+    expect(insertSpy).not.toHaveBeenCalled();
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(f1).toHaveBeenCalledTimes(2);
+    expect(f2).toHaveBeenCalledTimes(2);
+
+    // Shrink disposes only truncated indices, empty restores fallback.
+    list.set([f1]);
+    flush();
+    expect(disposed).toEqual([1]);
+    list.set([]);
+    flush();
+    expect(disposed).toEqual([1, 0]);
+    expect(text(p)).toBe('empty');
+
+    insertSpy.mockRestore();
+    removeSpy.mockRestore();
+    unmount();
+  });
+
+  it('returns the same cached array reference on same-length and empty-to-empty updates', () => {
+    const list = signal<string[]>([]);
+    const seen: unknown[] = [];
+    const reader = Index({
+      get each() {
+        return list.get();
+      },
+      fallback: 'empty',
+      children: (item) => item,
+    }) as () => unknown[];
+    const { unmount } = render(() => {
+      effect(() => void seen.push(reader()));
+      return null;
+    });
+    flush();
+    const emptyArr = reader();
+    expect(seen).toEqual([emptyArr]);
+
+    // Empty -> empty keeps exact array identity and does not notify observers.
+    list.set([]);
+    flush();
+    expect(reader()).toBe(emptyArr);
+    expect(seen).toHaveLength(1);
+
+    // Populated -> same-length update keeps exact array identity and does not notify observers.
+    list.set(['a', 'b']);
+    flush();
+    const twoArr = reader();
+    expect(twoArr).not.toBe(emptyArr);
+    expect(seen).toHaveLength(2);
+    list.set(['x', 'y']);
+    flush();
+    expect(reader()).toBe(twoArr);
+    expect(seen).toHaveLength(2);
+
+    unmount();
+  });
+
+  it('rebuilds output cleanly after partial row creation or fallback errors', () => {
+    const list = signal<string[]>([]);
+    const { container, unmount } = render(() => (
+      <p>
+        <Index each={list.get()} fallback={<em>empty</em>}>
+          {(item, i) => {
+            if (item() === 'boom') throw new Error(`row ${i}`);
+            return <i>{item()}</i>;
+          }}
+        </Index>
+      </p>
+    ));
+    expect(text(container)).toBe('empty');
+
+    // Partial creation failure: row 0 succeeds while row 1 throws (leaving rows.length === 1 and out = [<em>]).
+    list.set(['ok', 'boom']);
+    expect(() => flush()).toThrow('row 1');
+
+    // Recovering to length 1 must rebuild output with row 0 instead of reusing the disposed 1-element fallback.
+    list.set(['ok']);
+    flush();
+    expect(text(container)).toBe('ok');
+    expect(container.querySelector('em')).toBeNull();
+    expect(container.querySelector('i')?.textContent).toBe('ok');
     unmount();
   });
 });

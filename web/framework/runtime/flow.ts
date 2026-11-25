@@ -123,7 +123,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
   const update = (row: Row<T>, item: T, i: number) => {
     if (row.item !== item) {
       row.item = item;
-      row.sig?.set(item);
+      row.sig?.set(typeof item === 'function' ? () => item : item);
     }
     row.idx?.set(i);
   };
@@ -179,29 +179,37 @@ export function For<T>(props: ForProps<T>): JSX.Element {
             }
             break;
           }
-          // Middle: match the rest by key (duplicates chained in order).
-          const first = new Map<unknown, number>();
-          const chain = new Int32Array(newEnd + 1 > start ? newEnd + 1 : 0);
-          for (let j = newEnd; j >= start; j--) {
-            const k = keys[j];
-            const at = first.get(k);
-            chain[j] = at === undefined ? -1 : at;
-            first.set(k, j);
-          }
-          for (let i = start; i <= end; i++) {
-            const row = rows[i]!;
-            const j = first.get(row.key);
-            if (j !== undefined && j !== -1) {
-              next[j] = row;
-              const c = chain[j]!;
-              if (c === -1) first.delete(row.key);
-              else first.set(row.key, c);
-            } else drop(row);
-          }
-          for (let j = start; j <= newEnd; j++) {
-            const row = next[j];
-            if (row !== undefined) update(row, list[j]!, j);
-            else next[j] = make(list[j]!, j, keys[j]);
+          if (start > end) {
+            // Pure insertions (or everything matched in prefix/suffix/swap).
+            for (let j = start; j <= newEnd; j++) next[j] = make(list[j]!, j, keys[j]);
+          } else if (start > newEnd) {
+            // Pure removals.
+            for (let i = start; i <= end; i++) drop(rows[i]!);
+          } else {
+            // Middle: match the rest by key (duplicates chained in order).
+            const first = new Map<unknown, number>();
+            const chain = new Int32Array(newEnd - start + 1);
+            for (let j = newEnd; j >= start; j--) {
+              const k = keys[j];
+              const at = first.get(k);
+              chain[j - start] = at === undefined ? -1 : at;
+              first.set(k, j);
+            }
+            for (let i = start; i <= end; i++) {
+              const row = rows[i]!;
+              const j = first.get(row.key);
+              if (j !== undefined) {
+                next[j] = row;
+                const c = chain[j - start]!;
+                if (c === -1) first.delete(row.key);
+                else first.set(row.key, c);
+              } else drop(row);
+            }
+            for (let j = start; j <= newEnd; j++) {
+              const row = next[j];
+              if (row !== undefined) update(row, list[j]!, j);
+              else next[j] = make(list[j]!, j, keys[j]);
+            }
           }
         }
         rows = next;
@@ -234,17 +242,25 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
   const fn = props.children;
   let rows: { sig: Signal<T>; dispose: () => void; value: JSX.Element; b: Branch }[] = [];
   let fallback: { dispose: () => void; value: JSX.Element } | null = null;
+  let out: JSX.Element[] = [];
+  let outDirty = false;
   let ran = false;
-  const mapped: ReadSignal<JSX.Element[]> = computed(
-    () => {
-      // Length and entries tracked (a `deep()` array changed in place updates the rows), the rows' upkeep untracked.
-      const list = props.each || [];
-      const n = list.length;
-      const items = new Array<T>(n);
-      for (let i = 0; i < n; i++) items[i] = list[i]!;
-      return untrack(() => {
-        for (let i = 0; i < Math.min(n, rows.length); i++) rows[i]!.sig.set(() => items[i]!);
-        for (let i = rows.length; i < n; i++) {
+  const mapped: ReadSignal<JSX.Element[]> = computed(() => {
+    // Length and entries tracked (a `deep()` array changed in place updates the rows), the rows' upkeep untracked.
+    const list = props.each || [];
+    const n = list.length;
+    const items = new Array<T>(n);
+    for (let i = 0; i < n; i++) items[i] = list[i]!;
+    return untrack(() => {
+      const prevLen = rows.length;
+      const common = Math.min(n, prevLen);
+      for (let i = 0; i < common; i++) {
+        const item = items[i]!;
+        rows[i]!.sig.set(typeof item === 'function' ? () => item : item);
+      }
+      if (n > prevLen) {
+        outDirty = true;
+        for (let i = prevLen; i < n; i++) {
           rows.push(
             createRoot((dispose) => {
               const sig = signal<T>(items[i]!);
@@ -253,23 +269,36 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
             }, parent),
           );
         }
-        for (let i = n; i < rows.length; i++) {
+      } else if (n < prevLen) {
+        outDirty = true;
+        for (let i = n; i < prevLen; i++) {
           leaveBranch(rows[i]!.b, rows[i]!.value);
           rows[i]!.dispose();
         }
         rows.length = n;
-        if (n === 0 && fallback === null && props.fallback !== undefined) {
-          fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
-        } else if (n > 0 && fallback !== null) {
-          fallback.dispose();
-          fallback = null;
+      }
+      if (n === 0 && fallback === null && props.fallback !== undefined) {
+        outDirty = true;
+        fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
+      } else if (n > 0 && fallback !== null) {
+        outDirty = true;
+        const prevFallback = fallback;
+        fallback = null;
+        prevFallback.dispose();
+      }
+      ran = true;
+      if (outDirty) {
+        if (n === 0) out = fallback !== null ? [fallback.value] : [];
+        else {
+          const next = new Array<JSX.Element>(n);
+          for (let i = 0; i < n; i++) next[i] = rows[i]!.value;
+          out = next;
         }
-        ran = true;
-        return n === 0 ? (fallback !== null ? [fallback.value] : []) : rows.map((r) => r.value);
-      });
-    },
-    { equals: false },
-  );
+        outDirty = false;
+      }
+      return out;
+    });
+  });
   owning(mapped);
   eager(mapped);
   return reader(() => mapped.get());
