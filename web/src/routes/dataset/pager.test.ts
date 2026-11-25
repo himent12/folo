@@ -1,8 +1,10 @@
+import { createRoot, effect, flush } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import { ImagePager } from './pager';
+import type { DatasetImage } from '$lib/api/types';
+import { ImagePager, MAX_CACHED_PAGES, PAGE } from './pager';
 
 describe('ImagePager', () => {
   const saved = hub.api;
@@ -145,5 +147,115 @@ describe('ImagePager', () => {
     none = false;
     pager.reload();
     await vi.waitFor(() => expect(pager.total).toBeGreaterThan(0));
+  });
+
+  it('isolates reactivity per page so loading page 1 does not wake readers of page 0', async () => {
+    const mock = new MockApi('normal', 0);
+    hub.api = { datasetImages: (id, q) => mock.datasetImages(id, q) } as Api;
+    const pager = new ImagePager('ds_fasteners', undefined, undefined);
+    let page0Runs = 0;
+    let page1Runs = 0;
+    let page0RevRuns = 0;
+    const stop = createRoot((dispose) => {
+      effect(() => {
+        void pager.get(0);
+        page0Runs++;
+      });
+      effect(() => {
+        void pager.revisionOf(0);
+        page0RevRuns++;
+      });
+      effect(() => {
+        void pager.get(PAGE);
+        page1Runs++;
+      });
+      return dispose;
+    });
+    try {
+      flush();
+      expect([page0Runs, page0RevRuns, page1Runs]).toEqual([1, 1, 1]);
+      await pager.at(0);
+      flush();
+      expect([page0Runs, page0RevRuns, page1Runs]).toEqual([2, 2, 1]);
+      // Loading page 1 must only wake page 1's reader, never page 0's.
+      await pager.at(PAGE);
+      flush();
+      expect([page0Runs, page0RevRuns, page1Runs]).toEqual([2, 2, 2]);
+    } finally {
+      stop();
+    }
+  });
+
+  it('evicts the least-recently-used page once the LRU cap is exceeded and cleans its index entries', async () => {
+    const total = 1000;
+    const reads: number[] = [];
+    const makeImg = (idx: number): DatasetImage => ({
+      id: `img_${idx}`,
+      file: `img_${idx}.jpg`,
+      split: 'train',
+      width: 640,
+      height: 480,
+      boxes: [],
+    });
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        reads.push(off);
+        const end = Math.min(total, off + lim);
+        return { total, images: Array.from({ length: end - off }, (_, k) => makeImg(off + k)) };
+      },
+    };
+    hub.api = api as Api;
+    expect(MAX_CACHED_PAGES).toBe(50);
+    const pager = new ImagePager('ds_big', undefined, undefined, 0, 3);
+    await pager.at(0); // cache: [0]
+    await pager.at(PAGE); // cache: [0, 1]
+    await pager.at(2 * PAGE); // cache: [0, 1, 2]
+    expect(pager.cachedPages).toBe(3);
+    // Touch page 0 so page 1 becomes the least-recently-used page.
+    expect(pager.get(0)?.id).toBe('img_0');
+    await pager.at(3 * PAGE); // evicts page 1; cache: [2, 0, 3]
+    expect(pager.cachedPages).toBe(3);
+    expect(pager.get(0)?.id).toBe('img_0');
+    expect(pager.get(2 * PAGE)?.id).toBe(`img_${2 * PAGE}`);
+    expect(pager.get(3 * PAGE)?.id).toBe(`img_${3 * PAGE}`);
+    // Page 1 was evicted, and its index entries were removed too.
+    expect(pager.get(PAGE)).toBeUndefined();
+    expect(pager.indexOf(`img_${PAGE}`)).toBe(-1);
+    // Fetching page 1 again loads it from the API cleanly.
+    const before = reads.length;
+    expect((await pager.at(PAGE))?.id).toBe(`img_${PAGE}`);
+    expect(reads.length).toBe(before + 1);
+    expect(pager.cachedPages).toBe(3);
+  });
+
+  it('requests visible pages before leading and trailing overscan pages in ensure()', async () => {
+    const reads: number[] = [];
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        reads.push(off / PAGE);
+        return {
+          total: 1000,
+          images: Array.from({ length: PAGE }, (_, k) => ({
+            id: `img_${off + k}`,
+            file: `img_${off + k}.jpg`,
+            split: 'train',
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_big', undefined, undefined);
+    await pager.at(0);
+    reads.length = 0;
+    // Rendered range spans pages 2..5, with viewport covering pages 3..4 (page 2 leading overscan, page 5 trailing).
+    pager.ensure(2 * PAGE, 6 * PAGE, 3 * PAGE, 5 * PAGE);
+    await vi.waitFor(() => expect(reads).toHaveLength(4));
+    expect(reads).toEqual([3, 4, 2, 5]);
   });
 });

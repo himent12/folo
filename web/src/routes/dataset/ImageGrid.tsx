@@ -2,7 +2,7 @@
  * A dataset's thumbnails in a virtualised grid (ui/TileGrid): image pages load as their rows come into view. The
  * cells take the dataset's dominant image shape.
  */
-import { computed, css } from 'fw';
+import { computed, css, effect, signal, untrack } from 'fw';
 import DatasetImage from '$lib/detect/DatasetImage';
 import TileGrid, { dominantAspect, type Density } from '$lib/ui/TileGrid';
 import type { DatasetImage as ImageInfo } from '$lib/api/types';
@@ -40,17 +40,29 @@ export default function ImageGrid(props: ImageGridProps) {
     if (img) props.onopen(i, img.id);
   }
 
-  // A tile reads its image through one computed: a page landing elsewhere (the pager's version moves) re-checks it
-  // once, and its bindings re-run only when this cell's image itself changed (Svelte re-ran each `{@const}` reader).
-  const tile = (i: () => number) => {
+  // A tile reads its image through one computed subscribed only to its own page's signal, so a page landing elsewhere
+  // never wakes this tile or re-runs its bindings. Visible tiles mount their thumbnail immediately; off-screen overscan
+  // tiles wait one animation frame so visible thumbnails claim the connection pool first (and fast-scrolled overscan
+  // tiles cancel before fetching).
+  const tile = (i: () => number, inView: () => boolean) => {
     const img = computed(() => props.pager.get(i()));
+    const ready = signal(untrack(inView));
+    effect(() => {
+      if (ready.peek()) return;
+      if (inView() || typeof requestAnimationFrame === 'undefined') {
+        ready.set(true);
+        return;
+      }
+      const id = requestAnimationFrame(() => ready.set(true));
+      return () => cancelAnimationFrame(id);
+    });
     // The image's bindings may re-run once more as it goes (before the branch that shows it is taken down: a link to an
     // image opened from the Stats tab did): they read the last image there was, never undefined.
     let last: ImageInfo | undefined;
     const im = () => (last = img.get() ?? last)!;
     return (
       <>
-        {img.get() ? (
+        {img.get() && ready.get() ? (
           <span class="tile" class:bare={im().boxes.length === 0}>
             <DatasetImage
               datasetId={props.pager.datasetId}
@@ -87,7 +99,7 @@ export default function ImageGrid(props: ImageGridProps) {
       aspect={aspect.get()}
       label={label}
       onopen={open}
-      onrange={(lo, hi) => props.pager.ensure(lo, hi)}
+      onrange={(lo, hi, visLo, visHi) => props.pager.ensure(lo, hi, visLo, visHi)}
       toolbar=".ds-toolbar"
       reveal={props.reveal}
       tile={tile}
