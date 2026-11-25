@@ -61,8 +61,16 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "tal_topk" => {
             (1..=MAX_TOPK).contains(&u("K", 0)) && [1, 2, 4, 8, 16, 32, 64, 128].contains(&u("WG", 0))
         }
-        "det_dfl_stats" => (1..=MAX_REG_MAX).contains(&u("R", 0)),
-        "detect" | "sites_decode" => u("R", 0) <= MAX_REG_MAX,
+        "det_dfl_stats" => {
+            use crate::pipeline::SpecVal;
+            matches!(spec.get("R"), Some(SpecVal::U32(r)) if (1..=MAX_REG_MAX).contains(&(r as usize)))
+                && matches!(spec.get("MOMENTS"), Some(SpecVal::Bool(_)))
+                && matches!(spec.get("ENT"), Some(SpecVal::Bool(_)))
+        }
+        "detect" | "sites_decode" => {
+            use crate::pipeline::SpecVal;
+            matches!(spec.get("R"), Some(SpecVal::U32(r)) if (r as usize) <= MAX_REG_MAX)
+        }
         _ if name.starts_with("tal_") || name.starts_with("det_") => {
             u("K", 0) <= MAX_TOPK && u("K2", 0) <= MAX_TOPK && u("R", 0) <= MAX_REG_MAX
         }
@@ -239,9 +247,13 @@ mod tests {
             ("tal_topk", Spec::new().u32("K", 65)),
             ("tal_targets", Spec::new().u32("K", 10).u32("K2", 65536)),
             ("det_box", Spec::new().u32("R", 33)),
-            ("det_dfl_stats", Spec::new().u32("R", 0)),
-            ("det_dfl_stats", Spec::new().u32("R", 33)),
+            ("det_dfl_stats", Spec::new()),
+            ("det_dfl_stats", Spec::new().u32("R", 16)),
+            ("det_dfl_stats", Spec::new().u32("R", 0).bool("MOMENTS", true).bool("ENT", true)),
+            ("det_dfl_stats", Spec::new().u32("R", 33).bool("MOMENTS", true).bool("ENT", true)),
+            ("detect", Spec::new()),
             ("detect", Spec::new().u32("R", 33)),
+            ("sites_decode", Spec::new()),
             ("sites_decode", Spec::new().u32("R", 33)),
             ("muon_gemm", Spec::new().u32("MODE", 3)),
             (

@@ -1,10 +1,10 @@
-// Shared by the detection kernels (task-aligned assigner and detection loss, kernels/detect.rs).
+// Shared by the detection kernels (task-aligned assigner, detection loss, and candidate decode, kernels/detect.rs).
 //
 // The transcendental helpers are written out in basic arithmetic so every adapter computes them the same way and
-// close to folo-core's CPU kernels: `fexp` is folo-core's `cpu::fast_exp` (Cephes `expf`, about 1 ulp), `log1p_unit`
-// is accurate to a few ulp on [0, 1] (WGSL's `log` only promises an absolute error of 2^-21 near 1, which would
-// be a relative error of several percent for the `log(1 + e^-|x|)` of a background logit), and `atan_f` is
-// Cephes `atanf`.
+// close to folo-core's CPU kernels: `fexp` uses a degree-5 minimax polynomial with FMA and split-shift scaling,
+// `log1p_unit` uses a 4-term Remez minimax on [0, 1] (WGSL's `log` only promises an absolute error of 2^-21 near 1,
+// which would be a relative error of several percent for the `log(1 + e^-|x|)` of a background logit), and `atan_wh`
+// is a branch-free 1-division 3-region Remez approximation.
 
 const DET_NONE: u32 = 0xffffffffu;
 
@@ -48,8 +48,10 @@ fn softplus_f(x: f32) -> f32 {
     return max(x, 0.0) + log1p_unit(fexp(-abs(x)));
 }
 
-// Stable sigmoid, as folo-core computes it.
+// Stable sigmoid matching IEEE f32 underflow-to-zero semantics on extreme negative logits (`<= -88.72284`).
 fn sigmoid_f(x: f32) -> f32 {
+    if ((bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u) { return x; }
+    if (x <= -88.72284) { return 0.0; }
     let e = fexp(-abs(x));
     let r = 1.0 / (1.0 + e);
     return select(e * r, r, x >= 0.0);
@@ -294,31 +296,40 @@ fn saeiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32)
     let h1 = max(a.w - a.y, 0.0);
     let w2 = max(b.z - b.x, 0.0);
     let h2 = max(b.w - b.y, 0.0);
-    let m_dim = max(max(w1, h1), max(w2, h2));
-    let inv_s = select(1.0, 1.0 / m_dim, m_dim > 1e6);
-    let w1s = w1 * inv_s;
-    let h1s = h1 * inv_s;
-    let w2s = w2 * inv_s;
-    let h2s = h2 * inv_s;
-    let iws = max(min(a.z, b.z) - max(a.x, b.x), 0.0) * inv_s;
-    let ihs = max(min(a.w, b.w) - max(a.y, b.y), 0.0) * inv_s;
+    let mx = max(w1, w2);
+    let my = max(h1, h2);
+    let inv_sx = select(1.0, 1.0 / mx, mx > 1e6);
+    let inv_sy = select(1.0, 1.0 / my, my > 1e6);
+    let w1s = w1 * inv_sx;
+    let w2s = w2 * inv_sx;
+    let iws = max(min(a.z, b.z) - max(a.x, b.x), 0.0) * inv_sx;
+    let h1s = h1 * inv_sy;
+    let h2s = h2 * inv_sy;
+    let ihs = max(min(a.w, b.w) - max(a.y, b.y), 0.0) * inv_sy;
     let area1 = w1s * h1s;
     let area2 = w2s * h2s;
     let inter = iws * ihs;
-    let uni = area1 + area2 - inter + eps_s;
+    let eps_eff = max(eps_s * inv_sx * inv_sy, 1e-30);
+    let uni = area1 + area2 - inter + eps_eff;
     let iou = inter / uni;
-    let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps_s;
+    let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps_eff;
     let focal_iou = (deficit / uni) * (1.0 + beta * iou);
-    let sx = w2 + delta0;
-    let sy = h2 + delta0;
-    let inv_sum = 1.0 / (sx + sy);
-    let wx = 2.0 * sx * inv_sum;
-    let wy = 2.0 * sy * inv_sum;
+    let m_d = max(max(w2, h2), delta0);
+    let sc_d = select(1.0, 1e-20, m_d > 1e18);
+    let sx_n = w2 * sc_d + delta0 * sc_d;
+    let sy_n = h2 * sc_d + delta0 * sc_d;
+    let inv_sum_n = 1.0 / (sx_n + sy_n);
+    let wx = 2.0 * sx_n * inv_sum_n;
+    let wy = 2.0 * sy_n * inv_sum_n;
+    let sc_x = select(1.0, 1e-20, max(w2, delta0) > 1e18);
+    let sc_y = select(1.0, 1e-20, max(h2, delta0) > 1e18);
+    let sx_x = w2 * sc_x + delta0 * sc_x;
+    let sy_y = h2 * sc_y + delta0 * sc_y;
     let rk = sqrt(kappa);
-    let qt_x1 = inv_sqrt_1p_sq(rk * (a.x - b.x) / sx);
-    let qt_x2 = inv_sqrt_1p_sq(rk * (a.z - b.z) / sx);
-    let qt_y1 = inv_sqrt_1p_sq(rk * (a.y - b.y) / sy);
-    let qt_y2 = inv_sqrt_1p_sq(rk * (a.w - b.w) / sy);
+    let qt_x1 = inv_sqrt_1p_sq(rk * ((a.x * sc_x - b.x * sc_x) / sx_x));
+    let qt_x2 = inv_sqrt_1p_sq(rk * ((a.z * sc_x - b.z * sc_x) / sx_x));
+    let qt_y1 = inv_sqrt_1p_sq(rk * ((a.y * sc_y - b.y * sc_y) / sy_y));
+    let qt_y2 = inv_sqrt_1p_sq(rk * ((a.w * sc_y - b.w * sc_y) / sy_y));
     let phi_x1 = (qt_x1.y * qt_x1.y) / (1.0 + qt_x1.x);
     let phi_x2 = (qt_x2.y * qt_x2.y) / (1.0 + qt_x2.x);
     let phi_y1 = (qt_y1.y * qt_y1.y) / (1.0 + qt_y1.x);

@@ -1057,7 +1057,7 @@ with constants `γ₀ = 6.94` (`PEMA_GAMMA_0`, relative width `σ_rel = [(γ₀ 
 (`PEMA_RHO`), and `lf_min = 0.01` (`PEMA_LF_MIN`). When `ema_mode = power`, the trainer sets the prior shift to
 `t₀ = 0.0` for from-scratch runs and `t₀ = warmup_iters` (or `max(round(0.03 · T), 1)` when `warmup_iters == 0`) for
 transfer runs (`--weights`), so step 1 does not overwrite pretrained shadow weights. The `EmaPowerConfig` is stored in
-`folo.ema.power` (FORMAT.md; omitted in legacy mode so existing checkpoints stay byte-identical), and the trainer logs
+`folo.ema.power` (FORMAT.md; omitted in legacy mode so legacy `folo.ema` entries stay byte-identical), and the trainer logs
 `EMA PC-PEMA (γ₀ …, ρ …, t₀ …)` on its configuration line. `PC-PEMA` is opt-in and best suited for from-scratch
 training (on 30-epoch synthetic Shapes, early convergence improves by `+0.0335` mAP at epoch 10 and `+0.0264` at
 epoch 15 vs an identical run with legacy EMA); short fine-tunes should keep `ema_mode = legacy` or use a tuned `t₀`.

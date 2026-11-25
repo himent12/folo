@@ -69,3 +69,99 @@ fn saeiou_crps_vfl_qfl_match_host() {
     let ctx = folo_gpu::GpuContext::shared().unwrap();
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
+
+#[test]
+fn saeiou_and_crps_gpu_extreme_params_and_validation() {
+    let dev = gpu!();
+    // 1. Huge `rpiou_delta = f32::MAX` stays finite and matches CPU on GPU.
+    // 2. Thin large box (`[0, 3.2, 1.6e7, 4.8]` -> stride-8 width 2e6, height 0.2) matches CPU.
+    // 3. `dfl_crps_weight = 3e38` with `dfl_gain = 0.0` does not overflow per-slot terms on GPU.
+    let anchors = folo_vision::decode::make_anchors(32, 32, &[8], 0.5);
+    let a = anchors.len();
+    let mut rng = folo_core::rng::Rng::seed(999);
+    let bx = folo_core::Tensor::rand_uniform([1, 64, a], -1.0, 2.0, &mut rng);
+    let cx = folo_core::Tensor::rand_uniform([1, 2, a], -2.0, 1.0, &mut rng);
+    let norm_targets = vec![folo_vision::loss::ImageTargets {
+        boxes: vec![folo_vision::boxes::Xyxy::new(2.0, 2.0, 26.0, 26.0)],
+        labels: vec![0],
+    }];
+    let thin_targets = vec![folo_vision::loss::ImageTargets {
+        boxes: vec![folo_vision::boxes::Xyxy::new(0.0, 3.2, 1.6e7, 4.8)],
+        labels: vec![0],
+    }];
+
+    for (tag, cfg, tgts) in [
+        (
+            "delta_max",
+            LossConfig { box_loss: BoxLossKind::Saeiou, rpiou_delta: f32::MAX, ..LossConfig::default() },
+            &norm_targets,
+        ),
+        ("thin_large", LossConfig { box_loss: BoxLossKind::Saeiou, ..LossConfig::default() }, &thin_targets),
+        (
+            "crps_3e38_zero_gain",
+            LossConfig {
+                box_loss: BoxLossKind::Saeiou,
+                dfl_crps_weight: 3e38,
+                dfl_gain: 0.0,
+                ..LossConfig::default()
+            },
+            &norm_targets,
+        ),
+    ] {
+        let (bd, cd) = (
+            bx.detach().to_device(dev).unwrap().requires_grad_(),
+            cx.detach().to_device(dev).unwrap().requires_grad_(),
+        );
+        let (bh, ch) = (bx.detach().requires_grad_(), cx.detach().requires_grad_());
+        let want = detection_loss_host(&bh, &ch, &anchors, tgts, &cfg).unwrap();
+        let got = detection_loss(&bd, &cd, &anchors, tgts, &cfg).unwrap();
+        assert!(got.is_finite() && want.is_finite(), "{tag}: non-finite {got:?} vs {want:?}");
+        assert!(want.num_fg > 0, "{tag}: expected foreground anchors");
+        let gi = got.items;
+        let wi = want.items;
+        let rel = |g: f32, w: f32| (g - w).abs() <= 2e-4 * w.abs().max(1e-3);
+        assert!(
+            rel(gi.box_, wi.box_) && rel(gi.cls, wi.cls) && rel(gi.dfl, wi.dfl),
+            "{tag}: items {gi:?} vs {wi:?}"
+        );
+        let (gg, gw) = (got.total.backward().unwrap(), want.total.backward().unwrap());
+        let gb = gg.get(&bd).unwrap().to_vec::<f32>().unwrap();
+        let wb = gw.get(&bh).unwrap().to_vec::<f32>().unwrap();
+        assert!(gb.iter().all(|v| v.is_finite()), "{tag}: non-finite GPU grad");
+        let scale = wb.iter().fold(0f32, |m, v| m.max(v.abs()));
+        close_vec(&gb, &wb, 2e-4 * scale.max(1e-4), 2e-3, &format!("{tag}/box_raw"));
+    }
+
+    // `cls_loss != Bce && mal_gamma != 0` rejected identically in `folo_gpu::detect`.
+    let anchor_t = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let settings = folo_gpu::detect::LossSettings {
+        reg_max: 16,
+        gains: [7.5, 0.5, 1.5],
+        tal: folo_gpu::detect::TalSettings {
+            topk: 10,
+            topk2: None,
+            alpha: 0.5,
+            beta: 6.0,
+            eps: 1e-9,
+            min_box_size: 16.0,
+            eps_free: false,
+            nwd_weight: 0.0,
+        },
+        mal_gamma: 1.0,
+        cls_loss: folo_gpu::detect::ClsLossKind::Vfl,
+        vfl_alpha: 0.75,
+        vfl_gamma: 2.0,
+        qfl_beta: 2.0,
+        nwd_weight: 0.0,
+        box_loss: folo_gpu::detect::BoxLossKind::Ciou,
+        rpiou_beta: 0.5,
+        rpiou_kappa: 2.0,
+        rpiou_delta: 0.5,
+        dfl_ot_weight: 0.0,
+        dfl_crps_weight: 0.0,
+    };
+    let bd = bx.to_device(dev).unwrap();
+    let cd = cx.to_device(dev).unwrap();
+    let gt = [folo_gpu::detect::ImageGt { boxes: &[[2.0, 2.0, 26.0, 26.0]], labels: &[0] }];
+    assert!(folo_gpu::detect::detection_loss_with_assignment(&bd, &cd, &anchor_t, &gt, &settings).is_err());
+}

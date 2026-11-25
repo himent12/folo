@@ -308,10 +308,11 @@ impl Trainer {
     /// trains with (also `resolved` in its `config.json`).
     pub fn resolved_train(&self) -> folo_api::ResolvedTrain {
         let mut r = self.resolved.to_api(&self.cfg, self.accumulate, self.sched.contract().steps_per_epoch);
-        // The pair the EMA averages with: a resumed run's is its checkpoint's `folo.ema`, whatever its recipe says.
+        // The pair the EMA averages with: legacy runs publish (decay, tau); power-law PC-PEMA omits the legacy pair.
         if let Some(e) = &self.ema {
             let c = e.contract();
-            (r.ema_decay, r.ema_tau) = (Some(c.decay), Some(c.tau));
+            (r.ema_decay, r.ema_tau) =
+                if c.power.is_some() { (None, None) } else { (Some(c.decay), Some(c.tau)) };
         }
         // The same for MuSGD: a resumed run trains with its checkpoint's `folo.optim`.
         if let Some(m) = &mut r.musgd {

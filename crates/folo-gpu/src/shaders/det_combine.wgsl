@@ -5,7 +5,8 @@
 // `kernels/detect.rs` appends either the 1-barrier 32-wide subgroup reduction or the portable 8-barrier fallback.
 // STATS: 0 total, 1 box, 2 cls, 3 dfl, 4 positives, 5 Σ t, 6 non-finite flag, 7 tss, 8..10 the backward scales
 // (B / tss) · gain for box, cls, dfl, 11 B. TOTAL[0] = total (the loss tensor's storage).
-// Params: 0 = BCE partials, 1 = slots, 2 = B (f32), 3 = box gain, 4 = cls gain, 5 = dfl gain, 6 = dfl_ot_weight.
+// Params: 0 = BCE partials, 1 = slots, 2 = B (f32), 3 = box gain, 4 = cls gain, 5 = dfl gain, 6 = dfl_ot_weight,
+// 7 = dfl_crps_weight.
 @group(0) @binding(1) var<storage, read> PART: array<f32>;
 @group(0) @binding(2) var<storage, read> TERMS: array<f32>;
 @group(0) @binding(3) var<storage, read> SLOT: array<u32>;
@@ -17,28 +18,33 @@ struct CombineAcc {
     s: vec4<f32>,
     nf: f32,
     ot: vec2<f32>,
+    crps: f32,
 }
 
-fn det_combine_thread(lid: u32, dfl_ot_w: f32) -> CombineAcc {
+fn det_combine_thread(lid: u32, dfl_ot_w: f32, dfl_crps_w: f32) -> CombineAcc {
     var acc = vec4<f32>(0.0);
     var nfg = 0.0;
     var ot_acc = vec2<f32>(0.0, 0.0);
+    var crps_acc = 0.0;
     for (var i = lid; i < pu(0u); i += 256u) { acc.x = acc.x + PART[i]; }
     for (var s = lid; s < pu(1u); s += 256u) {
-        acc.y = acc.y + TERMS[4u * s];
-        acc.z = acc.z + TERMS[4u * s + 1u];
+        acc.y = acc.y + TERMS[5u * s];
+        acc.z = acc.z + TERMS[5u * s + 1u];
         if (dfl_ot_w > 0.0) {
-            ot_acc = add_split(ot_acc, vec2<f32>(TERMS[4u * s + 2u], TERMS[4u * s + 3u]));
+            ot_acc = add_split(ot_acc, vec2<f32>(TERMS[5u * s + 2u], TERMS[5u * s + 3u]));
+        }
+        if (dfl_crps_w > 0.0) {
+            crps_acc = crps_acc + TERMS[5u * s + 4u];
         }
         if (SLOT[2u * s + 1u] == 1u) {
             acc.w = acc.w + bitcast<f32>(SLOT[2u * s]);
             nfg = nfg + 1.0;
         }
     }
-    return CombineAcc(acc, nfg, ot_acc);
+    return CombineAcc(acc, nfg, ot_acc, crps_acc);
 }
 
-fn det_combine_finish(r: vec4<f32>, nf_sum: f32, ot_sum: vec2<f32>, dfl_ot_w: f32) {
+fn det_combine_finish(r: vec4<f32>, nf_sum: f32, ot_sum: vec2<f32>, crps_sum: f32, dfl_ot_w: f32, dfl_crps_w: f32) {
     let tss = max(r.w, 1.0);
     let nb = pf(2u);
     var wb = r.y / tss * pf(3u);
@@ -49,6 +55,11 @@ fn det_combine_finish(r: vec4<f32>, nf_sum: f32, ot_sum: vec2<f32>, dfl_ot_w: f3
         let ot_norm = div_split(ot_sum, norm_f32(tss));
         let ot_scaled = mul_split(mul_split(ot_norm, norm_f32(dfl_ot_w)), norm_f32(dfl_g));
         wd = wd + split_to_f32(ot_scaled);
+    }
+    if (dfl_crps_w > 0.0 && dfl_g != 0.0 && crps_sum > 0.0) {
+        let crps_norm = div_split(norm_f32(crps_sum), norm_f32(tss));
+        let crps_scaled = mul_split(mul_split(crps_norm, norm_f32(dfl_crps_w)), norm_f32(dfl_g));
+        wd = wd + split_to_f32(crps_scaled);
     }
     var total = (wb + wc + wd) * nb;
     let bad = MISC[0] != 0u;

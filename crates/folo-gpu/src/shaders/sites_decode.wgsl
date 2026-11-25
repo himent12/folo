@@ -34,12 +34,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         for (var side = 0u; side < 4u; side++) {
             let base = (b * 4u + side) * R * cap + s;
             var m = f32(RAW[base]);
+            var has_nan = (bitcast<u32>(m) & 0x7fffffffu) > 0x7f800000u;
             v[0] = m;
             for (var k = 1u; k < R; k++) {
                 let x = f32(RAW[base + k * cap]);
+                has_nan = has_nan || ((bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u);
                 v[k] = x;
                 m = max(m, x);
             }
+            let bad = has_nan || !is_finite_f(m);
             var z = 0.0;
             var e = 0.0;
             for (var k = 0u; k < R; k++) {
@@ -47,15 +50,19 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 z += p;
                 e = fma(p, f32(k), e);
             }
-            d[side] = e / z;
+            d[side] = select(e / z, bitcast<f32>(0x7fc00000u), bad);
         }
     } else {
         for (var side = 0u; side < 4u; side++) {
             let base = (b * 4u + side) * rm * cap + s;
             var m = f32(RAW[base]);
+            var has_nan = (bitcast<u32>(m) & 0x7fffffffu) > 0x7f800000u;
             for (var k = 1u; k < rm; k++) {
-                m = max(m, f32(RAW[base + k * cap]));
+                let x = f32(RAW[base + k * cap]);
+                has_nan = has_nan || ((bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u);
+                m = max(m, x);
             }
+            let bad = has_nan || !is_finite_f(m);
             var z = 0.0;
             var e = 0.0;
             for (var k = 0u; k < rm; k++) {
@@ -63,7 +70,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 z += p;
                 e = fma(p, f32(k), e);
             }
-            d[side] = e / z;
+            d[side] = select(e / z, bitcast<f32>(0x7fc00000u), bad);
         }
     }
     let w = pu(3u);

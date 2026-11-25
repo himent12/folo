@@ -463,6 +463,12 @@ pub fn detection_loss_with_assignment(
     if !(s.qfl_beta.is_finite() && (s.qfl_beta == 0.0 || s.qfl_beta >= 1.0)) {
         return Err(err(format!("qfl_beta {} must be finite and 0 or >= 1", s.qfl_beta)));
     }
+    if s.cls_loss != ClsLossKind::Bce && s.mal_gamma != 0.0 {
+        return Err(err(format!(
+            "mal_gamma {} applies only to ClsLossKind::Bce, got {:?}",
+            s.mal_gamma, s.cls_loss
+        )));
+    }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
     let mut d = asg.desc;
@@ -494,7 +500,7 @@ pub fn detection_loss_with_assignment(
         (raw(&asg.dense)?, raw(&asg.misc)?, raw(&asg.slots)?, raw(&asg.picks)?, raw(&asg.meta)?);
     let (_part, part) = bufs.alloc(DType::F32, &[d.bce_partials()], false)?;
     k::bce_forward(ctx, &d, &cls_buf, &dense_b, &part, &misc_b).map_err(gpu)?;
-    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 4], false)?;
+    let (_terms, terms) = bufs.alloc(DType::F32, &[d.slots(), 5], false)?;
     let dummy = ctx.dummy().clone();
     k::box_terms(ctx, &d, false, &box_buf, &meta_b, &pick_b, &slot_b, &terms, &dummy, &dummy).map_err(gpu)?;
     let (stats, stats_b) = bufs.alloc(DType::F32, &[12], false)?;

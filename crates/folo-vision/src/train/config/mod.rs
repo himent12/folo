@@ -569,7 +569,8 @@ impl ResolvedOptim {
         steps_per_epoch: u64,
     ) -> folo_api::ResolvedTrain {
         let adamw = self.kind == OptimKind::AdamW;
-        let ema = cfg.ema.then(|| cfg.ema_params(cfg.epochs as u64 * steps_per_epoch));
+        let ema = (cfg.ema && cfg.ema_mode == folo_nn::EmaMode::Legacy)
+            .then(|| cfg.ema_params(cfg.epochs as u64 * steps_per_epoch));
         folo_api::ResolvedTrain {
             optimizer: match self.kind {
                 OptimKind::Sgd => folo_api::ResolvedOptimizer::Sgd,
@@ -616,6 +617,7 @@ impl ResolvedOptim {
                 && let Some(t) =
                     v.get("train").and_then(|t| serde_json::from_value::<TrainConfig>(t.clone()).ok())
                 && t.ema
+                && t.ema_mode == folo_nn::EmaMode::Legacy
             {
                 let (d, tau) = t.ema_params(t.epochs as u64 * r.optimizer_steps_per_epoch);
                 (r.ema_decay, r.ema_tau) = (Some(d), Some(tau));

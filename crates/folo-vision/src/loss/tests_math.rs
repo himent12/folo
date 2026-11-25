@@ -15,14 +15,29 @@ fn saeiou_f64_central_fd_grad_check() {
         ([0.0, 0.0, 1.2, 1.4], [15.0, 18.0, 20.0, 22.0], 1.0, 3.0, 0.5), // disjoint
         ([1e-3, 2e-3, 5e-3, 6e-3], [2e-3, 1e-3, 7e-3, 5e-3], 0.5, 2.0, 0.5), // tiny
         ([1e7, 2e7, 4e7, 5e7], [1.5e7, 1.8e7, 4.5e7, 5.2e7], 0.5, 2.0, 0.5), // > 1e6 scale-normalized
+        ([0.0, 0.0, 2e6, 0.2], [0.0, 0.0, 1.5e6, 0.2], 0.5, 2.0, 0.5),   // thin large box > 1e6
         ([0.0, 0.0, 100.0, 2.0], [10.0, 0.5, 90.0, 2.5], 0.7, 1.5, 0.25), // extreme aspect ratio
     ];
     for (idx, &(a, b, beta, kappa, delta0)) in cases.iter().enumerate() {
         let (loss, grad) = saeiou_box_f64(a, b, beta, kappa, delta0);
         assert!(loss.is_finite() && loss >= 0.0, "case {idx}: non-finite or negative loss {loss}");
-        let scale = a.iter().chain(&b).fold(1.0f64, |m, v: &f64| m.max(v.abs()));
-        let eps = 1e-6 * scale;
+        let mut h = [0.0f64; 4];
         for c in 0..4 {
+            h[c] = 1e-6 * a[c].abs().max(b[c].abs()).max(1.0);
+        }
+        let eps_mag = (a[2] - a[0]).abs().min((a[3] - a[1]).abs()).max(1e-3);
+        let h_thin = [
+            (1e-6 * eps_mag).max(1e-8 * a[0].abs()),
+            (1e-6 * eps_mag).max(1e-8 * a[1].abs()),
+            (1e-6 * eps_mag).max(1e-8 * a[2].abs()),
+            (1e-6 * eps_mag).max(1e-8 * a[3].abs()),
+        ];
+        for c in 0..4 {
+            let eps = if c % 2 == 0 {
+                h_thin[c].max(h[c].min(1e-5 * (a[2] - a[0]).abs().max(1.0)))
+            } else {
+                h_thin[c].max(1e-7 * (a[3] - a[1]).abs().max(1e-4))
+            };
             let mut ap = a;
             let mut am = a;
             ap[c] += eps;
@@ -30,7 +45,7 @@ fn saeiou_f64_central_fd_grad_check() {
             let fd = (saeiou_box_f64(ap, b, beta, kappa, delta0).0
                 - saeiou_box_f64(am, b, beta, kappa, delta0).0)
                 / (2.0 * eps);
-            let tol = 1e-5 + 1e-5 * fd.abs().max(grad[c].abs());
+            let tol = 1e-10 + 1e-5 * fd.abs().max(grad[c].abs());
             assert!(
                 (grad[c] - fd).abs() <= tol,
                 "case {idx} coord {c}: analytic {} vs fd {fd} (diff {})",
@@ -39,6 +54,10 @@ fn saeiou_f64_central_fd_grad_check() {
             );
         }
     }
+    // Continuity across the `m_dim = 1e6` scaling boundary even for thin boxes (`h = 0.2`).
+    let l_lo = saeiou_box_f64([0.0, 0.0, 9.99999e5, 0.2], [0.0, 0.0, 7.5e5, 0.2], 0.5, 2.0, 0.5).0;
+    let l_hi = saeiou_box_f64([0.0, 0.0, 1.000001e6, 0.2], [0.0, 0.0, 7.5e5, 0.2], 0.5, 2.0, 0.5).0;
+    assert!((l_lo - l_hi).abs() < 1e-5, "threshold jump across 1e6: {l_lo} vs {l_hi}");
 }
 
 /// `S-AEIoU` extreme & degenerate edge cases: `1e15`, `1e-12`, inverted/zero-area boxes, `NaN`, `±Inf`,
@@ -214,6 +233,15 @@ fn crps_dfl_f64_fd_and_edge_cases() {
     assert!(out_ext.item::<f32>().unwrap().is_finite());
     let g_ext = out_ext.backward().unwrap().get(&logits_ext).unwrap().to_vec::<f32>().unwrap();
     assert!(g_ext.iter().all(|v| v.is_finite()));
+
+    // 4. Partial `NaN` in direct `crps_dfl` call propagates `NaN` to both loss and gradient.
+    let mut nan_row = vec![0.0f32; 4 * 16];
+    nan_row[2] = f32::NAN;
+    let logits_nan = Tensor::from_vec(nan_row, [1, 4, 16]).unwrap().requires_grad_();
+    let out_nan = crps_dfl(&logits_nan, &[3; 4], &[0.5; 4], &[0.25; 4], 0.5, 1.0, 1.5).unwrap();
+    assert!(out_nan.item::<f32>().unwrap().is_nan());
+    let g_nan = out_nan.backward().unwrap().get(&logits_nan).unwrap().to_vec::<f32>().unwrap();
+    assert!(g_nan[..16].iter().all(|v| v.is_nan()), "expected NaN grad on NaN side: {:?}", &g_nan[..16]);
 }
 
 /// Validation and serde round-trip for `S-AEIoU` and `CRPS-DFL`.

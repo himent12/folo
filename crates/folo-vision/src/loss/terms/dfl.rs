@@ -2,11 +2,11 @@
 
 use folo_core::{DType, Result, Tensor};
 
-/// Overflow/underflow-safe `exp(a - b)` in `f64` for `a <= b` down to `-700.0`.
+/// Overflow/underflow-safe `exp(a - b)` in `f64` for `a <= b` down to `-700.0` (propagating `NaN`).
 #[inline(always)]
 pub(super) fn exp_neg_f64(a: f32, b: f32) -> f64 {
     let d = a as f64 - b as f64;
-    if d > -700.0 { d.exp() } else { 0.0 }
+    if d <= -700.0 { 0.0 } else { d.exp() }
 }
 
 /// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:

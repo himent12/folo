@@ -129,6 +129,18 @@ fn pc_pema_resumes_bit_exactly() {
         .filter_map(|e| if let RunEvent::Log(l) = e { Some(l.message.clone()) } else { None })
         .collect();
     assert!(logs.iter().any(|m| m.contains("EMA PC-PEMA")), "{logs:?}");
+    let tr = Trainer::new(cfg.clone(), data(&ds), options(None).0).unwrap();
+    let res_tr = tr.resolved_train();
+    assert_eq!((res_tr.ema_decay, res_tr.ema_tau), (None, None));
+    let api_res = cfg.resolved_train(4, 1);
+    assert_eq!((api_res.ema_decay, api_res.ema_tau), (None, None));
+    let mut cfg_json =
+        serde_json::json!({ "resolved": api_res, "train": serde_json::to_value(&cfg).unwrap() });
+    let back = folo_vision::train::ResolvedOptim::from_run_config(&cfg_json).unwrap();
+    assert_eq!((back.ema_decay, back.ema_tau), (None, None));
+    cfg_json["resolved"].as_object_mut().unwrap().retain(|k, _| !k.starts_with("ema_"));
+    let back2 = folo_vision::train::ResolvedOptim::from_run_config(&cfg_json).unwrap();
+    assert_eq!((back2.ema_decay, back2.ema_tau), (None, None));
     let stopped = TrainOptions { after_epoch: Some(Box::new(StopAfter(1))), ..options(Some(&dir_b)).0 };
     assert_eq!(Trainer::new(cfg, data(&ds), stopped).unwrap().run().unwrap().status, RunStatus::Stopped);
     let mut b = Trainer::resume(

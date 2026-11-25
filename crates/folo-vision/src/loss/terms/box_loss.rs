@@ -559,21 +559,26 @@ pub(crate) fn saeiou_box_f64(
     let h1 = (ay2 - ay1).max(0.0);
     let w2 = (bx2 - bx1).max(0.0);
     let h2 = (by2 - by1).max(0.0);
-    let m_dim = w1.max(h1).max(w2.max(h2));
-    let inv_s = if m_dim > 1e6 { 1.0 / m_dim } else { 1.0 };
-    let (w1s, h1s, w2s, h2s) = (w1 * inv_s, h1 * inv_s, w2 * inv_s, h2 * inv_s);
+    let mx = w1.max(w2);
+    let my = h1.max(h2);
+    let inv_sx = if mx > 1e6 { 1.0 / mx } else { 1.0 };
+    let inv_sy = if my > 1e6 { 1.0 / my } else { 1.0 };
+    let (w1s, w2s) = (w1 * inv_sx, w2 * inv_sx);
+    let (h1s, h2s) = (h1 * inv_sy, h2 * inv_sy);
     let ix = ax2.min(bx2) - ax1.max(bx1);
     let iy = ay2.min(by2) - ay1.max(by1);
-    let (iws, ihs) = (ix.max(0.0) * inv_s, iy.max(0.0) * inv_s);
+    let (iws, ihs) = (ix.max(0.0) * inv_sx, iy.max(0.0) * inv_sy);
     let area1 = w1s * h1s;
     let area2 = w2s * h2s;
     let inter = iws * ihs;
-    let uni = area1 + area2 - inter + EPS_S;
+    let eps_eff = (EPS_S * inv_sx * inv_sy).max(1e-30);
+    let uni = area1 + area2 - inter + eps_eff;
     let iou = inter / uni;
-    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0) + EPS_S;
+    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0) + eps_eff;
     let focal = (deficit / uni) * (1.0 + beta * iou);
     let g_u = -(1.0 - beta + 2.0 * beta * iou);
-    let g_scale = (g_u * inv_s) / uni;
+    let g_scale_x = (g_u * inv_sx) / uni;
+    let g_scale_y = (g_u * inv_sy) / uni;
     let h1s_act = if ax2 > ax1 { h1s } else { 0.0 };
     let w1s_act = if ay2 > ay1 { w1s } else { 0.0 };
     let c_x1 = if ix > 0.0 { w_max(ax1, bx1) } else { 0.0 };
@@ -581,10 +586,10 @@ pub(crate) fn saeiou_box_f64(
     let c_y1 = if iy > 0.0 { w_max(ay1, by1) } else { 0.0 };
     let c_y2 = if iy > 0.0 { w_min(ay2, by2) } else { 0.0 };
     let mut g = [
-        -g_scale * ((inter * (2.0 * c_x1 * ihs - h1s_act) + deficit * (c_x1 * ihs)) / uni),
-        -g_scale * ((inter * (2.0 * c_y1 * iws - w1s_act) + deficit * (c_y1 * iws)) / uni),
-        g_scale * ((inter * (2.0 * c_x2 * ihs - h1s_act) + deficit * (c_x2 * ihs)) / uni),
-        g_scale * ((inter * (2.0 * c_y2 * iws - w1s_act) + deficit * (c_y2 * iws)) / uni),
+        -g_scale_x * ((inter * (2.0 * c_x1 * ihs - h1s_act) + deficit * (c_x1 * ihs)) / uni),
+        -g_scale_y * ((inter * (2.0 * c_y1 * iws - w1s_act) + deficit * (c_y1 * iws)) / uni),
+        g_scale_x * ((inter * (2.0 * c_x2 * ihs - h1s_act) + deficit * (c_x2 * ihs)) / uni),
+        g_scale_y * ((inter * (2.0 * c_y2 * iws - w1s_act) + deficit * (c_y2 * iws)) / uni),
     ];
     let sx = w2 + delta0;
     let sy = h2 + delta0;

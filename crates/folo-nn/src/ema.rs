@@ -88,9 +88,22 @@ impl EmaPowerConfig {
         if denom <= 1.0 {
             return 0.0;
         }
+        if lf.is_nan() {
+            return f64::NAN;
+        }
         let lf_c = lf.clamp(self.lf_min, 1.0);
-        let gamma_eff = self.gamma_0 * lf_c.powf(-self.rho);
-        ((gamma_eff + 1.0) * (-1.0 / denom).ln_1p()).exp()
+        let gamma_eff = if self.gamma_0 == 0.0 {
+            0.0
+        } else if self.rho == 0.0 || lf_c == 1.0 {
+            self.gamma_0
+        } else {
+            (self.gamma_0.ln() - self.rho * lf_c.ln()).exp()
+        };
+        if !gamma_eff.is_finite() {
+            return 0.0;
+        }
+        let d = ((gamma_eff + 1.0) * (-1.0 / denom).ln_1p()).exp();
+        if d.is_finite() { d.clamp(0.0, 1.0) } else { 0.0 }
     }
 }
 
@@ -316,7 +329,13 @@ impl<M: Module> ModelEma<M> {
     /// Fold the current `source` weights into the average with schedule LR factor `lf` (used by `PC-PEMA`;
     /// identical to [`ModelEma::update`] in legacy mode).
     pub fn update_with_lf(&mut self, source: &dyn Module, lf: f64) -> Result<()> {
+        if !lf.is_finite() {
+            return Err(Error::Invalid(format!("ModelEma: non-finite LR factor {lf}")));
+        }
         let d = self.decay_at_with_lf(self.updates + 1, lf);
+        if !d.is_finite() || !(0.0..=1.0).contains(&d) {
+            return Err(Error::Invalid(format!("ModelEma: invalid decay {d}")));
+        }
         let (d32, w) = (d as f32, (1.0 - d) as f32);
         let Self { cached, cached_keys, cached_disjoint, prefix, pair_scratch, updates, .. } = self;
         let guard = ClearGuard(pair_scratch);
@@ -816,5 +835,27 @@ mod tests {
         ] {
             assert!(bad.validate().is_err(), "{bad:?} must fail validate()");
         }
+
+        // `gamma_0 = 0.0` with extreme `rho = 1000.0` never triggers `0 * Inf = NaN` and keeps `(1 - 1/denom)^1`.
+        let zero_g = EmaPowerConfig { gamma_0: 0.0, rho: 1000.0, lf_min: 0.01, t_0: 0.0 };
+        zero_g.validate().unwrap();
+        let d_z = zero_g.decay_at(10, 0.01);
+        assert!(d_z.is_finite() && (d_z - 0.9).abs() < 1e-14, "got {d_z}");
+
+        // Positive `gamma_0` with huge `rho = 1000.0` at small `lf` saturates cleanly to `0.0` without NaN.
+        let huge_eff = EmaPowerConfig { gamma_0: 1.0, rho: 1000.0, lf_min: 0.01, t_0: 0.0 };
+        huge_eff.validate().unwrap();
+        assert_eq!(huge_eff.decay_at(10, 0.01), 0.0);
+
+        // `update_with_lf` with non-finite `lf` fails without mutating shadow tensors.
+        let mut rng = folo_core::rng::Rng::seed(1);
+        let src = crate::Conv2d::new(crate::Conv2dConfig::new(3, 4, 1), &mut rng);
+        let shadow = crate::Conv2d::new(crate::Conv2dConfig::new(3, 4, 1), &mut rng);
+        let mut ema = ModelEma::with_power(shadow, &src, EmaPowerConfig::new(5.0)).unwrap();
+        let before = ema.module().weight.to_vec::<f32>().unwrap();
+        assert!(ema.update_with_lf(&src, f64::NAN).is_err());
+        let after = ema.module().weight.to_vec::<f32>().unwrap();
+        assert_eq!(before, after);
+        assert_eq!(ema.updates(), 0);
     }
 }
