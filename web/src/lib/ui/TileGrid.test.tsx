@@ -109,6 +109,7 @@ describe('TileGrid scroll scheduling and tabindex stability', () => {
         onopen={() => {}}
         onrange={(lo, hi, visLo, visHi) => ranges.push([lo, hi, visLo, visHi])}
         toolbar=".toolbar"
+        directional
         tile={(i) => <span>{i()}</span>}
       />
     ));
@@ -140,6 +141,60 @@ describe('TileGrid scroll scheduling and tabindex stability', () => {
       expect(below[2]).toBeLessThanOrEqual(below[3]);
     } finally {
       unmount();
+    }
+  });
+
+  it('biases overscan 3:1 toward scroll direction, caches toolbar queries, and guards invalid aspect ratios', async () => {
+    const tb = document.createElement('div');
+    tb.className = 'toolbar';
+    document.body.appendChild(tb);
+    const qsSpy = vi.spyOn(document, 'querySelector');
+    const aspect = signal(4 / 3);
+    const ranges: [number, number, number, number][] = [];
+    const { container, unmount } = render(() => (
+      <TileGrid
+        total={400}
+        density="m"
+        aspect={aspect.get()}
+        label={(i) => `tile ${i}`}
+        onopen={() => {}}
+        onrange={(lo, hi, visLo, visHi) => ranges.push([lo, hi, visLo, visHi])}
+        toolbar=".toolbar"
+        directional
+        tile={(i) => <span>{i()}</span>}
+      />
+    ));
+    try {
+      flush();
+      qsSpy.mockClear();
+      // Scroll down to row 20 (4 cols, rowH = 154): 1 row trailing overscan above, 3 rows leading overscan below.
+      gridTop = -20 * 154;
+      window.dispatchEvent(new Event('scroll'));
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      const down = ranges.at(-1)!;
+      expect(down[2] - down[0]).toBe(4); // 1 row above
+      expect(down[1] - down[3]).toBe(12); // 3 rows below
+      // Cached toolbar avoids querying DOM again during scroll frames.
+      expect(qsSpy).not.toHaveBeenCalled();
+
+      // Scroll back up to row 10: 3 rows leading overscan above, 1 row trailing overscan below.
+      gridTop = -10 * 154;
+      window.dispatchEvent(new Event('scroll'));
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      const up = ranges.at(-1)!;
+      expect(up[2] - up[0]).toBe(12); // 3 rows above
+      expect(up[1] - up[3]).toBe(4); // 1 row below
+
+      // Invalid aspect (0 / NaN) must fall back cleanly without NaN heights or empty grid collapse.
+      aspect.set(0);
+      flush();
+      const h = parseFloat((container.querySelector('.grid') as HTMLElement).style.height);
+      expect(Number.isFinite(h) && h > 0).toBe(true);
+    } finally {
+      unmount();
+      tb.remove();
     }
   });
 });

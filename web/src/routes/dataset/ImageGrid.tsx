@@ -28,8 +28,8 @@ export default function ImageGrid(props: ImageGridProps) {
   /** The cells take the shape of the dataset's first 64 images (4:3 until they load; latched across page-0 eviction). */
   let lastAspect = 4 / 3;
   const aspect = computed(() => {
-    const sample = Array.from({ length: Math.min(props.pager.total ?? 0, 64) }, (_, i) => props.pager.get(i));
-    if (sample.some(Boolean)) lastAspect = dominantAspect(sample);
+    const sample = props.pager.sampleFirstPage(64);
+    if (sample) lastAspect = dominantAspect(sample);
     return lastAspect;
   });
 
@@ -50,10 +50,10 @@ export default function ImageGrid(props: ImageGridProps) {
   }
 
   // A tile reads its image through one computed subscribed only to its own page's signal, so a page landing elsewhere
-  // never wakes this tile or re-runs its bindings. Visible tiles mount their thumbnail immediately once metadata is
-  // available; off-screen overscan tiles wait one animation frame after metadata arrives so visible thumbnails claim
-  // the connection pool first (and fast-scrolled overscan tiles cancel before fetching).
-  const tile = (i: () => number, inView: () => boolean) => {
+  // never wakes this tile or re-runs its bindings. Visible tiles mount their thumbnail immediately (`fetchpriority="high"`)
+  // once metadata is available; off-screen overscan tiles wait one animation frame after scrolling pauses (`scrollSeq`)
+  // so rapid scrolling never wastes fetches or decodes on transient overscan rows.
+  const tile = (i: () => number, inView: () => boolean, scrollSeq: () => number) => {
     const img = computed(() => props.pager.get(i()));
     const initImg = untrack(() => img.get());
     const initOn = untrack(inView) && !!initImg;
@@ -72,7 +72,10 @@ export default function ImageGrid(props: ImageGridProps) {
         ready.set(true);
         return;
       }
+      // Track scroll movement only for unready overscan tiles so continuous rapid scrolling cancels & reschedules
+      // their warm-up rAF until scrolling pauses, without waking already-mounted or visible tiles.
       if (readyKey === key && ready.peek()) return;
+      void scrollSeq();
       ready.set(false);
       const id = requestAnimationFrame(() => {
         readyKey = key;
@@ -95,6 +98,7 @@ export default function ImageGrid(props: ImageGridProps) {
               width={im().width}
               height={im().height}
               thumb={256}
+              priority={inView() ? 'high' : 'low'}
               boxes={props.boxes ? im().boxes : NO_BOXES}
               classes={props.classes}
               only={props.only}
@@ -125,6 +129,7 @@ export default function ImageGrid(props: ImageGridProps) {
       onopen={open}
       onrange={(lo, hi, visLo, visHi) => props.pager.ensure(lo, hi, visLo, visHi)}
       toolbar=".ds-toolbar"
+      directional
       reveal={props.reveal}
       tile={tile}
     />

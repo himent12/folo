@@ -49,6 +49,8 @@ export interface DetectionViewProps {
   fit?: 'contain' | 'cover';
   /** Thin strokes and no chips, for thumbnails. */
   compact?: boolean;
+  /** Hint for the browser's fetch scheduler (`high` for visible viewport tiles, `low` for overscan). */
+  priority?: 'high' | 'low' | 'auto';
   alt?: string;
   /** Called once the image has loaded (or failed). */
   onload?: (ok: boolean) => void;
@@ -140,13 +142,46 @@ export default function DetectionView(props: DetectionViewProps) {
     );
   });
 
-  // A new image is not loaded yet. Through a computed: only a new `src` value counts, not a re-read of the parent's
-  // expression for it (Svelte memoises a prop expression; DatasetImage's `src` re-reads its phase on load).
+  // A new image is not loaded yet. Through a computed + effect.pre: only a new `src` value counts, and `loadSeq`
+  // advances before the DOM `src` updates so any in-flight `img.decode()` or stale load/error from an earlier URL
+  // (rapid scroll or filter change) is cancelled and ignored.
   const src = computed(() => p.src);
-  effect(() => {
+  let loadSeq = 0;
+  onCleanup(() => {
+    loadSeq++;
+  });
+  effect.pre(() => {
     void src.get();
+    loadSeq++;
     loaded.set(false);
   });
+
+  function onImgLoad(e: Event) {
+    const el = e.currentTarget as HTMLImageElement;
+    const seq = loadSeq;
+    const finish = () => {
+      if (seq !== loadSeq || !el.hasAttribute('src')) return;
+      loaded.set(true);
+      p.onload?.(true);
+    };
+    // Real browsers populate `naturalWidth > 0` once bytes arrive; await off-main-thread `decode()` before revealing
+    // the tile/boxes so rapid scroll/filter changes can cancel stale decodes cleanly. Synthetic test DOMs leave
+    // `naturalWidth === 0`, completing synchronously.
+    if (el.naturalWidth > 0 && typeof el.decode === 'function') {
+      void el.decode().then(finish, () => {
+        if (seq !== loadSeq || !el.hasAttribute('src')) return;
+        p.onload?.(false);
+      });
+    } else {
+      finish();
+    }
+  }
+
+  function onImgError(e: Event) {
+    const el = e.currentTarget as HTMLImageElement;
+    if (!el.hasAttribute('src')) return;
+    p.onload?.(false);
+  }
 
   let layerEl: HTMLDivElement | undefined;
 
@@ -185,16 +220,12 @@ export default function DetectionView(props: DetectionViewProps) {
           src={p.src}
           alt={p.alt}
           decoding="async"
+          fetchpriority={p.priority}
           class:loaded={loaded.get()}
           style:object-fit={p.fit}
           draggable="false"
-          onload={() => {
-            loaded.set(true);
-            p.onload?.(true);
-          }}
-          onerror={(e) => {
-            if ((e.target as HTMLImageElement).hasAttribute('src')) p.onload?.(false);
-          }}
+          onload={onImgLoad}
+          onerror={onImgError}
         />
       ) : null}
       {geo.get() ? (

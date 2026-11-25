@@ -36,6 +36,7 @@ export interface DatasetImageProps {
   onselect?: (i: number) => void;
   fit?: 'contain' | 'cover';
   compact?: boolean;
+  priority?: 'high' | 'low' | 'auto';
   alt?: string;
 }
 

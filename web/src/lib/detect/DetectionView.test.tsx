@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush } from 'fw';
+import { flush, signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import DetectionView, { type ViewBox } from './DetectionView';
@@ -84,6 +84,62 @@ describe('DetectionView', () => {
       chip0.click();
       box1.click();
       expect(selected).toEqual([0, 1]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('awaits async img.decode() for real bitmaps, cancels stale decodes on src swap/unmount, and forwards fetchpriority', async () => {
+    let resolveA!: () => void;
+    let rejectB!: (e: Error) => void;
+    let calls = 0;
+    vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(640);
+    vi.spyOn(HTMLImageElement.prototype, 'decode').mockImplementation(() => {
+      calls++;
+      if (calls === 1) return new Promise<void>((r) => (resolveA = r));
+      return new Promise<void>((_, rej) => (rejectB = rej));
+    });
+
+    const src = signal<string | null>('data:image/png;base64,A');
+    const outcomes: boolean[] = [];
+    const { container, unmount } = render(() => (
+      <DetectionView
+        src={src.get()}
+        priority="low"
+        width={640}
+        height={480}
+        boxes={BOXES}
+        classes={['cat', 'dog']}
+        onload={(ok) => outcomes.push(ok)}
+      />
+    ));
+    try {
+      flush();
+      const img = container.querySelector<HTMLImageElement>('img')!;
+      expect(img.getAttribute('fetchpriority')).toBe('low');
+
+      // Image A loads bytes, starts decoding asynchronously — not revealed yet.
+      img.dispatchEvent(new Event('load'));
+      flush();
+      expect(img.classList.contains('loaded')).toBe(false);
+      expect(outcomes).toEqual([]);
+
+      // Rapid filter/scroll swaps src to B before A finishes decoding.
+      src.set('data:image/png;base64,B');
+      flush();
+      // A's stale decode resolves late: must be ignored!
+      resolveA();
+      await Promise.resolve();
+      flush();
+      expect(img.classList.contains('loaded')).toBe(false);
+      expect(outcomes).toEqual([]);
+
+      // B loads bytes and fails decode while active: reports onload(false).
+      img.dispatchEvent(new Event('load'));
+      rejectB(new Error('corrupt'));
+      await Promise.resolve();
+      flush();
+      expect(outcomes).toEqual([false]);
     } finally {
       unmount();
     }

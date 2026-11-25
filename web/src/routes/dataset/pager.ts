@@ -110,6 +110,17 @@ export class ImagePager {
     return page?.[i % PAGE];
   }
 
+  /**
+   * Cached first-page sample for grid aspect-ratio inference: tracks page 0 reactively without triggering a stale
+   * network reload when the user has scrolled deep into the dataset.
+   */
+  sampleFirstPage(limit = 64): readonly DatasetImage[] | undefined {
+    this.#trackPage(0);
+    const page = this.#pages.get(0);
+    if (!page || page.length === 0) return undefined;
+    return page.length <= limit ? page : page.slice(0, limit);
+  }
+
   indexOf(id: string): number {
     void this.#indexVersion.get();
     return this.#index.get(id) ?? -1;
