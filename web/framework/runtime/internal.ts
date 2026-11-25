@@ -2,7 +2,7 @@
 
 import { computed, reader } from './core';
 
-export { template, insert, attr, prop, setAttribute, setProperty, setValue, setChecked, className, toggleClass, bindStyle } from './dom';
+export { template, insert, attr, prop, setAttribute, setProperty, setValue, setChecked, className, toggleClass, setStyleProp, styleProp, bindStyle } from './dom';
 export { createComponent, mergeProps, bound, propMemo, derive } from './component';
 export { spread } from './spread';
 export { setEvent, setDelegated, delegateEvents } from './events';

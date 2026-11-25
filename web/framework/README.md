@@ -27,7 +27,7 @@ Related: [Studio's README](../README.md) (the app built on it, and how to add a 
 | `runtime/icon.ts`, `render.ts`, `names.ts` | Lucide icons as components; `render`; names the compiler and the runtime share |
 | `runtime/internal.ts` | `fw/internal`: what compiled JSX calls, not for application code |
 | `compiler/index.ts` | The Vite plugin `fw()`: compiles `.tsx`, serves each file's scoped CSS and the `$icons/<name>` modules |
-| `compiler/jsx.ts`, `ast.ts`, `html.ts` | The JSX transform (oxc-parser + magic-string, exact source maps) and what it needs to know |
+| `compiler/jsx.ts`, `templates.ts`, `ast.ts`, `html.ts` | The JSX transform (oxc-parser + magic-string, exact source maps), template emission/deduplication, and AST/HTML helpers |
 | `compiler/css.ts` | Scoped CSS (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer) |
 | `jsx.d.ts`, `icons.d.ts` | JSX types (Svelte 5's element attribute types from `vendor/`, plus fw's directives); `$icons/*` |
 | `icons/` | `lucide.json`, the icon data the plugin builds `$icons/<name>` from, and its licence |
