@@ -237,11 +237,13 @@ css`
     }
   }
   @media (max-width: 767px) {
+    /* Bleed edge-to-edge under the mobile toolbar so scrolled chips glide across the full viewport width. */
     .class-strip {
       flex-wrap: nowrap;
       overflow-x: auto;
       scrollbar-width: none;
-      padding: 2px 0;
+      margin-inline: calc(var(--space-4) * -1);
+      padding: 2px var(--space-4);
     }
     .class-strip:global([data-fade='end']) {
       mask-image: linear-gradient(90deg, #000 calc(100% - 48px), transparent);
