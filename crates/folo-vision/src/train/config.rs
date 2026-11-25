@@ -433,18 +433,7 @@ impl TrainConfig {
         if !(0.0..=1.0).contains(&l.tal.nwd_weight) {
             return bad(format!("loss.tal.nwd_weight must be in 0..=1, got {}", l.tal.nwd_weight));
         }
-        if !(l.rpiou_beta.is_finite() && (0.0..=1.0).contains(&l.rpiou_beta)) {
-            return bad(format!("loss.rpiou_beta must be finite and in 0..=1, got {}", l.rpiou_beta));
-        }
-        if !(l.rpiou_kappa.is_finite() && l.rpiou_kappa > 0.0) {
-            return bad(format!("loss.rpiou_kappa must be finite and > 0, got {}", l.rpiou_kappa));
-        }
-        if !(l.rpiou_delta.is_finite() && l.rpiou_delta > 0.0) {
-            return bad(format!("loss.rpiou_delta must be finite and > 0, got {}", l.rpiou_delta));
-        }
-        if !(l.dfl_ot_weight.is_finite() && l.dfl_ot_weight >= 0.0) {
-            return bad(format!("loss.dfl_ot_weight must be finite and >= 0, got {}", l.dfl_ot_weight));
-        }
+        l.validate_params().map_err(Error::Config)?;
         if let Some(w) = self.wd_eff
             && !(w.is_finite() && w >= 0.0)
         {

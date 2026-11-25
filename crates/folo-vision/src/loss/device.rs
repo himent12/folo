@@ -57,6 +57,7 @@ pub(super) fn detection_loss_device_with_assignment(
     let box_loss = match cfg.box_loss {
         BoxLossKind::Ciou => folo_gpu::detect::BoxLossKind::Ciou,
         BoxLossKind::Rpiou => folo_gpu::detect::BoxLossKind::Rpiou,
+        other => unreachable!("device_loss_supported excludes {other:?}"),
     };
     let s = folo_gpu::detect::LossSettings {
         reg_max: cfg.reg_max,
