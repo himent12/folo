@@ -17,6 +17,7 @@ import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
 import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
 import { hoverOf, pickNearest, pillOf } from './lineHover';
+import { createRectCache } from './rectCache';
 import { textMeasurer } from './textWidth';
 import type { Future, Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
@@ -228,8 +229,9 @@ export default function LineChart(props: LineChartProps) {
 
   const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), keyed.get(), p.xTitle, xFormat.get(), x.get()));
 
+  const rectCache = createRectCache();
   const local = (e: PointerEvent) => {
-    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+    const rect = rectCache.get(e.currentTarget as SVGElement);
     return { px: e.clientX - rect.left, py: e.clientY - rect.top };
   };
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
@@ -270,6 +272,17 @@ export default function LineChart(props: LineChartProps) {
   effect(() => {
     hint.set(hintText.get());
   });
+  // Invalidate cached SVG rect when plot size or legend/readout state changes (e.g. a legend above the plot wrapping).
+  const hasHover = computed(() => hover.get() !== null);
+  effect(() => {
+    void width.get();
+    void p.height;
+    void p.highlight;
+    void picked.get();
+    void hasHover.get();
+    void hintText.get();
+    rectCache.clear();
+  });
   function onfocus() {
     try {
       keyFocus.set(!!svgEl.peek()?.matches(':focus-visible'));
@@ -308,9 +321,13 @@ export default function LineChart(props: LineChartProps) {
     };
   });
 
+  function onpointerenter() {
+    rectCache.clear();
+  }
   function onpointerdown(e: PointerEvent) {
     spoken.set('');
     if (!touchy(e)) return;
+    rectCache.clear();
     const { px, py } = local(e);
     const h = hover.peek();
     gesture = new TouchGesture(px, py, pinned.peek() && h ? h.px : null);
@@ -319,7 +336,10 @@ export default function LineChart(props: LineChartProps) {
     if (!touchy(e)) {
       // A click on a picked line (`pick`) acts on it.
       const id = picked.peek();
-      if (id !== null && e.button === 0) p.onpick?.(id);
+      if (id !== null && e.button === 0) {
+        rectCache.clear();
+        p.onpick?.(id);
+      }
       return;
     }
     if (!gesture) return;
@@ -344,6 +364,7 @@ export default function LineChart(props: LineChartProps) {
     if (props.pick) picked.set(pickAt(px, py, PICK_PX));
   }
   function onpointerleave(e: PointerEvent) {
+    rectCache.clear();
     if (!touchy(e) && !pinned.peek()) {
       cursor.set(null);
       picked.set(null);
@@ -547,6 +568,7 @@ export default function LineChart(props: LineChartProps) {
               aria-roledescription="chart"
               aria-label={p.label}
               tabindex={hasData.get() ? 0 : -1}
+              onpointerenter={onpointerenter}
               onpointermove={onpointermove}
               onpointerleave={onpointerleave}
               onpointerdown={onpointerdown}

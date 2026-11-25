@@ -9,7 +9,7 @@ import { render } from '../../../framework/testing';
 import LineChart from './LineChart';
 import { memoPathsOf } from './linePathsMemo';
 import { pathsOf } from './linePaths';
-import type { Series } from './lineSeries';
+import { seriesSummary, type Series } from './lineSeries';
 
 const pts = (n: number, f: (x: number) => number) => Array.from({ length: n }, (_, x) => ({ x, y: f(x) }));
 const copy = (series: Series[]) => series.map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) }));
@@ -86,6 +86,34 @@ describe('LineChart on a live page', () => {
     expect([...svg.querySelectorAll('.end-dot')]).toEqual(ends);
     c.unmount();
   });
+
+  it('caches the SVG DOMRect across pointermove bursts and invalidates on leave or scroll', async () => {
+    const series = [{ id: 'a', label: 'box', color: 'red', points: pts(20, (x) => 2 - x / 20) }];
+    const { c, svg } = mountAt({ series });
+    // fw attaches non-delegated pointerenter/pointerleave listeners after a microtask.
+    await Promise.resolve();
+    const rectSpy = vi.spyOn(svg, 'getBoundingClientRect');
+    svg.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
+    // First move activates hover (invalidating once in case a legend above the plot wrapped); subsequent moves hit cache.
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 60, clientY: 50, bubbles: true }));
+    flush();
+    rectSpy.mockClear();
+    for (let px = 80; px < 300; px += 20) {
+      svg.dispatchEvent(new PointerEvent('pointermove', { clientX: px, clientY: 50, bubbles: true }));
+      flush();
+    }
+    expect(rectSpy).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event('scroll'));
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 50, bubbles: true }));
+    flush();
+    expect(rectSpy).toHaveBeenCalledTimes(2);
+    svg.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+    flush();
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 140, clientY: 50, bubbles: true }));
+    flush();
+    expect(rectSpy).toHaveBeenCalledTimes(3);
+    c.unmount();
+  });
 });
 
 describe('memoPathsOf', () => {
@@ -127,5 +155,36 @@ describe('memoPathsOf', () => {
     const full = perPoll((s) => pathsOf(s, 'linear', 900, margin, 200, px, py, false));
     const kept = perPoll((s) => fresh(s, 'linear', 900, margin, 200, px, py, false));
     console.info(`[perf] a poll of 3 × 5000 points + 1 growing line: pathsOf ${full.toFixed(3)} ms, memoPathsOf ${kept.toFixed(3)} ms`);
+  });
+
+  it('detects in-place point appends (including when followed by a fresh slice) and interior updates', () => {
+    const memo = memoPathsOf();
+    const sharedPts = [
+      { x: 0, y: 1.5 },
+      { x: 1, y: 1.2 },
+    ];
+    let rev = 1;
+    const make = (): Series[] => [{ id: 'loss', label: 'loss', color: 'red', points: sharedPts, bounds: { lo: 1.2, hi: 1.5 }, rev }];
+    expect(memo(make(), 'linear', 900, margin, 200, x, y, false)).toEqual(pathsOf(make(), 'linear', 900, margin, 200, x, y, false));
+    expect(seriesSummary(make())[0]).toMatchObject({ last: 1.2, lo: 1.2, hi: 1.5 });
+
+    // Append in place without bumping rev and hand in a fresh copy matching the grown array: must rebuild, not reuse stale path.
+    sharedPts.push({ x: 2, y: 0.4 });
+    memo.stats.built = 0;
+    const sliced: Series[] = [{ id: 'loss', label: 'loss', color: 'red', points: sharedPts.slice(), rev }];
+    expect(memo(sliced, 'linear', 900, margin, 200, x, y, false)).toEqual(pathsOf(sliced, 'linear', 900, margin, 200, x, y, false));
+    expect(memo.stats.built).toBe(1);
+
+    // Interior point correction on an unbounded series is always reflected by seriesSummary.
+    const mutable = [
+      { x: 0, y: 1 },
+      { x: 1, y: 9 },
+      { x: 2, y: 2 },
+    ];
+    const s1: Series[] = [{ id: 'm', label: 'm', color: 'red', points: mutable }];
+    expect(seriesSummary(s1)[0]).toMatchObject({ lo: 1, hi: 9, last: 2 });
+    mutable[1] = { x: 1, y: 3 };
+    mutable.push({ x: 3, y: 4 });
+    expect(seriesSummary(s1)[0]).toMatchObject({ lo: 1, hi: 4, last: 4 });
   });
 });

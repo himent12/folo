@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { flush as flushSync } from 'fw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import ConfusionMatrix, { type ConfusionMatrixApi, type ConfusionMatrixProps } from './ConfusionMatrix';
 
@@ -57,5 +57,64 @@ describe('ConfusionMatrix labels', () => {
     expect(cell(0, 1).getAttribute('aria-label')).toBe('bolt predicted as nut: 0 of 40, 0%');
     for (const el of target.querySelectorAll('.cell')) expect(el.getAttribute('aria-label')).toMatch(/: \d+ of \d+, (<1|\d+)%$/);
     unmount(cm);
+  });
+
+  it('delegates pointer and focus events on the grid root without child flicker and rAF-throttles scroll', () => {
+    vi.useFakeTimers();
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const matrix = [
+      [8, 2, 0],
+      [1, 9, 0],
+      [0, 0, 0],
+    ];
+    const cm = mount(ConfusionMatrix, { target, props: { classes: ['cat', 'dog'], matrix, minCell: 32 } });
+    try {
+      flushSync();
+      const grid = target.querySelector<HTMLElement>('.cm')!;
+      const c00 = target.querySelector<HTMLElement>('[data-r="0"][data-c="0"]')!;
+      const c00Val = c00.querySelector<HTMLElement>('.v')!;
+      const c01 = target.querySelector<HTMLElement>('[data-r="0"][data-c="1"]')!;
+
+      // Hover cell (0, 0) via delegated pointerover -> readout updates.
+      c00.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, relatedTarget: grid }));
+      flushSync();
+      expect(c00.classList.contains('hl')).toBe(true);
+      expect(target.querySelector('.readout')!.textContent).toMatch(/cat\s+predicted as\s+cat/);
+
+      // Move onto cell child (.v) -> stays hovered without clearing.
+      c00.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget: c00Val }));
+      c00Val.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, relatedTarget: c00 }));
+      flushSync();
+      expect(c00.classList.contains('hl')).toBe(true);
+
+      // Focus cell (0, 1) via delegated focusin -> pins cell (0, 1).
+      c01.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      flushSync();
+      expect(c01.classList.contains('pin')).toBe(true);
+
+      // Leaving hovered cell to outside restores pinned cell (0, 1).
+      c00.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget: target }));
+      flushSync();
+      expect(target.querySelector('.readout')!.textContent).toMatch(/cat\s+predicted as\s+dog/);
+
+      // Focus leaving grid clears pin and hover.
+      c01.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: target }));
+      flushSync();
+      expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
+
+      // Burst of scroll events coalesces into one rAF measurement.
+      const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+      grid.dispatchEvent(new Event('scroll'));
+      grid.dispatchEvent(new Event('scroll'));
+      grid.dispatchEvent(new Event('scroll'));
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(20);
+    } finally {
+      unmount(cm);
+      target.remove();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
 });

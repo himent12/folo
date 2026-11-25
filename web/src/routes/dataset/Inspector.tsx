@@ -13,6 +13,7 @@ import X from '$icons/x';
 import { computed, css, cubicOut, effect, fly, Key, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Box, DatasetImage as ImageInfo } from '$lib/api/types';
+import { createRectCache } from '$lib/charts/rectCache';
 import DatasetImage from '$lib/detect/DatasetImage';
 import { count, num } from '$lib/format';
 import Button from '$lib/ui/Button';
@@ -211,8 +212,18 @@ export default function Inspector(props: InspectorProps) {
     ty.set(h / 2 - ((b.y1 + b.y2) / 2) * s * nz);
   }
 
+  let animating = false;
+  const rectCache = createRectCache();
+  effect(() => {
+    void vw.get();
+    void vh.get();
+    rectCache.clear();
+  });
   function local(e: { clientX: number; clientY: number }) {
-    const r = viewport.peek()!.getBoundingClientRect();
+    const v = viewport.peek()!;
+    // Avoid caching an intermediate rect while the dialog's opening scale animation is in flight.
+    const running = animating || !!dialog?.getAnimations?.().some((a) => a.playState === 'running');
+    const r = running ? v.getBoundingClientRect() : rectCache.get(v);
     return [e.clientX - r.left, e.clientY - r.top] as const;
   }
 
@@ -228,7 +239,24 @@ export default function Inspector(props: InspectorProps) {
       zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py, false);
     };
     v.addEventListener('wheel', onwheel, { passive: false });
-    return () => v.removeEventListener('wheel', onwheel);
+    const d = dialog;
+    const onAnimStart = () => {
+      animating = true;
+      rectCache.clear();
+    };
+    const onAnimDone = () => {
+      animating = false;
+      rectCache.clear();
+    };
+    d?.addEventListener('animationstart', onAnimStart);
+    d?.addEventListener('animationend', onAnimDone);
+    d?.addEventListener('animationcancel', onAnimDone);
+    return () => {
+      v.removeEventListener('wheel', onwheel);
+      d?.removeEventListener('animationstart', onAnimStart);
+      d?.removeEventListener('animationend', onAnimDone);
+      d?.removeEventListener('animationcancel', onAnimDone);
+    };
   });
 
   const pointers = new Map<number, { x: number; y: number }>();
@@ -244,8 +272,15 @@ export default function Inspector(props: InspectorProps) {
     return { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
   }
 
+  function onpointerenter() {
+    rectCache.clear();
+  }
+  function onpointerleave() {
+    if (pointers.size === 0) rectCache.clear();
+  }
   function onpointerdown(e: PointerEvent) {
     if (e.button !== 0) return;
+    if (pointers.size === 0) rectCache.clear();
     touched.set(true);
     viewport.peek()!.setPointerCapture(e.pointerId);
     const [px, py] = local(e);
@@ -405,6 +440,8 @@ export default function Inspector(props: InspectorProps) {
           aria-label={img.get() ? `${stem(im().file)} with ${count(im().boxes.length, 'labelled box', 'labelled boxes')}` : 'Loading image'}
           aria-describedby="insp-keys"
           onkeydown={onviewportkey}
+          onpointerenter={onpointerenter}
+          onpointerleave={onpointerleave}
           onpointerdown={onpointerdown}
           onpointermove={onpointermove}
           onpointerup={onpointerup}

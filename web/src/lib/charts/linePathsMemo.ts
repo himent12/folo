@@ -22,10 +22,30 @@ export function samePoints(a: readonly Pt[] | undefined, b: readonly Pt[] | unde
   return true;
 }
 
+interface PointStamp {
+  arr: Pt[] | undefined;
+  len: number;
+  first: Pt | undefined;
+  last: Pt | undefined;
+}
+
+function stampOf(arr: Pt[] | undefined): PointStamp {
+  return { arr, len: arr?.length ?? 0, first: arr?.[0], last: arr?.[arr.length - 1] };
+}
+
+function sameStamped(cur: Pt[] | undefined, prev: PointStamp): boolean {
+  if (prev.arr && (prev.arr.length !== prev.len || prev.arr[0] !== prev.first || prev.arr[prev.arr.length - 1] !== prev.last)) {
+    return false;
+  }
+  if (cur === prev.arr) return true;
+  return samePoints(cur, prev.arr);
+}
+
 /** A memoised `pathsOf`; `stats` counts the series rebuilt and reused (tests, measurements). */
 export function memoPathsOf() {
+  type Entry = { points: PointStamp; lower: PointStamp; rev: number | undefined; area: boolean; out: Paths[number] };
   let geo: unknown[] = [];
-  let cache = new Map<string, { points: Pt[]; lower: Pt[] | undefined; area: boolean; out: Paths[number] }>();
+  let cache = new Map<string, Entry>();
   const stats = { built: 0, reused: 0 };
   function paths(visible: Series[], curve: 'linear' | 'monotone', width: number, margin: Margin, height: number, x: Scale, y: Scale, yLog: boolean): Paths {
     const key = [curve, width, margin.top, margin.right, margin.bottom, margin.left, height, x, y, yLog];
@@ -33,28 +53,21 @@ export function memoPathsOf() {
       cache = new Map();
       geo = key;
     }
-    const next = new Map<
-      string,
-      {
-        points: Pt[];
-        lower: Pt[] | undefined;
-        area: boolean;
-        out: Paths[number];
-      }
-    >();
+    const next = new Map<string, Entry>();
     const out = visible.map((s) => {
       const hit = cache.get(s.id);
-      if (hit && !!s.area === hit.area && samePoints(s.points, hit.points) && samePoints(s.lower, hit.lower)) {
+      if (hit && !!s.area === hit.area && hit.rev === s.rev && sameStamped(s.points, hit.points) && sameStamped(s.lower, hit.lower)) {
         stats.reused++;
         const o = { ...hit.out, s };
-        next.set(s.id, { ...hit, points: s.points, lower: s.lower, out: o });
+        next.set(s.id, { points: stampOf(s.points), lower: stampOf(s.lower), rev: s.rev, area: !!s.area, out: o });
         return o;
       }
       stats.built++;
       const o = pathsOf([s], curve, width, margin, height, x, y, yLog)[0]!;
       next.set(s.id, {
-        points: s.points,
-        lower: s.lower,
+        points: stampOf(s.points),
+        lower: stampOf(s.lower),
+        rev: s.rev,
         area: !!s.area,
         out: o,
       });

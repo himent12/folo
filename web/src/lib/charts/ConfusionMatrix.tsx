@@ -18,7 +18,7 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import ChevronsLeft from '$icons/chevrons-left';
 import ChevronsRight from '$icons/chevrons-right';
-import { computed, createUniqueId, css, defaults, effect, Index, signal, tick } from 'fw';
+import { computed, createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { prefs } from '$lib/prefs';
 import { overviewGeometry, overviewHit, overviewWindow, pageFit, pageRange } from './cmOverview';
@@ -134,8 +134,8 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
     const cur = fit.peek();
     if (next?.cols !== cur?.cols || next?.cell !== cur?.cell) fit.set(next);
   }
-  function onscroll() {
-    // A deferred call (the next tick, an observer) can land after the matrix has gone.
+  function measureScroll() {
+    // A deferred call (the next tick, an observer, a rAF) can land after the matrix has gone.
     if (!root || !root.isConnected) return;
     const f = fit.peek();
     if (!f) {
@@ -153,8 +153,24 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
     // Partly visible columns count while a page slides in, so a label coming into view is never cut at the top.
     const lo = Math.max(0, Math.floor(root.scrollLeft / step));
     const hi = Math.min(count - 1, Math.ceil((root.scrollLeft + root.clientWidth - HEAD) / step) - 1);
-    const lbls = [...root.querySelectorAll<HTMLElement>('.colhead .lbl')].slice(lo, hi + 1);
-    labelH.set(Math.max(0, ...lbls.map((l) => Math.min(l.scrollHeight, 72))));
+    const lbls = root.querySelectorAll<HTMLElement>('.colhead .lbl');
+    let maxH = 0;
+    for (let i = lo; i <= hi && i < lbls.length; i++) {
+      const h = Math.min(lbls[i]!.scrollHeight, 72);
+      if (h > maxH) maxH = h;
+    }
+    labelH.set(maxH);
+  }
+  let scrollRaf = 0;
+  onCleanup(() => {
+    if (scrollRaf) cancelAnimationFrame(scrollRaf);
+  });
+  function onscroll() {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      measureScroll();
+    });
   }
   const behavior = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
   /** Pages the columns: the next (or previous) page of whole columns, sideways only. */
@@ -197,17 +213,51 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
     void fit.get();
     void n.get();
     let live = true;
-    void tick().then(() => live && onscroll());
+    void tick().then(() => live && measureScroll());
     return () => (live = false);
   });
   // A label's length changes when the font settles: the label row is measured again, so it never cuts a name short.
   effect(() => {
     if (!fixed.get()) return;
     void n.get();
-    const ro = new ResizeObserver(() => onscroll());
+    const ro = new ResizeObserver(() => measureScroll());
     for (const l of root.querySelectorAll('.colhead .lbl')) ro.observe(l);
     return () => ro.disconnect();
   });
+
+  function cellCoords(el: EventTarget | null): { r: number; c: number } | null {
+    const node = el instanceof Element ? el : el instanceof Node ? el.parentElement : null;
+    const cell = node?.closest<HTMLElement>('.cell[data-r][data-c]');
+    if (!cell || !root?.contains(cell)) return null;
+    const r = Number(cell.dataset.r);
+    const c = Number(cell.dataset.c);
+    return Number.isInteger(r) && Number.isInteger(c) ? { r, c } : null;
+  }
+  function onpointerover(e: PointerEvent) {
+    const to = cellCoords(e.target);
+    if (!to) return;
+    const from = cellCoords(e.relatedTarget);
+    if (from && from.r === to.r && from.c === to.c) return;
+    hovered.set(to);
+  }
+  function onpointerout(e: PointerEvent) {
+    if (!cellCoords(e.target)) return;
+    if (!cellCoords(e.relatedTarget)) hovered.set(pinned.peek());
+  }
+  function onfocusin(e: FocusEvent) {
+    const at = cellCoords(e.target);
+    if (!at) return;
+    focus.set(at);
+    hovered.set(at);
+    pinned.set(at);
+  }
+  function onfocusout(e: FocusEvent) {
+    if (!cellCoords(e.target)) return;
+    if (!cellCoords(e.relatedTarget)) {
+      hovered.set(null);
+      pinned.set(null);
+    }
+  }
 
   function onkeydown(e: KeyboardEvent) {
     const max = n.peek() - 1;
@@ -281,18 +331,6 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
         data-c={c}
         aria-label={cell()?.label}
         style={{ '--s': cell()?.s }}
-        onpointerenter={() => hovered.set({ r, c })}
-        onpointerleave={() => hovered.set(pinned.peek())}
-        onfocus={() => {
-          focus.set({ r, c });
-          const at = { r, c };
-          hovered.set(at);
-          pinned.set(at);
-        }}
-        onblur={() => {
-          hovered.set(null);
-          pinned.set(null);
-        }}
       >
         {(cell()?.v ?? 0) > 0 ? (
           <>
@@ -403,6 +441,10 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
         ref={(e) => (root = e)}
         onkeydown={onkeydown}
         onscroll={onscroll}
+        onpointerover={onpointerover}
+        onpointerout={onpointerout}
+        onfocusin={onfocusin}
+        onfocusout={onfocusout}
       >
         <div class="row" role="row">
           <div class="corner" role="columnheader">

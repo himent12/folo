@@ -42,6 +42,10 @@ export interface Series {
    * spread of many curves). Drawn as a soft fill under the lines; not in the legend or the readout.
    */
   lower?: Pt[];
+  /** Optional revision bumped when `points` grows in place, so live callers do not need to `.slice()` every tick. */
+  rev?: number;
+  /** Optional precomputed running min/max (`lo`, `hi`) of finite `y` values, letting `seriesSummary` run in O(1). */
+  bounds?: { lo: number; hi: number };
 }
 
 /**
@@ -125,9 +129,17 @@ export const latest = (s: Series) => {
   return null;
 };
 
-/** Per-series summary for assistive tech: latest, minimum and maximum. */
+/** Per-series summary for assistive tech: latest, minimum and maximum. Uses precomputed `s.bounds` in O(1) when provided. */
 export function seriesSummary(keyed: Series[]) {
   return keyed.map((s) => {
+    if (s.bounds) {
+      return {
+        s,
+        last: latest(s),
+        lo: Number.isFinite(s.bounds.lo) ? s.bounds.lo : null,
+        hi: Number.isFinite(s.bounds.hi) ? s.bounds.hi : null,
+      };
+    }
     let lo = Infinity;
     let hi = -Infinity;
     for (const p of s.points) {
