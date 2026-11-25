@@ -19,13 +19,23 @@
 //! long it went unused. A workload whose cycle is longer than [`FORGET_LIMITS`] limits of traffic can still churn.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use rayon::prelude::*;
 
 /// Buffers shorter than this (in floats, 16 KiB) bypass the pool.
 pub(crate) const MIN_POOLED: usize = 1 << 12;
+
+/// Maximum buffers kept in one thread's local magazine before spilling oldest entries to the shared pool.
+const TLS_MAX_BUFS: usize = 8;
+
+/// Largest single buffer (in bytes, 4 MiB) kept in a thread-local magazine; larger buffers go straight to the
+/// shared pool so huge allocations do not stay pinned to one worker thread.
+const TLS_MAX_BUF_BYTES: usize = 4 << 20;
+
+/// Maximum bytes held by one thread's local magazine (16 MiB).
+const TLS_MAX_BYTES: usize = 16 << 20;
 
 /// A length is stale, and evicted when the cache is full, at the earliest once this many times the cache limit
 /// (in bytes) has been returned to the cache since it was last taken or returned.
@@ -34,8 +44,6 @@ const STALE_LIMITS: u64 = 2;
 /// A length with no cached buffer is forgotten (its record dropped) after going unused for this many limits of
 /// traffic, or for as long as it would take to go stale, whichever is longer.
 const FORGET_LIMITS: u64 = 16;
-
-static LIMIT: AtomicUsize = AtomicUsize::new(1 << 30);
 
 /// The buffers of one length (possibly none: the record outlives them), when (in [`Pool::traffic`]) the length was
 /// last taken or returned, and the longest it went unused between two of those.
@@ -180,7 +188,279 @@ fn limits(k: u64, limit: usize) -> u64 {
     k.saturating_mul(limit as u64)
 }
 
-static POOL: Mutex<Option<Pool>> = Mutex::new(None);
+/// One thread's L1 magazine of recently recycled buffers (oldest at front, newest at back).
+///
+/// Stored behind an `Arc<Mutex<Slot>>` owned by the thread's `thread_local!` and registered weakly in a
+/// [`Cache`]'s slot list: the fast path locks only the calling thread's uncontended slot, while
+/// [`clear_buffer_cache`] and [`set_buffer_cache_limit`] can still drain every live thread's magazine immediately.
+struct Slot {
+    bufs: Vec<Vec<f32>>,
+    bytes: usize,
+    tls_bytes: &'static AtomicUsize,
+}
+
+impl Slot {
+    fn new(tls_bytes: &'static AtomicUsize) -> Self {
+        Slot { bufs: Vec::new(), bytes: 0, tls_bytes }
+    }
+
+    fn take(&mut self, n: usize) -> Option<Vec<f32>> {
+        let idx = self.bufs.iter().rposition(|b| b.len() == n)?;
+        let v = self.bufs.remove(idx);
+        let bytes = n * 4;
+        self.bytes -= bytes;
+        self.tls_bytes.fetch_sub(bytes, Ordering::Release);
+        Some(v)
+    }
+
+    fn drain_into(&mut self, out: &mut Vec<Vec<f32>>) {
+        if self.bytes > 0 {
+            self.tls_bytes.fetch_sub(self.bytes, Ordering::Release);
+            self.bytes = 0;
+        }
+        out.append(&mut self.bufs);
+    }
+
+    /// Try to keep `v` in this slot without exceeding per-thread or global TLS caps; returns any spilled oldest
+    /// buffers (plus `v` itself if it could not be kept in TLS) for the caller to hand to the shared pool outside
+    /// this lock.
+    fn put(
+        &mut self,
+        v: Vec<f32>,
+        limit: usize,
+        pool_bytes: &AtomicUsize,
+        spill: &mut Vec<Vec<f32>>,
+    ) -> Option<Vec<f32>> {
+        let bytes = v.len() * 4;
+        let tls_global_cap = limit / 2;
+        let per_thread_cap = TLS_MAX_BYTES.min(tls_global_cap);
+        if bytes > TLS_MAX_BUF_BYTES || bytes > per_thread_cap {
+            return Some(v);
+        }
+        // Evict oldest buffers first so the active working set stays in L1 and stale entries drain to L2 `Pool`.
+        let mut freed = 0usize;
+        while self.bufs.len() >= TLS_MAX_BUFS || self.bytes + bytes > per_thread_cap {
+            let Some(old) = (!self.bufs.is_empty()).then(|| self.bufs.remove(0)) else {
+                break;
+            };
+            let old_bytes = old.len() * 4;
+            self.bytes -= old_bytes;
+            freed += old_bytes;
+            spill.push(old);
+        }
+        if freed > 0 {
+            self.tls_bytes.fetch_sub(freed, Ordering::Release);
+        }
+        let budget = tls_global_cap.min(limit.saturating_sub(pool_bytes.load(Ordering::Acquire)));
+        if !try_reserve_atomic(self.tls_bytes, bytes, budget) {
+            return Some(v);
+        }
+        self.bytes += bytes;
+        self.bufs.push(v);
+        None
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.tls_bytes.fetch_sub(self.bytes, Ordering::Release);
+            self.bytes = 0;
+        }
+    }
+}
+
+fn try_reserve_atomic(counter: &AtomicUsize, add: usize, cap: usize) -> bool {
+    let mut cur = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = cur.checked_add(add) else {
+            return false;
+        };
+        if next > cap {
+            return false;
+        }
+        match counter.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// Two-level buffer cache: per-thread [`Slot`] magazines in front of a shared [`Pool`].
+///
+/// No method holds more than one lock at a time (`slots`, an individual `Slot`, and `pool` are always acquired
+/// and released separately), so deadlock is impossible and freed buffers are always dropped outside every lock.
+struct Cache {
+    limit: AtomicUsize,
+    pool: Mutex<Option<Pool>>,
+    pool_bytes: AtomicUsize,
+    slots: Mutex<Vec<Weak<Mutex<Slot>>>>,
+    tls_bytes: AtomicUsize,
+}
+
+impl Cache {
+    const fn new(limit: usize) -> Self {
+        Cache {
+            limit: AtomicUsize::new(limit),
+            pool: Mutex::new(None),
+            pool_bytes: AtomicUsize::new(0),
+            slots: Mutex::new(Vec::new()),
+            tls_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    fn register_slot(&'static self) -> Arc<Mutex<Slot>> {
+        let slot = Arc::new(Mutex::new(Slot::new(&self.tls_bytes)));
+        let mut g = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|w| w.strong_count() > 0);
+        g.push(Arc::downgrade(&slot));
+        slot
+    }
+
+    fn drain_all_slots(&self) -> Vec<Vec<f32>> {
+        let live: Vec<Arc<Mutex<Slot>>> = {
+            let mut g = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            let mut out = Vec::with_capacity(g.len());
+            g.retain(|w| match w.upgrade() {
+                Some(arc) => {
+                    out.push(arc);
+                    true
+                }
+                None => false,
+            });
+            out
+        };
+        let mut gone = Vec::new();
+        for slot in live {
+            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+            s.drain_into(&mut gone);
+        }
+        gone
+    }
+
+    fn set_limit(&self, bytes: usize) {
+        self.limit.store(bytes, Ordering::Release);
+        let mut gone = Vec::new();
+        if bytes == 0 || self.bytes() > bytes || self.tls_bytes.load(Ordering::Acquire) > bytes / 2 {
+            gone = self.drain_all_slots();
+        }
+        let pool_limit = bytes.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
+        {
+            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(p) = g.as_mut() {
+                p.set_limit(pool_limit);
+                self.pool_bytes.store(p.bytes, Ordering::Release);
+            }
+        }
+        drop(gone);
+    }
+
+    fn clear(&self) {
+        let gone = self.drain_all_slots();
+        let old_pool = {
+            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            self.pool_bytes.store(0, Ordering::Release);
+            g.take()
+        };
+        drop(gone);
+        drop(old_pool);
+    }
+
+    fn bytes(&self) -> usize {
+        self.pool_bytes.load(Ordering::Acquire) + self.tls_bytes.load(Ordering::Acquire)
+    }
+
+    fn take_from_pool(&self, n: usize) -> Option<Vec<f32>> {
+        let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let p = g.as_mut()?;
+        let v = p.take(n)?;
+        self.pool_bytes.store(p.bytes, Ordering::Release);
+        Some(v)
+    }
+
+    fn take_with_slot(&self, slot: Option<&Mutex<Slot>>, n: usize) -> Option<Vec<f32>> {
+        if n < MIN_POOLED {
+            return None;
+        }
+        if n.checked_mul(4).is_some_and(|b| b <= TLS_MAX_BUF_BYTES)
+            && let Some(slot) = slot
+        {
+            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(v) = s.take(n) {
+                return Some(v);
+            }
+        }
+        self.take_from_pool(n)
+    }
+
+    fn put_global(&self, bufs: impl IntoIterator<Item = Vec<f32>>) {
+        let limit = self.limit.load(Ordering::Acquire);
+        if limit == 0 {
+            return;
+        }
+        let mut pending: Vec<Vec<f32>> = bufs.into_iter().collect();
+        if pending.is_empty() {
+            return;
+        }
+        // If a single buffer fits under `limit` only when TLS gives up space (e.g. a small custom limit and a
+        // buffer larger than `limit / 2`), drain TLS once so the shared pool sees the full limit.
+        let max_bytes = pending.iter().map(|v| v.len() * 4).max().unwrap_or(0);
+        let mut pool_limit = limit.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
+        let mut drained = Vec::new();
+        if max_bytes <= limit && max_bytes > pool_limit {
+            drained = self.drain_all_slots();
+            pool_limit = limit.saturating_sub(self.tls_bytes.load(Ordering::Acquire));
+        }
+        let gone = {
+            let mut g = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let p = g.get_or_insert_with(Pool::new);
+            let mut evicted = Vec::new();
+            for v in pending.drain(..) {
+                evicted.extend(p.put(v, pool_limit));
+            }
+            self.pool_bytes.store(p.bytes, Ordering::Release);
+            evicted
+        };
+        // Freed outside the lock: returning large buffers to the OS takes a while.
+        drop(drained);
+        drop(gone);
+    }
+
+    fn recycle_with_slot(&self, slot: Option<&Mutex<Slot>>, v: Vec<f32>) {
+        let n = v.len();
+        if n < MIN_POOLED || v.capacity() != n {
+            return;
+        }
+        let limit = self.limit.load(Ordering::Acquire);
+        if limit == 0 {
+            return;
+        }
+        let mut spill = Vec::new();
+        let leftover = if let Some(slot) = slot {
+            let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+            // Re-read `limit` under the slot lock so `set_limit(0)` / `clear()` is linearizable with `recycle`.
+            let cur_limit = self.limit.load(Ordering::Acquire);
+            if cur_limit == 0 {
+                return;
+            }
+            s.put(v, cur_limit, &self.pool_bytes, &mut spill)
+        } else {
+            Some(v)
+        };
+        if let Some(v) = leftover {
+            spill.push(v);
+        }
+        if !spill.is_empty() {
+            self.put_global(spill);
+        }
+    }
+}
+
+static CACHE: Cache = Cache::new(1 << 30);
+
+thread_local! {
+    static TLS_SLOT: Arc<Mutex<Slot>> = CACHE.register_slot();
+}
 
 static POISON: AtomicBool = AtomicBool::new(false);
 
@@ -193,30 +473,27 @@ pub fn poison_uninit(on: bool) {
 
 /// Cap the bytes held by the CPU buffer cache (default 1 GiB; 0 disables caching). Shrinks immediately.
 pub fn set_buffer_cache_limit(bytes: usize) {
-    LIMIT.store(bytes, Ordering::Relaxed);
-    let mut g = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(p) = g.as_mut() {
-        p.set_limit(bytes);
-    }
+    CACHE.set_limit(bytes);
 }
 
 /// Release every cached buffer.
 pub fn clear_buffer_cache() {
-    let mut g = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    *g = None;
+    CACHE.clear();
 }
 
 /// Bytes currently held by the cache.
 pub fn buffer_cache_bytes() -> usize {
-    POOL.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |p| p.bytes)
+    CACHE.bytes()
 }
 
 fn take(n: usize) -> Option<Vec<f32>> {
     if n < MIN_POOLED {
         return None;
     }
-    let mut g = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_mut()?.take(n)
+    match TLS_SLOT.try_with(|slot| CACHE.take_with_slot(Some(slot), n)) {
+        Ok(res) => res,
+        Err(_) => CACHE.take_with_slot(None, n),
+    }
 }
 
 /// A buffer of `n` floats with unspecified contents (for kernels that overwrite every element).
@@ -249,13 +526,17 @@ pub(crate) fn recycle(v: Vec<f32>) {
     if n < MIN_POOLED || v.capacity() != n {
         return;
     }
-    let limit = LIMIT.load(Ordering::Relaxed);
-    let gone = {
-        let mut g = POOL.lock().unwrap_or_else(|e| e.into_inner());
-        g.get_or_insert_with(Pool::new).put(v, limit)
-    };
-    // Freed outside the lock: returning large buffers to the OS takes a while.
-    drop(gone);
+    let mut v = Some(v);
+    let handled = TLS_SLOT.try_with(|slot| {
+        if let Some(buf) = v.take() {
+            CACHE.recycle_with_slot(Some(slot), buf);
+        }
+    });
+    if handled.is_err()
+        && let Some(buf) = v.take()
+    {
+        CACHE.recycle_with_slot(None, buf);
+    }
 }
 
 #[cfg(test)]
@@ -419,5 +700,88 @@ mod tests {
         }
         // `FORGET_LIMITS` limits of traffic at 4 returns per limit, plus a sweep's slack.
         assert!(p.free.len() <= FORGET_LIMITS as usize * 4 + 8, "{} records", p.free.len());
+    }
+
+    /// Thread-local magazine hits without touching the shared pool, spills oldest buffers to the shared pool
+    /// once full, and `clear()` / `set_limit(0)` immediately releases buffers held on other threads.
+    #[test]
+    fn tls_magazine_hits_spills_clears_and_reclaims_on_thread_exit() {
+        static TEST_CACHE: Cache = Cache::new(1 << 24);
+        let slot = TEST_CACHE.register_slot();
+
+        // 1. Recycle & take on the same slot hits TLS without populating the shared pool.
+        let mut v = vec![1.25f32; N];
+        let ptr = v.as_ptr();
+        TEST_CACHE.recycle_with_slot(Some(&slot), v);
+        assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), N * 4);
+        assert_eq!(TEST_CACHE.pool_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(TEST_CACHE.bytes(), N * 4);
+        v = TEST_CACHE.take_with_slot(Some(&slot), N).expect("TLS hit");
+        assert_eq!(v.as_ptr(), ptr, "reused exact buffer from TLS magazine");
+        assert_eq!(TEST_CACHE.bytes(), 0);
+
+        // 2. Filling past `TLS_MAX_BUFS` spills the oldest buffers into the shared pool, so another thread (or
+        //    slot-less take) can still reuse them while the newest stay in TLS.
+        for i in 0..TLS_MAX_BUFS + 3 {
+            TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N + i]);
+        }
+        assert_eq!(
+            TEST_CACHE.tls_bytes.load(Ordering::Acquire),
+            (3..TLS_MAX_BUFS + 3).map(|i| (N + i) * 4).sum::<usize>()
+        );
+        assert_eq!(TEST_CACHE.pool_bytes.load(Ordering::Acquire), (0..3).map(|i| (N + i) * 4).sum::<usize>());
+        assert!(TEST_CACHE.take_with_slot(None, N).is_some(), "spilled oldest length found in shared pool");
+        assert!(
+            TEST_CACHE.take_with_slot(Some(&slot), N + TLS_MAX_BUFS + 2).is_some(),
+            "newest length in TLS"
+        );
+
+        // 3. `clear()` releases buffers cached on a separate live worker thread immediately.
+        let (tx_ready, rx_ready) = std::sync::mpsc::channel();
+        let (tx_exit, rx_exit) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let wslot = TEST_CACHE.register_slot();
+            TEST_CACHE.recycle_with_slot(Some(&wslot), vec![0.0; N * 2]);
+            tx_ready.send(()).unwrap();
+            rx_exit.recv().unwrap();
+            // Recycle one more buffer, then exit without clearing so `Drop for Slot` must reclaim it.
+            TEST_CACHE.recycle_with_slot(Some(&wslot), vec![0.0; N * 3]);
+        });
+        rx_ready.recv().unwrap();
+        assert!(TEST_CACHE.bytes() >= N * 2 * 4);
+        TEST_CACHE.clear();
+        assert_eq!(TEST_CACHE.bytes(), 0, "clear() must drain live worker TLS slots immediately");
+        tx_exit.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(TEST_CACHE.bytes(), 0, "exiting thread must release its TLS bytes on Slot::drop");
+
+        // 4. `set_limit(0)` shrinks immediately and refuses subsequent recycles; restoring limit re-enables caching.
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N]);
+        assert_eq!(TEST_CACHE.bytes(), N * 4);
+        TEST_CACHE.set_limit(0);
+        assert_eq!(TEST_CACHE.bytes(), 0);
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N]);
+        assert_eq!(TEST_CACHE.bytes(), 0);
+
+        // 5. Small custom limit: both TLS (`N`) and pool (`3 * N`) can coexist up to `4 * N`, and when a `3 * N`
+        //    buffer arrives while TLS holds `2 * N` (leaving only `2 * N` for the pool), TLS is drained once so
+        //    the `3 * N` buffer still fits in the shared pool.
+        let small_limit = 4 * N * 4;
+        TEST_CACHE.set_limit(small_limit);
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; N]);
+        assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), N * 4);
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; 3 * N]);
+        assert_eq!(TEST_CACHE.bytes(), 4 * N * 4);
+        assert!(TEST_CACHE.take_with_slot(Some(&slot), 3 * N).is_some());
+        assert!(TEST_CACHE.take_with_slot(Some(&slot), N).is_some());
+        assert_eq!(TEST_CACHE.bytes(), 0);
+
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; 2 * N]);
+        assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), 2 * N * 4);
+        TEST_CACHE.recycle_with_slot(Some(&slot), vec![0.0; 3 * N]);
+        assert_eq!(TEST_CACHE.tls_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(TEST_CACHE.bytes(), 3 * N * 4);
+        assert!(TEST_CACHE.take_with_slot(Some(&slot), 3 * N).is_some());
+        TEST_CACHE.clear();
     }
 }

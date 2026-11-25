@@ -800,3 +800,48 @@ fn q8_public_apis_reject_size_overflow() {
         .is_err()
     );
 }
+
+/// Parallel `q8::max_pool` (`>= PAR_MIN`, both `hw < MIN_POOLED` and `hw >= MIN_POOLED`) and cache-line-padded
+/// `image_rows` on non-16-aligned planes (`22×22` and `42×42`, hitting parallel `fill` when `body.len() >= par_words`)
+/// match the scalar reference bit-for-bit.
+#[test]
+fn parallel_max_pool_and_cacheline_padded_image_rows_match_reference() {
+    let mut rng = Rng::seed(808);
+    // 1. Parallel `max_pool` with `hw = 20*20 = 400 < MIN_POOLED` (`total = 2 * 64 * 400 = 51200 >= PAR_MIN`)
+    //    and with `hw = 64*65 = 4160 >= MIN_POOLED` (`total = 2 * 8 * 4160 = 66560 >= PAR_MIN`).
+    for (n, c, h, w, k) in [(2usize, 256usize, 20usize, 20usize, 5usize), (2, 32, 64, 65, 3)] {
+        let hw = h * w;
+        assert!(n * (c / 4) * hw >= crate::cpu::PAR_MIN);
+        let q = codes(&mut rng, n * (c / 4) * hw);
+        let view = C4 { data: &q, offset: 0, img_stride: (c / 4) * hw, c, zero: 0 };
+        let mut par_out = alloc(n, c, hw);
+        let mut ser_out = alloc(n, c, hw);
+        pool(4).install(|| max_pool(view, n, h, w, k, &mut par_out));
+        pool(1).install(|| max_pool(view, n, h, w, k, &mut ser_out));
+        assert_eq!(
+            par_out[..n * (c / 4) * hw],
+            ser_out[..n * (c / 4) * hw],
+            "max_pool ({n},{c},{h},{w},k={k})"
+        );
+    }
+
+    // 2. Non-16-aligned `plane` (`h=40, w=40, pad=1` => `hq=wq=42, plane=1764, plane % 16 == 4`) with enough
+    //    groups (`c = 320`, `groups = 80`, `body.len() = 80 * 1776 = 142080 >= par_words`) to exercise parallel
+    //    `image_rows` `fill` across adjacent cache-line-padded channel groups, plus `s=2, p=1` (`21×21` phase).
+    for (c, h, w, s) in [(320usize, 40usize, 40usize, 1usize), (160, 40, 40, 2)] {
+        let o = 8;
+        let g_in = Grid { scale: 0.05, zero: 17 };
+        let g_out = Grid { scale: 0.1, zero: 33 };
+        let wt: Vec<f32> = (0..o * c * 9).map(|_| rng.uniform(-0.2, 0.2)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let cv = QConv::new(&wt, &bias, (o, c, 3), s, 1, true, &vec![g_in; c]);
+        let (oh, ow) = cv.out_hw(h, w);
+        let x = codes(&mut rng, (c / 4) * h * w);
+        let view = C4 { data: &x, offset: 0, img_stride: (c / 4) * h * w, c, zero: g_in.zero };
+        let mut out1 = alloc(1, o, oh * ow);
+        let mut out4 = alloc(1, o, oh * ow);
+        pool(1).install(|| conv(&[view], 1, h, w, &cv, None, QOut::U8 { data: &mut out1, grid: g_out }));
+        pool(4).install(|| conv(&[view], 1, h, w, &cv, None, QOut::U8 { data: &mut out4, grid: g_out }));
+        assert_eq!(out1[..(o / 4) * oh * ow], out4[..(o / 4) * oh * ow], "conv s={s} c={c} {h}x{w}");
+    }
+}

@@ -382,3 +382,58 @@ fn max_pool_makes_indices_only_when_recorded() -> Result<()> {
     }
     Ok(())
 }
+
+/// Dense slot-indexed `topo_order` + in-place `track_saved` handle diamonds, repeated same-input fan-in (`x * x`),
+/// shared-output fallback (`max(..., keepdim=true)`), and `custom_op` output version checks.
+#[test]
+fn dense_topo_and_inplace_track_saved_handle_diamonds_and_custom_op() -> Result<()> {
+    let x = Tensor::from_slice(&[1.0f32, -2.0, 3.0, 4.0], [2, 2])?.requires_grad_();
+    let w = Tensor::from_slice(&[0.5f32, 1.5, -1.0, 2.0], [2, 2])?.requires_grad_();
+    let c = Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0], [2, 2])?; // no grad
+
+    // Diamond + repeated same input (`x * x`) + non-grad input (`c`) + shared-output `max(keepdim=true)`.
+    let sq = x.mul(&x)?;
+    let branch_a = sq.mul(&w)?.add(&c)?;
+    let branch_b = x.add(&w)?.max([1], true)?;
+    let fused = {
+        let out = {
+            let _g = no_grad();
+            branch_a.add(&branch_b)?
+        };
+        let out_copy = out.clone();
+        Tensor::custom_op("add_and_scale", &[&branch_a, &branch_b, &c], out, move |g| {
+            let _ = out_copy.shape();
+            Ok(vec![Some(g.mul_scalar(2.0)?), Some(g.mul_scalar(3.0)?.sum([1], true)?), None])
+        })?
+    };
+    let loss = fused.sum_all()?;
+    let grads = loss.backward()?;
+
+    // Analytic gradients:
+    //   d(loss)/d(branch_a) = 2 everywhere -> d/dx from branch_a = 2 * 2 * x * w = 4 * x * w
+    //   d(loss)/d(branch_b) = 3 * 2 = 6 per row -> goes to row argmax of (x + w):
+    //     row 0: x+w = [1.5, -0.5] -> argmax col 0 (+6 to x[0,0], w[0,0])
+    //     row 1: x+w = [2.0, 6.0]  -> argmax col 1 (+6 to x[1,1], w[1,1])
+    //   d/dw from branch_a = 2 * x^2
+    let gx = grads.get(&x).unwrap().to_vec::<f32>()?;
+    let gw = grads.get(&w).unwrap().to_vec::<f32>()?;
+    assert_eq!(gx, vec![8.0, -12.0, -12.0, 38.0]);
+    assert_eq!(gw, vec![8.0, 8.0, 18.0, 38.0]);
+    assert!(grads.get(&c).is_none());
+
+    // `custom_op` must still detect in-place mutation of `output` before `backward()`.
+    let y = Tensor::from_slice(&[2.0f32, 3.0], [2])?.requires_grad_();
+    let raw_out = {
+        let _g = no_grad();
+        y.mul_scalar(5.0)?
+    };
+    let tracked =
+        Tensor::custom_op("scale5", &[&y], raw_out.clone(), |g| Ok(vec![Some(g.mul_scalar(5.0)?)]))?;
+    {
+        let _g = no_grad();
+        raw_out.add_assign(&Tensor::ones([2]))?;
+    }
+    let err = tracked.backward_with(&Tensor::ones([2])).unwrap_err();
+    assert!(matches!(err, folo_core::Error::ModifiedInPlace { op: "scale5", .. }), "unexpected {err:?}");
+    Ok(())
+}

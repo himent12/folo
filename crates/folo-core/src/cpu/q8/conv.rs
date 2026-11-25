@@ -351,7 +351,11 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
         }
     }
     let phases: &[usize] = if s * s <= 16 { &phases_stack[..phases_len] } else { &phases_heap };
-    let per_g = phases.len().checked_mul(plane).expect("q8::conv: phase buffer overflow");
+    // Pad each channel group's phase block to a 64-byte cache line (16 `u32` words) so parallel `fill` workers
+    // writing adjacent groups never false-share the boundary cache line (e.g. `22×22` / `42×42` / `82×82` planes
+    // all have `plane % 16 == 4`).
+    let raw_per_g = phases.len().checked_mul(plane).expect("q8::conv: phase buffer overflow");
+    let per_g = raw_per_g.checked_add(15).map(|v| v & !15).expect("q8::conv: phase buffer overflow");
     let groups = cv.c / 4;
     let buf_len = groups
         .checked_mul(per_g)
