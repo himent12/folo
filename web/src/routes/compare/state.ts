@@ -3,7 +3,7 @@
 import { computed, effect, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import { pollTogether } from '$lib/api/share';
+import { pollTogether, reuse } from '$lib/api/share';
 import type { Epoch, Run, RunMetrics } from '$lib/api/types';
 import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
 import { nearest, type Pt } from '$lib/charts/downsample';
@@ -208,7 +208,8 @@ export function compareState() {
       const id = list[i]!;
       const res = settled[i]!;
       if (res.status === 'fulfilled') {
-        read.set(id, res.value);
+        const cached = prev?.get(id);
+        read.set(id, cached ? reuse(cached, res.value) : res.value);
         byRun.set(id, snapByRun ? (snapByRun.get(id) ?? null) : null);
       } else {
         const err = res.reason;
@@ -265,7 +266,8 @@ export function compareState() {
       const prev = metrics.data;
       const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
       const next = new Map(prev ?? []);
-      next.set(id, m);
+      const cached = prev?.get(id);
+      next.set(id, cached ? reuse(cached, m) : m);
       const nextByRun = new Map(prevByRun ?? []);
       nextByRun.set(id, stamp);
       const curErrs = metricErrors.peek();
@@ -438,6 +440,8 @@ export function compareState() {
   const metricId = signal<MetricId>('m95');
   const metricDef = computed(() => METRICS.find((m) => m.id === metricId.get())!);
   const emptyEpochs: readonly Epoch[] = [];
+  const samePts = (a: readonly Pt[], b: readonly Pt[]) =>
+    a.length === b.length && a.every((p, i) => Object.is(p.x, b[i]!.x) && Object.is(p.y, b[i]!.y));
   const series = computed(() => {
     const def = metricDef.get();
     const f = def.f;
@@ -453,7 +457,11 @@ export function compareState() {
       let cached = seriesCache.get(r.id);
       if (!cached || cached.epochs !== eps || cached.axis !== axis || cached.metric !== mId || cached.denom !== denom) {
         const points = eps.map((e) => ({ x: runX(e.epoch, r, axis), y: f(e) }));
-        cached = { epochs: eps, axis, metric: mId, denom, points, rev: ++seriesRev };
+        if (cached && samePts(cached.points, points)) {
+          cached = { epochs: eps, axis, metric: mId, denom, points: cached.points, rev: cached.rev };
+        } else {
+          cached = { epochs: eps, axis, metric: mId, denom, points, rev: ++seriesRev };
+        }
         seriesCache.set(r.id, cached);
       }
       return {

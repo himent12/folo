@@ -279,8 +279,8 @@ export default function Runs() {
     const list = filtered.get();
     const key = sortKey.get();
     const dir = sortDir.get();
-    // Subscribe to the ticking clock only when sorting by duration AND at least one run's duration is live.
-    const t = key === 'duration' && liveDurationRuns.get().length > 0 ? now.get() : 0;
+    // Subscribe to the ticking clock only when sorting by duration AND at least one visible row's duration is live.
+    const t = key === 'duration' && list.some((r) => !!r.started && !r.finished) ? now.get() : 0;
     return sortRuns(list, key, dir, t);
   });
 

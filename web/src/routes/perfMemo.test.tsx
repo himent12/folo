@@ -133,11 +133,23 @@ describe('RunModel per-step chart transform memoization', () => {
 });
 
 describe('compareState per-run series memoization', () => {
-  it('reuses unchanged run point arrays and rev when another compared run updates', async () => {
+  it('reuses unchanged run point arrays and rev across real metrics refreshes when another compared run updates', async () => {
     const runs = await hub.api.runs();
     const pair = runs.filter((r) => r.status === 'completed').slice(0, 2);
     expect(pair).toHaveLength(2);
     const [rA, rB] = pair as [Run, Run];
+    const mA0 = await hub.api.runMetrics(rA.id);
+    const mB0 = await hub.api.runMetrics(rB.id);
+    let bumpB = false;
+    vi.spyOn(hub.api, 'runMetrics').mockImplementation(async (id) => {
+      if (id === rA.id) return structuredClone(mA0);
+      const b = structuredClone(mB0);
+      if (bumpB && b.epochs.length > 0) {
+        const last = b.epochs[b.epochs.length - 1]!;
+        b.epochs.push({ ...last, epoch: last.epoch + 1, val: { ...last.val, map50_95: last.val.map50_95 + 0.01 } });
+      }
+      return b;
+    });
 
     router.go(`/runs/compare?ids=${rA.id},${rB.id}`, { replace: true });
     let st!: ReturnType<typeof compareState>;
@@ -156,12 +168,9 @@ describe('compareState per-run series memoization', () => {
       const firstA = st.series.get()[0]!;
       const firstB = st.series.get()[1]!;
 
-      // Simulate only rB getting a new metrics object while rA keeps its cached epochs array.
-      const prevMetrics = st.metrics.data!;
-      const nextMetrics = new Map(prevMetrics);
-      const bOld = prevMetrics.get(rB.id)!;
-      nextMetrics.set(rB.id, { ...bOld, epochs: [...bOld.epochs] });
-      st.metrics.set(nextMetrics);
+      // Real full metrics refresh returning fresh cloned JSON for both runs, with only rB advancing.
+      bumpB = true;
+      await st.metrics.refresh();
       flush();
 
       const secondA = st.series.get()[0]!;
