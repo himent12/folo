@@ -86,7 +86,7 @@ impl WindowTextSystem {
             });
         }
 
-        let layout = self.layout_line(&text, font_size, runs, force_width);
+        let layout = self.layout_line_with(&text, || text.clone(), font_size, runs, force_width);
 
         ShapedLine { layout, text, decoration_runs }
     }
@@ -162,6 +162,7 @@ impl WindowTextSystem {
 
             let layout = self.line_layout_cache.layout_wrapped_line(
                 &line_text,
+                || line_text.clone(),
                 font_size,
                 &font_runs,
                 wrap_width,
@@ -220,6 +221,17 @@ impl WindowTextSystem {
         runs: &[TextRun],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout> {
+        self.layout_line_with(text, || SharedString::new(text), font_size, runs, force_width)
+    }
+
+    fn layout_line_with(
+        &self,
+        text: &str,
+        into_shared: impl FnOnce() -> SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        force_width: Option<Pixels>,
+    ) -> Arc<LineLayout> {
         let mut last_run = None::<&TextRun>;
         let mut last_font: Option<FontId> = None;
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
@@ -252,7 +264,8 @@ impl WindowTextSystem {
         }
 
         let layout = self.line_layout_cache.layout_line(
-            SharedString::new(text),
+            text,
+            into_shared,
             font_size,
             &font_runs,
             force_width,

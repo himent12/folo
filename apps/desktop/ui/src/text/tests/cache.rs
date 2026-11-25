@@ -150,3 +150,59 @@ fn layouts_from_before_fonts_were_added_are_not_reused() {
     window.finish_frame();
     assert_eq!((shape(&window, "abc def", 10.).width, wrapped(&window)), (px(84.), 1));
 }
+
+#[test]
+fn borrowed_layout_line_and_shape_line_share_entries_across_frames() {
+    let (platform, window) = counting();
+    let owned = String::from("square 0.94");
+    let one = runs(&[owned.len()]);
+
+    // Populate via borrowed `&str`, then repeat within the same frame.
+    let first = window.layout_line(&owned, px(13.), &one, None);
+    let idx_after_first = window.layout_index();
+    let repeat_same_frame = window.layout_line(&owned, px(13.), &one, None);
+    assert!(Arc::ptr_eq(&first, &repeat_same_frame));
+    assert_eq!(window.layout_index(), idx_after_first, "same-frame hit does not grow used_lines");
+    assert_eq!(platform.layout_calls(), 1);
+    window.finish_frame();
+
+    // Next frame: `shape_line` hits the entry populated by `layout_line`, reusing the exact `Arc`.
+    let shaped = window.shape_line(SharedString::from(owned.clone()), px(13.), &one, None);
+    assert!(Arc::ptr_eq(&first, &shaped.layout));
+    assert_eq!(platform.layout_calls(), 1);
+    window.finish_frame();
+
+    // Skip one frame: the single-map retain evicts the unused entry.
+    window.finish_frame();
+    let reshaped = window.layout_line(&owned, px(13.), &one, None);
+    assert!(!Arc::ptr_eq(&first, &reshaped));
+    assert_eq!(platform.layout_calls(), 2);
+}
+
+#[test]
+fn reused_layouts_survive_multiple_consecutive_frames() {
+    let (platform, window) = counting();
+    let start = window.layout_index();
+    let line = shape(&window, "persistent", 13.);
+    let wrapped = window.shape_text("two\nlines".into(), px(13.), &runs(&[9]), Some(px(40.)), None).unwrap();
+    let end = window.layout_index();
+    let shaped = platform.layout_calls();
+    window.finish_frame();
+
+    // Reuse across two consecutive frames without laying out directly.
+    let range = start..end;
+    let r1_start = window.layout_index();
+    window.reuse_layouts(range.clone());
+    let r1_end = window.layout_index();
+    window.finish_frame();
+
+    window.reuse_layouts(r1_start..r1_end);
+    window.finish_frame();
+
+    let line2 = shape(&window, "persistent", 13.);
+    let wrapped2 = window.shape_text("two\nlines".into(), px(13.), &runs(&[9]), Some(px(40.)), None).unwrap();
+    assert!(Arc::ptr_eq(&line.layout, &line2.layout));
+    assert!(Arc::ptr_eq(&wrapped[0].layout, &wrapped2[0].layout));
+    assert!(Arc::ptr_eq(&wrapped[1].layout, &wrapped2[1].layout));
+    assert_eq!(platform.layout_calls(), shaped);
+}
