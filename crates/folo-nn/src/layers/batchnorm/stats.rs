@@ -10,7 +10,7 @@ use crate::module::{Mode, Module, TensorKind};
 /// forward so a non-finite batch can be undone (docs/MODEL.md §8.3, "Non-finite batches").
 ///
 /// A single `RunningStats` instance can be captured once before an epoch and refreshed in place across batches
-/// with [`RunningStats::recapture`] to avoid per-batch heap and tensor allocations, and checked with
+/// with [`RunningStats::recapture`] to avoid per-batch snapshot tensor allocations, and checked with
 /// [`RunningStats::all_finite_live`] without re-walking the module tree.
 ///
 /// ```
@@ -44,9 +44,10 @@ impl RunningStats {
 
     fn capture_filtered<M: Module + ?Sized>(model: &M, training_only: bool) -> Result<Self> {
         let _g = no_grad();
+        let filter = if training_only { BufferFilter::TrainingOnly } else { BufferFilter::All };
         let mut saved = Vec::new();
         let mut err: Option<crate::Error> = None;
-        visit_float_buffers(model, training_only, &mut |b| {
+        visit_float_buffers(model, filter, &mut |b| {
             if err.is_some() {
                 return;
             }
@@ -71,9 +72,12 @@ impl RunningStats {
         self.saved.is_empty()
     }
 
-    /// Refresh every saved snapshot in place from its live buffer, reusing the existing copy buffers with zero
-    /// heap or tensor allocations in the steady state. If a live buffer changed shape, dtype, or device since
-    /// capture, that slot's backing copy is reallocated cleanly.
+    /// Refresh every saved snapshot in place from its originally captured live tensor handle, reusing the
+    /// existing snapshot tensors (zero tensor allocations in the steady state, and zero heap allocations on
+    /// contiguous CPU `F32` buffers; device buffers copy via [`Tensor::copy_from`]). If a captured tensor
+    /// changed dtype or device in place (e.g. via `to_dtype_` / `to_device_`), that slot's backing copy is
+    /// reallocated cleanly. Callers that replace a module's public `Tensor` field with a different tensor
+    /// must create a fresh snapshot via [`RunningStats::capture`] or [`RunningStats::capture_training`].
     pub fn recapture(&mut self) -> Result<()> {
         if self.saved.is_empty() {
             return Ok(());
@@ -128,10 +132,20 @@ impl RunningStats {
     /// True if every floating (`F32`) buffer of `model` is finite. Buffers on a device are checked there with
     /// one readback per device (via multi-tensor `AbsMax` partials when supported, else `Σ 0 · x == 0`).
     pub fn all_finite<M: Module + ?Sized>(model: &M) -> Result<bool> {
+        Self::all_finite_filtered(model, BufferFilter::All)
+    }
+
+    /// True if every floating (`F32`) buffer owned by an eval-mode module in `model` is finite. Returns
+    /// `Ok(true)` immediately with zero device dispatches when no modules are in eval mode.
+    pub fn all_finite_eval<M: Module + ?Sized>(model: &M) -> Result<bool> {
+        Self::all_finite_filtered(model, BufferFilter::EvalOnly)
+    }
+
+    fn all_finite_filtered<M: Module + ?Sized>(model: &M, filter: BufferFilter) -> Result<bool> {
         let mut device: Vec<Tensor> = Vec::new();
         let mut finite = true;
         let mut err: Option<crate::Error> = None;
-        visit_float_buffers(model, false, &mut |b| {
+        visit_float_buffers(model, filter, &mut |b| {
             if !finite || err.is_some() || b.dtype() != DType::F32 {
                 return;
             }
@@ -156,10 +170,21 @@ impl RunningStats {
     }
 }
 
-/// Walk `model` and call `f` on every floating buffer without formatting dotted names or cloning parameters.
-/// When `training_only` is true, buffers directly owned by modules currently in eval mode are skipped.
-fn visit_float_buffers<M: Module + ?Sized>(model: &M, training_only: bool, f: &mut dyn FnMut(&Tensor)) {
-    let include_own = !training_only || model.mode().is_none_or(Mode::is_training);
+#[derive(Clone, Copy)]
+enum BufferFilter {
+    All,
+    TrainingOnly,
+    EvalOnly,
+}
+
+/// Walk `model` and call `f` on every matching floating buffer without formatting dotted names or cloning
+/// parameters.
+fn visit_float_buffers<M: Module + ?Sized>(model: &M, filter: BufferFilter, f: &mut dyn FnMut(&Tensor)) {
+    let include_own = match filter {
+        BufferFilter::All => true,
+        BufferFilter::TrainingOnly => model.mode().is_none_or(Mode::is_training),
+        BufferFilter::EvalOnly => model.mode().is_some_and(|m| !m.is_training()),
+    };
     if include_own {
         model.visit_tensors(&mut |_, t, kind| {
             if kind == TensorKind::Buffer && t.dtype().is_float() {
@@ -168,7 +193,7 @@ fn visit_float_buffers<M: Module + ?Sized>(model: &M, training_only: bool, f: &m
         });
     }
     model.visit_children(&mut |_, child| {
-        visit_float_buffers(child, training_only, f);
+        visit_float_buffers(child, filter, f);
     });
 }
 

@@ -716,6 +716,15 @@ fn running_stats_all_finite_on_gpu() {
         assert!(snap.all_finite_live().unwrap());
         assert_eq!(buf.to_vec::<f32>().unwrap(), [1.5, 2.5, 3.5, 4.5]);
     }
+    // Frozen/eval BN buffers are checked by `all_finite_eval` on GPU too.
+    m.eval();
+    assert!(RunningStats::all_finite_eval(&m).unwrap());
+    {
+        let (_, buf) = m.named_buffers().into_iter().nth(3).unwrap();
+        let _g = no_grad();
+        buf.fill_assign(f32::INFINITY).unwrap();
+    }
+    assert!(!RunningStats::all_finite_eval(&m).unwrap());
 }
 
 /// Global-norm clipping's multi-tensor kernels (`Tensor::norm_partials_many`, `scale_many_`) against the tensor ops

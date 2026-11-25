@@ -263,12 +263,26 @@ fn running_stats_recapture_and_capture_training() {
 
     // When all BNs are frozen, `capture_training` is empty and all operations are no-ops.
     model.eval();
+    assert!(RunningStats::all_finite_eval(&model).unwrap());
     let mut frozen = RunningStats::capture_training(&model).unwrap();
     assert!(frozen.is_empty());
     assert_eq!(frozen.len(), 0);
     frozen.recapture().unwrap();
     frozen.restore().unwrap();
     assert!(frozen.all_finite_live().unwrap());
+    // A pre-existing +Inf in a frozen/eval BN buffer is caught by `all_finite_eval`.
+    {
+        let (_, buf) = model.named_buffers().into_iter().nth(3).unwrap();
+        let _g = no_grad();
+        buf.fill_assign(f32::INFINITY).unwrap();
+    }
+    assert!(!RunningStats::all_finite_eval(&model).unwrap());
+    {
+        let (_, buf) = model.named_buffers().into_iter().nth(3).unwrap();
+        let _g = no_grad();
+        buf.fill_assign(1.0).unwrap();
+    }
+    assert!(RunningStats::all_finite_eval(&model).unwrap());
 
     // Live buffer changing dtype between capture and recapture reallocates its slot cleanly.
     struct BufOnly(Tensor);

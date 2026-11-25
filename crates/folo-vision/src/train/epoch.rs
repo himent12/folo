@@ -81,6 +81,13 @@ impl Trainer {
         // A batch's wall time starts when the previous one ends, so the ETA counts the wait for the loader too:
         // with mosaic on large JPEGs the loader, not the step, often sets the pace.
         let phase = self.mosaic_phase(e);
+        if !RunningStats::all_finite_eval(&self.model)? {
+            return Err(Error::Failed(format!(
+                "epoch {}: frozen BatchNorm running statistics contain non-finite values; check loaded weights or \
+                 checkpoint",
+                e + 1
+            )));
+        }
         let mut snapshot = RunningStats::capture_training(&self.model)?;
         let mut snapshot_dirty = false;
         let mut batch_start = Instant::now();
