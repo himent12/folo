@@ -13,6 +13,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Dataset, Run as RunT } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { pageCommandList } from '$lib/shell/pageCommands';
 import Run from './Run';
 
 let target: HTMLElement;
@@ -105,6 +106,20 @@ describe('a completed run', () => {
     target.querySelector<HTMLButtonElement>('header button[aria-label="More run actions"]')!.click();
     flushSync();
     expect([...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim())).toContain('Try in Playground');
+  });
+
+  it('offers "New run like this" in the ⋯ menu (before Delete run) and in page commands, linking to /runs/new?from=<id>', async () => {
+    const run = await open((rs) => rs.find((r) => r.status === 'completed' && r.model_id)!);
+    target.querySelector<HTMLButtonElement>('header .wide-only button[aria-label="More run actions"]')!.click();
+    flushSync();
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const labels = items.map((e) => e.textContent?.trim());
+    const cloneIdx = labels.indexOf('New run like this');
+    const delIdx = labels.indexOf('Delete run');
+    expect(cloneIdx).toBeGreaterThanOrEqual(0);
+    expect(cloneIdx).toBeLessThan(delIdx);
+    expect(items[cloneIdx]!.getAttribute('href')).toBe(`#/runs/new?from=${run.id}`);
+    expect(pageCommandList.items.some((cmd) => cmd.id === 'run-clone' && cmd.label === 'New run like this')).toBe(true);
   });
 });
 

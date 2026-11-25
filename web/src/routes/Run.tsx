@@ -285,6 +285,7 @@ export default function Run() {
       // Wherever the header does not show it (phones; a model that detected nothing, where the header leaves it out).
       if (!headerModel.get() || !wide || r.best?.map50_95 === 0) out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
+    out.push({ label: 'New run like this', icon: Copy, href: href(`/runs/new?from=${r.id}`) });
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.
     const removeQueued = () => stopOpen.set(true);
@@ -324,6 +325,7 @@ export default function Run() {
           : { id: 'run-resume', label: `Start ${r.name} again`, match: ['Start again', 'Resume run'], icon: RotateCcw, run: () => void resume() },
       );
     out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
+    out.push({ id: 'run-clone', label: 'New run like this', match: ['Clone run', 'Duplicate run', 'Copy settings', r.name], icon: Copy, run: () => router.go(`/runs/new?from=${r.id}`) });
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
     const line = runCli.get();
     if (line) out.push({ id: 'run-copy-cli', label: 'Copy CLI command', match: ['folo train', 'PowerShell'], icon: Copy, run: () => void copyText(line, 'CLI command') });

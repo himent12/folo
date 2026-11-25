@@ -485,9 +485,45 @@ describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
     expect(foot.textContent?.trim()).toBe(`${failed} of ${runs.length} runs`);
     // A search that matches nothing still says what is shown.
     const input = target.querySelector<HTMLInputElement>('.lt-search input')!;
+    expect(input.type).toBe('search');
     input.value = 'zzz-no-such-run';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     expect(target.querySelector('.list-foot')?.textContent?.trim()).toBe(`0 of ${runs.length} runs`);
+  });
+
+  it('offers a Clear selection button once runs are picked and explains the 4-run cap on disabled checkboxes', async () => {
+    const api = new MockApi('normal', 0);
+    await open(Runs, '/runs', api);
+    const tbl = await table('table.runs', (t) => t.querySelectorAll('tbody tr[data-row]').length >= 5, 'five rows');
+    expect(target.querySelector('header button[aria-label="Clear selection"]')).toBeNull();
+
+    const boxes = [...tbl.querySelectorAll<HTMLInputElement>('tbody tr[data-row] .check input')];
+    for (let i = 0; i < 4; i++) boxes[i]!.click();
+    flushSync();
+    expect(boxes[4]!.disabled).toBe(true);
+
+    // Hovering a disabled checkbox's label surfaces the 4-run cap tooltip.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const cappedLabel = boxes[4]!.closest<HTMLLabelElement>('label.hit')!;
+      cappedLabel.dispatchEvent(new Event('pointerenter'));
+      vi.advanceTimersByTime(500);
+      expect(document.getElementById('folo-tooltip')?.textContent).toBe('Compare up to 4 runs');
+      cappedLabel.dispatchEvent(new Event('pointerleave'));
+      vi.advanceTimersByTime(200);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const clear = target.querySelector<HTMLButtonElement>('header button[aria-label="Clear selection"]')!;
+    expect(clear.textContent?.trim()).toBe('Clear');
+    clear.focus();
+    clear.click();
+    flushSync();
+    expect(tbl.querySelectorAll('td.check input:checked')).toHaveLength(0);
+    expect(boxes[4]!.disabled).toBe(false);
+    expect(target.querySelector('header button[aria-label="Clear selection"]')).toBeNull();
+    expect(document.activeElement).toBe(target.querySelector('.lt-search input'));
   });
 });

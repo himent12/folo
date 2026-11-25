@@ -17,6 +17,8 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
+import { tooltip } from '$lib/ui/tooltip';
+import { COMPARE_CAP_TIP, COMPARE_MAX } from './compareHint';
 import { exactTime } from './when';
 
 export interface RunRowsProps {
@@ -74,15 +76,16 @@ export default function RunRows(props: RunRowsProps) {
             <For each={props.runs} key={(r) => r.id}>
               {(r) => {
                 const on = () => props.selected.includes(r().id);
+                const capped = () => !on() && props.selected.length >= COMPARE_MAX;
                 const cause = () => failureCause(r());
                 const items = computed(() => props.items(r()));
                 return (
                   <li class:on={on()}>
-                    <label class="r-check">
+                    <label class="r-check" use:tooltip={capped() ? COMPARE_CAP_TIP : null}>
                       <input
                         type="checkbox"
                         checked={on()}
-                        disabled={!on() && props.selected.length >= 4}
+                        disabled={capped()}
                         aria-label={`Select ${r().name} for comparison`}
                         onchange={() => props.toggle(r().id)}
                       />
@@ -238,6 +241,9 @@ css`
       width: 44px;
       height: 56px;
     }
+    .r-check:has(> input:disabled) {
+      cursor: not-allowed;
+    }
     /* The checkbox itself is the 44 px target (DESIGN_DIRECTION §2.10), not only its label: the input is a 44 px box
        whose drawn mark is the 20 px square at its centre, ink when checked as everywhere (§2.6). */
     .r-check input[type='checkbox'] {
@@ -276,6 +282,7 @@ css`
     }
     .r-check input[type='checkbox']:disabled {
       cursor: not-allowed;
+      pointer-events: none;
     }
     /* Off (four runs picked, the most Compare takes): an outline only, the control edge at half strength, so it never
        reads as filled, and a filled square means checked (round 26: a dark inset fill read as checked). */

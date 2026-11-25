@@ -176,6 +176,24 @@ describe("ConfigPanel: the run's CLI command (servers that list run_cli)", () =>
     const labels = [...target.querySelectorAll('#config header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim());
     expect(labels).toEqual(['Copy JSON']);
   });
+
+  it('gives Copy command and Copy JSON distinct icons and names PowerShell clearly', async () => {
+    mountWith({ cli: line, runId: 'run_7d1e' });
+    const header = target.querySelector('#config header')!;
+    const buttons = [...header.querySelectorAll<HTMLButtonElement>('button')];
+    expect(buttons).toHaveLength(2);
+    const svgs = buttons.map((b) => b.querySelector('svg')?.innerHTML ?? '');
+    expect(svgs[0]).toBeTruthy();
+    expect(svgs[1]).toBeTruthy();
+    expect(svgs[0]).not.toBe(svgs[1]);
+    expect(target.querySelector('.cli .shell')?.textContent).toBe("In PowerShell (for the server's machine):");
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    const ok = vi.spyOn(toast, 'success');
+    buttons[0]!.click();
+    await vi.waitFor(() => expect(ok).toHaveBeenCalledWith('PowerShell command copied', "The run's folo train command, for the server's machine."));
+    ok.mockRestore();
+  });
 });
 
 describe('ConfigPanel: the work before the reference', () => {

@@ -4,15 +4,17 @@
  * the LR decay, the warmup and the optimizer's momentum and weight decay; without it, the request as asked for.
  * Close mosaic is the trainer's capped count ("last 7 epochs (requested 10)"). Copy JSON copies the request: the
  * TrainConfig `POST /api/runs` and MCP `train` take, which resolves the same way again. With `cli` (servers that list
- * `run_cli`), the same run from a terminal on the server's machine closes the panel: "In PowerShell:" and the
+ * `run_cli`), the same run from a terminal on the server's machine closes the panel: "In PowerShell (for the server's machine):" and the
  * command on one copyable line (ui/CommandLine).
  */
 import Copy from '$icons/copy';
+import FileJson from '$icons/file-json';
 import { computed, css, For, MediaQuery } from 'fw';
 import { media } from '$lib/design/tokens';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { FROM_SCRATCH, type Origin } from '$lib/lineage';
 import { exactSeed, OVER_SEED, SEED_LEFT_OUT, withoutInexactSeed } from '$lib/seed';
+import { SHELL } from '$lib/trainCli';
 import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Lineage from '$lib/ui/Lineage';
@@ -20,6 +22,7 @@ import Note from '$lib/ui/Note';
 import Ident, { identKind } from '$lib/ui/Ident';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
+import { tooltip } from '$lib/ui/tooltip';
 import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, effectiveBatchSetting, type Setting } from './resolved';
 
 export interface ConfigPanelProps {
@@ -125,7 +128,7 @@ export default function ConfigPanel(props: ConfigPanelProps) {
   async function copyCli() {
     try {
       await navigator.clipboard.writeText(props.cli ?? '');
-      toast.success('Command copied', "The run's folo train command, for the server's machine.");
+      toast.success(`${SHELL} command copied`, "The run's folo train command, for the server's machine.");
     } catch (e) {
       toast.error(e, 'Could not copy');
     }
@@ -182,23 +185,27 @@ export default function ConfigPanel(props: ConfigPanelProps) {
         // and the request as JSON.
         <>
           {props.runId ? <Ident value={props.runId} class="run-id" /> : null}
-          {/* Where the column is narrow (the laptop rail, phones) the two are icons, named and titled. */}
+          {/* Distinct icons (Copy vs FileJson) so narrow icon-only headers (laptop rail, phones) stay tellable apart. */}
           {props.cli ? (
-            tight() ? (
-              <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={copyCli} />
-            ) : (
-              <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>
-                Copy command
-              </Button>
-            )
+            <span class="act-tip" use:tooltip={`Copy ${SHELL} command`}>
+              {tight() ? (
+                <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" onclick={copyCli} />
+              ) : (
+                <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>
+                  Copy command
+                </Button>
+              )}
+            </span>
           ) : null}
-          {tight() ? (
-            <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy JSON" title="Copy JSON" onclick={copy} />
-          ) : (
-            <Button size="sm" variant="ghost" icon={Copy} onclick={copy}>
-              Copy JSON
-            </Button>
-          )}
+          <span class="act-tip" use:tooltip={'Copy request JSON'}>
+            {tight() ? (
+              <Button size="sm" variant="ghost" icon={FileJson} aria-label="Copy JSON" onclick={copy} />
+            ) : (
+              <Button size="sm" variant="ghost" icon={FileJson} onclick={copy}>
+                Copy JSON
+              </Button>
+            )}
+          </span>
         </>
       )}
     >
@@ -225,8 +232,8 @@ export default function ConfigPanel(props: ConfigPanelProps) {
       )}
       {props.cli ? (
         <div class="cli">
-          <p class="shell">In PowerShell:</p>
-          <CommandLine command={props.cli} label="PowerShell command" copied="The run's folo train command, for the server's machine." />
+          <p class="shell">In {SHELL} (for the server&apos;s machine):</p>
+          <CommandLine command={props.cli} label={`${SHELL} command`} copied="The run's folo train command, for the server's machine." />
         </div>
       ) : null}
     </Panel>
@@ -238,6 +245,9 @@ css`
   :global(.ident.run-id) {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  .act-tip {
+    display: inline-flex;
   }
   /* The run from a terminal: under the settings, across the panel's width, the command one line that never wraps. */
   .cli {
