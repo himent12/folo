@@ -12,6 +12,7 @@ import {
   getOwner,
   memo,
   onCleanup,
+  onMount,
   renderEffect,
   runWithOwner,
   signal,
@@ -21,7 +22,7 @@ import {
 import { createComponent } from './component';
 import { insert, setLeave } from './dom';
 import { delegateEvents, delegateRoot, setDelegated } from './events';
-import { For, Index, Show } from './flow';
+import { For, Index } from './flow';
 import { render as rawRender } from './render';
 import { render } from '../testing';
 
@@ -190,6 +191,43 @@ describe('deterministic owner disposal & cleanup', () => {
     expect(lateCleanup).toHaveBeenCalledTimes(1);
     expect(zombieEffect).not.toHaveBeenCalled();
     expect(zombieRender).not.toHaveBeenCalled();
+  });
+
+  it('propagates DISPOSED through attach() so a dead memo rendering a child component leaks no effects or subscriptions', () => {
+    let subs = 0;
+    const s = watchedSignal(1, (on) => (subs += on ? 1 : -1));
+    const dep = signal(0);
+    const childRuns = vi.fn();
+    const childMounted = vi.fn();
+
+    const Child = () => {
+      renderEffect(() => childRuns(s.get()));
+      onMount(childMounted);
+      return null;
+    };
+
+    let retained!: () => unknown;
+    const stop = createRoot((d) => {
+      retained = memo(() => {
+        const v = dep.get();
+        if (v > 0) createComponent(Child, {});
+        return v;
+      });
+      return d;
+    });
+    expect(retained()).toBe(0);
+    stop();
+
+    // Mutate dependency and read retained memo after its parent root was disposed.
+    dep.set(1);
+    expect(retained()).toBe(1);
+    flush();
+    s.set(2);
+    flush();
+
+    expect(subs).toBe(0);
+    expect(childRuns).not.toHaveBeenCalled();
+    expect(childMounted).not.toHaveBeenCalled();
   });
 
   it('runs cleanups with no active owner so nested onCleanup/effect cannot attach to an ambient owner', () => {
@@ -420,14 +458,16 @@ describe('For / Index keyed diff & single-node outro hardening', () => {
     expect(cleanups).toContain('b');
     expect(cleanups).toContain('c');
 
-    // Same for Index row creation throw.
+    // Same for Index multi-row grow throw: earlier row in failed batch is disposed and never mounts.
     const idxCleanups: number[] = [];
+    const idxMounts: number[] = [];
     const idxList = signal<string[]>(['ok']);
     const idxView = render(() => (
       <div>
         <Index each={idxList.get()}>
           {(item, i) => {
             onCleanup(() => idxCleanups.push(i));
+            onMount(() => void idxMounts.push(i));
             if (item() === 'boom') throw new Error('idx-boom');
             return <span>{item()}</span>;
           }}
@@ -435,14 +475,84 @@ describe('For / Index keyed diff & single-node outro hardening', () => {
       </div>
     ));
     flush();
-    idxList.set(['ok', 'boom']);
+    expect(idxMounts).toEqual([0]);
+    idxList.set(['ok', 'partial', 'boom']);
     expect(() => flush()).toThrow('idx-boom');
-    expect(idxCleanups).toEqual([1]);
+    expect(idxCleanups).toEqual([2, 1]);
+    expect(idxMounts).toEqual([0]);
+    idxList.set(['ok', 'good']);
+    flush();
+    expect(idxView.container.textContent).toBe('okgood');
+    expect(idxMounts).toEqual([0, 1]);
     idxView.unmount();
   });
 
-  it('runs single-node outro transitions when replaced by text or another single element without leaking leaving count', () => {
-    const mode = signal<'outro' | 'text' | 'elem'>('outro');
+  it('recovers from throwing row cleanups in For middle reconcile and failed multi-row appends', () => {
+    // 1. Throwing row cleanup during middle reconcile must compact `rows` (no `undefined` holes).
+    const list = signal<string[]>(['a', 'b', 'c']);
+    let throwOnA = true;
+    const view = render(() => (
+      <div>
+        <For each={list.get()} key={(x) => x}>
+          {(item) => {
+            const v = item();
+            onCleanup(() => {
+              if (v === 'a' && throwOnA) {
+                throwOnA = false;
+                throw new Error('cleanup:a');
+              }
+            });
+            return <span>{v}</span>;
+          }}
+        </For>
+      </div>
+    ));
+    flush();
+    expect(view.container.textContent).toBe('abc');
+
+    list.set(['b', 'x', 'y']);
+    expect(() => flush()).toThrow('cleanup:a');
+
+    // Subsequent update must not crash on an `undefined` hole and must reconcile cleanly.
+    list.set(['b', 'z']);
+    flush();
+    expect(view.container.textContent).toBe('bz');
+    view.unmount();
+
+    // 2. Failed multi-row pure append in For disposes earlier rows in that batch before user effects run.
+    const mounted: string[] = [];
+    const disposed: string[] = [];
+    const appendList = signal<string[]>(['a']);
+    const appendView = render(() => (
+      <div>
+        <For each={appendList.get()} key={(x) => x}>
+          {(item) => {
+            const v = item();
+            onMount(() => void mounted.push(v));
+            onCleanup(() => void disposed.push(v));
+            if (v === 'bad') throw new Error('append-boom');
+            return <span>{v}</span>;
+          }}
+        </For>
+      </div>
+    ));
+    flush();
+    expect(mounted).toEqual(['a']);
+
+    appendList.set(['a', 'x', 'bad']);
+    expect(() => flush()).toThrow('append-boom');
+    expect(disposed).toEqual(['bad', 'x']);
+    expect(mounted).toEqual(['a']);
+
+    appendList.set(['a', 'ok']);
+    flush();
+    expect(appendView.container.textContent).toBe('aok');
+    expect(mounted).toEqual(['a', 'ok']);
+    appendView.unmount();
+  });
+
+  it('keeps a running single-node outro intact across consecutive text and element updates until done()', () => {
+    const mode = signal<'outro' | 'text1' | 'text2' | 'elem1' | 'elem2'>('outro');
     let finishOutro: (() => void) | undefined;
     const leaveSpy = vi.fn((done: () => void) => {
       finishOutro = done;
@@ -450,49 +560,68 @@ describe('For / Index keyed diff & single-node outro hardening', () => {
 
     const host = document.createElement('div');
     const stop = createRoot((d) => {
-      insert(
-        host,
-        <Show
-          when={mode.get() === 'outro'}
-          fallback={mode.get() === 'text' ? 'plain-text' : <em>replacement</em>}
-        >
-          {(() => {
-            const el = document.createElement('p');
-            el.textContent = 'leaving';
-            setLeave(el, leaveSpy);
-            return el;
-          })()}
-        </Show>,
-      );
+      insert(host, () => {
+        const m = mode.get();
+        if (m === 'outro') {
+          const el = document.createElement('p');
+          el.textContent = 'leaving';
+          setLeave(el, leaveSpy);
+          return el;
+        }
+        if (m === 'text1') return 'first';
+        if (m === 'text2') return 'second';
+        if (m === 'elem1') {
+          const el = document.createElement('em');
+          el.textContent = 'first-el';
+          return el;
+        }
+        const el = document.createElement('strong');
+        el.textContent = 'second-el';
+        return el;
+      });
       return d;
     });
     flush();
     expect(host.querySelector('p')?.textContent).toBe('leaving');
 
-    // Replace single leaving node with text: outro must fire and keep <p> in DOM until done().
-    mode.set('text');
+    // Replace single leaving node with "first", then update to "second" while outro is still running.
+    mode.set('text1');
     flush();
     expect(leaveSpy).toHaveBeenCalledTimes(1);
     expect(host.querySelector('p')).not.toBeNull();
-    expect(host.textContent).toContain('plain-text');
+    expect(host.textContent).toContain('first');
+
+    mode.set('text2');
+    flush();
+    expect(host.querySelector('p')).not.toBeNull();
+    expect(host.textContent).toContain('second');
+    expect(host.textContent).not.toContain('first');
+
     finishOutro!();
     expect(host.querySelector('p')).toBeNull();
-    expect(host.textContent).toBe('plain-text');
+    expect(host.textContent).toBe('second');
 
-    // Mount leaving node again and replace with another single element.
+    // Mount leaving node again and replace with elem1, then elem2 while outro is still running.
     finishOutro = undefined;
     mode.set('outro');
     flush();
     expect(host.querySelector('p')).not.toBeNull();
 
-    mode.set('elem');
+    mode.set('elem1');
     flush();
     expect(leaveSpy).toHaveBeenCalledTimes(2);
-    expect(host.querySelector('em')?.textContent).toBe('replacement');
+    expect(host.querySelector('em')?.textContent).toBe('first-el');
     expect(host.querySelector('p')).not.toBeNull();
+
+    mode.set('elem2');
+    flush();
+    expect(host.querySelector('p')).not.toBeNull();
+    expect(host.querySelector('em')).toBeNull();
+    expect(host.querySelector('strong')?.textContent).toBe('second-el');
+
     finishOutro!();
     expect(host.querySelector('p')).toBeNull();
-    expect(host.innerHTML).toBe('<em>replacement</em>');
+    expect(host.innerHTML).toBe('<strong>second-el</strong>');
 
     stop();
   });

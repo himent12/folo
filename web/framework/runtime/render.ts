@@ -32,6 +32,8 @@ export function render(code: () => JSX.Element, container: Element | DocumentFra
   } catch (e) {
     try {
       dispose?.();
+    } catch {
+      // Keep the original render error.
     } finally {
       undo();
       removeNodes();

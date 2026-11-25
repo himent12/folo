@@ -340,6 +340,10 @@ function attach(parent: Owner | null, child: Owner): void {
   child._parent = parent;
   child._depth = parent === null ? 0 : parent._depth + 1;
   if (parent === null) return;
+  if (parent._flags & DISPOSED) {
+    child._flags |= DISPOSED;
+    return;
+  }
   child._flags |= ATTACHED;
   child._prev = parent._last;
   if (parent._last !== null) parent._last._next = child;

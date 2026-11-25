@@ -45,8 +45,19 @@ function removeNode(node: Node): void {
   const leave = n.$$leave;
   if (leave !== undefined) {
     n.$$leave = undefined;
-    leaving--;
-    leave(() => n.parentNode?.removeChild(n));
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      leaving--;
+      n.parentNode?.removeChild(n);
+    };
+    try {
+      leave(finish);
+    } catch (e) {
+      finish();
+      throw e;
+    }
   } else n.parentNode?.removeChild(n);
 }
 
@@ -98,6 +109,9 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     }
     if (typeof current === 'string' && current !== '' && parent.firstChild !== null && parent.firstChild.nodeType === 3) {
       (parent.firstChild as Text).data = text;
+    } else if (leaving > 0 && Array.isArray(current) && current.length === 1 && (current[0] as Node).nodeType === 3) {
+      if ((current[0] as Text).data !== text) (current[0] as Text).data = text;
+      return current;
     } else if (leaving === 0 || (!Array.isArray(current) && !(current instanceof Node))) parent.textContent = text;
     else {
       return cleanChildren(parent, current, undefined, document.createTextNode(text));
@@ -163,13 +177,16 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
   if (Array.isArray(current)) {
     if (multi) return cleanChildren(parent, current, marker, node);
     cleanChildren(parent, current, null, node);
-  } else if (current == null || current === '' || parent.firstChild === null) {
-    parent.appendChild(node);
   } else if (current instanceof Node && (current as Leaving).$$leave !== undefined) {
     if (current.parentNode === parent) parent.insertBefore(node, current);
     else parent.appendChild(node);
     removeNode(current);
-  } else parent.replaceChild(node, parent.firstChild);
+  } else if (current == null || current === '' || parent.firstChild === null) {
+    parent.appendChild(node);
+  } else {
+    const target = current instanceof Node && current.parentNode === parent ? current : parent.firstChild;
+    parent.replaceChild(node, target);
+  }
   return node;
 }
 

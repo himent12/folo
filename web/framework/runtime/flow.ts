@@ -277,10 +277,22 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         outDirty = true;
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < start; j++) nextOut[j] = rows[j]!.value;
-        for (let j = start; j < n; j++) {
-          const r = make(list[j]!, j, keys[j]);
-          rows.push(r);
-          nextOut[j] = r.value;
+        try {
+          for (let j = start; j < n; j++) {
+            const r = make(list[j]!, j, keys[j]);
+            rows.push(r);
+            nextOut[j] = r.value;
+          }
+        } catch (e) {
+          for (let j = prevLen; j < rows.length; j++) {
+            try {
+              dispose(rows[j]!.root);
+            } catch {
+              // Keep the original row error.
+            }
+          }
+          rows.length = prevLen;
+          throw e;
         }
         ran = true;
         outDirty = false;
@@ -346,8 +358,8 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         // Single-row slot: preserve SameValueZero parity before replacing.
         if (sameKey(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
         else {
-          drop(rows[start]!);
           try {
+            drop(rows[start]!);
             next[start] = make(list[start]!, start, keys[start]);
           } catch (e) {
             rows.splice(start, 1);
@@ -381,20 +393,20 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           chain[j - start] = at === undefined ? -1 : at;
           first.set(k, j);
         }
-        for (let i = start; i <= end; i++) {
-          const row = rows[i]!;
-          const j = first.get(row.key);
-          if (j !== undefined) {
-            next[j] = row;
-            const c = chain[j - start]!;
-            if (c === -1) first.delete(row.key);
-            else first.set(row.key, c);
-          } else {
-            rows[i] = undefined!;
-            drop(row);
-          }
-        }
         try {
+          for (let i = start; i <= end; i++) {
+            const row = rows[i]!;
+            const j = first.get(row.key);
+            if (j !== undefined) {
+              next[j] = row;
+              const c = chain[j - start]!;
+              if (c === -1) first.delete(row.key);
+              else first.set(row.key, c);
+            } else {
+              rows[i] = undefined!;
+              drop(row);
+            }
+          }
           for (let j = start; j <= newEnd; j++) {
             const row = next[j];
             if (row !== undefined) update(row, list[j]!, j);
@@ -464,32 +476,44 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
       }
       if (n > prevLen) {
         outDirty = true;
-        for (let i = prevLen; i < n; i++) {
-          const root = ownedRoot(parent);
-          const prevOwner = swapOwner(root);
-          const sig = signal<T>(items[i]!);
-          let value: JSX.Element;
-          let t: BranchTransitions = null;
-          try {
-            enterBranch(ran);
-            let raw: JSX.Element;
+        try {
+          for (let i = prevLen; i < n; i++) {
+            const root = ownedRoot(parent);
+            const prevOwner = swapOwner(root);
+            const sig = signal<T>(items[i]!);
+            let value: JSX.Element;
+            let t: BranchTransitions = null;
             try {
-              raw = fn(() => sig.get(), i);
+              enterBranch(ran);
+              let raw: JSX.Element;
+              try {
+                raw = fn(() => sig.get(), i);
+              } finally {
+                t = exitBranch();
+              }
+              value = settle(raw);
+            } catch (e) {
+              try {
+                dispose(root);
+              } catch {
+                // Keep the original row error.
+              }
+              throw e;
             } finally {
-              t = exitBranch();
+              swapOwner(prevOwner);
             }
-            value = settle(raw);
-          } catch (e) {
+            rows.push({ sig, root, t, value });
+          }
+        } catch (e) {
+          for (let j = prevLen; j < rows.length; j++) {
             try {
-              dispose(root);
+              dispose(rows[j]!.root);
             } catch {
               // Keep the original row error.
             }
-            throw e;
-          } finally {
-            swapOwner(prevOwner);
           }
-          rows.push({ sig, root, t, value });
+          rows.length = prevLen;
+          throw e;
         }
       } else if (n < prevLen) {
         outDirty = true;
