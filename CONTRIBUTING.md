@@ -38,6 +38,8 @@ the docs site: CI uses Node 22 for Studio and Node 24 for the site, whose script
 ```sh
 cargo folo doctor                         # builds the CLI (`cargo folo` = `cargo run --release -p folo-cli --`)
 cargo test --workspace                    # the engine, the server, the CLI
+cargo test -p folo-core                   # fast inner loop: test one crate while iterating
+bash tools/test-tmp.sh cargo test --workspace         # same as CI: fails on leftover top-level folo-* scratch dirs
 (cd web && npm ci && npm run check && npm test)       # FOLO Studio
 (cd apps/desktop && cargo test --workspace)           # FOLO Desktop and folo-ui: their own cargo workspace
 (cd site && npm ci && npm run check)                  # the docs site: every link, anchor and image in the Markdown
@@ -45,6 +47,9 @@ cargo test --workspace                    # the engine, the server, the CLI
 
 The GPU tests need a Vulkan, DX12 or Metal adapter and skip without one. CI's hosted runners have no GPU, so if your
 change touches `crates/folo-gpu` or a GPU path, run the tests on a machine that has one and say so in the pull request.
+If you work across multiple git worktrees or want build output on a secondary disk, set `CARGO_TARGET_DIR` and
+`FOLO_TEST_TMP` (or `TEST_TMP` when running via `tools/test-tmp.sh`, which overrides `FOLO_TEST_TMP`) to keep scratch
+and build directories isolated.
 
 ## What a pull request must pass
 
@@ -53,7 +58,17 @@ change touches `crates/folo-gpu` or a GPU path, run the tests on a machine that 
 - For `web/`: `npm run check` and `npm test`. For `apps/desktop/`: fmt, clippy and the tests in that workspace.
 - For any Markdown: `npm run check` in `site/`, which fails on a broken link or anchor.
 - For a number in a chart: `node tools/charts/render.mjs` after changing `tools/charts/data.json`
-  ([docs/BENCHMARKS.md, Charts](docs/BENCHMARKS.md#charts)).
+  ([docs/BENCHMARKS.md, Charts](docs/BENCHMARKS.md#charts)); CI runs `node tools/charts/render.mjs --check`.
+
+### First PR checklist
+
+Before opening a pull request:
+1. Branch from `main` as `<area>/<short-topic>` and title the PR `area: imperative summary`.
+2. Run the checks above for every workspace you touched (plus `bash tools/file-size.sh`).
+3. Update the matching `docs/*.md` when behaviour or an interface changes, the crate or folder `README.md` when
+   adding, moving or removing a module, and `docs/ARCHITECTURE.md` when the map or change table no longer matches, then
+   run `(cd site && npm run check)`.
+4. If you changed a hot path, include before/after alternated benchmark numbers in the PR description.
 
 [docs/CI.md](docs/CI.md) lists what each workflow runs.
 

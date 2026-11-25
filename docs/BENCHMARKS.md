@@ -114,6 +114,39 @@ under `--work-dir` and `--out`.
 
 A full run is about 9 minutes of GPU work (2 training repeats) plus about 5 minutes of CPU benchmarks, not counting the time spent waiting for other jobs.
 
+### Running FOLO's own benches
+
+FOLO's own detector and crate benchmarks are plain Cargo `harness = false` binaries (no Python or PyTorch needed):
+
+```sh
+# GPU detector: forward (latency & throughput), end-to-end predict, and training step (f32 + AMP)
+FOLO_GPU_TENSOR_CORES=1 cargo bench -p folo-vision --bench gpu
+
+# CPU predictor end-to-end (batch 1 + optional batching) and CPU training step
+cargo bench -p folo-vision --bench cpu_e2e
+cargo bench -p folo-vision --bench train_step
+
+# Focused crate microbenchmarks (GPU kernels, data loader, vision-benchmark transforms & scorer)
+cargo bench -p folo-gpu --bench gemm           # also: conv, conv_model, elementwise, backend
+cargo bench -p folo-data --bench pipeline
+cargo bench -p folo-bench --bench conditions   # also: score
+```
+
+Useful environment knobs:
+- `folo-vision --bench gpu`: `FOLO_BENCH_SCALES=n,s`, `FOLO_BENCH_SECTIONS=forward,predict,train`,
+  `FOLO_BENCH_PRECISION=f32,f16,f16tc` (`f16tc` and AMP require `FOLO_GPU_TENSOR_CORES=1` on an adapter with
+  cooperative matrices), `FOLO_BENCH_TRAIN=f32,amp`, `FOLO_BENCH_OPTIM=musgd` (default is SGD to match the incumbent's
+  step), `FOLO_BENCH_CLIP=1`.
+- `folo-vision --bench cpu_e2e`: `FOLO_BENCH_SCALE=n|s|m`, `FOLO_BENCH_ITERS=100`, `FOLO_BENCH_BATCH=<N>`,
+  `FOLO_BENCH_WEIGHTS=<.folo>` + `FOLO_BENCH_IMAGES=<dir>` (for trained-weight candidate-first timings),
+  `RAYON_NUM_THREADS=<N>`.
+- `folo-vision --bench train_step`: `FOLO_BENCH_SIZE=320`, `FOLO_BENCH_BATCH=16`.
+
+When comparing runs: for GPU forward, match true-f32 FOLO against Ultralytics `fp32-strict` (TF32 off; the incumbent
+harness's end-to-end and training sections do not run a separate `fp32-strict` row), and FOLO `f16tc` / `--amp` against
+Ultralytics `fp16` / AMP. On a shared desktop, alternate baseline and candidate builds across 3+ rounds and take the
+medians (typical noise bands: ±3% alternated, ±10% across separate runs).
+
 ## Method
 
 **Inference (`gpu_fwd`, `cpu`)** times the model's forward pass: the `nn.Module` Ultralytics runs at inference
