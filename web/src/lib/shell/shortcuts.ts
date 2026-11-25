@@ -1,6 +1,7 @@
 // Global keyboard shortcuts. Two-key "go to" sequences (G then R) like Linear and GitHub. The single-character ones
 // (everything but Mod+K) can be turned off in Settings (ui/keyPrefs).
 
+import { signal } from 'fw';
 import { isTyping } from '$lib/keys';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import { sidebar } from './sidebarState';
@@ -10,7 +11,19 @@ import { mainNav, settingsNav } from './nav';
 export interface ShortcutHandlers {
   palette: () => void;
   shortcuts: () => void;
+  /** Called when a valid G-chord navigation sequence starts (never while typing, modified, or inside a dialog). */
+  gChord?: () => void;
+  /** Called on Escape before detail-page back navigation; return true if handled (e.g. cancelling a pending dialog load). */
+  escape?: () => boolean;
 }
+
+/** How long a G-chord stays armed waiting for the second navigation key. */
+export const G_CHORD_MS = 1200;
+
+/** Reactive flag: true while a G-chord ("go to") sequence is armed and waiting for its second key. */
+export const gChord = signal(false);
+
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta']);
 
 /** Opens the shortcuts dialog from anywhere (Settings' button), whether or not the `?` key is on. */
 export const SHOW_SHORTCUTS = 'folo:shortcuts';
@@ -99,27 +112,69 @@ function atRest(el: Element | null): boolean {
 
 export function installShortcuts(h: ShortcutHandlers): () => void {
   let pendingG = 0;
+  let chordTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearChord = () => {
+    if (chordTimer !== undefined) {
+      clearTimeout(chordTimer);
+      chordTimer = undefined;
+    }
+    pendingG = 0;
+    if (gChord.peek()) gChord.set(false);
+  };
 
   const onkeydown = (e: KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+      clearChord();
       e.preventDefault();
       h.palette();
       return;
     }
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
-    const k = e.key.toLowerCase();
-    if (pendingG && Date.now() - pendingG < 1200) {
-      pendingG = 0;
-      const target = [...mainNav, settingsNav].find((n) => n.keys === `G ${k.toUpperCase()}`);
-      if (target) {
-        e.preventDefault();
-        router.go(target.path);
-      }
+    if (MODIFIER_KEYS.has(e.key)) return;
+    if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) {
+      if (pendingG) clearChord();
       return;
     }
-    if (k === 'g') {
+    if (document.querySelector('dialog[open]')) {
+      if (pendingG) clearChord();
+      return;
+    }
+    if (!pendingG && !e.repeat && e.key === 'Escape' && h.escape?.()) {
+      e.preventDefault();
+      return;
+    }
+    if (!keyPrefs.singleKeys) {
+      if (pendingG) clearChord();
+      return;
+    }
+    if (e.repeat) return;
+    const k = e.key.toLowerCase();
+    if (pendingG) {
+      const live = Date.now() - pendingG < G_CHORD_MS;
+      clearChord();
+      if (live) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          return;
+        }
+        const target = [...mainNav, settingsNav].find((n) => n.keys === `G ${k.toUpperCase()}`);
+        if (target) {
+          e.preventDefault();
+          router.go(target.path);
+        }
+        return;
+      }
+      if (e.key === 'Escape' && h.escape?.()) {
+        e.preventDefault();
+        return;
+      }
+    }
+    if (k === 'g' && !e.shiftKey) {
       pendingG = Date.now();
+      gChord.set(true);
+      clearTimeout(chordTimer);
+      chordTimer = setTimeout(clearChord, G_CHORD_MS);
+      h.gChord?.();
       return;
     }
     if (e.key === 'Escape') {
@@ -145,9 +200,12 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
 
   const onshow = () => !touchOnly() && h.shortcuts();
   window.addEventListener('keydown', onkeydown);
+  window.addEventListener('blur', clearChord);
   window.addEventListener(SHOW_SHORTCUTS, onshow);
   return () => {
+    clearChord();
     window.removeEventListener('keydown', onkeydown);
+    window.removeEventListener('blur', clearChord);
     window.removeEventListener(SHOW_SHORTCUTS, onshow);
   };
 }

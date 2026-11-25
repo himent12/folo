@@ -82,7 +82,7 @@ server shows that offline state: start `folo serve`, or open `http://localhost:5
 | `src/routes/` | The screens (table below); each screen's parts in the folder beside it |
 | `src/lib/api/` | `index.ts` (`hub`: live server or mock), `client.ts` (the `Api` interface and `HttpApi`), `types.ts` + `types/` (docs/API.md's types, by resource), `resource.ts`, `sse.ts`, `live*.ts`, `reach.ts`, `handshake.ts`, `upload.ts`, `mock/` |
 | `src/lib/router.ts` | The hash router (`router`, `href`, `RouteName`) |
-| `src/lib/shell/` | App chrome: `Sidebar`, `Topbar`, `TabBar`, `CommandPalette`, `Page` (the page frame), `nav.ts`, `crumbs.ts`, `shortcuts.ts`, `RunWatch` |
+| `src/lib/shell/` | App chrome: `Sidebar`, `Topbar`, `TabBar`, `CommandPalette`, `GChordIndicator`, `Page` (the page frame), `nav.ts`, `crumbs.ts`, `shortcuts.ts`, `RunWatch` |
 | `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`) |
 | `src/lib/charts/` | SVG/canvas charts (`LineChart`, `Sparkline`, `Histogram`, `ConfusionMatrix`, `XYChart`) and their geometry |
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
