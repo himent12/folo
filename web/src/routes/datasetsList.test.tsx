@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { LABEL_FEATURE } from '$lib/label';
 import { parse, router } from '$lib/router';
 import Dataset from './Dataset';
 import Datasets from './Datasets';
@@ -32,6 +33,7 @@ afterEach(() => {
   c?.unmount();
   c = undefined;
   target?.remove();
+  hub.features = null;
   vi.restoreAllMocks();
 });
 
@@ -134,6 +136,84 @@ describe('the Datasets list', () => {
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
     document.dispatchEvent(new Event('visibilitychange'));
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 2));
+  });
+
+  it('sorts cards and phone rows by Name, Most images, Most boxes, and Most classes with deterministic tie-breakers', async () => {
+    const api = new MockApi('normal', 0);
+    const [base] = await api.datasets();
+    const baseDetail = await api.dataset(base!.id);
+    // Distinct image vs box rankings, tied counts, case-equivalent names with distinct IDs, and one missing folder.
+    const fixtures = [
+      { ...baseDetail, id: 'ds_b', name: 'beta', splits: { train: 100, val: 0, test: 0 }, classes: ['a', 'b'], stats: { ...baseDetail.stats!, boxes: 100 } },
+      { ...baseDetail, id: 'ds_a2', name: 'Alpha', splits: { train: 50, val: 0, test: 0 }, classes: ['a', 'b', 'c', 'd'], stats: { ...baseDetail.stats!, boxes: 500 } },
+      { ...baseDetail, id: 'ds_a1', name: 'alpha', splits: { train: 50, val: 0, test: 0 }, classes: ['a', 'b'], stats: { ...baseDetail.stats!, boxes: 500 } },
+      { ...baseDetail, id: 'ds_miss', name: 'missing', splits: { train: 999, val: 0, test: 0 }, classes: ['a', 'b', 'c'], stats: undefined },
+    ];
+    vi.spyOn(api, 'datasets').mockResolvedValue(fixtures);
+    vi.spyOn(api, 'dataset').mockImplementation((id: string) => {
+      if (id === 'ds_miss') return Promise.reject(new ApiError(404, 'path_not_found', 'missing'));
+      return Promise.resolve(fixtures.find((d) => d.id === id)!);
+    });
+    hub.api = api;
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('.card[data-name="missing"]')?.textContent?.includes('Folder missing'), 'loaded cards');
+
+    const cardIds = () => [...target.querySelectorAll<HTMLElement>('.cards .card')].map((el) => el.dataset.id);
+    const phoneIds = () => [...target.querySelectorAll<HTMLAnchorElement>('.phone-list .m-row > a')].map((el) => el.getAttribute('href')?.replace('#/datasets/', ''));
+    const select = target.querySelector<HTMLSelectElement>('#datasets-sort')!;
+    const pick = (v: string) => {
+      select.value = v;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+    };
+
+    // Name: case-insensitive A-Z, breaking equal names by id.
+    expect(cardIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+    expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+
+    // Most images: beta (100) > alpha/Alpha (50, tie broken by id) > missing (sunk despite 999 registered).
+    pick('images');
+    expect(cardIds()).toEqual(['ds_b', 'ds_a1', 'ds_a2', 'ds_miss']);
+    expect(phoneIds()).toEqual(['ds_b', 'ds_a1', 'ds_a2', 'ds_miss']);
+
+    // Most boxes: alpha/Alpha (500) > beta (100) > missing (-1), distinct from image order.
+    pick('boxes');
+    expect(cardIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+    expect(phoneIds()).toEqual(['ds_a1', 'ds_a2', 'ds_b', 'ds_miss']);
+
+    // Most classes: Alpha (4) > missing (3) > alpha/beta (2, tie broken by name).
+    pick('classes');
+    expect(cardIds()).toEqual(['ds_a2', 'ds_miss', 'ds_a1', 'ds_b']);
+    expect(phoneIds()).toEqual(['ds_a2', 'ds_miss', 'ds_a1', 'ds_b']);
+  });
+
+  it('hides Label images actions when the server lacks agent_labeling, and disables Sort on empty or failed lists', async () => {
+    vi.spyOn(hub.api, 'datasets').mockResolvedValue([]);
+    hub.features = ['cloud'];
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('.state')?.textContent?.includes('No datasets yet'), 'empty state');
+    expect(target.querySelector('a[href="#/datasets/label"]')).toBeNull();
+    expect(target.querySelector('button[aria-label="More dataset actions"]')).toBeNull();
+    expect(target.textContent).not.toContain('Label images');
+    expect(target.textContent).not.toContain('have an agent label your images');
+    // Sort control stays in place and disabled over an empty list.
+    expect(target.querySelector<HTMLSelectElement>('#datasets-sort')!.disabled).toBe(true);
+
+    // Server advertises agent_labeling: header, phone overflow menu, and empty state offer Label images.
+    hub.features = [LABEL_FEATURE];
+    flushSync();
+    const links = [...target.querySelectorAll<HTMLAnchorElement>('a[href="#/datasets/label"]')];
+    expect(links.length).toBeGreaterThanOrEqual(2);
+    expect(target.querySelector('button[aria-label="More dataset actions"]')).not.toBeNull();
+    expect(target.textContent).toContain('have an agent label your images');
+
+    // Failed list request also disables the Sort select.
+    c!.unmount();
+    target.remove();
+    vi.spyOn(hub.api, 'datasets').mockRejectedValue(new ApiError(500, 'err', 'boom'));
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('.state')?.textContent?.includes('Could not load datasets'), 'error state');
+    expect(target.querySelector<HTMLSelectElement>('#datasets-sort')!.disabled).toBe(true);
   });
 });
 
