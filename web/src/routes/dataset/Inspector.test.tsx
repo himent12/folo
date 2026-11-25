@@ -260,10 +260,10 @@ describe('Inspector labels', () => {
 
       const btn = () => target.querySelector<HTMLButtonElement>('.head-zoom button[aria-keyshortcuts="B"]')!;
       expect(btn().getAttribute('aria-pressed')).toBe('true');
-      expect(btn().getAttribute('aria-label')).toBe('Hide boxes');
+      expect(btn().getAttribute('aria-label')).toBe('Show boxes');
       expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
 
-      // Press B: boxes hide, button updates aria-pressed/label, viewport notes boxes hidden.
+      // Press B: boxes hide, button keeps stable accessible name and flips aria-pressed, viewport notes boxes hidden.
       target.querySelector<HTMLElement>('.viewport')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
       flushSync();
       expect(btn().getAttribute('aria-pressed')).toBe('false');
@@ -277,13 +277,18 @@ describe('Inspector labels', () => {
       expect(btn().getAttribute('aria-pressed')).toBe('true');
       expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
 
-      // Hiding again then clicking a label in the rail restores boxes so the picked box is visible.
+      // Selecting a label, hiding boxes with B, then picking the SAME label again restores boxes instead of leaving them hidden.
+      const firstLabel = target.querySelector<HTMLButtonElement>('.labels button')!;
+      firstLabel.click();
+      flushSync();
+      expect(firstLabel.getAttribute('aria-current')).toBe('true');
       btn().click();
       flushSync();
       expect(target.querySelectorAll('.stage .box')).toHaveLength(0);
-      target.querySelector<HTMLButtonElement>('.labels button')!.click();
+      firstLabel.click();
       flushSync();
       expect(btn().getAttribute('aria-pressed')).toBe('true');
+      expect(firstLabel.getAttribute('aria-current')).toBe('true');
       expect(target.querySelectorAll('.stage .box').length).toBeGreaterThan(0);
       pager.dispose();
     } finally {
@@ -315,24 +320,40 @@ describe('Inspector labels', () => {
     flushSync();
     expect(zoomBtn().textContent).toBe('Fit');
 
+    // A pointerup > 4px away without any intervening pointermove does not trigger click-to-zoom.
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 2, button: 0, pointerType: 'mouse', clientX: 100, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, button: 0, pointerType: 'mouse', clientX: 112, clientY: 100, bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).toBe('Fit');
+
     // A touch tap does not trigger mouse click-to-zoom (touch uses pinch / double-tap).
-    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 2, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
-    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 3, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 3, button: 0, pointerType: 'touch', clientX: 100, clientY: 100, bubbles: true }));
     flushSync();
     expect(zoomBtn().textContent).toBe('Fit');
 
     // A clean mouse click at Fit zooms in immediately.
-    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 3, button: 0, pointerType: 'mouse', clientX: 120, clientY: 80, bubbles: true }));
-    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 3, button: 0, pointerType: 'mouse', clientX: 121, clientY: 81, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 4, button: 0, pointerType: 'mouse', clientX: 120, clientY: 80, bubbles: true }));
+    vp.dispatchEvent(new PointerEvent('pointerup', { pointerId: 4, button: 0, pointerType: 'mouse', clientX: 121, clientY: 81, bubbles: true }));
+    vp.dispatchEvent(new MouseEvent('click', { detail: 1, clientX: 121, clientY: 81, bubbles: true }));
     flushSync();
     expect(vp.classList.contains('zoomed')).toBe(true);
     const zoomedOnce = zoomBtn().textContent;
     expect(zoomedOnce).not.toBe('Fit');
 
-    // An immediate follow-up dblclick inside the guard window does not double-zoom past 2.5x.
-    vp.dispatchEvent(new MouseEvent('dblclick', { clientX: 121, clientY: 81, bubbles: true }));
+    // A native dblclick completing that same click sequence (even after > 350ms) does not double-zoom past 2.5x.
+    vp.dispatchEvent(new MouseEvent('click', { detail: 2, clientX: 121, clientY: 81, bubbles: true }));
+    vp.dispatchEvent(new MouseEvent('dblclick', { detail: 2, clientX: 121, clientY: 81, bubbles: true }));
     flushSync();
     expect(zoomBtn().textContent).toBe(zoomedOnce);
+
+    // A subsequent deliberate double-click while zoomed (starting with a fresh click detail=1) zooms further.
+    vp.dispatchEvent(new MouseEvent('click', { detail: 1, clientX: 121, clientY: 81, bubbles: true }));
+    vp.dispatchEvent(new MouseEvent('click', { detail: 2, clientX: 121, clientY: 81, bubbles: true }));
+    vp.dispatchEvent(new MouseEvent('dblclick', { detail: 2, clientX: 121, clientY: 81, bubbles: true }));
+    flushSync();
+    expect(zoomBtn().textContent).not.toBe(zoomedOnce);
+    expect(zoomBtn().textContent).not.toBe('Fit');
 
     // Pressing 0 returns cleanly to Fit.
     vp.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));

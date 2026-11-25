@@ -43,8 +43,6 @@ const PAN: Record<string, [number, number]> = { ArrowLeft: [1, 0], ArrowRight: [
 const NO_BOXES: Box[] = [];
 /** Pointer travel (px) within which a press-and-release counts as a click rather than a drag. */
 const CLICK_SLOP = 4;
-/** Window (ms) after a click-to-zoom from Fit during which a follow-up dblclick does not double-zoom. */
-const DBLCLICK_GUARD_MS = 350;
 const clampAxis = (t: number, d: number, v: number) => (d <= v ? (v - d) / 2 : Math.min(0, Math.max(v - d, t)));
 
 export default function Inspector(props: InspectorProps) {
@@ -178,7 +176,8 @@ export default function Inspector(props: InspectorProps) {
       pointers.clear();
       pinch = null;
       downOrigin = null;
-      clickZoomAt = 0;
+      justClickZoomed = false;
+      suppressDblclick = false;
       dragging.set(false);
     });
   });
@@ -187,6 +186,8 @@ export default function Inspector(props: InspectorProps) {
   // pinch, drag) follows the hand with no transition. The CSS reduced-motion rule turns the glide off.
   const glide = signal(false);
   function zoomAt(f: number, px = vw.peek() / 2, py = vh.peek() / 2, eased = true) {
+    justClickZoomed = false;
+    suppressDblclick = false;
     glide.set(eased);
     const zz = z.peek();
     const s = s0.peek();
@@ -199,15 +200,17 @@ export default function Inspector(props: InspectorProps) {
   }
 
   function fit() {
+    justClickZoomed = false;
+    suppressDblclick = false;
     glide.set(true);
     z.set(1);
   }
 
-  /** A label's click: select it and zoom to its box, or (already selected) let go of it and fit the image again. */
+  /** A label's click: select it and zoom to its box, or (already selected with boxes shown) let go of it and fit again. */
   function pick(i: number) {
     const b = img.peek()?.boxes[i];
     if (!b) return;
-    if (selected.peek() === i) {
+    if (selected.peek() === i && showBoxes.peek()) {
       selected.set(null);
       fit();
       return;
@@ -281,7 +284,9 @@ export default function Inspector(props: InspectorProps) {
   const pointers = new Map<number, { x: number; y: number }>();
   let pinch: { d: number; mx: number; my: number } | null = null;
   let downOrigin: { id: number; x: number; y: number; moved: boolean; multi: boolean } | null = null;
-  let clickZoomAt = 0;
+  /** Suppresses the native `dblclick` belonging to the click that just zoomed from Fit, at any OS double-click speed. */
+  let justClickZoomed = false;
+  let suppressDblclick = false;
   const dragging = signal(false);
   /** The hint over the image (keys, gestures) fades once someone has used the viewer (a key, the wheel, a press), so
    *  it never sits on boxes in the corner for longer than it takes to read. */
@@ -308,7 +313,11 @@ export default function Inspector(props: InspectorProps) {
     const [px, py] = local(e);
     pointers.set(e.pointerId, { x: px, y: py });
     if (pointers.size === 1) downOrigin = { id: e.pointerId, x: px, y: py, moved: false, multi: false };
-    else if (downOrigin) downOrigin.multi = true;
+    else if (downOrigin) {
+      downOrigin.multi = true;
+      justClickZoomed = false;
+      suppressDblclick = false;
+    }
     pinch = pointers.size === 2 ? pinchState() : null;
     dragging.set(true);
     glide.set(false);
@@ -321,6 +330,8 @@ export default function Inspector(props: InspectorProps) {
     pointers.set(e.pointerId, { x: px, y: py });
     if (downOrigin && downOrigin.id === e.pointerId && !downOrigin.moved && Math.hypot(px - downOrigin.x, py - downOrigin.y) > CLICK_SLOP) {
       downOrigin.moved = true;
+      justClickZoomed = false;
+      suppressDblclick = false;
     }
     if (pointers.size >= 2) {
       const now = pinchState();
@@ -337,13 +348,15 @@ export default function Inspector(props: InspectorProps) {
   }
 
   function onpointerup(e: PointerEvent) {
+    const [px, py] = local(e);
     const cleanClick =
       e.pointerType !== 'touch' &&
       downOrigin !== null &&
       downOrigin.id === e.pointerId &&
       !downOrigin.moved &&
       !downOrigin.multi &&
-      pointers.size === 1;
+      pointers.size === 1 &&
+      Math.hypot(px - downOrigin.x, py - downOrigin.y) <= CLICK_SLOP;
     pointers.delete(e.pointerId);
     pinch = pointers.size === 2 ? pinchState() : null;
     if (pointers.size === 0) {
@@ -352,9 +365,9 @@ export default function Inspector(props: InspectorProps) {
     }
     // At Fit the viewport shows a zoom-in cursor: a clean click zooms in at the clicked point immediately.
     if (cleanClick && z.peek() <= 1.001 && img.peek()) {
-      const [px, py] = local(e);
-      clickZoomAt = performance.now();
       zoomAt(2.5, px, py);
+      justClickZoomed = true;
+      suppressDblclick = true;
     }
   }
 
@@ -363,11 +376,24 @@ export default function Inspector(props: InspectorProps) {
     pinch = pointers.size === 2 ? pinchState() : null;
     if (pointers.size === 0) dragging.set(false);
     downOrigin = null;
+    justClickZoomed = false;
+    suppressDblclick = false;
+  }
+
+  function onviewportclick(e: MouseEvent) {
+    if (e.detail === 1) {
+      if (justClickZoomed) justClickZoomed = false;
+      else suppressDblclick = false;
+    }
   }
 
   function ondblclick(e: MouseEvent) {
     if (e.target instanceof Element && e.target.closest('button, a')) return;
-    if (performance.now() - clickZoomAt < DBLCLICK_GUARD_MS) return;
+    if (suppressDblclick) {
+      suppressDblclick = false;
+      justClickZoomed = false;
+      return;
+    }
     const [px, py] = local(e);
     if (z.peek() >= maxZ.peek() * 0.99) fit();
     else zoomAt(2.5, px, py);
@@ -407,7 +433,7 @@ export default function Inspector(props: InspectorProps) {
         icon={Scan}
         class={showBoxes.get() ? 'boxes-on' : 'boxes-off'}
         aria-pressed={showBoxes.get()}
-        aria-label={showBoxes.get() ? 'Hide boxes' : 'Show boxes'}
+        aria-label="Show boxes"
         aria-keyshortcuts="B"
         onclick={toggleBoxes}
       />
@@ -522,6 +548,7 @@ export default function Inspector(props: InspectorProps) {
           onpointermove={onpointermove}
           onpointerup={onpointerup}
           onpointercancel={onpointercancel}
+          onclick={onviewportclick}
           ondblclick={ondblclick}
         >
           {img.get() ? (

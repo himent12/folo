@@ -8,7 +8,7 @@ import RotateCw from '$icons/rotate-cw';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, field, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, field, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { isActive, LiveLabelJob } from '$lib/api/liveLabel';
 import { lastKnown, Now } from '$lib/api/freshness';
@@ -82,9 +82,12 @@ export default function LabelJob() {
   // so Close and Back agree and leave no spare entry. An entry reached by a direct link replaces in place on close.
   const from = entryState<string>('labeljob.from');
   const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
+  /** Entry currently unwinding via async `history.back()`, so concurrent effects/clicks never double-back. */
+  let backingEntry: number | null = null;
+  onCleanup(router.onEntry(() => (backingEntry = null)));
 
-  /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
-  function setQuery(patch: Record<string, string | null>, push = false) {
+  /** Changes query params (null removes one): `push` adds a history entry; `replaceOnly` forces in-place replace. */
+  function setQuery(patch: Record<string, string | null>, push = false, replaceOnly = false) {
     const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
@@ -96,24 +99,32 @@ export default function LabelJob() {
     const at = router.route.path;
     const path = `/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
     if (push) {
+      backingEntry = null;
       const was = router.entry;
       router.go(path);
       if (router.entry !== was) from.set(view(at, before));
-    } else if (from.get() === view(at, s)) history.back();
-    else router.go(path, { replace: true });
+    } else if (!replaceOnly && from.get() === view(at, s)) {
+      if (backingEntry === router.entry) return;
+      backingEntry = router.entry;
+      history.back();
+    } else {
+      backingEntry = null;
+      if (replaceOnly && patch.image === null) from.set(undefined);
+      router.go(path, { replace: true });
+    }
   }
   const shown = computed(() => (show.get() === 'all' ? live.images : live.images.filter((i) => inFilter(i, show.get()))));
   /** Labeled images a person has checked (the job's counts do not have them: the images do). */
   const reviewed = computed(() => live.images.reduce((n, i) => n + (i.status === 'labeled' && i.reviewed ? 1 : 0), 0));
   // A linked image the job does not have (removed since, a stale link) would open the editor empty: the job holds all
-  // its images once loaded, so the link is dropped and the page says why.
+  // its images once loaded, so the link is dropped in place (scrubbing any stale Forward entry) and the page says why.
   effect(() => {
     const want = imageParam.get();
-    if (!want || live.loading || live.error || live.images.some((i) => i.id === want)) return;
+    if (!want || backingEntry === router.entry || live.loading || live.error || live.images.some((i) => i.id === want)) return;
     untrack(() => {
       // page-level: the editor never opened for it.
       toast.info('Image not in this job', `${want} has been removed from it.`);
-      setQuery({ image: null });
+      setQuery({ image: null }, false, true);
     });
   });
 
