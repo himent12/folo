@@ -163,9 +163,12 @@ Each step names the file and the function or type that does it. Paths are under 
    (`GET /api/models/{id}/weights?format=f16`).
 3. `FoloDetector.load` (`folo-wasm/src/lib.rs`) → `Detector::load` (`detector.rs`): parse the `.folo` file, build the
    fused eval-mode model, place it on WebGPU or the CPU (`auto` checks WebGPU with one small forward pass).
-4. `FoloDetector.detect` → `Detector::detect`: folo-vision's `Predictor` steps (letterbox, forward, decode, NMS,
-   unmap), with the GPU readback awaited (`folo_gpu::download_async`); the result is `/api/predict`'s response shape
-   plus `backend`.
+4. `FoloDetector.detect` → `Detector::detect`: on WebGPU, runs `Predictor::prepare` (device letterbox when supported,
+   or host letterbox + upload) + forward + `Tensor::detect_candidates` and awaits the compact candidate readback
+   (`folo_gpu::download_async`: ~28 KiB initial readback for the count plus up to 1,024 candidate slots, a second
+   compact readback on overflow, or dense decode fallback when candidate extraction returns no tensor); on the CPU,
+   letterboxes RGBA directly into planar `f32` (`folo-wasm/src/simd.rs`, WASM SIMD128) and runs candidate-first /
+   sparse decode. The result is `/api/predict`'s response shape plus `backend`.
 
 ### A cloud run
 1. `POST /api/runs` with `compute` → `RealStore::start_run` → `run_settings`: `cloud::check_device` and
@@ -233,10 +236,14 @@ The wgpu backend ([GPU.md](GPU.md)).
   hundreds. Forward plans (`folo_gpu::ForwardPlans`) record an inference call once (a forward, or the whole device
   side of candidate-first prediction) and replay it as a flat list of dispatches over buffers the plan owns,
   bit-identically, retired when a listed tensor changes; `Predictor` turns them on for its model.
-- Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), convolution as implicit GEMM (no im2col buffer) with
-  direct depthwise kernels, elementwise + fused activations, reductions, softmax, pooling, upsample, concat. Each
-  kernel is tested against the CPU reference. f16 storage and compute when the adapter supports `shader-f16`, with
-  f32 accumulation.
+- Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads) and native 16×16×16 f16 tensor-core cooperative
+  matrices, convolution as implicit GEMM (no im2col buffer) with direct depthwise and candidate-first site kernels,
+  elementwise + fused activations, ceiling-division split-K reductions and online softmax (single global read for rows
+  `≤ 1024`, register-cached small-`D` columns; 1-barrier 32-wide subgroup reductions natively with a portable
+  shared-memory fallback), value-only inference max pooling,
+  upsample, concat, fused detection/distillation losses, and grouped Muon / multi-tensor optimizer updates. Each kernel
+  is tested against the CPU reference. f16 storage and compute when the adapter supports `shader-f16`, with f32
+  accumulation.
 - `folo_gpu::GpuBackend` implements folo-core's `Backend`: `folo_gpu::init()` registers the default adapter as
   `Device::Gpu(0)`, after which `tensor.to_device(Device::Gpu(0))` keeps data and every op (forward and the gradient
   ops autograd records) on the GPU. It also implements the fused hooks: Conv + bias + activation in the conv epilogue,
@@ -297,16 +304,18 @@ builds on.
   `ENGINE_VERSION` names what the crate computes and goes into every benchmark's fingerprint; a change the golden
   tests catch is a bump.
 - `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number of
-  BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types. AP is
-  folo-vision's `Evaluator` (and `CocoEval` for the size buckets), never a second implementation; the bootstrap
-  interval reruns it on 200 seeded resamples in parallel.
+  BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types. Headline
+  AP uses folo-vision's `Evaluator` (and chunked parallel `CocoEval` for the size buckets); the 200-resample bootstrap
+  interval (`score/bootstrap.rs`) precomputes per-image greedy matching once in parallel and accumulates
+  weighted/unweighted AP per seeded resample to reproduce `Evaluator`'s `mAP@0.5:0.95` bit-identically.
 
 ### folo-wasm
 FOLO in the browser ([WASM.md](WASM.md): JS API, build and limits). `crates/folo-wasm` (wasm-bindgen) loads a `.folo`
 file from bytes and runs `folo_vision::Predictor`'s steps on WebGPU (folo-gpu's browser backend, async device
-creation and readback) or on folo-core's CPU kernels compiled to wasm (single-threaded, built with SIMD128). `detect`
-resolves to `/api/predict`'s response shape plus the backend, so Studio can run models in the page.
-`scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
+creation and candidate-compacted async readback via `Tensor::detect_candidates`) or on folo-core's CPU kernels
+compiled to wasm (single-threaded, built with SIMD128, including direct SIMD128 RGBA→planar-`f32` letterboxing in
+`src/simd.rs` and candidate-first decode). `detect` resolves to `/api/predict`'s response shape plus the backend, so
+Studio can run models in the page. `scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
 
 ## The service crates
 How they fit together, with the server's internals: [SERVER.md](SERVER.md).
