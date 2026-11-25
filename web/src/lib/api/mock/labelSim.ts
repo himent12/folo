@@ -98,7 +98,8 @@ export function buildDatasetSpec(
   taken: readonly string[],
   now: number,
   t0: number,
-): { spec: MockDatasetSpec; logMessage: string } {
+  onCreated: (dsId: string, logMessage: string) => void,
+): MockDatasetSpec {
   const frac = body.val_fraction ?? 0.2;
   if (!(frac >= 0 && frac <= 0.5)) throw new ApiError(400, 'invalid_body', 'field `val_fraction`: between 0 and 0.5');
   const labeled = j.images.filter((i) => i.status === 'labeled');
@@ -112,23 +113,21 @@ export function buildDatasetSpec(
   const counts = j.classes.map((_, c) => labeled.reduce((a, i) => a + i.boxes.filter((b) => b.class === c).length, 0));
   const boxes = counts.reduce((a, b) => a + b, 0);
   const dsId = `ds_${(hash(name + now) & 0xffff).toString(16).padStart(4, '0')}`;
+  onCreated(dsId, `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`);
   return {
-    logMessage: `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`,
-    spec: {
-      ...look,
-      id: dsId,
-      name,
-      path: `D:/folo/datasets/${name}`,
-      format: 'yolo',
-      classes: [...j.classes],
-      classWeights: counts.map((c) => Math.max(1, c)),
-      classShape: j.classes.map((_, c) => look.classShape[c] ?? 'square'),
-      splits: { train: labeled.length - val, val, test: 0 },
-      meanBoxes: boxes / labeled.length,
-      emptyRate: labeled.filter((i) => !i.boxes.length).length / labeled.length,
-      brokenLabels: 0,
-      createdAgoS: (t0 - now) / 1000,
-      seed: hash(j.id),
-    },
+    ...look,
+    id: dsId,
+    name,
+    path: `D:/folo/datasets/${name}`,
+    format: 'yolo',
+    classes: [...j.classes],
+    classWeights: counts.map((c) => Math.max(1, c)),
+    classShape: j.classes.map((_, c) => look.classShape[c] ?? 'square'),
+    splits: { train: labeled.length - val, val, test: 0 },
+    meanBoxes: boxes / labeled.length,
+    emptyRate: labeled.filter((i) => !i.boxes.length).length / labeled.length,
+    brokenLabels: 0,
+    createdAgoS: (t0 - now) / 1000,
+    seed: hash(j.id),
   };
 }

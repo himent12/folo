@@ -51,7 +51,7 @@ import { buildDatasetSpec, callUsage, draftBoxes, runSummary, serializeImage, se
 import { renderImage } from './render';
 import { hash, hashBytes } from './rng';
 
-export { BATCH_MS, checkMockModel, mockAgents, resolveAgentRequest } from './labelAgents';
+export { BATCH_MS, DEFAULT_BATCH, checkMockModel, mockAgents, resolveAgentRequest } from './labelAgents';
 
 export class MockLabeling {
   #jobs: Job[] = [];
@@ -649,10 +649,10 @@ export class MockLabeling {
     const j = this.#job(id);
     this.advance(j, now);
     if (this.#active(j)) throw this.#busy(j);
-    const { spec, logMessage } = buildDatasetSpec(j, body, taken, now, this.t0);
-    j.datasetId = spec.id;
-    this.#log(j, now, 'info', logMessage);
-    return spec;
+    return buildDatasetSpec(j, body, taken, now, this.t0, (dsId, logMessage) => {
+      j.datasetId = dsId;
+      this.#log(j, now, 'info', logMessage);
+    });
   }
 
   // ---------- events ----------

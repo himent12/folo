@@ -67,6 +67,7 @@ afterEach(() => {
   if (c) unmount(c);
   c = undefined;
   target.remove();
+  vi.restoreAllMocks();
 });
 
 describe('New run from a link', () => {
