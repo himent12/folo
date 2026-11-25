@@ -6,7 +6,7 @@ use crate::bbox::BBox;
 use crate::image::Sample;
 use crate::letterbox::PAD_VALUE;
 use crate::rng::Rng;
-use crate::warp::{Plane, Tile};
+use crate::warp::{Plane, PlaneTiles, Tile};
 
 /// Tiles four samples around a random centre on a `2s x 2s` grey canvas (YOLO's mosaic).
 ///
@@ -33,8 +33,9 @@ pub(crate) fn mosaic_plane<'a>(parts: [&'a Sample; 4], s: u32, rng: &mut Rng) ->
     let cs = 2 * s as i64;
     let xc = rng.uniform(s as f32 * 0.5, s as f32 * 1.5) as i64;
     let yc = rng.uniform(s as f32 * 0.5, s as f32 * 1.5) as i64;
-    let mut tiles = Vec::with_capacity(4);
-    let mut boxes = Vec::new();
+    let mut tiles = PlaneTiles::new();
+    let total_boxes: usize = parts.iter().map(|p| p.boxes.len()).sum();
+    let mut boxes = Vec::with_capacity(total_boxes);
     for (i, part) in parts.into_iter().enumerate() {
         let (w, h) = (part.image.width as i64, part.image.height as i64);
         // Destination rectangle on the canvas (a) and source rectangle in the image (b).
@@ -71,6 +72,14 @@ pub(crate) fn mosaic_plane<'a>(parts: [&'a Sample; 4], s: u32, rng: &mut Rng) ->
     (Plane { width: cs as u32, height: cs as u32, fill: [PAD_VALUE; 3], tiles }, boxes)
 }
 
+/// Draws the 8-bit fixed-point blend weight `wa ∈ 0..=256` for [`mixup`] (shared with the fused planar path).
+#[inline]
+pub(crate) fn mixup_weight(rng: &mut Rng) -> u32 {
+    // Beta(32, 32) has mean 0.5 and sd ~0.062; a clamped normal is indistinguishable for this purpose.
+    let r = (0.5 + 0.0620 * rng.normal()).clamp(0.0, 1.0);
+    (r * 256.0).round() as u32
+}
+
 /// Blends `other` into `s` (YOLO mixup): `s = r * s + (1 - r) * other` with `r ≈ Beta(32, 32)`, and concatenates
 /// the boxes. Both images must have the same size.
 pub fn mixup(s: &mut Sample, other: &Sample, rng: &mut Rng) {
@@ -79,9 +88,7 @@ pub fn mixup(s: &mut Sample, other: &Sample, rng: &mut Rng) {
         (other.image.width, other.image.height),
         "mixup needs images of the same size"
     );
-    // Beta(32, 32) has mean 0.5 and sd ~0.062; a clamped normal is indistinguishable for this purpose.
-    let r = (0.5 + 0.0620 * rng.normal()).clamp(0.0, 1.0);
-    let wa = (r * 256.0).round() as u32;
+    let wa = mixup_weight(rng);
     let n = s.image.data.len().min(other.image.data.len());
     crate::simd::planar::mixup_blend_u8(&mut s.image.data[..n], &other.image.data[..n], wa);
     s.boxes.extend_from_slice(&other.boxes);

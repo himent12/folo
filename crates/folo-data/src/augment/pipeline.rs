@@ -2,10 +2,10 @@
 
 use super::geometry::{long_side_dims, random_affine_matrix, transform_boxes};
 use super::hsv::{HsvTables, random_hsv_tables};
-use super::mosaic::mosaic_plane;
-use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_affine, random_hsv};
+use super::mosaic::{mixup_weight, mosaic_plane};
+use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_hsv};
 use crate::bbox::BBox;
-use crate::buffers;
+use crate::buffers::{self, scratch_u8};
 use crate::dataset::Dataset;
 use crate::error::Result;
 use crate::image::{Image, Sample};
@@ -13,8 +13,9 @@ use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox_sample}
 use crate::ram_cache::Entry as RamEntry;
 use crate::rng::Rng;
 use crate::simd::hsv_fused::rgb_row_to_planar_fused;
+use crate::simd::planar::mixup_blend_u8_into;
 use crate::simd::{PlanarDst, for_planar_bands};
-use crate::warp::{Plane, Tile, warp_plane, warp_plane_fused};
+use crate::warp::{Plane, PlaneTiles, Tile, warp_plane, warp_plane_fused};
 
 /// A sample as the transform's `fetch` delivers it.
 #[derive(Clone, Debug)]
@@ -133,22 +134,37 @@ pub(crate) struct ProducedMeta {
     pub boxes: Vec<BBox>,
 }
 
-/// Fuses `HSV + flip_ud + flip_lr + interleaved RGB → planar` over an existing HWC image (the mixup tail path).
-fn image_to_planar_fused(
-    img: &Image,
+/// Fuses `mixup + HSV + flip_ud + flip_lr + interleaved RGB → planar` row by row in L1 scratch, eliminating the
+/// intermediate full-image blend write and re-read.
+#[allow(clippy::too_many_arguments)]
+fn mixup_to_planar_fused(
+    a: &Image,
+    b: &Image,
+    wa: u32,
     hsv: Option<&HsvTables>,
     flip_ud: bool,
     flip_lr: bool,
     dst: &mut PlanarDst<'_>,
 ) {
-    let (w, h) = (img.width as usize, img.height as usize);
-    let stride = img.stride();
+    assert_eq!((a.width, a.height), (b.width, b.height), "mixup needs images of the same size");
+    let (w, h) = (a.width as usize, a.height as usize);
+    let stride = a.stride();
     for_planar_bands(dst, w, h, |dy0, band| {
+        let mut row_buf = if wa == 0 || wa == 256 { buffers::ScratchU8::empty() } else { scratch_u8(stride) };
         let rows = band.rows(w);
         for bi in 0..rows {
             let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi };
+            let off = src_y * stride;
+            let row = if wa == 256 {
+                &a.data[off..off + stride]
+            } else if wa == 0 {
+                &b.data[off..off + stride]
+            } else {
+                mixup_blend_u8_into(&a.data[off..off + stride], &b.data[off..off + stride], wa, &mut row_buf);
+                &row_buf
+            };
             let mut drow = band.row_slices(bi, w);
-            rgb_row_to_planar_fused(&img.data[src_y * stride..(src_y + 1) * stride], hsv, flip_lr, &mut drow);
+            rgb_row_to_planar_fused(row, hsv, flip_lr, &mut drow);
         }
     });
 }
@@ -306,28 +322,18 @@ impl TrainTransform {
                 } else {
                     warp_plane(&plane, &m, s, s)
                 };
-                drop(plane);
                 for p in parts {
                     p.recycle();
                 }
-                let mut sample = Sample { image: img, boxes };
-                let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
-                mixup(&mut sample, &other.sample, rng);
-                buffers::recycle(other.sample.image.data);
-                let hsv = random_hsv_tables(cfg.hsv, rng);
-                let do_ud = rng.chance(cfg.flipud);
-                let do_lr = rng.chance(cfg.fliplr);
-                flip_boxes(&mut sample.boxes, do_ud, do_lr);
-                image_to_planar_fused(&sample.image, hsv.as_ref(), do_ud, do_lr, dst);
-                buffers::recycle(sample.image.data);
-                return Ok(ProducedMeta { index: primary, orig_size, letterbox, boxes: sample.boxes });
+                return self.finish_mixup_into_planar(
+                    cfg, primary, orig_size, letterbox, img, boxes, len, fetch, rng, dst,
+                );
             }
             let hsv = random_hsv_tables(cfg.hsv, rng);
             let do_ud = rng.chance(cfg.flipud);
             let do_lr = rng.chance(cfg.fliplr);
             flip_boxes(&mut boxes, do_ud, do_lr);
             warp_plane_fused(&plane, &m, s, s, hsv.as_ref(), do_ud, do_lr, dst);
-            drop(plane);
             for p in parts {
                 p.recycle();
             }
@@ -359,7 +365,7 @@ impl TrainTransform {
             let tile_img = resized_opt.as_ref().unwrap_or(&src.image);
             let tile =
                 Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
-            let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: vec![tile] };
+            let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: PlaneTiles::single(tile) };
             let m = random_affine_matrix(s, s, s, s, cfg, rng);
             let mut boxes = if m.is_identity() {
                 lb_boxes
@@ -368,35 +374,61 @@ impl TrainTransform {
             };
             if self.mosaic && rng.chance(cfg.mixup) {
                 let img = if m.is_identity() { plane.render() } else { warp_plane(&plane, &m, s, s) };
-                drop(plane);
                 if let Some(r) = resized_opt {
                     buffers::recycle(r.data);
                 }
                 f.recycle();
-                let mut sample = Sample { image: img, boxes };
-                let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
-                mixup(&mut sample, &other.sample, rng);
-                buffers::recycle(other.sample.image.data);
-                let hsv = random_hsv_tables(cfg.hsv, rng);
-                let do_ud = rng.chance(cfg.flipud);
-                let do_lr = rng.chance(cfg.fliplr);
-                flip_boxes(&mut sample.boxes, do_ud, do_lr);
-                image_to_planar_fused(&sample.image, hsv.as_ref(), do_ud, do_lr, dst);
-                buffers::recycle(sample.image.data);
-                return Ok(ProducedMeta { index: out_index, orig_size, letterbox, boxes: sample.boxes });
+                return self.finish_mixup_into_planar(
+                    cfg, out_index, orig_size, letterbox, img, boxes, len, fetch, rng, dst,
+                );
             }
             let hsv = random_hsv_tables(cfg.hsv, rng);
             let do_ud = rng.chance(cfg.flipud);
             let do_lr = rng.chance(cfg.fliplr);
             flip_boxes(&mut boxes, do_ud, do_lr);
             warp_plane_fused(&plane, &m, s, s, hsv.as_ref(), do_ud, do_lr, dst);
-            drop(plane);
             if let Some(r) = resized_opt {
                 buffers::recycle(r.data);
             }
             f.recycle();
             Ok(ProducedMeta { index: out_index, orig_size, letterbox, boxes })
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_mixup_into_planar<F>(
+        &self,
+        cfg: &AugmentConfig,
+        index: usize,
+        orig_size: [u32; 2],
+        letterbox: Letterbox,
+        img: Image,
+        mut boxes: Vec<BBox>,
+        len: usize,
+        fetch: &F,
+        rng: &mut Rng,
+        dst: &mut PlanarDst<'_>,
+    ) -> Result<ProducedMeta>
+    where
+        F: Fn(usize) -> Result<FetchedSample>,
+    {
+        let other = match self.one(cfg, rng.below(len), len, fetch, rng) {
+            Ok(o) => o,
+            Err(e) => {
+                buffers::recycle(img.data);
+                return Err(e);
+            }
+        };
+        let wa = mixup_weight(rng);
+        boxes.extend_from_slice(&other.sample.boxes);
+        let hsv = random_hsv_tables(cfg.hsv, rng);
+        let do_ud = rng.chance(cfg.flipud);
+        let do_lr = rng.chance(cfg.fliplr);
+        flip_boxes(&mut boxes, do_ud, do_lr);
+        mixup_to_planar_fused(&img, &other.sample.image, wa, hsv.as_ref(), do_ud, do_lr, dst);
+        buffers::recycle(other.sample.image.data);
+        buffers::recycle(img.data);
+        Ok(ProducedMeta { index, orig_size, letterbox, boxes })
     }
 
     fn one<F>(
@@ -435,12 +467,43 @@ impl TrainTransform {
             Ok(Transformed { index: primary, sample, orig_size, letterbox: Letterbox::identity(s, s) })
         } else {
             let f = fetch(index)?;
-            let (lb_sample, letterbox) = letterbox_fetched(&f, s);
-            let sample = random_affine(&lb_sample, s, s, cfg, rng);
-            let (out_index, orig_size) = (f.index(), f.orig_size());
-            buffers::recycle(lb_sample.image.data);
+            let opts = LetterboxOptions::default();
+            let src = f.sample();
+            let orig_size = f.orig_size();
+            let out_index = f.index();
+            let lb_img = Letterbox::compute(src.image.width, src.image.height, s, s, &opts);
+            let (lb_boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
+                (src.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
+            } else {
+                let orig = Letterbox::compute(orig_size[0], orig_size[1], s, s, &opts);
+                debug_assert_eq!(
+                    (orig.resized, orig.out, orig.pad),
+                    (lb_img.resized, lb_img.out, lb_img.pad)
+                );
+                (src.boxes.iter().map(|b| orig.map_box(b)).collect(), orig)
+            };
+            let [rw, rh] = lb_img.resized;
+            let [left, top] = lb_img.pad.map(|v| v as i64);
+            let resized_opt = if (src.image.width, src.image.height) == (rw, rh) {
+                None
+            } else {
+                Some(crate::resize::resize(&src.image, rw, rh))
+            };
+            let tile_img = resized_opt.as_ref().unwrap_or(&src.image);
+            let tile =
+                Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
+            let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: PlaneTiles::single(tile) };
+            let m = random_affine_matrix(s, s, s, s, cfg, rng);
+            let (image, boxes) = if m.is_identity() {
+                (plane.render(), lb_boxes)
+            } else {
+                (warp_plane(&plane, &m, s, s), transform_boxes(&lb_boxes, s, s, &m, s, s, &cfg.box_filter()))
+            };
+            if let Some(r) = resized_opt {
+                buffers::recycle(r.data);
+            }
             f.recycle();
-            Ok(Transformed { index: out_index, sample, orig_size, letterbox })
+            Ok(Transformed { index: out_index, sample: Sample { image, boxes }, orig_size, letterbox })
         }
     }
 }

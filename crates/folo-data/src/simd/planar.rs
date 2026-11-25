@@ -217,6 +217,31 @@ pub(crate) fn mixup_blend_u8_scalar(dst: &mut [u8], other: &[u8], wa: u32) {
     }
 }
 
+/// Blends `a` and `b` into `dst` out of place: `dst[i] = ((a[i] * wa + b[i] * (256 - wa) + 128) >> 8) as u8`,
+/// bit-exact with [`mixup_blend_u8`] for every `wa in 0..=256`.
+#[inline]
+pub(crate) fn mixup_blend_u8_into(a: &[u8], b: &[u8], wa: u32, dst: &mut [u8]) {
+    assert!(a.len() == b.len() && dst.len() == a.len() && wa <= 256);
+    if wa == 256 {
+        dst.copy_from_slice(a);
+        return;
+    }
+    if wa == 0 {
+        dst.copy_from_slice(b);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() && dst.len() >= 32 {
+        // SAFETY: CPU supports AVX2, slice lengths are equal, and `1 <= wa <= 255`.
+        unsafe { mixup_blend_u8_into_avx2(a, b, wa, dst) };
+        return;
+    }
+    let wb = 256 - wa;
+    for ((d, &va), &vb) in dst.iter_mut().zip(a).zip(b) {
+        *d = ((va as u32 * wa + vb as u32 * wb + 128) >> 8) as u8;
+    }
+}
+
 /// Strips alpha from interleaved `RGBA` bytes (`n * 4`) into `RGB` bytes (`n * 3`).
 #[inline]
 pub(crate) fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
@@ -614,6 +639,46 @@ unsafe fn mixup_blend_u8_avx2(dst: &mut [u8], other: &[u8], wa: u32) {
     }
     while i < n {
         dst[i] = ((dst[i] as u32 * wa + other[i] as u32 * wb + 128) >> 8) as u8;
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mixup_blend_u8_into_avx2(a: &[u8], b: &[u8], wa: u32, dst: &mut [u8]) {
+    let n = dst.len();
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let wb = 256 - wa;
+    let vwa = _mm256_set1_epi16(wa as i16);
+    let vwb = _mm256_set1_epi16(wb as i16);
+    let v128 = _mm256_set1_epi16(128);
+    let mut i = 0usize;
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n == a.len() == b.len() == dst.len()`.
+        unsafe {
+            let a0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(ap.add(i) as *const __m128i));
+            let b0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(bp.add(i) as *const __m128i));
+            let r0 = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_add_epi16(_mm256_mullo_epi16(a0, vwa), _mm256_mullo_epi16(b0, vwb)),
+                v128,
+            ));
+
+            let a1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(ap.add(i + 16) as *const __m128i));
+            let b1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(bp.add(i + 16) as *const __m128i));
+            let r1 = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_add_epi16(_mm256_mullo_epi16(a1, vwa), _mm256_mullo_epi16(b1, vwb)),
+                v128,
+            ));
+
+            let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi16(r0, r1));
+            _mm256_storeu_si256(dp.add(i) as *mut __m256i, packed);
+        }
+        i += 32;
+    }
+    while i < n {
+        dst[i] = ((a[i] as u32 * wa + b[i] as u32 * wb + 128) >> 8) as u8;
         i += 1;
     }
 }

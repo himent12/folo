@@ -2,7 +2,7 @@
 
 use crate::bbox::BBox;
 use crate::image::{Image, Sample};
-use crate::resize::{RowResizer, resize_into};
+use crate::resize::RowResizer;
 use crate::simd::PlanarDst;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -103,13 +103,34 @@ impl Letterbox {
     /// Resizes and pads `img` according to this geometry.
     pub fn apply(&self, img: &Image, pad_value: u8) -> Image {
         assert_eq!([img.width, img.height], self.orig, "letterbox geometry computed for another size");
-        let (left, top, _, _) = self.checked_window();
+        let (left, top, rw, rh) = self.checked_window();
         let [ow, oh] = self.out;
-        let mut out =
-            Image { width: ow, height: oh, data: crate::buffers::scratch(ow as usize * oh as usize * 3) };
-        out.data.fill(pad_value);
-        let stride = out.stride();
-        resize_into(img, &mut out.data[top * stride..], stride, left, self.resized[0], self.resized[1]);
+        let stride = (ow as usize).checked_mul(3).expect("letterbox row stride overflow");
+        let total = stride.checked_mul(oh as usize).expect("letterbox output size overflow");
+        let rows = RowResizer::new(img, rw as u32, rh as u32);
+        let mut out = Image { width: ow, height: oh, data: crate::buffers::scratch(total) };
+        if top > 0 {
+            out.data[..top * stride].fill(pad_value);
+        }
+        let bot_start = (top + rh) * stride;
+        if bot_start < out.data.len() {
+            out.data[bot_start..].fill(pad_value);
+        }
+        let left_bytes = left * 3;
+        let right_start = (left + rw) * 3;
+        let active = &mut out.data[top * stride..bot_start];
+        crate::par::for_bands(active, stride, |y0, band| {
+            let mut scratch = rows.band_scratch();
+            for (i, row) in band.chunks_exact_mut(stride).enumerate() {
+                if left_bytes > 0 {
+                    row[..left_bytes].fill(pad_value);
+                }
+                if right_start < stride {
+                    row[right_start..].fill(pad_value);
+                }
+                rows.row_with_scratch(y0 + i, &mut row[left_bytes..right_start], &mut scratch);
+            }
+        });
         out
     }
 
@@ -518,5 +539,39 @@ mod tests {
             }
         }
         let _ = lb;
+    }
+
+    #[test]
+    fn apply_border_only_fill_matches_full_fill_reference() {
+        let opts_list = [
+            LetterboxOptions::default(),
+            LetterboxOptions { center: false, ..Default::default() },
+            LetterboxOptions { scale_up: false, ..Default::default() },
+            LetterboxOptions { stride: Some(32), pad_value: 29, ..Default::default() },
+        ];
+        for &(w, h, tw, th) in &[(128, 72, 64, 64), (72, 128, 64, 64), (64, 64, 64, 64), (37, 23, 64, 64)] {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            for (i, v) in img.data.iter_mut().enumerate() {
+                *v = (i.wrapping_mul(37) % 251) as u8;
+            }
+            for opts in &opts_list {
+                let lb = Letterbox::compute(w, h, tw, th, opts);
+                let got = lb.apply(&img, opts.pad_value);
+                let mut ref_data = vec![opts.pad_value; lb.out[0] as usize * lb.out[1] as usize * 3];
+                let stride = lb.out[0] as usize * 3;
+                let (left, top) = (lb.pad[0] as usize, lb.pad[1] as usize);
+                crate::resize::resize_into(
+                    &img,
+                    &mut ref_data[top * stride..],
+                    stride,
+                    left,
+                    lb.resized[0],
+                    lb.resized[1],
+                );
+                assert_eq!(got.data, ref_data, "{w}x{h} -> {tw}x{th} {opts:?}");
+                let serial = crate::par::serial(|| lb.apply(&img, opts.pad_value));
+                assert_eq!(serial.data, ref_data, "serial {w}x{h}");
+            }
+        }
     }
 }

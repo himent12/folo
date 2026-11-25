@@ -4,6 +4,7 @@
 //! scale exactly by `dst / src`. Weights are 11-bit fixed point; rows are processed in parallel. When shrinking by 2x
 //! or more an integer box filter runs first so large downscales do not alias.
 
+use crate::buffers::{ScratchU32, scratch_u32};
 use crate::image::Image;
 use crate::par::{for_bands, for_rows};
 use crate::simd::assert_image_data;
@@ -28,23 +29,36 @@ struct Taps {
     w: Vec<u32>,
 }
 
+/// Writes taps for `dst` outputs over `src` inputs (`src_extent` real pixels) into `i0`, `w`, and optional `i1`.
+#[inline]
+fn fill_taps(
+    dst: u32,
+    src: u32,
+    src_extent: f64,
+    i0_out: &mut [u32],
+    mut i1_out: Option<&mut [u32]>,
+    w_out: &mut [u32],
+) {
+    let scale = src_extent / dst as f64;
+    let max = (src - 1) as f64;
+    for d in 0..dst as usize {
+        let s = ((d as f64 + 0.5) * scale - 0.5).clamp(0.0, max);
+        let i0 = s.floor() as u32;
+        let w = (((s - i0 as f64) * ONE as f64).round() as u32).min(ONE);
+        i0_out[d] = i0;
+        if let Some(ref mut i1) = i1_out {
+            i1[d] = (i0 + 1).min(src - 1);
+        }
+        w_out[d] = w;
+    }
+}
+
 /// Builds taps for `dst` outputs over `src` inputs, where the source has `src_extent` real pixels of size `cell`
 /// (`cell > 1` after a box prefilter whose last cell may be partial).
 fn taps(dst: u32, src: u32, src_extent: f64) -> Taps {
-    let scale = src_extent / dst as f64;
-    let mut t = Taps { i0: Vec::with_capacity(dst as usize), i1: Vec::new(), w: Vec::new() };
-    t.i1.reserve(dst as usize);
-    t.w.reserve(dst as usize);
-    let max = (src - 1) as f64;
-    for d in 0..dst {
-        let s = ((d as f64 + 0.5) * scale - 0.5).clamp(0.0, max);
-        let i0 = s.floor() as u32;
-        let i1 = (i0 + 1).min(src - 1);
-        let w = (((s - i0 as f64) * ONE as f64).round() as u32).min(ONE);
-        t.i0.push(i0);
-        t.i1.push(i1);
-        t.w.push(w);
-    }
+    let n = dst as usize;
+    let mut t = Taps { i0: vec![0; n], i1: vec![0; n], w: vec![0; n] };
+    fill_taps(dst, src, src_extent, &mut t.i0, Some(&mut t.i1), &mut t.w);
     t
 }
 
@@ -123,6 +137,40 @@ pub fn resize_into(src: &Image, dst: &mut [u8], dst_stride: usize, x_offset: usi
     });
 }
 
+/// Packed horizontal (`x0`, `wx`) and vertical (`y0`, `y1`, `wy`) taps in one reusable [`ScratchU32`] buffer,
+/// eliminating 6 per-call `Vec<u32>` allocations inside [`RowResizer`].
+struct RowPlan {
+    taps: ScratchU32,
+    width: usize,
+    height: usize,
+}
+
+impl RowPlan {
+    #[inline]
+    fn x0(&self) -> &[u32] {
+        &self.taps[..self.width]
+    }
+    #[inline]
+    fn wx(&self) -> &[u32] {
+        &self.taps[self.width..2 * self.width]
+    }
+    #[inline]
+    fn y0(&self) -> &[u32] {
+        let o = 2 * self.width;
+        &self.taps[o..o + self.height]
+    }
+    #[inline]
+    fn y1(&self) -> &[u32] {
+        let o = 2 * self.width + self.height;
+        &self.taps[o..o + self.height]
+    }
+    #[inline]
+    fn wy(&self) -> &[u32] {
+        let o = 2 * self.width + 2 * self.height;
+        &self.taps[o..o + self.height]
+    }
+}
+
 /// One `width x height` resize of an image, produced a row at a time, so callers can write each row wherever (and in
 /// whatever format) they need without an intermediate image. The box prefilter, when the plan needs one, runs once in
 /// [`RowResizer::new`].
@@ -131,14 +179,14 @@ pub(crate) struct RowResizer<'a> {
     /// The box-prefiltered source (`None`: no prefilter).
     filtered: Option<Image>,
     /// `None` for an identity resize (rows are copied).
-    plan: Option<ResizePlan>,
+    plan: Option<RowPlan>,
     width: usize,
 }
 
 /// Per-band scratch holding the vertically blended `[R, G, B, 0]` `u32` row (plus one duplicated trailing column so
 /// clamped `x1 == src_w - 1` reads `v[x0 + 1]`).
 pub(crate) struct RowScratch {
-    v: Vec<u32>,
+    v: ScratchU32,
     cached: Option<(u32, u32, u32)>,
 }
 
@@ -152,34 +200,59 @@ impl<'a> RowResizer<'a> {
         if src.width == width && src.height == height {
             return RowResizer { src, filtered: None, plan: None, width: width as usize };
         }
-        let plan = resize_plan(src.width, src.height, width, height);
-        let [fx, fy] = plan.prefilter;
+        let fx = (src.width / width).max(1);
+        let fy = (src.height / height).max(1);
+        let (pw, ph, ext_w, ext_h) = if fx >= 2 || fy >= 2 {
+            (
+                src.width.div_ceil(fx),
+                src.height.div_ceil(fy),
+                src.width as f64 / fx as f64,
+                src.height as f64 / fy as f64,
+            )
+        } else {
+            (src.width, src.height, src.width as f64, src.height as f64)
+        };
+        let (w, h) = (width as usize, height as usize);
+        let total = 2usize
+            .checked_mul(w)
+            .and_then(|a| 3usize.checked_mul(h).and_then(|b| a.checked_add(b)))
+            .expect("resize tap table size overflow");
+        let mut taps = scratch_u32(total);
+        {
+            let (xs, ys) = taps.split_at_mut(2 * w);
+            let (x0, wx) = xs.split_at_mut(w);
+            fill_taps(width, pw, ext_w, x0, None, wx);
+            let (y0, yrest) = ys.split_at_mut(h);
+            let (y1, wy) = yrest.split_at_mut(h);
+            fill_taps(height, ph, ext_h, y0, Some(y1), wy);
+        }
+        let plan = RowPlan { taps, width: w, height: h };
         // Integer box prefilter for large reductions.
         let filtered = (fx >= 2 || fy >= 2).then(|| box_downsample(src, fx, fy));
         let sw = filtered.as_ref().unwrap_or(src).width as usize;
-        assert!(plan.x0.iter().all(|&k| (k as usize) < sw), "resize tap out of source bounds");
-        RowResizer { src, filtered, plan: Some(plan), width: width as usize }
+        assert!(plan.x0().iter().all(|&k| (k as usize) < sw), "resize tap out of source bounds");
+        RowResizer { src, filtered, plan: Some(plan), width: w }
     }
 
-    /// Allocates reusable vertical-blend scratch for a band of rows.
+    /// Checks out reusable vertical-blend scratch for a band of rows.
     pub(crate) fn band_scratch(&self) -> RowScratch {
-        let len = match &self.plan {
-            None => 0,
-            Some(_) => (self.filtered.as_ref().unwrap_or(self.src).width as usize + 1) * 4,
+        let v = match &self.plan {
+            None => ScratchU32::empty(),
+            Some(_) => scratch_u32((self.filtered.as_ref().unwrap_or(self.src).width as usize + 1) * 4),
         };
-        RowScratch { v: vec![0u32; len], cached: None }
+        RowScratch { v, cached: None }
     }
 
     /// Populates `scratch.v` with the vertically blended source row for destination row `y`.
     #[inline]
-    fn fill_v<'b>(&self, y: usize, plan: &ResizePlan, scratch: &'b mut RowScratch) -> &'b [u32] {
-        let (y0, y1, wy) = (plan.y0[y], plan.y1[y], plan.wy[y]);
+    fn fill_v<'b>(&self, y: usize, plan: &RowPlan, scratch: &'b mut RowScratch) -> &'b [u32] {
+        let (y0, y1, wy) = (plan.y0()[y], plan.y1()[y], plan.wy()[y]);
         let key = (y0, y1, wy);
         let s = self.filtered.as_ref().unwrap_or(self.src);
         let sw = s.width as usize;
         let need = (sw + 1) * 4;
         if scratch.v.len() < need {
-            scratch.v.resize(need, 0);
+            scratch.v.ensure(need);
             scratch.cached = None;
         }
         if scratch.cached != Some(key) {
@@ -208,8 +281,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
-        unsafe { hinterp_taps_to_rgb(v, &plan.x0, &plan.wx, out) };
+        // SAFETY: `RowResizer::new` asserted `plan.x0()[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb(v, plan.x0(), plan.wx(), out) };
     }
 
     /// Writes destination row `y` straight into planar `u8` (`r`, `g`, `b` of length `width`).
@@ -228,8 +301,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
-        unsafe { hinterp_taps_to_planar_u8(v, &plan.x0, &plan.wx, r, g, b) };
+        // SAFETY: `RowResizer::new` asserted `plan.x0()[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_u8(v, plan.x0(), plan.wx(), r, g, b) };
     }
 
     /// Writes destination row `y` straight into planar `f32` (`v as f32 * scale`).
@@ -249,8 +322,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
-        unsafe { hinterp_taps_to_planar_f32_scale(v, &plan.x0, &plan.wx, scale, r, g, b) };
+        // SAFETY: `RowResizer::new` asserted `plan.x0()[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_scale(v, plan.x0(), plan.wx(), scale, r, g, b) };
     }
 
     /// Writes destination row `y` straight into planar `f32` (`v as f32 / 255.0`).
@@ -269,8 +342,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
-        unsafe { hinterp_taps_to_planar_f32_div255(v, &plan.x0, &plan.wx, r, g, b) };
+        // SAFETY: `RowResizer::new` asserted `plan.x0()[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_planar_f32_div255(v, plan.x0(), plan.wx(), r, g, b) };
     }
 
     /// Writes destination row `y` straight into packed `[R, G, B, 0]` `u32` words.
@@ -282,8 +355,8 @@ impl<'a> RowResizer<'a> {
             return;
         };
         let v = self.fill_v(y, plan, scratch);
-        // SAFETY: `RowResizer::new` asserted `plan.x0[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
-        unsafe { hinterp_taps_to_rgb0_u32(v, &plan.x0, &plan.wx, dst) };
+        // SAFETY: `RowResizer::new` asserted `plan.x0()[x] < sw` and `fill_v` returns `(sw + 1) * 4` elements.
+        unsafe { hinterp_taps_to_rgb0_u32(v, plan.x0(), plan.wx(), dst) };
     }
 }
 
@@ -314,7 +387,7 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
     // Columns in the last (maybe partial) block.
     let last_w = w - (ow - 1) * fx;
     for_bands(&mut out, ow * 3, |oy0, band| {
-        let mut col = vec![0u32; stride];
+        let mut col = scratch_u32(stride);
         for (bi, row) in band.chunks_exact_mut(ow * 3).enumerate() {
             let oy = oy0 + bi;
             let y0 = oy * fy;

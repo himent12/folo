@@ -11,6 +11,7 @@
 //! its source as a [`Plane`]: images placed on a plane of one colour, so a mosaic is warped straight from its four
 //! images without painting its canvas first.
 
+use crate::buffers::{ScratchU8, ScratchU32, scratch_u8};
 use crate::image::Image;
 use crate::par::{for_bands, for_rows};
 use crate::simd::bilinear::{
@@ -113,6 +114,48 @@ pub(crate) struct Tile<'a> {
     pub src: [i64; 2],
 }
 
+/// Inline storage for up to 4 tiles on a [`Plane`] (1 for letterbox/single-image warp, up to 4 for mosaic),
+/// avoiding a heap `Vec` allocation per image.
+#[derive(Clone, Debug)]
+pub(crate) struct PlaneTiles<'a> {
+    items: [Option<Tile<'a>>; 4],
+    len: usize,
+}
+
+impl<'a> PlaneTiles<'a> {
+    #[inline]
+    pub(crate) const fn new() -> Self {
+        PlaneTiles { items: [None; 4], len: 0 }
+    }
+
+    #[inline]
+    pub(crate) const fn single(tile: Tile<'a>) -> Self {
+        PlaneTiles { items: [Some(tile), None, None, None], len: 1 }
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, tile: Tile<'a>) {
+        assert!(self.len < 4, "PlaneTiles holds at most 4 tiles");
+        self.items[self.len] = Some(tile);
+        self.len += 1;
+    }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Tile<'a>> {
+        self.items[..self.len].iter().map(|t| t.as_ref().expect("len matches populated slots"))
+    }
+
+    #[inline]
+    fn get(&self, idx: usize) -> &Tile<'a> {
+        self.items[idx].as_ref().expect("tile index in bounds")
+    }
+
+    #[inline]
+    fn single_tile(&self) -> Option<&Tile<'a>> {
+        (self.len == 1).then(|| self.get(0))
+    }
+}
+
 /// A warp's source: tiles on an endless plane of colour `fill`, of which `width x height` from the origin is the
 /// source image (its size for the matrix). A plane pixel no tile covers is `fill`, inside that rectangle or not.
 /// Tiles do not overlap.
@@ -121,20 +164,64 @@ pub(crate) struct Plane<'a> {
     pub width: u32,
     pub height: u32,
     pub fill: [u8; 3],
-    pub tiles: Vec<Tile<'a>>,
+    pub tiles: PlaneTiles<'a>,
 }
 
 impl<'a> Plane<'a> {
     /// `img` with `fill` around it.
     pub fn image(img: &'a Image, fill: [u8; 3]) -> Self {
         let tile = Tile { img, dst: [0, 0, img.width as i64, img.height as i64], src: [0, 0] };
-        Plane { width: img.width, height: img.height, fill, tiles: vec![tile] }
+        Plane { width: img.width, height: img.height, fill, tiles: PlaneTiles::single(tile) }
     }
 
-    /// Writes plane row `y`, columns `x0 .. x0 + out.len() / 3`, into `out` (interleaved RGB).
+    /// Writes plane row `y`, columns `x0 .. x0 + out.len() / 3`, into `out` (interleaved RGB), filling only
+    /// uncovered gaps with `self.fill` so tile pixels are never double-written.
     pub(crate) fn row(&self, y: i64, x0: i64, out: &mut [u8]) {
-        fill_rgb(out, self.fill);
-        self.overlay_tiles(y, x0, out);
+        let x1 = x0 + (out.len() / 3) as i64;
+        let mut spans = [(0i64, 0i64, 0usize); 4];
+        let mut n = 0usize;
+        for (idx, t) in self.tiles.iter().enumerate() {
+            let [tx0, ty0, tx1, ty1] = t.dst;
+            let (a, b) = (tx0.max(x0), tx1.min(x1));
+            if y >= ty0 && y < ty1 && a < b {
+                spans[n] = (a, b, idx);
+                n += 1;
+            }
+        }
+        if n == 0 {
+            fill_rgb(out, self.fill);
+            return;
+        }
+        for i in 1..n {
+            let cur = spans[i];
+            let mut j = i;
+            while j > 0 && spans[j - 1].0 > cur.0 {
+                spans[j] = spans[j - 1];
+                j -= 1;
+            }
+            spans[j] = cur;
+        }
+        if spans[..n].windows(2).any(|w| w[0].1 > w[1].0) {
+            fill_rgb(out, self.fill);
+            self.overlay_tiles(y, x0, out);
+            return;
+        }
+        let mut cursor = x0;
+        for &(a, b, idx) in &spans[..n] {
+            if a > cursor {
+                fill_rgb(&mut out[(cursor - x0) as usize * 3..(a - x0) as usize * 3], self.fill);
+            }
+            let t = self.tiles.get(idx);
+            let img = t.img;
+            let (sx, sy) = ((a - t.dst[0] + t.src[0]) as usize, (y - t.dst[1] + t.src[1]) as usize);
+            let len = (b - a) as usize * 3;
+            out[(a - x0) as usize * 3..][..len]
+                .copy_from_slice(&img.data[sy * img.stride() + sx * 3..][..len]);
+            cursor = b;
+        }
+        if cursor < x1 {
+            fill_rgb(&mut out[(cursor - x0) as usize * 3..], self.fill);
+        }
     }
 
     /// Borrows a contiguous slice straight from a single tile when one covers all of `[x0, x0 + len / 3)` at row `y`.
@@ -144,7 +231,7 @@ impl<'a> Plane<'a> {
             return Some(&[]);
         }
         let x1 = x0 + (len / 3) as i64;
-        for t in &self.tiles {
+        for t in self.tiles.iter() {
             let [tx0, ty0, tx1, ty1] = t.dst;
             if y >= ty0 && y < ty1 && tx0 <= x0 && tx1 >= x1 {
                 let img = t.img;
@@ -159,7 +246,7 @@ impl<'a> Plane<'a> {
     #[inline]
     fn overlay_tiles(&self, y: i64, x0: i64, out: &mut [u8]) {
         let x1 = x0 + (out.len() / 3) as i64;
-        for t in &self.tiles {
+        for t in self.tiles.iter() {
             let [tx0, ty0, tx1, ty1] = t.dst;
             let (a, b) = (tx0.max(x0), tx1.min(x1));
             if y < ty0 || y >= ty1 || a >= b {
@@ -172,24 +259,19 @@ impl<'a> Plane<'a> {
         }
     }
 
-    /// The `width x height` source image itself.
+    /// The `width x height` source image itself, written in one pass without pre-filling pixels covered by tiles.
     pub fn render(&self) -> Image {
-        let mut img = Image {
-            width: self.width,
-            height: self.height,
-            data: crate::buffers::scratch(self.width as usize * self.height as usize * 3),
-        };
+        let stride = (self.width as usize).checked_mul(3).expect("plane row stride overflow");
+        let total = stride.checked_mul(self.height as usize).expect("plane image size overflow");
+        let mut img = Image { width: self.width, height: self.height, data: crate::buffers::scratch(total) };
         if img.data.is_empty() {
             return img;
         }
-        fill_rgb(&mut img.data, self.fill);
-        let stride = img.stride();
-        for (y, row) in img.data.chunks_exact_mut(stride).enumerate() {
-            let y = y as i64;
-            if self.tiles.iter().any(|t| (t.dst[1]..t.dst[3]).contains(&y)) {
-                self.overlay_tiles(y, 0, row);
+        for_bands(&mut img.data, stride, |y0, band| {
+            for (i, row) in band.chunks_exact_mut(stride).enumerate() {
+                self.row((y0 + i) as i64, 0, row);
             }
-        }
+        });
         img
     }
 }
@@ -240,7 +322,7 @@ pub fn warp_affine(src: &Image, m: &Affine, width: u32, height: u32, border: [u8
 /// plane's fill as the border, without rendering the plane when the source row does not change along a destination
 /// row.
 pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> Image {
-    for t in &plane.tiles {
+    for t in plane.tiles.iter() {
         assert_image_data(t.img);
     }
     if width == 0 || height == 0 {
@@ -259,12 +341,13 @@ pub(crate) fn warp_plane(plane: &Plane, m: &Affine, width: u32, height: u32) -> 
     {
         warp_rows(plane, &inv, width as usize, &mut out);
     } else {
-        match plane.tiles.as_slice() {
+        match plane.tiles.single_tile() {
             // One tile that is its whole image and the whole plane: warp the image itself. (A tile showing part of
             // a larger image must not: the general path would read the image's pixels outside the plane.)
-            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64]
-                && t.src == [0, 0]
-                && (t.img.width, t.img.height) == (plane.width, plane.height) =>
+            Some(t)
+                if t.dst == [0, 0, plane.width as i64, plane.height as i64]
+                    && t.src == [0, 0]
+                    && (t.img.width, t.img.height) == (plane.width, plane.height) =>
             {
                 warp_general(t.img, &inv, width as usize, border, &mut out)
             }
@@ -292,7 +375,7 @@ pub(crate) fn warp_plane_fused(
     flip_lr: bool,
     dst: &mut PlanarDst<'_>,
 ) {
-    for t in &plane.tiles {
+    for t in plane.tiles.iter() {
         assert_image_data(t.img);
     }
     let (w, h) = (width as usize, height as usize);
@@ -302,7 +385,7 @@ pub(crate) fn warp_plane_fused(
     let fill_post = hsv.map_or(plane.fill, |t| t.apply_pixel(plane.fill));
     if m.is_identity() && (plane.width, plane.height) == (width, height) {
         for_planar_bands(dst, w, h, |dy0, band| {
-            let mut scratch = Vec::new();
+            let mut scratch = ScratchU8::empty();
             let rows = band.rows(w);
             for bi in 0..rows {
                 let src_y = if flip_ud { h - 1 - (dy0 + bi) } else { dy0 + bi } as i64;
@@ -310,11 +393,9 @@ pub(crate) fn warp_plane_fused(
                 if let Some(direct) = plane.row_ref_direct(src_y, 0, w * 3) {
                     rgb_row_to_planar_fused(direct, hsv, flip_lr, &mut drow);
                 } else {
-                    if scratch.len() < w * 3 {
-                        scratch.resize(w * 3, 0);
-                    }
-                    plane.row(src_y, 0, &mut scratch[..w * 3]);
-                    rgb_row_to_planar_fused(&scratch[..w * 3], hsv, flip_lr, &mut drow);
+                    let row = scratch.ensure(w * 3);
+                    plane.row(src_y, 0, row);
+                    rgb_row_to_planar_fused(row, hsv, flip_lr, &mut drow);
                 }
             }
         });
@@ -329,10 +410,11 @@ pub(crate) fn warp_plane_fused(
     if (inv.0[3] * (1i64 << FRAC) as f64).round() as i64 == 0 && rows_fit(&inv, w, h) {
         warp_rows_fused(plane, &inv, w, h, fill_post, hsv, flip_ud, flip_lr, dst);
     } else {
-        match plane.tiles.as_slice() {
-            [t] if t.dst == [0, 0, plane.width as i64, plane.height as i64]
-                && t.src == [0, 0]
-                && (t.img.width, t.img.height) == (plane.width, plane.height) =>
+        match plane.tiles.single_tile() {
+            Some(t)
+                if t.dst == [0, 0, plane.width as i64, plane.height as i64]
+                    && t.src == [0, 0]
+                    && (t.img.width, t.img.height) == (plane.width, plane.height) =>
             {
                 warp_general_fused(t.img, &inv, w, h, plane.fill, hsv, flip_ud, flip_lr, dst);
             }
@@ -513,7 +595,7 @@ fn warp_general_fused(
     let sstride = src.stride();
     let sdata = &src.data;
     for_planar_bands(dst, width, height, |dy0, band| {
-        let mut row_rgb = vec![0u8; width * 3];
+        let mut row_rgb = scratch_u8(width * 3);
         let rows = band.rows(width);
         for bi in 0..rows {
             let src_y = if flip_ud { height - 1 - (dy0 + bi) } else { dy0 + bi };
@@ -525,15 +607,27 @@ fn warp_general_fused(
 }
 
 /// Reusable per-band scratch for [`warp_rows`] and [`warp_rows_fused`]: caches copied multi-tile rows and the
-/// vertically blended `[R, G, B, 0]` `u32` buffer across consecutive destination rows.
-#[derive(Default)]
+/// vertically blended `[R, G, B, 0]` `u32` buffer across consecutive destination rows, backed by per-thread scratch.
 struct PlaneRowCache {
-    top: Vec<u8>,
-    bot: Vec<u8>,
-    v: Vec<u32>,
+    top: ScratchU8,
+    bot: ScratchU8,
+    v: ScratchU32,
     top_key: Option<(i64, i64, usize)>,
     bot_key: Option<(i64, i64, usize)>,
     v_key: Option<(i64, u32, i64, usize)>,
+}
+
+impl Default for PlaneRowCache {
+    fn default() -> Self {
+        PlaneRowCache {
+            top: ScratchU8::empty(),
+            bot: ScratchU8::empty(),
+            v: ScratchU32::empty(),
+            top_key: None,
+            bot_key: None,
+            v_key: None,
+        }
+    }
 }
 
 impl PlaneRowCache {
@@ -545,7 +639,7 @@ impl PlaneRowCache {
         }
         let n = cols * 3;
         if self.v.len() < cols * 4 {
-            self.v.resize(cols * 4, 0);
+            self.v.ensure(cols * 4);
         }
         let top_direct = plane.row_ref_direct(iy, lo, n);
         if top_direct.is_none() && self.top_key != Some((iy, lo, n)) {
@@ -553,10 +647,8 @@ impl PlaneRowCache {
                 std::mem::swap(&mut self.top, &mut self.bot);
                 std::mem::swap(&mut self.top_key, &mut self.bot_key);
             } else {
-                if self.top.len() < n {
-                    self.top.resize(n, 0);
-                }
-                plane.row(iy, lo, &mut self.top[..n]);
+                let top = self.top.ensure(n);
+                plane.row(iy, lo, top);
                 self.top_key = Some((iy, lo, n));
             }
         }
@@ -572,10 +664,8 @@ impl PlaneRowCache {
                 std::mem::swap(&mut self.top, &mut self.bot);
                 std::mem::swap(&mut self.top_key, &mut self.bot_key);
             } else {
-                if self.bot.len() < n {
-                    self.bot.resize(n, 0);
-                }
-                plane.row(iy + 1, lo, &mut self.bot[..n]);
+                let bot = self.bot.ensure(n);
+                plane.row(iy + 1, lo, bot);
                 self.bot_key = Some((iy + 1, lo, n));
             }
         }
@@ -711,218 +801,4 @@ fn warp_rows_fused(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::rng::Rng;
-
-    fn pattern(w: u32, h: u32) -> Image {
-        let mut img = Image::new(w, h, [0, 0, 0]);
-        for (i, v) in img.data.iter_mut().enumerate() {
-            *v = (i * 13 % 251) as u8;
-        }
-        img
-    }
-
-    #[test]
-    fn matrix_algebra() {
-        let m = Affine::rotate(30.0).then(&Affine::scale(2.0, 1.5)).then(&Affine::translate(3.0, -4.0));
-        let inv = m.inverse().unwrap();
-        let (x, y) = m.apply(5.0, 7.0);
-        let (bx, by) = inv.apply(x, y);
-        assert!((bx - 5.0).abs() < 1e-9 && (by - 7.0).abs() < 1e-9);
-        assert!(m.then(&inv).is_identity());
-        assert!((m.det() - 3.0).abs() < 1e-9);
-        // OpenCV convention: +90 degrees takes the x axis to -y (up on screen).
-        let (rx, ry) = Affine::rotate(90.0).apply(1.0, 0.0);
-        assert!(rx.abs() < 1e-12 && (ry + 1.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn identity_and_integer_translation_are_exact() {
-        let img = pattern(31, 17);
-        assert_eq!(warp_affine(&img, &Affine::IDENTITY, 31, 17, [1, 2, 3]), img);
-        let t = warp_affine(&img, &Affine::translate(3.0, 2.0), 31, 17, [1, 2, 3]);
-        assert_eq!(t.pixel(3, 2), img.pixel(0, 0));
-        assert_eq!(t.pixel(30, 16), img.pixel(27, 14));
-        assert_eq!(t.pixel(0, 0), [1, 2, 3]);
-        assert_eq!(t.pixel(2, 5), [1, 2, 3]);
-    }
-
-    #[test]
-    fn mirror_by_matrix() {
-        let img = pattern(20, 10);
-        let flip = Affine([-1.0, 0.0, 20.0, 0.0, 1.0, 0.0]);
-        let out = warp_affine(&img, &flip, 20, 10, [0; 3]);
-        for x in 0..20 {
-            assert_eq!(out.pixel(x, 4), img.pixel(19 - x, 4));
-        }
-    }
-
-    /// Scale (mirrored sometimes, each axis its own) and translate, no rotation or shear: no vertical step.
-    fn random_upright(rng: &mut Rng, sw: u32, sh: u32) -> Affine {
-        let mut scale = || {
-            let s = rng.uniform(0.2, 3.0) as f64;
-            if rng.chance(0.2) { -s } else { s }
-        };
-        let (sx, sy) = (scale(), scale());
-        let (tx, ty) = (rng.uniform(-40.0, 90.0) as f64, rng.uniform(-40.0, 90.0) as f64);
-        Affine::translate(-(sw as f64) / 2.0, -(sh as f64) / 2.0)
-            .then(&Affine::scale(sx, sy))
-            .then(&Affine::translate(tx, ty))
-    }
-
-    #[test]
-    fn row_path_matches_the_general_path() {
-        let mut rng = Rng::new(5);
-        let images: Vec<Image> =
-            [(40, 30), (17, 53), (64, 64), (5, 3), (1, 1)].map(|(w, h)| pattern(w, h)).into();
-        for case in 0..400 {
-            let img = &images[case % images.len()];
-            let m = random_upright(&mut rng, img.width, img.height);
-            let inv = m.inverse().unwrap();
-            assert_eq!((inv.0[3] * (1 << FRAC) as f64).round(), 0.0);
-            let (w, h) = (1 + rng.below(70), 1 + rng.below(50));
-            let border = [rng.below(256) as u8, 114, 7];
-            let (mut rows, mut general) = (vec![0u8; w * h * 3], vec![0u8; w * h * 3]);
-            warp_rows(&Plane::image(img, border), &inv, w, &mut rows);
-            warp_general(img, &inv, w, border, &mut general);
-            assert_eq!(rows, general, "case {case}: {m:?} into {w}x{h}");
-        }
-    }
-
-    #[test]
-    fn plane_warps_as_its_rendered_image() {
-        let mut rng = Rng::new(8);
-        let images: Vec<Image> = [(30, 20), (25, 41), (12, 12), (50, 9)].map(|(w, h)| pattern(w, h)).into();
-        for case in 0..200 {
-            // Four tiles in the quadrants around a centre, cropped by the plane's edges, as a mosaic places them.
-            let (pw, ph) = (40 + rng.below(30) as i64, 40 + rng.below(30) as i64);
-            let (xc, yc) = (rng.below(pw as usize) as i64, rng.below(ph as usize) as i64);
-            let mut tiles = Vec::new();
-            for (k, img) in images.iter().enumerate() {
-                let (w, h) = (img.width as i64, img.height as i64);
-                let (x0, x1) = if k % 2 == 0 { ((xc - w).max(0), xc) } else { (xc, (xc + w).min(pw)) };
-                let (y0, y1) = if k < 2 { ((yc - h).max(0), yc) } else { (yc, (yc + h).min(ph)) };
-                if x1 > x0 && y1 > y0 {
-                    let src =
-                        [if k % 2 == 0 { w - (x1 - x0) } else { 0 }, if k < 2 { h - (y1 - y0) } else { 0 }];
-                    tiles.push(Tile { img, dst: [x0, y0, x1, y1], src });
-                }
-            }
-            let plane = Plane { width: pw as u32, height: ph as u32, fill: [114; 3], tiles };
-            let rendered = plane.render();
-            let (w, h) = (1 + rng.below(60) as u32, 1 + rng.below(60) as u32);
-            let m = if case % 4 == 3 {
-                // A rotation takes the general path, through the rendered plane.
-                Affine::rotate(rng.uniform(-30.0, 30.0) as f64).then(&Affine::translate(10.0, 5.0))
-            } else {
-                random_upright(&mut rng, plane.width, plane.height)
-            };
-            assert_eq!(
-                warp_plane(&plane, &m, w, h),
-                warp_affine(&rendered, &m, w, h, [114; 3]),
-                "case {case}"
-            );
-            let inv = m.inverse().unwrap();
-            let mut general = vec![0u8; (w * h * 3) as usize];
-            warp_general(&rendered, &inv, w as usize, [114; 3], &mut general);
-            assert_eq!(warp_plane(&plane, &m, w, h).data, general, "case {case}");
-        }
-    }
-
-    /// A single tile showing part of a larger image (a mosaic's one visible tile, cropped by the canvas), warped
-    /// with shear: the warp reads only the shown part, as the rendered plane has it.
-    #[test]
-    fn a_cropped_tile_shows_only_its_part() {
-        let img = pattern(4, 4);
-        let tiles = |dst, src| vec![Tile { img: &img, dst, src }];
-        for (dst, src) in [([0, 0, 2, 2], [0, 0]), ([0, 0, 2, 2], [2, 2]), ([0, 0, 3, 2], [1, 0])] {
-            let plane =
-                Plane { width: dst[2] as u32, height: dst[3] as u32, fill: [114; 3], tiles: tiles(dst, src) };
-            for m in [
-                Affine([1.0, 0.0, -2.0, 1.0, 1.0, -4.0]),
-                Affine([1.0, 0.3, 0.0, 0.2, 1.0, 0.0]),
-                Affine::rotate(20.0).then(&Affine::scale(2.0, 2.0)),
-            ] {
-                for (w, h) in [(1, 1), (5, 4)] {
-                    assert_eq!(
-                        warp_plane(&plane, &m, w, h),
-                        warp_affine(&plane.render(), &m, w, h, [114; 3]),
-                        "{dst:?} {src:?} {m:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// An empty output is returned at once, whatever the other side's size (no per-row work, no scratch).
-    #[test]
-    fn empty_outputs() {
-        let src = pattern(1, 1);
-        for (w, h) in [(0, u32::MAX), (u32::MAX, 0), (0, 0)] {
-            let out = warp_affine(&src, &Affine::IDENTITY, w, h, [1; 3]);
-            assert_eq!((out.width, out.height, out.data.len()), (w, h, 0));
-        }
-        let wide = Image { width: 1 << 30, height: 0, data: Vec::new() };
-        assert!(warp_affine(&wide, &Affine::IDENTITY, 1, 0, [1; 3]).data.is_empty());
-    }
-
-    /// An empty plane renders as an empty image and warps to the fill.
-    #[test]
-    fn empty_planes() {
-        for (pw, ph) in [(0, 0), (0, 5), (5, 0)] {
-            let plane = Plane { width: pw, height: ph, fill: [9, 8, 7], tiles: Vec::new() };
-            let r = plane.render();
-            assert_eq!((r.width, r.height, r.data.len()), (pw, ph, 0));
-            for m in [Affine::translate(1.0, 2.0), Affine::rotate(10.0)] {
-                assert_eq!(warp_plane(&plane, &m, 3, 2), Image::new(3, 2, [9, 8, 7]));
-            }
-        }
-    }
-
-    /// A step so large that `du · (width - 1)` overflows `i64` while every running position the general path adds up
-    /// fits: the warp gives the general path's bytes, without overflowing.
-    #[test]
-    fn a_huge_step_does_not_overflow() {
-        let src = pattern(1, 1);
-        let m = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(128.5, 0.0));
-        let inv = m.inverse().unwrap();
-        let mut general = vec![0u8; 257 * 3];
-        warp_general(&src, &inv, 257, [114; 3], &mut general);
-        assert_eq!(warp_affine(&src, &m, 257, 1, [114; 3]).data, general);
-    }
-
-    /// A step whose sampled positions leave `i64` takes the general path, whose sums wrap (release build) as before:
-    /// here column 511's position wraps round to -0.5, half border, half image.
-    #[test]
-    fn positions_beyond_i64_take_the_general_path() {
-        let m = Affine::scale(2f64.powi(-39), 1.0).then(&Affine::translate(-0.5, 0.0));
-        let inv = m.inverse().unwrap();
-        assert!(!rows_fit(&inv, 512, 1));
-        // Steps of more than 4 source pixels per output pixel take the general path too.
-        assert!(!rows_fit(&inv, 1, 1));
-        assert!(!rows_fit(&Affine::scale(0.2, 1.0).inverse().unwrap(), 10, 1));
-        assert!(rows_fit(&Affine::scale(0.25, 1.0).inverse().unwrap(), 10, 1));
-        // The sums overflow, which a build with overflow checks stops at; compare the bytes where they wrap.
-        #[cfg(not(debug_assertions))]
-        {
-            let src = Image::new(1, 1, [0; 3]);
-            let mut general = vec![0u8; 512 * 3];
-            warp_general(&src, &inv, 512, [114; 3], &mut general);
-            assert_eq!(&general[511 * 3..], &[57; 3]);
-            assert_eq!(warp_affine(&src, &m, 512, 1, [114; 3]).data, general);
-        }
-    }
-
-    #[test]
-    fn parallel_matches_serial() {
-        let img = pattern(400, 300);
-        let m = Affine::translate(-200.0, -150.0)
-            .then(&Affine::rotate(17.0))
-            .then(&Affine::scale(1.3, 1.3))
-            .then(&Affine::translate(320.0, 320.0));
-        let a = warp_affine(&img, &m, 640, 640, [114; 3]);
-        let b = crate::par::serial(|| warp_affine(&img, &m, 640, 640, [114; 3]));
-        assert_eq!(a, b);
-    }
-}
+mod tests;

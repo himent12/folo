@@ -20,7 +20,7 @@ use crate::image::{Image, Sample};
 use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE};
 use crate::resize::{resize, resize_plan};
 use crate::rng::Rng;
-use crate::warp::{Affine, Plane, Tile, warp_plane, warp_plane_fused};
+use crate::warp::{Affine, Plane, PlaneTiles, Tile, warp_plane, warp_plane_fused};
 
 fn noisy_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut rng = Rng::new(seed);
@@ -260,7 +260,7 @@ fn warp_plane_fused_matches_unfused_pipeline_bit_exact() {
     for case in 0..48 {
         let (pw, ph) = (120 + rng.below(50) as u32, 120 + rng.below(50) as u32);
         let (xc, yc) = (30 + rng.below(60) as i64, 30 + rng.below(60) as i64);
-        let mut tiles = Vec::new();
+        let mut tiles = PlaneTiles::new();
         for (k, img) in imgs.iter().enumerate() {
             let (iw, ih) = (img.width as i64, img.height as i64);
             let (x0, x1) = if k % 2 == 0 { ((xc - iw).max(0), xc) } else { (xc, (xc + iw).min(pw as i64)) };
